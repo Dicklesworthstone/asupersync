@@ -213,6 +213,13 @@ const RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
 /// below large-object lanes that may rely on broader adaptive model choices.
 const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD: f64 = 1.001;
+/// Control-stream payload chunk for the small clean source-only lane.
+///
+/// ATP frames are capped at 1 MiB; keep payloads well below that after the
+/// entry/offset header so a 50 MiB clean transfer becomes about 100 frames
+/// instead of ~43k RQ source-symbol datagrams.
+const RQ_CONTROL_SOURCE_CHUNK_BYTES: usize = 512 * 1024;
+const RQ_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8;
 /// The 2% "bad" matrix path is rate-shaped to 50 mbit. Cold-starting it at
 /// 16 MiB/s overshoots the pipe before feedback can correct the spray, causing
 /// repair rounds to chase self-inflicted drops. Keep this deliberately narrow:
@@ -1767,6 +1774,14 @@ fn small_clean_source_only_round0(total_bytes: u64, config: &RqConfig) -> bool {
         && loss_free_target
 }
 
+fn control_source_stream_eligible(
+    total_bytes: u64,
+    config: &RqConfig,
+    symbol_auth_enabled: bool,
+) -> bool {
+    small_clean_source_only_round0(total_bytes, config) && !symbol_auth_enabled
+}
+
 fn apply_small_clean_round0_source_only(
     total_bytes: u64,
     config: &RqConfig,
@@ -1939,6 +1954,12 @@ struct Hello {
     /// kernel drops. `serde(default)` keeps it tolerant of peers that do not send it.
     #[serde(default)]
     total_bytes: u64,
+    /// Sender preference for the small-clean source-only control-stream lane.
+    ///
+    /// Older receivers ignore this field and omit the matching ack bit, causing
+    /// the sender to fall back to the UDP/RaptorQ symbol path.
+    #[serde(default)]
+    prefer_control_source_stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1950,6 +1971,9 @@ struct HelloAck {
     /// Full receiver-side UDP fanout. Empty means legacy single-port `udp_port`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     udp_ports: Vec<u16>,
+    /// Receiver accepted the small-clean source-only control-stream lane.
+    #[serde(default)]
+    control_source_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -2365,6 +2389,37 @@ fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, RqError> 
 
 fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError> {
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
+}
+
+fn control_source_data_frame(entry: u32, offset: u64, data: &[u8]) -> Result<Frame, RqError> {
+    let mut payload = Vec::with_capacity(RQ_CONTROL_SOURCE_DATA_HEADER + data.len());
+    payload.extend_from_slice(&entry.to_be_bytes());
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.extend_from_slice(data);
+    Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, payload)
+        .map_err(|e| RqError::Frame(e.to_string()))
+}
+
+struct ControlSourceData<'a> {
+    entry: u32,
+    offset: u64,
+    data: &'a [u8],
+}
+
+fn parse_control_source_data_frame(frame: &Frame) -> Result<ControlSourceData<'_>, RqError> {
+    let payload = frame.payload();
+    if payload.len() < RQ_CONTROL_SOURCE_DATA_HEADER {
+        return Err(RqError::Frame(format!(
+            "ObjectData frame shorter than {RQ_CONTROL_SOURCE_DATA_HEADER}-byte source header"
+        )));
+    }
+    let entry = u32::from_be_bytes(payload[0..4].try_into().expect("entry header width"));
+    let offset = u64::from_be_bytes(payload[4..12].try_into().expect("offset header width"));
+    Ok(ControlSourceData {
+        entry,
+        offset,
+        data: &payload[RQ_CONTROL_SOURCE_DATA_HEADER..],
+    })
 }
 
 fn parse_round_complete(frame: &Frame) -> Result<RqRoundComplete, RqError> {
@@ -4038,6 +4093,8 @@ pub async fn send_path(
         merkle_root_hex: merkle_root_hex.clone(),
         entries: manifest_entries,
     };
+    let prefer_control_source_stream =
+        control_source_stream_eligible(total_bytes, &config, symbol_auth_enabled);
 
     // Control plane: TCP connect + handshake.
     let stream = TcpStream::connect(addr).await?;
@@ -4054,6 +4111,7 @@ pub async fn send_path(
                 max_block_size: config.max_block_size as u64,
                 symbol_auth: symbol_auth_enabled,
                 total_bytes,
+                prefer_control_source_stream,
             },
         )?)
         .await?;
@@ -4070,34 +4128,22 @@ pub async fn send_path(
             ack.reason.unwrap_or_else(|| "no reason given".to_string()),
         ));
     }
-    let udp_ports = hello_ack_udp_ports(&ack);
-    rqtrace!(
-        "sender: handshake ok, peer udp_ports={:?}",
-        udp_ports.as_slice()
-    );
-
-    // Data plane: open UDP sockets connected across the receiver's advertised UDP fanout.
-    let fanout = config.udp_fanout.max(1);
-    let mut adaptive = RqAdaptiveSendState::new(tag, &config, fanout);
-    let local_unspec = if peer.ip().is_ipv4() {
-        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-    } else {
-        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-    };
-    let mut sockets: Vec<UdpSocket> = Vec::with_capacity(fanout);
-    for socket_index in 0..fanout {
-        let udp_addr = receiver_udp_addr_for_socket(peer, &udp_ports, socket_index)?;
-        let sock = UdpSocket::bind(SocketAddr::new(local_unspec, 0)).await?;
-        sock.connect(udp_addr).await?;
-        // Large send buffer absorbs bursts so the spray loop does not busy-spin
-        // on `ENOBUFS`/`WouldBlock` (UDP sockets epoll-report writable even when
-        // the send buffer is full).
-        let _ = sock.tune_buffers(UdpBufferConfig {
-            send_buffer_bytes: Some(16 * 1024 * 1024),
-            recv_buffer_bytes: None,
-        });
-        sockets.push(sock);
+    if ack.control_source_stream && !prefer_control_source_stream {
+        return Err(RqError::HandshakeRejected(
+            "receiver selected control source stream for an ineligible transfer".to_string(),
+        ));
     }
+    let control_source_stream = ack.control_source_stream;
+    let udp_ports = if control_source_stream {
+        SmallVec::<[u16; DEFAULT_UDP_FANOUT]>::new()
+    } else {
+        hello_ack_udp_ports(&ack)
+    };
+    rqtrace!(
+        "sender: handshake ok, peer udp_ports={:?} control_source_stream={}",
+        udp_ports.as_slice(),
+        control_source_stream
+    );
 
     let mut encoders: Vec<EntryEncoder> = Vec::with_capacity(entries.len());
     for (i, (entry, digest)) in entries.iter().zip(digests.iter()).enumerate() {
@@ -4125,6 +4171,76 @@ pub async fn send_path(
     control
         .send(&json_frame(FrameType::ObjectManifest, &manifest)?)
         .await?;
+
+    if control_source_stream {
+        let bytes_streamed = stream_control_source_entries(cx, &mut control, &encoders).await?;
+        if bytes_streamed != total_bytes {
+            return Err(RqError::Source(format!(
+                "control source stream sent {bytes_streamed} bytes, expected {total_bytes}"
+            )));
+        }
+        control
+            .send(&json_frame(
+                FrameType::ObjectComplete,
+                &RqRoundComplete {
+                    round_symbols_sent: 0,
+                },
+            )?)
+            .await?;
+        let reply = control.recv().await?;
+        if reply.frame_type() != FrameType::Proof {
+            return Err(RqError::Unexpected {
+                got: reply.frame_type(),
+                expected: "Proof",
+            });
+        }
+        let receipt: ReceiveReceipt = parse_json(&reply)?;
+        let _ = control
+            .send(&Frame::empty(FrameType::Close).map_err(|e| RqError::Frame(e.to_string()))?)
+            .await;
+        if !receipt.committed {
+            return Err(RqError::Integrity(
+                receipt
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "receiver did not commit".to_string()),
+            ));
+        }
+        return Ok(SendReport {
+            transfer_id,
+            bytes_sent: total_bytes,
+            files: u32::try_from(logical_digests.len()).unwrap_or(u32::MAX),
+            symbols_sent: 0,
+            feedback_rounds: 0,
+            merkle_root_hex,
+            receipt,
+            udp_send_acceleration: UdpSendAccelerationReport::default(),
+            peer,
+        });
+    }
+
+    // Data plane: open UDP sockets connected across the receiver's advertised UDP fanout.
+    let fanout = config.udp_fanout.max(1);
+    let mut adaptive = RqAdaptiveSendState::new(tag, &config, fanout);
+    let local_unspec = if peer.ip().is_ipv4() {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    } else {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    };
+    let mut sockets: Vec<UdpSocket> = Vec::with_capacity(fanout);
+    for socket_index in 0..fanout {
+        let udp_addr = receiver_udp_addr_for_socket(peer, &udp_ports, socket_index)?;
+        let sock = UdpSocket::bind(SocketAddr::new(local_unspec, 0)).await?;
+        sock.connect(udp_addr).await?;
+        // Large send buffer absorbs bursts so the spray loop does not busy-spin
+        // on `ENOBUFS`/`WouldBlock` (UDP sockets epoll-report writable even when
+        // the send buffer is full).
+        let _ = sock.tune_buffers(UdpBufferConfig {
+            send_buffer_bytes: Some(16 * 1024 * 1024),
+            recv_buffer_bytes: None,
+        });
+        sockets.push(sock);
+    }
 
     let mut symbols_sent: u64 = 0;
     let mut rr = 0usize;
@@ -5106,6 +5222,69 @@ async fn read_source_range(path: &Path, offset: usize, len: usize) -> Result<Vec
     Ok(bytes)
 }
 
+async fn stream_control_source_entries<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    encoders: &[EntryEncoder],
+) -> Result<u64, RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let mut buf = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES];
+    let mut bytes_streamed = 0u64;
+    let mut chunks = 0u64;
+    for enc in encoders {
+        cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let mut file = crate::fs::File::open(&enc.abs_path)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
+        let source_offset = u64::try_from(enc.source_offset).map_err(|_| {
+            RqError::Source(format!(
+                "{}: source offset does not fit u64: {}",
+                enc.abs_path.display(),
+                enc.source_offset
+            ))
+        })?;
+        file.seek(std::io::SeekFrom::Start(source_offset))
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
+        let mut remaining = u64::try_from(enc.size).map_err(|_| RqError::TooLarge {
+            size: u64::MAX,
+            max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+        })?;
+        let mut offset = 0u64;
+        while remaining > 0 {
+            cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+            let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+            let n = file
+                .read(&mut buf[..want])
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
+            if n == 0 {
+                return Err(RqError::Source(format!(
+                    "{}: short read while streaming control source entry {}",
+                    enc.abs_path.display(),
+                    enc.index
+                )));
+            }
+            control
+                .send(&control_source_data_frame(enc.index, offset, &buf[..n])?)
+                .await?;
+            let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
+            offset = offset.saturating_add(n_u64);
+            remaining -= n_u64;
+            bytes_streamed = bytes_streamed.saturating_add(n_u64);
+            chunks = chunks.saturating_add(1);
+        }
+    }
+    rqtrace!(
+        "sender: control_source_stream sent chunks={} bytes={}",
+        chunks,
+        bytes_streamed
+    );
+    Ok(bytes_streamed)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spray_source_requests<S>(
     cx: &Cx,
@@ -5401,41 +5580,52 @@ pub async fn receive_connection(
     }
     let hello: Hello = parse_json(&hello_frame)?;
     let accepted = hello.protocol == ATP_RQ_PROTOCOL && hello.symbol_auth == symbol_auth_enabled;
+    let control_source_stream = accepted
+        && hello.prefer_control_source_stream
+        && control_source_stream_eligible(hello.total_bytes, &config, symbol_auth_enabled);
 
-    // Bind the UDP data sockets before acking so the sender can spray immediately.
-    // Build an owned `SocketAddr` (Copy + 'static) so it satisfies
-    // `UdpSocket::bind`'s `'static` address bound and handles IPv6 correctly.
-    let bind_ip: std::net::IpAddr = udp_bind_ip
-        .parse()
-        .map_err(|e| RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {e}")))?;
-    // Size the receive buffer to ABSORB the sender's symbol burst: the sender now encodes blocks in
-    // parallel (F3) and can spray them faster than the CPU-bound decode drains, so we set the buffer
-    // to the transfer size plus headroom, clamped to a generous cap (the kernel further caps at
-    // net.core.rmem_max). For a transfer that fits, the whole burst lands in the buffer with no
-    // kernel drops and the decoder drains at its own pace — turning the parallel encode into a
-    // wall-clock win instead of a feedback-round explosion. `total_bytes == 0` (older peers that did
-    // not advertise it) falls back to the prior fixed 16 MiB.
-    let recv_buf_bytes = if hello.total_bytes == 0 {
-        16 * 1024 * 1024
+    let (udp, udp_ports, udp_port) = if control_source_stream {
+        rqtrace!(
+            "receiver: control_source_stream accepted total_bytes={}",
+            hello.total_bytes
+        );
+        (None, Vec::new(), 0)
     } else {
-        usize::try_from(hello.total_bytes.saturating_add(32 * 1024 * 1024))
-            .unwrap_or(usize::MAX)
-            .clamp(16 * 1024 * 1024, 120 * 1024 * 1024)
+        // Bind the UDP data sockets before acking so the sender can spray immediately.
+        // Build an owned `SocketAddr` (Copy + 'static) so it satisfies
+        // `UdpSocket::bind`'s `'static` address bound and handles IPv6 correctly.
+        let bind_ip: std::net::IpAddr = udp_bind_ip
+            .parse()
+            .map_err(|e| RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {e}")))?;
+        // Size the receive buffer to ABSORB the sender's symbol burst: the sender now encodes
+        // blocks in parallel (F3) and can spray them faster than the CPU-bound decode drains, so
+        // we set the buffer to the transfer size plus headroom, clamped to a generous cap (the
+        // kernel further caps at net.core.rmem_max). For a transfer that fits, the whole burst
+        // lands in the buffer with no kernel drops and the decoder drains at its own pace. The
+        // control-source fast lane skips this allocation entirely.
+        let recv_buf_bytes = if hello.total_bytes == 0 {
+            16 * 1024 * 1024
+        } else {
+            usize::try_from(hello.total_bytes.saturating_add(32 * 1024 * 1024))
+                .unwrap_or(usize::MAX)
+                .clamp(16 * 1024 * 1024, 120 * 1024 * 1024)
+        };
+        let udp =
+            RqReceiverUdpFanout::bind(bind_ip, config.udp_fanout.max(1), recv_buf_bytes).await?;
+        let udp_ports = udp.local_ports()?;
+        let udp_port = udp_ports.first().copied().ok_or_else(|| {
+            RqError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "RQ receiver UDP fanout has no bound sockets",
+            ))
+        })?;
+        rqtrace!(
+            "receiver: udp fanout sockets={} ports={:?}",
+            udp.len(),
+            udp_ports
+        );
+        (Some(udp), udp_ports, udp_port)
     };
-    let mut udp =
-        RqReceiverUdpFanout::bind(bind_ip, config.udp_fanout.max(1), recv_buf_bytes).await?;
-    let udp_ports = udp.local_ports()?;
-    let udp_port = udp_ports.first().copied().ok_or_else(|| {
-        RqError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "RQ receiver UDP fanout has no bound sockets",
-        ))
-    })?;
-    rqtrace!(
-        "receiver: udp fanout sockets={} ports={:?}",
-        udp.len(),
-        udp_ports
-    );
 
     control
         .send(&json_frame(
@@ -5445,6 +5635,7 @@ pub async fn receive_connection(
                 peer_id: peer_id.to_string(),
                 udp_port,
                 udp_ports,
+                control_source_stream,
                 reason: if accepted {
                     None
                 } else if hello.protocol != ATP_RQ_PROTOCOL {
@@ -5487,6 +5678,12 @@ pub async fn receive_connection(
         });
     }
     let manifest = parse_and_validate_manifest_frame(&manifest_frame, &config)?;
+    if hello.total_bytes != 0 && hello.total_bytes != manifest.total_bytes {
+        return Err(RqError::Frame(format!(
+            "handshake total_bytes {} does not match manifest total_bytes {}",
+            hello.total_bytes, manifest.total_bytes
+        )));
+    }
     let symbol_size = hello.symbol_size;
     let receiver_max_block_size = usize::try_from(hello.max_block_size).map_err(|_| {
         RqError::Frame(format!(
@@ -5563,6 +5760,19 @@ pub async fn receive_connection(
         })
         .collect();
 
+    if control_source_stream {
+        return receive_control_source_stream(
+            cx,
+            &mut control,
+            &manifest,
+            &mut decoders,
+            dest_dir,
+            peer,
+        )
+        .await;
+    }
+
+    let mut udp = udp.expect("UDP receiver is bound for non-control-source transfers");
     let tag = transfer_tag(&manifest.transfer_id);
     let mut symbols_accepted: u64 = 0;
     let mut round_stats = RqDatagramRoundStats::default();
@@ -5932,6 +6142,183 @@ pub async fn receive_connection(
                 return Err(RqError::Unexpected {
                     got: other,
                     expected: "ObjectComplete | KeepAlive",
+                });
+            }
+        }
+    }
+}
+
+async fn apply_control_source_data_frame(
+    frame: &Frame,
+    decoders: &mut [EntryDecoder],
+) -> Result<usize, RqError> {
+    let data = parse_control_source_data_frame(frame)?;
+    let pos = decoder_position_for_entry(decoders, data.entry).ok_or_else(|| {
+        RqError::Frame(format!(
+            "control source ObjectData for unknown entry {}",
+            data.entry
+        ))
+    })?;
+    let dec = &mut decoders[pos];
+    let len_u64 = u64::try_from(data.data.len()).unwrap_or(u64::MAX);
+    let end = data.offset.checked_add(len_u64).ok_or_else(|| {
+        RqError::Frame(format!(
+            "control source ObjectData entry {} offset overflow",
+            data.entry
+        ))
+    })?;
+    if data.offset != dec.bytes_written {
+        return Err(RqError::Frame(format!(
+            "control source ObjectData entry {} offset {} does not match expected {}",
+            data.entry, data.offset, dec.bytes_written
+        )));
+    }
+    if end > dec.size {
+        return Err(RqError::Frame(format!(
+            "control source ObjectData entry {} overruns declared size {}",
+            data.entry, dec.size
+        )));
+    }
+    if data.data.is_empty() {
+        return Ok(0);
+    }
+
+    write_entry_staging_range(dec, data.offset, data.data).await?;
+    dec.bytes_written = end;
+    if dec.bytes_written == dec.size {
+        dec.complete = true;
+        dec.pipeline = None;
+        close_cached_entry_staging_file(dec).await?;
+    }
+    Ok(data.data.len())
+}
+
+async fn receive_control_source_stream<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    manifest: &TransferManifest,
+    decoders: &mut [EntryDecoder],
+    dest_dir: &Path,
+    peer: SocketAddr,
+) -> Result<ReceiveReport, RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let mut bytes_streamed = 0u64;
+    let mut chunks = 0u64;
+    loop {
+        cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let frame = control.recv().await?;
+        match frame.frame_type() {
+            FrameType::ObjectData => {
+                let n = apply_control_source_data_frame(&frame, decoders).await?;
+                bytes_streamed =
+                    bytes_streamed.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                chunks = chunks.saturating_add(1);
+            }
+            FrameType::ObjectComplete => {
+                flush_cached_entry_staging_files(decoders).await?;
+                let pending: Vec<u32> = decoders
+                    .iter()
+                    .filter(|decoder| !decoder.complete)
+                    .map(|decoder| decoder.index)
+                    .collect();
+                if !pending.is_empty() {
+                    let receipt = ReceiveReceipt {
+                        committed: false,
+                        bytes_received: bytes_streamed,
+                        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                        sha_ok: false,
+                        merkle_ok: false,
+                        symbols_accepted: 0,
+                        feedback_rounds: 0,
+                        reason: Some(format!(
+                            "control source stream ended with {} entries pending",
+                            pending.len()
+                        )),
+                        committed_paths: Vec::new(),
+                    };
+                    let _ = control.send(&json_frame(FrameType::Proof, &receipt)?).await;
+                    return Err(RqError::NoConvergence {
+                        rounds: 0,
+                        pending: pending.len(),
+                    });
+                }
+
+                let receipt = verify_and_commit(manifest, decoders, dest_dir, 0, 0).await?;
+                control
+                    .send(&json_frame(FrameType::Proof, &receipt)?)
+                    .await?;
+                for _ in 0..4 {
+                    match control.recv().await {
+                        Ok(frame) if frame.frame_type() == FrameType::Close => break,
+                        Ok(frame)
+                            if matches!(
+                                frame.frame_type(),
+                                FrameType::ObjectComplete | FrameType::KeepAlive
+                            ) =>
+                        {
+                            rqtrace!(
+                                "receiver: draining late {:?} while waiting for sender Close",
+                                frame.frame_type()
+                            );
+                        }
+                        Ok(frame) => {
+                            rqtrace!(
+                                "receiver: expected sender Close after Proof, got {:?}",
+                                frame.frame_type()
+                            );
+                            break;
+                        }
+                        Err(err) => {
+                            rqtrace!("receiver: sender Close after Proof unavailable: {err}");
+                            break;
+                        }
+                    }
+                }
+                if !receipt.committed {
+                    return Err(RqError::Integrity(
+                        receipt
+                            .reason
+                            .unwrap_or_else(|| "verification failed".to_string()),
+                    ));
+                }
+                rqtrace!(
+                    "receiver: control_source_stream committed chunks={} bytes={}",
+                    chunks,
+                    bytes_streamed
+                );
+                let committed_paths: Vec<PathBuf> =
+                    receipt.committed_paths.iter().map(PathBuf::from).collect();
+                return Ok(ReceiveReport {
+                    transfer_id: manifest.transfer_id.clone(),
+                    bytes_received: receipt.bytes_received,
+                    files: receipt.files,
+                    committed: true,
+                    symbols_accepted: 0,
+                    feedback_rounds: 0,
+                    committed_paths,
+                    peer,
+                });
+            }
+            FrameType::KeepAlive => {
+                control
+                    .send(
+                        &Frame::empty(FrameType::KeepAlive)
+                            .map_err(|e| RqError::Frame(e.to_string()))?,
+                    )
+                    .await?;
+            }
+            FrameType::Close => {
+                return Err(RqError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "sender closed control before source stream completed",
+                )));
+            }
+            other => {
+                return Err(RqError::Unexpected {
+                    got: other,
+                    expected: "ObjectData | ObjectComplete | KeepAlive",
                 });
             }
         }
@@ -8940,6 +9327,7 @@ mod tests {
             peer_id: "receiver".to_string(),
             udp_port: 8472,
             udp_ports: Vec::new(),
+            control_source_stream: false,
             reason: None,
         };
 
@@ -8953,6 +9341,7 @@ mod tests {
             peer_id: "receiver".to_string(),
             udp_port: 3001,
             udp_ports: vec![3001, 3002, 3003],
+            control_source_stream: false,
             reason: None,
         };
         let ports = hello_ack_udp_ports(&ack);
@@ -12245,6 +12634,75 @@ mod tests {
         assert_eq!(
             large_adjusted.pacing.rate_bytes_per_sec(),
             tuning.pacing.rate_bytes_per_sec()
+        );
+    }
+
+    #[test]
+    fn control_source_stream_only_negotiates_for_small_clean_unauthenticated() {
+        let clean = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+        let good = RqConfig {
+            round0_loss_target: 0.001,
+            ..clean.clone()
+        };
+        let lossy = RqConfig {
+            round0_loss_target: 0.02,
+            ..clean.clone()
+        };
+        let explicit_repair = RqConfig {
+            repair_overhead: 1.05,
+            ..clean.clone()
+        };
+
+        assert!(control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &clean,
+            false
+        ));
+        assert!(!control_source_stream_eligible(
+            RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES + 1,
+            &clean,
+            false
+        ));
+        assert!(!control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &clean,
+            true
+        ));
+        assert!(!control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &good,
+            false
+        ));
+        assert!(!control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &lossy,
+            false
+        ));
+        assert!(!control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &explicit_repair,
+            false
+        ));
+    }
+
+    #[test]
+    fn control_source_data_frame_roundtrips_entry_offset_and_payload() {
+        let frame = control_source_data_frame(7, 123_456, b"payload").expect("frame");
+        assert_eq!(frame.frame_type(), FrameType::ObjectData);
+
+        let parsed = parse_control_source_data_frame(&frame).expect("parse");
+        assert_eq!(parsed.entry, 7);
+        assert_eq!(parsed.offset, 123_456);
+        assert_eq!(parsed.data, b"payload");
+        assert!(
+            frame.payload().len()
+                <= usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap()
         );
     }
 
