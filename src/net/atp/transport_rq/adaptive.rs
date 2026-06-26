@@ -530,7 +530,7 @@ pub fn rate_matched_pacing_plan(
     }
 
     let block = optimal_block(est, policy, symbol_size);
-    let lambda_bytes_per_s = est.bw_median_bps.max(0.0) * fanout_gain(block.fanout);
+    let lambda_bytes_per_s = pacing_capacity_bytes_per_s(est) * fanout_gain(block.fanout);
     let overhead_factor = 1.0 + block.overhead.max(0.0);
     let network_useful_bytes_per_s = lambda_bytes_per_s / overhead_factor;
     let coding_useful_bytes_per_s =
@@ -661,6 +661,15 @@ fn estimate_can_drive_pacing(est: &PathEstimate, policy: &AdaptivePolicy) -> boo
         && est.bw_median_bps.is_finite()
         && est.bw_median_bps > 0.0
         && est.loss_p_bar.is_finite()
+}
+
+fn pacing_capacity_bytes_per_s(est: &PathEstimate) -> f64 {
+    let median = est.bw_median_bps.max(0.0);
+    if est.bw_trough_bps.is_finite() && est.bw_trough_bps > 0.0 {
+        median.min(est.bw_trough_bps)
+    } else {
+        median
+    }
 }
 
 fn responsive_coding_bytes_per_s(
@@ -1351,6 +1360,56 @@ mod tests {
             raw_bytes_per_s
         );
         assert!(plan.datagrams_per_s > 0);
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_caps_raw_rate_to_sustained_trough() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        let path = PathEstimate {
+            bw_median_bps: 100_000_000.0,
+            bw_trough_bps: 25_000_000.0,
+            dec_symbols_per_s: 50_000_000.0,
+            ..est(0.02, 100_000_000.0)
+        };
+
+        let plan = rate_matched_pacing_plan(&path, &policy, 1200, 1_000_000.0, 32);
+
+        let raw_bytes_per_s = plan.raw_pacing_bits_per_s as f64 / 8.0;
+        let sustained_capacity = path.bw_trough_bps * fanout_gain(1);
+        assert!(
+            raw_bytes_per_s <= sustained_capacity + 1.0,
+            "raw pacing must follow sustained trough, raw={raw_bytes_per_s} cap={sustained_capacity}"
+        );
+        assert!(!plan.cold_start);
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_uses_median_when_trough_is_malformed() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        let malformed_trough = PathEstimate {
+            bw_median_bps: 40_000_000.0,
+            bw_trough_bps: f64::NAN,
+            dec_symbols_per_s: 50_000_000.0,
+            ..est(0.02, 40_000_000.0)
+        };
+
+        let plan = rate_matched_pacing_plan(&malformed_trough, &policy, 1200, 1_000_000.0, 32);
+
+        assert!(!plan.cold_start);
+        assert!(
+            plan.raw_pacing_bits_per_s as f64 / 8.0 > malformed_trough.bw_median_bps * 0.25,
+            "malformed trough evidence should not collapse a valid median estimate"
+        );
     }
 
     #[test]
