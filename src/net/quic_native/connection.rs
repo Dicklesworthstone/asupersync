@@ -1531,7 +1531,14 @@ impl NativeQuicConnection {
         payload: Bytes,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        self.enqueue_datagram(cx, payload)
+    }
 
+    fn enqueue_datagram(
+        &mut self,
+        cx: &Cx,
+        payload: Bytes,
+    ) -> Result<(), NativeQuicConnectionError> {
         // RFC 9221: a sender MUST NOT send a DATAGRAM frame larger than the
         // peer-advertised max_datagram_frame_size. Bound the encoded frame so a
         // single datagram always fits one 1-RTT packet.
@@ -1619,6 +1626,30 @@ impl NativeQuicConnection {
             self.datagrams_dropped_on_send
         );
         Ok(())
+    }
+
+    /// Queue several unreliable application datagrams for transmission after a
+    /// single cancellation checkpoint. The per-payload size and bounded-queue
+    /// checks are identical to [`Self::send_datagram`]; the batch form exists so
+    /// ATP/QUIC symbol producers can hand a full flush window to the connection
+    /// without ping-ponging through the queue one symbol at a time.
+    ///
+    /// Returns the number of payloads queued before any error.
+    pub fn send_datagram_batch<I>(
+        &mut self,
+        cx: &Cx,
+        payloads: I,
+    ) -> Result<usize, NativeQuicConnectionError>
+    where
+        I: IntoIterator<Item = Bytes>,
+    {
+        checkpoint(cx)?;
+        let mut queued = 0usize;
+        for payload in payloads {
+            self.enqueue_datagram(cx, payload)?;
+            queued = queued.saturating_add(1);
+        }
+        Ok(queued)
     }
 
     /// Number of queued outbound DATAGRAM payloads awaiting transmission.
@@ -3234,6 +3265,35 @@ mod tests {
         assert_eq!(emitted, datagram_count);
         assert_eq!(conn.pending_outbound_datagram_count(), 0);
         assert_eq!(conn.datagrams_sent(), datagram_count as u64);
+    }
+
+    #[test]
+    fn application_datagram_batch_enqueue_preserves_order() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let payloads = (0..8)
+            .map(|idx| Bytes::from(vec![idx as u8; 4]))
+            .collect::<Vec<_>>();
+
+        let queued = conn
+            .send_datagram_batch(&cx, payloads.clone())
+            .expect("batch queues outbound datagrams");
+
+        assert_eq!(queued, payloads.len());
+        assert_eq!(conn.pending_outbound_datagram_count(), payloads.len());
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65_000)
+            .expect("coalesced datagram frames should generate");
+        let emitted = frames
+            .into_iter()
+            .filter_map(|frame| match frame {
+                QuicFrame::Datagram { data } => Some(data),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(emitted, payloads);
+        assert_eq!(conn.pending_outbound_datagram_count(), 0);
+        assert_eq!(conn.datagrams_sent(), queued as u64);
     }
 
     #[test]

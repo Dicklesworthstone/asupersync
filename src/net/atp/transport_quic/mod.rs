@@ -5791,6 +5791,20 @@ fn first_client_bidi_stream() -> StreamId {
 }
 
 #[allow(dead_code)]
+fn native_symbol_datagram(
+    symbol: &Symbol,
+    transfer_tag: u64,
+    entry: u32,
+    auth_tag: Option<[u8; crate::security::tag::TAG_SIZE]>,
+) -> Result<Bytes, QuicTransportError> {
+    let envelope = symbol_to_envelope(symbol, transfer_tag, entry, auth_tag);
+    envelope
+        .encode()
+        .map_err(SymbolDatagramError::from)
+        .map_err(QuicTransportError::from)
+}
+
+#[allow(dead_code)]
 fn send_native_symbol(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
@@ -5804,13 +5818,27 @@ fn send_native_symbol(
             "send_native_symbol requires an established 1-RTT connection".to_string(),
         ));
     }
-    let envelope = symbol_to_envelope(symbol, transfer_tag, entry, auth_tag);
-    let bytes = envelope
-        .encode()
-        .map_err(SymbolDatagramError::from)
-        .map_err(QuicTransportError::from)?;
+    let bytes = native_symbol_datagram(symbol, transfer_tag, entry, auth_tag)?;
     conn.send_datagram(cx, bytes)?;
     Ok(())
+}
+
+#[allow(dead_code)]
+fn send_native_symbol_batch<I>(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    payloads: I,
+) -> Result<usize, QuicTransportError>
+where
+    I: IntoIterator<Item = Bytes>,
+{
+    if !conn.can_send_1rtt() {
+        return Err(QuicTransportError::Quic(
+            "send_native_symbol_batch requires an established 1-RTT connection".to_string(),
+        ));
+    }
+    conn.send_datagram_batch(cx, payloads)
+        .map_err(QuicTransportError::from)
 }
 
 #[allow(dead_code)]

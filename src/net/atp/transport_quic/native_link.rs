@@ -228,6 +228,10 @@ const QUIC_CLEAN_SPRAY_MAX_LOSS_RATE: f64 = 0.01;
 /// rate (MATRIX-111). Sub-floor owed time is accrued as debt and paid once it
 /// crosses this floor.
 const QUIC_PACING_PARK_FLOOR: Duration = Duration::from_millis(1);
+/// Upper bound for symbols handed from the RQ producer loop to the QUIC sender
+/// pump in one in-process turn. This keeps clean encrypted sends out of a
+/// per-symbol async lock-step without letting one handoff monopolize memory.
+const QUIC_NATIVE_SPRAY_HANDOFF_MAX_SYMBOLS: usize = 64;
 
 /// Fixed socket buffer budget for the native ATP-QUIC link. This is intentionally
 /// a constant envelope, not proportional to object size, so large transfers cannot
@@ -364,6 +368,50 @@ fn trace_quic_flush_coalescing(
     );
 }
 
+fn trace_quic_symbol_handoff(
+    cx: &Cx,
+    symbols: usize,
+    encoded_bytes: usize,
+    queue_before: usize,
+    queue_after: usize,
+    flush_symbol_limit: usize,
+    flushed_packets: usize,
+    pacing_rate_bps: u64,
+) {
+    if symbols == 0 || std::env::var_os("ATP_RQ_TRACE").is_none() {
+        return;
+    }
+    let symbols_s = symbols.to_string();
+    let encoded_bytes_s = encoded_bytes.to_string();
+    let queue_before_s = queue_before.to_string();
+    let queue_after_s = queue_after.to_string();
+    let flush_symbol_limit_s = flush_symbol_limit.to_string();
+    let flushed_packets_s = flushed_packets.to_string();
+    let pacing_rate_bps_s = pacing_rate_bps.to_string();
+    cx.trace_with_fields(
+        "atp_quic.sender.symbol_handoff",
+        &[
+            ("symbols", symbols_s.as_str()),
+            ("encoded_bytes", encoded_bytes_s.as_str()),
+            ("queue_before", queue_before_s.as_str()),
+            ("queue_after", queue_after_s.as_str()),
+            ("flush_symbol_limit", flush_symbol_limit_s.as_str()),
+            ("flushed_packets", flushed_packets_s.as_str()),
+            ("pacing_rate_bps", pacing_rate_bps_s.as_str()),
+        ],
+    );
+    quic_rqtrace!(
+        "sender: symbol_handoff symbols={} encoded_bytes={} queue_before={} queue_after={} flush_symbol_limit={} flushed_packets={} pacing_rate_bps={}",
+        symbols,
+        encoded_bytes,
+        queue_before,
+        queue_after,
+        flush_symbol_limit,
+        flushed_packets,
+        pacing_rate_bps,
+    );
+}
+
 fn need_more_repair_symbol_count(need: &QuicNeedMore) -> u64 {
     need.repair_blocks.iter().fold(0u64, |acc, request| {
         acc.saturating_add(u64::from(request.symbols))
@@ -471,6 +519,12 @@ fn next_feedback_round_or_no_convergence(
 struct SentControlStreamFrame {
     stream: StreamId,
     offset: u64,
+}
+
+struct NativeQuicSpraySymbol {
+    symbol: Symbol,
+    entry: u32,
+    auth_tag: Option<[u8; TAG_SIZE]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1005,6 +1059,7 @@ pub struct QuicLink {
     /// in fewer, full parks avoids the per-flush async-timer over-sleep (MATRIX-111);
     /// drained at round end so the average rate is preserved.
     spray_pacing_debt: Duration,
+    sender_handoff: QuicSenderHandoffStats,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
     pending_control_frames: VecDeque<Frame>,
@@ -1013,6 +1068,86 @@ pub struct QuicLink {
     one_rtt_packets_ingested: u64,
     non_one_rtt_packets_dropped: u64,
     unprotect_packets_dropped: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct QuicSenderHandoffStats {
+    symbols_queued: u64,
+    enqueue_micros: u128,
+    max_pending_before_enqueue: usize,
+    max_pending_after_enqueue: usize,
+    queue_full_flushes: u64,
+    liveness_polls: u64,
+    liveness_micros: u128,
+    flushes: u64,
+    generated_packets: u64,
+    datagram_frames: u64,
+    generate_micros: u128,
+    protect_micros: u128,
+    udp_send_micros: u128,
+    max_pending_before_flush: usize,
+    max_datagrams_per_plain_packet: usize,
+}
+
+impl QuicSenderHandoffStats {
+    fn has_symbol_work(&self) -> bool {
+        self.symbols_queued > 0 || self.flushes > 0 || self.queue_full_flushes > 0
+    }
+
+    fn record_enqueue(
+        &mut self,
+        queued: usize,
+        pending_before: usize,
+        pending_after: usize,
+        elapsed: Duration,
+    ) {
+        self.symbols_queued = self
+            .symbols_queued
+            .saturating_add(u64::try_from(queued).unwrap_or(u64::MAX));
+        self.enqueue_micros = self.enqueue_micros.saturating_add(elapsed.as_micros());
+        self.max_pending_before_enqueue = self.max_pending_before_enqueue.max(pending_before);
+        self.max_pending_after_enqueue = self.max_pending_after_enqueue.max(pending_after);
+    }
+
+    fn record_queue_full_flush(&mut self, liveness_elapsed: Duration) {
+        self.queue_full_flushes = self.queue_full_flushes.saturating_add(1);
+        self.liveness_polls = self.liveness_polls.saturating_add(1);
+        self.liveness_micros = self
+            .liveness_micros
+            .saturating_add(liveness_elapsed.as_micros());
+    }
+
+    fn record_flush(
+        &mut self,
+        packets: usize,
+        datagram_frames: usize,
+        pending_before: usize,
+        max_datagrams_per_plain_packet: usize,
+        generate_elapsed: Duration,
+        protect_elapsed: Duration,
+        udp_send_elapsed: Duration,
+    ) {
+        self.flushes = self.flushes.saturating_add(1);
+        self.generated_packets = self
+            .generated_packets
+            .saturating_add(u64::try_from(packets).unwrap_or(u64::MAX));
+        self.datagram_frames = self
+            .datagram_frames
+            .saturating_add(u64::try_from(datagram_frames).unwrap_or(u64::MAX));
+        self.generate_micros = self
+            .generate_micros
+            .saturating_add(generate_elapsed.as_micros());
+        self.protect_micros = self
+            .protect_micros
+            .saturating_add(protect_elapsed.as_micros());
+        self.udp_send_micros = self
+            .udp_send_micros
+            .saturating_add(udp_send_elapsed.as_micros());
+        self.max_pending_before_flush = self.max_pending_before_flush.max(pending_before);
+        self.max_datagrams_per_plain_packet = self
+            .max_datagrams_per_plain_packet
+            .max(max_datagrams_per_plain_packet);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1147,6 +1282,89 @@ impl QuicLink {
         )
     }
 
+    fn reset_sender_handoff_trace(&mut self) {
+        self.sender_handoff = QuicSenderHandoffStats::default();
+    }
+
+    fn trace_sender_handoff_summary(&mut self, cx: &Cx, phase: &'static str, symbols: u64) {
+        let stats = self.sender_handoff;
+        if !stats.has_symbol_work() {
+            return;
+        }
+
+        let symbols_s = symbols.to_string();
+        let symbols_queued_s = stats.symbols_queued.to_string();
+        let enqueue_micros_s = stats.enqueue_micros.to_string();
+        let max_pending_before_enqueue_s = stats.max_pending_before_enqueue.to_string();
+        let max_pending_after_enqueue_s = stats.max_pending_after_enqueue.to_string();
+        let queue_full_flushes_s = stats.queue_full_flushes.to_string();
+        let liveness_polls_s = stats.liveness_polls.to_string();
+        let liveness_micros_s = stats.liveness_micros.to_string();
+        let flushes_s = stats.flushes.to_string();
+        let generated_packets_s = stats.generated_packets.to_string();
+        let datagram_frames_s = stats.datagram_frames.to_string();
+        let generate_micros_s = stats.generate_micros.to_string();
+        let protect_micros_s = stats.protect_micros.to_string();
+        let udp_send_micros_s = stats.udp_send_micros.to_string();
+        let max_pending_before_flush_s = stats.max_pending_before_flush.to_string();
+        let max_datagrams_per_plain_packet_s = stats.max_datagrams_per_plain_packet.to_string();
+
+        cx.trace_with_fields(
+            "atp_quic.sender.symbol_handoff_summary",
+            &[
+                ("phase", phase),
+                ("symbols", symbols_s.as_str()),
+                ("symbols_queued", symbols_queued_s.as_str()),
+                ("enqueue_micros", enqueue_micros_s.as_str()),
+                (
+                    "max_pending_before_enqueue",
+                    max_pending_before_enqueue_s.as_str(),
+                ),
+                (
+                    "max_pending_after_enqueue",
+                    max_pending_after_enqueue_s.as_str(),
+                ),
+                ("queue_full_flushes", queue_full_flushes_s.as_str()),
+                ("liveness_polls", liveness_polls_s.as_str()),
+                ("liveness_micros", liveness_micros_s.as_str()),
+                ("flushes", flushes_s.as_str()),
+                ("generated_packets", generated_packets_s.as_str()),
+                ("datagram_frames", datagram_frames_s.as_str()),
+                ("generate_micros", generate_micros_s.as_str()),
+                ("protect_micros", protect_micros_s.as_str()),
+                ("udp_send_micros", udp_send_micros_s.as_str()),
+                (
+                    "max_pending_before_flush",
+                    max_pending_before_flush_s.as_str(),
+                ),
+                (
+                    "max_datagrams_per_plain_packet",
+                    max_datagrams_per_plain_packet_s.as_str(),
+                ),
+            ],
+        );
+        quic_rqtrace!(
+            "sender: symbol_handoff_summary phase={} symbols={} symbols_queued={} enqueue_micros={} queue_full_flushes={} liveness_micros={} flushes={} generated_packets={} datagram_frames={} generate_micros={} protect_micros={} udp_send_micros={} max_pending_before_enqueue={} max_pending_after_enqueue={} max_pending_before_flush={} max_datagrams_per_plain_packet={}",
+            phase,
+            symbols,
+            stats.symbols_queued,
+            stats.enqueue_micros,
+            stats.queue_full_flushes,
+            stats.liveness_micros,
+            stats.flushes,
+            stats.generated_packets,
+            stats.datagram_frames,
+            stats.generate_micros,
+            stats.protect_micros,
+            stats.udp_send_micros,
+            stats.max_pending_before_enqueue,
+            stats.max_pending_after_enqueue,
+            stats.max_pending_before_flush,
+            stats.max_datagrams_per_plain_packet,
+        );
+        self.reset_sender_handoff_trace();
+    }
+
     fn paced_flush_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
         let clean_flush_cap = clean_gso_flush_symbol_cap(
             self.max_spray_symbols_per_flush,
@@ -1204,6 +1422,14 @@ impl QuicLink {
         control: &mut NativeQuicFrameTransport,
     ) -> Result<(), QuicTransportError> {
         let _ = self.pump_inbound_for(cx, INBOUND_PUMP_DRAIN_GRACE).await?;
+        self.service_decoded_spray_liveness(cx, control).await
+    }
+
+    async fn service_decoded_spray_liveness(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+    ) -> Result<(), QuicTransportError> {
         while let Some(frame) = control.try_recv(cx, &mut self.conn)? {
             match frame.frame_type() {
                 FrameType::KeepAlive => self.mark_peer_activity(),
@@ -1280,6 +1506,8 @@ impl QuicLink {
             payload: BytesMut,
         }
 
+        let pending_before_flush = self.conn.pending_outbound_datagram_count();
+        let generate_started = Instant::now();
         let mut plain_packets = Vec::new();
         let mut flushed_stream_frames = Vec::new();
         let mut datagram_frames = 0usize;
@@ -1332,8 +1560,10 @@ impl QuicLink {
                 payload,
             });
         }
+        let generate_elapsed = generate_started.elapsed();
         let count = plain_packets.len();
         if !plain_packets.is_empty() {
+            let protect_started = Instant::now();
             let requests = plain_packets
                 .iter()
                 .map(|packet| PacketProtectionRequest {
@@ -1346,6 +1576,7 @@ impl QuicLink {
                 .collect::<Vec<_>>();
             let protected_packets =
                 protection_result(self.protection.protect_packets(cx, &requests))?;
+            let protect_elapsed = protect_started.elapsed();
             let mut packets = Vec::with_capacity(protected_packets.len());
             for (plain, protected) in plain_packets.iter().zip(protected_packets) {
                 debug_assert_eq!(protected.packet_number, plain.packet_number);
@@ -1369,11 +1600,13 @@ impl QuicLink {
                 });
             }
             let send_strategy = quic_gso_send_strategy(&packets);
+            let udp_send_started = Instant::now();
             let report = self
                 .endpoint
                 .send_batch_with_strategy(cx, &packets, send_strategy)
                 .await
                 .map_err(map_udp_error)?;
+            let udp_send_elapsed = udp_send_started.elapsed();
             if let Some(error) = report.error {
                 return Err(QuicTransportError::Quic(format!(
                     "udp endpoint sent {} of {} QUIC packets before error: {error}",
@@ -1397,6 +1630,15 @@ impl QuicLink {
                 report.native_send_batch_used,
                 report.gso_send_used,
                 report.fallback_used,
+            );
+            self.sender_handoff.record_flush(
+                count,
+                datagram_frames,
+                pending_before_flush,
+                max_datagram_frames_per_plain_packet,
+                generate_elapsed,
+                protect_elapsed,
+                udp_send_elapsed,
             );
         }
         self.last_flushed_stream_frames = flushed_stream_frames;
@@ -1623,27 +1865,157 @@ impl QuicLink {
         super::quic_spray_pacing_decision_from_transport(&config, self.conn.transport())
     }
 
-    /// Spray one symbol, flushing first if the paced outbound queue is full.
-    async fn spray_symbol(
+    fn spray_handoff_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
+        self.paced_flush_symbol_limit(pacing)
+            .saturating_sub(self.conn.pending_outbound_datagram_count())
+            .clamp(1, QUIC_NATIVE_SPRAY_HANDOFF_MAX_SYMBOLS)
+    }
+
+    /// Spray a bounded symbol batch, flushing first whenever the paced outbound
+    /// queue is full. MATRIX-112 showed the encrypted clean path parked mostly
+    /// in futex/scheduler handoffs; this gives the RQ producer one batched
+    /// handoff into the QUIC sender pump per flush window and traces the seam.
+    async fn spray_symbol_batch(
         &mut self,
         cx: &Cx,
         control: &mut NativeQuicFrameTransport,
-        symbol: &Symbol,
         tag: u64,
-        entry: u32,
-        auth_tag: Option<[u8; TAG_SIZE]>,
+        symbols: &[NativeQuicSpraySymbol],
         pacing: &QuicSprayPacingDecision,
     ) -> Result<(), QuicTransportError> {
+        if symbols.is_empty() {
+            return Ok(());
+        }
+
+        let trace_start = Instant::now();
         let flush_symbols = self.paced_flush_symbol_limit(pacing);
-        if self.conn.pending_outbound_datagram_count() >= flush_symbols {
-            self.flush(cx).await?;
-            self.service_spray_liveness(cx, control).await?;
+        let mut flushes = 0usize;
+        let mut flushed_packets = 0usize;
+        let mut flush_elapsed = Duration::ZERO;
+        let mut liveness_elapsed = Duration::ZERO;
+        let mut pause_elapsed = Duration::ZERO;
+        let mut max_pending_before = self.conn.pending_outbound_datagram_count();
+
+        if max_pending_before >= flush_symbols {
+            let flush_start = Instant::now();
+            flushed_packets = flushed_packets.saturating_add(self.flush(cx).await?);
+            flush_elapsed = flush_elapsed.saturating_add(flush_start.elapsed());
+            flushes = flushes.saturating_add(1);
+
+            let liveness_start = Instant::now();
+            self.service_decoded_spray_liveness(cx, control).await?;
+            let liveness_poll_elapsed = liveness_start.elapsed();
+            liveness_elapsed = liveness_elapsed.saturating_add(liveness_poll_elapsed);
+            self.sender_handoff
+                .record_queue_full_flush(liveness_poll_elapsed);
+
             let pause = self.pause_after_symbol_flush(flush_symbols, pacing);
             if !pause.is_zero() {
+                let pause_start = Instant::now();
                 crate::time::sleep(cx.now(), pause).await;
+                pause_elapsed = pause_elapsed.saturating_add(pause_start.elapsed());
             }
         }
-        super::send_native_symbol(cx, &mut self.conn, symbol, tag, entry, auth_tag)
+
+        let mut encoded_bytes = 0usize;
+        let mut payloads = Vec::with_capacity(symbols.len());
+        for item in symbols {
+            let payload =
+                super::native_symbol_datagram(&item.symbol, tag, item.entry, item.auth_tag)?;
+            encoded_bytes = encoded_bytes.saturating_add(payload.len());
+            payloads.push(payload);
+        }
+
+        let pending_before_enqueue = self.conn.pending_outbound_datagram_count();
+        max_pending_before = max_pending_before.max(pending_before_enqueue);
+        let enqueue_start = Instant::now();
+        let queued = super::send_native_symbol_batch(cx, &mut self.conn, payloads)?;
+        if queued != symbols.len() {
+            return Err(QuicTransportError::Quic(format!(
+                "native QUIC symbol batch queued {queued} of {} payloads",
+                symbols.len()
+            )));
+        }
+        let pending_after_enqueue = self.conn.pending_outbound_datagram_count();
+        self.sender_handoff.record_enqueue(
+            queued,
+            pending_before_enqueue,
+            pending_after_enqueue,
+            enqueue_start.elapsed(),
+        );
+
+        if pending_after_enqueue >= flush_symbols {
+            let flush_start = Instant::now();
+            flushed_packets = flushed_packets.saturating_add(self.flush(cx).await?);
+            flush_elapsed = flush_elapsed.saturating_add(flush_start.elapsed());
+            flushes = flushes.saturating_add(1);
+
+            let liveness_start = Instant::now();
+            self.service_decoded_spray_liveness(cx, control).await?;
+            let liveness_poll_elapsed = liveness_start.elapsed();
+            liveness_elapsed = liveness_elapsed.saturating_add(liveness_poll_elapsed);
+            self.sender_handoff
+                .record_queue_full_flush(liveness_poll_elapsed);
+
+            let pause = self.pause_after_symbol_flush(flush_symbols, pacing);
+            if !pause.is_zero() {
+                let pause_start = Instant::now();
+                crate::time::sleep(cx.now(), pause).await;
+                pause_elapsed = pause_elapsed.saturating_add(pause_start.elapsed());
+            }
+        }
+
+        trace_quic_symbol_handoff(
+            cx,
+            queued,
+            encoded_bytes,
+            pending_before_enqueue,
+            pending_after_enqueue,
+            flush_symbols,
+            flushed_packets,
+            pacing.pacing_rate_bps,
+        );
+        if std::env::var_os("ATP_RQ_TRACE").is_some() {
+            let symbols_s = symbols.len().to_string();
+            let flushes_s = flushes.to_string();
+            let flushed_packets_s = flushed_packets.to_string();
+            let flush_limit_s = flush_symbols.to_string();
+            let max_pending_before_s = max_pending_before.to_string();
+            let pending_after_s = self.conn.pending_outbound_datagram_count().to_string();
+            let elapsed_micros_s = trace_start.elapsed().as_micros().to_string();
+            let flush_micros_s = flush_elapsed.as_micros().to_string();
+            let liveness_micros_s = liveness_elapsed.as_micros().to_string();
+            let pause_micros_s = pause_elapsed.as_micros().to_string();
+            cx.trace_with_fields(
+                "atp_quic.sender.symbol_handoff_batch",
+                &[
+                    ("symbols", symbols_s.as_str()),
+                    ("flushes", flushes_s.as_str()),
+                    ("flushed_packets", flushed_packets_s.as_str()),
+                    ("flush_symbol_limit", flush_limit_s.as_str()),
+                    ("max_pending_before", max_pending_before_s.as_str()),
+                    ("pending_after", pending_after_s.as_str()),
+                    ("elapsed_micros", elapsed_micros_s.as_str()),
+                    ("flush_micros", flush_micros_s.as_str()),
+                    ("liveness_micros", liveness_micros_s.as_str()),
+                    ("pause_micros", pause_micros_s.as_str()),
+                ],
+            );
+            quic_rqtrace!(
+                "sender-native: symbol_handoff_batch symbols={} flushes={} flushed_packets={} flush_symbol_limit={} max_pending_before={} pending_after={} elapsed_us={} flush_us={} liveness_us={} pause_us={}",
+                symbols.len(),
+                flushes,
+                flushed_packets,
+                flush_symbols,
+                max_pending_before,
+                self.conn.pending_outbound_datagram_count(),
+                trace_start.elapsed().as_micros(),
+                flush_elapsed.as_micros(),
+                liveness_elapsed.as_micros(),
+                pause_elapsed.as_micros(),
+            );
+        }
+        Ok(())
     }
 
     async fn finish_paced_spray_round(
@@ -1659,7 +2031,7 @@ impl QuicLink {
 
         let pending_symbols = self.conn.pending_outbound_datagram_count();
         self.flush(cx).await?;
-        self.service_spray_liveness(cx, control).await?;
+        self.service_decoded_spray_liveness(cx, control).await?;
 
         let flush_symbol_limit = self.paced_flush_symbol_limit(pacing);
         let flushed_symbols = pending_symbols.min(flush_symbol_limit);
@@ -1856,6 +2228,7 @@ fn link_from_handshake(
         one_rtt_packets_ingested: 0,
         non_one_rtt_packets_dropped: 0,
         unprotect_packets_dropped: 0,
+        sender_handoff: QuicSenderHandoffStats::default(),
     })
 }
 
@@ -2155,6 +2528,7 @@ async fn spray_round(
         );
     }
     pacing.trace_epoch(cx, u64::from(!with_source));
+    link.reset_sender_handoff_trace();
     let mut sent = 0u64;
     let mut sprayed = 0u64;
     for index in pending {
@@ -2197,6 +2571,7 @@ async fn spray_round(
                     repair_count,
                 ))
             };
+            let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
             for encoded_symbol in encoded {
                 let symbol = encoded_symbol
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
@@ -2209,22 +2584,58 @@ async fn spray_round(
                     continue;
                 }
                 let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
-                link.spray_symbol(cx, control, &symbol, tag, entry_index, auth_tag, &pacing)
+                handoff_batch.push(NativeQuicSpraySymbol {
+                    symbol,
+                    entry: entry_index,
+                    auth_tag,
+                });
+                let handoff_limit = link.spray_handoff_symbol_limit(&pacing);
+                if handoff_batch.len() >= handoff_limit {
+                    link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
+                        .await?;
+                    let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
+                    sent = sent.saturating_add(batch_len);
+                    for _ in 0..handoff_batch.len() {
+                        if let Some(ramp) = &mut clean_ramp {
+                            if let Some(report) =
+                                ramp.observe_datagram(&mut pacing, link.symbol_datagram_frame_len)
+                            {
+                                quic_rqtrace!(
+                                    "sender-native: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} next_step_bytes={} max_rate_Bps={}",
+                                    report.sent_datagrams,
+                                    report.sent_bytes,
+                                    report.old_rate_bps,
+                                    report.new_rate_bps,
+                                    report.next_step_bytes,
+                                    report.max_rate_bps,
+                                );
+                            }
+                        }
+                    }
+                    handoff_batch.clear();
+                    handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
+                }
+            }
+            if !handoff_batch.is_empty() {
+                link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
                     .await?;
-                sent = sent.saturating_add(1);
-                if let Some(ramp) = &mut clean_ramp {
-                    if let Some(report) =
-                        ramp.observe_datagram(&mut pacing, link.symbol_datagram_frame_len)
-                    {
-                        quic_rqtrace!(
-                            "sender-native: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} next_step_bytes={} max_rate_Bps={}",
-                            report.sent_datagrams,
-                            report.sent_bytes,
-                            report.old_rate_bps,
-                            report.new_rate_bps,
-                            report.next_step_bytes,
-                            report.max_rate_bps,
-                        );
+                let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
+                sent = sent.saturating_add(batch_len);
+                for _ in 0..handoff_batch.len() {
+                    if let Some(ramp) = &mut clean_ramp {
+                        if let Some(report) =
+                            ramp.observe_datagram(&mut pacing, link.symbol_datagram_frame_len)
+                        {
+                            quic_rqtrace!(
+                                "sender-native: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} next_step_bytes={} max_rate_Bps={}",
+                                report.sent_datagrams,
+                                report.sent_bytes,
+                                report.old_rate_bps,
+                                report.new_rate_bps,
+                                report.next_step_bytes,
+                                report.max_rate_bps,
+                            );
+                        }
                     }
                 }
             }
@@ -2250,7 +2661,9 @@ async fn spray_source_requests(
     let tag = super::transfer_tag(&manifest.transfer_id);
     let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
     pacing.trace_epoch(cx, 2);
+    link.reset_sender_handoff_trace();
     let mut sent = 0u64;
+    let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let enc = encoders
@@ -2286,9 +2699,23 @@ async fn spray_source_requests(
             crate::types::symbol::SymbolKind::Source,
         );
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
-        link.spray_symbol(cx, control, &symbol, tag, request.entry, auth_tag, &pacing)
+        handoff_batch.push(NativeQuicSpraySymbol {
+            symbol,
+            entry: request.entry,
+            auth_tag,
+        });
+        if handoff_batch.len() >= link.spray_handoff_symbol_limit(&pacing) {
+            link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
+                .await?;
+            sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
+            handoff_batch.clear();
+            handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
+        }
+    }
+    if !handoff_batch.is_empty() {
+        link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
             .await?;
-        sent = sent.saturating_add(1);
+        sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
     }
     aimd.record_spray(sent, pacing.pacing_rate_bps);
     link.finish_paced_spray_round(cx, control, sent, &pacing)
@@ -2311,6 +2738,7 @@ async fn spray_block_repair_requests(
     let tag = super::transfer_tag(&manifest.transfer_id);
     let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
     pacing.trace_epoch(cx, 3);
+    link.reset_sender_handoff_trace();
     let mut sent = 0u64;
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -2333,6 +2761,7 @@ async fn spray_block_repair_requests(
         let object_id = enc.object_id;
         let entry_index = enc.index;
         let sent_before_request = sent;
+        let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
         for encoded in pipeline.encode_single_block_repair_range(
             object_id,
             request.sbn,
@@ -2344,9 +2773,23 @@ async fn spray_block_repair_requests(
                 .map_err(|err| QuicTransportError::Control(err.to_string()))?
                 .into_symbol();
             let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
-            link.spray_symbol(cx, control, &symbol, tag, entry_index, auth_tag, &pacing)
+            handoff_batch.push(NativeQuicSpraySymbol {
+                symbol,
+                entry: entry_index,
+                auth_tag,
+            });
+            if handoff_batch.len() >= link.spray_handoff_symbol_limit(&pacing) {
+                link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
+                    .await?;
+                sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
+                handoff_batch.clear();
+                handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
+            }
+        }
+        if !handoff_batch.is_empty() {
+            link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
                 .await?;
-            sent = sent.saturating_add(1);
+            sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
         }
         let emitted_for_request = sent.saturating_sub(sent_before_request);
         if emitted_for_request != u64::from(request.symbols) {
@@ -2453,6 +2896,7 @@ async fn run_sender_session(
     // so without this split a >1-batch spray would assemble prematurely and force
     // a needless feedback round.
     link.flush(cx).await?;
+    link.trace_sender_handoff_summary(cx, "initial_source", symbols_sent);
     send_native_object_complete_for_round(cx, &mut link.conn, &mut control, 0, symbols_sent)?;
     link.flush(cx).await?;
 
@@ -2645,6 +3089,12 @@ async fn run_sender_session(
                 // Flush this round's repair/source symbols before ObjectComplete
                 // (same ordering guarantee as the initial spray).
                 link.flush(cx).await?;
+                let handoff_phase = if need.repair_blocks.is_empty() {
+                    "source_requests"
+                } else {
+                    "repair_blocks"
+                };
+                link.trace_sender_handoff_summary(cx, handoff_phase, sent);
                 send_native_object_complete_for_round(
                     cx,
                     &mut link.conn,
