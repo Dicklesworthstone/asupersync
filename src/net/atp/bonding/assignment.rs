@@ -229,10 +229,18 @@ impl BondedDonorSpraySchedule {
     /// each block so the receiver's source-first fast path stays available.
     #[must_use]
     pub fn symbol_emissions(&self) -> Vec<BondedDonorSymbolEmission> {
+        self.iter_symbol_emissions().collect()
+    }
+
+    /// Iterate the donor's exact symbol-emission stream without preallocating it.
+    ///
+    /// Hot donor paths can hand this iterator to the transport encoder so large
+    /// bonded transfers do not need a flat vector of every scheduled ESI before
+    /// the first symbol is emitted.
+    pub fn iter_symbol_emissions(&self) -> impl Iterator<Item = BondedDonorSymbolEmission> + '_ {
         self.blocks
             .iter()
-            .flat_map(|block| block.symbol_emissions(self.donor_index))
-            .collect()
+            .flat_map(|block| block.iter_symbol_emissions(self.donor_index))
     }
 
     /// Count all source symbols this donor should spray.
@@ -491,32 +499,40 @@ impl BondedBlockSpraySchedule {
     /// Materialize this block's donor-owned symbols in source-first order.
     #[must_use]
     pub fn symbol_emissions(&self, donor_index: u32) -> Vec<BondedDonorSymbolEmission> {
-        let mut emissions = Vec::with_capacity(self.source_esis.len() + self.repair_esis.len());
-        emissions.extend(
-            self.source_esis
-                .iter()
-                .copied()
-                .map(|esi| BondedDonorSymbolEmission {
-                    donor_index,
-                    geometry: self.geometry,
-                    esi,
-                    kind: BondedDonorSymbolKind::Source,
-                    stagger_delay_slots: self.stagger_delay_slots,
-                }),
-        );
-        emissions.extend(
-            self.repair_esis
-                .iter()
-                .copied()
-                .map(|esi| BondedDonorSymbolEmission {
-                    donor_index,
-                    geometry: self.geometry,
-                    esi,
-                    kind: BondedDonorSymbolKind::Repair,
-                    stagger_delay_slots: self.stagger_delay_slots,
-                }),
-        );
-        emissions
+        self.iter_symbol_emissions(donor_index).collect()
+    }
+
+    /// Iterate this block's donor-owned symbols in source-first order.
+    pub fn iter_symbol_emissions(
+        &self,
+        donor_index: u32,
+    ) -> impl Iterator<Item = BondedDonorSymbolEmission> + '_ {
+        let source_geometry = self.geometry;
+        let source_stagger = self.stagger_delay_slots;
+        let repair_geometry = self.geometry;
+        let repair_stagger = self.stagger_delay_slots;
+        self.source_esis
+            .iter()
+            .copied()
+            .map(move |esi| BondedDonorSymbolEmission {
+                donor_index,
+                geometry: source_geometry,
+                esi,
+                kind: BondedDonorSymbolKind::Source,
+                stagger_delay_slots: source_stagger,
+            })
+            .chain(
+                self.repair_esis
+                    .iter()
+                    .copied()
+                    .map(move |esi| BondedDonorSymbolEmission {
+                        donor_index,
+                        geometry: repair_geometry,
+                        esi,
+                        kind: BondedDonorSymbolKind::Repair,
+                        stagger_delay_slots: repair_stagger,
+                    }),
+            )
     }
 
     /// Build a B3 continuation batch for this block after the initial spray.
@@ -2617,6 +2633,25 @@ mod tests {
                 .symbol_id()
                 .is_repair(u32::from(repair.geometry.source_symbols))
         );
+    }
+
+    #[test]
+    fn donor_symbol_emission_iterator_matches_materialized_stream() {
+        let descriptor = descriptor();
+        let donor = DonorAssignment::new_static(1, 3, vec![endpoint()], None);
+
+        let schedule = schedule_bonded_donor_spray(&descriptor, &donor, 8).expect("schedule");
+        let streamed = schedule.iter_symbol_emissions().collect::<Vec<_>>();
+
+        assert_eq!(streamed, schedule.symbol_emissions());
+        for block in &schedule.blocks {
+            assert_eq!(
+                block
+                    .iter_symbol_emissions(schedule.donor_index)
+                    .collect::<Vec<_>>(),
+                block.symbol_emissions(schedule.donor_index)
+            );
+        }
     }
 
     #[test]

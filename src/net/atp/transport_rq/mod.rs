@@ -70,6 +70,9 @@ use crate::decoding::{
 };
 use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
+use crate::net::atp::bonding::{
+    BondTransferDescriptor, BondedDonorSymbolEmission, DonorAssignment, schedule_bonded_donor_spray,
+};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::datagram::congestion::{CongestionConfig, CongestionController};
 use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
@@ -2333,6 +2336,180 @@ pub struct ReceiveReport {
     pub committed_paths: Vec<PathBuf>,
     /// Peer control-plane address.
     pub peer: SocketAddr,
+}
+
+/// Outcome of a bonded donor's one-way symbol spray.
+///
+/// This is the B1 donor-side data-path report: the donor has proven its local
+/// bytes match the agreed descriptor, materialized only its assigned ESIs, and
+/// sent those symbols to the receiver endpoint(s). Receiver feedback and
+/// `NeedMore`/`Close` handling are intentionally left to the B3 control loop.
+#[derive(Debug, Clone)]
+pub struct BondedDonorSendReport {
+    /// Stable transfer identifier from the bonded descriptor.
+    pub transfer_id: String,
+    /// Donor index used by the active assignment.
+    pub donor_index: u32,
+    /// Total donor count in the active assignment.
+    pub donor_count: u32,
+    /// Receiver UDP endpoints this donor connected to.
+    pub receiver_endpoints: Vec<SocketAddr>,
+    /// Descriptor entries considered for spray.
+    pub entries: usize,
+    /// Source blocks considered for spray.
+    pub blocks: usize,
+    /// Systematic/source symbols emitted.
+    pub source_symbols_sent: u64,
+    /// Repair/FEC symbols emitted.
+    pub repair_symbols_sent: u64,
+    /// Total UDP datagrams emitted by the donor.
+    pub symbols_sent: u64,
+    /// UDP send acceleration counters observed while spraying.
+    pub udp_send_acceleration: UdpSendAccelerationReport,
+}
+
+/// Donate this host's assigned slice of an agreed bonded RaptorQ fountain.
+///
+/// The descriptor is the receiver/donor agreement from Phase A. `source_root`
+/// is this donor's local directory containing the descriptor's relative entry
+/// paths; the descriptor proof rejects mismatched or escaping paths before any
+/// symbol is sent. `receiver_endpoint` is the primary UDP endpoint selected by
+/// the control plane, and any additional endpoints in `assignment` are used for
+/// send fanout.
+///
+/// This B1 entrypoint performs the initial source-first spray only. It does not
+/// read receiver feedback, honor `NeedMore`, or close the bonded control plane;
+/// those belong to the B3 donor-control loop.
+pub async fn donate_path(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    assignment: &DonorAssignment,
+    receiver_endpoint: SocketAddr,
+    source_root: &Path,
+    mut config: RqConfig,
+) -> Result<BondedDonorSendReport, RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    assignment
+        .validate()
+        .map_err(|err| RqError::Coding(format!("invalid bonded donor assignment: {err}")))?;
+    descriptor
+        .prove_local_holding(source_root)
+        .await
+        .map_err(|err| RqError::Source(format!("bonded donor byte proof failed: {err}")))?;
+    apply_bonded_descriptor_config(descriptor, &mut config)?;
+
+    let symbol_auth = config.symbol_auth_context()?;
+    if assignment.requires_symbol_auth() && symbol_auth.is_none() {
+        return Err(RqError::Authentication(
+            "bonded donor assignment requires symbol auth but RqConfig allowed unauthenticated symbols"
+                .to_string(),
+        ));
+    }
+
+    let repair_symbols_per_block = bonded_initial_repair_symbols_per_block(&config)?;
+    let schedule = schedule_bonded_donor_spray(descriptor, assignment, repair_symbols_per_block)
+        .map_err(|err| RqError::Coding(format!("bonded donor spray schedule failed: {err}")))?;
+    let receiver_endpoints = bonded_receiver_endpoints(assignment, receiver_endpoint);
+    let local_unspec = if receiver_endpoint.ip().is_ipv4() {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    } else {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    };
+
+    let mut sockets = Vec::with_capacity(receiver_endpoints.len());
+    for endpoint in &receiver_endpoints {
+        let sock = UdpSocket::bind(SocketAddr::new(local_unspec, 0)).await?;
+        sock.connect(*endpoint).await?;
+        let _ = sock.tune_buffers(UdpBufferConfig {
+            send_buffer_bytes: Some(16 * 1024 * 1024),
+            recv_buffer_bytes: None,
+        });
+        sockets.push(sock);
+    }
+
+    let mut pacer = RqSprayPacer::new_round0(
+        RqAdaptiveSendState::new(
+            transfer_tag(&descriptor.transfer_id),
+            &config,
+            sockets.len(),
+        )
+        .round0_tuning(&config)
+        .pacing,
+        &config,
+        false,
+    );
+    let mut send_batch = RqPendingSendBatch::new(sockets.len());
+    let mut symbols_sent = 0u64;
+    let mut source_symbols_sent = 0u64;
+    let mut repair_symbols_sent = 0u64;
+    let mut rr = 0usize;
+    let mut dropper = 0u32;
+    let mut udp_send_acceleration = UdpSendAccelerationReport::default();
+    let tag = transfer_tag(&descriptor.transfer_id);
+
+    for block in &schedule.blocks {
+        cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let entry = descriptor
+            .entry_by_index(block.geometry.entry_index)
+            .ok_or_else(|| {
+                RqError::Coding(format!(
+                    "bonded donor schedule references unknown entry {}",
+                    block.geometry.entry_index
+                ))
+            })?;
+        let entry_path = bonded_donor_entry_path(source_root, &entry.rel_path)?;
+        let block_start =
+            usize::try_from(block.geometry.block_start).map_err(|_| RqError::TooLarge {
+                size: block.geometry.block_start,
+                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            })?;
+        let block_len =
+            usize::try_from(block.geometry.block_bytes).map_err(|_| RqError::TooLarge {
+                size: block.geometry.block_bytes,
+                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            })?;
+        let block_bytes = read_source_range(&entry_path, block_start, block_len).await?;
+
+        for emission in block.iter_symbol_emissions(schedule.donor_index) {
+            let symbol = encode_bonded_donor_emission(emission, &block_bytes, &config)?;
+            match emission.symbol_kind() {
+                SymbolKind::Source => source_symbols_sent = source_symbols_sent.saturating_add(1),
+                SymbolKind::Repair => repair_symbols_sent = repair_symbols_sent.saturating_add(1),
+            }
+            queue_bonded_donor_datagram(
+                cx,
+                &mut sockets,
+                &mut rr,
+                &mut symbols_sent,
+                &mut dropper,
+                tag,
+                block.geometry.entry_index,
+                &symbol,
+                &config,
+                &mut pacer,
+                symbol_auth.as_ref(),
+                &mut send_batch,
+                &mut udp_send_acceleration,
+            )
+            .await?;
+        }
+    }
+
+    let report = send_batch.flush(&mut sockets, &mut symbols_sent).await?;
+    udp_send_acceleration.observe_flush_report(report);
+
+    Ok(BondedDonorSendReport {
+        transfer_id: descriptor.transfer_id.clone(),
+        donor_index: assignment.donor_index,
+        donor_count: assignment.donor_count,
+        receiver_endpoints,
+        entries: descriptor.entries.len(),
+        blocks: schedule.blocks.len(),
+        source_symbols_sent,
+        repair_symbols_sent,
+        symbols_sent,
+        udp_send_acceleration,
+    })
 }
 
 // ─── Frame transport over the TCP control stream ─────────────────────────────
@@ -5299,6 +5476,197 @@ where
                 pending.len(),
             );
         }
+    }
+    Ok(())
+}
+
+fn apply_bonded_descriptor_config(
+    descriptor: &BondTransferDescriptor,
+    config: &mut RqConfig,
+) -> Result<(), RqError> {
+    if descriptor.symbol_size == 0 {
+        return Err(RqError::Coding(
+            "bonded donor descriptor has zero symbol_size".to_string(),
+        ));
+    }
+    let max_block_size =
+        usize::try_from(descriptor.max_block_size).map_err(|_| RqError::TooLarge {
+            size: descriptor.max_block_size,
+            max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+        })?;
+    if max_block_size == 0 {
+        return Err(RqError::Coding(
+            "bonded donor descriptor has zero max_block_size".to_string(),
+        ));
+    }
+    config.symbol_size = descriptor.symbol_size;
+    config.max_block_size = max_block_size;
+    Ok(())
+}
+
+fn bonded_initial_repair_symbols_per_block(config: &RqConfig) -> Result<u32, RqError> {
+    let tuning = RqAdaptiveSendState::new(0, config, 1).round0_tuning(config);
+    let block_source_n = usize::try_from(fixed_block_k(config)).map_err(|_| {
+        RqError::Coding(format!(
+            "bonded donor fixed block size does not fit usize: {}",
+            fixed_block_k(config)
+        ))
+    })?;
+    let repair = initial_repair_target_per_block(block_source_n, tuning.repair_overhead);
+    u32::try_from(repair)
+        .map_err(|_| RqError::Coding(format!("bonded donor repair budget too large: {repair}")))
+}
+
+fn bonded_receiver_endpoints(
+    assignment: &DonorAssignment,
+    receiver_endpoint: SocketAddr,
+) -> Vec<SocketAddr> {
+    let mut endpoints = Vec::with_capacity(assignment.receiver_udp_endpoints.len().max(1));
+    endpoints.push(receiver_endpoint);
+    for endpoint in &assignment.receiver_udp_endpoints {
+        if !endpoints.contains(endpoint) {
+            endpoints.push(*endpoint);
+        }
+    }
+    endpoints
+}
+
+fn bonded_donor_entry_path(root_dir: &Path, rel_path: &str) -> Result<PathBuf, RqError> {
+    if Path::new(rel_path).is_absolute() {
+        return Err(RqError::Source(format!(
+            "bonded donor rel_path escapes root: {rel_path}"
+        )));
+    }
+
+    let mut out = root_dir.to_path_buf();
+    let mut pushed = false;
+    for component in rel_path.split('/') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." || Path::new(component).components().count() != 1 {
+            return Err(RqError::Source(format!(
+                "bonded donor rel_path escapes root: {rel_path}"
+            )));
+        }
+        out.push(component);
+        pushed = true;
+    }
+    if pushed {
+        Ok(out)
+    } else {
+        Err(RqError::Source(
+            "bonded donor rel_path must name a file".to_string(),
+        ))
+    }
+}
+
+fn encode_bonded_donor_emission(
+    emission: BondedDonorSymbolEmission,
+    block_bytes: &[u8],
+    config: &RqConfig,
+) -> Result<Symbol, RqError> {
+    let k = u32::from(emission.geometry.source_symbols);
+    let symbol = if emission.esi < k {
+        source_symbol_from_block(
+            emission.geometry.object_id,
+            emission.geometry.source_block_number,
+            usize::try_from(emission.esi).map_err(|_| {
+                RqError::Coding(format!(
+                    "bonded donor source ESI does not fit usize: {}",
+                    emission.esi
+                ))
+            })?,
+            block_bytes,
+            usize::from(config.symbol_size.max(1)),
+        )?
+    } else {
+        let first_repair = usize::try_from(emission.esi - k).map_err(|_| {
+            RqError::Coding(format!(
+                "bonded donor repair ESI does not fit usize: {}",
+                emission.esi
+            ))
+        })?;
+        let mut pipeline = EncodingPipeline::new(
+            crate::config::EncodingConfig {
+                repair_overhead: config.repair_overhead,
+                max_block_size: config.max_block_size,
+                symbol_size: config.symbol_size,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let mut encoded = pipeline.encode_single_block_repair_range(
+            emission.geometry.object_id,
+            emission.geometry.source_block_number,
+            block_bytes,
+            first_repair,
+            1,
+        );
+        let encoded = encoded
+            .next()
+            .ok_or_else(|| {
+                RqError::Coding(format!(
+                    "bonded donor encoder produced no repair symbol for esi {}",
+                    emission.esi
+                ))
+            })?
+            .map_err(|err| RqError::Coding(err.to_string()))?;
+        encoded.symbol().clone()
+    };
+
+    if symbol.id() != emission.symbol_id() || symbol.kind() != emission.symbol_kind() {
+        return Err(RqError::Coding(format!(
+            "bonded donor encoded wrong symbol: expected sbn={} esi={} kind={:?}, got sbn={} esi={} kind={:?}",
+            emission.geometry.source_block_number,
+            emission.esi,
+            emission.symbol_kind(),
+            symbol.id().sbn(),
+            symbol.id().esi(),
+            symbol.kind(),
+        )));
+    }
+
+    Ok(symbol)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn queue_bonded_donor_datagram(
+    cx: &Cx,
+    sockets: &mut [UdpSocket],
+    rr: &mut usize,
+    symbols_sent: &mut u64,
+    dropper: &mut u32,
+    tag: u64,
+    entry: u32,
+    sym: &Symbol,
+    config: &RqConfig,
+    pacer: &mut RqSprayPacer,
+    symbol_auth: Option<&SecurityContext>,
+    send_batch: &mut RqPendingSendBatch,
+    udp_send_acceleration: &mut UdpSendAccelerationReport,
+) -> Result<(), RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    if config.debug_drop_one_in > 0 {
+        *dropper = dropper.wrapping_add(1);
+        if *dropper % config.debug_drop_one_in == 0 {
+            return Ok(());
+        }
+    }
+
+    pacer.before_send(cx).await?;
+    let auth = symbol_auth.map(|ctx| ctx.sign_symbol(sym));
+    let dgram =
+        encode_symbol_datagram(tag, entry, sym, auth.as_ref().map(AuthenticatedSymbol::tag));
+    let fanout = send_batch.fanout();
+    let socket_index = *rr % fanout;
+    *rr = rr.wrapping_add(1);
+    send_batch.push(socket_index, dgram);
+    pacer.observe_datagram_sent();
+    if send_batch.should_flush() {
+        let report = send_batch.flush(sockets, symbols_sent).await?;
+        udp_send_acceleration.observe_flush_report(report);
     }
     Ok(())
 }
@@ -13631,6 +13999,116 @@ mod tests {
             }
         }
         symbols
+    }
+
+    fn bonded_test_descriptor(bytes: &[u8], config: &RqConfig) -> BondTransferDescriptor {
+        let entry = ManifestEntry {
+            index: 0,
+            rel_path: "payload.bin".to_string(),
+            size: bytes.len() as u64,
+            sha256_hex: hex_encode(&Sha256::digest(bytes)),
+            members: Vec::new(),
+            fragment: None,
+        };
+        let manifest = TransferManifest {
+            transfer_id: "bonded-donor-spray-test".to_string(),
+            root_name: "payload".to_string(),
+            is_directory: false,
+            total_bytes: bytes.len() as u64,
+            merkle_root_hex: "00".repeat(32),
+            entries: vec![entry],
+        };
+        BondTransferDescriptor::from_manifest(
+            &manifest,
+            config.symbol_size,
+            config.max_block_size as u64,
+            None,
+        )
+    }
+
+    fn bonded_test_assignment(donor_index: u32, donor_count: u32) -> DonorAssignment {
+        DonorAssignment::new_static(
+            donor_index,
+            donor_count,
+            vec![std::net::SocketAddr::from(([127, 0, 0, 1], 48123))],
+            None,
+        )
+    }
+
+    fn collect_bonded_donor_test_symbols(
+        descriptor: &BondTransferDescriptor,
+        assignment: &DonorAssignment,
+        bytes: &[u8],
+        config: &RqConfig,
+    ) -> Vec<(u8, u32, SymbolKind, Vec<u8>)> {
+        let repair_symbols_per_block =
+            bonded_initial_repair_symbols_per_block(config).expect("repair budget");
+        let schedule =
+            schedule_bonded_donor_spray(descriptor, assignment, repair_symbols_per_block)
+                .expect("bonded schedule");
+
+        let mut symbols = Vec::new();
+        for block in &schedule.blocks {
+            let start = usize::try_from(block.geometry.block_start).expect("test block start");
+            let len = usize::try_from(block.geometry.block_bytes).expect("test block len");
+            for emission in block.symbol_emissions(schedule.donor_index) {
+                let symbol =
+                    encode_bonded_donor_emission(emission, &bytes[start..start + len], config)
+                        .expect("bonded emission encodes");
+                symbols.push(symbol_fingerprint(&symbol));
+            }
+        }
+        symbols
+    }
+
+    #[test]
+    fn bonded_donor_count_one_matches_single_source_round0_symbols() {
+        let config = RqConfig {
+            symbol_size: 4,
+            max_block_size: 8,
+            repair_overhead: 2.0,
+            ..RqConfig::default()
+        };
+        let bytes = b"abcdefghijklmnop";
+        let descriptor = bonded_test_descriptor(bytes, &config);
+        let assignment = bonded_test_assignment(0, 1);
+        let object_id = descriptor.entry_object_id(0);
+
+        let actual = collect_bonded_donor_test_symbols(&descriptor, &assignment, bytes, &config);
+        let expected = collect_m1_source_symbols(object_id, bytes, &config, 2);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bonded_donor_symbols_stay_inside_static_residue_class() {
+        let config = RqConfig {
+            symbol_size: 4,
+            max_block_size: 8,
+            repair_overhead: 2.0,
+            ..RqConfig::default()
+        };
+        let bytes = b"abcdefghijklmnop";
+        let descriptor = bonded_test_descriptor(bytes, &config);
+        let assignment = bonded_test_assignment(1, 2);
+
+        let symbols = collect_bonded_donor_test_symbols(&descriptor, &assignment, bytes, &config);
+
+        assert!(
+            symbols
+                .iter()
+                .any(|(_, _, kind, _)| *kind == SymbolKind::Source),
+            "donor should keep the receiver's source-first path alive"
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|(_, _, kind, _)| *kind == SymbolKind::Repair),
+            "donor should emit assigned repair symbols too"
+        );
+        for (_, esi, _, _) in symbols {
+            assert_eq!(esi % 2, 1, "donor emitted out-of-residue ESI {esi}");
+        }
     }
 
     fn collect_monolithic_repair_symbols(
