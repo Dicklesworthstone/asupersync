@@ -21,7 +21,7 @@ use std::{collections::BTreeSet, net::SocketAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
-use crate::types::Symbol;
+use crate::types::{Symbol, SymbolId, SymbolKind};
 
 use super::descriptor::{BondEntryBlockGeometry, BondProofError, BondTransferDescriptor};
 use super::esi::{EsiPartition, EsiPartitionError};
@@ -282,6 +282,24 @@ pub struct BondedDonorSymbolEmission {
     pub stagger_delay_slots: u32,
 }
 
+impl BondedDonorSymbolEmission {
+    /// Build the exact runtime symbol id this donor emission names.
+    #[must_use]
+    pub const fn symbol_id(self) -> SymbolId {
+        SymbolId::new(
+            self.geometry.object_id,
+            self.geometry.source_block_number,
+            self.esi,
+        )
+    }
+
+    /// Convert the scheduled bonded kind to the runtime symbol kind.
+    #[must_use]
+    pub const fn symbol_kind(self) -> SymbolKind {
+        self.kind.as_symbol_kind()
+    }
+}
+
 /// Scheduled bonded symbol kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BondedDonorSymbolKind {
@@ -289,6 +307,17 @@ pub enum BondedDonorSymbolKind {
     Source,
     /// Repair/FEC symbol (`esi >= K`).
     Repair,
+}
+
+impl BondedDonorSymbolKind {
+    /// Convert this bonded schedule marker to the runtime symbol kind.
+    #[must_use]
+    pub const fn as_symbol_kind(self) -> SymbolKind {
+        match self {
+            Self::Source => SymbolKind::Source,
+            Self::Repair => SymbolKind::Repair,
+        }
+    }
 }
 
 /// Collective source-range coverage for a bonded transfer.
@@ -1114,12 +1143,8 @@ fn schedule_block(
             repair_symbols: repair_symbols_per_block,
         })?;
 
-    let source_esis = (0..source_symbols)
-        .filter(|esi| assignment.owns_esi(*esi))
-        .collect();
-    let repair_esis = (repair_start..repair_end)
-        .filter(|esi| assignment.owns_esi(*esi))
-        .collect();
+    let source_esis = assigned_esis_in_range(assignment, 0, source_symbols);
+    let repair_esis = assigned_esis_in_range(assignment, repair_start, repair_end);
 
     Ok(BondedBlockSpraySchedule {
         geometry,
@@ -1128,6 +1153,30 @@ fn schedule_block(
         next_repair_esi: repair_end,
         stagger_delay_slots: assignment.donor_index,
     })
+}
+
+fn assigned_esis_in_range(assignment: &DonorAssignment, start: u32, end: u32) -> Vec<u32> {
+    if start >= end {
+        return Vec::new();
+    }
+    if !assignment.esi_windows.is_empty() {
+        return (start..end)
+            .filter(|esi| assignment.owns_esi(*esi))
+            .collect();
+    }
+
+    let Some(mut esi) = first_static_owned_esi_at_or_after(assignment, start) else {
+        return Vec::new();
+    };
+    let mut esis = Vec::new();
+    while esi < end {
+        esis.push(esi);
+        let Some(next) = esi.checked_add(assignment.donor_count) else {
+            break;
+        };
+        esi = next;
+    }
+    esis
 }
 
 fn validate_collective_assignments(
@@ -1685,6 +1734,58 @@ mod tests {
             for esi in right_esis {
                 assert_eq!(esi % 2, 1);
             }
+        }
+    }
+
+    #[test]
+    fn single_donor_spray_schedule_matches_single_source_esi_order() {
+        let descriptor = descriptor();
+        let donor = DonorAssignment::new_static(0, 1, vec![endpoint()], None);
+
+        let schedule =
+            schedule_bonded_donor_spray(&descriptor, &donor, 4).expect("single donor schedule");
+
+        assert_eq!(schedule.donor_index, 0);
+        assert_eq!(schedule.donor_count, 1);
+        assert_eq!(schedule.blocks.len(), 2);
+        assert!(schedule.covers_every_block());
+        assert_eq!(schedule.source_symbol_count(), 4);
+        assert_eq!(schedule.repair_symbol_count(), 8);
+        assert_eq!(schedule.total_symbol_count(), 12);
+
+        for block in &schedule.blocks {
+            assert_eq!(block.source_esis, vec![0, 1]);
+            assert_eq!(block.repair_esis, vec![2, 3, 4, 5]);
+            assert_eq!(block.ordered_esis(), vec![0, 1, 2, 3, 4, 5]);
+            assert_eq!(block.next_repair_esi, 6);
+            assert_eq!(block.stagger_delay_slots, 0);
+        }
+
+        let emissions = schedule.symbol_emissions();
+        assert_eq!(emissions.len(), schedule.total_symbol_count());
+        assert!(emissions.iter().all(|emission| emission.donor_index == 0));
+        assert_eq!(emissions[0].kind, BondedDonorSymbolKind::Source);
+        assert_eq!(emissions[2].kind, BondedDonorSymbolKind::Repair);
+    }
+
+    #[test]
+    fn windowed_donor_spray_schedule_uses_explicit_esi_windows() {
+        let descriptor = descriptor();
+        let donor =
+            DonorAssignment::new_windowed(0, 1, vec![EsiWindow::new(1, 3)], vec![endpoint()], None);
+
+        let schedule =
+            schedule_bonded_donor_spray(&descriptor, &donor, 4).expect("windowed schedule");
+
+        for block in &schedule.blocks {
+            assert_eq!(
+                block.ordered_esis(),
+                vec![1, 2],
+                "explicit windows override static residue and remain half-open"
+            );
+            assert_eq!(block.source_esis, vec![1]);
+            assert_eq!(block.repair_esis, vec![2]);
+            assert_eq!(block.next_repair_esi, 6);
         }
     }
 
@@ -2467,6 +2568,54 @@ mod tests {
                 (0, 1, 4, BondedDonorSymbolKind::Repair, 0),
             ],
             "donor_count=1 must preserve the single-source source-then-repair ESI stream"
+        );
+    }
+
+    #[test]
+    fn donor_symbol_emission_exposes_runtime_symbol_identity() {
+        let descriptor = descriptor();
+        let assignment = DonorAssignment::new_static(0, 1, vec![endpoint()], None);
+        let schedule = schedule_bonded_donor_spray(&descriptor, &assignment, 1).expect("schedule");
+
+        let source = schedule
+            .symbol_emissions()
+            .into_iter()
+            .find(|emission| emission.kind == BondedDonorSymbolKind::Source)
+            .expect("source emission");
+        let repair = schedule
+            .symbol_emissions()
+            .into_iter()
+            .find(|emission| emission.kind == BondedDonorSymbolKind::Repair)
+            .expect("repair emission");
+
+        assert_eq!(
+            source.symbol_id(),
+            SymbolId::new(
+                source.geometry.object_id,
+                source.geometry.source_block_number,
+                0
+            )
+        );
+        assert_eq!(source.symbol_kind(), SymbolKind::Source);
+        assert!(
+            source
+                .symbol_id()
+                .is_source(u32::from(source.geometry.source_symbols))
+        );
+
+        assert_eq!(
+            repair.symbol_id(),
+            SymbolId::new(
+                repair.geometry.object_id,
+                repair.geometry.source_block_number,
+                2
+            )
+        );
+        assert_eq!(repair.symbol_kind(), SymbolKind::Repair);
+        assert!(
+            repair
+                .symbol_id()
+                .is_repair(u32::from(repair.geometry.source_symbols))
         );
     }
 
