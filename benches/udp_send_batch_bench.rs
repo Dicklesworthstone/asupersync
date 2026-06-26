@@ -14,6 +14,8 @@ enum SendBatchBenchCase {
     PortableLoop,
     NativeSendmmsgOnly,
     NativeGsoSendmmsg,
+    ConnectedNativeSendmmsgOnly,
+    ConnectedNativeGsoSendmmsg,
 }
 
 impl SendBatchBenchCase {
@@ -22,17 +24,28 @@ impl SendBatchBenchCase {
             Self::PortableLoop => "portable_send_to_loop",
             Self::NativeSendmmsgOnly => "native_sendmmsg_only",
             Self::NativeGsoSendmmsg => "native_gso_sendmmsg",
+            Self::ConnectedNativeSendmmsgOnly => "connected_native_sendmmsg_only",
+            Self::ConnectedNativeGsoSendmmsg => "connected_native_gso_sendmmsg",
         }
     }
 
     fn strategy(self) -> UdpSendBatchStrategy {
         match self {
-            Self::PortableLoop | Self::NativeGsoSendmmsg => UdpSendBatchStrategy::default(),
-            Self::NativeSendmmsgOnly => UdpSendBatchStrategy {
+            Self::PortableLoop | Self::NativeGsoSendmmsg | Self::ConnectedNativeGsoSendmmsg => {
+                UdpSendBatchStrategy::default()
+            }
+            Self::NativeSendmmsgOnly | Self::ConnectedNativeSendmmsgOnly => UdpSendBatchStrategy {
                 prefer_gso: false,
                 ..UdpSendBatchStrategy::default()
             },
         }
+    }
+
+    fn connected(self) -> bool {
+        matches!(
+            self,
+            Self::ConnectedNativeSendmmsgOnly | Self::ConnectedNativeGsoSendmmsg
+        )
     }
 }
 
@@ -48,17 +61,26 @@ fn send_and_drain(payloads: &[Vec<u8>], bench_case: SendBatchBenchCase) {
         let receiver_addr = receiver.local_addr().unwrap();
         let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-        let packets = payloads
-            .iter()
-            .map(|payload| UdpOutboundDatagram {
-                dst_addr: receiver_addr,
-                payload,
-            })
-            .collect::<Vec<_>>();
-        let report = sender
-            .send_batch_to_with_strategy(&packets, bench_case.strategy())
-            .await
-            .unwrap();
+        let report = if bench_case.connected() {
+            sender.connect(receiver_addr).await.unwrap();
+            let payload_refs = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            sender
+                .send_connected_batch_with_strategy(&payload_refs, bench_case.strategy())
+                .await
+                .unwrap()
+        } else {
+            let packets = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+            sender
+                .send_batch_to_with_strategy(&packets, bench_case.strategy())
+                .await
+                .unwrap()
+        };
         assert_eq!(report.packets_processed, PACKETS_PER_BATCH);
         assert_eq!(report.bytes_processed, PACKETS_PER_BATCH * PAYLOAD_BYTES);
 
@@ -68,13 +90,15 @@ fn send_and_drain(payloads: &[Vec<u8>], bench_case: SendBatchBenchCase) {
                 assert!(!report.native_send_batch_used);
                 assert!(!report.gso_send_used);
             }
-            SendBatchBenchCase::NativeSendmmsgOnly => {
+            SendBatchBenchCase::NativeSendmmsgOnly
+            | SendBatchBenchCase::ConnectedNativeSendmmsgOnly => {
                 if cfg!(target_os = "linux") {
                     assert!(report.native_send_batch_used);
                     assert!(!report.gso_send_used);
                 }
             }
-            SendBatchBenchCase::NativeGsoSendmmsg => {
+            SendBatchBenchCase::NativeGsoSendmmsg
+            | SendBatchBenchCase::ConnectedNativeGsoSendmmsg => {
                 if cfg!(target_os = "linux") {
                     assert!(
                         report.native_send_batch_used,
@@ -110,6 +134,8 @@ fn bench_udp_send_batch(c: &mut Criterion) {
         SendBatchBenchCase::PortableLoop,
         SendBatchBenchCase::NativeSendmmsgOnly,
         SendBatchBenchCase::NativeGsoSendmmsg,
+        SendBatchBenchCase::ConnectedNativeSendmmsgOnly,
+        SendBatchBenchCase::ConnectedNativeGsoSendmmsg,
     ] {
         group.bench_with_input(
             BenchmarkId::new(bench_case.name(), PACKETS_PER_BATCH),

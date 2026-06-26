@@ -15,6 +15,13 @@ use crate::net::lookup_all;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use smallvec::SmallVec;
 use std::io;
 #[cfg(any(
     target_os = "linux",
@@ -1097,6 +1104,24 @@ fn native_sendmmsg_addrs_for_packets(
     target_os = "netbsd"
 ))]
 type NativeSendmmsgAddr = nix::sys::socket::SockaddrStorage;
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+type NativeSendmmsgAddrList = SmallVec<[Option<NativeSendmmsgAddr>; UDP_MAX_GSO_SEGMENTS]>;
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+fn native_sendmmsg_none_addrs(len: usize) -> NativeSendmmsgAddrList {
+    std::iter::repeat_with(|| None).take(len).collect()
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 // `Sent` and `WouldBlock` are only constructed inside the
@@ -2237,7 +2262,7 @@ impl UdpSocket {
                 .iter()
                 .map(|packet| [IoSlice::new(packet.buffer.as_slice())])
                 .collect::<Vec<_>>();
-            let addrs = vec![None; chunk.len()];
+            let addrs = native_sendmmsg_none_addrs(chunk.len());
             let mut headers = nix::sys::socket::MultiHeaders::<NativeSendmmsgAddr>::preallocate(
                 chunk.len(),
                 Some(nix::cmsg_space!(u16)),
@@ -2385,7 +2410,7 @@ impl UdpSocket {
                 .iter()
                 .map(|payload| [IoSlice::new(payload)])
                 .collect::<Vec<_>>();
-            let addrs = vec![None; chunk.len()];
+            let addrs = native_sendmmsg_none_addrs(chunk.len());
             let mut headers = nix::sys::socket::MultiHeaders::<NativeSendmmsgAddr>::preallocate(
                 chunk.len(),
                 None,
@@ -2930,6 +2955,21 @@ mod tests {
         assert_eq!(plan.estimated_syscalls, 1);
         assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
         assert_eq!(plan.gso_segments_per_packet, Some(UDP_MAX_GSO_SEGMENTS));
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    #[test]
+    fn native_connected_sendmmsg_addrs_stay_inline_for_rq_window() {
+        let addrs = native_sendmmsg_none_addrs(UDP_MAX_GSO_SEGMENTS);
+
+        assert_eq!(addrs.len(), UDP_MAX_GSO_SEGMENTS);
+        assert!(addrs.iter().all(Option::is_none));
+        assert!(!addrs.spilled());
     }
 
     #[test]
