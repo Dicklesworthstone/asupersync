@@ -2715,3 +2715,16 @@ Benched origin/main HEAD `5f70be4f2` (incl `94c20eacb`; bench bin atp 0.3.5), 50
 | perfect | 10.26s (5/5 sha, rounds=0) | 0.85s | 12.1× | 10.46s / 12.3× — HELD |
 
 **Integrity sweep of the new code (`94c20eacb` small-clean source-stream + `c39af6d9e`/`7b62bac84` encrypted-good) COMPLETE and clean:** (95) small-clean nocrypto = WIN 0.66×; (96) large-clean nocrypto = no regression (correct fallback); (97) lossy nocrypto = no regression + WIN 0.75×; (98) encrypted-perfect = floor held 12.1×. No cherry-picking — the matrix corners touched by this session's code are all verified, with the small-clean flip and the encrypted-good convergence closure both landing without collateral.
+
+## MATRIX-99 (2026-06-26) — large-clean source-stream (`aba20bb91` 'stream large clean RQ source over control', p1sufr): ★2.17× PROGRESS, memory-safe, but NOT a flip (still 1.51× rsync). 500M/perfect nocrypto **16.86s → 7.76s (2.17× faster)**, ratio **3.29× → 1.51×**, sha **3/3**, peak RSS **13 MB** (disk-backed CONFIRMED — bounded, even lighter than the normal path's 24 MB). The RaptorQ source-encode tax is eliminated (rounds=0, streamed over the reliable QUIC control channel) but atp does not yet beat rsync at 500M because the new bottleneck is QUIC reliable-stream throughput.
+
+Benched origin/main HEAD `f45da6598` (fix `aba20bb91`; built clean from `git archive`, 0 errors, atp 0.3.5), 500M / `perfect` (2ms / 1gbit) / `nocrypto`, streams=1, reps=3, sha-verified, ATP_RQ_TRACE=1:
+
+| method | median wall | sha | rounds | peak RSS | ratio |
+|---|---|---|---|---|---|
+| atp-rq-lab | **7.76s** (7.66–8.16) | 3/3 ✓ | 0 | **13 MB** | 1.51× (was 3.29× / 16.86s) |
+| rsyncd | 5.13s | 3/3 ✓ | — | 40 MB | — |
+
+**Verdict: big improvement, correctness- and memory-safe, but 500M/perfect is NOT yet flipped (1.51× slower).** The disk-backed source-stream works as designed: it streams 500M source over the reliable QUIC control channel with peak RSS 13 MB (no buffering — the unbounded-stream risk is cleared) and is byte-identical (sha 3/3), halving the wall (16.86→7.76s) by removing the RaptorQ source-encode/intermediate-symbol precompute. **Why it doesn't beat rsync at 500M (yet):** atp's QUIC reliable-stream throughput is ~62 MB/s and roughly *flat* with size (50M→0.81s/61 MB/s [MATRIX-95], 500M→7.76s/64 MB/s), whereas rsync's bulk-TCP **ramps with size** (50M→41 MB/s, 500M→97 MB/s — TCP slow-start completes and it hits high throughput on large transfers). So small-clean flips (rsync hasn't ramped) but large-clean doesn't (rsync ramps past atp's steady-state). The bottleneck moved from RaptorQ-encode to QUIC-stream-throughput.
+
+**Routed to owner (p1sufr):** excellent memory-safe 2.17× cut — keep it (it strictly improves 500M/perfect and is byte-identical). To actually FLIP 500M/perfect, raise the QUIC reliable-stream steady-state throughput above ~97 MB/s: candidates are (a) larger stream flow-control / receive window (let the sender keep more in flight), (b) multi-stream source striping (parallel control streams), (c) GSO on the stream send path, (d) a more aggressive stream congestion ramp on a detected-clean link. This is the last clean-link frontier; clean nocrypto is now WON at 50M (MATRIX-95, 0.66×) and a near-tie-trending-win at 500M (1.51×, down from 3.29×). Evidence: `artifacts/atp_bench_matrix/20260626T013209Z/`.
