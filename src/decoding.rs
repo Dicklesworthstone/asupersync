@@ -872,6 +872,20 @@ impl DecodingPipeline {
         retain_decoded_block: bool,
     ) -> Option<SymbolAcceptResult> {
         let block_plan = self.block_plan(sbn)?.clone();
+        // O(1) gate (br-asupersync-atp-dataplane-redesign-317hxr.29, drhadc lever):
+        // try_complete_from_source_symbols allocates + copies the ENTIRE block on every
+        // call and returns None until all k source symbols are present. Called per source
+        // symbol, that is O(k^2) alloc/copy per block — the clean-link receiver-intake
+        // wall (MATRIX-23 feed_micros). Skip it until the maintained source count reaches
+        // k; source symbols are never evicted, so the count is exact.
+        if self
+            .block_symbol_counts
+            .get(&sbn)
+            .map_or(0, |counts| counts.source_symbols)
+            < block_plan.k
+        {
+            return None;
+        }
         let block_data = self.try_complete_from_source_symbols(&block_plan)?;
 
         self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
@@ -885,6 +899,21 @@ impl DecodingPipeline {
     fn prepare_decode_job(&self, sbn: u8, retain_decoded_block: bool) -> Option<BlockDecodeJob> {
         let block_plan = self.block_plan(sbn)?.clone();
         if block_plan.k == 0 {
+            return None;
+        }
+
+        // O(1) gate (br-asupersync-atp-dataplane-redesign-317hxr.29, drhadc lever):
+        // skip cloning every received block symbol until at least k symbols
+        // (source+repair) are available to decode. Called per symbol, the old
+        // clone-then-`len() < k` was O(k^2) clone per block. The authoritative
+        // `symbols.len() < k` check below is retained as a backstop in case repair
+        // retention eviction leaves the count ahead of the live symbol set.
+        if self
+            .block_symbol_counts
+            .get(&sbn)
+            .map_or(0, |counts| counts.total())
+            < block_plan.k
+        {
             return None;
         }
 
