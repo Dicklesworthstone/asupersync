@@ -2746,3 +2746,12 @@ Benched origin/main HEAD `f45da6598` (fix `aba20bb91`; built clean from `git arc
 | rsyncd | 1.03s | 5/5 ✓ | — | — | — |
 
 **Verdict: tree_small is a near-tie (1.22×), not a loss to chase.** Many-small-files is rsync's design strength (it batches the file list + per-file deltas efficiently), so atp being within 1.22× — byte-identical (sorted per-file digest set vs the gen manifest), single-shot (rounds=0), 12 MB RSS — is a solid result, consistent with the clean-link source path. Not a priority frontier; logged for whole-matrix completeness (no cherry-picking). The high-value frontier remains encrypted-perfect (12.1×); the swarm has just committed `b1cf10730` 'stream encrypted clean QUIC sources' (the encrypted-tier source-stream) — benching next.
+
+## MATRIX-102 (2026-06-26) — ★★REGRESSION: encrypted source-stream `b1cf10730` ('stream encrypted clean QUIC sources', m9c4w4) BREAKS encrypted clean transfers. encrypted 50M/perfect = **0/5 sha** — all reps `status=error, sha_ok=false`, failing in ~0.15s (impossibly fast for 50M = it errors out WITHOUT transferring), vs the MATRIX-98 floor of 10.26s/working. rsync-ssh in the same run is fine (0.85s, 5/5 sha), so this is a real atp break, not a harness glitch. ★This is on origin/main HEAD — the encrypted clean path is currently BROKEN. Routed URGENT to owner: revert or fix b1cf10730.
+
+| method | result | sha | status |
+|---|---|---|---|
+| atp-quic-tls13 50M/perfect/encrypted | ~0.15s (FAILS fast, no transfer) | 0/5 ✗ | error |
+| rsync-ssh-aes128gcm | 0.85s | 5/5 ✓ | ok |
+
+**Verdict: REGRESSION — do NOT bank; main needs a revert/fix.** The nocrypto source-stream (MATRIX-95/99) streams plaintext source over the reliable control channel, which is correct on the nocrypto tier. Porting it to the encrypted tier (`b1cf10730`) broke it: encrypted 50M/perfect now fails immediately (0/5, ~0.15s, sha-fail) — the encrypted clean source presumably is not being sealed/authenticated correctly when sent over the control stream (the receiver rejects it / the path errors before transferring), so the byte-identical guarantee fails closed (good that it errors rather than corrupts, but the cell is broken). encrypted-perfect regressed from the working 10.26s floor (MATRIX-98) to non-functional. **The fix must either correctly AEAD-seal the streamed encrypted source (and re-verify sha 5/5) or be reverted.** Until then, encrypted-perfect is broken on main. Evidence: `artifacts/atp_bench_matrix/20260626T025323Z/`.
