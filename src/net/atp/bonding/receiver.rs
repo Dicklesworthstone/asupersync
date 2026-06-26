@@ -75,6 +75,8 @@ pub struct BondedDonorIngressStats {
     pub source_symbols_accepted: u64,
     /// Accepted repair/FEC symbols.
     pub repair_symbols_accepted: u64,
+    /// Novel symbols dropped by the bounded receiver-retention policy.
+    pub symbols_rejected_by_retention: u64,
 }
 
 impl BondedDonorIngressStats {
@@ -84,6 +86,10 @@ impl BondedDonorIngressStats {
 
     fn record_duplicate(&mut self) {
         self.duplicate_symbols = self.duplicate_symbols.saturating_add(1);
+    }
+
+    fn record_retention_reject(&mut self) {
+        self.symbols_rejected_by_retention = self.symbols_rejected_by_retention.saturating_add(1);
     }
 
     fn record_accepted(&mut self, kind: SymbolKind) {
@@ -115,6 +121,8 @@ pub struct BondedReceiverIngressStats {
     pub source_symbols_accepted: u64,
     /// Accepted repair/FEC symbols.
     pub repair_symbols_accepted: u64,
+    /// Novel symbols dropped by the bounded receiver-retention policy.
+    pub symbols_rejected_by_retention: u64,
     /// Number of donors that have contributed at least one symbol.
     pub donor_count: usize,
 }
@@ -134,6 +142,51 @@ pub enum BondedSymbolDisposition {
     Accepted(BondedSymbolKey),
     /// The key was already present and should not be decoded again.
     Duplicate(BondedSymbolKey),
+    /// The key was novel but rejected before retention would exceed the policy.
+    RejectedByRetention {
+        /// Symbol that was dropped.
+        key: BondedSymbolKey,
+        /// Memory-retention limit that rejected the symbol.
+        reason: BondedReceiverRetentionRejectReason,
+    },
+}
+
+/// Bounded receiver-retention policy for the shared bonded symbol set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedReceiverRetentionPolicy {
+    /// Maximum retained unique symbols for one `(object_id, sbn)` block.
+    pub max_symbols_per_block: Option<u32>,
+    /// Maximum retained unique symbols across the whole bonded receiver set.
+    pub max_total_symbols: Option<usize>,
+}
+
+impl BondedReceiverRetentionPolicy {
+    /// No retention cap; preserves the original C2 receiver behavior.
+    #[must_use]
+    pub const fn unbounded() -> Self {
+        Self {
+            max_symbols_per_block: None,
+            max_total_symbols: None,
+        }
+    }
+
+    /// Build a policy with both per-block and transfer-wide retention caps.
+    #[must_use]
+    pub const fn bounded(max_symbols_per_block: u32, max_total_symbols: usize) -> Self {
+        Self {
+            max_symbols_per_block: Some(max_symbols_per_block),
+            max_total_symbols: Some(max_total_symbols),
+        }
+    }
+}
+
+/// Why a bounded receiver-retention policy rejected a novel symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BondedReceiverRetentionRejectReason {
+    /// Accepting the symbol would exceed the per-block retained-symbol cap.
+    BlockSymbolCap,
+    /// Accepting the symbol would exceed the transfer-wide retained-symbol cap.
+    TransferSymbolCap,
 }
 
 /// Receiver coverage for one bonded RaptorQ source block.
@@ -429,6 +482,7 @@ impl BondedReceiverSymbolSet {
                 duplicate_symbols: 0,
                 source_symbols_accepted: 0,
                 repair_symbols_accepted: 0,
+                symbols_rejected_by_retention: 0,
                 donor_count: 0,
             },
         }
@@ -464,6 +518,35 @@ impl BondedReceiverSymbolSet {
         key: BondedSymbolKey,
         kind: SymbolKind,
     ) -> BondedSymbolDisposition {
+        self.record_key_with_retention(
+            donor_index,
+            key,
+            kind,
+            BondedReceiverRetentionPolicy::unbounded(),
+        )
+    }
+
+    /// Record an authenticated bonded key under a bounded retention policy.
+    ///
+    /// Duplicate keys are detected before retention checks, so duplicate donor
+    /// retransmits never consume memory and remain observable as duplicates even
+    /// when the block or transfer is at capacity. Novel over-cap symbols are
+    /// rejected before they enter `seen`/`source_seen`, preserving a hard bound
+    /// for callers that opt into this path.
+    pub fn record_key_with_retention(
+        &mut self,
+        donor_index: u32,
+        key: BondedSymbolKey,
+        kind: SymbolKind,
+        retention: BondedReceiverRetentionPolicy,
+    ) -> BondedSymbolDisposition {
+        let duplicate = self.seen.contains(&key);
+        let retention_reject_reason = if duplicate {
+            None
+        } else {
+            self.retention_reject_reason(key, retention)
+        };
+
         let was_new_donor = !self.donor_stats.contains_key(&donor_index);
         let donor = self.donor_stats.entry(donor_index).or_default();
         if was_new_donor {
@@ -473,7 +556,19 @@ impl BondedReceiverSymbolSet {
         donor.record_received();
         self.aggregate.symbols_received = self.aggregate.symbols_received.saturating_add(1);
 
-        if self.seen.insert(key) {
+        if duplicate {
+            donor.record_duplicate();
+            self.aggregate.duplicate_symbols = self.aggregate.duplicate_symbols.saturating_add(1);
+            BondedSymbolDisposition::Duplicate(key)
+        } else if let Some(reason) = retention_reject_reason {
+            donor.record_retention_reject();
+            self.aggregate.symbols_rejected_by_retention = self
+                .aggregate
+                .symbols_rejected_by_retention
+                .saturating_add(1);
+            BondedSymbolDisposition::RejectedByRetention { key, reason }
+        } else {
+            self.seen.insert(key);
             let source_symbol = kind.is_source();
             if source_symbol {
                 self.source_seen.insert(key);
@@ -488,11 +583,37 @@ impl BondedReceiverSymbolSet {
                     self.aggregate.repair_symbols_accepted.saturating_add(1);
             }
             BondedSymbolDisposition::Accepted(key)
-        } else {
-            donor.record_duplicate();
-            self.aggregate.duplicate_symbols = self.aggregate.duplicate_symbols.saturating_add(1);
-            BondedSymbolDisposition::Duplicate(key)
         }
+    }
+
+    fn retention_reject_reason(
+        &self,
+        key: BondedSymbolKey,
+        retention: BondedReceiverRetentionPolicy,
+    ) -> Option<BondedReceiverRetentionRejectReason> {
+        if retention
+            .max_total_symbols
+            .is_some_and(|max_total| self.seen.len() >= max_total)
+        {
+            return Some(BondedReceiverRetentionRejectReason::TransferSymbolCap);
+        }
+
+        if retention
+            .max_symbols_per_block
+            .is_some_and(|max_block| self.block_symbol_count(key.object_id, key.sbn) >= max_block)
+        {
+            return Some(BondedReceiverRetentionRejectReason::BlockSymbolCap);
+        }
+
+        None
+    }
+
+    fn block_symbol_count(&self, object_id: ObjectId, sbn: u8) -> u32 {
+        self.seen
+            .iter()
+            .filter(|key| key.object_id == object_id && key.sbn == sbn)
+            .count()
+            .min(u32::MAX as usize) as u32
     }
 
     /// Return true if the unified set already contains `key`.
@@ -917,6 +1038,102 @@ mod tests {
         assert_eq!(donor1.duplicate_symbols, 2);
         assert_eq!(donor1.source_symbols_accepted, 0);
         assert_eq!(donor1.repair_symbols_accepted, 0);
+    }
+
+    #[test]
+    fn retention_policy_rejects_novel_symbols_after_block_cap_without_growing_set() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(12);
+        let retention = BondedReceiverRetentionPolicy::bounded(2, 16);
+
+        assert!(matches!(
+            set.record_key_with_retention(
+                0,
+                BondedSymbolKey::new(object_id, 0, 0),
+                SymbolKind::Source,
+                retention,
+            ),
+            BondedSymbolDisposition::Accepted(_)
+        ));
+        assert!(matches!(
+            set.record_key_with_retention(
+                1,
+                BondedSymbolKey::new(object_id, 0, 2),
+                SymbolKind::Repair,
+                retention,
+            ),
+            BondedSymbolDisposition::Accepted(_)
+        ));
+
+        assert_eq!(
+            set.record_key_with_retention(
+                2,
+                BondedSymbolKey::new(object_id, 0, 3),
+                SymbolKind::Repair,
+                retention,
+            ),
+            BondedSymbolDisposition::RejectedByRetention {
+                key: BondedSymbolKey::new(object_id, 0, 3),
+                reason: BondedReceiverRetentionRejectReason::BlockSymbolCap,
+            }
+        );
+        assert_eq!(
+            set.record_key_with_retention(
+                3,
+                BondedSymbolKey::new(object_id, 0, 2),
+                SymbolKind::Repair,
+                retention,
+            ),
+            BondedSymbolDisposition::Duplicate(BondedSymbolKey::new(object_id, 0, 2))
+        );
+
+        assert_eq!(set.len(), 2);
+        let aggregate = set.aggregate_stats();
+        assert_eq!(aggregate.symbols_received, 4);
+        assert_eq!(aggregate.symbols_accepted, 2);
+        assert_eq!(aggregate.duplicate_symbols, 1);
+        assert_eq!(aggregate.symbols_rejected_by_retention, 1);
+        assert_eq!(
+            set.donor_stats(2)
+                .expect("donor 2 stats")
+                .symbols_rejected_by_retention,
+            1
+        );
+    }
+
+    #[test]
+    fn retention_policy_rejects_novel_symbols_after_transfer_cap() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(14);
+        let retention = BondedReceiverRetentionPolicy::bounded(8, 2);
+
+        set.record_key_with_retention(
+            0,
+            BondedSymbolKey::new(object_id, 0, 0),
+            SymbolKind::Source,
+            retention,
+        );
+        set.record_key_with_retention(
+            1,
+            BondedSymbolKey::new(object_id, 1, 0),
+            SymbolKind::Source,
+            retention,
+        );
+
+        assert_eq!(
+            set.record_key_with_retention(
+                2,
+                BondedSymbolKey::new(object_id, 2, 0),
+                SymbolKind::Source,
+                retention,
+            ),
+            BondedSymbolDisposition::RejectedByRetention {
+                key: BondedSymbolKey::new(object_id, 2, 0),
+                reason: BondedReceiverRetentionRejectReason::TransferSymbolCap,
+            }
+        );
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.aggregate_stats().symbols_rejected_by_retention, 1);
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub use receiver::{
     BondedBlockCompletionPath, BondedBlockCoverage, BondedBlockProgressMetrics,
     BondedBlockSourceHoles, BondedDonorIngressStats, BondedDonorProgressMetrics,
     BondedReceiverFeedbackAction, BondedReceiverFeedbackPlan, BondedReceiverIngressStats,
-    BondedReceiverLiveProgressMetrics, BondedReceiverProgressSnapshot, BondedReceiverSymbolSet,
+    BondedReceiverLiveProgressMetrics, BondedReceiverProgressSnapshot,
+    BondedReceiverRetentionPolicy, BondedReceiverRetentionRejectReason, BondedReceiverSymbolSet,
     BondedSymbolDisposition, BondedSymbolKey,
 };
