@@ -159,6 +159,33 @@ impl BondedBlockCoverage {
     }
 }
 
+/// Receiver-side source-fast-path holes for one bonded RaptorQ source block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedBlockSourceHoles {
+    /// RaptorQ object id shared by all bonded donors.
+    pub object_id: ObjectId,
+    /// Source block number within the object.
+    pub sbn: u8,
+    /// Number of systematic source ESIs for this block.
+    pub source_symbols: u32,
+    /// Source ESIs still missing after global cross-donor deduplication.
+    pub missing_source_esis: Vec<u32>,
+}
+
+impl BondedBlockSourceHoles {
+    /// True when the receiver can stay on the source-only memcpy path.
+    #[must_use]
+    pub fn is_source_complete(&self) -> bool {
+        self.missing_source_esis.is_empty()
+    }
+
+    /// Count missing systematic source symbols for this block.
+    #[must_use]
+    pub fn missing_source_count(&self) -> usize {
+        self.missing_source_esis.len()
+    }
+}
+
 /// Live receiver progress summary for a bonded transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BondedReceiverProgressSnapshot {
@@ -193,6 +220,8 @@ impl BondedReceiverProgressSnapshot {
 pub struct BondedReceiverFeedbackPlan {
     /// Donor control connections that should receive every feedback action.
     pub donor_targets: Vec<u32>,
+    /// Missing systematic/source ESIs to request before generic repair.
+    pub source_first_need_more: Vec<BondedBlockSourceHoles>,
     /// Aggregate block deficits to broadcast as NeedMore.
     pub need_more: Vec<BondedBlockCoverage>,
     /// True when the receiver should broadcast ObjectComplete/Close.
@@ -211,6 +240,19 @@ impl BondedReceiverFeedbackPlan {
     /// True when at least one donor target should receive a NeedMore frame.
     #[must_use]
     pub fn should_broadcast_need_more(&self) -> bool {
+        !self.donor_targets.is_empty()
+            && (!self.source_first_need_more.is_empty() || !self.need_more.is_empty())
+    }
+
+    /// True when NeedMore should ask for missing systematic/source ESIs first.
+    #[must_use]
+    pub fn should_broadcast_source_first_need_more(&self) -> bool {
+        !self.donor_targets.is_empty() && !self.source_first_need_more.is_empty()
+    }
+
+    /// True when NeedMore should fall back to generic repair deficits.
+    #[must_use]
+    pub fn should_broadcast_repair_need_more(&self) -> bool {
         !self.donor_targets.is_empty() && !self.need_more.is_empty()
     }
 
@@ -225,6 +267,7 @@ impl BondedReceiverFeedbackPlan {
 #[derive(Debug, Clone, Default)]
 pub struct BondedReceiverSymbolSet {
     seen: BTreeSet<BondedSymbolKey>,
+    source_seen: BTreeSet<BondedSymbolKey>,
     donor_stats: BTreeMap<u32, BondedDonorIngressStats>,
     aggregate: BondedReceiverIngressStats,
 }
@@ -235,6 +278,7 @@ impl BondedReceiverSymbolSet {
     pub const fn new() -> Self {
         Self {
             seen: BTreeSet::new(),
+            source_seen: BTreeSet::new(),
             donor_stats: BTreeMap::new(),
             aggregate: BondedReceiverIngressStats {
                 symbols_received: 0,
@@ -287,9 +331,13 @@ impl BondedReceiverSymbolSet {
         self.aggregate.symbols_received = self.aggregate.symbols_received.saturating_add(1);
 
         if self.seen.insert(key) {
+            let source_symbol = kind.is_source();
+            if source_symbol {
+                self.source_seen.insert(key);
+            }
             donor.record_accepted(kind);
             self.aggregate.symbols_accepted = self.aggregate.symbols_accepted.saturating_add(1);
-            if kind.is_source() {
+            if source_symbol {
                 self.aggregate.source_symbols_accepted =
                     self.aggregate.source_symbols_accepted.saturating_add(1);
             } else {
@@ -366,6 +414,50 @@ impl BondedReceiverSymbolSet {
         }
     }
 
+    /// Return missing systematic/source ESIs for one block.
+    ///
+    /// B4 source-first feedback uses this before generic repair requests: repair
+    /// ESIs can make the block decodable, but only source ESIs preserve the
+    /// receiver's memcpy fast path. Duplicate donor retransmits are ignored by
+    /// the shared `(object_id, sbn, esi)` set before holes are computed.
+    #[must_use]
+    pub fn block_source_holes(
+        &self,
+        object_id: ObjectId,
+        sbn: u8,
+        source_symbols: u32,
+    ) -> BondedBlockSourceHoles {
+        let missing_source_esis = (0..source_symbols)
+            .filter(|esi| {
+                !self
+                    .source_seen
+                    .contains(&BondedSymbolKey::new(object_id, sbn, *esi))
+            })
+            .collect();
+
+        BondedBlockSourceHoles {
+            object_id,
+            sbn,
+            source_symbols,
+            missing_source_esis,
+        }
+    }
+
+    /// Return only blocks that still need systematic/source retransmits.
+    #[must_use]
+    pub fn blocks_with_source_holes(
+        &self,
+        blocks: impl IntoIterator<Item = (ObjectId, u8, u32)>,
+    ) -> Vec<BondedBlockSourceHoles> {
+        blocks
+            .into_iter()
+            .map(|(object_id, sbn, source_symbols)| {
+                self.block_source_holes(object_id, sbn, source_symbols)
+            })
+            .filter(|holes| !holes.is_source_complete())
+            .collect()
+    }
+
     /// Return coverage rows only for blocks that still need repair symbols.
     #[must_use]
     pub fn blocks_needing_more(
@@ -416,6 +508,12 @@ impl BondedReceiverSymbolSet {
     /// `object_verified_complete` is the receiver's fail-closed byte/object
     /// verification result. Once true, Close wins over any stale per-block
     /// deficit so no donor keeps spraying into a completed transfer.
+    ///
+    /// Missing systematic/source ESIs are reported separately from generic
+    /// repair deficits. Control-plane callers should prefer
+    /// `source_first_need_more` before falling back to `need_more` so clean and
+    /// near-clean bonded transfers can complete through the memcpy source path
+    /// instead of spending receiver CPU on RaptorQ repair decode.
     #[must_use]
     pub fn feedback_broadcast_plan(
         &self,
@@ -424,14 +522,18 @@ impl BondedReceiverSymbolSet {
     ) -> BondedReceiverFeedbackPlan {
         let block_list: Vec<_> = blocks.into_iter().collect();
         let progress = self.progress_snapshot(block_list.iter().copied());
-        let need_more = if object_verified_complete {
-            Vec::new()
+        let (source_first_need_more, need_more) = if object_verified_complete {
+            (Vec::new(), Vec::new())
         } else {
-            self.blocks_needing_more(block_list.iter().copied())
+            (
+                self.blocks_with_source_holes(block_list.iter().copied()),
+                self.blocks_needing_more(block_list.iter().copied()),
+            )
         };
 
         BondedReceiverFeedbackPlan {
             donor_targets: self.donor_targets(),
+            source_first_need_more,
             need_more,
             close: object_verified_complete,
             progress,
@@ -597,7 +699,7 @@ mod tests {
         let object_id = ObjectId::new_for_test(17);
         set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
         set.record_key(1, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
-        set.record_key(1, BondedSymbolKey::new(object_id, 1, 1), SymbolKind::Repair);
+        set.record_key(1, BondedSymbolKey::new(object_id, 1, 2), SymbolKind::Repair);
 
         let needs_more = set.blocks_needing_more([(object_id, 0, 2), (object_id, 1, 2)]);
 
@@ -618,7 +720,7 @@ mod tests {
         let mut set = BondedReceiverSymbolSet::new();
         let object_id = ObjectId::new_for_test(19);
         set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
-        set.record_key(1, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Repair);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 2), SymbolKind::Repair);
         set.record_key(2, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
         set.record_key(3, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
 
@@ -653,13 +755,30 @@ mod tests {
         let object_id = ObjectId::new_for_test(23);
 
         set.record_key(2, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
-        set.record_key(0, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Repair);
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 2), SymbolKind::Repair);
         set.record_key(1, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
         set.record_key(2, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
 
         let plan = set.feedback_broadcast_plan([(object_id, 0, 2), (object_id, 1, 3)], false);
 
         assert_eq!(plan.donor_targets, vec![0, 1, 2]);
+        assert_eq!(
+            plan.source_first_need_more,
+            vec![
+                BondedBlockSourceHoles {
+                    object_id,
+                    sbn: 0,
+                    source_symbols: 2,
+                    missing_source_esis: vec![1],
+                },
+                BondedBlockSourceHoles {
+                    object_id,
+                    sbn: 1,
+                    source_symbols: 3,
+                    missing_source_esis: vec![1, 2],
+                },
+            ]
+        );
         assert_eq!(
             plan.need_more,
             vec![BondedBlockCoverage {
@@ -672,8 +791,39 @@ mod tests {
         );
         assert!(!plan.close);
         assert!(plan.should_broadcast_need_more());
+        assert!(plan.should_broadcast_source_first_need_more());
+        assert!(plan.should_broadcast_repair_need_more());
         assert!(!plan.should_broadcast_close());
         assert_eq!(plan.progress.total_deficit_symbols, 2);
+    }
+
+    #[test]
+    fn feedback_plan_prefers_source_holes_even_when_repairs_meet_target() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(27);
+
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 3), SymbolKind::Repair);
+        set.record_key(2, BondedSymbolKey::new(object_id, 0, 4), SymbolKind::Repair);
+
+        let plan = set.feedback_broadcast_plan([(object_id, 0, 3)], false);
+
+        assert_eq!(plan.donor_targets, vec![0, 1, 2]);
+        assert_eq!(
+            plan.source_first_need_more,
+            vec![BondedBlockSourceHoles {
+                object_id,
+                sbn: 0,
+                source_symbols: 3,
+                missing_source_esis: vec![1, 2],
+            }]
+        );
+        assert!(plan.need_more.is_empty());
+        assert!(plan.progress.is_complete());
+        assert!(plan.should_broadcast_need_more());
+        assert!(plan.should_broadcast_source_first_need_more());
+        assert!(!plan.should_broadcast_repair_need_more());
+        assert!(!plan.is_idle());
     }
 
     #[test]
@@ -682,14 +832,17 @@ mod tests {
         let object_id = ObjectId::new_for_test(29);
 
         set.record_key(1, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
-        set.record_key(0, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Repair);
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 4), SymbolKind::Repair);
 
         let plan = set.feedback_broadcast_plan([(object_id, 0, 4)], true);
 
         assert_eq!(plan.donor_targets, vec![0, 1]);
+        assert!(plan.source_first_need_more.is_empty());
         assert!(plan.need_more.is_empty());
         assert!(plan.close);
         assert!(!plan.should_broadcast_need_more());
+        assert!(!plan.should_broadcast_source_first_need_more());
+        assert!(!plan.should_broadcast_repair_need_more());
         assert!(plan.should_broadcast_close());
         assert_eq!(plan.progress.total_deficit_symbols, 2);
     }
@@ -701,8 +854,11 @@ mod tests {
         let plan = set.feedback_broadcast_plan([(object_id, 0, 1)], false);
 
         assert!(plan.donor_targets.is_empty());
+        assert_eq!(plan.source_first_need_more.len(), 1);
         assert_eq!(plan.need_more.len(), 1);
         assert!(!plan.should_broadcast_need_more());
+        assert!(!plan.should_broadcast_source_first_need_more());
+        assert!(!plan.should_broadcast_repair_need_more());
         assert!(!plan.should_broadcast_close());
         assert_eq!(plan.progress.total_deficit_symbols, 1);
     }
@@ -724,6 +880,57 @@ mod tests {
 
         assert_eq!(set.len(), 3);
         assert_eq!(set.aggregate_stats().duplicate_symbols, 0);
+    }
+
+    #[test]
+    fn source_holes_ignore_repair_symbols_and_duplicates() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(37);
+
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(2, BondedSymbolKey::new(object_id, 0, 3), SymbolKind::Repair);
+
+        let holes = set.block_source_holes(object_id, 0, 3);
+
+        assert_eq!(
+            holes,
+            BondedBlockSourceHoles {
+                object_id,
+                sbn: 0,
+                source_symbols: 3,
+                missing_source_esis: vec![1, 2],
+            }
+        );
+        assert!(!holes.is_source_complete());
+        assert_eq!(holes.missing_source_count(), 2);
+
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 2), SymbolKind::Source);
+
+        assert!(set.block_source_holes(object_id, 0, 3).is_source_complete());
+    }
+
+    #[test]
+    fn blocks_with_source_holes_filters_complete_blocks() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(41);
+
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Source);
+        set.record_key(0, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+
+        let holes = set.blocks_with_source_holes([(object_id, 0, 2), (object_id, 1, 2)]);
+
+        assert_eq!(
+            holes,
+            vec![BondedBlockSourceHoles {
+                object_id,
+                sbn: 1,
+                source_symbols: 2,
+                missing_source_esis: vec![1],
+            }]
+        );
     }
 
     #[test]

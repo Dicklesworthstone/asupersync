@@ -45,7 +45,7 @@ pub use handshake::{
     BondingReceiverControlPlane,
 };
 pub use receiver::{
-    BondedBlockCoverage, BondedDonorIngressStats, BondedReceiverFeedbackPlan,
-    BondedReceiverIngressStats, BondedReceiverProgressSnapshot, BondedReceiverSymbolSet,
-    BondedSymbolDisposition, BondedSymbolKey,
+    BondedBlockCoverage, BondedBlockSourceHoles, BondedDonorIngressStats,
+    BondedReceiverFeedbackPlan, BondedReceiverIngressStats, BondedReceiverProgressSnapshot,
+    BondedReceiverSymbolSet, BondedSymbolDisposition, BondedSymbolKey,
 };
