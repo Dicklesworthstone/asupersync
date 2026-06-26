@@ -332,6 +332,7 @@ const _: () = assert!(
             - QUIC_CONTROL_SOURCE_DATA_HEADER
 );
 /// Flush cadence for bulk `ObjectData` frames on the native reliable stream.
+#[allow(dead_code)]
 const QUIC_CONTROL_SOURCE_FLUSH_BYTES: usize = QUIC_CONTROL_SOURCE_CHUNK_BYTES;
 
 /// Tuning knobs for the ATP-over-QUIC transport.
