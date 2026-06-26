@@ -2374,8 +2374,53 @@ pub struct BondedDonorSendReport {
     pub repair_symbols_sent: u64,
     /// Total UDP datagrams emitted by the donor.
     pub symbols_sent: u64,
+    /// Pacing decision used for the donor's initial source-first spray.
+    pub pacing: BondedDonorPacingReport,
     /// UDP send acceleration counters observed while spraying.
     pub udp_send_acceleration: UdpSendAccelerationReport,
+}
+
+/// Pacing evidence for a bonded donor's source-first spray.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedDonorPacingReport {
+    /// Initial token-bucket rate before any clean-link round-0 ramp.
+    pub initial_rate_bytes_per_sec: u64,
+    /// Final token-bucket rate after the donor spray completed.
+    pub final_rate_bytes_per_sec: u64,
+    /// Maximum symbols allowed in one pacer burst.
+    pub burst_symbols: u32,
+    /// Maximum bytes allowed in one pacer burst.
+    pub burst_bytes: u64,
+    /// Estimated authenticated symbol datagram size.
+    pub datagram_bytes: u32,
+    /// Whether the clean-link additive round-0 ramp is enabled.
+    pub clean_round0_ramp_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BondedDonorPacingDecision {
+    pacing: RqSprayPacing,
+    report: BondedDonorPacingReport,
+}
+
+fn bonded_donor_round0_pacing_decision(
+    transfer_id: &str,
+    config: &RqConfig,
+    fanout: usize,
+) -> BondedDonorPacingDecision {
+    let mut state = RqAdaptiveSendState::new(transfer_tag(transfer_id), config, fanout);
+    let pacing = state.round0_tuning(config).pacing;
+    BondedDonorPacingDecision {
+        pacing,
+        report: BondedDonorPacingReport {
+            initial_rate_bytes_per_sec: pacing.rate_bytes_per_sec(),
+            final_rate_bytes_per_sec: pacing.rate_bytes_per_sec(),
+            burst_symbols: pacing.max_burst_size,
+            burst_bytes: pacing.burst_bytes(),
+            datagram_bytes: pacing.datagram_bytes,
+            clean_round0_ramp_enabled: round0_clean_ramp_enabled(config, pacing),
+        },
+    }
 }
 
 /// Donate this host's assigned slice of an agreed bonded RaptorQ fountain.
@@ -2437,17 +2482,10 @@ pub async fn donate_path(
         sockets.push(sock);
     }
 
-    let mut pacer = RqSprayPacer::new_round0(
-        RqAdaptiveSendState::new(
-            transfer_tag(&descriptor.transfer_id),
-            &config,
-            sockets.len(),
-        )
-        .round0_tuning(&config)
-        .pacing,
-        &config,
-        false,
-    );
+    let pacing_decision =
+        bonded_donor_round0_pacing_decision(&descriptor.transfer_id, &config, sockets.len());
+    let mut pacing_report = pacing_decision.report;
+    let mut pacer = RqSprayPacer::new_round0(pacing_decision.pacing, &config, false);
     let mut send_batch = RqPendingSendBatch::new(sockets.len());
     let mut symbols_sent = 0u64;
     let mut source_symbols_sent = 0u64;
@@ -2462,7 +2500,7 @@ pub async fn donate_path(
         "windowed"
     };
     bondtrace!(
-        "donor: spray_start transfer_id={} donor_index={} donor_count={} assignment_mode={} esi_windows={:?} receiver_endpoints={} blocks={} repair_symbols_per_block={} pacing_rate_Bps={}",
+        "donor: spray_start transfer_id={} donor_index={} donor_count={} assignment_mode={} esi_windows={:?} receiver_endpoints={} blocks={} repair_symbols_per_block={} pacing_rate_Bps={} burst_symbols={} burst_bytes={} clean_round0_ramp={}",
         descriptor.transfer_id,
         assignment.donor_index,
         assignment.donor_count,
@@ -2471,7 +2509,10 @@ pub async fn donate_path(
         receiver_endpoints.len(),
         schedule.blocks.len(),
         repair_symbols_per_block,
-        pacer.pacing().rate_bytes_per_sec(),
+        pacing_report.initial_rate_bytes_per_sec,
+        pacing_report.burst_symbols,
+        pacing_report.burst_bytes,
+        pacing_report.clean_round0_ramp_enabled,
     );
 
     for block in &schedule.blocks {
@@ -2549,14 +2590,17 @@ pub async fn donate_path(
 
     let report = send_batch.flush(&mut sockets, &mut symbols_sent).await?;
     udp_send_acceleration.observe_flush_report(report);
+    pacing_report.final_rate_bytes_per_sec = pacer.pacing().rate_bytes_per_sec();
     bondtrace!(
-        "donor: spray_done transfer_id={} donor_index={} donor_count={} symbols_sent={} source_symbols_sent={} repair_symbols_sent={} udp_flushes={} native_batch_datagrams={} gso_datagrams={} fallback_datagrams={}",
+        "donor: spray_done transfer_id={} donor_index={} donor_count={} symbols_sent={} source_symbols_sent={} repair_symbols_sent={} initial_pacing_rate_Bps={} final_pacing_rate_Bps={} udp_flushes={} native_batch_datagrams={} gso_datagrams={} fallback_datagrams={}",
         descriptor.transfer_id,
         assignment.donor_index,
         assignment.donor_count,
         symbols_sent,
         source_symbols_sent,
         repair_symbols_sent,
+        pacing_report.initial_rate_bytes_per_sec,
+        pacing_report.final_rate_bytes_per_sec,
         udp_send_acceleration.flushes,
         udp_send_acceleration.native_batch_datagrams,
         udp_send_acceleration.gso_datagrams,
@@ -2573,6 +2617,7 @@ pub async fn donate_path(
         source_symbols_sent,
         repair_symbols_sent,
         symbols_sent,
+        pacing: pacing_report,
         udp_send_acceleration,
     })
 }
@@ -14174,6 +14219,46 @@ mod tests {
         for (_, esi, _, _) in symbols {
             assert_eq!(esi % 2, 1, "donor emitted out-of-residue ESI {esi}");
         }
+    }
+
+    #[test]
+    fn bonded_donor_round0_pacing_decision_is_reported_and_bounded() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+
+        let decision = bonded_donor_round0_pacing_decision("bonded-donor-pacing", &config, 2);
+        let pacer = RqSprayPacer::new_round0(decision.pacing, &config, false);
+
+        assert_eq!(
+            decision.report.initial_rate_bytes_per_sec,
+            decision.pacing.rate_bytes_per_sec()
+        );
+        assert_eq!(
+            decision.report.final_rate_bytes_per_sec,
+            decision.report.initial_rate_bytes_per_sec
+        );
+        assert_eq!(
+            decision.report.burst_symbols,
+            decision.pacing.max_burst_size
+        );
+        assert_eq!(decision.report.burst_bytes, decision.pacing.burst_bytes());
+        assert_eq!(
+            decision.report.datagram_bytes,
+            decision.pacing.datagram_bytes
+        );
+        assert!(
+            decision.report.burst_bytes < decision.report.initial_rate_bytes_per_sec,
+            "donor pacing must bound a send burst below a full second of path budget"
+        );
+        assert_eq!(
+            decision.report.clean_round0_ramp_enabled,
+            pacer.round0_ramp.is_some()
+        );
     }
 
     fn collect_monolithic_repair_symbols(
