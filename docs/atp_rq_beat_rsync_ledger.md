@@ -2707,3 +2707,11 @@ Benched origin/main HEAD `5f70be4f2` (incl `94c20eacb`; bench bin atp 0.3.5), 50
 | rsyncd | 14.64s | 3/3 ✓ | — | — | — |
 
 **Verdict: MATRIX-95 small-clean win is FULLY VERIFIED clean across the whole boundary.** Trilogy: (95) small-clean nocrypto = WIN 0.66× via source-stream; (96) large-clean nocrypto = no regression, falls back to normal RaptorQ path (sha 3/3, bounded RSS); (97) lossy nocrypto = no regression, FEC path intact (sha 3/3) AND itself a WIN 0.75×. The adaptive clean+small source-stream lever is correctly scoped — it engages only on clean small transfers, leaving large-clean and all lossy cells on the proven RaptorQ/FEC path. No cherry-picking: small-clean flipped to a win without collateral anywhere on the boundary, and atp's lossy edge (0.75× on 50M/bad) is confirmed intact. Evidence: `artifacts/atp_bench_matrix/20260626T004121Z/`.
+
+## MATRIX-98 (2026-06-26) — regression check: encrypted-perfect FLOOR held through the encrypted-good fixes. encrypted 50M/perfect on HEAD `5e84afd81` (incl `c39af6d9e` keepalives-off-control-stream + `7b62bac84` burst-sizing, both transport_quic) = sha **5/5**, median **10.26s / 12.1× rsync** (range 8.2–11.0s) — statistically identical to the MATRIX-89 banked floor (10.46s / 12.3×), marginally better. ★NO REGRESSION: the encrypted-good convergence/perf work did not disturb the encrypted-perfect clean path (keepalives run regardless of loss, so this was a real shared-code risk — cleared).
+
+| regime | atp-quic-tls13 median | rsync-ssh | ratio | vs MATRIX-89 |
+|---|---|---|---|---|
+| perfect | 10.26s (5/5 sha, rounds=0) | 0.85s | 12.1× | 10.46s / 12.3× — HELD |
+
+**Integrity sweep of the new code (`94c20eacb` small-clean source-stream + `c39af6d9e`/`7b62bac84` encrypted-good) COMPLETE and clean:** (95) small-clean nocrypto = WIN 0.66×; (96) large-clean nocrypto = no regression (correct fallback); (97) lossy nocrypto = no regression + WIN 0.75×; (98) encrypted-perfect = floor held 12.1×. No cherry-picking — the matrix corners touched by this session's code are all verified, with the small-clean flip and the encrypted-good convergence closure both landing without collateral.
