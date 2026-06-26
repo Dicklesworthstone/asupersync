@@ -408,6 +408,7 @@ pub struct DecodingPipeline {
     object_id: Option<ObjectId>,
     object_size: Option<u64>,
     block_plans: Option<Vec<BlockPlan>>,
+    block_plan_by_sbn: [Option<usize>; 256],
     auth_context: Option<SecurityContext>,
     /// br-asupersync-f4mdcr: count of symbols accepted with
     /// authentication INTENTIONALLY skipped because
@@ -443,6 +444,7 @@ impl DecodingPipeline {
             object_id: None,
             object_size: None,
             block_plans: None,
+            block_plan_by_sbn: [None; 256],
             auth_context: None,
             skipped_verifications: 0,
             verify_auth_disabled_warned: false,
@@ -497,9 +499,11 @@ impl DecodingPipeline {
             self.config.max_block_size,
         )?;
         validate_object_params_layout(params, &plans)?;
+        let block_plan_by_sbn = block_plan_index_by_sbn(&plans);
         self.object_id = Some(params.object_id);
         self.object_size = Some(params.object_size);
         self.block_plans = Some(plans);
+        self.block_plan_by_sbn = block_plan_by_sbn;
         self.configure_auto_buffer_limit();
         self.configure_block_k();
         Ok(())
@@ -1114,9 +1118,8 @@ impl DecodingPipeline {
     }
 
     fn block_plan(&self, sbn: u8) -> Option<&BlockPlan> {
-        self.block_plans
-            .as_ref()
-            .and_then(|plans| plans.iter().find(|plan| plan.sbn == sbn))
+        let idx = self.block_plan_by_sbn[usize::from(sbn)]?;
+        self.block_plans.as_ref()?.get(idx)
     }
 
     fn block_rank_status(&self, sbn: u8) -> Option<RankStatus> {
@@ -1207,6 +1210,14 @@ fn plan_blocks(
     }
 
     Ok(blocks)
+}
+
+fn block_plan_index_by_sbn(plans: &[BlockPlan]) -> [Option<usize>; 256] {
+    let mut index = [None; 256];
+    for (idx, plan) in plans.iter().enumerate() {
+        index[usize::from(plan.sbn)] = Some(idx);
+    }
+    index
 }
 
 fn validate_object_params_layout(
@@ -2302,6 +2313,25 @@ mod tests {
         pipeline
             .set_object_params(ObjectParams::new(oid, 512, config.symbol_size, 1, 2))
             .expect("second with same id should succeed");
+    }
+
+    #[test]
+    fn pipeline_indexes_block_plans_by_sbn() {
+        let object_id = ObjectId::new_for_test(3);
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 8,
+            max_block_size: 16,
+            ..DecodingConfig::without_auth()
+        });
+        pipeline
+            .set_object_params(ObjectParams::new(object_id, 40, 8, 3, 2))
+            .expect("multi-block params");
+
+        assert_eq!(pipeline.block_plan_by_sbn[0], Some(0));
+        assert_eq!(pipeline.block_plan_by_sbn[1], Some(1));
+        assert_eq!(pipeline.block_plan_by_sbn[2], Some(2));
+        assert_eq!(pipeline.block_plan(2).map(|plan| plan.len), Some(8));
+        assert!(pipeline.block_plan(3).is_none());
     }
 
     #[test]
