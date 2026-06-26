@@ -5,7 +5,7 @@
 //! receiver, not via the in-process `establish_loopback` substitute but over two
 //! real `QuicUdpEndpoint` sockets on `127.0.0.1`, with the genuine
 //! `rustls::quic` TLS-1.3 handshake (real WebPKI server-identity verification),
-//! per-symbol HMAC authentication, RaptorQ symbols sprayed as QUIC DATAGRAMs, the
+//! QUIC 1-RTT AEAD authentication, RaptorQ symbols sprayed as QUIC DATAGRAMs, the
 //! fountain feedback loop recovering simulated symbol loss, and SHA-256 +
 //! flat-merkle verification before an atomic commit.
 //!
@@ -139,7 +139,7 @@ fn server_tls() -> QuicServerTls {
     }
 }
 
-/// A pair of matching send/receive configs sharing the same per-symbol auth posture.
+/// A pair of matching send/receive configs sharing the same direct transport auth posture.
 struct Configs {
     send: QuicConfig,
     recv: QuicConfig,
@@ -563,10 +563,10 @@ fn real_udp_quic_send_fails_closed_on_expired_server_certificate() {
 }
 
 #[test]
-fn real_udp_quic_rejects_auth_failing_symbols_before_commit() {
-    // TLS succeeds and both peers require per-symbol authentication, but the
-    // receiver uses a different HMAC context. The first symbol must be rejected
-    // before decode/commit rather than being treated as unauthenticated data.
+fn real_udp_quic_direct_transport_auth_ignores_per_symbol_hmac_contexts() {
+    // Direct single-connection QUIC/TLS authenticates symbol bytes with QUIC
+    // 1-RTT AEAD. A legacy per-symbol HMAC key in the config must not add a
+    // second authentication boundary on this path.
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");
     let source = src.path().join("auth-failing-symbol.bin");
@@ -588,20 +588,12 @@ fn real_udp_quic_rejects_auth_failing_symbols_before_commit() {
     recv.accept_timeout = Duration::from_secs(5);
 
     let (send_res, recv_res) = run_transfer(send, recv, &source, dst.path());
-    assert!(
-        matches!(
-            recv_res,
-            Err(QuicTransportError::Integrity(ref message))
-                if message.contains("symbol authentication failed")
-        ),
-        "receiver must fail closed on auth-failing symbols, got {recv_res:?}"
-    );
-    assert!(
-        send_res.is_err(),
-        "sender must not receive a committed proof after auth failure"
-    );
-    assert!(
-        std::fs::read(dst.path().join("auth-failing-symbol.bin")).is_err(),
-        "auth-failing symbols must not commit destination bytes"
+    let send_res = send_res.expect("direct QUIC send completes with transport AEAD auth");
+    let recv_res = recv_res.expect("direct QUIC receive commits with transport AEAD auth");
+    assert_receive_report_counters(&send_res, &recv_res, payload.len() as u64, 1);
+    assert_eq!(
+        std::fs::read(dst.path().join("auth-failing-symbol.bin")).expect("read committed"),
+        payload,
+        "direct QUIC must rely on packet AEAD, not per-symbol HMAC contexts"
     );
 }

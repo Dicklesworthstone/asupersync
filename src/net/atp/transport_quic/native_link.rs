@@ -1683,6 +1683,22 @@ fn unspecified_for(peer: SocketAddr) -> SocketAddr {
     }
 }
 
+fn direct_single_connection_quic_aead_covers_symbols(config: &QuicConfig) -> bool {
+    super::quic_effective_datagram_fanout(config, usize::MAX) == 1
+}
+
+fn transport_authenticated_direct_config(config: &QuicConfig) -> QuicConfig {
+    if direct_single_connection_quic_aead_covers_symbols(config) {
+        return config.clone().use_transport_authenticated_symbols();
+    }
+    config.clone()
+}
+
+fn direct_native_symbol_auth_enabled(config: &QuicConfig) -> bool {
+    !direct_single_connection_quic_aead_covers_symbols(config)
+        && config.symbol_auth_context.is_some()
+}
+
 /// Establish a [`QuicLink`] from a completed handshake driver and its endpoint.
 fn link_from_handshake(
     cx: &Cx,
@@ -1705,13 +1721,13 @@ fn link_from_handshake(
     let max_app_payload = one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET);
     let max_datagram_frame_size = config.max_datagram_size.min(max_app_payload);
     // Use the smallest ATP symbol envelope this link may legitimately carry
-    // (trusted unauthenticated mode) so the receive batch bound remains safe for
-    // both auth postures.
+    // (direct transport-authenticated mode) so the receive batch bound remains
+    // safe for both auth postures.
     let symbol_frame_len =
         symbol_datagram_frame_len(config.symbol_size, super::ENVELOPE_HEADER_LEN);
     let max_datagram_frames_per_packet =
         coalesced_datagram_frames_per_packet(max_app_payload, symbol_frame_len);
-    let send_envelope_header_len = if config.symbol_auth_context.is_some() {
+    let send_envelope_header_len = if direct_native_symbol_auth_enabled(config) {
         super::AUTH_ENVELOPE_HEADER_LEN
     } else {
         super::ENVELOPE_HEADER_LEN
@@ -2117,7 +2133,7 @@ async fn spray_round(
                 if with_source && drop_one_in > 0 && sprayed % u64::from(drop_one_in) == 0 {
                     continue;
                 }
-                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
                 link.spray_symbol(cx, control, &symbol, tag, entry_index, auth_tag, &pacing)
                     .await?;
                 sent = sent.saturating_add(1);
@@ -2194,7 +2210,7 @@ async fn spray_source_requests(
             buffer,
             crate::types::symbol::SymbolKind::Source,
         );
-        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
         link.spray_symbol(cx, control, &symbol, tag, request.entry, auth_tag, &pacing)
             .await?;
         sent = sent.saturating_add(1);
@@ -2252,7 +2268,7 @@ async fn spray_block_repair_requests(
             let symbol = encoded
                 .map_err(|err| QuicTransportError::Control(err.to_string()))?
                 .into_symbol();
-            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
             link.spray_symbol(cx, control, &symbol, tag, entry_index, auth_tag, &pacing)
                 .await?;
             sent = sent.saturating_add(1);
@@ -2312,6 +2328,7 @@ async fn run_sender_session(
     peer_id: &str,
 ) -> Result<SendReport, QuicTransportError> {
     let config = prepared.effective_config(config);
+    let config = transport_authenticated_direct_config(&config);
     let config = &config;
     config.validate()?;
     super::validate_quic_manifest(&prepared.manifest, config)?;
@@ -2996,6 +3013,8 @@ async fn run_receiver_session(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    let config = transport_authenticated_direct_config(config);
+    let config = &config;
     config.validate()?;
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
@@ -3438,6 +3457,7 @@ pub(crate) async fn send_prepared_over_udp(
     peer_id: &str,
 ) -> Result<SendReport, QuicTransportError> {
     let config = prepared.effective_config(config);
+    let config = transport_authenticated_direct_config(&config);
     config.validate()?;
     let client_tls = config.client_tls.as_ref().ok_or_else(|| {
         QuicTransportError::Config(
@@ -3460,6 +3480,8 @@ pub async fn receive_on_endpoint(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    let config = transport_authenticated_direct_config(config);
+    config.validate()?;
     let server_tls = config.server_tls.as_ref().ok_or_else(|| {
         QuicTransportError::Config(
             "ATP-over-QUIC receive requires server TLS config; set QuicConfig::server_tls \
@@ -3467,14 +3489,14 @@ pub async fn receive_on_endpoint(
                 .to_string(),
         )
     })?;
-    let (mut link, early_data) = accept(cx, endpoint, server_tls, config).await?;
+    let (mut link, early_data) = accept(cx, endpoint, server_tls, &config).await?;
     // Replay any 1-RTT packets that raced ahead of the handshake's completion
     // (the client finishes first and may start the data plane immediately), so
     // the receiver session sees the sender's Hello / early symbols.
     if !early_data.is_empty() {
         link.ingest_packets(cx, &early_data).await?;
     }
-    run_receiver_session(cx, &mut link, dest_dir, config, peer_id).await
+    run_receiver_session(cx, &mut link, dest_dir, &config, peer_id).await
 }
 
 /// Bind a server UDP endpoint on `listen` for the native QUIC receive path.
@@ -3533,6 +3555,55 @@ mod tests {
             next_feedback_round_or_no_convergence(1, 1, 0)
                 .expect("empty feedback is not an incomplete-transfer convergence failure"),
             2
+        );
+    }
+
+    #[test]
+    fn direct_native_quic_uses_transport_aead_for_symbol_auth() {
+        let config = transport_authenticated_direct_config(&QuicConfig::default());
+
+        assert!(
+            !direct_native_symbol_auth_enabled(&config),
+            "direct single-connection native QUIC should not attach per-symbol HMAC tags"
+        );
+        assert!(
+            config
+                .symbol_auth_context()
+                .expect("direct native QUIC has a deliberate auth posture")
+                .is_none(),
+            "QUIC packet AEAD is the symbol authentication boundary on this path"
+        );
+    }
+
+    #[test]
+    fn fanout_native_quic_keeps_per_symbol_auth_boundary() {
+        let fanout = QuicConfig {
+            datagram_fanout: 2,
+            max_active_connections: 2,
+            ..QuicConfig::default()
+        };
+
+        assert!(
+            !direct_single_connection_quic_aead_covers_symbols(&fanout),
+            "multi-lane QUIC fanout remains outside the direct single-connection shortcut"
+        );
+        assert!(
+            transport_authenticated_direct_config(&fanout)
+                .symbol_auth_context()
+                .is_err(),
+            "fanout without symbol auth still fails closed"
+        );
+
+        let authenticated = fanout.with_symbol_auth(SecurityContext::for_testing(0xA7_50));
+        assert!(
+            direct_native_symbol_auth_enabled(&authenticated),
+            "fanout keeps per-symbol authentication tags"
+        );
+        assert!(
+            transport_authenticated_direct_config(&authenticated)
+                .symbol_auth_context()
+                .expect("authenticated fanout config")
+                .is_some()
         );
     }
 

@@ -227,12 +227,12 @@ struct SendArgs {
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
     ///
     /// Direct RQ transfers require this unless --rq-allow-unauthenticated-lab
-    /// is explicitly set. SSH bootstrap auto-generates a per-transfer key when
-    /// no key is supplied.
+    /// is explicitly set. Direct QUIC/TLS transfers authenticate symbol bytes
+    /// with QUIC 1-RTT AEAD and ignore this per-symbol HMAC key.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
-    /// Explicitly disable RQ/QUIC symbol authentication for loopback/lab-only
-    /// runs. Applies to both `--transport rq` and `--transport quic`.
+    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    /// Direct QUIC/TLS transfers are already transport-authenticated.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
     // ─── QUIC (`--transport quic`) TLS material ───
@@ -309,6 +309,9 @@ struct RecvArgs {
     #[arg(long, default_value_t = DEFAULT_ROUND_TAIL_DRAIN_MS)]
     rq_tail_drain_ms: u64,
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    ///
+    /// Direct QUIC/TLS transfers authenticate symbol bytes with QUIC 1-RTT AEAD
+    /// and ignore this per-symbol HMAC key.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
@@ -763,23 +766,17 @@ fn default_quic_server_name_for_ssh(remote: &RemoteTarget) -> String {
     default_server_name(ssh_host_without_user(&remote.ssh_host))
 }
 
-/// Apply the shared RQ/QUIC per-symbol auth posture to a base QUIC config.
+/// Apply the direct QUIC/TLS authentication posture to a base QUIC config.
 #[cfg(feature = "tls")]
-fn quic_with_symbol_auth(
+fn quic_with_transport_auth(
     base: asupersync::net::atp::transport_quic::QuicConfig,
-    rq_auth_key_hex: Option<&str>,
-    rq_allow_unauthenticated_lab: bool,
-) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
-    match resolve_rq_auth_choice(rq_auth_key_hex, rq_allow_unauthenticated_lab, false)? {
-        RqAuthChoice::KeyHex(key_hex) => {
-            let key = auth_key_from_hex(&key_hex)?;
-            Ok(base.with_symbol_auth(SecurityContext::new(key)))
-        }
-        RqAuthChoice::UnauthenticatedLab => Ok(base.allow_unauthenticated_for_trusted_transport()),
-    }
+    _rq_auth_key_hex: Option<&str>,
+    _rq_allow_unauthenticated_lab: bool,
+) -> asupersync::net::atp::transport_quic::QuicConfig {
+    base.use_transport_authenticated_symbols()
 }
 
-/// Build the sending QUIC config: client TLS trust + per-symbol auth + tuning.
+/// Build the sending QUIC config: client TLS trust + transport auth + tuning.
 #[cfg(feature = "tls")]
 fn quic_config_send(
     args: &SendArgs,
@@ -808,11 +805,11 @@ fn quic_config_send(
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         ..QuicConfig::default()
     };
-    let mut cfg = quic_with_symbol_auth(
+    let mut cfg = quic_with_transport_auth(
         base,
         args.rq_auth_key_hex.as_deref(),
         args.rq_allow_unauthenticated_lab,
-    )?;
+    );
     cfg.client_tls = Some(QuicClientTls {
         server_name,
         config,
@@ -820,7 +817,7 @@ fn quic_config_send(
     Ok(cfg)
 }
 
-/// Build the receiving QUIC config: server cert/key + per-symbol auth + tuning.
+/// Build the receiving QUIC config: server cert/key + transport auth + tuning.
 #[cfg(feature = "tls")]
 fn quic_config_recv(
     args: &RecvArgs,
@@ -848,11 +845,11 @@ fn quic_config_recv(
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         ..QuicConfig::default()
     };
-    let mut cfg = quic_with_symbol_auth(
+    let mut cfg = quic_with_transport_auth(
         base,
         args.rq_auth_key_hex.as_deref(),
         args.rq_allow_unauthenticated_lab,
-    )?;
+    );
     cfg.server_tls = Some(QuicServerTls { config });
     Ok(cfg)
 }
@@ -1501,10 +1498,10 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
     }
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
 
-    // Both the RQ and QUIC transports carry per-symbol HMAC auth; SSH bootstrap
-    // generates a fresh per-transfer key when none was supplied and feeds it to
-    // both ends. (TCP has no symbol auth.)
-    let rq_auth = if args.transport != Transport::Tcp {
+    // RQ still needs a per-symbol HMAC key. Direct QUIC/TLS authenticates the
+    // same symbol bytes with QUIC 1-RTT AEAD, so SSH bootstrap does not generate
+    // or export an RQ auth key for that transport.
+    let rq_auth = if args.transport == Transport::Rq {
         let auth = resolve_rq_auth_choice(
             args.rq_auth_key_hex.as_deref(),
             args.rq_allow_unauthenticated_lab,
@@ -4860,6 +4857,22 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         let err = resolve_rq_auth_choice(Some(VALID_KEY_HEX), true, false)
             .expect_err("explicit unauthenticated lab mode must not accept a key too");
         assert!(err.contains("conflicts"));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn direct_quic_uses_transport_auth_even_when_rq_key_is_configured() {
+        let cfg = quic_with_transport_auth(
+            asupersync::net::atp::transport_quic::QuicConfig::default(),
+            Some(VALID_KEY_HEX),
+            false,
+        );
+
+        assert_eq!(
+            cfg.symbol_auth_mode(),
+            asupersync::net::atp::transport_quic::QuicSymbolAuthMode::TransportAuthenticated
+        );
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

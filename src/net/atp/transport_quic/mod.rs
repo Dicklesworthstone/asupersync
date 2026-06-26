@@ -364,9 +364,12 @@ pub struct QuicConfig {
     /// Optional per-symbol authentication context for QUIC DATAGRAM symbols.
     ///
     /// When present, senders append an HMAC tag to every symbol envelope and
-    /// receivers verify every symbol before decoding.
+    /// receivers verify every symbol before decoding. Direct native QUIC/TLS
+    /// transfers do not need this second authentication layer: the stream and
+    /// DATAGRAM bytes are already covered by QUIC 1-RTT AEAD.
     pub symbol_auth_context: Option<SecurityContext>,
-    /// Explicit escape hatch for trusted loopback/lab links that intentionally
+    /// Explicit opt-in for links whose transport already authenticates every
+    /// byte (direct native QUIC/TLS) or trusted lab links that intentionally
     /// accept integrity-vs-manifest only.
     pub allow_unauthenticated_symbols: bool,
     /// Filesystem-metadata fidelity policy for manifest entries.
@@ -397,9 +400,9 @@ pub struct QuicConfig {
 pub enum QuicSymbolAuthMode {
     /// Symbols are signed and verified with a configured [`SecurityContext`].
     Authenticated,
-    /// Symbols are deliberately unauthenticated on a trusted loopback/lab link.
-    TrustedUnauthenticated,
-    /// No auth context was configured and no explicit trusted opt-out was set.
+    /// Symbols rely on the authenticated direct transport, e.g. QUIC 1-RTT AEAD.
+    TransportAuthenticated,
+    /// No auth context was configured and no explicit transport-auth opt-out was set.
     MissingAuthenticationContext,
 }
 
@@ -444,12 +447,20 @@ impl QuicConfig {
         self
     }
 
-    /// Explicitly allow unauthenticated symbols for trusted loopback/lab links.
+    /// Use the native QUIC/TLS transport AEAD as the symbol authentication
+    /// boundary for direct, single-connection transfers.
     #[must_use]
-    pub fn allow_unauthenticated_for_trusted_transport(mut self) -> Self {
+    pub fn use_transport_authenticated_symbols(mut self) -> Self {
         self.symbol_auth_context = None;
         self.allow_unauthenticated_symbols = true;
         self
+    }
+
+    /// Explicitly allow symbols without per-symbol HMAC on links whose transport
+    /// already authenticates every byte, or for trusted loopback/lab links.
+    #[must_use]
+    pub fn allow_unauthenticated_for_trusted_transport(self) -> Self {
+        self.use_transport_authenticated_symbols()
     }
 
     /// Return the configured per-symbol authentication posture.
@@ -459,7 +470,7 @@ impl QuicConfig {
             return QuicSymbolAuthMode::Authenticated;
         }
         if self.allow_unauthenticated_symbols {
-            return QuicSymbolAuthMode::TrustedUnauthenticated;
+            return QuicSymbolAuthMode::TransportAuthenticated;
         }
         QuicSymbolAuthMode::MissingAuthenticationContext
     }
@@ -477,8 +488,9 @@ impl QuicConfig {
             return Ok(None);
         }
         Err(QuicTransportError::Config(
-            "ATP-over-QUIC requires symbol_auth_context; call with_symbol_auth(...) or \
-             explicitly opt into allow_unauthenticated_for_trusted_transport() for loopback/lab use"
+            "ATP-over-QUIC requires symbol_auth_context or a deliberate symbol authentication posture: call \
+             with_symbol_auth(...) for relay/multipath/raw-UDP symbol auth or \
+             use_transport_authenticated_symbols() for direct QUIC/TLS transport AEAD"
                 .to_string(),
         ))
     }
@@ -3347,7 +3359,7 @@ fn spray_symbol_round(
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
                 send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
             }
@@ -3358,7 +3370,7 @@ fn spray_symbol_round(
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
                 send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
             }
@@ -3429,7 +3441,7 @@ async fn spray_streaming_symbol_round(
                 let symbol = symbol
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
                 send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
                 pacer.after_symbol_sent(cx).await?;
@@ -3544,7 +3556,7 @@ async fn send_source_symbol_requests(
                 ))
             })?;
         let symbol = streaming_source_symbol_for_request(cx, enc, *request, config).await?;
-        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
         send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
         pacer.after_symbol_sent(cx).await?;
@@ -3598,7 +3610,7 @@ async fn send_block_repair_requests(
             let symbol = encoded
                 .map_err(|err| QuicTransportError::Control(err.to_string()))?
                 .into_symbol();
-            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
             send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
             sent = sent.saturating_add(1);
             pacer.after_symbol_sent(cx).await?;
@@ -5862,7 +5874,7 @@ async fn spray_native_symbol_round(
                 let symbol = symbol
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
                 send_native_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
                 pacer.after_symbol_sent(cx).await?;
@@ -5979,7 +5991,7 @@ async fn send_native_source_symbol_requests(
                 ))
             })?;
         let symbol = native_source_symbol_for_request(cx, enc, *request, config).await?;
-        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
         send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
         pacer.after_symbol_sent(cx).await?;
@@ -6033,7 +6045,7 @@ async fn send_native_block_repair_requests(
             let symbol = encoded
                 .map_err(|err| QuicTransportError::Control(err.to_string()))?
                 .into_symbol();
-            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
             send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
             sent = sent.saturating_add(1);
             pacer.after_symbol_sent(cx).await?;
@@ -8019,16 +8031,22 @@ mod tests {
     }
 
     #[test]
-    fn default_config_requires_symbol_auth_or_trusted_mode() {
+    fn default_config_requires_explicit_symbol_auth_posture() {
         let err = QuicConfig::default()
             .validate()
             .expect_err("default config must fail closed");
         assert!(matches!(
             err,
-            QuicTransportError::Config(m) if m.contains("symbol_auth_context")
+            QuicTransportError::Config(m) if m.contains("symbol authentication posture")
         ));
         assert!(trusted_quic_config().validate().is_ok());
         assert!(auth_quic_config(7).validate().is_ok());
+        assert_eq!(
+            QuicConfig::default()
+                .use_transport_authenticated_symbols()
+                .symbol_auth_mode(),
+            QuicSymbolAuthMode::TransportAuthenticated
+        );
     }
 
     #[test]

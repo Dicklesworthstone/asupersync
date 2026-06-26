@@ -241,9 +241,19 @@ impl SecurityContext {
     /// Signs a symbol, producing an authenticated symbol.
     #[must_use]
     pub fn sign_symbol(&self, symbol: &Symbol) -> AuthenticatedSymbol {
+        let tag = self.sign_symbol_tag(symbol);
+        AuthenticatedSymbol::new_verified(symbol.clone(), tag)
+    }
+
+    /// Computes the authentication tag for a symbol without cloning the symbol.
+    ///
+    /// Hot transport paths use this when they only need to append the tag bytes
+    /// to an existing wire envelope.
+    #[must_use]
+    pub fn sign_symbol_tag(&self, symbol: &Symbol) -> AuthenticationTag {
         let tag = AuthenticationTag::compute(&self.key, symbol);
         self.stats.signed.fetch_add(1, Ordering::Relaxed);
-        AuthenticatedSymbol::new_verified(symbol.clone(), tag)
+        tag
     }
 
     /// Verifies an authenticated symbol.
@@ -594,6 +604,19 @@ mod tests {
         ctx.verify_authenticated_symbol(&mut received)
             .expect("verification failed");
         assert!(received.is_verified());
+    }
+
+    #[test]
+    fn sign_symbol_tag_matches_authenticated_symbol_tag() {
+        let ctx = SecurityContext::for_testing(123);
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+
+        let tag = ctx.sign_symbol_tag(&symbol);
+        let auth = ctx.sign_symbol(&symbol);
+
+        assert_eq!(tag.as_bytes(), auth.tag().as_bytes());
+        assert_eq!(ctx.stats().signed.load(Ordering::Relaxed), 2);
     }
 
     #[test]

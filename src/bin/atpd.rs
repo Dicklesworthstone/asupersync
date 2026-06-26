@@ -16,8 +16,6 @@ use asupersync::atp::identity::DurablePeerIdentity;
 use asupersync::atp::supervision::{AtpdChildRole, AtpdRegionId};
 use asupersync::net::atp::protocol::PeerId;
 use asupersync::runtime::RuntimeBuilder;
-#[cfg(feature = "tls")]
-use asupersync::security::{AUTH_KEY_SIZE, AuthKey, SecurityContext};
 use asupersync::security::{IdentityKeyStore, KeyStoreError};
 use asupersync::types::Time;
 use clap::{Args, Parser, Subcommand};
@@ -167,11 +165,13 @@ struct StartArgs {
     #[arg(long, value_name = "PATH")]
     quic_server_key: Option<PathBuf>,
 
-    /// Hex-encoded 32-byte per-symbol auth key for RaptorQ-over-QUIC symbols.
+    /// Legacy RQ per-symbol auth key. Direct QUIC/TLS transfer symbols are
+    /// authenticated by QUIC 1-RTT AEAD and ignore this value.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
 
-    /// Explicitly disable per-symbol auth for trusted loopback/lab QUIC runs.
+    /// Legacy lab opt-out for RQ symbol auth. Direct QUIC/TLS transfers are
+    /// transport-authenticated.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
 
@@ -265,9 +265,10 @@ pub struct QuicDaemonConfig {
     pub server_cert_path: Option<PathBuf>,
     /// PEM private key for the QUIC listener certificate.
     pub server_key_path: Option<PathBuf>,
-    /// Hex-encoded 32-byte per-symbol auth key for RaptorQ-over-QUIC symbols.
+    /// Legacy RQ per-symbol auth key. Direct QUIC/TLS transfer symbols are
+    /// authenticated by QUIC 1-RTT AEAD and ignore this value.
     pub rq_auth_key_hex: Option<String>,
-    /// Explicit loopback/lab-only unauthenticated symbol mode.
+    /// Legacy loopback/lab-only RQ unauthenticated symbol mode.
     pub allow_unauthenticated_lab: bool,
 }
 
@@ -570,28 +571,6 @@ fn load_atpd_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer
 }
 
 #[cfg(feature = "tls")]
-fn atpd_auth_key_from_hex(key_hex: &str) -> Result<AuthKey> {
-    let trimmed = key_hex.trim();
-    let key_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    if key_hex.len() != AUTH_KEY_SIZE * 2 {
-        return Err(cli_error(format!(
-            "RQ auth key must be exactly {} hex characters for a {AUTH_KEY_SIZE}-byte key",
-            AUTH_KEY_SIZE * 2
-        )));
-    }
-    if !key_hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(cli_error(
-            "RQ auth key must contain only hexadecimal characters",
-        ));
-    }
-
-    let mut bytes = [0u8; AUTH_KEY_SIZE];
-    hex::decode_to_slice(key_hex, &mut bytes)
-        .map_err(|err| cli_error(format!("decode RQ auth key hex: {err}")))?;
-    AuthKey::from_bytes(bytes).map_err(|err| cli_error(format!("RQ auth key rejected: {err}")))
-}
-
-#[cfg(feature = "tls")]
 fn atpd_quic_config(
     config: &AtpdConfig,
 ) -> Result<asupersync::net::atp::transport_quic::QuicConfig> {
@@ -599,17 +578,6 @@ fn atpd_quic_config(
     use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, server_config};
 
     let quic = &config.network.quic;
-    let configured_auth_key = quic
-        .rq_auth_key_hex
-        .as_deref()
-        .map(str::trim)
-        .filter(|key| !key.is_empty());
-    if quic.allow_unauthenticated_lab && configured_auth_key.is_some() {
-        return Err(cli_error(
-            "network.quic.allow_unauthenticated_lab conflicts with network.quic.rq_auth_key_hex",
-        ));
-    }
-
     let cert_path = quic.server_cert_path.as_deref().ok_or_else(|| {
         cli_error(
             "network.enable_quic requires network.quic.server_cert_path (PEM certificate chain)",
@@ -627,16 +595,7 @@ fn atpd_quic_config(
         max_transfer_bytes: config.transfers.max_transfer_size,
         ..QuicConfig::default()
     };
-    let mut quic_config = if quic.allow_unauthenticated_lab {
-        base.allow_unauthenticated_for_trusted_transport()
-    } else if let Some(key_hex) = configured_auth_key {
-        base.with_symbol_auth(SecurityContext::new(atpd_auth_key_from_hex(key_hex)?))
-    } else {
-        return Err(cli_error(
-            "network.enable_quic requires network.quic.rq_auth_key_hex, or \
-             network.quic.allow_unauthenticated_lab=true for loopback/lab use",
-        ));
-    };
+    let mut quic_config = base.use_transport_authenticated_symbols();
     quic_config.server_tls = Some(QuicServerTls { config: tls_config });
     quic_config
         .validate()
@@ -2343,8 +2302,6 @@ mod tests {
     fn enabled_quic_config_requires_tls_material() {
         let mut config = AtpdConfig::default();
         config.network.enable_quic = true;
-        config.network.quic.rq_auth_key_hex =
-            Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string());
 
         let err = atpd_quic_config(&config).expect_err("missing TLS material must fail closed");
         let message = err.to_string();
@@ -2356,20 +2313,18 @@ mod tests {
 
     #[cfg(feature = "tls")]
     #[test]
-    fn enabled_quic_config_rejects_auth_key_and_lab_escape_hatch_together() {
+    fn enabled_quic_config_ignores_legacy_auth_fields_for_direct_transport_auth() {
         let mut config = AtpdConfig::default();
         config.network.enable_quic = true;
-        config.network.quic.server_cert_path = Some(PathBuf::from("server.pem"));
-        config.network.quic.server_key_path = Some(PathBuf::from("server.key"));
         config.network.quic.rq_auth_key_hex =
             Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string());
         config.network.quic.allow_unauthenticated_lab = true;
 
-        let err = atpd_quic_config(&config).expect_err("conflicting auth modes must fail closed");
+        let err = atpd_quic_config(&config).expect_err("missing TLS material must fail closed");
         let message = err.to_string();
         assert!(
-            message.contains("allow_unauthenticated_lab") && message.contains("rq_auth_key_hex"),
-            "auth conflict should name both fields, got {message}"
+            message.contains("server_cert_path") && !message.contains("conflicts"),
+            "legacy auth fields should not block direct QUIC transport auth, got {message}"
         );
     }
 }

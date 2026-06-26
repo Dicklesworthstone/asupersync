@@ -48,7 +48,7 @@ attacker who simply drops all packets (unpreventable at this layer).
 | Threat | Mitigation (implemented) | Pinning test | Residual gap |
 |--------|--------------------------|--------------|--------------|
 | **Server impersonation / MITM** | Client X.509 verification (chain + hostname + signature) against configured roots; **fail closed** — a client cannot reach `Established` unless a genuine verification recorded the identity (`record_verified_server_identity`); the native `rustls::quic` handshake driver exchanges CRYPTO bytes, installs 1-RTT keys, and has **no insecure skip-verify default** | `tests/quic_native_x509_verification.rs`, `tests/quic_legacy_no_accept_all_cert_verifier.rs`, `tests/quic_native_handshake_udp_loopback.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | The handshake driver, production bad-cert transfer path, and verified 1-RTT control/manifest path are pinned. This is still not a fleet benchmark, release-readiness, or generic-QUIC-interoperability claim. |
-| **Symbol injection / forgery** | Per-symbol HMAC auth; default posture is `MissingAuthenticationContext` -> `send_path` / receiver entry points **refuse to run before data transfer** unless the caller chooses `with_symbol_auth(ctx)` (every UDP symbol signed+verified) or the explicit `allow_unauthenticated_for_trusted_transport()` opt-out; handshake rejects posture mismatch both directions | `tests/atp_rq_symbol_auth_e2e_contract.rs`, `tests/decoding_secure_default.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | Real UDP ATP-over-QUIC pins auth-failing symbol rejection before commit. The sibling `transport_tcp` path still has no per-symbol authentication (see §5.4). |
+| **Symbol injection / forgery** | Direct single-connection native QUIC/TLS authenticates symbol bytes with QUIC 1-RTT AEAD and header protection; relay, multipath, raw-UDP, and other cross-trust symbol planes still use `with_symbol_auth(ctx)` for per-symbol HMAC. The default posture remains fail-closed unless the caller chooses per-symbol auth or the explicit transport-authenticated posture. | `tests/atp_rq_symbol_auth_e2e_contract.rs`, `tests/decoding_secure_default.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs`, `tests/quic_application_data_udp_loopback.rs` | Direct native ATP-over-QUIC pins fail-closed TLS identity and AEAD packet tamper rejection; explicit per-symbol HMAC remains the boundary for non-direct symbol planes. The sibling `transport_tcp` path still has no per-symbol authentication (see §5.4). |
 | **Packet tampering** | 1-RTT AEAD (encrypt+authenticate) + header protection in the primitive packet-protection layer; the ATP-over-QUIC native link uses handshake-derived 1-RTT keys for control STREAM and symbol DATAGRAM packets | `atp::quic::packet_protection` inline tests (round-trip / tamper / header-protection), `tests/quic_application_data_udp_loopback.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | The native ATP link uses a simplified asupersync-only short-header format, so this is not wire-interoperability proof against a generic QUIC stack. |
 | **Replay** | Bounded per-PN-space replay window (`REPLAY_WINDOW_CAPACITY = 1024`, span 1023): duplicate or too-old packet numbers rejected | `packet_protection.rs` replay-window inline tests; `tests/quic_application_data_udp_loopback.rs` | Window capacity and stale-packet behavior are pinned at the crypto boundary; duplicate protected packets are now rejected through the native router over real loopback UDP without duplicate application delivery |
 | **Amplification / off-path DoS** | Server anti-amplification accounting (`anti_amplification_bytes_received/sent`, `AmplificationLimited` error) bounds bytes sent to an unvalidated peer address until validation; the real UDP path also keeps pre-validation Initial responses within the 3× envelope | `connection.rs` anti-amplification inline coverage; `tests/quic_application_data_udp_loopback.rs` | Standard QUIC 3× envelope pinned through real loopback UDP pre-validation Initial responses; not a defense against on-path floods |
@@ -61,7 +61,8 @@ Implemented and pinned: fail-closed client identity gate (no silent-accept MITM)
 real QUIC/TLS-1.3 handshake driver evidence over protected packets and loopback
 UDP, handshake-derived 1-RTT protection for ATP control STREAM and symbol
 DATAGRAM packets, 1-RTT AEAD + replay window with real-UDP replay rejection,
-fail-closed RaptorQ symbol authentication posture, anti-amplification accounting
+fail-closed RaptorQ symbol authentication posture on non-direct symbol planes,
+anti-amplification accounting
 with real-UDP response-envelope coverage, bounded queues. The prior silent-accept
 exposure (`asupersync-7pwwwe`) is removed: the client path returns
 `ServerCertificateUnverified` rather than accepting an unverified server.
@@ -87,8 +88,9 @@ failures.
 The public transfer path now carries ATP control frames, including the manifest,
 over the native QUIC STREAM path protected by those handshake-derived 1-RTT
 keys; RaptorQ symbols ride protected 1-RTT QUIC DATAGRAM packets and then pass
-the per-symbol authentication posture. This closes the G4 manifest/control
-authentication item for the native ATP-over-QUIC path. It does not prove
+the deliberate symbol-authentication posture: QUIC AEAD on direct native QUIC,
+per-symbol HMAC on non-direct symbol planes. This closes the G4
+manifest/control authentication item for the native ATP-over-QUIC path. It does not prove
 generic QUIC wire interoperability, fleet performance, release readiness, or
 every future CLI/daemon integration surface.
 
@@ -120,9 +122,9 @@ do not assume QUIC's symbol-auth guarantees apply to it.
 ## 6. Fail-closed verdict and pre-open-internet checklist
 
 Verdict: the native ATP-over-QUIC security path is **fail-closed-by-construction**
-for G4 today — unverified server identity, missing symbol-auth context, posture
-mismatch, oversize datagrams, replayed packets, and amplification limits all
-refuse rather than proceed insecurely. This is still a scoped security claim,
+for G4 today — unverified server identity, missing deliberate symbol-auth
+posture, posture mismatch, oversize datagrams, replayed packets, and
+amplification limits all refuse rather than proceed insecurely. This is still a scoped security claim,
 not release readiness, broad workspace health, fleet performance, or generic
 QUIC interoperability.
 
