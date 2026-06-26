@@ -212,6 +212,16 @@ const QUIC_CLEAN_GSO_MAX_FLUSH_SYMBOLS: usize = 255;
 /// the post-burst byte-paced sleep keeps the average rate at the budget.
 const QUIC_CLEAN_SPRAY_BURST_FLOOR_SYMBOLS: usize = 32;
 
+/// Loss ceiling below which a spray uses the clean coalescing/burst-floor path
+/// (amortize per-flush QUIC packet-protection over a 32-symbol burst) instead of
+/// the per-symbol lossy path. A strict `<= f64::EPSILON` gate left the encrypted
+/// near-clean path — which measures a trace of startup/handshake loss — in the
+/// per-symbol branch, so the QUIC_CLEAN_SPRAY_BURST_FLOOR_SYMBOLS floor (008e9c7e1)
+/// never engaged and the send stayed at ~2 symbols/flush, ~5 MB/s (MATRIX-109).
+/// `bad` (2%) and `broken` (10%) stay above this ceiling and keep per-symbol
+/// pacing to preserve loss granularity on constrained links.
+const QUIC_CLEAN_SPRAY_MAX_LOSS_RATE: f64 = 0.01;
+
 /// Fixed socket buffer budget for the native ATP-QUIC link. This is intentionally
 /// a constant envelope, not proportional to object size, so large transfers cannot
 /// force process/object-sized buffering while loopback proof runs avoid kernel
@@ -868,7 +878,7 @@ fn coalesced_spray_flush_symbol_limit(
 ) -> usize {
     let flush_cap = max_flush_symbols.max(1);
     let packet_width = max_symbol_frames_per_packet.max(1);
-    let burst = if path_loss_rate <= f64::EPSILON {
+    let burst = if path_loss_rate < QUIC_CLEAN_SPRAY_MAX_LOSS_RATE {
         // Loss-free encrypted sprays are dominated by per-packet QUIC work.
         // Queue multiple full protected packets, then sleep by byte count so
         // average pacing stays unchanged while UDP GSO has work to batch.
@@ -1116,7 +1126,7 @@ impl QuicLink {
             self.max_spray_symbols_per_flush,
             self.max_symbol_frames_per_packet,
         );
-        let max_flush_symbols = if pacing.path_loss_rate <= f64::EPSILON {
+        let max_flush_symbols = if pacing.path_loss_rate < QUIC_CLEAN_SPRAY_MAX_LOSS_RATE {
             clean_flush_cap
         } else {
             self.max_spray_symbols_per_flush
