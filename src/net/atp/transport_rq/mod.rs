@@ -74,7 +74,8 @@ use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::datagram::congestion::{CongestionConfig, CongestionController};
 use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
-use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
+use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
+use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::transport_common::{
     EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode, plan_multi_object_split,
@@ -214,13 +215,30 @@ const RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
 /// use the disk-backed control-source stream instead.
 const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD: f64 = 1.001;
+/// Maximum ATP wire frame size expressed as a `usize` for control-source sizing.
+const RQ_CONTROL_SOURCE_FRAME_MAX_BYTES: usize = MAX_FRAME_SIZE as usize;
+/// Maximum no-extension ATP frame header for source `ObjectData` frames:
+/// version(1) + ObjectData type(2) + large payload length(4) + extension count(1).
+const RQ_CONTROL_SOURCE_WIRE_HEADER_MAX_BYTES: usize = 1 + 2 + 4 + 1;
+const RQ_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8;
 /// Control-stream payload chunk for the clean source-stream lane.
 ///
-/// ATP frames are capped at 1 MiB; keep payloads well below that after the
-/// entry/offset header. A 500 MiB clean transfer becomes about 1000 bounded
-/// control frames instead of hundreds of thousands of RQ source-symbol datagrams.
-const RQ_CONTROL_SOURCE_CHUNK_BYTES: usize = 512 * 1024;
-const RQ_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8;
+/// Fill each ATP frame to the largest safe no-extension `ObjectData` frame.
+/// A 500 MiB clean transfer becomes about 500 bounded control frames instead
+/// of ~1000 half-full frames or hundreds of thousands of RQ source datagrams.
+const RQ_CONTROL_SOURCE_CHUNK_BYTES: usize = RQ_CONTROL_SOURCE_FRAME_MAX_BYTES
+    - RQ_CONTROL_SOURCE_WIRE_HEADER_MAX_BYTES
+    - RQ_CONTROL_SOURCE_DATA_HEADER;
+/// Flush cadence for bulk `ObjectData` frames on the reliable control stream.
+///
+/// Handshake, feedback, proof, and close frames still flush immediately through
+/// `FrameTransport::send`; only the clean source-stream bulk loop batches these
+/// writes. The threshold is deliberately above a 100 Mbit / 25 ms BDP while
+/// remaining tiny relative to the 100 MB RSS gate because bytes are handed to
+/// the OS stream, not buffered in user space.
+const RQ_CONTROL_SOURCE_FLUSH_BYTES: usize = 8 * 1024 * 1024;
+/// Best-effort socket buffer request for the clean source-stream control path.
+const RQ_CONTROL_STREAM_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 /// The 2% "bad" matrix path is rate-shaped to 50 mbit. Cold-starting it at
 /// 16 MiB/s overshoots the pipe before feedback can correct the spray, causing
 /// repair rounds to chase self-inflicted drops. Keep this deliberately narrow:
@@ -2315,10 +2333,32 @@ where
     }
 
     async fn send(&mut self, frame: &Frame) -> Result<(), RqError> {
+        self.send_unflushed(frame).await?;
+        self.flush().await
+    }
+
+    async fn send_unflushed(&mut self, frame: &Frame) -> Result<usize, RqError> {
         let bytes = frame
             .to_wire_bytes()
             .map_err(|e| RqError::Frame(e.to_string()))?;
+        let len = bytes.len();
         self.stream.write_all(&bytes).await?;
+        Ok(len)
+    }
+
+    async fn send_control_source_data_unflushed(
+        &mut self,
+        entry: u32,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, RqError> {
+        let bytes = control_source_data_wire_frame(entry, offset, data)?;
+        let len = bytes.len();
+        self.stream.write_all(&bytes).await?;
+        Ok(len)
+    }
+
+    async fn flush(&mut self) -> Result<(), RqError> {
         self.stream.flush().await?;
         Ok(())
     }
@@ -2388,6 +2428,17 @@ where
     }
 }
 
+fn tune_control_stream_for_bulk_source(stream: &TcpStream) {
+    let _ = stream.set_nodelay(true);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(std_stream) = stream.try_as_std() {
+        let sock = socket2::SockRef::from(std_stream);
+        let _ = sock.set_send_buffer_size(RQ_CONTROL_STREAM_SOCKET_BUFFER_BYTES);
+        let _ = sock.set_recv_buffer_size(RQ_CONTROL_STREAM_SOCKET_BUFFER_BYTES);
+    }
+}
+
 // ─── Helpers (entry walk + merkle, shared definition with transport_tcp) ─────
 
 fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, RqError> {
@@ -2399,6 +2450,7 @@ fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError>
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
 }
 
+#[cfg(test)]
 fn control_source_data_frame(entry: u32, offset: u64, data: &[u8]) -> Result<Frame, RqError> {
     let mut payload = Vec::with_capacity(RQ_CONTROL_SOURCE_DATA_HEADER + data.len());
     payload.extend_from_slice(&entry.to_be_bytes());
@@ -2406,6 +2458,72 @@ fn control_source_data_frame(entry: u32, offset: u64, data: &[u8]) -> Result<Fra
     payload.extend_from_slice(data);
     Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, payload)
         .map_err(|e| RqError::Frame(e.to_string()))
+}
+
+fn control_source_data_wire_frame(
+    entry: u32,
+    offset: u64,
+    data: &[u8],
+) -> Result<BytesMut, RqError> {
+    let payload_len = RQ_CONTROL_SOURCE_DATA_HEADER
+        .checked_add(data.len())
+        .ok_or_else(|| {
+            RqError::Frame("control source ObjectData payload length overflow".into())
+        })?;
+    let payload_len_u64 = u64::try_from(payload_len)
+        .map_err(|_| RqError::Frame("control source ObjectData payload too large".into()))?;
+    let header_len = control_frame_header_len(
+        ProtocolVersion::CURRENT,
+        FrameType::ObjectData,
+        payload_len_u64,
+    )?;
+    let total_len = header_len
+        .checked_add(payload_len)
+        .ok_or_else(|| RqError::Frame("control source ObjectData frame length overflow".into()))?;
+    let max_frame_size = usize::try_from(MAX_FRAME_SIZE).unwrap_or(usize::MAX);
+    if total_len > max_frame_size {
+        return Err(RqError::Frame(format!(
+            "control source ObjectData frame too large: {total_len} bytes (max {max_frame_size})"
+        )));
+    }
+
+    let mut wire = BytesMut::with_capacity(total_len);
+    encode_control_frame_varint(&mut wire, u64::from(ProtocolVersion::CURRENT.0))?;
+    encode_control_frame_varint(&mut wire, FrameType::ObjectData as u64)?;
+    encode_control_frame_varint(&mut wire, payload_len_u64)?;
+    encode_control_frame_varint(&mut wire, 0)?;
+    wire.extend_from_slice(&entry.to_be_bytes());
+    wire.extend_from_slice(&offset.to_be_bytes());
+    wire.extend_from_slice(data);
+    debug_assert_eq!(wire.len(), total_len);
+    Ok(wire)
+}
+
+fn control_frame_header_len(
+    version: ProtocolVersion,
+    frame_type: FrameType,
+    payload_len: u64,
+) -> Result<usize, RqError> {
+    let version_len = control_frame_varint(u64::from(version.0))?.encoded_len();
+    let type_len = frame_type.to_varint().encoded_len();
+    let payload_len_len = control_frame_varint(payload_len)?.encoded_len();
+
+    version_len
+        .checked_add(type_len)
+        .and_then(|len| len.checked_add(payload_len_len))
+        .and_then(|len| len.checked_add(1))
+        .ok_or_else(|| RqError::Frame("control frame header length overflow".into()))
+}
+
+fn control_frame_varint(value: u64) -> Result<VarInt, RqError> {
+    VarInt::try_from(value).map_err(|err| RqError::Frame(err.to_string()))
+}
+
+fn encode_control_frame_varint(dst: &mut BytesMut, value: u64) -> Result<(), RqError> {
+    control_frame_varint(value)?
+        .encode(dst)
+        .into_result()
+        .map_err(|err| RqError::Frame(err.to_string()))
 }
 
 struct ControlSourceData<'a> {
@@ -4106,6 +4224,9 @@ pub async fn send_path(
 
     // Control plane: TCP connect + handshake.
     let stream = TcpStream::connect(addr).await?;
+    if prefer_control_source_stream {
+        tune_control_stream_for_bulk_source(&stream);
+    }
     let peer = stream.peer_addr().unwrap_or(addr);
     let mut control = FrameTransport::new(stream);
     control
@@ -5241,6 +5362,8 @@ where
     let mut buf = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES];
     let mut bytes_streamed = 0u64;
     let mut chunks = 0u64;
+    let mut pending_flush_bytes = 0usize;
+    let mut flushes = 0u64;
     for enc in encoders {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let mut file = crate::fs::File::open(&enc.abs_path)
@@ -5275,9 +5398,15 @@ where
                     enc.index
                 )));
             }
-            control
-                .send(&control_source_data_frame(enc.index, offset, &buf[..n])?)
+            let written = control
+                .send_control_source_data_unflushed(enc.index, offset, &buf[..n])
                 .await?;
+            pending_flush_bytes = pending_flush_bytes.saturating_add(written);
+            if pending_flush_bytes >= RQ_CONTROL_SOURCE_FLUSH_BYTES {
+                control.flush().await?;
+                pending_flush_bytes = 0;
+                flushes = flushes.saturating_add(1);
+            }
             let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
             offset = offset.saturating_add(n_u64);
             remaining -= n_u64;
@@ -5285,10 +5414,16 @@ where
             chunks = chunks.saturating_add(1);
         }
     }
+    if pending_flush_bytes > 0 {
+        control.flush().await?;
+        flushes = flushes.saturating_add(1);
+    }
     rqtrace!(
-        "sender: control_source_stream sent chunks={} bytes={}",
+        "sender: control_source_stream sent chunks={} bytes={} flushes={} flush_threshold_bytes={}",
         chunks,
-        bytes_streamed
+        bytes_streamed,
+        flushes,
+        RQ_CONTROL_SOURCE_FLUSH_BYTES
     );
     Ok(bytes_streamed)
 }
@@ -5574,9 +5709,14 @@ pub async fn receive_connection(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, RqError> {
-    let mut control = FrameTransport::new(stream);
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
+    let should_tune_for_bulk_source =
+        clean_control_source_stream_round0(&config) && !symbol_auth_enabled;
+    if should_tune_for_bulk_source {
+        tune_control_stream_for_bulk_source(&stream);
+    }
+    let mut control = FrameTransport::new(stream);
 
     // Handshake.
     let hello_frame = control.recv().await?;
@@ -12741,8 +12881,11 @@ mod tests {
         assert_eq!(parsed.entry, 7);
         assert_eq!(parsed.offset, 123_456);
         assert_eq!(parsed.data, b"payload");
+        let canonical = frame.to_wire_bytes().expect("canonical wire");
+        let direct = control_source_data_wire_frame(7, 123_456, b"payload").expect("direct wire");
+        assert_eq!(direct.as_ref(), canonical.as_slice());
         assert!(
-            frame.payload().len()
+            frame.encoded_len()
                 <= usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap()
         );
     }
@@ -12751,11 +12894,101 @@ mod tests {
     fn control_source_data_chunk_stays_within_frame_cap() {
         let payload = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES];
         let frame = control_source_data_frame(7, 123_456, &payload).expect("frame");
+        let canonical = frame.to_wire_bytes().expect("canonical wire");
+        let direct = control_source_data_wire_frame(7, 123_456, &payload).expect("direct wire");
+        let max_frame_size =
+            usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap();
+
+        assert_eq!(RQ_CONTROL_SOURCE_FRAME_MAX_BYTES, max_frame_size);
+        assert_eq!(frame.encoded_len(), max_frame_size);
+        assert_eq!(canonical.len(), max_frame_size);
+        assert_eq!(direct.as_ref(), canonical.as_slice());
+        let too_large = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES + 1];
+        assert!(control_source_data_wire_frame(7, 123_456, &too_large).is_err());
+    }
+
+    #[derive(Default)]
+    struct CountingControlIo {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl crate::io::AsyncRead for CountingControlIo {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl crate::io::AsyncWrite for CountingControlIo {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.bytes.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.flushes += 1;
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn frame_transport_unflushed_send_defers_flush_until_requested() {
+        let frame = control_source_data_frame(7, 0, b"payload").expect("frame");
+        let mut control = FrameTransport::new(CountingControlIo::default());
+
+        let written = futures_lite::future::block_on(control.send_unflushed(&frame)).expect("send");
+        assert_eq!(control.stream.flushes, 0);
+        assert_eq!(control.stream.bytes.len(), written);
+
+        futures_lite::future::block_on(control.flush()).expect("flush");
+        assert_eq!(control.stream.flushes, 1);
+    }
+
+    #[test]
+    fn frame_transport_control_source_data_uses_canonical_wire_bytes_without_flush() {
+        let frame = control_source_data_frame(7, 123_456, b"payload").expect("frame");
+        let canonical = frame.to_wire_bytes().expect("canonical wire");
+        let mut control = FrameTransport::new(CountingControlIo::default());
+
+        let written = futures_lite::future::block_on(
+            control.send_control_source_data_unflushed(7, 123_456, b"payload"),
+        )
+        .expect("send");
+
+        assert_eq!(written, canonical.len());
+        assert_eq!(control.stream.bytes, canonical);
+        assert_eq!(control.stream.flushes, 0);
+    }
+
+    #[test]
+    fn control_source_bulk_flush_batches_multiple_data_frames() {
+        let payload = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES];
+        let frame = control_source_data_frame(7, 0, &payload).expect("frame");
+        let wire_len = frame.to_wire_bytes().expect("wire").len();
 
         assert!(
-            frame.payload().len()
-                <= usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap()
+            RQ_CONTROL_SOURCE_FLUSH_BYTES >= wire_len * 8,
+            "bulk source stream should flush groups of data frames, not every frame"
         );
+        assert!(RQ_CONTROL_SOURCE_FLUSH_BYTES <= 16 * 1024 * 1024);
     }
 
     #[test]
