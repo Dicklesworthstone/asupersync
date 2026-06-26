@@ -1216,6 +1216,18 @@ struct RqAdaptiveSendState {
     regime_shift: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RqDeliverySampleKind {
+    InitialOrRepair,
+    SourceRetransmit,
+}
+
+impl RqDeliverySampleKind {
+    fn feeds_pacing_estimator(self) -> bool {
+        matches!(self, Self::InitialOrRepair)
+    }
+}
+
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 impl RqAdaptiveSendState {
     fn new(seed: u64, config: &RqConfig, fanout: usize) -> Self {
@@ -1403,6 +1415,7 @@ impl RqAdaptiveSendState {
         sent_this_round: u64,
         received_this_round: u64,
         round_loss_fraction: Option<f64>,
+        delivery_sample_kind: RqDeliverySampleKind,
         send_wall: Duration,
         control_wait: Duration,
         total_bytes: u64,
@@ -1424,12 +1437,18 @@ impl RqAdaptiveSendState {
         let wire_loss_hat = round_loss_fraction
             .filter(|loss| loss.is_finite())
             .map_or(derived_wire_loss, |loss| loss.clamp(0.0, 0.90));
+        let feeds_pacing_estimator = delivery_sample_kind.feeds_pacing_estimator();
+        let estimator_wire_loss = if feeds_pacing_estimator {
+            wire_loss_hat
+        } else {
+            0.0
+        };
         let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
         let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let observed_delivery_bps = (useful_bytes as f64 / send_wall_s).max(1.0);
-        if sent_this_round != 0 {
-            self.apply_aimd_feedback(config, wire_loss_hat, Some(observed_delivery_bps));
+        if sent_this_round != 0 && feeds_pacing_estimator {
+            self.apply_aimd_feedback(config, estimator_wire_loss, Some(observed_delivery_bps));
         }
         let byte_pressure = if total_bytes == 0 {
             0.0
@@ -1437,15 +1456,20 @@ impl RqAdaptiveSendState {
             (pending_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0)
         };
         let pressure_loss = byte_pressure * RQ_PENDING_PRESSURE_LOSS_FLOOR;
-        let repair_loss_hat = wire_loss_hat
+        let repair_loss_hat = estimator_wire_loss
             .max(decode_pending_loss)
             .max(pressure_loss)
             .clamp(0.0, 0.90);
 
-        self.regime_shift = self.pacing_loss_ema > 0.0
-            && wire_loss_hat > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
+        if feeds_pacing_estimator {
+            self.regime_shift = self.pacing_loss_ema > 0.0
+                && estimator_wire_loss > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
+        }
         self.loss_ema = ema(self.loss_ema, repair_loss_hat, RQ_LOSS_EMA_ALPHA);
-        self.pacing_loss_ema = ema(self.pacing_loss_ema, wire_loss_hat, RQ_LOSS_EMA_ALPHA);
+        if feeds_pacing_estimator {
+            self.pacing_loss_ema =
+                ema(self.pacing_loss_ema, estimator_wire_loss, RQ_LOSS_EMA_ALPHA);
+        }
         let raw_loss_bar = repair_loss_hat.max(self.loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
         self.loss_bar = if self.loss_bar <= 0.0 {
             raw_loss_bar
@@ -1453,16 +1477,20 @@ impl RqAdaptiveSendState {
             ema(self.loss_bar, raw_loss_bar, RQ_LOSS_EMA_ALPHA).max(repair_loss_hat)
         }
         .clamp(0.0, 0.90);
-        let raw_pacing_loss_bar = wire_loss_hat.max(self.pacing_loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
-        self.pacing_loss_bar = if self.pacing_loss_bar <= 0.0 {
-            raw_pacing_loss_bar
-        } else {
-            ema(self.pacing_loss_bar, raw_pacing_loss_bar, RQ_LOSS_EMA_ALPHA).max(wire_loss_hat)
+        if feeds_pacing_estimator {
+            let raw_pacing_loss_bar =
+                estimator_wire_loss.max(self.pacing_loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
+            self.pacing_loss_bar = if self.pacing_loss_bar <= 0.0 {
+                raw_pacing_loss_bar
+            } else {
+                ema(self.pacing_loss_bar, raw_pacing_loss_bar, RQ_LOSS_EMA_ALPHA)
+                    .max(estimator_wire_loss)
+            }
+            .clamp(0.0, 0.90);
         }
-        .clamp(0.0, 0.90);
 
         let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
-        let useful_factor = (1.0 - wire_loss_hat * 0.5).clamp(0.25, 1.0);
+        let useful_factor = (1.0 - estimator_wire_loss * 0.5).clamp(0.25, 1.0);
         let bw_sample = offered_bps * useful_factor;
         let sent_payload_fraction = if pending_bytes == 0 {
             1.0
@@ -1471,8 +1499,8 @@ impl RqAdaptiveSendState {
         };
         let stalled_repair_sample = byte_pressure >= RQ_STALLED_REPAIR_PRESSURE_MIN
             && sent_payload_fraction < RQ_STALLED_REPAIR_PAYLOAD_FRACTION_MAX
-            && wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS;
-        if self.bw_ema_bps <= 0.0 || !stalled_repair_sample {
+            && estimator_wire_loss <= RQ_MILD_LOSS_PACING_MAX_LOSS;
+        if feeds_pacing_estimator && (self.bw_ema_bps <= 0.0 || !stalled_repair_sample) {
             self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
                 bw_sample
             } else {
@@ -1501,28 +1529,30 @@ impl RqAdaptiveSendState {
         self.loss_pacing_cap_bps = None;
         self.loss_fec_floor = 0.0;
         let lost_symbols = sent_symbols.saturating_sub(received_symbols);
-        let loss_result = self.loss_detector.observe_datagram_loss_sample(
-            sent_symbols,
-            lost_symbols,
-            Some(control_wait),
-            sent_payload_bytes,
-            cwnd_bytes,
-        );
-        let mild_wire_loss = wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS
-            && self.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS;
-        self.apply_loss_recommendations(&loss_result.recommendations, mild_wire_loss);
-        self.controller.observe_path_signals(
-            sent_symbols,
-            received_symbols,
-            send_wall_s,
-            useful_bytes,
-            config.symbol_size,
-            PathSignalSample {
-                smoothed_rtt_s: rtt_s,
-                congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
-                loss_rate: wire_loss_hat,
-            },
-        );
+        if feeds_pacing_estimator {
+            let loss_result = self.loss_detector.observe_datagram_loss_sample(
+                sent_symbols,
+                lost_symbols,
+                Some(control_wait),
+                sent_payload_bytes,
+                cwnd_bytes,
+            );
+            let mild_wire_loss = estimator_wire_loss <= RQ_MILD_LOSS_PACING_MAX_LOSS
+                && self.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS;
+            self.apply_loss_recommendations(&loss_result.recommendations, mild_wire_loss);
+            self.controller.observe_path_signals(
+                sent_symbols,
+                received_symbols,
+                send_wall_s,
+                useful_bytes,
+                config.symbol_size,
+                PathSignalSample {
+                    smoothed_rtt_s: rtt_s,
+                    congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
+                    loss_rate: estimator_wire_loss,
+                },
+            );
+        }
     }
 
     fn apply_aimd_feedback(
@@ -4410,6 +4440,7 @@ pub async fn send_path(
         RqSprayPacer::new_round0(round_tuning.pacing, &config, round0_small_clean_source_only);
     let mut round_started = Instant::now();
     let mut round_symbols_start = symbols_sent;
+    let mut round_delivery_sample_kind = RqDeliverySampleKind::InitialOrRepair;
     spray_round(
         cx,
         &mut control,
@@ -4560,6 +4591,7 @@ pub async fn send_path(
                     sent_this_round,
                     received_this_round,
                     need.round_loss_fraction,
+                    round_delivery_sample_kind,
                     round_send_wall,
                     control_wait,
                     total_bytes,
@@ -4632,6 +4664,7 @@ pub async fn send_path(
                     )
                     .await?;
                     round_send_wall = round_started.elapsed();
+                    round_delivery_sample_kind = RqDeliverySampleKind::InitialOrRepair;
                 } else {
                     round_started = Instant::now();
                     round_symbols_start = symbols_sent;
@@ -4676,6 +4709,7 @@ pub async fn send_path(
                         .await?;
                     }
                     round_send_wall = round_started.elapsed();
+                    round_delivery_sample_kind = RqDeliverySampleKind::SourceRetransmit;
                 }
                 let emitted_this_response = symbols_sent.saturating_sub(round_symbols_start);
                 rqtrace!(
@@ -10193,6 +10227,7 @@ mod tests {
             sent_symbols,
             9_400,
             None,
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(800),
             Duration::from_millis(100),
             total_bytes,
@@ -10227,6 +10262,7 @@ mod tests {
             10_000,
             10_000,
             Some(0.06),
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(800),
             Duration::from_millis(100),
             total_bytes,
@@ -10262,6 +10298,7 @@ mod tests {
             10_000,
             9_000,
             None,
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(800),
             Duration::from_millis(100),
             total_bytes,
@@ -10300,6 +10337,7 @@ mod tests {
             10_000,
             9_800,
             None,
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(800),
             Duration::from_millis(100),
             total_bytes,
@@ -10339,6 +10377,7 @@ mod tests {
             10_000,
             5_000,
             Some(0.50),
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_secs(1),
             Duration::from_millis(80),
             total_bytes,
@@ -10381,6 +10420,7 @@ mod tests {
             10_000,
             9_400,
             Some(0.06),
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(800),
             Duration::from_millis(25),
             total_bytes,
@@ -10429,6 +10469,7 @@ mod tests {
             4_000,
             4_000,
             None,
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(400),
             Duration::from_millis(100),
             total_bytes,
@@ -10510,6 +10551,7 @@ mod tests {
             sent_symbols,
             sent_symbols.saturating_sub(1),
             None,
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_secs(120),
             Duration::from_millis(50),
             total_bytes,
@@ -10576,6 +10618,7 @@ mod tests {
                 sent_symbols,
                 sent_symbols.saturating_sub(lost_symbols),
                 None,
+                RqDeliverySampleKind::InitialOrRepair,
                 send_wall,
                 Duration::from_millis(200),
                 total_bytes,
@@ -10610,6 +10653,64 @@ mod tests {
     }
 
     #[test]
+    fn rq_source_retransmit_undercredit_does_not_poison_pacing_estimator() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            15_992,
+            1_884,
+            None,
+            RqDeliverySampleKind::SourceRetransmit,
+            Duration::from_millis(12_300),
+            Duration::from_millis(200),
+            total_bytes,
+        );
+
+        assert_eq!(
+            state.last_round_loss_fraction, 0.0,
+            "under-credited source retransmit rounds must not become measured wire loss"
+        );
+        assert_eq!(
+            state.pacing_loss_ema, 0.0,
+            "source retransmit under-credit must stay out of pacing loss"
+        );
+        assert_eq!(
+            state.pacing_loss_bar, 0.0,
+            "source retransmit under-credit must not disable the pacing floor"
+        );
+        assert_eq!(
+            state.loss_pacing_cap_bps, None,
+            "source retransmit under-credit must not create a congestion cap"
+        );
+        assert!(
+            state.loss_bar >= RQ_PENDING_PRESSURE_LOSS_FLOOR,
+            "pending pressure should still size repair FEC"
+        );
+        assert_eq!(
+            state.round_tuning(&config).pacing.rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS,
+            "source retransmit under-credit must not collapse the next path rate"
+        );
+    }
+
+    #[test]
     fn rq_need_more_broken_wire_loss_disables_mild_floor() {
         let config = RqConfig {
             symbol_size: 1200,
@@ -10635,6 +10736,7 @@ mod tests {
             sent_symbols,
             sent_symbols.saturating_sub(sent_symbols.div_ceil(10)),
             None,
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(3_300),
             Duration::from_millis(200),
             total_bytes,
@@ -10852,6 +10954,7 @@ mod tests {
             sent_symbols,
             sent_symbols,
             None,
+            RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(300),
             Duration::from_secs(120),
             total_bytes,
