@@ -49,7 +49,7 @@ use crate::runtime::JoinError;
 use crate::runtime::TaskHandle;
 use crate::runtime::state::SpawnError;
 use crate::types::policy::FailFast;
-use crate::types::{Outcome, PanicPayload, Policy, Severity};
+use crate::types::{CancelReason, Outcome, PanicPayload, Policy, Severity};
 
 /// A dynamically-sized collection of tasks spawned into a single region, whose
 /// results are collected as four-valued [`Outcome`]s.
@@ -232,9 +232,24 @@ where
     /// joined so the caller observes the final [`Outcome`] for each child. This
     /// is the explicit counterpart to drop's best-effort cancellation request:
     /// `cancel_all` waits for the handles it owns before returning.
-    pub async fn cancel_all(mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
+    pub async fn cancel_all(self, cx: &Cx) -> Vec<Outcome<T, E>> {
+        self.cancel_all_with_reason(cx, CancelReason::user("abort"))
+            .await
+    }
+
+    /// Requests cancellation for every member with `reason` and drains all
+    /// terminal outcomes in spawn order.
+    ///
+    /// This is the explicit-reason form used by higher-level combinators that
+    /// need cancellation attribution stronger than ordinary user aborts, such
+    /// as `RaceLost` loser-drain verification.
+    pub async fn cancel_all_with_reason(
+        mut self,
+        cx: &Cx,
+        reason: CancelReason,
+    ) -> Vec<Outcome<T, E>> {
         for handle in &self.handles {
-            handle.abort();
+            handle.abort_with_reason(reason.clone());
         }
         self.drain_all(cx).await
     }
@@ -731,5 +746,54 @@ mod tests {
         );
         assert_eq!(summary.completed(), 3);
         assert_eq!(summary.worst(), Severity::Cancelled);
+    }
+
+    #[test]
+    fn cancel_all_with_race_loser_reason_satisfies_loser_drain_witness() {
+        let outcomes = run_in_runtime(|cx| async move {
+            let started = Arc::new(AtomicUsize::new(0));
+            let mut set = JoinSet::<u32, crate::error::Error, _>::in_cx(&cx);
+
+            for _ in 0..2 {
+                let started = Arc::clone(&started);
+                set.spawn(&cx, move |member_cx| async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    loop {
+                        if let Err(error) = member_cx.checkpoint() {
+                            return Err(error);
+                        }
+                        yield_now().await;
+                    }
+                })
+                .expect("join-set member spawns");
+            }
+
+            for _ in 0..16 {
+                if started.load(Ordering::SeqCst) == 2 {
+                    break;
+                }
+                yield_now().await;
+            }
+            assert_eq!(
+                started.load(Ordering::SeqCst),
+                2,
+                "both members must start before race-loser cancellation"
+            );
+
+            set.cancel_all_with_reason(&cx, CancelReason::race_loser())
+                .await
+        });
+
+        let loser_refs = outcomes.iter().collect::<Vec<_>>();
+        let witness = crate::combinator::race::verify_losers_drained(&loser_refs)
+            .expect("JoinSet-drained race losers satisfy L-LOSER-DRAINED");
+
+        assert_eq!(witness.losers_checked(), 2);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, Outcome::Cancelled(reason) if reason.is_kind(crate::types::CancelKind::RaceLost))),
+            "explicit race-loser cancellation must preserve RaceLost attribution: {outcomes:?}"
+        );
     }
 }
