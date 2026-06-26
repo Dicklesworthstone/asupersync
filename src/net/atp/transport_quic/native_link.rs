@@ -2758,28 +2758,42 @@ async fn spray_block_repair_requests(
     pacing.trace_epoch(cx, 3);
     link.reset_sender_handoff_trace();
     let mut sent = 0u64;
+    let mut cursor_updates = Vec::with_capacity(requests.len());
+    let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let enc = encoders
-            .iter_mut()
-            .find(|entry| entry.index == request.entry)
-            .ok_or_else(|| {
-                QuicTransportError::Integrity(format!(
-                    "receiver requested repair block for unknown entry {}",
-                    request.entry
-                ))
-            })?;
+        let Some(enc_index) = encoders
+            .iter()
+            .position(|entry| entry.index == request.entry)
+        else {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested repair block for unknown entry {}",
+                request.entry
+            )));
+        };
         let repair_count = usize::try_from(request.symbols).map_err(|_| {
             QuicTransportError::Integrity("repair symbol count does not fit usize".to_string())
         })?;
-        let block = enc.read_block(cx, request.sbn, config).await?;
-        let already = enc.repair_cursor(request.sbn);
-        let target_repair = already.saturating_add(repair_count);
+        let (block, already, target_repair, object_id, entry_index) = {
+            let enc = &mut encoders[enc_index];
+            let block = enc.read_block(cx, request.sbn, config).await?;
+            let already = enc.repair_cursor(request.sbn);
+            (
+                block,
+                already,
+                already.saturating_add(repair_count),
+                enc.object_id,
+                enc.index,
+            )
+        };
+        if entry_index != request.entry {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested repair block for unknown entry {}",
+                request.entry
+            )));
+        }
         let mut pipeline = super::encoding_pipeline(config);
-        let object_id = enc.object_id;
-        let entry_index = enc.index;
-        let sent_before_request = sent;
-        let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
+        let mut emitted_for_request = 0u64;
         for encoded in pipeline.encode_single_block_repair_range(
             object_id,
             request.sbn,
@@ -2796,6 +2810,7 @@ async fn spray_block_repair_requests(
                 entry: entry_index,
                 auth_tag,
             });
+            emitted_for_request = emitted_for_request.saturating_add(1);
             if handoff_batch.len() >= link.spray_handoff_symbol_limit(&pacing) {
                 link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
                     .await?;
@@ -2804,19 +2819,13 @@ async fn spray_block_repair_requests(
                 handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
             }
         }
-        if !handoff_batch.is_empty() {
-            link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-                .await?;
-            sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
-        }
-        let emitted_for_request = sent.saturating_sub(sent_before_request);
         if emitted_for_request != u64::from(request.symbols) {
             return Err(QuicTransportError::Integrity(format!(
                 "sender emitted {emitted_for_request} repair symbols for receiver-requested deficit {} on entry {} block {}",
                 request.symbols, entry_index, request.sbn
             )));
         }
-        enc.set_repair_cursor(request.sbn, target_repair);
+        cursor_updates.push((enc_index, request.sbn, target_repair));
         quic_rqtrace!(
             "sender: repair_block entry={} sbn={} requested_symbols={} emitted_symbols={} repair_cursor_before={} repair_cursor_after={} pacing_rate_bps={}",
             entry_index,
@@ -2827,6 +2836,19 @@ async fn spray_block_repair_requests(
             target_repair,
             pacing.pacing_rate_bps,
         );
+    }
+    if !handoff_batch.is_empty() {
+        link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
+            .await?;
+        sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
+    }
+    for (enc_index, sbn, target_repair) in cursor_updates {
+        let Some(enc) = encoders.get_mut(enc_index) else {
+            return Err(QuicTransportError::Integrity(
+                "repair cursor update referenced missing encoder".to_string(),
+            ));
+        };
+        enc.set_repair_cursor(sbn, target_repair);
     }
     aimd.record_spray(sent, pacing.pacing_rate_bps);
     link.finish_paced_spray_round(cx, control, sent, &pacing)
