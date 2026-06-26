@@ -209,15 +209,16 @@ const RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 128 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
 /// Small, explicitly clean transfers should not pay proactive RaptorQ repair
-/// setup in round 0. 50M/perfect/nocrypto is the target cell; keep the gate
-/// below large-object lanes that may rely on broader adaptive model choices.
+/// setup in round 0 when the peer does not take the control-source fast lane.
+/// Keep this UDP/RQ fallback gate below large-object lanes; large clean should
+/// use the disk-backed control-source stream instead.
 const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD: f64 = 1.001;
-/// Control-stream payload chunk for the small clean source-only lane.
+/// Control-stream payload chunk for the clean source-stream lane.
 ///
 /// ATP frames are capped at 1 MiB; keep payloads well below that after the
-/// entry/offset header so a 50 MiB clean transfer becomes about 100 frames
-/// instead of ~43k RQ source-symbol datagrams.
+/// entry/offset header. A 500 MiB clean transfer becomes about 1000 bounded
+/// control frames instead of hundreds of thousands of RQ source-symbol datagrams.
 const RQ_CONTROL_SOURCE_CHUNK_BYTES: usize = 512 * 1024;
 const RQ_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8;
 /// The 2% "bad" matrix path is rate-shaped to 50 mbit. Cold-starting it at
@@ -1765,10 +1766,14 @@ fn round0_source_first_loss_target(config: &RqConfig) -> bool {
 }
 
 fn small_clean_source_only_round0(total_bytes: u64, config: &RqConfig) -> bool {
+    clean_control_source_stream_round0(config)
+        && total_bytes <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES
+}
+
+fn clean_control_source_stream_round0(config: &RqConfig) -> bool {
     let loss_free_target = round0_source_first_loss_target(config)
         && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
-    total_bytes <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES
-        && config.debug_drop_one_in == 0
+    config.debug_drop_one_in == 0
         && config.repair_overhead.is_finite()
         && config.repair_overhead <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD
         && loss_free_target
@@ -1779,7 +1784,10 @@ fn control_source_stream_eligible(
     config: &RqConfig,
     symbol_auth_enabled: bool,
 ) -> bool {
-    small_clean_source_only_round0(total_bytes, config) && !symbol_auth_enabled
+    total_bytes > 0
+        && total_bytes <= config.max_transfer_bytes
+        && clean_control_source_stream_round0(config)
+        && !symbol_auth_enabled
 }
 
 fn apply_small_clean_round0_source_only(
@@ -1954,7 +1962,7 @@ struct Hello {
     /// kernel drops. `serde(default)` keeps it tolerant of peers that do not send it.
     #[serde(default)]
     total_bytes: u64,
-    /// Sender preference for the small-clean source-only control-stream lane.
+    /// Sender preference for the clean source-only control-stream lane.
     ///
     /// Older receivers ignore this field and omit the matching ack bit, causing
     /// the sender to fall back to the UDP/RaptorQ symbol path.
@@ -1971,7 +1979,7 @@ struct HelloAck {
     /// Full receiver-side UDP fanout. Empty means legacy single-port `udp_port`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     udp_ports: Vec<u16>,
-    /// Receiver accepted the small-clean source-only control-stream lane.
+    /// Receiver accepted the clean source-only control-stream lane.
     #[serde(default)]
     control_source_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5701,43 +5709,53 @@ pub async fn receive_connection(
         .iter()
         .map(|e| {
             let object_id = entry_object_id(&manifest.transfer_id, e.index);
-            let dconfig = DecodingConfig {
-                symbol_size,
-                max_block_size: receiver_max_block_size,
-                repair_overhead: config.repair_overhead,
-                min_overhead: 0,
-                // RQ repair rows are round-critical: dropping an undecoded
-                // block's repair symbols makes the sender re-spray another
-                // round. Keep them until block completion; mark_block_complete
-                // clears the block immediately after decode.
-                max_buffered_symbols: RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK,
-                block_timeout: std::time::Duration::from_secs(0),
-                verify_auth: symbol_auth_enabled,
-            };
-            let mut pipeline = if let Some(context) = &symbol_auth {
-                DecodingPipeline::with_auth(dconfig, context.clone())
+            let (pipeline, entry_source_streaming, source_blocks) = if control_source_stream {
+                (None, false, Vec::new())
             } else {
-                DecodingPipeline::new(dconfig)
+                let dconfig = DecodingConfig {
+                    symbol_size,
+                    max_block_size: receiver_max_block_size,
+                    repair_overhead: config.repair_overhead,
+                    min_overhead: 0,
+                    // RQ repair rows are round-critical: dropping an undecoded
+                    // block's repair symbols makes the sender re-spray another
+                    // round. Keep them until block completion; mark_block_complete
+                    // clears the block immediately after decode.
+                    max_buffered_symbols: RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK,
+                    block_timeout: std::time::Duration::from_secs(0),
+                    verify_auth: symbol_auth_enabled,
+                };
+                let mut pipeline = if let Some(context) = &symbol_auth {
+                    DecodingPipeline::with_auth(dconfig, context.clone())
+                } else {
+                    DecodingPipeline::new(dconfig)
+                };
+                let params =
+                    object_params_for(object_id, e.size, symbol_size, hello.max_block_size);
+                // set_object_params failure is a metadata bug, surfaced on first feed.
+                if let Err(err) = pipeline.set_object_params(params) {
+                    rqtrace!(
+                        "receiver: entry {} set_object_params FAILED: {err:?} (size={}, blocks={}, k={})",
+                        e.index,
+                        e.size,
+                        params.source_blocks,
+                        params.symbols_per_block
+                    );
+                }
+                let source_blocks =
+                    source_block_progress_for(e.size, receiver_max_block_size, symbol_size);
+                let entry_source_streaming = source_streaming && source_blocks.is_some();
+                (
+                    Some(pipeline),
+                    entry_source_streaming,
+                    source_blocks.unwrap_or_default(),
+                )
             };
-            let params = object_params_for(object_id, e.size, symbol_size, hello.max_block_size);
-            // set_object_params failure is a metadata bug, surfaced on first feed.
-            if let Err(err) = pipeline.set_object_params(params) {
-                rqtrace!(
-                    "receiver: entry {} set_object_params FAILED: {err:?} (size={}, blocks={}, k={})",
-                    e.index,
-                    e.size,
-                    params.source_blocks,
-                    params.symbols_per_block
-                );
-            }
-            let source_blocks =
-                source_block_progress_for(e.size, receiver_max_block_size, symbol_size);
-            let entry_source_streaming = source_streaming && source_blocks.is_some();
             EntryDecoder {
                 index: e.index,
                 object_id,
                 size: e.size,
-                pipeline: Some(pipeline),
+                pipeline,
                 complete: e.size == 0,
                 staging_path: staging_dir.join(e.index.to_string()),
                 staging_created: false,
@@ -5752,9 +5770,13 @@ pub async fn receive_connection(
                 bytes_written: 0,
                 max_block_size: receiver_max_block_size,
                 source_streaming: entry_source_streaming,
-                source_blocks: source_blocks.unwrap_or_default(),
+                source_blocks,
                 pending_decodes: Vec::new(),
-                source_write_buffer: Vec::with_capacity(RQ_SOURCE_STAGE_BUFFER_BYTES),
+                source_write_buffer: if control_source_stream {
+                    Vec::new()
+                } else {
+                    Vec::with_capacity(RQ_SOURCE_STAGE_BUFFER_BYTES)
+                },
                 source_write_buffer_offset: None,
             }
         })
@@ -12638,7 +12660,7 @@ mod tests {
     }
 
     #[test]
-    fn control_source_stream_only_negotiates_for_small_clean_unauthenticated() {
+    fn control_source_stream_negotiates_for_clean_unauthenticated_including_large() {
         let clean = RqConfig {
             symbol_size: 1200,
             max_block_size: 512 * 1024,
@@ -12658,17 +12680,26 @@ mod tests {
             repair_overhead: 1.05,
             ..clean.clone()
         };
+        let debug_drop = RqConfig {
+            debug_drop_one_in: 17,
+            ..clean.clone()
+        };
+        let capped = RqConfig {
+            max_transfer_bytes: 128 * 1024 * 1024,
+            ..clean.clone()
+        };
 
         assert!(control_source_stream_eligible(
             50 * 1024 * 1024,
             &clean,
             false
         ));
-        assert!(!control_source_stream_eligible(
-            RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES + 1,
+        assert!(control_source_stream_eligible(
+            500 * 1024 * 1024,
             &clean,
             false
         ));
+        assert!(!small_clean_source_only_round0(500 * 1024 * 1024, &clean));
         assert!(!control_source_stream_eligible(
             50 * 1024 * 1024,
             &clean,
@@ -12689,6 +12720,16 @@ mod tests {
             &explicit_repair,
             false
         ));
+        assert!(!control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &debug_drop,
+            false
+        ));
+        assert!(!control_source_stream_eligible(
+            500 * 1024 * 1024,
+            &capped,
+            false
+        ));
     }
 
     #[test]
@@ -12700,6 +12741,17 @@ mod tests {
         assert_eq!(parsed.entry, 7);
         assert_eq!(parsed.offset, 123_456);
         assert_eq!(parsed.data, b"payload");
+        assert!(
+            frame.payload().len()
+                <= usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap()
+        );
+    }
+
+    #[test]
+    fn control_source_data_chunk_stays_within_frame_cap() {
+        let payload = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES];
+        let frame = control_source_data_frame(7, 123_456, &payload).expect("frame");
+
         assert!(
             frame.payload().len()
                 <= usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap()
