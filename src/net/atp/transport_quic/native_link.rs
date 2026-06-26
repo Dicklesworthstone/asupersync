@@ -60,7 +60,7 @@ use rustls::{ClientConfig, ServerConfig};
 
 use crate::bytes::BytesMut;
 use crate::cx::Cx;
-use crate::io::AsyncWriteExt;
+use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::quic::packet_protection::{
@@ -120,6 +120,20 @@ const QUIC_STAGING_FILE_CACHE_MAX_ENTRIES: usize = 128;
 /// Flush cached staged writes in bounded chunks. This matches the RQ staging
 /// cache envelope and keeps dirty data bounded while avoiding per-block flushes.
 const QUIC_STAGE_BUFFER_BYTES: usize = 256 * 1024;
+/// Extra reliable-stream credit above the encrypted clean source-stream cap.
+///
+/// The fast lane is bounded to 128 MiB in the ATP layer; this headroom covers
+/// manifest/control frames and lets the receiver fail closed on manifest hashes
+/// instead of failing early on stream flow control.
+const QUIC_CONTROL_STREAM_FLOW_HEADROOM_BYTES: u64 = 16 * 1024 * 1024;
+
+fn native_control_stream_flow_window(config: &QuicConfig) -> u64 {
+    config
+        .max_transfer_bytes
+        .min(super::QUIC_CONTROL_SOURCE_STREAM_MAX_BYTES)
+        .saturating_add(QUIC_CONTROL_STREAM_FLOW_HEADROOM_BYTES)
+        .max(NativeQuicConnectionConfig::default().connection_send_limit)
+}
 
 fn send_native_keep_alive(
     cx: &Cx,
@@ -1720,8 +1734,13 @@ fn link_from_handshake(
         symbol_datagram_frame_len(config.symbol_size, send_envelope_header_len);
     let max_symbol_frames_per_packet =
         coalesced_datagram_frames_per_packet(max_app_payload, send_symbol_frame_len);
+    let control_stream_flow_window = native_control_stream_flow_window(config);
     let conn_config = NativeQuicConnectionConfig {
         role,
+        send_window: control_stream_flow_window,
+        recv_window: control_stream_flow_window,
+        connection_send_limit: control_stream_flow_window,
+        connection_recv_limit: control_stream_flow_window,
         max_datagram_frame_size,
         ..NativeQuicConnectionConfig::default()
     };
@@ -2301,6 +2320,142 @@ fn parse_hello_ack(frame: &Frame) -> Result<QuicHelloAck, QuicTransportError> {
     Ok(ack)
 }
 
+async fn stream_native_control_source_entries(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    prepared: &QuicPreparedSource,
+    symbol_auth: &SecurityContext,
+) -> Result<u64, QuicTransportError> {
+    let mut buf = vec![0_u8; super::QUIC_CONTROL_SOURCE_CHUNK_BYTES];
+    let mut bytes_streamed = 0u64;
+    let mut chunks = 0u64;
+    let mut pending_flush_bytes = 0usize;
+    let mut flushes = 0u64;
+
+    for entry in &prepared.entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        if entry.size == 0 {
+            continue;
+        }
+        let mut file = crate::fs::File::open(&entry.abs_path)
+            .await
+            .map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+            })?;
+        let mut remaining = entry.size;
+        let mut offset = 0u64;
+        let mut chunk_index = 0u64;
+        while remaining > 0 {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+            let n = file.read(&mut buf[..want]).await.map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+            })?;
+            if n == 0 {
+                return Err(QuicTransportError::Source(format!(
+                    "{}: short read while streaming QUIC control source entry {}",
+                    entry.abs_path.display(),
+                    entry.index
+                )));
+            }
+            let chunk_index_u32 = u32::try_from(chunk_index).map_err(|_| {
+                QuicTransportError::Integrity(format!(
+                    "QUIC control-source chunk index overflow for entry {}",
+                    entry.index
+                ))
+            })?;
+            let symbol = super::quic_control_source_chunk_symbol(
+                &prepared.manifest.transfer_id,
+                entry.index,
+                offset,
+                chunk_index_u32,
+                &buf[..n],
+            );
+            let auth_tag = *symbol_auth.sign_symbol(&symbol).tag();
+            let written = control.send_control_source_data(
+                cx,
+                &mut link.conn,
+                entry.index,
+                offset,
+                chunk_index_u32,
+                &auth_tag,
+                &buf[..n],
+            )?;
+            pending_flush_bytes = pending_flush_bytes.saturating_add(written);
+            if pending_flush_bytes >= super::QUIC_CONTROL_SOURCE_FLUSH_BYTES {
+                link.flush(cx).await?;
+                pending_flush_bytes = 0;
+                flushes = flushes.saturating_add(1);
+            }
+            let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
+            offset = offset.saturating_add(n_u64);
+            remaining -= n_u64;
+            bytes_streamed = bytes_streamed.saturating_add(n_u64);
+            chunks = chunks.saturating_add(1);
+            chunk_index = chunk_index.saturating_add(1);
+        }
+    }
+    if pending_flush_bytes > 0 {
+        link.flush(cx).await?;
+        flushes = flushes.saturating_add(1);
+    }
+    quic_rqtrace!(
+        "sender: quic_control_source_stream sent chunks={} bytes={} flushes={} flush_threshold_bytes={}",
+        chunks,
+        bytes_streamed,
+        flushes,
+        super::QUIC_CONTROL_SOURCE_FLUSH_BYTES
+    );
+    Ok(bytes_streamed)
+}
+
+async fn finish_native_control_source_send(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+) -> Result<SendReport, QuicTransportError> {
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let reply_frame = link
+            .next_control_frame(cx, control, "receive control-source proof")
+            .await?;
+        match reply_frame.frame_type() {
+            FrameType::Proof => {
+                let receipt = super::parse_json::<ReceiveReceipt>(&reply_frame)?;
+                super::send_native_close(cx, &mut link.conn, control)?;
+                link.flush(cx).await?;
+                if !receipt.committed {
+                    return Err(QuicTransportError::Integrity(
+                        receipt
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "receiver did not commit".to_string()),
+                    ));
+                }
+                return Ok(SendReport {
+                    transfer_id: manifest.transfer_id.clone(),
+                    bytes_sent: manifest.total_bytes,
+                    files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                    symbols_sent: 0,
+                    feedback_rounds: 0,
+                    merkle_root_hex: manifest.merkle_root_hex.clone(),
+                    receipt,
+                    peer: link.peer,
+                });
+            }
+            FrameType::KeepAlive => continue,
+            got => {
+                return Err(QuicTransportError::Unexpected {
+                    got,
+                    expected: "Proof | KeepAlive",
+                });
+            }
+        }
+    }
+}
+
 /// Drive a full ATP-over-QUIC send over an established link: Hello, manifest,
 /// initial symbol spray, then the fountain feedback loop until Proof or the
 /// feedback-round budget is exhausted.
@@ -2318,26 +2473,57 @@ async fn run_sender_session(
     let manifest = &prepared.manifest;
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
+    let prefer_control_source_stream = super::quic_control_source_stream_eligible(
+        manifest.total_bytes,
+        config,
+        symbol_auth_enabled,
+    );
 
     let mut control = NativeQuicFrameTransport::open(cx, &mut link.conn)?;
-    super::send_native_sender_hello(
+    super::send_native_sender_hello_with_source_stream(
         cx,
         &mut link.conn,
         &mut control,
         config,
         peer_id,
         symbol_auth_enabled,
+        manifest.total_bytes,
+        prefer_control_source_stream,
     )?;
     link.flush(cx).await?;
     let ack_frame = link
         .next_control_frame(cx, &mut control, "receive sender handshake ack")
         .await?;
-    let _ack = parse_hello_ack(&ack_frame)?;
+    let ack = parse_hello_ack(&ack_frame)?;
+    if ack.control_source_stream && !prefer_control_source_stream {
+        return Err(QuicTransportError::HandshakeRejected(
+            "receiver accepted QUIC control-source stream that sender did not offer".to_string(),
+        ));
+    }
 
-    let mut encoders = super::encoders_from_prepared_source(cx, prepared, config).await?;
     super::send_native_manifest(cx, &mut link.conn, &mut control, manifest)?;
     link.flush(cx).await?;
+    if ack.control_source_stream {
+        let symbol_auth = symbol_auth.as_ref().ok_or_else(|| {
+            QuicTransportError::Integrity(
+                "QUIC control-source stream requires symbol authentication".to_string(),
+            )
+        })?;
+        let bytes_streamed =
+            stream_native_control_source_entries(cx, link, &mut control, prepared, symbol_auth)
+                .await?;
+        if bytes_streamed != manifest.total_bytes {
+            return Err(QuicTransportError::Source(format!(
+                "QUIC control-source stream sent {bytes_streamed} bytes, manifest declares {}",
+                manifest.total_bytes
+            )));
+        }
+        send_native_object_complete_for_round(cx, &mut link.conn, &mut control, 0, 0)?;
+        link.flush(cx).await?;
+        return finish_native_control_source_send(cx, link, &mut control, manifest).await;
+    }
 
+    let mut encoders = super::encoders_from_prepared_source(cx, prepared, config).await?;
     let pending_all: std::collections::BTreeSet<u32> =
         encoders.iter().map(|entry| entry.index).collect();
     let mut aimd = NativeQuicAimdPacer::default();
@@ -2651,6 +2837,29 @@ impl QuicStagedEntryReceive {
             )));
         }
 
+        self.write_range(entry, offset, data).await
+    }
+
+    async fn write_range(
+        &mut self,
+        entry: &super::ManifestEntry,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), QuicTransportError> {
+        if offset >= entry.size && !data.is_empty() {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream range starts outside entry {} (offset {offset}, size {})",
+                entry.index, entry.size
+            )));
+        }
+        let end = offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        if end > entry.size {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream range overruns entry {}: end {end}, size {}",
+                entry.index, entry.size
+            )));
+        }
+
         if self.cache_staging_file {
             if self.staging_file.is_none() {
                 let file = self.open_staging_file(entry).await?;
@@ -2737,6 +2946,198 @@ async fn flush_cached_quic_staging_files(
         entry.flush_cached_staging_file().await?;
     }
     Ok(())
+}
+
+async fn apply_native_control_source_data_frame(
+    frame: &Frame,
+    manifest: &TransferManifest,
+    symbol_auth: &SecurityContext,
+    staged: &mut [QuicStagedEntryReceive],
+    bytes_written: &mut [u64],
+    chunk_indexes: &mut [u32],
+) -> Result<usize, QuicTransportError> {
+    let data = super::verified_quic_control_source_data_frame(frame, manifest, symbol_auth)?;
+    let pos = manifest
+        .entries
+        .iter()
+        .position(|entry| entry.index == data.entry)
+        .ok_or_else(|| {
+            QuicTransportError::Frame(format!(
+                "control source ObjectData for unknown entry {}",
+                data.entry
+            ))
+        })?;
+    let entry = &manifest.entries[pos];
+    let len_u64 = u64::try_from(data.data.len()).unwrap_or(u64::MAX);
+    let end = data.offset.checked_add(len_u64).ok_or_else(|| {
+        QuicTransportError::Frame(format!(
+            "control source ObjectData entry {} offset overflow",
+            data.entry
+        ))
+    })?;
+    if data.offset != bytes_written[pos] {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData entry {} offset {} does not match expected {}",
+            data.entry, data.offset, bytes_written[pos]
+        )));
+    }
+    if data.chunk_index != chunk_indexes[pos] {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData entry {} chunk {} does not match expected {}",
+            data.entry, data.chunk_index, chunk_indexes[pos]
+        )));
+    }
+    if end > entry.size {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData entry {} overruns declared size {}",
+            data.entry, entry.size
+        )));
+    }
+    if data.data.is_empty() {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData entry {} chunk {} is empty",
+            data.entry, data.chunk_index
+        )));
+    }
+
+    staged[pos]
+        .write_range(entry, data.offset, data.data)
+        .await?;
+    bytes_written[pos] = end;
+    chunk_indexes[pos] = chunk_indexes[pos].checked_add(1).ok_or_else(|| {
+        QuicTransportError::Frame(format!(
+            "control source ObjectData entry {} chunk index overflow",
+            data.entry
+        ))
+    })?;
+    if end == entry.size {
+        staged[pos].close_cached_staging_file().await?;
+    }
+    Ok(data.data.len())
+}
+
+async fn receive_native_control_source_stream(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    dest_dir: &Path,
+    config: &QuicConfig,
+    peer: SocketAddr,
+    manifest: &TransferManifest,
+    staged: &mut [QuicStagedEntryReceive],
+    symbol_auth: &SecurityContext,
+) -> Result<ReceiveReport, QuicTransportError> {
+    let mut bytes_written = vec![0u64; manifest.entries.len()];
+    let mut chunk_indexes = vec![0u32; manifest.entries.len()];
+    let mut bytes_streamed = 0u64;
+    let mut chunks = 0u64;
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let frame = link
+            .next_control_frame(cx, control, "receive control-source stream")
+            .await?;
+        match frame.frame_type() {
+            FrameType::ObjectData => {
+                let n = apply_native_control_source_data_frame(
+                    &frame,
+                    manifest,
+                    symbol_auth,
+                    staged,
+                    &mut bytes_written,
+                    &mut chunk_indexes,
+                )
+                .await?;
+                bytes_streamed =
+                    bytes_streamed.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                chunks = chunks.saturating_add(1);
+            }
+            FrameType::ObjectComplete => {
+                flush_cached_quic_staging_files(staged).await?;
+                let pending = manifest
+                    .entries
+                    .iter()
+                    .zip(bytes_written.iter())
+                    .filter(|(entry, written)| **written != entry.size)
+                    .map(|(entry, _)| entry.index)
+                    .collect::<Vec<_>>();
+                if !pending.is_empty() {
+                    let receipt = ReceiveReceipt {
+                        committed: false,
+                        bytes_received: bytes_streamed,
+                        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                        sha_ok: false,
+                        merkle_ok: false,
+                        symbols_accepted: 0,
+                        feedback_rounds: 0,
+                        decode_count: 0,
+                        decode_micros: 0,
+                        reason: Some(format!(
+                            "QUIC control source stream ended with {} entries pending",
+                            pending.len()
+                        )),
+                        committed_paths: Vec::new(),
+                    };
+                    send_native_proof_until_close(cx, link, control, &receipt, config).await?;
+                    return Err(QuicTransportError::NoConvergence {
+                        rounds: 0,
+                        pending: pending.len(),
+                    });
+                }
+
+                let (mut receipt, committed_paths) =
+                    commit_staged_entries(cx, link, control, dest_dir, manifest, staged, config)
+                        .await?;
+                receipt.symbols_accepted = 0;
+                receipt.feedback_rounds = 0;
+                receipt.decode_count = 0;
+                receipt.decode_micros = 0;
+                send_native_proof_until_close(cx, link, control, &receipt, config).await?;
+                let _ = super::send_native_close(cx, &mut link.conn, control);
+                let _ = link.flush(cx).await;
+
+                if !receipt.committed {
+                    return Err(QuicTransportError::Integrity(
+                        receipt
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "receiver did not commit".to_string()),
+                    ));
+                }
+                quic_rqtrace!(
+                    "receiver: quic_control_source_stream committed chunks={} bytes={}",
+                    chunks,
+                    bytes_streamed
+                );
+                return Ok(ReceiveReport {
+                    transfer_id: manifest.transfer_id.clone(),
+                    bytes_received: receipt.bytes_received,
+                    files: receipt.files,
+                    committed: true,
+                    symbols_accepted: receipt.symbols_accepted,
+                    feedback_rounds: receipt.feedback_rounds,
+                    decode_count: receipt.decode_count,
+                    decode_micros: receipt.decode_micros,
+                    committed_paths,
+                    peer,
+                });
+            }
+            FrameType::KeepAlive => {
+                send_and_flush_native_keep_alive(cx, link, control).await?;
+            }
+            FrameType::Close => {
+                return Err(QuicTransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "sender closed control before QUIC source stream completed",
+                )));
+            }
+            got => {
+                return Err(QuicTransportError::Unexpected {
+                    got,
+                    expected: "ObjectData | ObjectComplete | KeepAlive",
+                });
+            }
+        }
+    }
 }
 
 fn quic_staging_nonce_hex() -> Result<String, QuicTransportError> {
@@ -3014,10 +3415,18 @@ async fn run_receiver_session(
     let hello: QuicHello = super::parse_json(&hello_frame)?;
     let reason = super::reject_hello_reason(&hello, config, symbol_auth_enabled);
     let accepted = reason.is_none();
+    let control_source_stream = accepted
+        && hello.prefer_control_source_stream
+        && super::quic_control_source_stream_eligible(
+            hello.total_bytes,
+            config,
+            symbol_auth_enabled,
+        );
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
         reason: reason.clone(),
+        control_source_stream,
     };
     let ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
     control.send(cx, &mut link.conn, &ack_frame)?;
@@ -3033,8 +3442,12 @@ async fn run_receiver_session(
     let manifest: TransferManifest =
         super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
     super::validate_quic_manifest(&manifest, config)?;
-
-    let mut decoders = super::decoders_from_manifest(&manifest, config)?;
+    if control_source_stream && hello.total_bytes != manifest.total_bytes {
+        return Err(QuicTransportError::Integrity(format!(
+            "QUIC control-source hello declared {} bytes, manifest declares {}",
+            hello.total_bytes, manifest.total_bytes
+        )));
+    }
     let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
     let staging_nonce = quic_staging_nonce_hex()?;
     let staging_dir = dest_dir.join(format!(
@@ -3072,6 +3485,27 @@ async fn run_receiver_session(
     let needmore_pto_max_attempts = needmore_pto_attempt_budget(config.idle_timeout);
 
     let receive_result: Result<ReceiveReport, QuicTransportError> = async {
+        if control_source_stream {
+            let peer = link.peer;
+            return receive_native_control_source_stream(
+                cx,
+                link,
+                &mut control,
+                dest_dir,
+                config,
+                peer,
+                &manifest,
+                &mut staged,
+                symbol_auth.as_ref().ok_or_else(|| {
+                    QuicTransportError::Integrity(
+                        "QUIC control-source stream requires symbol authentication".to_string(),
+                    )
+                })?,
+            )
+            .await;
+        }
+
+        let mut decoders = super::decoders_from_manifest(&manifest, config)?;
         'rounds: loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let mut round_symbols_observed = 0u64;
@@ -4183,6 +4617,30 @@ mod tests {
         let mut prefix = [0u8; 8];
         std::io::Read::read_exact(&mut file, &mut prefix).expect("read staged prefix");
         assert_eq!(prefix, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn quic_staging_write_range_preserves_offsets_and_rejects_overrun() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let staging_path = temp.path().join("entry0");
+        let entry = quic_staging_test_entry(8);
+        let mut staged = QuicStagedEntryReceive::new(staging_path.clone(), entry.size, 1);
+
+        futures_lite::future::block_on(staged.write_range(&entry, 0, &[1, 2, 3, 4]))
+            .expect("write first range");
+        futures_lite::future::block_on(staged.write_range(&entry, 4, &[5, 6, 7, 8]))
+            .expect("write second range");
+        let err = futures_lite::future::block_on(staged.write_range(&entry, 7, &[9, 10]))
+            .expect_err("overrun must fail");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message) if message.contains("overruns entry")
+        ));
+
+        let mut file = std::fs::File::open(staging_path).expect("open staged file");
+        let mut bytes = [0u8; 8];
+        std::io::Read::read_exact(&mut file, &mut bytes).expect("read staged bytes");
+        assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]

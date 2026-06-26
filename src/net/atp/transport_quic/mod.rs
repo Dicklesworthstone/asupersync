@@ -95,6 +95,7 @@ use crate::encoding::EncodingPipeline;
 use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
+use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::quic::AtpTransportMetrics;
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, MetadataApplyReport, StreamingError,
@@ -110,6 +111,7 @@ use crate::net::quic_native::{
     QuicConnection, QuicPathStats, QuicTransportMachine, StreamDirection, StreamId, StreamRole,
     StreamTableError,
 };
+use crate::security::tag::TAG_SIZE;
 use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::transport::{
     AggregatorConfig, MultipathAggregator, PathId, ReordererConfig, TransportPath,
@@ -305,6 +307,32 @@ const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MIN_BLOCK_SYMBOLS: usize = 128;
 const QUIC_FEEDBACK_FIRST_REPAIR_BURST_Z_ALPHA: f64 = 2.0;
 const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MARGIN_SYMBOLS: usize = 2;
 const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MAX_EXTRA_PER_BLOCK: usize = 32;
+/// Keep the encrypted control-source fast lane targeted at the 50M clean cell
+/// until central A/B proves the reliable stream throughput/memory envelope for
+/// larger encrypted transfers. Larger objects continue down the disk-backed RQ
+/// DATAGRAM path.
+const QUIC_CONTROL_SOURCE_STREAM_MAX_BYTES: u64 = 128 * 1024 * 1024;
+/// Maximum ATP wire frame size expressed as `usize` for clean-source stream sizing.
+const QUIC_CONTROL_SOURCE_FRAME_MAX_BYTES: usize = MAX_FRAME_SIZE as usize;
+/// Maximum no-extension ATP frame header for source `ObjectData` frames:
+/// version(1) + ObjectData type(2) + large payload length(4) + extension count(1).
+const QUIC_CONTROL_SOURCE_WIRE_HEADER_MAX_BYTES: usize = 1 + 2 + 4 + 1;
+const QUIC_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8 + 4 + TAG_SIZE;
+/// Control-stream payload chunk for the encrypted clean source-stream lane.
+///
+/// Keep chunks well below the native QUIC default stream window. The ATP native
+/// link raises its bounded flow-control window for this fast lane, but the
+/// smaller frame keeps each write and flush cadence conservative if a test uses
+/// a default in-memory connection.
+const QUIC_CONTROL_SOURCE_CHUNK_BYTES: usize = 256 * 1024;
+const _: () = assert!(
+    QUIC_CONTROL_SOURCE_CHUNK_BYTES
+        <= QUIC_CONTROL_SOURCE_FRAME_MAX_BYTES
+            - QUIC_CONTROL_SOURCE_WIRE_HEADER_MAX_BYTES
+            - QUIC_CONTROL_SOURCE_DATA_HEADER
+);
+/// Flush cadence for bulk `ObjectData` frames on the native reliable stream.
+const QUIC_CONTROL_SOURCE_FLUSH_BYTES: usize = QUIC_CONTROL_SOURCE_CHUNK_BYTES;
 
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
@@ -1834,6 +1862,10 @@ struct QuicHello {
     max_block_size: u64,
     #[serde(default)]
     symbol_auth: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    total_bytes: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    prefer_control_source_stream: bool,
 }
 
 #[allow(dead_code)]
@@ -1843,6 +1875,8 @@ struct QuicHelloAck {
     peer_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    control_source_stream: bool,
 }
 
 /// Sender → receiver marker for one completed QUIC symbol spray round.
@@ -1904,6 +1938,14 @@ struct QuicNeedMore {
 
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Request for fresh repair symbols for one incomplete source block.
@@ -5273,6 +5315,22 @@ impl NativeQuicFrameTransport {
         Ok(())
     }
 
+    fn send_control_source_data(
+        &mut self,
+        cx: &Cx,
+        conn: &mut NativeQuicConnection,
+        entry: u32,
+        offset: u64,
+        chunk_index: u32,
+        auth_tag: &AuthenticationTag,
+        data: &[u8],
+    ) -> Result<usize, QuicTransportError> {
+        let wire = quic_control_source_data_wire_frame(entry, offset, chunk_index, auth_tag, data)?;
+        let len = wire.len();
+        conn.write_stream_bytes(cx, self.stream, wire.freeze(), false)?;
+        Ok(len)
+    }
+
     fn send_json<T: Serialize>(
         &mut self,
         cx: &Cx,
@@ -5341,6 +5399,16 @@ fn next_native_control_frame(
 
 #[allow(dead_code)]
 fn sender_hello(peer_id: &str, config: &QuicConfig, symbol_auth: bool) -> QuicHello {
+    sender_hello_with_source_stream(peer_id, config, symbol_auth, 0, false)
+}
+
+fn sender_hello_with_source_stream(
+    peer_id: &str,
+    config: &QuicConfig,
+    symbol_auth: bool,
+    total_bytes: u64,
+    prefer_control_source_stream: bool,
+) -> QuicHello {
     QuicHello {
         protocol: ATP_QUIC_PROTOCOL,
         role: "sender".to_string(),
@@ -5348,7 +5416,301 @@ fn sender_hello(peer_id: &str, config: &QuicConfig, symbol_auth: bool) -> QuicHe
         symbol_size: config.symbol_size,
         max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
         symbol_auth,
+        total_bytes,
+        prefer_control_source_stream,
     }
+}
+
+fn quic_clean_control_source_stream_round0(config: &QuicConfig) -> bool {
+    config.debug_drop_one_in == 0
+        && config.bwlimit_bps.is_none()
+        && quic_effective_datagram_fanout(config, usize::MAX) == 1
+        && config.repair_overhead.is_finite()
+        && config.repair_overhead <= QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD
+}
+
+pub(crate) fn quic_control_source_stream_eligible(
+    total_bytes: u64,
+    config: &QuicConfig,
+    symbol_auth_enabled: bool,
+) -> bool {
+    symbol_auth_enabled
+        && total_bytes > 0
+        && total_bytes <= config.max_transfer_bytes
+        && total_bytes <= QUIC_CONTROL_SOURCE_STREAM_MAX_BYTES
+        && quic_clean_control_source_stream_round0(config)
+}
+
+#[cfg(test)]
+fn quic_control_source_data_frame(
+    entry: u32,
+    offset: u64,
+    chunk_index: u32,
+    auth_tag: &AuthenticationTag,
+    data: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    if data.len() > QUIC_CONTROL_SOURCE_CHUNK_BYTES {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData chunk too large: {} bytes (max {QUIC_CONTROL_SOURCE_CHUNK_BYTES})",
+            data.len()
+        )));
+    }
+    let mut payload = Vec::with_capacity(QUIC_CONTROL_SOURCE_DATA_HEADER + data.len());
+    payload.extend_from_slice(&entry.to_be_bytes());
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.extend_from_slice(&chunk_index.to_be_bytes());
+    payload.extend_from_slice(auth_tag.as_bytes());
+    payload.extend_from_slice(data);
+    let frame = Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, payload)
+        .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+    let encoded_len = u64::try_from(frame.encoded_len()).unwrap_or(u64::MAX);
+    if encoded_len > MAX_FRAME_SIZE {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData frame too large: {encoded_len} bytes (max {MAX_FRAME_SIZE})"
+        )));
+    }
+    Ok(frame)
+}
+
+fn quic_control_source_data_wire_frame(
+    entry: u32,
+    offset: u64,
+    chunk_index: u32,
+    auth_tag: &AuthenticationTag,
+    data: &[u8],
+) -> Result<BytesMut, QuicTransportError> {
+    if data.len() > QUIC_CONTROL_SOURCE_CHUNK_BYTES {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData chunk too large: {} bytes (max {QUIC_CONTROL_SOURCE_CHUNK_BYTES})",
+            data.len()
+        )));
+    }
+    let payload_len = QUIC_CONTROL_SOURCE_DATA_HEADER
+        .checked_add(data.len())
+        .ok_or_else(|| {
+            QuicTransportError::Frame(
+                "control source ObjectData payload length overflow".to_string(),
+            )
+        })?;
+    let payload_len_u64 = u64::try_from(payload_len).map_err(|_| {
+        QuicTransportError::Frame("control source ObjectData payload too large".to_string())
+    })?;
+    let header_len = quic_control_frame_header_len(
+        ProtocolVersion::CURRENT,
+        FrameType::ObjectData,
+        payload_len_u64,
+    )?;
+    let total_len = header_len.checked_add(payload_len).ok_or_else(|| {
+        QuicTransportError::Frame("control source ObjectData frame length overflow".to_string())
+    })?;
+    let max_frame_size = usize::try_from(MAX_FRAME_SIZE).unwrap_or(usize::MAX);
+    if total_len > max_frame_size {
+        return Err(QuicTransportError::Frame(format!(
+            "control source ObjectData frame too large: {total_len} bytes (max {max_frame_size})"
+        )));
+    }
+
+    let mut wire = BytesMut::with_capacity(total_len);
+    encode_quic_control_frame_varint(&mut wire, u64::from(ProtocolVersion::CURRENT.0))?;
+    encode_quic_control_frame_varint(&mut wire, FrameType::ObjectData as u64)?;
+    encode_quic_control_frame_varint(&mut wire, payload_len_u64)?;
+    encode_quic_control_frame_varint(&mut wire, 0)?;
+    wire.extend_from_slice(&entry.to_be_bytes());
+    wire.extend_from_slice(&offset.to_be_bytes());
+    wire.extend_from_slice(&chunk_index.to_be_bytes());
+    wire.extend_from_slice(auth_tag.as_bytes());
+    wire.extend_from_slice(data);
+    debug_assert_eq!(wire.len(), total_len);
+    Ok(wire)
+}
+
+fn quic_control_frame_header_len(
+    version: ProtocolVersion,
+    frame_type: FrameType,
+    payload_len: u64,
+) -> Result<usize, QuicTransportError> {
+    let version_len = quic_control_frame_varint(u64::from(version.0))?.encoded_len();
+    let type_len = frame_type.to_varint().encoded_len();
+    let payload_len_len = quic_control_frame_varint(payload_len)?.encoded_len();
+
+    version_len
+        .checked_add(type_len)
+        .and_then(|len| len.checked_add(payload_len_len))
+        .and_then(|len| len.checked_add(1))
+        .ok_or_else(|| {
+            QuicTransportError::Frame("control frame header length overflow".to_string())
+        })
+}
+
+fn quic_control_frame_varint(value: u64) -> Result<VarInt, QuicTransportError> {
+    VarInt::try_from(value).map_err(|err| QuicTransportError::Frame(err.to_string()))
+}
+
+fn encode_quic_control_frame_varint(
+    dst: &mut BytesMut,
+    value: u64,
+) -> Result<(), QuicTransportError> {
+    quic_control_frame_varint(value)?
+        .encode(dst)
+        .into_result()
+        .map_err(|err| QuicTransportError::Frame(err.to_string()))
+}
+
+pub(crate) struct QuicControlSourceData<'a> {
+    pub(crate) entry: u32,
+    pub(crate) offset: u64,
+    pub(crate) chunk_index: u32,
+    pub(crate) auth_tag: AuthenticationTag,
+    pub(crate) data: &'a [u8],
+}
+
+fn parse_quic_control_source_data_frame(
+    frame: &Frame,
+) -> Result<QuicControlSourceData<'_>, QuicTransportError> {
+    if frame.frame_type() != FrameType::ObjectData {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: "ObjectData",
+        });
+    }
+    let payload = frame.payload();
+    if payload.len() < QUIC_CONTROL_SOURCE_DATA_HEADER {
+        return Err(QuicTransportError::Frame(format!(
+            "ObjectData frame shorter than {QUIC_CONTROL_SOURCE_DATA_HEADER}-byte source header"
+        )));
+    }
+    let entry = u32::from_be_bytes(payload[0..4].try_into().expect("entry header width"));
+    let offset = u64::from_be_bytes(payload[4..12].try_into().expect("offset header width"));
+    let chunk_index = u32::from_be_bytes(payload[12..16].try_into().expect("chunk header width"));
+    let mut tag = [0u8; TAG_SIZE];
+    tag.copy_from_slice(&payload[16..16 + TAG_SIZE]);
+    Ok(QuicControlSourceData {
+        entry,
+        offset,
+        chunk_index,
+        auth_tag: AuthenticationTag::from_bytes(tag),
+        data: &payload[QUIC_CONTROL_SOURCE_DATA_HEADER..],
+    })
+}
+
+pub(crate) fn quic_control_source_chunk_symbol(
+    transfer_id: &str,
+    entry: u32,
+    offset: u64,
+    chunk_index: u32,
+    data: &[u8],
+) -> Symbol {
+    let mut payload = Vec::with_capacity(8 + data.len());
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.extend_from_slice(data);
+    Symbol::new(
+        SymbolId::new(entry_object_id(transfer_id, entry), 0, chunk_index),
+        payload,
+        SymbolKind::Source,
+    )
+}
+
+pub(crate) fn verified_quic_control_source_data_frame<'a>(
+    frame: &'a Frame,
+    manifest: &TransferManifest,
+    symbol_auth: &SecurityContext,
+) -> Result<QuicControlSourceData<'a>, QuicTransportError> {
+    let chunk = parse_quic_control_source_data_frame(frame)?;
+    if !manifest
+        .entries
+        .iter()
+        .any(|entry| entry.index == chunk.entry)
+    {
+        return Err(QuicTransportError::Integrity(format!(
+            "authenticated control-source chunk for unknown entry {}",
+            chunk.entry
+        )));
+    }
+    let symbol = quic_control_source_chunk_symbol(
+        &manifest.transfer_id,
+        chunk.entry,
+        chunk.offset,
+        chunk.chunk_index,
+        chunk.data,
+    );
+    let mut authenticated = AuthenticatedSymbol::from_parts(symbol, chunk.auth_tag);
+    symbol_auth
+        .verify_authenticated_symbol(&mut authenticated)
+        .map_err(|_| {
+            QuicTransportError::Integrity(format!(
+                "control-source chunk authentication failed for entry {} chunk {}",
+                chunk.entry, chunk.chunk_index
+            ))
+        })?;
+    Ok(chunk)
+}
+
+fn apply_quic_control_source_data_frame(
+    frame: &Frame,
+    manifest: &TransferManifest,
+    symbol_auth: &SecurityContext,
+    decoders: &mut [QuicEntryDecoder],
+    chunk_indexes: &mut [u32],
+) -> Result<usize, QuicTransportError> {
+    let chunk = verified_quic_control_source_data_frame(frame, manifest, symbol_auth)?;
+    let decoder_pos = decoders
+        .iter()
+        .position(|decoder| decoder.index == chunk.entry)
+        .ok_or_else(|| {
+            QuicTransportError::Integrity(format!(
+                "control-source chunk for unknown entry {}",
+                chunk.entry
+            ))
+        })?;
+    let decoder = &mut decoders[decoder_pos];
+    let expected_offset = u64::try_from(decoder.data.len()).unwrap_or(u64::MAX);
+    if chunk.offset != expected_offset {
+        return Err(QuicTransportError::Integrity(format!(
+            "control-source chunk for entry {} arrived at offset {}, expected {}",
+            chunk.entry, chunk.offset, expected_offset
+        )));
+    }
+    if chunk.chunk_index != chunk_indexes[decoder_pos] {
+        return Err(QuicTransportError::Integrity(format!(
+            "control-source chunk for entry {} arrived with chunk {}, expected {}",
+            chunk.entry, chunk.chunk_index, chunk_indexes[decoder_pos]
+        )));
+    }
+    let chunk_len = u64::try_from(chunk.data.len()).unwrap_or(u64::MAX);
+    let end = chunk.offset.checked_add(chunk_len).ok_or_else(|| {
+        QuicTransportError::Integrity("control-source offset overflow".to_string())
+    })?;
+    if end > decoder.size {
+        return Err(QuicTransportError::Integrity(format!(
+            "control-source chunk for entry {} exceeds declared size {} (end {})",
+            chunk.entry, decoder.size, end
+        )));
+    }
+    if decoder.complete && chunk_len > 0 {
+        return Err(QuicTransportError::Integrity(format!(
+            "control-source chunk arrived after entry {} was complete",
+            chunk.entry
+        )));
+    }
+    if chunk.data.is_empty() {
+        return Err(QuicTransportError::Integrity(format!(
+            "control-source chunk {} for entry {} is empty",
+            chunk.chunk_index, chunk.entry
+        )));
+    }
+    decoder.pipeline = None;
+    decoder.pending_decodes.clear();
+    decoder.data.extend_from_slice(chunk.data);
+    chunk_indexes[decoder_pos] = chunk_indexes[decoder_pos].checked_add(1).ok_or_else(|| {
+        QuicTransportError::Integrity(format!(
+            "control-source chunk index overflow for entry {}",
+            chunk.entry
+        ))
+    })?;
+    if end == decoder.size {
+        decoder.complete = true;
+    }
+    Ok(chunk.data.len())
 }
 
 #[allow(dead_code)]
@@ -5436,10 +5798,14 @@ fn receive_sender_hello_and_ack(
     let hello: QuicHello = parse_json(&frame)?;
     let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
     let accepted = reason.is_none();
+    let control_source_stream = accepted
+        && hello.prefer_control_source_stream
+        && quic_control_source_stream_eligible(hello.total_bytes, config, expected_symbol_auth);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
         reason: reason.clone(),
+        control_source_stream,
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
     control.send(cx, conn, &ack_frame)?;
@@ -5468,10 +5834,14 @@ fn receive_native_sender_hello_and_ack(
     let hello: QuicHello = parse_json(&frame)?;
     let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
     let accepted = reason.is_none();
+    let control_source_stream = accepted
+        && hello.prefer_control_source_stream
+        && quic_control_source_stream_eligible(hello.total_bytes, config, expected_symbol_auth);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
         reason: reason.clone(),
+        control_source_stream,
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
     control.send(cx, conn, &ack_frame)?;
@@ -5490,9 +5860,38 @@ fn send_native_sender_hello(
     peer_id: &str,
     symbol_auth: bool,
 ) -> Result<(), QuicTransportError> {
+    send_native_sender_hello_with_source_stream(
+        cx,
+        conn,
+        control,
+        config,
+        peer_id,
+        symbol_auth,
+        0,
+        false,
+    )
+}
+
+#[allow(dead_code)]
+fn send_native_sender_hello_with_source_stream(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    config: &QuicConfig,
+    peer_id: &str,
+    symbol_auth: bool,
+    total_bytes: u64,
+    prefer_control_source_stream: bool,
+) -> Result<(), QuicTransportError> {
     let frame = json_frame(
         FrameType::Handshake,
-        &sender_hello(peer_id, config, symbol_auth),
+        &sender_hello_with_source_stream(
+            peer_id,
+            config,
+            symbol_auth,
+            total_bytes,
+            prefer_control_source_stream,
+        ),
     )?;
     control.send(cx, conn, &frame)
 }
@@ -6149,6 +6548,158 @@ async fn send_native_prepared_source_manifest_symbols_complete(
 }
 
 #[allow(dead_code)]
+async fn send_native_control_source_entries(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    prepared: &QuicPreparedSource,
+    symbol_auth: &SecurityContext,
+) -> Result<u64, QuicTransportError> {
+    let mut buf = vec![0u8; QUIC_CONTROL_SOURCE_CHUNK_BYTES];
+    let mut bytes_sent = 0u64;
+    for entry in &prepared.entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        if entry.size == 0 {
+            continue;
+        }
+        let mut file = crate::fs::File::open(&entry.abs_path).await?;
+        let mut offset = 0u64;
+        let mut chunk_index = 0u64;
+        while offset < entry.size {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let remaining = entry.size.saturating_sub(offset);
+            let want = usize::try_from(
+                remaining.min(u64::try_from(QUIC_CONTROL_SOURCE_CHUNK_BYTES).unwrap_or(u64::MAX)),
+            )
+            .unwrap_or(QUIC_CONTROL_SOURCE_CHUNK_BYTES);
+            let read = file.read(&mut buf[..want]).await?;
+            if read == 0 {
+                return Err(QuicTransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "source entry {} ended at offset {offset}, expected {} bytes",
+                        entry.index, entry.size
+                    ),
+                )));
+            }
+            let chunk_index_u32 = u32::try_from(chunk_index).map_err(|_| {
+                QuicTransportError::Integrity(format!(
+                    "control-source chunk index overflow for entry {}",
+                    entry.index
+                ))
+            })?;
+            let symbol = quic_control_source_chunk_symbol(
+                &prepared.manifest.transfer_id,
+                entry.index,
+                offset,
+                chunk_index_u32,
+                &buf[..read],
+            );
+            let auth_tag = *symbol_auth.sign_symbol(&symbol).tag();
+            control.send_control_source_data(
+                cx,
+                conn,
+                entry.index,
+                offset,
+                chunk_index_u32,
+                &auth_tag,
+                &buf[..read],
+            )?;
+            let read_u64 = u64::try_from(read).unwrap_or(u64::MAX);
+            offset = offset.saturating_add(read_u64);
+            bytes_sent = bytes_sent.saturating_add(read_u64);
+            chunk_index = chunk_index.saturating_add(1);
+        }
+    }
+    Ok(bytes_sent)
+}
+
+#[allow(dead_code)]
+async fn receive_native_control_source_stream(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    dest_dir: &Path,
+    config: &QuicConfig,
+    peer: SocketAddr,
+    symbol_auth: &SecurityContext,
+) -> Result<ReceiveReport, QuicTransportError> {
+    let mut bytes_received = 0u64;
+    let mut chunk_indexes = vec![0u32; decoders.len()];
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let frame = next_native_control_frame(cx, conn, control, "receive control source stream")?;
+        match frame.frame_type() {
+            FrameType::ObjectData => {
+                let accepted = apply_quic_control_source_data_frame(
+                    &frame,
+                    manifest,
+                    symbol_auth,
+                    decoders,
+                    &mut chunk_indexes,
+                )?;
+                bytes_received =
+                    bytes_received.saturating_add(u64::try_from(accepted).unwrap_or(u64::MAX));
+            }
+            FrameType::ObjectComplete => {
+                let (receipt, committed_paths) = commit_decoded_entries(
+                    cx,
+                    dest_dir,
+                    manifest,
+                    decoders,
+                    0,
+                    0,
+                    QuicDecodeStats::default(),
+                    config,
+                )
+                .await?;
+                send_native_proof(cx, conn, control, &receipt)?;
+                let _ = send_native_close(cx, conn, control);
+                if !receipt.committed {
+                    return Err(QuicTransportError::Integrity(
+                        receipt
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "receiver did not commit".to_string()),
+                    ));
+                }
+                if receipt.bytes_received != bytes_received {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "control-source stream received {} bytes but receipt committed {}",
+                        bytes_received, receipt.bytes_received
+                    )));
+                }
+                return Ok(ReceiveReport {
+                    transfer_id: manifest.transfer_id.clone(),
+                    bytes_received: receipt.bytes_received,
+                    files: receipt.files,
+                    committed: true,
+                    symbols_accepted: receipt.symbols_accepted,
+                    feedback_rounds: receipt.feedback_rounds,
+                    decode_count: receipt.decode_count,
+                    decode_micros: receipt.decode_micros,
+                    committed_paths,
+                    peer,
+                });
+            }
+            FrameType::KeepAlive => {
+                let keepalive = Frame::empty(FrameType::KeepAlive)
+                    .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+                control.send(cx, conn, &keepalive)?;
+            }
+            got => {
+                return Err(QuicTransportError::Unexpected {
+                    got,
+                    expected: "ObjectData | ObjectComplete | KeepAlive",
+                });
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn finish_native_sender_transfer(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
@@ -6286,18 +6837,65 @@ where
     trace_quic_fanout_dispatch_plan(cx, 0, &fanout_plan);
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
+    let prefer_control_source_stream = quic_control_source_stream_eligible(
+        prepared.manifest.total_bytes,
+        &config,
+        symbol_auth_enabled,
+    );
     let mut control = NativeQuicFrameTransport::open(cx, conn)?;
 
-    send_native_sender_hello(
+    send_native_sender_hello_with_source_stream(
         cx,
         conn,
         &mut control,
         &config,
         peer_id,
         symbol_auth_enabled,
+        prepared.manifest.total_bytes,
+        prefer_control_source_stream,
     )?;
     drive_peer(NativeSenderDrivePoint::HelloSent, conn)?;
-    receive_native_sender_hello_ack(cx, conn, &mut control)?;
+    let ack = receive_native_sender_hello_ack(cx, conn, &mut control)?;
+
+    if ack.control_source_stream {
+        if !prefer_control_source_stream {
+            return Err(QuicTransportError::HandshakeRejected(
+                "receiver accepted control-source stream that sender did not offer".to_string(),
+            ));
+        }
+        send_native_manifest(cx, conn, &mut control, &prepared.manifest)?;
+        let symbol_auth = symbol_auth.as_ref().ok_or_else(|| {
+            QuicTransportError::Integrity(
+                "control-source stream requires symbol authentication".to_string(),
+            )
+        })?;
+        let bytes_sent =
+            send_native_control_source_entries(cx, conn, &mut control, prepared, symbol_auth)
+                .await?;
+        if bytes_sent != prepared.manifest.total_bytes {
+            return Err(QuicTransportError::Integrity(format!(
+                "control-source stream sent {bytes_sent} bytes, manifest declares {}",
+                prepared.manifest.total_bytes
+            )));
+        }
+        send_native_object_complete(cx, conn, &mut control, 0)?;
+        drive_peer(NativeSenderDrivePoint::ObjectCompleteSent, conn)?;
+        return match receive_native_proof_or_need_more(cx, conn, &mut control)? {
+            QuicControlReply::Proof(receipt) => finish_native_sender_transfer(
+                cx,
+                conn,
+                &mut control,
+                &prepared.manifest,
+                peer,
+                receipt,
+                0,
+                0,
+            ),
+            QuicControlReply::NeedMore(_) => Err(QuicTransportError::Integrity(
+                "control-source receiver requested repair feedback".to_string(),
+            )),
+        };
+    }
 
     let (mut encoders, symbols_sent) = send_native_prepared_source_manifest_symbols_complete(
         cx,
@@ -7193,7 +7791,7 @@ async fn receive_established_native_connection(
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
-    receive_native_sender_hello_and_ack(
+    let hello = receive_native_sender_hello_and_ack(
         cx,
         &mut connection,
         &mut control,
@@ -7204,6 +7802,32 @@ async fn receive_established_native_connection(
     let manifest = receive_native_manifest(cx, &mut connection, &mut control)?;
     validate_quic_manifest(&manifest, &config)?;
     let mut decoders = decoders_from_manifest(&manifest, &config)?;
+    if hello.prefer_control_source_stream
+        && quic_control_source_stream_eligible(hello.total_bytes, &config, symbol_auth_enabled)
+    {
+        if hello.total_bytes != manifest.total_bytes {
+            return Err(QuicTransportError::Integrity(format!(
+                "control-source handshake declared {} bytes, manifest declares {}",
+                hello.total_bytes, manifest.total_bytes
+            )));
+        }
+        return receive_native_control_source_stream(
+            cx,
+            &mut connection,
+            &mut control,
+            &manifest,
+            &mut decoders,
+            dest_dir,
+            &config,
+            peer,
+            symbol_auth.as_ref().ok_or_else(|| {
+                QuicTransportError::Integrity(
+                    "control-source stream requires symbol authentication".to_string(),
+                )
+            })?,
+        )
+        .await;
+    }
     let aggregator = primary_quic_receive_aggregator(peer.to_string());
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
@@ -7560,6 +8184,124 @@ mod tests {
     #[test]
     fn native_symbol_drain_batch_matches_receiver_pump_width() {
         assert_eq!(NATIVE_SYMBOL_DRAIN_BATCH, 512);
+    }
+
+    #[test]
+    fn quic_control_source_stream_eligible_only_for_clean_small_transfer() {
+        let config = trusted_quic_config();
+        assert!(quic_control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &config,
+            true
+        ));
+        assert!(!quic_control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &config,
+            false
+        ));
+        assert!(!quic_control_source_stream_eligible(0, &config, true));
+        assert!(!quic_control_source_stream_eligible(
+            QUIC_CONTROL_SOURCE_STREAM_MAX_BYTES + 1,
+            &config,
+            true
+        ));
+
+        let lossy = QuicConfig {
+            debug_drop_one_in: 1000,
+            ..config.clone()
+        };
+        assert!(!quic_control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &lossy,
+            true
+        ));
+
+        let repair_heavy = QuicConfig {
+            repair_overhead: 1.25,
+            ..config.clone()
+        };
+        assert!(!quic_control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &repair_heavy,
+            true
+        ));
+
+        let bw_limited = QuicConfig {
+            bwlimit_bps: Some(1_000_000),
+            ..config
+        };
+        assert!(!quic_control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &bw_limited,
+            true
+        ));
+    }
+
+    #[test]
+    fn quic_control_source_data_frame_roundtrips_entry_offset_and_payload() {
+        let tag = AuthenticationTag::from_bytes([0xA5; TAG_SIZE]);
+        let frame = quic_control_source_data_frame(7, 123_456, 3, &tag, b"payload")
+            .expect("source data frame");
+        let parsed = parse_quic_control_source_data_frame(&frame).expect("parse source data");
+        assert_eq!(parsed.entry, 7);
+        assert_eq!(parsed.offset, 123_456);
+        assert_eq!(parsed.chunk_index, 3);
+        assert_eq!(parsed.auth_tag, tag);
+        assert_eq!(parsed.data, b"payload");
+
+        let direct = quic_control_source_data_wire_frame(7, 123_456, 3, &tag, b"payload")
+            .expect("direct wire");
+        let canonical = frame.to_wire_bytes().expect("canonical frame wire");
+        assert_eq!(direct.as_ref(), canonical.as_slice());
+    }
+
+    #[test]
+    fn quic_control_source_data_authentication_binds_offset_and_payload() {
+        let ctx = SecurityContext::for_testing(89);
+        let entries = [("file.bin".to_string(), b"payload".to_vec())];
+        let manifest = manifest_from_entries("payload", false, &entries);
+        let symbol = quic_control_source_chunk_symbol(&manifest.transfer_id, 0, 0, 0, b"payload");
+        let tag = *ctx.sign_symbol(&symbol).tag();
+
+        let good = quic_control_source_data_frame(0, 0, 0, &tag, b"payload")
+            .expect("authenticated source data frame");
+        let verified =
+            verified_quic_control_source_data_frame(&good, &manifest, &ctx).expect("verified");
+        assert_eq!(verified.data, b"payload");
+
+        let tampered_offset = quic_control_source_data_frame(0, 1, 0, &tag, b"payload")
+            .expect("tampered offset frame");
+        let err = verified_quic_control_source_data_frame(&tampered_offset, &manifest, &ctx)
+            .expect_err("offset tamper must fail auth");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message)
+                if message.contains("authentication failed")
+        ));
+
+        let tampered_payload = quic_control_source_data_frame(0, 0, 0, &tag, b"tampered")
+            .expect("tampered payload frame");
+        let err = verified_quic_control_source_data_frame(&tampered_payload, &manifest, &ctx)
+            .expect_err("payload tamper must fail auth");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message)
+                if message.contains("authentication failed")
+        ));
+    }
+
+    #[test]
+    fn quic_control_source_data_chunk_stays_within_frame_cap() {
+        let tag = AuthenticationTag::from_bytes([0x5A; TAG_SIZE]);
+        let payload = vec![0u8; QUIC_CONTROL_SOURCE_CHUNK_BYTES];
+        let direct = quic_control_source_data_wire_frame(7, 123_456, 0, &tag, &payload)
+            .expect("chunk cap fits");
+        let max_frame_size = usize::try_from(MAX_FRAME_SIZE).unwrap_or(usize::MAX);
+        assert!(direct.len() <= max_frame_size);
+        assert_eq!(QUIC_CONTROL_SOURCE_FRAME_MAX_BYTES, max_frame_size);
+
+        let too_large = vec![0u8; QUIC_CONTROL_SOURCE_CHUNK_BYTES + 1];
+        assert!(quic_control_source_data_wire_frame(7, 123_456, 0, &tag, &too_large).is_err());
     }
 
     #[test]
@@ -9625,6 +10367,8 @@ mod tests {
             symbol_size: DEFAULT_SYMBOL_SIZE,
             max_block_size: u64::try_from(DEFAULT_MAX_BLOCK_SIZE).unwrap_or(u64::MAX),
             symbol_auth: true,
+            total_bytes: 123_456,
+            prefer_control_source_stream: true,
         };
         let hello_frame = json_frame(FrameType::Handshake, &hello).expect("hello frame");
         assert_eq!(hello_frame.version(), ProtocolVersion::CURRENT);
@@ -9638,6 +10382,7 @@ mod tests {
             accepted: false,
             peer_id: "peer-b".to_string(),
             reason: Some("unsupported protocol".to_string()),
+            control_source_stream: false,
         };
         let ack_frame = json_frame(FrameType::HandshakeAck, &ack).expect("ack frame");
         assert_eq!(ack_frame.frame_type(), FrameType::HandshakeAck);
@@ -12158,6 +12903,8 @@ mod tests {
             symbol_size: config.symbol_size,
             max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
             symbol_auth: false,
+            total_bytes: 0,
+            prefer_control_source_stream: false,
         };
         let frame = json_frame(FrameType::Handshake, &bad_hello).expect("bad hello frame");
         sender_control
@@ -12214,6 +12961,8 @@ mod tests {
             symbol_size: config.symbol_size.saturating_div(2).max(1),
             max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
             symbol_auth: false,
+            total_bytes: 0,
+            prefer_control_source_stream: false,
         };
 
         let reason = reject_hello_reason(&bad_hello, &config, false)
