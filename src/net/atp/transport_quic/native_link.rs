@@ -229,9 +229,10 @@ const QUIC_CLEAN_SPRAY_MAX_LOSS_RATE: f64 = 0.01;
 /// crosses this floor.
 const QUIC_PACING_PARK_FLOOR: Duration = Duration::from_millis(1);
 /// Upper bound for symbols handed from the RQ producer loop to the QUIC sender
-/// pump in one in-process turn. This keeps clean encrypted sends out of a
-/// per-symbol async lock-step without letting one handoff monopolize memory.
-const QUIC_NATIVE_SPRAY_HANDOFF_MAX_SYMBOLS: usize = 64;
+/// pump in one in-process turn on lossy paths. Clean paths may hand off the
+/// whole bounded flush window so they do not split one GSO-ready burst into
+/// multiple scheduler-visible producer/sender turns.
+const QUIC_LOSSY_SPRAY_HANDOFF_MAX_SYMBOLS: usize = 64;
 
 /// Fixed socket buffer budget for the native ATP-QUIC link. This is intentionally
 /// a constant envelope, not proportional to object size, so large transfers cannot
@@ -992,6 +993,21 @@ fn clean_gso_flush_symbol_cap(
     } else {
         base_cap
     }
+}
+
+fn spray_handoff_symbol_limit_for(
+    flush_symbols: usize,
+    pending_outbound_datagrams: usize,
+    path_loss_rate: f64,
+) -> usize {
+    let flush_symbols = flush_symbols.max(1);
+    let remaining = flush_symbols.saturating_sub(pending_outbound_datagrams);
+    let max_handoff = if path_loss_rate < QUIC_CLEAN_SPRAY_MAX_LOSS_RATE {
+        flush_symbols
+    } else {
+        QUIC_LOSSY_SPRAY_HANDOFF_MAX_SYMBOLS
+    };
+    remaining.clamp(1, max_handoff)
 }
 
 fn quic_gso_send_strategy(packets: &[OutgoingPacket]) -> UdpSendBatchStrategy {
@@ -1866,9 +1882,11 @@ impl QuicLink {
     }
 
     fn spray_handoff_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
-        self.paced_flush_symbol_limit(pacing)
-            .saturating_sub(self.conn.pending_outbound_datagram_count())
-            .clamp(1, QUIC_NATIVE_SPRAY_HANDOFF_MAX_SYMBOLS)
+        spray_handoff_symbol_limit_for(
+            self.paced_flush_symbol_limit(pacing),
+            self.conn.pending_outbound_datagram_count(),
+            pacing.path_loss_rate,
+        )
     }
 
     /// Spray a bounded symbol batch, flushing first whenever the paced outbound
@@ -4391,6 +4409,52 @@ mod tests {
             clean_gso_flush_symbol_cap(128, 54),
             128,
             "explicit operator caps above one packet remain explicit"
+        );
+    }
+
+    #[test]
+    fn clean_handoff_limit_fills_gso_flush_window() {
+        let flush_window = 54 * QUIC_CLEAN_GSO_PACKETS_PER_FLUSH;
+        assert_eq!(
+            spray_handoff_symbol_limit_for(flush_window, 0, 0.0),
+            flush_window,
+            "MATRIX-112: clean encrypted sends hand one full GSO-ready flush window \
+             to the QUIC sender instead of splitting it into 64-symbol scheduler turns"
+        );
+        assert_eq!(
+            spray_handoff_symbol_limit_for(flush_window, 54, 0.0),
+            flush_window - 54,
+            "pending DATAGRAMs still reduce the next handoff to the remaining flush window"
+        );
+        assert_eq!(
+            spray_handoff_symbol_limit_for(flush_window, flush_window, 0.0),
+            1,
+            "a full queue reports the minimum nudge so the caller flushes before enqueueing more"
+        );
+    }
+
+    #[test]
+    fn lossy_handoff_limit_preserves_bounded_scheduler_turns() {
+        let flush_window = 54 * QUIC_CLEAN_GSO_PACKETS_PER_FLUSH;
+        assert_eq!(
+            spray_handoff_symbol_limit_for(flush_window, 0, 0.02),
+            QUIC_LOSSY_SPRAY_HANDOFF_MAX_SYMBOLS,
+            "lossy paths keep the old conservative per-turn handoff cap"
+        );
+        assert_eq!(
+            spray_handoff_symbol_limit_for(32, 0, 0.02),
+            32,
+            "small lossy pacing bursts are still limited by the paced flush window"
+        );
+        assert_eq!(
+            spray_handoff_symbol_limit_for(flush_window, flush_window - 10, 0.02),
+            10,
+            "pending DATAGRAMs can shrink the lossy handoff below the cap"
+        );
+        assert_eq!(
+            spray_handoff_symbol_limit_for(flush_window, 0, QUIC_CLEAN_SPRAY_MAX_LOSS_RATE),
+            QUIC_LOSSY_SPRAY_HANDOFF_MAX_SYMBOLS,
+            "the clean fast path remains below the documented loss ceiling"
         );
     }
 
