@@ -230,6 +230,30 @@ pub struct BondedReceiverFeedbackPlan {
     pub progress: BondedReceiverProgressSnapshot,
 }
 
+/// One control action to send to one bonded donor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BondedReceiverFeedbackAction {
+    /// Ask one donor for missing systematic/source ESIs first.
+    SourceFirstNeedMore {
+        /// Donor control connection that should receive the request.
+        donor_index: u32,
+        /// Missing source symbols for one source block.
+        holes: BondedBlockSourceHoles,
+    },
+    /// Ask one donor for generic repair symbols for one source block.
+    RepairNeedMore {
+        /// Donor control connection that should receive the request.
+        donor_index: u32,
+        /// Aggregate block deficit after cross-donor deduplication.
+        coverage: BondedBlockCoverage,
+    },
+    /// Tell one donor to stop spraying a verified-complete transfer.
+    Close {
+        /// Donor control connection that should receive the close.
+        donor_index: u32,
+    },
+}
+
 impl BondedReceiverFeedbackPlan {
     /// True when there is no feedback to broadcast.
     #[must_use]
@@ -260,6 +284,41 @@ impl BondedReceiverFeedbackPlan {
     #[must_use]
     pub fn should_broadcast_close(&self) -> bool {
         self.close && !self.donor_targets.is_empty()
+    }
+
+    /// Materialize the per-donor control fan-out for this aggregate plan.
+    ///
+    /// Close wins over stale deficits: once the object is verified complete,
+    /// every donor receives exactly one close action and no donor receives
+    /// another `NeedMore`.
+    #[must_use]
+    pub fn broadcast_actions(&self) -> Vec<BondedReceiverFeedbackAction> {
+        if self.should_broadcast_close() {
+            return self
+                .donor_targets
+                .iter()
+                .copied()
+                .map(|donor_index| BondedReceiverFeedbackAction::Close { donor_index })
+                .collect();
+        }
+
+        if !self.should_broadcast_need_more() {
+            return Vec::new();
+        }
+
+        let mut actions = Vec::new();
+        for donor_index in self.donor_targets.iter().copied() {
+            actions.extend(self.source_first_need_more.iter().cloned().map(|holes| {
+                BondedReceiverFeedbackAction::SourceFirstNeedMore { donor_index, holes }
+            }));
+            actions.extend(self.need_more.iter().copied().map(|coverage| {
+                BondedReceiverFeedbackAction::RepairNeedMore {
+                    donor_index,
+                    coverage,
+                }
+            }));
+        }
+        actions
     }
 }
 
@@ -798,6 +857,52 @@ mod tests {
     }
 
     #[test]
+    fn feedback_plan_materializes_need_more_actions_for_every_donor() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(24);
+
+        set.record_key(2, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 3), SymbolKind::Repair);
+
+        let plan = set.feedback_broadcast_plan([(object_id, 0, 3)], false);
+        let source_holes = BondedBlockSourceHoles {
+            object_id,
+            sbn: 0,
+            source_symbols: 3,
+            missing_source_esis: vec![1, 2],
+        };
+        let repair_deficit = BondedBlockCoverage {
+            object_id,
+            sbn: 0,
+            target_symbols: 3,
+            accepted_symbols: 2,
+            deficit_symbols: 1,
+        };
+
+        assert_eq!(
+            plan.broadcast_actions(),
+            vec![
+                BondedReceiverFeedbackAction::SourceFirstNeedMore {
+                    donor_index: 0,
+                    holes: source_holes.clone(),
+                },
+                BondedReceiverFeedbackAction::RepairNeedMore {
+                    donor_index: 0,
+                    coverage: repair_deficit,
+                },
+                BondedReceiverFeedbackAction::SourceFirstNeedMore {
+                    donor_index: 2,
+                    holes: source_holes,
+                },
+                BondedReceiverFeedbackAction::RepairNeedMore {
+                    donor_index: 2,
+                    coverage: repair_deficit,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn feedback_plan_prefers_source_holes_even_when_repairs_meet_target() {
         let mut set = BondedReceiverSymbolSet::new();
         let object_id = ObjectId::new_for_test(27);
@@ -845,6 +950,13 @@ mod tests {
         assert!(!plan.should_broadcast_repair_need_more());
         assert!(plan.should_broadcast_close());
         assert_eq!(plan.progress.total_deficit_symbols, 2);
+        assert_eq!(
+            plan.broadcast_actions(),
+            vec![
+                BondedReceiverFeedbackAction::Close { donor_index: 0 },
+                BondedReceiverFeedbackAction::Close { donor_index: 1 },
+            ]
+        );
     }
 
     #[test]
