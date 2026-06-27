@@ -179,15 +179,15 @@ const ONE_RTT_TAG_LEN: usize = 16;
 const ONE_RTT_FIXED_BIT: u8 = 0x40;
 /// QUIC short-header key-phase bit (bit 2).
 const ONE_RTT_KEY_PHASE_BIT: u8 = 0x04;
-/// Packet-count-sized recovery charge for one simplified ATP 1-RTT data packet.
+/// Packet-credit-sized recovery charge for one simplified ATP 1-RTT data packet.
 ///
-/// The native recovery machine's initial cwnd is expressed in 1200-byte packet
-/// units. ATP-over-QUIC can pack many symbol DATAGRAM frames into one jumbo UDP
-/// packet on hermetic benchmark links, so charging the full jumbo length would
-/// make the first data packet exceed cwnd and deadlock. Charging one packet unit
-/// gives the pump real bytes-in-flight / ACK / loss accounting while preserving
-/// the already-proven jumbo coalescing envelope.
-const QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES: u64 = 1_200;
+/// ATP's RaptorQ repair loop, not QUIC stream retransmission, owns data
+/// recovery. The native QUIC recovery machine is still useful as a packet-loss
+/// signal, but byte-sized cwnd accounting collapses the lossy sender to a
+/// two-symbol minimum cwnd after random packet loss. Charge each symbol packet
+/// as a small virtual credit instead: enough to bound bursts and observe loss,
+/// not enough to underfill a 50M/80ms path by two orders of magnitude.
+const QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES: u64 = 16;
 
 /// UDP max packet size for the link's endpoint.
 ///
@@ -237,6 +237,11 @@ const QUIC_CLEAN_SPRAY_MAX_LOSS_RATE: f64 = 0.01;
 /// packed 54 symbols into one ~63 KiB UDP datagram, so one shaped-link packet
 /// loss erased a whole symbol group and stalled recovery behind cwnd.
 const QUIC_CLEAN_COALESCING_MAX_RTT_S: f64 = 0.050;
+/// Keep native ATP-QUIC symbol packets loss-granular until the lossy convergence
+/// gate is banked. The current recovery RTT is a synthetic pump clock sample,
+/// not a trustworthy wall-clock path RTT, so an RTT-based clean gate can still
+/// misclassify the 50M/bad cell as jumbo-safe.
+const QUIC_NATIVE_CLEAN_JUMBO_COALESCING_ENABLED: bool = false;
 
 /// Minimum owed pacing time worth parking the async timer for on the clean-link
 /// spray. Per-flush owed time is often sub-millisecond; parking that each flush
@@ -1036,6 +1041,43 @@ fn trace_quic_data_plane_congestion_limited(
     );
 }
 
+fn trace_quic_data_plane_loss_timeout(
+    cx: &Cx,
+    pending_datagrams: usize,
+    lost_packets: usize,
+    lost_bytes: u64,
+    bytes_in_flight: u64,
+    congestion_window: u64,
+    pto_count: u32,
+) {
+    let pending_datagrams_s = pending_datagrams.to_string();
+    let lost_packets_s = lost_packets.to_string();
+    let lost_bytes_s = lost_bytes.to_string();
+    let bytes_in_flight_s = bytes_in_flight.to_string();
+    let congestion_window_s = congestion_window.to_string();
+    let pto_count_s = pto_count.to_string();
+    cx.trace_with_fields(
+        "atp_quic.sender.data_plane_loss_timeout",
+        &[
+            ("pending_datagrams", pending_datagrams_s.as_str()),
+            ("lost_packets", lost_packets_s.as_str()),
+            ("lost_bytes", lost_bytes_s.as_str()),
+            ("bytes_in_flight", bytes_in_flight_s.as_str()),
+            ("congestion_window", congestion_window_s.as_str()),
+            ("pto_count", pto_count_s.as_str()),
+        ],
+    );
+    quic_rqtrace!(
+        "sender: data_plane_loss_timeout pending_datagrams={} lost_packets={} lost_bytes={} bytes_in_flight={} congestion_window={} pto_count={}",
+        pending_datagrams,
+        lost_packets,
+        lost_bytes,
+        bytes_in_flight,
+        congestion_window,
+        pto_count,
+    );
+}
+
 fn queued_fountain_feedback_count(pending: &VecDeque<Frame>) -> usize {
     pending
         .iter()
@@ -1141,7 +1183,10 @@ fn coalesced_spray_flush_symbol_limit(
 }
 
 fn quic_clean_spray_coalescing_allowed(pacing: &QuicSprayPacingDecision) -> bool {
-    pacing.path_loss_rate < QUIC_CLEAN_SPRAY_MAX_LOSS_RATE
+    QUIC_NATIVE_CLEAN_JUMBO_COALESCING_ENABLED
+        && pacing.path_loss_rate < QUIC_CLEAN_SPRAY_MAX_LOSS_RATE
+        && pacing.path_rtt_s.is_finite()
+        && pacing.path_rtt_s > 0.0
         && pacing.path_rtt_s <= QUIC_CLEAN_COALESCING_MAX_RTT_S
 }
 
@@ -1922,6 +1967,37 @@ impl QuicLink {
         Ok(dropped)
     }
 
+    fn release_expired_data_plane_loss(
+        &mut self,
+        cx: &Cx,
+        pending_datagrams: usize,
+    ) -> Result<(), QuicTransportError> {
+        let Some(deadline) = self.conn.pto_deadline_micros(cx, self.clock)? else {
+            return Ok(());
+        };
+        if deadline > self.clock {
+            return Ok(());
+        }
+
+        let event = self.conn.on_loss_timeout_expired(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            self.clock,
+        )?;
+        if event.lost_packets > 0 {
+            trace_quic_data_plane_loss_timeout(
+                cx,
+                pending_datagrams,
+                event.lost_packets,
+                event.lost_bytes,
+                self.conn.transport().bytes_in_flight(),
+                self.conn.transport().congestion_window_bytes(),
+                self.conn.transport().pto_count(),
+            );
+        }
+        Ok(())
+    }
+
     /// Drain all currently-pending application frames, protect each into a 1-RTT
     /// packet, and send the batch over UDP. Returns the number of packets sent.
     async fn flush(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
@@ -1941,12 +2017,22 @@ impl QuicLink {
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let pending_datagrams = self.conn.pending_outbound_datagram_count();
-            let data_plane_blocked = self.role == StreamRole::Client
+            let mut data_plane_blocked = self.role == StreamRole::Client
                 && pending_datagrams > 0
                 && !self
                     .conn
                     .transport()
                     .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES);
+            if data_plane_blocked {
+                self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
+                self.release_expired_data_plane_loss(cx, pending_datagrams)?;
+                data_plane_blocked = self.role == StreamRole::Client
+                    && pending_datagrams > 0
+                    && !self
+                        .conn
+                        .transport()
+                        .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES);
+            }
             if data_plane_blocked {
                 trace_quic_data_plane_congestion_limited(
                     cx,
@@ -2759,6 +2845,46 @@ impl QuicLink {
             }
         }
     }
+
+    async fn next_control_frame_with_stream_pto(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+        operation: &'static str,
+        frames: &[SentControlStreamFrame],
+        reason: &'static str,
+    ) -> Result<Frame, QuicTransportError> {
+        if frames.is_empty() {
+            return self.next_control_frame(cx, control, operation).await;
+        }
+
+        let max_attempts = needmore_pto_attempt_budget(self.idle_timeout);
+        let mut attempts = 0u32;
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if let Some(frame) = self.pending_control_frames.pop_front() {
+                return Ok(frame);
+            }
+            if let Some(frame) = control.try_recv(cx, &mut self.conn)? {
+                return Ok(frame);
+            }
+            self.flush(cx).await?;
+            let pumped = self.pump_inbound_for(cx, NEEDMORE_PTO).await?;
+            if pumped > 0 {
+                attempts = 0;
+                continue;
+            }
+
+            attempts = attempts.saturating_add(1);
+            if attempts > max_attempts {
+                return Err(QuicTransportError::Timeout {
+                    operation,
+                    timeout: self.idle_timeout,
+                });
+            }
+            self.retransmit_stream_frames(cx, frames, reason).await?;
+        }
+    }
 }
 
 /// Bind a `QuicUdpEndpoint` on `local`, tuned for the ATP-over-QUIC handshake.
@@ -3364,6 +3490,8 @@ async fn spray_round(
         }
     }
     aimd.record_spray(sent, pacing.pacing_rate_bps);
+    link.finish_paced_spray_round(cx, control, sent, &pacing)
+        .await?;
     Ok(sent)
 }
 
@@ -3606,8 +3734,15 @@ async fn run_sender_session(
         symbol_auth_enabled,
     )?;
     link.flush(cx).await?;
+    let hello_frames = link.last_flushed_stream_frames();
     let ack_frame = link
-        .next_control_frame(cx, &mut control, "receive sender handshake ack")
+        .next_control_frame_with_stream_pto(
+            cx,
+            &mut control,
+            "receive sender handshake ack",
+            &hello_frames,
+            "sender_hello_pto",
+        )
         .await?;
     let _ack = parse_hello_ack(&ack_frame)?;
 
@@ -3631,13 +3766,8 @@ async fn run_sender_session(
         &mut aimd,
     )
     .await?;
-    // Push every sprayed symbol onto the wire BEFORE the ObjectComplete marker so
-    // the (in-order, loopback/LAN) receiver drains all of this round's symbols
-    // before it reads ObjectComplete and assembles. `generate_frames` emits the
-    // ObjectComplete STREAM frame ahead of queued DATAGRAMs within a single flush,
-    // so without this split a >1-batch spray would assemble prematurely and force
-    // a needless feedback round.
-    link.flush(cx).await?;
+    // `spray_round` drains queued DATAGRAMs before returning so ObjectComplete
+    // cannot overtake unsent symbols in the connection's outbound queues.
     link.trace_sender_handoff_summary(cx, "initial_source", symbols_sent);
     send_native_object_complete_for_round(cx, &mut link.conn, &mut control, 0, symbols_sent)?;
     link.flush(cx).await?;
@@ -5183,7 +5313,10 @@ mod tests {
     fn native_data_plane_recovery_accounting_uses_packet_units_for_jumbo_udp() {
         let cx = Cx::for_testing();
         assert_eq!(data_plane_packet_accounting_bytes(0), 1);
-        assert_eq!(data_plane_packet_accounting_bytes(512), 512);
+        assert_eq!(
+            data_plane_packet_accounting_bytes(512),
+            QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES
+        );
         assert_eq!(
             data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET),
             QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES
@@ -5201,9 +5334,10 @@ mod tests {
 
         let mut conn = established_native_test_conn();
         let initial_cwnd = conn.transport().congestion_window_bytes();
-        assert_eq!(initial_cwnd, QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES * 10);
+        let initial_packet_credits = initial_cwnd / QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES;
+        assert!(initial_packet_credits >= 700);
 
-        for idx in 0..10 {
+        for idx in 0..initial_packet_credits {
             assert!(
                 conn.transport()
                     .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES),
@@ -5230,7 +5364,8 @@ mod tests {
             "initial cwnd should be full after ten coalesced ATP packets"
         );
 
-        let ack_range = crate::net::quic_native::AckRange::new(9, 0).expect("ack range");
+        let ack_range = crate::net::quic_native::AckRange::new(initial_packet_credits - 1, 0)
+            .expect("ack range");
         conn.on_ack_ranges(
             &cx,
             PacketNumberSpace::ApplicationData,
@@ -5492,7 +5627,16 @@ mod tests {
             path_loss_rate: 0.0,
             limiter: super::super::QuicSprayPacingLimiter::CongestionWindow,
         };
-        assert!(quic_clean_spray_coalescing_allowed(&pacing));
+        assert!(
+            !quic_clean_spray_coalescing_allowed(&pacing),
+            "native ATP-QUIC keeps loss-granular symbol packets until lossy convergence is banked"
+        );
+
+        pacing.path_rtt_s = 0.0;
+        assert!(
+            !quic_clean_spray_coalescing_allowed(&pacing),
+            "unknown RTT must stay on per-symbol packets until a clean path is measured"
+        );
 
         pacing.path_rtt_s = 0.080;
         assert!(

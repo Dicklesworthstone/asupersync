@@ -467,6 +467,41 @@ impl LossRecovery {
 
         deadline
     }
+
+    fn on_loss_timeout_expired(&mut self, space: PacketNumberSpace, now_micros: u64) -> AckEvent {
+        let mut event = AckEvent::empty();
+        let mut newest_lost_packet_sent_micros: Option<u64> = None;
+        let mut retained = VecDeque::with_capacity(self.sent_packets.len());
+
+        while let Some(pkt) = self.sent_packets.pop_front() {
+            let lost = pkt.space == space && pkt.in_flight && pkt.ack_eliciting;
+            if lost {
+                event.lost_packets += 1;
+                event.lost_bytes = event.lost_bytes.saturating_add(pkt.bytes);
+                self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
+                newest_lost_packet_sent_micros = Some(
+                    newest_lost_packet_sent_micros
+                        .map_or(pkt.time_sent_micros, |seen| seen.max(pkt.time_sent_micros)),
+                );
+            } else {
+                retained.push_back(pkt);
+            }
+        }
+
+        self.sent_packets = retained;
+
+        if event.lost_packets > 0 {
+            self.pto_count = self.pto_count.saturating_add(1);
+            self.packets_lost_total = self
+                .packets_lost_total
+                .saturating_add(u64::try_from(event.lost_packets).unwrap_or(u64::MAX));
+            if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
+                self.on_loss_congestion(lost_packet_sent_time, now_micros);
+            }
+        }
+
+        event
+    }
 }
 
 fn ack_ranges_from_packet_numbers(acked_packet_numbers: &[u64]) -> Vec<AckRange> {
@@ -700,6 +735,22 @@ impl QuicTransportMachine {
         self.recovery.pto_count = self.recovery.pto_count.saturating_add(1);
     }
 
+    /// Declare ack-eliciting in-flight packets in `space` lost after a
+    /// PTO-style application timeout.
+    ///
+    /// Generic QUIC PTO sends probes instead of immediately marking packets
+    /// lost. ATP's native DATAGRAM data plane does not retransmit individual
+    /// DATAGRAM packets; fountain repair owns recovery, so stale DATAGRAM
+    /// in-flight accounting must be released or a small cwnd can remain full
+    /// forever behind lost packets.
+    pub fn on_loss_timeout_expired(
+        &mut self,
+        space: PacketNumberSpace,
+        now_micros: u64,
+    ) -> AckEvent {
+        self.recovery.on_loss_timeout_expired(space, now_micros)
+    }
+
     /// Current RTT estimator snapshot.
     #[must_use]
     pub fn rtt(&self) -> &RttEstimator {
@@ -869,6 +920,23 @@ mod tests {
         assert_eq!(t.pto_count(), 1);
         let second = t.pto_deadline_micros(2_000).expect("second deadline");
         assert!(second > first);
+    }
+
+    #[test]
+    fn loss_timeout_releases_ack_eliciting_in_flight_packets() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 10_100));
+        assert_eq!(t.bytes_in_flight(), 200);
+
+        let event = t.on_loss_timeout_expired(PacketNumberSpace::ApplicationData, 50_000);
+
+        assert_eq!(event.lost_packets, 2);
+        assert_eq!(event.lost_bytes, 200);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.packets_lost_total(), 2);
+        assert_eq!(t.pto_count(), 1);
+        assert!(t.congestion_window_bytes() < 12_000);
     }
 
     #[test]

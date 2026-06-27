@@ -997,6 +997,17 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Release expired ack-eliciting in-flight packets in `space` as lost.
+    pub fn on_loss_timeout_expired(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        now_micros: u64,
+    ) -> Result<AckEvent, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        Ok(self.transport.on_loss_timeout_expired(space, now_micros))
+    }
+
     /// Record a PTO firing and queue an ack-eliciting probe frame.
     pub fn on_probe_timeout(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
         self.on_pto_expired(cx)?;
