@@ -205,7 +205,7 @@ imax() { local a="${1:-0}" b="${2:-0}"; [ -z "$a" ] && a=0; [ -z "$b" ] && b=0; 
 
 netem_args() {  # turn ATP_MATRIX_NETEM_JSON into a tc netem argument string
     python3 - "$NETEM_JSON" <<'PY'
-import json, sys
+import json, os, sys
 c = json.loads(sys.argv[1])
 parts = ["delay", f"{c.get('delay_ms',0)}ms"]
 jit = c.get("jitter_ms", 0) or 0
@@ -228,6 +228,9 @@ if rate:
 # tail-drops and silently throttles BOTH transports far below line rate. Only
 # regimes that set "limit" get one; others keep the default for stable baselines.
 limit = c.get("limit", 0) or 0
+env_limit = os.environ.get("ATP_NETEM_LIMIT")
+if env_limit:
+    limit = int(env_limit)  # override for fairness experiments (MATRIX-125)
 if limit:
     parts += ["limit", str(int(limit))]
 print(" ".join(parts))
