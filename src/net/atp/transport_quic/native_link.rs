@@ -79,9 +79,9 @@ use crate::net::quic_native::tls::{
     RustlsQuicCryptoProvider, TranscriptHash,
 };
 use crate::net::quic_native::{
-    NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, PacketNumberSpace,
-    QuicTransportMachine, QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket, StreamId,
-    StreamRole,
+    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, OutgoingPacket,
+    PacketNumberSpace, QuicTransportMachine, QuicUdpEndpoint, QuicUdpEndpointConfig,
+    ReceivedPacket, StreamId, StreamRole,
 };
 use crate::net::{UDP_MAX_GSO_SEGMENTS, UdpSendBatchStrategy};
 use crate::security::SecurityContext;
@@ -261,6 +261,10 @@ const INBOUND_PUMP_BATCH: usize = 512;
 /// F1.1 drain-until-empty behavior for ordinary bursts while bounding a single
 /// turn under sustained peer flooding.
 const INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
+/// Receiver symbol batches fed before giving the UDP socket another immediate
+/// drain chance. Keeping this at one prevents a full userspace DATAGRAM queue
+/// from monopolizing the receive task while the kernel socket buffer is filling.
+const RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL: usize = 1;
 /// After the first full batch, wait only a tiny quiet window for the next batch.
 /// `UdpSocket::recv_batch_from` drains immediately-ready datagrams internally;
 /// this grace covers the full-batch case where the kernel may still have more
@@ -927,6 +931,18 @@ struct PendingOneRttPacket {
     protected: ProtectedPacket,
 }
 
+enum DecodedInboundPacket {
+    OneRtt(PendingOneRttPacket),
+    NonOneRtt,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct IngestPacketsReport {
+    packets_consumed: usize,
+    one_rtt_packets_processed: usize,
+    receive_backpressure: bool,
+}
+
 fn decode_protected_one_rtt_packet(
     provider_kind: &'static str,
     packet: &ReceivedPacket,
@@ -1156,6 +1172,7 @@ pub struct QuicLink {
     /// Configured upper bound on symbols queued before a protected packet flush.
     max_spray_symbols_per_flush: usize,
     symbol_datagram_frame_len: usize,
+    pending_received_packets: VecDeque<ReceivedPacket>,
     /// Accrued sub-`QUIC_PACING_PARK_FLOOR` clean-link pacing owed-time. Paying it
     /// in fewer, full parks avoids the per-flush async-timer over-sleep (MATRIX-111);
     /// drained at round end so the average rate is preserved.
@@ -1260,13 +1277,19 @@ struct NativeReceiveTraceCounters {
     datagrams_received: u64,
     datagrams_dropped_on_receive: u64,
     pending_datagrams: usize,
+    pending_received_packets: usize,
     inbound_datagram_capacity: usize,
     inbound_datagram_available: usize,
     inbound_pump_batch_limit: usize,
+    udp_recv_buffer_requested: Option<usize>,
+    udp_recv_buffer_applied: Option<usize>,
+    udp_kernel_rx_queue_bytes: Option<u64>,
+    udp_kernel_drops: Option<u64>,
 }
 
 impl NativeReceiveTraceCounters {
     fn capture(link: &QuicLink) -> Self {
+        let socket = NativeUdpReceiveDiagnostics::capture(&link.endpoint);
         Self {
             udp_packets_received: link.udp_packets_received,
             one_rtt_packets_ingested: link.one_rtt_packets_ingested,
@@ -1275,9 +1298,14 @@ impl NativeReceiveTraceCounters {
             datagrams_received: link.conn.datagrams_received(),
             datagrams_dropped_on_receive: link.conn.datagrams_dropped_on_receive(),
             pending_datagrams: link.conn.pending_datagram_count(),
+            pending_received_packets: link.pending_received_packets.len(),
             inbound_datagram_capacity: link.conn.inbound_datagram_capacity(),
             inbound_datagram_available: link.conn.inbound_datagram_remaining_capacity(),
             inbound_pump_batch_limit: INBOUND_PUMP_BATCH,
+            udp_recv_buffer_requested: socket.recv_buffer_requested,
+            udp_recv_buffer_applied: socket.recv_buffer_applied,
+            udp_kernel_rx_queue_bytes: socket.kernel_rx_queue_bytes,
+            udp_kernel_drops: socket.kernel_drops,
         }
     }
 
@@ -1300,9 +1328,14 @@ impl NativeReceiveTraceCounters {
         let datagrams_received_text = self.datagrams_received.to_string();
         let datagrams_dropped_on_receive_text = self.datagrams_dropped_on_receive.to_string();
         let pending_datagrams_text = self.pending_datagrams.to_string();
+        let pending_received_packets_text = self.pending_received_packets.to_string();
         let inbound_datagram_capacity_text = self.inbound_datagram_capacity.to_string();
         let inbound_datagram_available_text = self.inbound_datagram_available.to_string();
         let inbound_pump_batch_limit_text = self.inbound_pump_batch_limit.to_string();
+        let udp_recv_buffer_requested_text = option_usize_trace(self.udp_recv_buffer_requested);
+        let udp_recv_buffer_applied_text = option_usize_trace(self.udp_recv_buffer_applied);
+        let udp_kernel_rx_queue_bytes_text = option_u64_trace(self.udp_kernel_rx_queue_bytes);
+        let udp_kernel_drops_text = option_u64_trace(self.udp_kernel_drops);
         cx.trace_with_fields(
             "atp_quic.receive.decoded",
             &[
@@ -1332,6 +1365,10 @@ impl NativeReceiveTraceCounters {
                 ("pending_datagrams", pending_datagrams_text.as_str()),
                 ("reorder_occupancy", pending_datagrams_text.as_str()),
                 (
+                    "pending_received_packets",
+                    pending_received_packets_text.as_str(),
+                ),
+                (
                     "inbound_datagram_capacity",
                     inbound_datagram_capacity_text.as_str(),
                 ),
@@ -1343,9 +1380,122 @@ impl NativeReceiveTraceCounters {
                     "inbound_pump_batch_limit",
                     inbound_pump_batch_limit_text.as_str(),
                 ),
+                (
+                    "udp_recv_buffer_requested",
+                    udp_recv_buffer_requested_text.as_str(),
+                ),
+                (
+                    "udp_recv_buffer_applied",
+                    udp_recv_buffer_applied_text.as_str(),
+                ),
+                (
+                    "udp_kernel_rx_queue_bytes",
+                    udp_kernel_rx_queue_bytes_text.as_str(),
+                ),
+                ("udp_kernel_drops", udp_kernel_drops_text.as_str()),
             ],
         );
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NativeUdpReceiveDiagnostics {
+    recv_buffer_requested: Option<usize>,
+    recv_buffer_applied: Option<usize>,
+    kernel_rx_queue_bytes: Option<u64>,
+    kernel_drops: Option<u64>,
+}
+
+impl NativeUdpReceiveDiagnostics {
+    fn capture(endpoint: &QuicUdpEndpoint) -> Self {
+        let buffer_report = endpoint.buffer_report();
+        let kernel = linux_udp_proc_receive_stats(endpoint.local_addr());
+        Self {
+            recv_buffer_requested: buffer_report.requested_recv_buffer_bytes,
+            recv_buffer_applied: buffer_report.applied_recv_buffer_bytes,
+            kernel_rx_queue_bytes: kernel.map(|stats| stats.rx_queue_bytes),
+            kernel_drops: kernel.map(|stats| stats.drops),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinuxUdpProcReceiveStats {
+    rx_queue_bytes: u64,
+    drops: u64,
+}
+
+fn option_usize_trace(value: Option<usize>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |value| value.to_string())
+}
+
+fn option_u64_trace(value: Option<u64>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |value| value.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_udp_proc_receive_stats(local_addr: SocketAddr) -> Option<LinuxUdpProcReceiveStats> {
+    std::fs::read_to_string("/proc/net/udp")
+        .ok()
+        .and_then(|table| linux_udp_proc_receive_stats_from_table(&table, local_addr))
+        .or_else(|| {
+            std::fs::read_to_string("/proc/net/udp6")
+                .ok()
+                .and_then(|table| linux_udp_proc_receive_stats_from_table(&table, local_addr))
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_udp_proc_receive_stats(_local_addr: SocketAddr) -> Option<LinuxUdpProcReceiveStats> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linux_udp_proc_receive_stats_from_table(
+    table: &str,
+    local_addr: SocketAddr,
+) -> Option<LinuxUdpProcReceiveStats> {
+    table.lines().skip(1).find_map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let local = *fields.get(1)?;
+        let queues = *fields.get(4)?;
+        if !linux_udp_proc_local_matches(local, local_addr) {
+            return None;
+        }
+        let (_, rx_queue_hex) = queues.split_once(':')?;
+        let rx_queue_bytes = u64::from_str_radix(rx_queue_hex, 16).ok()?;
+        let drops = fields.last()?.parse::<u64>().ok()?;
+        Some(LinuxUdpProcReceiveStats {
+            rx_queue_bytes,
+            drops,
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_udp_proc_local_matches(proc_local: &str, local_addr: SocketAddr) -> bool {
+    let Some((addr_hex, port_hex)) = proc_local.split_once(':') else {
+        return false;
+    };
+    let Ok(port) = u16::from_str_radix(port_hex, 16) else {
+        return false;
+    };
+    if port != local_addr.port() {
+        return false;
+    }
+    match local_addr.ip() {
+        IpAddr::V4(ip) => ip.is_unspecified() || parse_linux_udp_proc_ipv4(addr_hex) == Some(ip),
+        IpAddr::V6(ip) => ip.is_unspecified() || addr_hex.len() == 32,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_udp_proc_ipv4(addr_hex: &str) -> Option<Ipv4Addr> {
+    if addr_hex.len() != 8 {
+        return None;
+    }
+    let raw = u32::from_str_radix(addr_hex, 16).ok()?;
+    Some(Ipv4Addr::from(raw.to_le_bytes()))
 }
 
 fn native_quic_path_signal_with_observed_loss(
@@ -1396,6 +1546,27 @@ impl QuicLink {
             self.conn.inbound_datagram_remaining_capacity(),
             self.max_datagram_frames_per_packet,
         )
+    }
+
+    fn queue_received_packets(&mut self, packets: impl IntoIterator<Item = ReceivedPacket>) {
+        self.pending_received_packets.extend(packets);
+    }
+
+    fn push_front_received_packets(&mut self, packets: &[ReceivedPacket]) {
+        for packet in packets.iter().rev() {
+            self.pending_received_packets.push_front(packet.clone());
+        }
+    }
+
+    fn take_pending_received_packets(&mut self, limit: usize) -> Vec<ReceivedPacket> {
+        let take = limit.min(self.pending_received_packets.len());
+        let mut packets = Vec::with_capacity(take);
+        for _ in 0..take {
+            if let Some(packet) = self.pending_received_packets.pop_front() {
+                packets.push(packet);
+            }
+        }
+        packets
     }
 
     fn reset_sender_handoff_trace(&mut self) {
@@ -1877,18 +2048,75 @@ impl QuicLink {
         cx: &Cx,
         packet_number: u64,
         plaintext: &[u8],
-    ) -> Result<(), QuicTransportError> {
+    ) -> Result<bool, QuicTransportError> {
+        let required_datagram_slots = self.max_datagram_frames_per_packet.max(1);
+        let available_datagram_slots = self.conn.inbound_datagram_remaining_capacity();
+        if available_datagram_slots < required_datagram_slots {
+            let packet_number_text = packet_number.to_string();
+            let required_text = required_datagram_slots.to_string();
+            let available_text = available_datagram_slots.to_string();
+            let pending_datagrams_text = self.conn.pending_datagram_count().to_string();
+            let pending_received_packets_text = self.pending_received_packets.len().to_string();
+            cx.trace_with_fields(
+                "atp_quic.receive.datagram_queue_backpressure",
+                &[
+                    ("reason", "insufficient_slots_for_packet"),
+                    ("packet_number", packet_number_text.as_str()),
+                    ("required_datagram_slots", required_text.as_str()),
+                    ("available_datagram_slots", available_text.as_str()),
+                    ("pending_datagrams", pending_datagrams_text.as_str()),
+                    (
+                        "pending_received_packets",
+                        pending_received_packets_text.as_str(),
+                    ),
+                ],
+            );
+            self.mark_peer_activity();
+            return Ok(false);
+        }
         self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
-        self.conn.process_packet_payload(
+        match self.conn.process_packet_payload(
             cx,
             PacketNumberSpace::ApplicationData,
             packet_number,
             plaintext,
             self.clock,
-        )?;
-        self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
-        self.mark_peer_activity();
-        Ok(())
+        ) {
+            Ok(()) => {
+                self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
+                self.mark_peer_activity();
+                Ok(true)
+            }
+            Err(NativeQuicConnectionError::DatagramReceiveQueueFull { capacity }) => {
+                let packet_number_text = packet_number.to_string();
+                let capacity_text = capacity.to_string();
+                let pending_datagrams_text = self.conn.pending_datagram_count().to_string();
+                let pending_received_packets_text = self.pending_received_packets.len().to_string();
+                let datagrams_received_text = self.conn.datagrams_received().to_string();
+                let datagrams_dropped_on_receive_text =
+                    self.conn.datagrams_dropped_on_receive().to_string();
+                cx.trace_with_fields(
+                    "atp_quic.receive.datagram_queue_backpressure",
+                    &[
+                        ("packet_number", packet_number_text.as_str()),
+                        ("capacity", capacity_text.as_str()),
+                        ("pending_datagrams", pending_datagrams_text.as_str()),
+                        (
+                            "pending_received_packets",
+                            pending_received_packets_text.as_str(),
+                        ),
+                        ("datagrams_received", datagrams_received_text.as_str()),
+                        (
+                            "datagrams_dropped_on_receive",
+                            datagrams_dropped_on_receive_text.as_str(),
+                        ),
+                    ],
+                );
+                self.mark_peer_activity();
+                Ok(false)
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Feed a batch of already-received packets (e.g. 1-RTT data that arrived at
@@ -1897,49 +2125,113 @@ impl QuicLink {
         &mut self,
         cx: &Cx,
         packets: &[ReceivedPacket],
-    ) -> Result<usize, QuicTransportError> {
+    ) -> Result<IngestPacketsReport, QuicTransportError> {
         let provider_kind = self.protection.provider_kind();
-        let mut pending = Vec::with_capacity(packets.len());
-        for packet in packets {
-            if let Some(decoded) = decode_protected_one_rtt_packet(provider_kind, packet) {
-                pending.push(decoded);
-            } else {
-                self.non_one_rtt_packets_dropped =
-                    self.non_one_rtt_packets_dropped.saturating_add(1);
-            }
-        }
-        if pending.is_empty() {
-            return Ok(0);
-        }
-
-        let requests = pending
+        let decoded = packets
             .iter()
-            .map(|packet| PacketUnprotectionRequest {
-                packet: &packet.protected,
-                associated_data: &packet.header,
+            .map(|packet| {
+                decode_protected_one_rtt_packet(provider_kind, packet).map_or(
+                    DecodedInboundPacket::NonOneRtt,
+                    DecodedInboundPacket::OneRtt,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let requests = decoded
+            .iter()
+            .filter_map(|packet| match packet {
+                DecodedInboundPacket::OneRtt(packet) => Some(PacketUnprotectionRequest {
+                    packet: &packet.protected,
+                    associated_data: &packet.header,
+                }),
+                DecodedInboundPacket::NonOneRtt => None,
             })
             .collect::<Vec<_>>();
         let unprotected = self.protection.unprotect_packets(cx, &requests);
 
-        let mut processed = 0usize;
-        for (packet, outcome) in pending.iter().zip(unprotected) {
-            match outcome {
-                Outcome::Ok(unprotected) => {
-                    self.process_unprotected_one_rtt_packet(
-                        cx,
-                        packet.packet_number,
-                        &unprotected.plaintext,
-                    )?;
-                    processed = processed.saturating_add(1);
-                }
-                // Undecryptable / replayed / stray packet: drop it (QUIC semantics).
-                Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                    self.unprotect_packets_dropped =
-                        self.unprotect_packets_dropped.saturating_add(1);
+        let mut report = IngestPacketsReport::default();
+        let mut unprotected = unprotected.into_iter();
+        for (packet_index, packet) in decoded.iter().enumerate() {
+            match packet {
+                DecodedInboundPacket::OneRtt(packet) => match unprotected
+                    .next()
+                    .expect("one unprotect outcome per decoded 1-RTT packet")
+                {
+                    Outcome::Ok(unprotected) => {
+                        if self.process_unprotected_one_rtt_packet(
+                            cx,
+                            packet.packet_number,
+                            &unprotected.plaintext,
+                        )? {
+                            report.packets_consumed = packet_index.saturating_add(1);
+                            report.one_rtt_packets_processed =
+                                report.one_rtt_packets_processed.saturating_add(1);
+                        } else {
+                            report.receive_backpressure = true;
+                            break;
+                        }
+                    }
+                    // Undecryptable / replayed / stray packet: drop it (QUIC semantics).
+                    Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                        self.unprotect_packets_dropped =
+                            self.unprotect_packets_dropped.saturating_add(1);
+                        report.packets_consumed = packet_index.saturating_add(1);
+                    }
+                },
+                DecodedInboundPacket::NonOneRtt => {
+                    self.non_one_rtt_packets_dropped =
+                        self.non_one_rtt_packets_dropped.saturating_add(1);
+                    report.packets_consumed = packet_index.saturating_add(1);
                 }
             }
         }
-        Ok(processed)
+        Ok(report)
+    }
+
+    async fn ingest_pending_received_packets(
+        &mut self,
+        cx: &Cx,
+        limit: usize,
+    ) -> Result<IngestPacketsReport, QuicTransportError> {
+        let packets = self.take_pending_received_packets(limit);
+        let report = self.ingest_packets(cx, &packets).await?;
+        if report.receive_backpressure {
+            self.push_front_received_packets(&packets[report.packets_consumed..]);
+        }
+        Ok(report)
+    }
+
+    fn trace_datagram_queue_needs_drain(&self, cx: &Cx, packets_processed: usize) {
+        let pending_datagrams = self.conn.pending_datagram_count();
+        let datagram_capacity = self.conn.inbound_datagram_capacity();
+        let remaining_capacity = self.conn.inbound_datagram_remaining_capacity();
+        let pending_datagrams_text = pending_datagrams.to_string();
+        let datagram_capacity_text = datagram_capacity.to_string();
+        let remaining_capacity_text = remaining_capacity.to_string();
+        let packets_processed_text = packets_processed.to_string();
+        let max_datagrams_per_packet_text = self.max_datagram_frames_per_packet.to_string();
+        let pending_received_packets_text = self.pending_received_packets.len().to_string();
+        cx.trace_with_fields(
+            "atp_quic.receive.datagram_queue_needs_drain",
+            &[
+                ("pending_datagrams", pending_datagrams_text.as_str()),
+                ("reorder_occupancy", pending_datagrams_text.as_str()),
+                ("inbound_datagram_capacity", datagram_capacity_text.as_str()),
+                (
+                    "inbound_datagram_available",
+                    remaining_capacity_text.as_str(),
+                ),
+                ("packets_processed", packets_processed_text.as_str()),
+                (
+                    "max_datagrams_per_packet",
+                    max_datagrams_per_packet_text.as_str(),
+                ),
+                (
+                    "pending_received_packets",
+                    pending_received_packets_text.as_str(),
+                ),
+            ],
+        );
     }
 
     /// Receive one batch of UDP packets, unprotect each, and feed the recovered
@@ -1953,39 +2245,37 @@ impl QuicLink {
         cx: &Cx,
         timeout: Duration,
     ) -> Result<usize, QuicTransportError> {
+        self.pump_inbound_for_with_drain_budget(cx, timeout, INBOUND_PUMP_MAX_DRAIN_BATCHES)
+            .await
+    }
+
+    async fn pump_inbound_for_with_drain_budget(
+        &mut self,
+        cx: &Cx,
+        timeout: Duration,
+        max_drain_batches: usize,
+    ) -> Result<usize, QuicTransportError> {
         let mut total_processed = 0usize;
         let mut batches = 0usize;
         let mut next_timeout = timeout;
+        let max_drain_batches = max_drain_batches.max(1);
 
         loop {
-            let pending_datagrams = self.conn.pending_datagram_count();
-            let datagram_capacity = self.conn.inbound_datagram_capacity();
-            let remaining_capacity = self.conn.inbound_datagram_remaining_capacity();
             let receive_limit = self.inbound_receive_packet_limit();
             if receive_limit == 0 {
-                let pending_datagrams_text = pending_datagrams.to_string();
-                let datagram_capacity_text = datagram_capacity.to_string();
-                let remaining_capacity_text = remaining_capacity.to_string();
-                let total_processed_text = total_processed.to_string();
-                let max_datagrams_per_packet_text = self.max_datagram_frames_per_packet.to_string();
-                cx.trace_with_fields(
-                    "atp_quic.receive.datagram_queue_needs_drain",
-                    &[
-                        ("pending_datagrams", pending_datagrams_text.as_str()),
-                        ("reorder_occupancy", pending_datagrams_text.as_str()),
-                        ("inbound_datagram_capacity", datagram_capacity_text.as_str()),
-                        (
-                            "inbound_datagram_available",
-                            remaining_capacity_text.as_str(),
-                        ),
-                        ("packets_processed", total_processed_text.as_str()),
-                        (
-                            "max_datagrams_per_packet",
-                            max_datagrams_per_packet_text.as_str(),
-                        ),
-                    ],
-                );
+                self.trace_datagram_queue_needs_drain(cx, total_processed);
                 return Ok(total_processed);
+            }
+            if !self.pending_received_packets.is_empty() {
+                let report = self
+                    .ingest_pending_received_packets(cx, receive_limit)
+                    .await?;
+                total_processed = total_processed.saturating_add(report.one_rtt_packets_processed);
+                if report.receive_backpressure {
+                    self.trace_datagram_queue_needs_drain(cx, total_processed);
+                    return Ok(total_processed);
+                }
+                continue;
             }
             let received = match crate::time::timeout(
                 cx.now(),
@@ -2005,20 +2295,27 @@ impl QuicLink {
             self.udp_packets_received = self
                 .udp_packets_received
                 .saturating_add(u64::try_from(received_len).unwrap_or(u64::MAX));
-            total_processed =
-                total_processed.saturating_add(self.ingest_packets(cx, &received).await?);
+            let report = self.ingest_packets(cx, &received).await?;
+            total_processed = total_processed.saturating_add(report.one_rtt_packets_processed);
+            if report.receive_backpressure {
+                self.queue_received_packets(received.into_iter().skip(report.packets_consumed));
+                self.trace_datagram_queue_needs_drain(cx, total_processed);
+                return Ok(total_processed);
+            }
 
             batches = batches.saturating_add(1);
             if received_len < receive_limit {
                 return Ok(total_processed);
             }
-            if batches >= INBOUND_PUMP_MAX_DRAIN_BATCHES {
+            if batches >= max_drain_batches {
                 let batches_s = batches.to_string();
+                let max_batches_s = max_drain_batches.to_string();
                 let total_processed_s = total_processed.to_string();
                 cx.trace_with_fields(
                     "atp_quic.inbound_pump.drain_budget_exhausted",
                     &[
                         ("batches", batches_s.as_str()),
+                        ("max_batches", max_batches_s.as_str()),
                         ("packets_processed", total_processed_s.as_str()),
                     ],
                 );
@@ -2033,12 +2330,16 @@ impl QuicLink {
     }
 
     fn symbol_round_timeout(&self, timeout: Duration, symbols_accepted: u64) -> QuicTransportError {
+        let socket = NativeUdpReceiveDiagnostics::capture(&self.endpoint);
         QuicTransportError::Quic(format!(
             "transport timeout during receive symbol round after {timeout:?}; \
              udp_packets_received={} one_rtt_packets_ingested={} \
              non_one_rtt_packets_dropped={} unprotect_packets_dropped={} \
              datagrams_received={} datagrams_dropped_on_receive={} \
-             pending_datagrams={} symbols_accepted={symbols_accepted}",
+             pending_datagrams={} pending_received_packets={} \
+             udp_recv_buffer_requested={} udp_recv_buffer_applied={} \
+             udp_kernel_rx_queue_bytes={} udp_kernel_drops={} \
+             symbols_accepted={symbols_accepted}",
             self.udp_packets_received,
             self.one_rtt_packets_ingested,
             self.non_one_rtt_packets_dropped,
@@ -2046,6 +2347,11 @@ impl QuicLink {
             self.conn.datagrams_received(),
             self.conn.datagrams_dropped_on_receive(),
             self.conn.pending_datagram_count(),
+            self.pending_received_packets.len(),
+            option_usize_trace(socket.recv_buffer_requested),
+            option_usize_trace(socket.recv_buffer_applied),
+            option_u64_trace(socket.kernel_rx_queue_bytes),
+            option_u64_trace(socket.kernel_drops),
         ))
     }
 
@@ -2434,6 +2740,7 @@ fn link_from_handshake(
         max_symbol_frames_per_packet,
         max_spray_symbols_per_flush: config.max_spray_symbols_per_flush.max(1),
         symbol_datagram_frame_len: send_symbol_frame_len,
+        pending_received_packets: VecDeque::new(),
         spray_pacing_debt: Duration::ZERO,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
@@ -3589,6 +3896,7 @@ fn quic_staging_nonce_hex() -> Result<String, QuicTransportError> {
 #[derive(Debug, Default, Clone, Copy)]
 struct NativeReceiverIntakeStats {
     drain_calls: u64,
+    symbols_observed: u64,
     symbols_accepted: u64,
     blocks_completed: u64,
     drain_micros: u64,
@@ -3601,8 +3909,15 @@ struct NativeReceiverIntakeStats {
 }
 
 impl NativeReceiverIntakeStats {
-    fn record_symbol_drain(&mut self, elapsed: Duration, accepted: u64, completed_blocks: usize) {
+    fn record_symbol_drain(
+        &mut self,
+        elapsed: Duration,
+        observed: u64,
+        accepted: u64,
+        completed_blocks: usize,
+    ) {
         self.drain_calls = self.drain_calls.saturating_add(1);
+        self.symbols_observed = self.symbols_observed.saturating_add(observed);
         self.symbols_accepted = self.symbols_accepted.saturating_add(accepted);
         self.blocks_completed = self
             .blocks_completed
@@ -3632,6 +3947,12 @@ impl NativeReceiverIntakeStats {
             .saturating_add(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
     }
 
+    fn record_completed_blocks(&mut self, completed_blocks: usize) {
+        self.blocks_completed = self
+            .blocks_completed
+            .saturating_add(u64::try_from(completed_blocks).unwrap_or(u64::MAX));
+    }
+
     fn trace_need_more(&self, cx: &Cx, round: u32, need: &QuicNeedMore) {
         let round = round.to_string();
         let pending = need.pending.len().to_string();
@@ -3652,6 +3973,7 @@ impl NativeReceiverIntakeStats {
         let repair_block_request_cap =
             super::MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
         let drain_calls = self.drain_calls.to_string();
+        let symbols_observed = self.symbols_observed.to_string();
         let symbols_accepted = self.symbols_accepted.to_string();
         let blocks_completed = self.blocks_completed.to_string();
         let drain_micros = self.drain_micros.to_string();
@@ -3679,6 +4001,7 @@ impl NativeReceiverIntakeStats {
                     repair_block_request_cap.as_str(),
                 ),
                 ("drain_calls", drain_calls.as_str()),
+                ("symbols_observed", symbols_observed.as_str()),
                 ("symbols_accepted", symbols_accepted.as_str()),
                 ("blocks_completed", blocks_completed.as_str()),
                 ("drain_micros", drain_micros.as_str()),
@@ -3694,6 +4017,7 @@ impl NativeReceiverIntakeStats {
 
     fn trace_summary(&self, cx: &Cx, transfer_id: &str) {
         let drain_calls = self.drain_calls.to_string();
+        let symbols_observed = self.symbols_observed.to_string();
         let symbols_accepted = self.symbols_accepted.to_string();
         let blocks_completed = self.blocks_completed.to_string();
         let drain_micros = self.drain_micros.to_string();
@@ -3708,6 +4032,7 @@ impl NativeReceiverIntakeStats {
             &[
                 ("transfer_id", transfer_id),
                 ("drain_calls", drain_calls.as_str()),
+                ("symbols_observed", symbols_observed.as_str()),
                 ("symbols_accepted", symbols_accepted.as_str()),
                 ("blocks_completed", blocks_completed.as_str()),
                 ("drain_micros", drain_micros.as_str()),
@@ -3826,6 +4151,113 @@ async fn commit_staged_entries(
     ))
 }
 
+async fn drain_native_receiver_symbol_queue(
+    cx: &Cx,
+    link: &mut QuicLink,
+    manifest: &TransferManifest,
+    decoders: &mut [super::QuicEntryDecoder],
+    config: &QuicConfig,
+    decode_stats: &mut super::QuicDecodeStats,
+    intake_stats: &mut NativeReceiverIntakeStats,
+    completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+    drain_mode: super::NativeSymbolDrainMode,
+    max_batches: usize,
+) -> Result<(u64, u64), QuicTransportError> {
+    let drain_started = Instant::now(); // ubs:ignore - monotonic intake timing, not crypto randomness
+    let (observed, accepted, completed_blocks) = super::drain_native_symbol_datagrams_with_blocks(
+        cx,
+        &mut link.conn,
+        manifest,
+        decoders,
+        config,
+        decode_stats,
+        drain_mode,
+        max_batches,
+    )
+    .await?;
+    intake_stats.record_symbol_drain(
+        drain_started.elapsed(),
+        observed,
+        accepted,
+        completed_blocks.len(),
+    );
+    completed_backlog.extend(completed_blocks);
+    Ok((observed, accepted))
+}
+
+async fn join_native_receiver_decode_jobs(
+    cx: &Cx,
+    decoders: &mut [super::QuicEntryDecoder],
+    config: &QuicConfig,
+    decode_stats: &mut super::QuicDecodeStats,
+    intake_stats: &mut NativeReceiverIntakeStats,
+    completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+) -> Result<(), QuicTransportError> {
+    let completed =
+        super::join_native_symbol_decode_jobs_with_blocks(cx, decoders, config, decode_stats)
+            .await?;
+    intake_stats.record_completed_blocks(completed.len());
+    completed_backlog.extend(completed);
+    Ok(())
+}
+
+async fn pump_native_receiver_ready(
+    cx: &Cx,
+    link: &mut QuicLink,
+    intake_stats: &mut NativeReceiverIntakeStats,
+) -> Result<usize, QuicTransportError> {
+    let pump_started = Instant::now(); // ubs:ignore - monotonic pump timing, not crypto randomness
+    let pumped_packets = link
+        .pump_inbound_for_with_drain_budget(
+            cx,
+            Duration::ZERO,
+            RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
+        )
+        .await?;
+    intake_stats.record_pump(pump_started.elapsed(), pumped_packets);
+    Ok(pumped_packets)
+}
+
+async fn write_completed_native_blocks(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    staged: &mut [QuicStagedEntryReceive],
+    config: &QuicConfig,
+    intake_stats: &mut NativeReceiverIntakeStats,
+    completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+) -> Result<(), QuicTransportError> {
+    for block in completed_backlog.drain(..) {
+        send_and_flush_native_keep_alive(cx, link, control).await?;
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.index == block.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "decoded block for unknown entry {}",
+                    block.entry
+                ))
+            })?;
+        let staged_entry = staged
+            .get_mut(usize::try_from(block.entry).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "decoded block for out-of-range entry {}",
+                    block.entry
+                ))
+            })?;
+        let write_started = Instant::now(); // ubs:ignore - monotonic staging timing, not crypto randomness
+        staged_entry
+            .write_block(entry, block.sbn, &block.data, config)
+            .await?;
+        intake_stats.record_staging_write(write_started.elapsed(), block.data.len());
+        send_and_flush_native_keep_alive(cx, link, control).await?;
+    }
+    Ok(())
+}
+
 /// Drive a full ATP-over-QUIC receive over an established link: Hello+ack,
 /// manifest, then symbol rounds with fountain feedback until every entry decodes,
 /// then verify + atomic commit and return a [`ReceiveReport`].
@@ -3927,66 +4359,50 @@ async fn run_receiver_session(
                 round: expected_round_complete,
                 ..super::QuicRoundComplete::default()
             };
+            let mut completed_backlog = Vec::new();
             loop {
-                let drain_started = Instant::now(); // ubs:ignore - monotonic intake timing, not crypto randomness
-                let (observed, accepted, completed_blocks) =
-                    super::drain_native_symbol_datagrams_with_blocks(
-                        cx,
-                        &mut link.conn,
-                        &manifest,
-                        &mut decoders,
-                        config,
-                        &mut decode_stats,
-                    )
-                    .await?;
+                let (observed, accepted) = drain_native_receiver_symbol_queue(
+                    cx,
+                    link,
+                    &manifest,
+                    &mut decoders,
+                    config,
+                    &mut decode_stats,
+                    &mut intake_stats,
+                    &mut completed_backlog,
+                    super::NativeSymbolDrainMode::ReadyOnly,
+                    RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
+                )
+                .await?;
                 round_symbols_observed = round_symbols_observed.saturating_add(observed);
                 round_symbols_accepted = round_symbols_accepted.saturating_add(accepted);
-                intake_stats.record_symbol_drain(
-                    drain_started.elapsed(),
-                    accepted,
-                    completed_blocks.len(),
-                );
                 symbols_accepted = symbols_accepted.saturating_add(accepted);
                 if observed > 0 {
                     // Repair (or spray) is flowing again — reset the control-PTO budget.
                     needmore_pto_attempts = 0;
-                    send_and_flush_native_keep_alive(cx, link, &mut control).await?;
+                    send_native_keep_alive(cx, &mut link.conn, &mut control)?;
                 }
-                for block in completed_blocks {
-                    send_and_flush_native_keep_alive(cx, link, &mut control).await?;
-                    let entry = manifest
-                        .entries
-                        .iter()
-                        .find(|entry| entry.index == block.entry)
-                        .ok_or_else(|| {
-                            QuicTransportError::Integrity(format!(
-                                "decoded block for unknown entry {}",
-                                block.entry
-                            ))
-                        })?;
-                    let staged_entry = staged
-                        .get_mut(usize::try_from(block.entry).unwrap_or(usize::MAX))
-                        .ok_or_else(|| {
-                            QuicTransportError::Integrity(format!(
-                                "decoded block for out-of-range entry {}",
-                                block.entry
-                            ))
-                        })?;
-                    let write_started = Instant::now(); // ubs:ignore - monotonic staging timing, not crypto randomness
-                    staged_entry
-                        .write_block(entry, block.sbn, &block.data, config)
-                        .await?;
-                    intake_stats.record_staging_write(write_started.elapsed(), block.data.len());
-                    send_and_flush_native_keep_alive(cx, link, &mut control).await?;
+                if pump_native_receiver_ready(cx, link, &mut intake_stats).await? > 0
+                    || link.conn.pending_datagram_count() > 0
+                {
+                    continue;
                 }
+                write_completed_native_blocks(
+                    cx,
+                    link,
+                    &mut control,
+                    &manifest,
+                    &mut staged,
+                    config,
+                    &mut intake_stats,
+                    &mut completed_backlog,
+                )
+                .await?;
                 if super::pending_entries(&decoders).is_empty() {
                     // Once all entries decode, Proof can complete the transfer even
                     // if the best-effort ObjectComplete control packet was dropped.
                     flush_cached_quic_staging_files(&mut staged).await?;
                     break 'rounds;
-                }
-                if link.conn.pending_datagram_count() > 0 {
-                    continue;
                 }
                 if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
                     match frame.frame_type() {
@@ -3997,6 +4413,31 @@ async fn run_receiver_session(
                                 continue;
                             }
                             round_complete = complete;
+                            if pump_native_receiver_ready(cx, link, &mut intake_stats).await? > 0
+                                || link.conn.pending_datagram_count() > 0
+                            {
+                                continue;
+                            }
+                            join_native_receiver_decode_jobs(
+                                cx,
+                                &mut decoders,
+                                config,
+                                &mut decode_stats,
+                                &mut intake_stats,
+                                &mut completed_backlog,
+                            )
+                            .await?;
+                            write_completed_native_blocks(
+                                cx,
+                                link,
+                                &mut control,
+                                &manifest,
+                                &mut staged,
+                                config,
+                                &mut intake_stats,
+                                &mut completed_backlog,
+                            )
+                            .await?;
                             break;
                         }
                         FrameType::KeepAlive => {
@@ -4023,13 +4464,39 @@ async fn run_receiver_session(
                     config.idle_timeout
                 };
                 let pump_started = Instant::now(); // ubs:ignore - monotonic pump timing, not crypto randomness
-                let pumped_packets = link.pump_inbound_for(cx, pump_timeout).await?;
+                let pumped_packets = link
+                    .pump_inbound_for_with_drain_budget(
+                        cx,
+                        pump_timeout,
+                        RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
+                    )
+                    .await?;
                 intake_stats.record_pump(pump_started.elapsed(), pumped_packets);
                 if pumped_packets == 0 {
                     if link.conn.pending_datagram_count() > 0 {
                         continue;
                     }
                     if round_made_progress {
+                        join_native_receiver_decode_jobs(
+                            cx,
+                            &mut decoders,
+                            config,
+                            &mut decode_stats,
+                            &mut intake_stats,
+                            &mut completed_backlog,
+                        )
+                        .await?;
+                        write_completed_native_blocks(
+                            cx,
+                            link,
+                            &mut control,
+                            &manifest,
+                            &mut staged,
+                            config,
+                            &mut intake_stats,
+                            &mut completed_backlog,
+                        )
+                        .await?;
                         break;
                     }
                     // Idle with no progress. If we are awaiting a repair round, the NeedMore (or the
@@ -4311,10 +4778,10 @@ pub async fn receive_on_endpoint(
     let (mut link, early_data) = accept(cx, endpoint, server_tls, &config).await?;
     // Replay any 1-RTT packets that raced ahead of the handshake's completion
     // (the client finishes first and may start the data plane immediately), so
-    // the receiver session sees the sender's Hello / early symbols.
-    if !early_data.is_empty() {
-        link.ingest_packets(cx, &early_data).await?;
-    }
+    // the receiver session sees the sender's Hello / early symbols. Keep them in
+    // the same bounded replay path as freshly received UDP packets instead of
+    // bulk-ingesting before manifest parsing creates decoders.
+    link.queue_received_packets(early_data);
     run_receiver_session(cx, &mut link, dest_dir, &config, peer_id).await
 }
 
@@ -5024,9 +5491,14 @@ mod tests {
             datagrams_received: 12,
             datagrams_dropped_on_receive: 0,
             pending_datagrams: 3,
+            pending_received_packets: 2,
             inbound_datagram_capacity: 4096,
             inbound_datagram_available: 4093,
             inbound_pump_batch_limit: INBOUND_PUMP_BATCH,
+            udp_recv_buffer_requested: Some(16 * 1024 * 1024),
+            udp_recv_buffer_applied: Some(32 * 1024 * 1024),
+            udp_kernel_rx_queue_bytes: Some(4096),
+            udp_kernel_drops: Some(7),
         };
         let decode_stats = crate::net::atp::transport_quic::QuicDecodeStats {
             decode_count: 4,
@@ -5054,9 +5526,37 @@ mod tests {
         assert_eq!(entry.get_field("datagrams_dropped_on_receive"), Some("0"));
         assert_eq!(entry.get_field("pending_datagrams"), Some("3"));
         assert_eq!(entry.get_field("reorder_occupancy"), Some("3"));
+        assert_eq!(entry.get_field("pending_received_packets"), Some("2"));
         assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("4096"));
         assert_eq!(entry.get_field("inbound_datagram_available"), Some("4093"));
         assert_eq!(entry.get_field("inbound_pump_batch_limit"), Some("512"));
+        assert_eq!(
+            entry.get_field("udp_recv_buffer_requested"),
+            Some("16777216")
+        );
+        assert_eq!(entry.get_field("udp_recv_buffer_applied"), Some("33554432"));
+        assert_eq!(entry.get_field("udp_kernel_rx_queue_bytes"), Some("4096"));
+        assert_eq!(entry.get_field("udp_kernel_drops"), Some("7"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_udp_proc_receive_stats_parses_rx_queue_and_drops() {
+        let table = "\
+  sl  local_address rem_address   st tx_queue:rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+  7: 0100007F:9C40 00000000:0000 07 00000000:00001000 00:00000000 00000000  1000        0 12345 2 0000000000000000 17
+";
+        let local: SocketAddr = "127.0.0.1:40000".parse().expect("local addr");
+        let stats = linux_udp_proc_receive_stats_from_table(table, local)
+            .expect("synthetic udp row should match local socket");
+
+        assert_eq!(
+            stats,
+            LinuxUdpProcReceiveStats {
+                rx_queue_bytes: 4096,
+                drops: 17,
+            }
+        );
     }
 
     #[test]
@@ -5225,7 +5725,7 @@ mod tests {
             .with_min_level(crate::observability::LogLevel::Trace);
         cx.set_log_collector(collector.clone());
         let mut stats = NativeReceiverIntakeStats::default();
-        stats.record_symbol_drain(Duration::from_micros(11), 7, 2);
+        stats.record_symbol_drain(Duration::from_micros(11), 9, 7, 2);
         stats.record_pump(Duration::from_micros(13), 5);
         stats.record_staging_write(Duration::from_micros(17), 1024);
         stats.trace_summary(&cx, "transfer-intake");
@@ -5237,6 +5737,7 @@ mod tests {
             .expect("receive intake trace entry");
         assert_eq!(entry.get_field("transfer_id"), Some("transfer-intake"));
         assert_eq!(entry.get_field("drain_calls"), Some("1"));
+        assert_eq!(entry.get_field("symbols_observed"), Some("9"));
         assert_eq!(entry.get_field("symbols_accepted"), Some("7"));
         assert_eq!(entry.get_field("blocks_completed"), Some("2"));
         assert_eq!(entry.get_field("drain_micros"), Some("11"));

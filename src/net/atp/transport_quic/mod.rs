@@ -6516,6 +6516,14 @@ async fn drain_native_symbol_datagrams_with_aggregator_deferred(
 }
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSymbolDrainMode {
+    ReadyOnly,
+    #[allow(dead_code)]
+    JoinPendingDecodes,
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
 async fn drain_native_symbol_datagrams_with_blocks(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
@@ -6523,6 +6531,8 @@ async fn drain_native_symbol_datagrams_with_blocks(
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
     decode_stats: &mut QuicDecodeStats,
+    drain_mode: NativeSymbolDrainMode,
+    max_batches: usize,
 ) -> Result<(u64, u64, Vec<QuicDecodedBlock>), QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
@@ -6530,8 +6540,16 @@ async fn drain_native_symbol_datagrams_with_blocks(
     let mut accepted = 0u64;
     let mut completed = Vec::new();
     let mut drained = 0usize;
+    let mut drain_batches = 0usize;
     let mut datagrams = VecDeque::with_capacity(NATIVE_SYMBOL_DRAIN_BATCH);
-    let _ = conn.recv_datagram_batch(NATIVE_SYMBOL_DRAIN_BATCH, &mut datagrams);
+    let mut drain_batch = VecDeque::with_capacity(NATIVE_SYMBOL_DRAIN_BATCH);
+    for _ in 0..max_batches.max(1) {
+        if conn.recv_datagram_batch(NATIVE_SYMBOL_DRAIN_BATCH, &mut drain_batch) == 0 {
+            break;
+        }
+        drain_batches = drain_batches.saturating_add(1);
+        datagrams.extend(drain_batch.drain(..));
+    }
     while let Some(bytes) = datagrams.pop_front() {
         let envelope = decode_native_symbol_envelope(bytes, auth_required)?;
         if envelope.transfer_tag != tag {
@@ -6591,22 +6609,69 @@ async fn drain_native_symbol_datagrams_with_blocks(
         );
         drained = drained.saturating_add(1);
     }
+    if drain_batches > 1 {
+        let batches = drain_batches.to_string();
+        let datagrams_drained = drained.to_string();
+        let symbols_accepted = accepted.to_string();
+        let completed_blocks = completed.len().to_string();
+        let pending_datagrams_after = conn.pending_datagram_count().to_string();
+        cx.trace_with_fields(
+            "atp_quic.receive.symbol_drain_backlog",
+            &[
+                ("batches", batches.as_str()),
+                ("datagrams_drained", datagrams_drained.as_str()),
+                ("symbols_accepted", symbols_accepted.as_str()),
+                ("completed_blocks", completed_blocks.as_str()),
+                ("pending_datagrams_after", pending_datagrams_after.as_str()),
+            ],
+        );
+    }
     let transfer_decode_width = quic_transfer_decode_width(decoders, config);
-    completed.extend(
-        join_all_quic_decodes_with_blocks(
-            cx,
-            decoders,
-            config,
-            decode_stats,
-            transfer_decode_width,
-        )
-        .await?,
-    );
+    match drain_mode {
+        NativeSymbolDrainMode::ReadyOnly => {
+            let allow_spawn_decode = quic_pending_decode_jobs(decoders) < transfer_decode_width;
+            completed.extend(
+                drain_ready_quic_decodes_with_blocks(
+                    cx,
+                    decoders,
+                    config,
+                    decode_stats,
+                    allow_spawn_decode,
+                    transfer_decode_width,
+                )
+                .await?,
+            );
+        }
+        NativeSymbolDrainMode::JoinPendingDecodes => {
+            completed.extend(
+                join_all_quic_decodes_with_blocks(
+                    cx,
+                    decoders,
+                    config,
+                    decode_stats,
+                    transfer_decode_width,
+                )
+                .await?,
+            );
+        }
+    }
     Ok((
         u64::try_from(drained).unwrap_or(u64::MAX),
         accepted,
         completed,
     ))
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+async fn join_native_symbol_decode_jobs_with_blocks(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<Vec<QuicDecodedBlock>, QuicTransportError> {
+    let transfer_decode_width = quic_transfer_decode_width(decoders, config);
+    join_all_quic_decodes_with_blocks(cx, decoders, config, decode_stats, transfer_decode_width)
+        .await
 }
 
 fn validate_quic_manifest(
@@ -7592,6 +7657,128 @@ mod tests {
     #[test]
     fn native_symbol_drain_batch_matches_receiver_pump_width() {
         assert_eq!(NATIVE_SYMBOL_DRAIN_BATCH, 512);
+    }
+
+    #[test]
+    fn native_block_drain_consumes_more_than_one_symbol_batch_per_call() {
+        let (cx, _client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 128,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 21))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let object_id = decoders[0].object_id;
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            entries[0].1.clone(),
+            SymbolKind::Source,
+        );
+        let datagram =
+            native_symbol_datagram(&symbol, transfer_tag(&manifest.transfer_id), 0, None)
+                .expect("symbol datagram");
+        let total_datagrams = NATIVE_SYMBOL_DRAIN_BATCH + 7;
+        let frames = (0..total_datagrams)
+            .map(
+                |_| crate::net::atp::protocol::quic_frames::QuicFrame::Datagram {
+                    data: datagram.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut payload = BytesMut::new();
+        NativeQuicConnection::encode_frames(&frames, &mut payload).expect("encode frames");
+        server
+            .process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 0, &payload, 1_000)
+            .expect("queue inbound datagrams");
+        assert_eq!(server.pending_datagram_count(), total_datagrams);
+
+        let mut decode_stats = QuicDecodeStats::default();
+        let (observed, accepted, _completed) = block_on(drain_native_symbol_datagrams_with_blocks(
+            &cx,
+            &mut server,
+            &manifest,
+            &mut decoders,
+            &config,
+            &mut decode_stats,
+            NativeSymbolDrainMode::JoinPendingDecodes,
+            usize::MAX,
+        ))
+        .expect("drain queued native symbols");
+
+        assert_eq!(
+            observed,
+            u64::try_from(total_datagrams).unwrap_or(u64::MAX),
+            "native receiver must drain every queued DATAGRAM, not only the first batch"
+        );
+        assert_eq!(
+            server.pending_datagram_count(),
+            0,
+            "single receiver drain should leave no buffered DATAGRAMs"
+        );
+        assert!(
+            accepted > 0,
+            "at least the first source symbol should reach the decoder"
+        );
+    }
+
+    #[test]
+    fn native_block_drain_honors_batch_limit_for_socket_interleave() {
+        let (cx, _client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 128,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 31))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let object_id = decoders[0].object_id;
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            entries[0].1.clone(),
+            SymbolKind::Source,
+        );
+        let datagram =
+            native_symbol_datagram(&symbol, transfer_tag(&manifest.transfer_id), 0, None)
+                .expect("symbol datagram");
+        let total_datagrams = NATIVE_SYMBOL_DRAIN_BATCH + 7;
+        let frames = (0..total_datagrams)
+            .map(
+                |_| crate::net::atp::protocol::quic_frames::QuicFrame::Datagram {
+                    data: datagram.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut payload = BytesMut::new();
+        NativeQuicConnection::encode_frames(&frames, &mut payload).expect("encode frames");
+        server
+            .process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 0, &payload, 1_000)
+            .expect("queue inbound datagrams");
+
+        let mut decode_stats = QuicDecodeStats::default();
+        let (observed, _accepted, _completed) =
+            block_on(drain_native_symbol_datagrams_with_blocks(
+                &cx,
+                &mut server,
+                &manifest,
+                &mut decoders,
+                &config,
+                &mut decode_stats,
+                NativeSymbolDrainMode::ReadyOnly,
+                1,
+            ))
+            .expect("drain one native symbol batch");
+
+        assert_eq!(observed, NATIVE_SYMBOL_DRAIN_BATCH as u64);
+        assert_eq!(
+            server.pending_datagram_count(),
+            total_datagrams - NATIVE_SYMBOL_DRAIN_BATCH,
+            "batch-limited receiver drain must leave later DATAGRAMs queued for the next socket poll turn"
+        );
     }
 
     #[test]
