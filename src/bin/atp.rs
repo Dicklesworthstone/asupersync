@@ -88,7 +88,8 @@ const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
 const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
-const DEFAULT_RECV_LISTEN_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_RECV_ACCEPT_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_RECV_LISTEN_TIMEOUT_MS: u64 = 0;
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -287,7 +288,11 @@ struct RecvArgs {
     /// Maximum transfer size in bytes.
     #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
     max_bytes: u64,
-    /// Maximum milliseconds a one-shot receiver waits for the sender to connect.
+    /// Maximum seconds a one-shot receiver waits for the sender to connect.
+    #[arg(long, default_value_t = DEFAULT_RECV_ACCEPT_TIMEOUT_SECS)]
+    accept_timeout_secs: u64,
+    /// Optional millisecond override for how long a one-shot receiver waits for
+    /// the sender to connect. Pass 0 to use --accept-timeout-secs.
     #[arg(long, default_value_t = DEFAULT_RECV_LISTEN_TIMEOUT_MS)]
     listen_timeout_ms: u64,
     /// Worker threads for the local runtime.
@@ -430,11 +435,19 @@ fn tcp_config(max_bytes: u64, enable_delta: bool) -> TransferConfig {
     }
 }
 
+fn recv_accept_timeout(seconds: u64) -> Result<Duration, String> {
+    if seconds == 0 {
+        return Err("--accept-timeout-secs must be greater than 0".to_string());
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 fn recv_listen_timeout(args: &RecvArgs) -> Result<Duration, String> {
     if args.listen_timeout_ms == 0 {
-        return Err("--listen-timeout-ms must be greater than 0".to_string());
+        recv_accept_timeout(args.accept_timeout_secs)
+    } else {
+        Ok(Duration::from_millis(args.listen_timeout_ms))
     }
-    Ok(Duration::from_millis(args.listen_timeout_ms))
 }
 
 fn rq_config(
@@ -4782,6 +4795,15 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         let recv_zero = RecvArgs::try_parse_from(["recv", "/tmp/dest", "--max-block-size", "0"])
             .expect("recv parser should accept zero max-block-size sentinel");
         assert_eq!(recv_zero.max_block_size, MaxBlockSizeArg::Auto);
+
+        let recv_timeout =
+            RecvArgs::try_parse_from(["recv", "/tmp/dest", "--once", "--accept-timeout-secs", "2"])
+                .expect("recv parser should accept bounded one-shot accept timeout");
+        assert_eq!(recv_timeout.accept_timeout_secs, 2);
+        assert_eq!(
+            recv_listen_timeout(&recv_timeout),
+            Ok(Duration::from_secs(2))
+        );
 
         let recv_timeout_ms = RecvArgs::try_parse_from([
             "recv",
