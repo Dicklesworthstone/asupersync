@@ -4307,10 +4307,7 @@ mod tests {
             MaxBlockSizeArg::Auto.effective(1024),
             Ok(AUTO_MAX_BLOCK_SIZE)
         );
-        assert!(
-            AUTO_MAX_BLOCK_SIZE
-                < asupersync::net::atp::transport_rq::DEFAULT_MAX_BLOCK_SIZE
-        );
+        assert!(AUTO_MAX_BLOCK_SIZE < asupersync::net::atp::transport_rq::DEFAULT_MAX_BLOCK_SIZE);
         assert_eq!(MaxBlockSizeArg::Bytes(512).effective(1024), Ok(1024));
         assert_eq!(
             MaxBlockSizeArg::Bytes(512 * 1024).effective(1024),
