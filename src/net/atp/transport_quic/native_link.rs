@@ -62,6 +62,7 @@ use crate::bytes::BytesMut;
 use crate::cx::Cx;
 use crate::io::AsyncWriteExt;
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
+use crate::net::atp::datagram::congestion::{CongestionConfig, CongestionController};
 use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{
@@ -179,15 +180,20 @@ const ONE_RTT_TAG_LEN: usize = 16;
 const ONE_RTT_FIXED_BIT: u8 = 0x40;
 /// QUIC short-header key-phase bit (bit 2).
 const ONE_RTT_KEY_PHASE_BIT: u8 = 0x04;
-/// Packet-credit-sized recovery charge for one simplified ATP 1-RTT data packet.
+/// Packet-credit-sized recovery telemetry charge for one simplified ATP 1-RTT data packet.
 ///
 /// ATP's RaptorQ repair loop, not QUIC stream retransmission, owns data
 /// recovery. The native QUIC recovery machine is still useful as a packet-loss
-/// signal, but byte-sized cwnd accounting collapses the lossy sender to a
-/// two-symbol minimum cwnd after random packet loss. Charge each symbol packet
-/// as a small virtual credit instead: enough to bound bursts and observe loss,
-/// not enough to underfill a 50M/80ms path by two orders of magnitude.
-const QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES: u64 = 16;
+/// signal, but its NewReno cwnd is not the data-plane admission authority:
+/// erasures within the FEC budget must be handled by the fountain pacer instead
+/// of a TCP-style 2x-MSS floor. Charge each symbol packet as a small virtual
+/// credit so ACK/loss telemetry remains useful without throttling RaptorQ repair.
+const QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES: u64 = 16;
+/// Match the RQ raw-datagram pacer wait envelope: short enough for high-rate
+/// clean paths, bounded enough that cancellation/liveness checkpoints keep
+/// making progress under constrained lossy paths.
+const QUIC_DATA_PLANE_PACER_MIN_PAUSE: Duration = Duration::from_micros(50);
+const QUIC_DATA_PLANE_PACER_MAX_PAUSE: Duration = Duration::from_millis(250);
 
 /// UDP max packet size for the link's endpoint.
 ///
@@ -243,12 +249,6 @@ const QUIC_CLEAN_COALESCING_MAX_RTT_S: f64 = 0.050;
 /// misclassify the 50M/bad cell as jumbo-safe.
 const QUIC_NATIVE_CLEAN_JUMBO_COALESCING_ENABLED: bool = false;
 
-/// Minimum owed pacing time worth parking the async timer for on the clean-link
-/// spray. Per-flush owed time is often sub-millisecond; parking that each flush
-/// over-sleeps (async-timer granularity) and floors throughput far below the paced
-/// rate (MATRIX-111). Sub-floor owed time is accrued as debt and paid once it
-/// crosses this floor.
-const QUIC_PACING_PARK_FLOOR: Duration = Duration::from_millis(1);
 /// Upper bound for symbols handed from the RQ producer loop to the QUIC sender
 /// pump in one in-process turn on lossy paths. Clean paths may hand off the
 /// whole bounded flush window so they do not split one GSO-ready burst into
@@ -1007,37 +1007,93 @@ fn frames_have_datagram(frames: &[QuicFrame]) -> bool {
         .any(|frame| matches!(frame, QuicFrame::Datagram { .. }))
 }
 
+fn frames_require_quic_recovery_in_flight(frames: &[QuicFrame]) -> bool {
+    frames.iter().any(|frame| {
+        frame_is_ack_eliciting_for_recovery(frame) && !matches!(frame, QuicFrame::Datagram { .. })
+    })
+}
+
 fn data_plane_packet_accounting_bytes(packet_len: usize) -> u64 {
     u64::try_from(packet_len)
         .unwrap_or(u64::MAX)
-        .clamp(1, QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES)
+        .clamp(1, QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES)
 }
 
-fn trace_quic_data_plane_congestion_limited(
-    cx: &Cx,
-    pending_datagrams: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DataPlaneCwndTelemetry {
     bytes_in_flight: u64,
     congestion_window: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DataPlaneFlushAdmission {
+    max_frame_bytes: usize,
+    cwnd_telemetry: Option<DataPlaneCwndTelemetry>,
+}
+
+fn data_plane_cwnd_telemetry(
+    transport: &crate::net::quic_native::QuicTransportMachine,
+    pending_datagrams: usize,
+) -> Option<DataPlaneCwndTelemetry> {
+    if pending_datagrams == 0 || transport.can_send(QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES) {
+        return None;
+    }
+    Some(DataPlaneCwndTelemetry {
+        bytes_in_flight: transport.bytes_in_flight(),
+        congestion_window: transport.congestion_window_bytes(),
+    })
+}
+
+fn data_plane_flush_admission(
+    transport: &crate::net::quic_native::QuicTransportMachine,
+    pending_datagrams: usize,
+    spray_frame_payload_limit: usize,
+    max_app_payload: usize,
+) -> DataPlaneFlushAdmission {
+    DataPlaneFlushAdmission {
+        max_frame_bytes: if pending_datagrams > 0 {
+            spray_frame_payload_limit
+        } else {
+            max_app_payload
+        },
+        cwnd_telemetry: data_plane_cwnd_telemetry(transport, pending_datagrams),
+    }
+}
+
+fn data_plane_packet_uses_paced_recovery(frames: &[QuicFrame]) -> bool {
+    frames_have_datagram(frames) && !frames_require_quic_recovery_in_flight(frames)
+}
+
+fn data_plane_packet_tracks_recovery_in_flight(frames: &[QuicFrame]) -> bool {
+    !data_plane_packet_uses_paced_recovery(frames)
+        && frames.iter().any(frame_is_ack_eliciting_for_recovery)
+}
+
+fn trace_quic_data_plane_cwnd_telemetry(
+    cx: &Cx,
+    pending_datagrams: usize,
+    telemetry: DataPlaneCwndTelemetry,
 ) {
     if std::env::var_os("ATP_RQ_TRACE").is_none() {
         return;
     }
     let pending_datagrams_s = pending_datagrams.to_string();
-    let bytes_in_flight_s = bytes_in_flight.to_string();
-    let congestion_window_s = congestion_window.to_string();
+    let bytes_in_flight_s = telemetry.bytes_in_flight.to_string();
+    let congestion_window_s = telemetry.congestion_window.to_string();
     cx.trace_with_fields(
-        "atp_quic.sender.data_plane_congestion_limited",
+        "atp_quic.sender.data_plane_cwnd_telemetry",
         &[
             ("pending_datagrams", pending_datagrams_s.as_str()),
             ("bytes_in_flight", bytes_in_flight_s.as_str()),
             ("congestion_window", congestion_window_s.as_str()),
+            ("admission", "pacer"),
         ],
     );
     quic_rqtrace!(
-        "sender: data_plane_congestion_limited pending_datagrams={} bytes_in_flight={} congestion_window={}",
+        "sender: data_plane_cwnd_telemetry pending_datagrams={} bytes_in_flight={} congestion_window={} admission=pacer",
         pending_datagrams,
-        bytes_in_flight,
-        congestion_window,
+        telemetry.bytes_in_flight,
+        telemetry.congestion_window,
     );
 }
 
@@ -1075,6 +1131,43 @@ fn trace_quic_data_plane_loss_timeout(
         bytes_in_flight,
         congestion_window,
         pto_count,
+    );
+}
+
+fn trace_quic_data_plane_pacer_limited(
+    cx: &Cx,
+    pending_datagrams: usize,
+    wait: Duration,
+    pacing_rate_bps: u64,
+    bytes_in_flight: u64,
+    congestion_window: u64,
+) {
+    if std::env::var_os("ATP_RQ_TRACE").is_none() {
+        return;
+    }
+    let pending_datagrams_s = pending_datagrams.to_string();
+    let wait_micros_s = wait.as_micros().to_string();
+    let pacing_rate_bps_s = pacing_rate_bps.to_string();
+    let bytes_in_flight_s = bytes_in_flight.to_string();
+    let congestion_window_s = congestion_window.to_string();
+    cx.trace_with_fields(
+        "atp_quic.sender.data_plane_pacer_limited",
+        &[
+            ("pending_datagrams", pending_datagrams_s.as_str()),
+            ("wait_micros", wait_micros_s.as_str()),
+            ("pacing_rate_bps", pacing_rate_bps_s.as_str()),
+            ("bytes_in_flight", bytes_in_flight_s.as_str()),
+            ("congestion_window", congestion_window_s.as_str()),
+            ("admission", "pacer"),
+        ],
+    );
+    quic_rqtrace!(
+        "sender: data_plane_pacer_limited pending_datagrams={} wait_micros={} pacing_rate_bps={} bytes_in_flight={} congestion_window={} admission=pacer",
+        pending_datagrams,
+        wait.as_micros(),
+        pacing_rate_bps,
+        bytes_in_flight,
+        congestion_window,
     );
 }
 
@@ -1135,19 +1228,86 @@ fn trace_quic_initial_spray_cut_for_feedback(
     );
 }
 
-/// Un-clamped pacing owed-time for `bytes` at `rate_bps` (≈ bytes/rate seconds).
-/// Unlike `super::pacing_pause_for_bytes`, this does NOT floor at
-/// `QUIC_SPRAY_MIN_PAUSE`, so sub-millisecond owed time can be accrued as pacing
-/// debt instead of being over-slept each flush (MATRIX-111).
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn raw_pacing_owed(bytes: u64, rate_bps: u64) -> Duration {
-    let micros =
-        (bytes.max(1) as f64 / rate_bps.max(1) as f64 * 1_000_000.0).clamp(0.0, u64::MAX as f64);
-    Duration::from_micros(micros as u64)
+/// Native ATP-QUIC data-plane send authority.
+///
+/// QUIC recovery remains useful as ACK/loss/RTT telemetry, but its NewReno cwnd
+/// floors at `2*MSS` on random loss. MATRIX-132 showed that this strangles the
+/// RaptorQ fountain below rsync on the 50M/bad cell. Spend one token per symbol
+/// before handing it to the QUIC DATAGRAM queue; the connection's cwnd is still
+/// sampled, but no longer decides whether fountain symbols may leave.
+struct NativeDataPlanePacer {
+    controller: CongestionController,
+    symbol_frame_bytes: u32,
+    pacing_rate_bps: u64,
+}
+
+impl NativeDataPlanePacer {
+    fn new(symbol_frame_len: usize, burst_symbols: usize, rate_bytes_per_sec: u64) -> Self {
+        let symbol_frame_bytes = u32::try_from(symbol_frame_len.max(1))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let mut pacer = Self {
+            controller: CongestionController::new(CongestionConfig::default()),
+            symbol_frame_bytes,
+            pacing_rate_bps: rate_bytes_per_sec.max(1),
+        };
+        pacer.controller.configure_for_path_rate(
+            pacer.pacing_rate_bps.saturating_mul(8).max(1),
+            pacer.symbol_frame_bytes,
+            u32::try_from(burst_symbols.max(1)).unwrap_or(u32::MAX),
+        );
+        pacer
+    }
+
+    fn configure(&mut self, pacing: &QuicSprayPacingDecision) {
+        self.pacing_rate_bps = pacing.pacing_rate_bps.max(1);
+        self.controller.configure_for_path_rate(
+            self.pacing_rate_bps.saturating_mul(8).max(1),
+            self.symbol_frame_bytes,
+            u32::try_from(pacing.max_burst_symbols.max(1)).unwrap_or(u32::MAX),
+        );
+        self.controller.update_congestion_feedback(
+            data_plane_pacer_rtt(pacing),
+            pacing.congestion_loss_rate > 0.0,
+        );
+    }
+
+    async fn before_send(
+        &mut self,
+        cx: &Cx,
+        pending_datagrams: usize,
+        bytes_in_flight: u64,
+        congestion_window: u64,
+    ) -> Result<(), QuicTransportError> {
+        loop {
+            let now = Instant::now();
+            if self.controller.try_consume_send_budget(now) {
+                return Ok(());
+            }
+            let wait = self.controller.time_until_send_budget(now).clamp(
+                QUIC_DATA_PLANE_PACER_MIN_PAUSE,
+                QUIC_DATA_PLANE_PACER_MAX_PAUSE,
+            );
+            trace_quic_data_plane_pacer_limited(
+                cx,
+                pending_datagrams,
+                wait,
+                self.pacing_rate_bps,
+                bytes_in_flight,
+                congestion_window,
+            );
+            crate::time::sleep(cx.now(), wait).await;
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        }
+    }
+}
+
+fn data_plane_pacer_rtt(pacing: &QuicSprayPacingDecision) -> Option<Duration> {
+    if pacing.path_rtt_s.is_finite() && pacing.path_rtt_s > 0.0 {
+        Some(Duration::from_secs_f64(pacing.path_rtt_s))
+    } else {
+        None
+    }
 }
 
 fn coalesced_spray_flush_symbol_limit(
@@ -1286,11 +1446,8 @@ pub struct QuicLink {
     /// Configured upper bound on symbols queued before a protected packet flush.
     max_spray_symbols_per_flush: usize,
     symbol_datagram_frame_len: usize,
+    data_plane_pacer: NativeDataPlanePacer,
     pending_received_packets: VecDeque<ReceivedPacket>,
-    /// Accrued sub-`QUIC_PACING_PARK_FLOOR` clean-link pacing owed-time. Paying it
-    /// in fewer, full parks avoids the per-flush async-timer over-sleep (MATRIX-111);
-    /// drained at round end so the average rate is preserved.
-    spray_pacing_debt: Duration,
     sender_handoff: QuicSenderHandoffStats,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
@@ -1623,13 +1780,14 @@ fn native_quic_path_signal_with_observed_loss(
     observed_loss: f64,
 ) -> super::QuicPathSignalSample {
     let mut path = super::quic_path_signal_from_transport(transport);
-    // MATRIX-123/126/127: the encrypted native spray can see queue drops only
-    // through sender-observed delivery loss. Fold that signal into the path sample
-    // before computing the pacing decision so the loss backoff, burst, pause, trace
-    // fields, and clean-ramp gate all use the same loss view.
-    if observed_loss.is_finite() {
-        path.loss_rate = path.loss_rate.max(observed_loss.clamp(0.0, 0.90));
-    }
+    // MATRIX-132: raw QUIC DATAGRAM loss is expected inside the FEC budget. Keep
+    // NewReno loss/cwnd observable through telemetry, but let the data-plane
+    // pacer react to sender-observed fountain delivery loss instead.
+    path.loss_rate = if observed_loss.is_finite() {
+        observed_loss.clamp(0.0, 0.90)
+    } else {
+        0.0
+    };
     path.clamped()
 }
 
@@ -1815,38 +1973,6 @@ impl QuicLink {
         )
     }
 
-    fn pause_after_symbol_flush(
-        &mut self,
-        symbols: usize,
-        pacing: &QuicSprayPacingDecision,
-    ) -> Duration {
-        let bytes = u64::try_from(symbols.max(1))
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(self.symbol_datagram_frame_len).unwrap_or(u64::MAX));
-        if !quic_clean_spray_coalescing_allowed(pacing) {
-            // Lossy path keeps the clamped per-flush sleep (conservative pacing /
-            // loss granularity on constrained links).
-            if symbols == pacing.max_burst_symbols {
-                return pacing.pause_after_burst;
-            }
-            return super::pacing_pause_for_bytes(bytes, pacing.pacing_rate_bps);
-        }
-        // Clean-link deadline/debt pacer: accrue the RAW (un-clamped) owed time and
-        // park only once it crosses QUIC_PACING_PARK_FLOOR. pacing_pause_for_bytes /
-        // pause_after_burst floor at QUIC_SPRAY_MIN_PAUSE (1ms), so parking each
-        // sub-ms flush over-sleeps and floors throughput far below the paced rate
-        // (MATRIX-111). The average rate is preserved: the debt is paid in full once
-        // it reaches the floor, and the remainder is drained at round end.
-        self.spray_pacing_debt = self
-            .spray_pacing_debt
-            .saturating_add(raw_pacing_owed(bytes, pacing.pacing_rate_bps));
-        if self.spray_pacing_debt >= QUIC_PACING_PARK_FLOOR {
-            core::mem::take(&mut self.spray_pacing_debt)
-        } else {
-            Duration::ZERO
-        }
-    }
-
     async fn service_spray_liveness(
         &mut self,
         cx: &Cx,
@@ -2017,48 +2143,31 @@ impl QuicLink {
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let pending_datagrams = self.conn.pending_outbound_datagram_count();
-            let mut data_plane_blocked = self.role == StreamRole::Client
-                && pending_datagrams > 0
-                && !self
-                    .conn
-                    .transport()
-                    .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES);
-            if data_plane_blocked {
-                self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
+            let admission = if self.role == StreamRole::Client && pending_datagrams > 0 {
                 self.release_expired_data_plane_loss(cx, pending_datagrams)?;
-                data_plane_blocked = self.role == StreamRole::Client
-                    && pending_datagrams > 0
-                    && !self
-                        .conn
-                        .transport()
-                        .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES);
-            }
-            if data_plane_blocked {
-                trace_quic_data_plane_congestion_limited(
-                    cx,
+                let admission = data_plane_flush_admission(
+                    self.conn.transport(),
                     pending_datagrams,
-                    self.conn.transport().bytes_in_flight(),
-                    self.conn.transport().congestion_window_bytes(),
-                );
-            }
-            let max_frame_bytes = if pending_datagrams > 0 && !data_plane_blocked {
-                self.spray_frame_payload_limit()
-            } else {
-                self.max_app_payload
-            };
-            let frames = if data_plane_blocked {
-                self.conn.generate_non_datagram_frames(
-                    cx,
-                    PacketNumberSpace::ApplicationData,
+                    self.spray_frame_payload_limit(),
                     self.max_app_payload,
-                )?
+                );
+                if let Some(telemetry) = admission.cwnd_telemetry {
+                    trace_quic_data_plane_cwnd_telemetry(cx, pending_datagrams, telemetry);
+                }
+                admission
             } else {
-                self.conn.generate_frames(
-                    cx,
-                    PacketNumberSpace::ApplicationData,
-                    max_frame_bytes,
-                )?
+                data_plane_flush_admission(
+                    self.conn.transport(),
+                    pending_datagrams,
+                    self.spray_frame_payload_limit(),
+                    self.max_app_payload,
+                )
             };
+            let frames = self.conn.generate_frames(
+                cx,
+                PacketNumberSpace::ApplicationData,
+                admission.max_frame_bytes,
+            )?;
             if frames.is_empty() {
                 break;
             }
@@ -2092,20 +2201,30 @@ impl QuicLink {
             let packet_number = if self.role == StreamRole::Client {
                 self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
                 let ack_eliciting = frames.iter().any(frame_is_ack_eliciting_for_recovery);
-                let tracks_data_plane = frames_have_datagram(&frames);
-                let accounting_bytes = if tracks_data_plane {
+                let uses_paced_data_plane = data_plane_packet_uses_paced_recovery(&frames);
+                let tracks_quic_recovery = data_plane_packet_tracks_recovery_in_flight(&frames);
+                let accounting_bytes = if uses_paced_data_plane {
                     data_plane_packet_accounting_bytes(packet_len)
                 } else {
                     u64::try_from(packet_len).unwrap_or(u64::MAX).max(1)
                 };
-                let packet_number = self.conn.on_packet_sent(
-                    cx,
-                    PacketNumberSpace::ApplicationData,
-                    accounting_bytes,
-                    ack_eliciting,
-                    tracks_data_plane,
-                    self.clock,
-                )?;
+                let packet_number = if uses_paced_data_plane {
+                    self.conn.record_paced_data_plane_packet_sent(
+                        cx,
+                        accounting_bytes,
+                        ack_eliciting,
+                        self.clock,
+                    )?
+                } else {
+                    self.conn.on_packet_sent(
+                        cx,
+                        PacketNumberSpace::ApplicationData,
+                        accounting_bytes,
+                        ack_eliciting,
+                        tracks_quic_recovery,
+                        self.clock,
+                    )?
+                };
                 self.send_pn = self.send_pn.max(packet_number.saturating_add(1));
                 packet_number
             } else {
@@ -2587,16 +2706,15 @@ impl QuicLink {
         cx: &Cx,
         control: &mut NativeQuicFrameTransport,
         flush_symbols: usize,
-        pacing: &QuicSprayPacingDecision,
+        _pacing: &QuicSprayPacingDecision,
         flushes: &mut usize,
         flushed_packets: &mut usize,
         flush_elapsed: &mut Duration,
         liveness_elapsed: &mut Duration,
-        pause_elapsed: &mut Duration,
+        _pause_elapsed: &mut Duration,
     ) -> Result<(), QuicTransportError> {
         while self.conn.pending_outbound_datagram_count() >= flush_symbols {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            let pending_before_flush = self.conn.pending_outbound_datagram_count();
             let flush_start = Instant::now();
             let packets_flushed = self.flush(cx).await?;
             *flushed_packets = (*flushed_packets).saturating_add(packets_flushed);
@@ -2611,14 +2729,6 @@ impl QuicLink {
                 .record_queue_full_flush(liveness_poll_elapsed);
             if self.has_pending_fountain_feedback() {
                 return Ok(());
-            }
-
-            let pause =
-                self.pause_after_symbol_flush(pending_before_flush.min(flush_symbols), pacing);
-            if !pause.is_zero() {
-                let pause_start = Instant::now();
-                crate::time::sleep(cx.now(), pause).await;
-                *pause_elapsed = (*pause_elapsed).saturating_add(pause_start.elapsed());
             }
         }
         Ok(())
@@ -2642,6 +2752,7 @@ impl QuicLink {
 
         let trace_start = Instant::now();
         self.update_spray_packet_coalescing(pacing);
+        self.data_plane_pacer.configure(pacing);
         let flush_symbols = self.paced_flush_symbol_limit(pacing);
         let mut flushes = 0usize;
         let mut flushed_packets = 0usize;
@@ -2668,6 +2779,15 @@ impl QuicLink {
         let mut encoded_bytes = 0usize;
         let mut payloads = Vec::with_capacity(symbols.len());
         for item in symbols {
+            let pending_datagrams = self
+                .conn
+                .pending_outbound_datagram_count()
+                .saturating_add(payloads.len());
+            let bytes_in_flight = self.conn.transport().bytes_in_flight();
+            let congestion_window = self.conn.transport().congestion_window_bytes();
+            self.data_plane_pacer
+                .before_send(cx, pending_datagrams, bytes_in_flight, congestion_window)
+                .await?;
             let payload =
                 super::native_symbol_datagram(&item.symbol, tag, item.entry, item.auth_tag)?;
             encoded_bytes = encoded_bytes.saturating_add(payload.len());
@@ -2780,17 +2900,11 @@ impl QuicLink {
         .await?;
 
         let flush_symbol_limit = self.paced_flush_symbol_limit(pacing);
-        let flushed_symbols = pending_symbols.min(flush_symbol_limit);
         let sent_s = sent.to_string();
         let pending_symbols_s = pending_symbols.to_string();
         let flush_symbol_limit_s = flush_symbol_limit.to_string();
         let max_symbol_frames_per_packet_s = self.max_symbol_frames_per_packet.to_string();
-        let mut pause_after_flush = self.pause_after_symbol_flush(flushed_symbols, pacing);
-        // Drain any accrued clean-link pacing debt at round end so the round's total
-        // sleep equals the total owed time (average rate preserved).
-        pause_after_flush =
-            pause_after_flush.saturating_add(core::mem::take(&mut self.spray_pacing_debt));
-        let pause_after_burst_micros = pause_after_flush.as_micros().to_string();
+        let pause_after_burst_micros = Duration::ZERO.as_micros().to_string();
         let pacing_rate_bps = pacing.pacing_rate_bps.to_string();
         cx.trace_with_fields(
             "atp_quic.sender.final_paced_spray_flush",
@@ -2809,9 +2923,6 @@ impl QuicLink {
                 ),
             ],
         );
-        if !pause_after_flush.is_zero() {
-            crate::time::sleep(cx.now(), pause_after_flush).await;
-        }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)
     }
 
@@ -2990,8 +3101,14 @@ fn link_from_handshake(
         spray_max_datagram_frames_per_packet: max_symbol_frames_per_packet,
         max_spray_symbols_per_flush: config.max_spray_symbols_per_flush.max(1),
         symbol_datagram_frame_len: send_symbol_frame_len,
+        data_plane_pacer: NativeDataPlanePacer::new(
+            send_symbol_frame_len,
+            config.max_spray_symbols_per_flush.max(1),
+            config
+                .bwlimit_bps
+                .unwrap_or(super::QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64),
+        ),
         pending_received_packets: VecDeque::new(),
-        spray_pacing_debt: Duration::ZERO,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
         pending_control_frames: VecDeque::new(),
@@ -5310,16 +5427,33 @@ mod tests {
     }
 
     #[test]
+    fn native_data_plane_path_signal_preserves_cwnd_as_telemetry() {
+        let conn = established_native_test_conn();
+        let native_cwnd = conn.transport().congestion_window_bytes();
+
+        let clean = native_quic_path_signal_with_observed_loss(conn.transport(), 0.0);
+        assert_eq!(
+            clean.congestion_window_bytes, native_cwnd,
+            "MATRIX-132: native cwnd must remain honest telemetry, not a synthesized data-plane window"
+        );
+        assert_eq!(clean.loss_rate, 0.0);
+
+        let lossy = native_quic_path_signal_with_observed_loss(conn.transport(), 0.42);
+        assert_eq!(lossy.congestion_window_bytes, native_cwnd);
+        assert_eq!(lossy.loss_rate, 0.42);
+    }
+
+    #[test]
     fn native_data_plane_recovery_accounting_uses_packet_units_for_jumbo_udp() {
         let cx = Cx::for_testing();
         assert_eq!(data_plane_packet_accounting_bytes(0), 1);
         assert_eq!(
             data_plane_packet_accounting_bytes(512),
-            QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES
+            QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES
         );
         assert_eq!(
             data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET),
-            QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES
+            QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES
         );
 
         let datagram = QuicFrame::Datagram {
@@ -5334,13 +5468,13 @@ mod tests {
 
         let mut conn = established_native_test_conn();
         let initial_cwnd = conn.transport().congestion_window_bytes();
-        let initial_packet_credits = initial_cwnd / QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES;
+        let initial_packet_credits = initial_cwnd / QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES;
         assert!(initial_packet_credits >= 700);
 
         for idx in 0..initial_packet_credits {
             assert!(
                 conn.transport()
-                    .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES),
+                    .can_send(QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES),
                 "packet {idx} should fit before cwnd fills"
             );
             let pn = conn
@@ -5360,12 +5494,58 @@ mod tests {
         assert!(
             !conn
                 .transport()
-                .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES),
-            "initial cwnd should be full after ten coalesced ATP packets"
+                .can_send(QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES),
+            "initial cwnd should be full after ATP packet-credit charges"
+        );
+        assert_eq!(
+            data_plane_cwnd_telemetry(conn.transport(), 0),
+            None,
+            "empty data-plane queues must not emit cwnd telemetry"
+        );
+        let cwnd_telemetry = data_plane_cwnd_telemetry(conn.transport(), 3)
+            .expect("full native cwnd should be visible as telemetry");
+        assert_eq!(cwnd_telemetry.bytes_in_flight, initial_cwnd);
+        assert_eq!(cwnd_telemetry.congestion_window, initial_cwnd);
+        let admission =
+            data_plane_flush_admission(conn.transport(), 3, 1_200, ATP_QUIC_UDP_MAX_PACKET);
+        assert_eq!(
+            admission.max_frame_bytes, 1_200,
+            "MATRIX-132: cwnd telemetry must not switch ATP DATAGRAM flushes to the control-only path"
+        );
+        assert_eq!(
+            admission.cwnd_telemetry,
+            Some(cwnd_telemetry),
+            "native QUIC cwnd remains observable while the RaptorQ pacer owns admission"
+        );
+        let overflow_accounting = data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET);
+        let datagram_tracks_recovery =
+            data_plane_packet_tracks_recovery_in_flight(core::slice::from_ref(&datagram));
+        assert!(
+            data_plane_packet_uses_paced_recovery(core::slice::from_ref(&datagram)),
+            "pure ATP DATAGRAM packets must use the RaptorQ data-plane pacer as send authority"
+        );
+        assert!(
+            !data_plane_packet_tracks_recovery_in_flight(core::slice::from_ref(&datagram)),
+            "pure ATP DATAGRAM packets must not require NewReno admission"
+        );
+        let overflow_pn = conn
+            .record_paced_data_plane_packet_sent(
+                &cx,
+                overflow_accounting,
+                true,
+                datagram_tracks_recovery,
+                (initial_packet_credits + 1) * CLOCK_STEP_MICROS,
+            )
+            .expect("MATRIX-132: ATP pacer, not QUIC cwnd, admits the next DATAGRAM");
+        assert_eq!(overflow_pn, initial_packet_credits);
+        assert_eq!(
+            conn.transport().bytes_in_flight(),
+            initial_cwnd,
+            "telemetry-only DATAGRAM sends must not grow QUIC bytes_in_flight past cwnd"
         );
 
-        let ack_range = crate::net::quic_native::AckRange::new(initial_packet_credits - 1, 0)
-            .expect("ack range");
+        let ack_range =
+            crate::net::quic_native::AckRange::new(initial_packet_credits, 0).expect("ack range");
         conn.on_ack_ranges(
             &cx,
             PacketNumberSpace::ApplicationData,
@@ -5377,9 +5557,81 @@ mod tests {
         assert_eq!(conn.transport().bytes_in_flight(), 0);
         assert!(
             conn.transport()
-                .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES),
+                .can_send(QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES),
             "ACK feedback should reopen native recovery cwnd"
         );
+    }
+
+    #[test]
+    fn native_data_plane_admission_is_pacer_not_newreno_cwnd() {
+        let cx = Cx::for_testing();
+        let datagram = QuicFrame::Datagram {
+            data: Bytes::from_static(b"symbol"),
+        };
+        assert!(frame_is_ack_eliciting_for_recovery(&datagram));
+        assert!(!frames_require_quic_recovery_in_flight(
+            core::slice::from_ref(&datagram)
+        ));
+        assert!(frames_require_quic_recovery_in_flight(&[QuicFrame::Ping]));
+
+        let mut conn = established_native_test_conn();
+        let initial_cwnd = conn.transport().congestion_window_bytes();
+        let initial_packet_credits = initial_cwnd / QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES;
+        assert!(initial_packet_credits > 0);
+        for idx in 0..initial_packet_credits {
+            conn.on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES,
+                true,
+                true,
+                (idx + 1) * CLOCK_STEP_MICROS,
+            )
+            .expect("setup packet should fit before cwnd fills");
+        }
+        assert_eq!(conn.transport().bytes_in_flight(), initial_cwnd);
+        assert!(
+            !conn
+                .transport()
+                .can_send(QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES)
+        );
+
+        let datagram_accounting = data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET);
+        let datagram_tracks_recovery =
+            data_plane_packet_tracks_recovery_in_flight(core::slice::from_ref(&datagram));
+        assert!(data_plane_packet_uses_paced_recovery(
+            core::slice::from_ref(&datagram)
+        ));
+        let datagram_pn = conn
+            .record_paced_data_plane_packet_sent(
+                &cx,
+                datagram_accounting,
+                true,
+                datagram_tracks_recovery,
+                (initial_packet_credits + 1) * CLOCK_STEP_MICROS,
+            )
+            .expect("pure ATP DATAGRAM packet admission is owned by the spray pacer");
+        assert_eq!(datagram_pn, initial_packet_credits);
+        assert_eq!(
+            conn.transport().bytes_in_flight(),
+            initial_cwnd,
+            "pure ATP DATAGRAM packets stay packet-number visible but bypass NewReno in-flight admission"
+        );
+
+        let control_err = conn
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1,
+                true,
+                frames_require_quic_recovery_in_flight(&[QuicFrame::Ping]),
+                (initial_packet_credits + 2) * CLOCK_STEP_MICROS,
+            )
+            .expect_err("reliable/control packets must remain NewReno governed");
+        assert!(matches!(
+            control_err,
+            NativeQuicConnectionError::CongestionLimited { .. }
+        ));
     }
 
     #[test]
@@ -5620,12 +5872,15 @@ mod tests {
             pacing_rate_bps: 12_000_000,
             cwnd_symbols: 10,
             cwnd_share_symbols: 10,
+            burst_cap_share_symbols: 10,
             loss_backoff: 1.0,
             responsiveness_backoff: 1.0,
             path_rtt_s: 0.025,
             path_cwnd_bytes: 12_000,
             path_loss_rate: 0.0,
-            limiter: super::super::QuicSprayPacingLimiter::CongestionWindow,
+            fec_loss_budget: 0.0,
+            congestion_loss_rate: 0.0,
+            limiter: super::super::QuicSprayPacingLimiter::PacingRate,
         };
         assert!(
             !quic_clean_spray_coalescing_allowed(&pacing),

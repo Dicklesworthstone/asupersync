@@ -267,13 +267,14 @@ pub const DEFAULT_DATAGRAM_FANOUT: usize = 1;
 
 /// Default upper bound for one paced QUIC DATAGRAM spray burst.
 ///
-/// C3 still lets the congestion window choose a smaller burst. This cap prevents
-/// a very large cwnd estimate from turning one scheduler slice into an unbounded
-/// outbound queue while still letting the native encrypted link coalesce a
-/// near-full jumbo 1-RTT packet of symbol DATAGRAM frames after MATRIX-39
-/// removed the old one-symbol packet budget. The native clean encrypted send
-/// path may expand this default cap into a bounded multi-packet GSO window; an
-/// explicit non-default cap remains the operator's pacing envelope.
+/// C3's token-bucket pacer, not the QUIC NewReno cwnd, owns data-plane burst
+/// admission. This cap prevents a high adaptive/AIMD rate from turning one
+/// scheduler slice into an unbounded outbound queue while still letting the
+/// native encrypted link coalesce a near-full jumbo 1-RTT packet of symbol
+/// DATAGRAM frames after MATRIX-39 removed the old one-symbol packet budget. The
+/// native clean encrypted send path may expand this default cap into a bounded
+/// multi-packet GSO window; an explicit non-default cap remains the operator's
+/// pacing envelope.
 pub const DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH: usize = 54;
 
 const QUIC_SPRAY_BURST_RTT_FRACTION: f64 = 0.125;
@@ -352,8 +353,10 @@ pub struct QuicConfig {
     pub bwlimit_bps: Option<u64>,
     /// Maximum DATAGRAM symbols queued before a paced flush.
     ///
-    /// The live decision is the minimum of this cap, the cwnd-derived burst, and
-    /// any bwlimit/responsiveness backoff.
+    /// The live decision is governed by the token-bucket pacer using the
+    /// adaptive/AIMD rate, FEC-budgeted loss, responsiveness pressure, and this
+    /// cap. QUIC recovery cwnd remains telemetry for path estimation; it is not
+    /// the ATP RaptorQ data-plane admission gate.
     pub max_spray_symbols_per_flush: usize,
     /// Normalized host pressure used by the pacing policy.
     ///
@@ -788,6 +791,9 @@ pub struct QuicSprayPacingInput {
     /// Optional user/operator bandwidth cap in bytes per second. J6 wires this
     /// from `--bwlimit`; C3 keeps it as a pure input.
     pub bandwidth_limit_bps: Option<u64>,
+    /// Loss fraction expected to be absorbed by RaptorQ repair before treating
+    /// path loss as congestion.
+    pub fec_loss_budget: f64,
     /// Caller-sampled host responsiveness pressure.
     pub machine_pressure: QuicMachinePressure,
     /// Hard burst ceiling before a flush/yield, independent of path cwnd.
@@ -797,8 +803,8 @@ pub struct QuicSprayPacingInput {
 /// The limiting factor chosen for a QUIC spray pacing epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuicSprayPacingLimiter {
-    /// Congestion window / RTT derived pacing is the active limiter.
-    CongestionWindow,
+    /// The adaptive/AIMD token-bucket rate is the active limiter.
+    PacingRate,
     /// The fixed burst ceiling capped a larger cwnd/rate budget.
     BurstCap,
     /// Recent loss reduced the pacing rate.
@@ -813,7 +819,7 @@ impl QuicSprayPacingLimiter {
     #[must_use]
     fn as_str(self) -> &'static str {
         match self {
-            Self::CongestionWindow => "cwnd",
+            Self::PacingRate => "pacing_rate",
             Self::BurstCap => "burst_cap",
             Self::LossBackoff => "loss",
             Self::ResponsivenessBackoff => "responsiveness",
@@ -835,7 +841,9 @@ pub struct QuicSprayPacingDecision {
     pub cwnd_symbols: usize,
     /// Per-fan-out share of the cwnd symbol budget.
     pub cwnd_share_symbols: usize,
-    /// Loss multiplier applied to the cwnd/RTT rate.
+    /// Per-fan-out share of the configured token-bucket burst ceiling.
+    pub burst_cap_share_symbols: usize,
+    /// Loss multiplier applied to the token-bucket rate.
     pub loss_backoff: f64,
     /// Machine responsiveness multiplier applied to the rate.
     pub responsiveness_backoff: f64,
@@ -845,6 +853,10 @@ pub struct QuicSprayPacingDecision {
     pub path_cwnd_bytes: u64,
     /// Clamped recent loss rate used for the rate calculation.
     pub path_loss_rate: f64,
+    /// FEC repair budget discounted before loss is treated as congestion.
+    pub fec_loss_budget: f64,
+    /// Path loss beyond the FEC budget that reduced the token-bucket rate.
+    pub congestion_loss_rate: f64,
     /// Active limiting factor.
     pub limiter: QuicSprayPacingLimiter,
 }
@@ -859,11 +871,14 @@ impl QuicSprayPacingDecision {
         let pacing_rate_bps = self.pacing_rate_bps.to_string();
         let cwnd_symbols = self.cwnd_symbols.to_string();
         let cwnd_share_symbols = self.cwnd_share_symbols.to_string();
+        let burst_cap_share_symbols = self.burst_cap_share_symbols.to_string();
         let loss_backoff = format!("{:.6}", self.loss_backoff);
         let responsiveness_backoff = format!("{:.6}", self.responsiveness_backoff);
         let path_rtt_s = format!("{:.6}", self.path_rtt_s);
         let path_cwnd_bytes = self.path_cwnd_bytes.to_string();
         let path_loss_rate = format!("{:.6}", self.path_loss_rate);
+        let fec_loss_budget = format!("{:.6}", self.fec_loss_budget);
+        let congestion_loss_rate = format!("{:.6}", self.congestion_loss_rate);
 
         cx.trace_with_fields(
             "atp_quic.spray.pacing_epoch",
@@ -875,11 +890,14 @@ impl QuicSprayPacingDecision {
                 ("pacing_rate_bps", &pacing_rate_bps),
                 ("cwnd_symbols", &cwnd_symbols),
                 ("cwnd_share_symbols", &cwnd_share_symbols),
+                ("burst_cap_share_symbols", &burst_cap_share_symbols),
                 ("loss_backoff", &loss_backoff),
                 ("responsiveness_backoff", &responsiveness_backoff),
                 ("path_rtt_s", &path_rtt_s),
                 ("path_cwnd_bytes", &path_cwnd_bytes),
                 ("path_loss_rate", &path_loss_rate),
+                ("fec_loss_budget", &fec_loss_budget),
+                ("congestion_loss_rate", &congestion_loss_rate),
                 ("limiter", self.limiter.as_str()),
             ],
         );
@@ -913,24 +931,24 @@ pub fn quic_spray_pacing_decision(input: QuicSprayPacingInput) -> QuicSprayPacin
         .max(1);
     let cwnd_symbols = usize::try_from(cwnd_symbols_u64).unwrap_or(usize::MAX);
     let cwnd_share_symbols = (cwnd_symbols / fanout).max(1);
+    let burst_cap_share_symbols = (burst_cap / fanout).max(1);
 
-    let base_rate = path.congestion_window_bytes as f64 / rtt_s;
-    let loss_backoff = (1.0 - (2.0 * path.loss_rate)).clamp(QUIC_SPRAY_MIN_BACKOFF, 1.0);
+    let base_rate = input
+        .bandwidth_limit_bps
+        .map_or(QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64, |cap| {
+            cap.max(MIN_QUIC_SPRAY_RATE_BPS)
+        }) as f64
+        / fanout as f64;
+    let fec_loss_budget = if input.fec_loss_budget.is_finite() {
+        input.fec_loss_budget.clamp(0.0, 0.90)
+    } else {
+        0.0
+    };
+    let congestion_loss_rate = (path.loss_rate - fec_loss_budget).max(0.0).clamp(0.0, 0.90);
+    let loss_backoff = (1.0 - (2.0 * congestion_loss_rate)).clamp(QUIC_SPRAY_MIN_BACKOFF, 1.0);
     let pressure = machine_pressure.max_pressure();
     let responsiveness_backoff = (1.0 - (0.75 * pressure)).clamp(QUIC_SPRAY_MIN_BACKOFF, 1.0);
-    let mut rate = (base_rate / fanout as f64) * loss_backoff * responsiveness_backoff;
-
-    let cap_applied = if let Some(cap) = input.bandwidth_limit_bps {
-        let cap = cap.max(MIN_QUIC_SPRAY_RATE_BPS);
-        if rate > cap as f64 {
-            rate = cap as f64;
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    let rate = base_rate * loss_backoff * responsiveness_backoff;
 
     let rate = if rate.is_finite() && rate > 0.0 {
         rate
@@ -941,22 +959,22 @@ pub fn quic_spray_pacing_decision(input: QuicSprayPacingInput) -> QuicSprayPacin
     let burst_by_rate = ((rate * rtt_s * QUIC_SPRAY_BURST_RTT_FRACTION) / symbol_payload as f64)
         .ceil()
         .max(1.0) as usize;
-    let max_burst_symbols = burst_by_rate.min(cwnd_share_symbols).min(burst_cap).max(1);
+    let max_burst_symbols = burst_by_rate.min(burst_cap_share_symbols).max(1);
     let burst_bytes = u64::try_from(max_burst_symbols)
         .unwrap_or(u64::MAX)
         .saturating_mul(u64::try_from(symbol_payload).unwrap_or(u64::MAX).max(1));
     let pause_after_burst = pacing_pause_for_bytes(burst_bytes, pacing_rate_bps);
 
-    let limiter = if cap_applied {
-        QuicSprayPacingLimiter::BandwidthLimit
+    let limiter = if congestion_loss_rate > 0.0 {
+        QuicSprayPacingLimiter::LossBackoff
     } else if pressure > 0.0 {
         QuicSprayPacingLimiter::ResponsivenessBackoff
-    } else if path.loss_rate > 0.0 {
-        QuicSprayPacingLimiter::LossBackoff
-    } else if burst_cap < burst_by_rate.min(cwnd_share_symbols) {
+    } else if input.bandwidth_limit_bps.is_some() {
+        QuicSprayPacingLimiter::BandwidthLimit
+    } else if burst_cap_share_symbols < burst_by_rate {
         QuicSprayPacingLimiter::BurstCap
     } else {
-        QuicSprayPacingLimiter::CongestionWindow
+        QuicSprayPacingLimiter::PacingRate
     };
 
     QuicSprayPacingDecision {
@@ -965,11 +983,14 @@ pub fn quic_spray_pacing_decision(input: QuicSprayPacingInput) -> QuicSprayPacin
         pacing_rate_bps,
         cwnd_symbols,
         cwnd_share_symbols,
+        burst_cap_share_symbols,
         loss_backoff,
         responsiveness_backoff,
         path_rtt_s: rtt_s,
         path_cwnd_bytes: path.congestion_window_bytes,
         path_loss_rate: path.loss_rate,
+        fec_loss_budget,
+        congestion_loss_rate,
         limiter,
     }
 }
@@ -996,6 +1017,7 @@ pub fn quic_spray_pacing_decision_from_config_with_cpu(
         max_datagram_size: config.max_datagram_size,
         datagram_fanout: quic_effective_datagram_fanout(config, cpu_parallelism),
         bandwidth_limit_bps: config.bwlimit_bps,
+        fec_loss_budget: (config.repair_overhead - 1.0).max(0.0),
         machine_pressure: QuicMachinePressure {
             cpu_pressure: config.responsiveness_pressure,
             load_pressure: 0.0,
@@ -1502,7 +1524,7 @@ fn update_quic_pacing_pause(
             .ceil()
             .max(1.0) as usize;
     pacing.max_burst_symbols = burst_by_rate
-        .min(pacing.cwnd_share_symbols)
+        .min(pacing.burst_cap_share_symbols)
         .min(burst_cap_symbols.max(1))
         .max(1);
     let burst_bytes = u64::try_from(pacing.max_burst_symbols.max(1))
@@ -8890,7 +8912,7 @@ mod tests {
     }
 
     #[test]
-    fn quic_spray_pacing_tracks_cwnd_loss_bwlimit_and_pressure() {
+    fn quic_spray_pacing_uses_token_bucket_not_cwnd_gate() {
         let config = QuicConfig {
             symbol_size: 1024,
             max_spray_symbols_per_flush: 64,
@@ -8901,15 +8923,23 @@ mod tests {
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 16_000, 0.0));
         let large_cwnd =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.0));
-        assert!(
-            large_cwnd.max_burst_symbols > small_cwnd.max_burst_symbols,
-            "larger cwnd should permit a larger paced burst: small={small_cwnd:?} large={large_cwnd:?}"
+        assert_eq!(
+            small_cwnd.max_burst_symbols, large_cwnd.max_burst_symbols,
+            "NewReno cwnd is telemetry only for ATP-QUIC data-plane admission: small={small_cwnd:?} large={large_cwnd:?}"
         );
-        assert_eq!(large_cwnd.max_burst_symbols, 64);
+        assert_eq!(
+            small_cwnd.pacing_rate_bps, large_cwnd.pacing_rate_bps,
+            "token-bucket rate must not collapse to the native QUIC cwnd floor"
+        );
+        assert!(
+            large_cwnd.cwnd_symbols > small_cwnd.cwnd_symbols,
+            "cwnd telemetry should still reflect the sampled native QUIC path"
+        );
 
         let lossy =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.40));
         assert_eq!(lossy.limiter, QuicSprayPacingLimiter::LossBackoff);
+        assert!(lossy.congestion_loss_rate > 0.0);
         assert!(lossy.pacing_rate_bps < large_cwnd.pacing_rate_bps);
         assert!(lossy.max_burst_symbols < large_cwnd.max_burst_symbols);
 

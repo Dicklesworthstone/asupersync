@@ -920,9 +920,53 @@ impl NativeQuicConnection {
         in_flight: bool,
         time_sent_micros: u64,
     ) -> Result<u64, NativeQuicConnectionError> {
+        self.on_packet_sent_inner(
+            cx,
+            space,
+            bytes,
+            ack_eliciting,
+            in_flight,
+            time_sent_micros,
+            true,
+        )
+    }
+
+    /// Track a paced ATP data-plane packet for recovery telemetry.
+    ///
+    /// ATP's RaptorQ pacer owns DATAGRAM admission, so this records ACK/loss/RTT
+    /// state without letting the QUIC NewReno cwnd reject a paced fountain send.
+    pub(crate) fn record_paced_data_plane_packet_sent(
+        &mut self,
+        cx: &Cx,
+        bytes: u64,
+        ack_eliciting: bool,
+        in_flight: bool,
+        time_sent_micros: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        self.on_packet_sent_inner(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            bytes,
+            ack_eliciting,
+            in_flight,
+            time_sent_micros,
+            false,
+        )
+    }
+
+    fn on_packet_sent_inner(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        bytes: u64,
+        ack_eliciting: bool,
+        in_flight: bool,
+        time_sent_micros: u64,
+        enforce_congestion_admission: bool,
+    ) -> Result<u64, NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_packet_send_state(space)?;
-        if in_flight && !self.transport.can_send(bytes) {
+        if enforce_congestion_admission && in_flight && !self.transport.can_send(bytes) {
             return Err(NativeQuicConnectionError::CongestionLimited {
                 requested: bytes,
                 bytes_in_flight: self.transport.bytes_in_flight(),
