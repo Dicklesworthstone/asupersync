@@ -2,9 +2,9 @@
 
 use asupersync::atp::dedupe::build_canonical_dedup_payload_parts_if_smaller;
 use asupersync::atp::delta::{
-    ContentAddressedChunkStore, DeltaResyncMode, PersistentChunkManifest,
-    apply_delta_resync_transmission, build_delta_resync_transmission, plan_incremental_resync,
-    reconstruct_manifest_bytes,
+    ContentAddressedChunkStore, DeltaResyncFallbackReason, DeltaResyncMode,
+    PersistentChunkManifest, apply_delta_resync_transmission, build_delta_resync_transmission,
+    plan_incremental_resync, reconstruct_manifest_bytes,
 };
 use asupersync::atp::delta_subchunk;
 use asupersync::atp::reconcile::{
@@ -142,6 +142,46 @@ fn public_append_resync_uses_compact_whole_chunk_run_wire_overhead() {
     );
     assert_eq!(applied.whole_chunk_count, 3);
     assert_eq!(applied.subchunk_count, 0);
+}
+
+#[test]
+fn public_delta_transmission_falls_back_when_wire_envelope_exceeds_full_object() {
+    let shared = pattern_bytes(32, 13);
+    let missing = pattern_bytes(4 * 1024, 41);
+
+    let mut sender_store = ContentAddressedChunkStore::new();
+    let mut receiver_store = ContentAddressedChunkStore::new();
+    let sender = manifest(
+        &mut sender_store,
+        "wire-envelope-accounting",
+        vec![shared.as_slice(), missing.as_slice()],
+    );
+    let receiver = manifest(
+        &mut receiver_store,
+        "wire-envelope-accounting",
+        vec![shared.as_slice()],
+    );
+
+    let chunk_level_plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+    assert_eq!(chunk_level_plan.mode, DeltaResyncMode::DeltaChunks);
+    assert!(chunk_level_plan.missing_bytes < sender.total_size_bytes);
+
+    let transmission = build_delta_resync_transmission(
+        &sender,
+        &sender_store,
+        Some(&receiver),
+        &receiver_store,
+        delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+    )
+    .expect("build fallback transmission");
+
+    assert!(transmission.requires_full_object_fallback());
+    assert!(!transmission.uses_delta_wire_payload());
+    assert_eq!(transmission.full_object_bytes, sender.total_size_bytes);
+    assert_eq!(
+        transmission.plan.fallback_reason,
+        Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject)
+    );
 }
 
 #[test]

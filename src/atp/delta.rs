@@ -911,10 +911,20 @@ impl DeltaResyncSendPlan {
             .count()
     }
 
+    /// Encoded transfer envelope bytes for this concrete payload.
+    pub fn wire_payload_bytes(&self) -> Result<u64, DeltaError> {
+        u64::try_from(self.to_wire_bytes()?.len()).map_err(|_| DeltaError::ChunkSizeOverflow)
+    }
+
     /// Whether this concrete payload is smaller than a full-object send.
+    ///
+    /// The decision uses encoded envelope bytes, not just item payload bytes,
+    /// because many tiny chunk/sub-chunk wins can lose once per-item metadata is
+    /// included.
     #[must_use]
-    pub const fn beats_full_object(&self, full_object_bytes: u64) -> bool {
-        self.payload_bytes < full_object_bytes
+    pub fn beats_full_object(&self, full_object_bytes: u64) -> bool {
+        self.wire_payload_bytes()
+            .is_ok_and(|wire_payload_bytes| wire_payload_bytes < full_object_bytes)
     }
 
     /// Encode this concrete send plan into its deterministic transfer envelope.
@@ -1497,9 +1507,8 @@ pub fn build_delta_resync_wire_payload(
 /// Plan and build the sender-side delta transmission for one re-sync.
 ///
 /// This is the end-to-end sender decision used by an edited-file re-sync: it
-/// sends a delta envelope when either the chunk-level plan is smaller than the
-/// full object or a sub-chunk op stream makes the otherwise-full-object change
-/// smaller on the wire.
+/// sends a delta envelope only when the encoded chunk/sub-chunk transfer is
+/// smaller than the full object.
 pub fn build_delta_resync_transmission(
     sender: &PersistentChunkManifest,
     sender_store: &ContentAddressedChunkStore,
@@ -1534,11 +1543,23 @@ pub fn build_delta_resync_transmission(
                 receiver_manifest,
                 &signatures,
             )?;
-            Ok(DeltaResyncTransmission {
-                plan: base_plan,
-                wire_payload: Some(wire_payload),
-                full_object_bytes: sender.total_size_bytes,
-            })
+            if wire_payload.beats_full_object(sender.total_size_bytes) {
+                Ok(DeltaResyncTransmission {
+                    plan: base_plan,
+                    wire_payload: Some(wire_payload),
+                    full_object_bytes: sender.total_size_bytes,
+                })
+            } else {
+                Ok(DeltaResyncTransmission {
+                    plan: full_object_plan(
+                        sender,
+                        Some(receiver_manifest),
+                        DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject,
+                    ),
+                    wire_payload: None,
+                    full_object_bytes: sender.total_size_bytes,
+                })
+            }
         }
         DeltaResyncMode::FullObjectFallback
             if base_plan.fallback_reason
@@ -3540,6 +3561,64 @@ mod tests {
             err,
             DeltaError::DeltaSendPlanPayloadBytesMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn transmission_falls_back_when_delta_envelope_exceeds_full_object() {
+        let shared = vec![0x11, 0x22];
+        let mut sender_chunks = Vec::new();
+        sender_chunks.push(shared.clone());
+        for idx in 0..512u16 {
+            sender_chunks.push(vec![(idx & 0xff) as u8, (idx >> 8) as u8, 0xa5]);
+        }
+        let sender_slices = sender_chunks.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(&mut sender_store, "tiny-chunk-file", sender_slices);
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tiny-chunk-file",
+            vec![shared.as_slice()],
+        );
+
+        let chunk_level_plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+        assert_eq!(chunk_level_plan.mode, DeltaResyncMode::DeltaChunks);
+        assert!(chunk_level_plan.missing_bytes < sender.total_size_bytes);
+
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let raw_delta = build_delta_resync_wire_payload(
+            &chunk_level_plan,
+            &sender_store,
+            &receiver,
+            &signatures,
+        )
+        .expect("raw delta wire payload");
+        assert!(
+            raw_delta.wire_payload_bytes > sender.total_size_bytes,
+            "test fixture must exercise metadata-dominated over-full delta"
+        );
+
+        let transmission = build_delta_resync_transmission(
+            &sender,
+            &sender_store,
+            Some(&receiver),
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("transmission");
+
+        assert!(transmission.requires_full_object_fallback());
+        assert_eq!(
+            transmission.plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject)
+        );
+        assert!(transmission.wire_payload.is_none());
     }
 
     #[test]

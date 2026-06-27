@@ -217,7 +217,8 @@ pub fn signature(old: &[u8], block_size: usize) -> SubBlockSignature {
 /// Compute the byte-precise op stream that reconstructs `new` from the OLD buffer
 /// described by `sig`. `apply(old, diff(new, signature(old, b))) == new` exactly.
 ///
-/// Consecutive literal bytes are coalesced into a single [`SubDeltaOp::Literal`].
+/// Consecutive literal bytes are coalesced into a single [`SubDeltaOp::Literal`],
+/// and adjacent copy blocks are coalesced into a single [`SubDeltaOp::Copy`].
 #[must_use]
 pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
     let block_size = sig.block_size as usize;
@@ -259,10 +260,7 @@ pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
             if pos > literal_start {
                 ops.push(SubDeltaOp::Literal(new[literal_start..pos].to_vec()));
             }
-            ops.push(SubDeltaOp::Copy {
-                old_offset: b.offset,
-                len: b.len,
-            });
+            push_copy_op(&mut ops, b.offset, b.len);
             pos += block_size;
             literal_start = pos;
             if pos + block_size <= new.len() {
@@ -289,6 +287,27 @@ pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
         ops.push(SubDeltaOp::Literal(new[literal_start..].to_vec()));
     }
     ops
+}
+
+fn push_copy_op(ops: &mut Vec<SubDeltaOp>, old_offset: u64, len: u32) {
+    if len == 0 {
+        return;
+    }
+
+    if let Some(SubDeltaOp::Copy {
+        old_offset: previous_offset,
+        len: previous_len,
+    }) = ops.last_mut()
+    {
+        let previous_end = previous_offset.checked_add(u64::from(*previous_len));
+        let merged_len = u64::from(*previous_len) + u64::from(len);
+        if previous_end == Some(old_offset) && u32::try_from(merged_len).is_ok() {
+            *previous_len = merged_len as u32;
+            return;
+        }
+    }
+
+    ops.push(SubDeltaOp::Copy { old_offset, len });
 }
 
 /// Reconstruct the NEW buffer from the OLD buffer and the op stream.
@@ -394,7 +413,15 @@ mod tests {
             0,
             "identical content sends no literals"
         );
-        assert!(ops.iter().all(|o| matches!(o, SubDeltaOp::Copy { .. })));
+        assert_eq!(
+            ops,
+            vec![SubDeltaOp::Copy {
+                old_offset: 0,
+                len: old.len() as u32,
+            }],
+            "adjacent matching blocks should encode as one copy run"
+        );
+        assert_eq!(wire_bytes(&ops), 10);
     }
 
     #[test]
@@ -406,6 +433,17 @@ mod tests {
         // The 8192 old bytes (8 full blocks) are copied; only the 200 appended
         // bytes are literal.
         assert_eq!(literal_bytes(&ops), 200);
+        assert_eq!(
+            ops,
+            vec![
+                SubDeltaOp::Copy {
+                    old_offset: 0,
+                    len: old.len() as u32,
+                },
+                SubDeltaOp::Literal(vec![0xAB; 200]),
+            ],
+            "append should not pay one copy op per reused block"
+        );
     }
 
     #[test]
