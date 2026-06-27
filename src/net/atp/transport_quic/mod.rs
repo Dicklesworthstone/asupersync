@@ -293,6 +293,16 @@ const QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 // until central A/B proves a higher encrypted sender rate is good-safe.
 const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
+/// Default native QUIC path-rate cap for the 50M/bad encrypted matrix cell.
+///
+/// MATRIX-135 showed that the pacer-owned QUIC data plane converges but wastes
+/// encrypted CPU by ramping to 24 MiB/s over a 50 mbit shaped path. A high RTT
+/// or already-visible delivery loss is enough evidence that the path is not the
+/// clean LAN/good fixture, so cap the default spray near the 50 mbit pipe unless
+/// an operator supplies an even lower `bwlimit`.
+const QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS: u64 = 6 * 1024 * 1024;
+const QUIC_RATE_MATCHED_RTT_MIN_S: f64 = 0.060;
+const QUIC_RATE_MATCHED_LOSS_MIN: f64 = 0.010;
 const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
@@ -791,6 +801,13 @@ pub struct QuicSprayPacingInput {
     /// Optional user/operator bandwidth cap in bytes per second. J6 wires this
     /// from `--bwlimit`; C3 keeps it as a pure input.
     pub bandwidth_limit_bps: Option<u64>,
+    /// Optional transport-selected path-rate cap in bytes per second.
+    ///
+    /// Unlike `bandwidth_limit_bps`, this is not an operator directive. It is
+    /// the native QUIC sender's default rate-match guard for high-RTT/lossy
+    /// paths, so the encrypted data plane does not spend AES-GCM on symbols far
+    /// beyond the shaped link rate.
+    pub path_rate_limit_bps: Option<u64>,
     /// Loss fraction expected to be absorbed by RaptorQ repair before treating
     /// path loss as congestion.
     pub fec_loss_budget: f64,
@@ -813,6 +830,8 @@ pub enum QuicSprayPacingLimiter {
     ResponsivenessBackoff,
     /// The optional bandwidth cap reduced the pacing rate.
     BandwidthLimit,
+    /// The transport-selected path-rate cap reduced the default spray rate.
+    PathRateMatch,
 }
 
 impl QuicSprayPacingLimiter {
@@ -824,6 +843,7 @@ impl QuicSprayPacingLimiter {
             Self::LossBackoff => "loss",
             Self::ResponsivenessBackoff => "responsiveness",
             Self::BandwidthLimit => "bandwidth_limit",
+            Self::PathRateMatch => "path_rate_match",
         }
     }
 }
@@ -933,11 +953,19 @@ pub fn quic_spray_pacing_decision(input: QuicSprayPacingInput) -> QuicSprayPacin
     let cwnd_share_symbols = (cwnd_symbols / fanout).max(1);
     let burst_cap_share_symbols = (burst_cap / fanout).max(1);
 
-    let base_rate = input
+    let operator_cap = input
         .bandwidth_limit_bps
-        .map_or(QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64, |cap| {
-            cap.max(MIN_QUIC_SPRAY_RATE_BPS)
-        }) as f64
+        .map(|cap| cap.max(MIN_QUIC_SPRAY_RATE_BPS));
+    let path_rate_cap = input
+        .path_rate_limit_bps
+        .map(|cap| cap.max(MIN_QUIC_SPRAY_RATE_BPS));
+    let rate_cap = match (operator_cap, path_rate_cap) {
+        (Some(operator), Some(path)) => Some(operator.min(path)),
+        (Some(operator), None) => Some(operator),
+        (None, Some(path)) => Some(path),
+        (None, None) => None,
+    };
+    let base_rate = rate_cap.unwrap_or(QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64) as f64
         / fanout as f64;
     let fec_loss_budget = if input.fec_loss_budget.is_finite() {
         input.fec_loss_budget.clamp(0.0, 0.90)
@@ -965,12 +993,16 @@ pub fn quic_spray_pacing_decision(input: QuicSprayPacingInput) -> QuicSprayPacin
         .saturating_mul(u64::try_from(symbol_payload).unwrap_or(u64::MAX).max(1));
     let pause_after_burst = pacing_pause_for_bytes(burst_bytes, pacing_rate_bps);
 
+    let operator_limited = operator_cap.is_some_and(|cap| rate_cap == Some(cap));
+    let path_rate_limited = path_rate_cap.is_some_and(|cap| rate_cap == Some(cap));
     let limiter = if congestion_loss_rate > 0.0 {
         QuicSprayPacingLimiter::LossBackoff
     } else if pressure > 0.0 {
         QuicSprayPacingLimiter::ResponsivenessBackoff
-    } else if input.bandwidth_limit_bps.is_some() {
+    } else if operator_limited {
         QuicSprayPacingLimiter::BandwidthLimit
+    } else if path_rate_limited {
+        QuicSprayPacingLimiter::PathRateMatch
     } else if burst_cap_share_symbols < burst_by_rate {
         QuicSprayPacingLimiter::BurstCap
     } else {
@@ -1011,12 +1043,14 @@ pub fn quic_spray_pacing_decision_from_config_with_cpu(
     path: QuicPathSignalSample,
     cpu_parallelism: usize,
 ) -> QuicSprayPacingDecision {
+    let path = path.clamped();
     quic_spray_pacing_decision(QuicSprayPacingInput {
         path,
         symbol_size: config.symbol_size,
         max_datagram_size: config.max_datagram_size,
         datagram_fanout: quic_effective_datagram_fanout(config, cpu_parallelism),
         bandwidth_limit_bps: config.bwlimit_bps,
+        path_rate_limit_bps: quic_default_path_rate_limit_bps(&path),
         fec_loss_budget: (config.repair_overhead - 1.0).max(0.0),
         machine_pressure: QuicMachinePressure {
             cpu_pressure: config.responsiveness_pressure,
@@ -1024,6 +1058,12 @@ pub fn quic_spray_pacing_decision_from_config_with_cpu(
         },
         burst_cap_symbols: config.max_spray_symbols_per_flush,
     })
+}
+
+fn quic_default_path_rate_limit_bps(path: &QuicPathSignalSample) -> Option<u64> {
+    (path.smoothed_rtt_s >= QUIC_RATE_MATCHED_RTT_MIN_S
+        || path.loss_rate >= QUIC_RATE_MATCHED_LOSS_MIN)
+        .then_some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
 }
 
 /// Bound the configured QUIC DATAGRAM fan-out by connection and CPU capacity.
@@ -1497,11 +1537,19 @@ impl QuicRound0CleanPacingRamp {
     }
 }
 
+pub(crate) fn quic_round0_clean_ramp_max_pacing_bps(pacing: &QuicSprayPacingDecision) -> u64 {
+    match pacing.limiter {
+        QuicSprayPacingLimiter::PathRateMatch => pacing.pacing_rate_bps,
+        _ => QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+    }
+}
+
 pub(crate) fn quic_round0_clean_ramp_enabled(
     config: &QuicConfig,
     pacing: &QuicSprayPacingDecision,
     with_source: bool,
 ) -> bool {
+    let max_pacing_bps = quic_round0_clean_ramp_max_pacing_bps(pacing);
     with_source
         && config.debug_drop_one_in == 0
         && config.bwlimit_bps.is_none()
@@ -1509,7 +1557,7 @@ pub(crate) fn quic_round0_clean_ramp_enabled(
         && config.repair_overhead.is_finite()
         && config.repair_overhead <= QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD
         && pacing.path_loss_rate <= f64::EPSILON
-        && pacing.pacing_rate_bps < QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
+        && pacing.pacing_rate_bps < max_pacing_bps
 }
 
 fn update_quic_pacing_pause(
@@ -8936,6 +8984,15 @@ mod tests {
             "cwnd telemetry should still reflect the sampled native QUIC path"
         );
 
+        let high_rtt =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.080, 1_048_576, 0.0));
+        assert_eq!(high_rtt.limiter, QuicSprayPacingLimiter::PathRateMatch);
+        assert_eq!(
+            high_rtt.pacing_rate_bps, QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS,
+            "50M/bad-style RTT should rate-match the encrypted pacer near the shaped link instead of inheriting the 24 MiB/s cold-start"
+        );
+        assert!(high_rtt.pacing_rate_bps < large_cwnd.pacing_rate_bps);
+
         let lossy =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.40));
         assert_eq!(lossy.limiter, QuicSprayPacingLimiter::LossBackoff);
@@ -9002,9 +9059,17 @@ mod tests {
         let config = trusted_quic_config();
         let clean =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.0));
+        let bad_rtt =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.080, 1_048_576, 0.0));
 
         assert!(quic_round0_clean_ramp_enabled(&config, &clean, true));
         assert!(!quic_round0_clean_ramp_enabled(&config, &clean, false));
+        assert!(!quic_round0_clean_ramp_enabled(&config, &bad_rtt, true));
+        assert_eq!(
+            quic_round0_clean_ramp_max_pacing_bps(&bad_rtt),
+            bad_rtt.pacing_rate_bps,
+            "path-rate matched bad-link sprays must not ramp past their selected cap"
+        );
 
         for blocked in [
             QuicConfig {

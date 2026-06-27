@@ -368,6 +368,14 @@ fn spray_pacing_policy_is_public_and_uses_cwnd_as_telemetry() {
     assert!(high_cwnd.cwnd_symbols > low_cwnd.cwnd_symbols);
     assert!(high_cwnd.max_burst_symbols <= config.max_spray_symbols_per_flush);
 
+    let high_rtt =
+        quic_spray_pacing_decision_from_config(&config, quic_pacing_signal(0.080, 768 * 1024, 0.0));
+    assert_eq!(high_rtt.limiter, QuicSprayPacingLimiter::PathRateMatch);
+    assert!(
+        high_rtt.pacing_rate_bps <= 6 * 1024 * 1024,
+        "high-RTT encrypted paths should rate-match near the 50 mbit matrix link instead of inheriting the clean cold-start rate"
+    );
+
     let lossy = quic_spray_pacing_decision_from_config(
         &config,
         quic_pacing_signal(0.040, 768 * 1024, 0.35),

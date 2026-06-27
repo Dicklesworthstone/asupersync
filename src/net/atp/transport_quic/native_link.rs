@@ -3433,10 +3433,11 @@ async fn spray_round(
     let repair_batch = super::repair_batch_per_block(config);
     let drop_one_in = config.debug_drop_one_in;
     let mut pacing = link.spray_pacing_decision(config, aimd.cap_bps(), aimd.observed_loss());
+    let clean_ramp_max_pacing_bps = super::quic_round0_clean_ramp_max_pacing_bps(&pacing);
     let mut clean_ramp =
         super::quic_round0_clean_ramp_enabled(config, &pacing, with_source).then(|| {
             super::QuicRound0CleanPacingRamp::new_with_burst_cap(
-                super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+                clean_ramp_max_pacing_bps,
                 config.max_spray_symbols_per_flush,
             )
         });
@@ -3445,7 +3446,7 @@ async fn spray_round(
             "sender-native: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} datagram_fanout={} datagram_frame_bytes={} burst_symbols={}",
             pacing.pacing_rate_bps,
             super::QUIC_ROUND0_CLEAN_RAMP_STEP_BYTES,
-            super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+            clean_ramp_max_pacing_bps,
             config.datagram_fanout.max(1),
             link.symbol_datagram_frame_len,
             pacing.max_burst_symbols,
