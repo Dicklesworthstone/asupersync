@@ -191,8 +191,8 @@ mod tls_key_share_tests {
             ];
 
             let cert = asupersync::tls::Certificate::from_der(test_cert_der);
-            let chain = asupersync::tls::CertificateChain::from_certificates(vec![cert])?;
-            let key = asupersync::tls::PrivateKey::from_der(test_key_der)?;
+            let chain = asupersync::tls::CertificateChain::from(vec![cert]);
+            let key = asupersync::tls::PrivateKey::from_pkcs8_der(test_key_der);
 
             Ok((chain, key))
         }
