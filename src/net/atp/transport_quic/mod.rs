@@ -1390,14 +1390,6 @@ pub fn trace_quic_fanout_dispatch_plan(cx: &Cx, round: u64, plan: &QuicFanoutDis
     }
 }
 
-#[cfg(feature = "tls")]
-pub(crate) fn quic_spray_pacing_decision_from_transport(
-    config: &QuicConfig,
-    transport: &QuicTransportMachine,
-) -> QuicSprayPacingDecision {
-    quic_spray_pacing_decision_from_config(config, quic_path_signal_from_transport(transport))
-}
-
 fn clamp_unit_pressure(value: f64) -> f64 {
     if value.is_nan() {
         0.0

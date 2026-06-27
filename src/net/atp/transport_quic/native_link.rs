@@ -63,6 +63,7 @@ use crate::cx::Cx;
 use crate::io::AsyncWriteExt;
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::protocol::frames::{Frame, FrameType};
+use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{
     AtpPacketProtection, AtpPacketProtectionConfig, PacketUnprotectionRequest,
 };
@@ -79,7 +80,8 @@ use crate::net::quic_native::tls::{
 };
 use crate::net::quic_native::{
     NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, PacketNumberSpace,
-    QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket, StreamId, StreamRole,
+    QuicTransportMachine, QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket, StreamId,
+    StreamRole,
 };
 use crate::net::{UDP_MAX_GSO_SEGMENTS, UdpSendBatchStrategy};
 use crate::security::SecurityContext;
@@ -177,6 +179,15 @@ const ONE_RTT_TAG_LEN: usize = 16;
 const ONE_RTT_FIXED_BIT: u8 = 0x40;
 /// QUIC short-header key-phase bit (bit 2).
 const ONE_RTT_KEY_PHASE_BIT: u8 = 0x04;
+/// Packet-count-sized recovery charge for one simplified ATP 1-RTT data packet.
+///
+/// The native recovery machine's initial cwnd is expressed in 1200-byte packet
+/// units. ATP-over-QUIC can pack many symbol DATAGRAM frames into one jumbo UDP
+/// packet on hermetic benchmark links, so charging the full jumbo length would
+/// make the first data packet exceed cwnd and deadlock. Charging one packet unit
+/// gives the pump real bytes-in-flight / ACK / loss accounting while preserving
+/// the already-proven jumbo coalescing envelope.
+const QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES: u64 = 1_200;
 
 /// UDP max packet size for the link's endpoint.
 ///
@@ -500,6 +511,32 @@ fn need_more_loss_compensated_target_symbols(
         .unwrap_or_else(|| {
             loss_compensated_repair_target(base_deficit_symbols, need.round_loss_fraction)
         })
+}
+
+fn delivery_loss_compensated_repair_blocks(
+    requests: &[QuicBlockRepairRequest],
+    sender_delivery_loss: Option<f64>,
+) -> Vec<QuicBlockRepairRequest> {
+    let Some(loss) = sender_delivery_loss.filter(|loss| loss.is_finite() && *loss > 0.0) else {
+        return requests.to_vec();
+    };
+    requests
+        .iter()
+        .map(|request| {
+            let target = loss_compensated_repair_target(u64::from(request.symbols), Some(loss))
+                .min(u64::from(u32::MAX));
+            QuicBlockRepairRequest {
+                symbols: u32::try_from(target).unwrap_or(u32::MAX),
+                ..*request
+            }
+        })
+        .collect()
+}
+
+fn repair_block_symbol_count(requests: &[QuicBlockRepairRequest]) -> u64 {
+    requests.iter().fold(0u64, |acc, request| {
+        acc.saturating_add(u64::from(request.symbols))
+    })
 }
 
 fn next_feedback_round_or_no_convergence(
@@ -931,6 +968,53 @@ fn coalesced_datagram_frames_per_packet(
     (max_app_payload / datagram_frame_len.max(1)).max(1)
 }
 
+fn frame_is_ack_eliciting_for_recovery(frame: &QuicFrame) -> bool {
+    !matches!(
+        frame,
+        QuicFrame::Padding { .. } | QuicFrame::Ack { .. } | QuicFrame::ConnectionClose { .. }
+    )
+}
+
+fn frames_have_datagram(frames: &[QuicFrame]) -> bool {
+    frames
+        .iter()
+        .any(|frame| matches!(frame, QuicFrame::Datagram { .. }))
+}
+
+fn data_plane_packet_accounting_bytes(packet_len: usize) -> u64 {
+    u64::try_from(packet_len)
+        .unwrap_or(u64::MAX)
+        .clamp(1, QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES)
+}
+
+fn trace_quic_data_plane_congestion_limited(
+    cx: &Cx,
+    pending_datagrams: usize,
+    bytes_in_flight: u64,
+    congestion_window: u64,
+) {
+    if std::env::var_os("ATP_RQ_TRACE").is_none() {
+        return;
+    }
+    let pending_datagrams_s = pending_datagrams.to_string();
+    let bytes_in_flight_s = bytes_in_flight.to_string();
+    let congestion_window_s = congestion_window.to_string();
+    cx.trace_with_fields(
+        "atp_quic.sender.data_plane_congestion_limited",
+        &[
+            ("pending_datagrams", pending_datagrams_s.as_str()),
+            ("bytes_in_flight", bytes_in_flight_s.as_str()),
+            ("congestion_window", congestion_window_s.as_str()),
+        ],
+    );
+    quic_rqtrace!(
+        "sender: data_plane_congestion_limited pending_datagrams={} bytes_in_flight={} congestion_window={}",
+        pending_datagrams,
+        bytes_in_flight,
+        congestion_window,
+    );
+}
+
 /// Un-clamped pacing owed-time for `bytes` at `rate_bps` (≈ bytes/rate seconds).
 /// Unlike `super::pacing_pause_for_bytes`, this does NOT floor at
 /// `QUIC_SPRAY_MIN_PAUSE`, so sub-millisecond owed time can be accrued as pacing
@@ -1056,7 +1140,8 @@ pub struct QuicLink {
     endpoint: QuicUdpEndpoint,
     protection: AtpPacketProtection,
     peer: SocketAddr,
-    /// Monotonic outbound 1-RTT packet number.
+    role: StreamRole,
+    /// Local short-header packet number fallback for packets not tracked by recovery.
     send_pn: u64,
     /// Monotonic data-plane clock fed to the connection.
     clock: u64,
@@ -1263,6 +1348,21 @@ impl NativeReceiveTraceCounters {
     }
 }
 
+fn native_quic_path_signal_with_observed_loss(
+    transport: &QuicTransportMachine,
+    observed_loss: f64,
+) -> super::QuicPathSignalSample {
+    let mut path = super::quic_path_signal_from_transport(transport);
+    // MATRIX-123/126/127: the encrypted native spray can see queue drops only
+    // through sender-observed delivery loss. Fold that signal into the path sample
+    // before computing the pacing decision so the loss backoff, burst, pause, trace
+    // fields, and clean-ramp gate all use the same loss view.
+    if observed_loss.is_finite() {
+        path.loss_rate = path.loss_rate.max(observed_loss.clamp(0.0, 0.90));
+    }
+    path.clamped()
+}
+
 impl QuicLink {
     fn protection_config() -> AtpPacketProtectionConfig {
         AtpPacketProtectionConfig {
@@ -1441,6 +1541,45 @@ impl QuicLink {
         self.service_decoded_spray_liveness(cx, control).await
     }
 
+    async fn flush_until_outbound_datagrams_drained(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+        operation: &'static str,
+    ) -> Result<usize, QuicTransportError> {
+        let mut total_flushed = 0usize;
+        let mut idle_waits = 0usize;
+
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if self.conn.pending_outbound_datagram_count() == 0 {
+                return Ok(total_flushed);
+            }
+
+            let before = self.conn.pending_outbound_datagram_count();
+            let flushed = self.flush(cx).await?;
+            total_flushed = total_flushed.saturating_add(flushed);
+            if self.conn.pending_outbound_datagram_count() == 0 {
+                return Ok(total_flushed);
+            }
+
+            let pumped = self.pump_inbound_for(cx, NEEDMORE_PTO).await?;
+            self.service_decoded_spray_liveness(cx, control).await?;
+            let after = self.conn.pending_outbound_datagram_count();
+            if flushed == 0 && pumped == 0 && after >= before {
+                idle_waits = idle_waits.saturating_add(1);
+                if idle_waits >= 2 {
+                    return Err(QuicTransportError::Timeout {
+                        operation,
+                        timeout: NEEDMORE_PTO.saturating_mul(2),
+                    });
+                }
+            } else {
+                idle_waits = 0;
+            }
+        }
+    }
+
     async fn service_decoded_spray_liveness(
         &mut self,
         cx: &Cx,
@@ -1531,6 +1670,22 @@ impl QuicLink {
         let mut plaintext_payload_bytes = 0usize;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let pending_datagrams = self.conn.pending_outbound_datagram_count();
+            if self.role == StreamRole::Client
+                && pending_datagrams > 0
+                && !self
+                    .conn
+                    .transport()
+                    .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES)
+            {
+                trace_quic_data_plane_congestion_limited(
+                    cx,
+                    pending_datagrams,
+                    self.conn.transport().bytes_in_flight(),
+                    self.conn.transport().congestion_window_bytes(),
+                );
+                break;
+            }
             let frames = self.conn.generate_frames(
                 cx,
                 PacketNumberSpace::ApplicationData,
@@ -1563,12 +1718,37 @@ impl QuicLink {
                 .count();
             let mut payload = BytesMut::new();
             NativeQuicConnection::encode_frames(&frames, &mut payload)?;
+            let packet_len = ONE_RTT_HEADER_LEN
+                .saturating_add(payload.len())
+                .saturating_add(ONE_RTT_TAG_LEN);
+            let packet_number = if self.role == StreamRole::Client {
+                self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
+                let ack_eliciting = frames.iter().any(frame_is_ack_eliciting_for_recovery);
+                let tracks_data_plane = frames_have_datagram(&frames);
+                let accounting_bytes = if tracks_data_plane {
+                    data_plane_packet_accounting_bytes(packet_len)
+                } else {
+                    u64::try_from(packet_len).unwrap_or(u64::MAX).max(1)
+                };
+                let packet_number = self.conn.on_packet_sent(
+                    cx,
+                    PacketNumberSpace::ApplicationData,
+                    accounting_bytes,
+                    ack_eliciting,
+                    tracks_data_plane,
+                    self.clock,
+                )?;
+                self.send_pn = self.send_pn.max(packet_number.saturating_add(1));
+                packet_number
+            } else {
+                let packet_number = self.send_pn;
+                self.send_pn = self.send_pn.saturating_add(1);
+                packet_number
+            };
             datagram_frames = datagram_frames.saturating_add(packet_datagram_frames);
             max_datagram_frames_per_plain_packet =
                 max_datagram_frames_per_plain_packet.max(packet_datagram_frames);
             plaintext_payload_bytes = plaintext_payload_bytes.saturating_add(payload.len());
-            let packet_number = self.send_pn;
-            self.send_pn = self.send_pn.saturating_add(1);
             let header = encode_one_rtt_header(packet_number);
             plain_packets.push(PlainOneRttPacket {
                 packet_number,
@@ -1879,18 +2059,8 @@ impl QuicLink {
         if let Some(cap) = aimd_cap_bps {
             config.bwlimit_bps = Some(config.bwlimit_bps.map_or(cap, |existing| existing.min(cap)));
         }
-        let mut decision =
-            super::quic_spray_pacing_decision_from_transport(&config, self.conn.transport());
-        // Bug A (MATRIX-123/126): the transport's `path.loss_rate` stays ~0 on the
-        // encrypted spray, so the round-0 `clean_pacing_ramp` gate (`path_loss_rate <=
-        // EPSILON`) keeps re-arming every round and FLOODS the link (12->24 MiB/s into a
-        // 50 mbit link = ~96% queue drop), bypassing the AIMD cap. Fold the sender-observed
-        // round delivery loss in so the clean ramp disables once round-0's massive drop is
-        // measured; the spray then uses the normal/AIMD-capped rate and can converge.
-        if observed_loss.is_finite() {
-            decision.path_loss_rate = decision.path_loss_rate.max(observed_loss.clamp(0.0, 0.90));
-        }
-        decision
+        let path = native_quic_path_signal_with_observed_loss(self.conn.transport(), observed_loss);
+        super::quic_spray_pacing_decision_from_config(&config, path)
     }
 
     fn spray_handoff_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
@@ -1899,6 +2069,45 @@ impl QuicLink {
             self.conn.pending_outbound_datagram_count(),
             pacing.path_loss_rate,
         )
+    }
+
+    async fn flush_symbol_queue_until_below_limit(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+        flush_symbols: usize,
+        pacing: &QuicSprayPacingDecision,
+        flushes: &mut usize,
+        flushed_packets: &mut usize,
+        flush_elapsed: &mut Duration,
+        liveness_elapsed: &mut Duration,
+        pause_elapsed: &mut Duration,
+    ) -> Result<(), QuicTransportError> {
+        while self.conn.pending_outbound_datagram_count() >= flush_symbols {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let pending_before_flush = self.conn.pending_outbound_datagram_count();
+            let flush_start = Instant::now();
+            let packets_flushed = self.flush(cx).await?;
+            *flushed_packets = (*flushed_packets).saturating_add(packets_flushed);
+            *flush_elapsed = (*flush_elapsed).saturating_add(flush_start.elapsed());
+            *flushes = (*flushes).saturating_add(1);
+
+            let liveness_start = Instant::now();
+            self.service_spray_liveness(cx, control).await?;
+            let liveness_poll_elapsed = liveness_start.elapsed();
+            *liveness_elapsed = (*liveness_elapsed).saturating_add(liveness_poll_elapsed);
+            self.sender_handoff
+                .record_queue_full_flush(liveness_poll_elapsed);
+
+            let pause =
+                self.pause_after_symbol_flush(pending_before_flush.min(flush_symbols), pacing);
+            if !pause.is_zero() {
+                let pause_start = Instant::now();
+                crate::time::sleep(cx.now(), pause).await;
+                *pause_elapsed = (*pause_elapsed).saturating_add(pause_start.elapsed());
+            }
+        }
+        Ok(())
     }
 
     /// Spray a bounded symbol batch, flushing first whenever the paced outbound
@@ -1927,24 +2136,18 @@ impl QuicLink {
         let mut max_pending_before = self.conn.pending_outbound_datagram_count();
 
         if max_pending_before >= flush_symbols {
-            let flush_start = Instant::now();
-            flushed_packets = flushed_packets.saturating_add(self.flush(cx).await?);
-            flush_elapsed = flush_elapsed.saturating_add(flush_start.elapsed());
-            flushes = flushes.saturating_add(1);
-
-            let liveness_start = Instant::now();
-            self.service_decoded_spray_liveness(cx, control).await?;
-            let liveness_poll_elapsed = liveness_start.elapsed();
-            liveness_elapsed = liveness_elapsed.saturating_add(liveness_poll_elapsed);
-            self.sender_handoff
-                .record_queue_full_flush(liveness_poll_elapsed);
-
-            let pause = self.pause_after_symbol_flush(flush_symbols, pacing);
-            if !pause.is_zero() {
-                let pause_start = Instant::now();
-                crate::time::sleep(cx.now(), pause).await;
-                pause_elapsed = pause_elapsed.saturating_add(pause_start.elapsed());
-            }
+            self.flush_symbol_queue_until_below_limit(
+                cx,
+                control,
+                flush_symbols,
+                pacing,
+                &mut flushes,
+                &mut flushed_packets,
+                &mut flush_elapsed,
+                &mut liveness_elapsed,
+                &mut pause_elapsed,
+            )
+            .await?;
         }
 
         let mut encoded_bytes = 0usize;
@@ -1975,24 +2178,18 @@ impl QuicLink {
         );
 
         if pending_after_enqueue >= flush_symbols {
-            let flush_start = Instant::now();
-            flushed_packets = flushed_packets.saturating_add(self.flush(cx).await?);
-            flush_elapsed = flush_elapsed.saturating_add(flush_start.elapsed());
-            flushes = flushes.saturating_add(1);
-
-            let liveness_start = Instant::now();
-            self.service_decoded_spray_liveness(cx, control).await?;
-            let liveness_poll_elapsed = liveness_start.elapsed();
-            liveness_elapsed = liveness_elapsed.saturating_add(liveness_poll_elapsed);
-            self.sender_handoff
-                .record_queue_full_flush(liveness_poll_elapsed);
-
-            let pause = self.pause_after_symbol_flush(flush_symbols, pacing);
-            if !pause.is_zero() {
-                let pause_start = Instant::now();
-                crate::time::sleep(cx.now(), pause).await;
-                pause_elapsed = pause_elapsed.saturating_add(pause_start.elapsed());
-            }
+            self.flush_symbol_queue_until_below_limit(
+                cx,
+                control,
+                flush_symbols,
+                pacing,
+                &mut flushes,
+                &mut flushed_packets,
+                &mut flush_elapsed,
+                &mut liveness_elapsed,
+                &mut pause_elapsed,
+            )
+            .await?;
         }
 
         trace_quic_symbol_handoff(
@@ -2060,8 +2257,12 @@ impl QuicLink {
         }
 
         let pending_symbols = self.conn.pending_outbound_datagram_count();
-        self.flush(cx).await?;
-        self.service_decoded_spray_liveness(cx, control).await?;
+        self.flush_until_outbound_datagrams_drained(
+            cx,
+            control,
+            "drain cwnd-gated spray before ObjectComplete",
+        )
+        .await?;
 
         let flush_symbol_limit = self.paced_flush_symbol_limit(pacing);
         let flushed_symbols = pending_symbols.min(flush_symbol_limit);
@@ -2225,6 +2426,7 @@ fn link_from_handshake(
         endpoint,
         protection,
         peer,
+        role,
         send_pn: 0,
         clock: 0,
         max_app_payload,
@@ -2445,6 +2647,18 @@ impl NativeQuicAimdPacer {
         self.last_round_loss_fraction
     }
 
+    fn sender_delivery_loss_for_repair(&self, receiver_loss: Option<f64>) -> Option<f64> {
+        if self.last_round_symbols_sent == 0 || !self.last_round_loss_fraction.is_finite() {
+            return None;
+        }
+        let receiver_loss = receiver_loss
+            .filter(|loss| loss.is_finite())
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.90);
+        let sender_loss = self.last_round_loss_fraction.clamp(0.0, 0.90);
+        (sender_loss > receiver_loss + f64::EPSILON).then_some(sender_loss)
+    }
+
     fn record_spray(&mut self, symbols_sent: u64, pacing_rate_bps: u64) {
         self.last_round_symbols_sent = symbols_sent;
         self.last_round_pacing_rate_bps = pacing_rate_bps;
@@ -2485,7 +2699,10 @@ impl NativeQuicAimdPacer {
                 .cap_bps
                 .unwrap_or(self.last_round_pacing_rate_bps)
                 .max(super::QUIC_AIMD_MIN_RATE_BPS);
-            let reduced = (base as f64 * super::QUIC_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
+            let loss_responsive_factor = (1.0 - loss).clamp(super::QUIC_SPRAY_MIN_BACKOFF, 1.0);
+            let decrease_factor =
+                super::QUIC_AIMD_MULTIPLICATIVE_DECREASE.min(loss_responsive_factor);
+            let reduced = (base as f64 * decrease_factor).ceil() as u64;
             self.cap_bps =
                 Some(reduced.clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS));
         } else if loss <= super::QUIC_AIMD_CLEAN_INCREASE_THRESHOLD
@@ -3017,29 +3234,50 @@ async fn run_sender_session(
                 let requested_repair_symbols = need_more_repair_symbol_count(&need);
                 let base_deficit_symbols =
                     need_more_base_deficit_symbols(&need, requested_repair_symbols);
+                let sender_delivery_loss_for_repair =
+                    aimd.sender_delivery_loss_for_repair(need.round_loss_fraction);
                 let loss_compensated_target_symbols =
                     loss_compensated_repair_target(base_deficit_symbols, need.round_loss_fraction);
+                let sender_loss_compensated_target_symbols = sender_delivery_loss_for_repair
+                    .map(|loss| loss_compensated_repair_target(base_deficit_symbols, Some(loss)))
+                    .unwrap_or(base_deficit_symbols);
                 let loss_compensated_target_symbols =
                     need_more_loss_compensated_target_symbols(&need, base_deficit_symbols)
-                        .max(loss_compensated_target_symbols);
+                        .max(loss_compensated_target_symbols)
+                        .max(sender_loss_compensated_target_symbols);
+                let repair_blocks_to_send = if need.repair_blocks.is_empty() {
+                    Vec::new()
+                } else {
+                    delivery_loss_compensated_repair_blocks(
+                        &need.repair_blocks,
+                        sender_delivery_loss_for_repair,
+                    )
+                };
+                let repair_symbols_to_emit = repair_block_symbol_count(&repair_blocks_to_send);
+                let loss_compensated_target_symbols =
+                    loss_compensated_target_symbols.max(repair_symbols_to_emit);
                 let request_gap_to_target = need
                     .repair_request_gap_to_target_symbols
                     .unwrap_or_else(|| {
                         loss_compensated_target_symbols.saturating_sub(requested_repair_symbols)
                     });
                 let repair_detail = repair_block_trace_summary(&need.repair_blocks);
+                let sender_delivery_loss_for_repair_trace =
+                    sender_delivery_loss_for_repair.unwrap_or(0.0);
                 quic_rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} repair_blocks={} base_deficit_symbols={} requested_repair_symbols={} loss_compensated_target_symbols={} request_gap_to_target={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} repair_blocks={} base_deficit_symbols={} requested_repair_symbols={} repair_symbols_to_emit={} loss_compensated_target_symbols={} request_gap_to_target={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} sender_delivery_loss_for_repair={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
                     need.pending.len(),
                     need.repair_blocks.len(),
                     base_deficit_symbols,
                     requested_repair_symbols,
+                    repair_symbols_to_emit,
                     loss_compensated_target_symbols,
                     request_gap_to_target,
                     need.source_symbols.len(),
                     need.round_symbols_observed.unwrap_or(0),
                     need.round_symbols_accepted.unwrap_or(0),
                     need.round_loss_fraction.unwrap_or(0.0),
+                    sender_delivery_loss_for_repair_trace,
                     config.max_feedback_rounds,
                     feedback_rounds > config.max_feedback_rounds,
                     super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
@@ -3091,7 +3329,7 @@ async fn run_sender_session(
                         &mut control,
                         manifest,
                         &mut encoders,
-                        &need.repair_blocks,
+                        &repair_blocks_to_send,
                         config,
                         symbol_auth.as_ref(),
                         &mut aimd,
@@ -3116,9 +3354,9 @@ async fn run_sender_session(
                     )
                     .await?
                 };
-                if !need.repair_blocks.is_empty() && sent != requested_repair_symbols {
+                if !need.repair_blocks.is_empty() && sent != repair_symbols_to_emit {
                     return Err(QuicTransportError::Integrity(format!(
-                        "sender emitted {sent} repair symbols for receiver-requested deficit {requested_repair_symbols}"
+                        "sender emitted {sent} repair symbols for loss-compensated repair target {repair_symbols_to_emit}"
                     )));
                 }
                 symbols_sent = symbols_sent.saturating_add(sent);
@@ -4254,7 +4492,12 @@ mod tests {
             aimd.cap_bps().is_some(),
             "a ~98% drop must trip the AIMD multiplicative-decrease cap (no flood)"
         );
-
+        assert_eq!(
+            aimd.cap_bps(),
+            Some(5_000_000),
+            "severe sender-observed delivery loss must cut below half-rate, got {:?}",
+            aimd.cap_bps()
+        );
         // Clean delivery (observed ~= sent) must NOT spuriously back off.
         let mut clean = NativeQuicAimdPacer::default();
         clean.record_spray(1000, 50_000_000);
@@ -4269,6 +4512,158 @@ mod tests {
             clean.last_round_loss_fraction <= f64::EPSILON,
             "full delivery must register ~0 loss, got {}",
             clean.last_round_loss_fraction
+        );
+    }
+
+    #[test]
+    fn native_sender_observed_loss_shapes_pacing_decision_not_only_trace_field() {
+        // MATRIX-127: observed delivery loss must be present before the pacing
+        // decision is computed. Updating only `path_loss_rate` after the fact disables
+        // the clean-ramp flag but leaves rate, burst, pause, and limiter on stale
+        // zero-loss math.
+        let conn = established_native_test_conn();
+        let config = QuicConfig {
+            max_spray_symbols_per_flush: 64,
+            ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+        };
+
+        let clean = super::super::quic_spray_pacing_decision_from_config(
+            &config,
+            native_quic_path_signal_with_observed_loss(conn.transport(), 0.0),
+        );
+        let lossy = super::super::quic_spray_pacing_decision_from_config(
+            &config,
+            native_quic_path_signal_with_observed_loss(conn.transport(), 0.90),
+        );
+
+        assert_eq!(
+            lossy.limiter,
+            super::super::QuicSprayPacingLimiter::LossBackoff
+        );
+        assert!(
+            lossy.pacing_rate_bps < clean.pacing_rate_bps,
+            "sender-observed loss must reduce the computed pacing rate: clean={clean:?} lossy={lossy:?}"
+        );
+        assert!(
+            lossy.max_burst_symbols <= clean.max_burst_symbols,
+            "sender-observed loss must not leave burst sizing on the stale clean path: clean={clean:?} lossy={lossy:?}"
+        );
+        assert!(
+            !super::super::quic_round0_clean_ramp_enabled(&config, &lossy, true),
+            "sender-observed delivery loss must also block clean-ramp eligibility"
+        );
+    }
+
+    #[test]
+    fn native_data_plane_recovery_accounting_uses_packet_units_for_jumbo_udp() {
+        let cx = Cx::for_testing();
+        assert_eq!(data_plane_packet_accounting_bytes(0), 1);
+        assert_eq!(data_plane_packet_accounting_bytes(512), 512);
+        assert_eq!(
+            data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET),
+            QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES
+        );
+
+        let datagram = QuicFrame::Datagram {
+            data: Bytes::from_static(b"symbol"),
+        };
+        assert!(frames_have_datagram(core::slice::from_ref(&datagram)));
+        assert!(frame_is_ack_eliciting_for_recovery(&datagram));
+        assert!(!frames_have_datagram(&[QuicFrame::Ping]));
+        assert!(!frame_is_ack_eliciting_for_recovery(&QuicFrame::Padding {
+            length: 1
+        }));
+
+        let mut conn = established_native_test_conn();
+        let initial_cwnd = conn.transport().congestion_window_bytes();
+        assert_eq!(initial_cwnd, QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES * 10);
+
+        for idx in 0..10 {
+            assert!(
+                conn.transport()
+                    .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES),
+                "packet {idx} should fit before cwnd fills"
+            );
+            let pn = conn
+                .on_packet_sent(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET),
+                    true,
+                    true,
+                    (idx + 1) * CLOCK_STEP_MICROS,
+                )
+                .expect("jumbo ATP packet should charge one recovery unit");
+            assert_eq!(pn, idx);
+        }
+
+        assert_eq!(conn.transport().bytes_in_flight(), initial_cwnd);
+        assert!(
+            !conn
+                .transport()
+                .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES),
+            "initial cwnd should be full after ten coalesced ATP packets"
+        );
+
+        let ack_range = crate::net::quic_native::AckRange::new(9, 0).expect("ack range");
+        conn.on_ack_ranges(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            &[ack_range],
+            0,
+            20 * CLOCK_STEP_MICROS,
+        )
+        .expect("ack range should clear tracked in-flight packets");
+        assert_eq!(conn.transport().bytes_in_flight(), 0);
+        assert!(
+            conn.transport()
+                .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES),
+            "ACK feedback should reopen native recovery cwnd"
+        );
+    }
+
+    #[test]
+    fn quic_sender_delivery_loss_compensates_blind_repair_requests() {
+        // MATRIX-127: Bug B/A made AIMD see sender-side delivery loss, but repair
+        // sizing must use that same signal. Otherwise a receiver with
+        // round_loss_fraction=0.0 still asks for the raw deficit only, even after a
+        // massive queue drop.
+        let cx = Cx::for_testing();
+        let mut aimd = NativeQuicAimdPacer::default();
+        aimd.record_spray(1_000, 50_000_000);
+        let need = QuicNeedMore {
+            feedback_round: 1,
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 0,
+                symbols: 100,
+            }],
+            round_symbols_observed: Some(20),
+            round_loss_fraction: Some(0.0),
+            ..QuicNeedMore::default()
+        };
+
+        aimd.observe_need_more(&cx, &need);
+        let sender_loss = aimd.sender_delivery_loss_for_repair(need.round_loss_fraction);
+        assert!(
+            sender_loss.is_some_and(|loss| loss >= 0.5),
+            "sender-side delivery loss should dominate blind receiver loss: {sender_loss:?}"
+        );
+        let expanded = delivery_loss_compensated_repair_blocks(&need.repair_blocks, sender_loss);
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].entry, 0);
+        assert_eq!(expanded[0].sbn, 0);
+        assert!(
+            expanded[0].symbols > need.repair_blocks[0].symbols,
+            "sender-side delivery loss should inflate repair symbols from {} to {}, not leave the raw deficit",
+            need.repair_blocks[0].symbols,
+            expanded[0].symbols,
+        );
+
+        assert!(
+            aimd.sender_delivery_loss_for_repair(Some(0.90)).is_none(),
+            "do not double-compensate when the receiver loss signal is already at least as high"
         );
     }
 
