@@ -1873,12 +1873,24 @@ impl QuicLink {
         &self,
         config: &QuicConfig,
         aimd_cap_bps: Option<u64>,
+        observed_loss: f64,
     ) -> QuicSprayPacingDecision {
         let mut config = config.clone();
         if let Some(cap) = aimd_cap_bps {
             config.bwlimit_bps = Some(config.bwlimit_bps.map_or(cap, |existing| existing.min(cap)));
         }
-        super::quic_spray_pacing_decision_from_transport(&config, self.conn.transport())
+        let mut decision =
+            super::quic_spray_pacing_decision_from_transport(&config, self.conn.transport());
+        // Bug A (MATRIX-123/126): the transport's `path.loss_rate` stays ~0 on the
+        // encrypted spray, so the round-0 `clean_pacing_ramp` gate (`path_loss_rate <=
+        // EPSILON`) keeps re-arming every round and FLOODS the link (12->24 MiB/s into a
+        // 50 mbit link = ~96% queue drop), bypassing the AIMD cap. Fold the sender-observed
+        // round delivery loss in so the clean ramp disables once round-0's massive drop is
+        // measured; the spray then uses the normal/AIMD-capped rate and can converge.
+        if observed_loss.is_finite() {
+            decision.path_loss_rate = decision.path_loss_rate.max(observed_loss.clamp(0.0, 0.90));
+        }
+        decision
     }
 
     fn spray_handoff_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
@@ -2426,6 +2438,13 @@ impl NativeQuicAimdPacer {
         self.cap_bps
     }
 
+    /// Sender-observed delivery loss from the last completed round. Used to seed
+    /// `pacing.path_loss_rate` (Bug A, MATRIX-126) so the round-0 clean-link ramp
+    /// disables after a high delivery loss instead of re-arming and flooding.
+    fn observed_loss(&self) -> f64 {
+        self.last_round_loss_fraction
+    }
+
     fn record_spray(&mut self, symbols_sent: u64, pacing_rate_bps: u64) {
         self.last_round_symbols_sent = symbols_sent;
         self.last_round_pacing_rate_bps = pacing_rate_bps;
@@ -2520,7 +2539,7 @@ async fn spray_round(
     let tag = super::transfer_tag(&manifest.transfer_id);
     let repair_batch = super::repair_batch_per_block(config);
     let drop_one_in = config.debug_drop_one_in;
-    let mut pacing = link.spray_pacing_decision(config, aimd.cap_bps());
+    let mut pacing = link.spray_pacing_decision(config, aimd.cap_bps(), aimd.observed_loss());
     let mut clean_ramp =
         super::quic_round0_clean_ramp_enabled(config, &pacing, with_source).then(|| {
             super::QuicRound0CleanPacingRamp::new_with_burst_cap(
@@ -2679,7 +2698,7 @@ async fn spray_source_requests(
     aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
+    let pacing = link.spray_pacing_decision(config, aimd.cap_bps(), aimd.observed_loss());
     pacing.trace_epoch(cx, 2);
     link.reset_sender_handoff_trace();
     let mut sent = 0u64;
@@ -2756,7 +2775,7 @@ async fn spray_block_repair_requests(
     aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
+    let pacing = link.spray_pacing_decision(config, aimd.cap_bps(), aimd.observed_loss());
     pacing.trace_epoch(cx, 3);
     link.reset_sender_handoff_trace();
     let mut sent = 0u64;
