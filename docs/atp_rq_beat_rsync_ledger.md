@@ -3025,3 +3025,20 @@ Available win: encrypted-perfect 10.36s (4.8 MB/s) → toward nocrypto's 2.82s (
 ★**THE BIG STORY (honest):** the MATRIX-133 cwnd-decouple (quic) + the earlier rq receiver-observed AIMD together moved atp on 50M/bad from **timeout/non-convergence** (MATRIX-126→131) to **competitive: a TIE on auth, ~14% on nocrypto**, all sha-ok, `rounds=0` on the rq paths. That is the home-turf turnaround — atp now keeps pace with rsync on a lossy link on 2 of 3 tiers. It is NOT yet a clean F-POS win (auth is a statistical tie, not a decisive margin), and encrypted is still 2.7× off.
 
 ★**Re-prioritized routing (REPLACES MATRIX-134's parallel-decode-first):** for the ENCRYPTED tier the #1 lever is now **rate-match the data-plane pacer to ~link bandwidth** (stop the 24 MiB/s→6.25 MB/s 4× overshoot) — on the encrypted tier this directly cuts ~4× the per-symbol AES-GCM decrypt CPU, and should also remove the round-1 — plausibly collapsing 49s toward the rq path's ~17s. Parallel block decode (F6.3) is DEMOTED (decode is ~3 MB/s, not the wall). For nocrypto/auth (already tie/-14%): smaller gains — encode-ahead / less FEC overhead / faster decode — to convert the tie into a clean win. Routed to bead 317hxr.2.5.1. ★RSS caveat (verify separately): this run shows atp rq-path peak RSS ~188-197 MB vs rsync ~40-48 MB (atp ~4× MORE on nocrypto/auth — the B5 Vec-materialization), and atp encrypted ~77 MB; the prior "~74× less memory" claim came from runs with multi-GB rsync RSS readings that are harness artifacts — the memory claim needs a clean re-measure. Evidence: runs `20260627T2023*`/`2026*` (50M/bad reps3 nocrypto+auth; all-tier reps1).
+
+## MATRIX-136 (2026-06-27) — ★INTEGRITY CORRECTION: the "~74× less memory" atp advantage is RETRACTED — it was a measurement artifact. Audited the harness peak-RSS method (`run_matrix_cell.sh`: `/usr/bin/time -v` ru_maxrss + a 200ms `/proc/VmRSS` sampler) against recorded `results.jsonl` across runs `20260627T1931*`–`2030*`:
+
+★**Reliable readings (bad regime, both methods agree, consistent across reps):**
+| method | peak RSS | avg RSS |
+|---|---|---|
+| atp-rq-lab (nocrypto/bad) | 188–196 MB | 198–206 MB |
+| atp-rq-auth (auth/bad) | 182–198 MB | 178–207 MB |
+| atp-quic-tls13 (encrypted/bad) | ~77–80 MB | ~66 MB |
+| rsyncd (nocrypto/bad) | ~40.6 MB | ~38 MB |
+| rsync-ssh (auth/encrypted/bad) | ~48.7 MB | ~45 MB |
+
+⇒ **On the lossy regime atp uses 1.6–4× MORE memory than rsync, not less** (the rq paths materialize ~190 MB — the known B5 Vec-of-entries; the quic path ~77 MB; rsync ~41–49 MB).
+
+★**The artifact:** rsync-ssh on **perfect/good** reports `peak_rss_kb` ≈ `avg_rss_kb` ≈ **9.8 GB / 7.6 GB** — physically impossible for rsync moving 50 MB (BOTH the time-v and sampler methods inflate identically only on the fast-link rsync-ssh cells; cause TBD — likely the sampler/`time -v` capturing an ssh/sshd mmap or wrong-PID sum when the transfer completes in ~1–4s). The historical "~74× less memory" headline = atp's small RSS ÷ this rsync GB-artifact, so it is **not a real comparison.**
+
+★**Honest memory picture:** atp's RSS is 20 MB (perfect/encrypted) → 77 MB (bad/encrypted) → ~190 MB (bad/rq). rsync's reliable RSS is ~40–49 MB. So atp likely uses ~2× LESS only on the small/clean encrypted case (atp ~20 MB vs rsync's plausible ~40 MB) and MORE on lossy/rq. **There is no blanket atp memory win.** Action: corrected MEMORY.md; the rq-path ~190 MB (B5 bounded-memory) is a real efficiency target. ★Harness follow-up (scripts/atp_bench/*, mine to fix): the perfect/good rsync-ssh RSS artifact should be fixed (scope the sampler/`time -v` to the actual rsync data-mover PID) so the scorecard's memory column is trustworthy — but it does not affect wall/sha verdicts. Evidence: `results.jsonl` across runs `20260627T1931*`–`2030*` (bad RSS consistent; perfect/good rsync RSS = 7.6–9.8 GB artifacts).
