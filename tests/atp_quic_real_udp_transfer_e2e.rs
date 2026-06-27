@@ -563,10 +563,9 @@ fn real_udp_quic_send_fails_closed_on_expired_server_certificate() {
 }
 
 #[test]
-fn real_udp_quic_direct_transport_auth_ignores_per_symbol_hmac_contexts() {
-    // Direct single-connection QUIC/TLS authenticates symbol bytes with QUIC
-    // 1-RTT AEAD. A legacy per-symbol HMAC key in the config must not add a
-    // second authentication boundary on this path.
+fn real_udp_quic_direct_symbol_auth_mismatch_fails_closed() {
+    // Direct single-connection QUIC/TLS still honors an explicit per-symbol
+    // HMAC context. Mismatched sender/receiver contexts must fail before commit.
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");
     let source = src.path().join("auth-failing-symbol.bin");
@@ -588,12 +587,12 @@ fn real_udp_quic_direct_transport_auth_ignores_per_symbol_hmac_contexts() {
     recv.accept_timeout = Duration::from_secs(5);
 
     let (send_res, recv_res) = run_transfer(send, recv, &source, dst.path());
-    let send_res = send_res.expect("direct QUIC send completes with transport AEAD auth");
-    let recv_res = recv_res.expect("direct QUIC receive commits with transport AEAD auth");
-    assert_receive_report_counters(&send_res, &recv_res, payload.len() as u64, 1);
-    assert_eq!(
-        std::fs::read(dst.path().join("auth-failing-symbol.bin")).expect("read committed"),
-        payload,
-        "direct QUIC must rely on packet AEAD, not per-symbol HMAC contexts"
+    assert!(
+        send_res.is_err() || recv_res.as_ref().map_or(true, |report| !report.committed),
+        "mismatched direct QUIC symbol-auth contexts must not complete successfully"
+    );
+    assert!(
+        std::fs::read(dst.path().join("auth-failing-symbol.bin")).is_err(),
+        "direct QUIC must not commit bytes when explicit per-symbol auth fails"
     );
 }
