@@ -20,7 +20,11 @@ use smallvec::SmallVec;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+const QUIC_UDP_DEFAULT_RECV_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+const QUIC_UDP_DEFAULT_SEND_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// Configuration for the QUIC UDP endpoint.
 #[derive(Debug, Clone)]
@@ -40,9 +44,9 @@ pub struct QuicUdpEndpointConfig {
 impl Default for QuicUdpEndpointConfig {
     fn default() -> Self {
         Self {
-            max_packet_size: 1500,                      // Standard MTU
-            socket_recv_buffer_size: Some(1024 * 1024), // 1MB receive buffer
-            socket_send_buffer_size: Some(1024 * 1024), // 1MB send buffer
+            max_packet_size: 1500,
+            socket_recv_buffer_size: Some(QUIC_UDP_DEFAULT_RECV_BUFFER_BYTES),
+            socket_send_buffer_size: Some(QUIC_UDP_DEFAULT_SEND_BUFFER_BYTES),
             max_batch_size: UDP_MAX_GSO_SEGMENTS,
             enable_timestamping: true,
         }
@@ -92,6 +96,15 @@ pub struct BatchResult {
     pub error: Option<String>,
 }
 
+/// Best-effort Linux UDP socket receive counters sampled from `/proc/net/udp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpKernelReceiveSnapshot {
+    /// Kernel receive queue bytes reported for the socket.
+    pub rx_queue_bytes: u64,
+    /// Kernel packet drops reported for the socket.
+    pub drops: u64,
+}
+
 fn homogeneous_packet_run_len(packets: &[OutgoingPacket]) -> usize {
     let Some(first) = packets.first() else {
         return 0;
@@ -117,6 +130,54 @@ fn send_strategy_for_packet_run(
     strategy
 }
 
+fn record_atomic_max(slot: &AtomicU64, value: u64) {
+    let mut current = slot.load(Ordering::Relaxed);
+    while value > current {
+        match slot.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn linux_proc_udp_key(addr: SocketAddr) -> Option<String> {
+    match addr {
+        SocketAddr::V4(addr) => Some(format!(
+            "{:08X}:{:04X}",
+            u32::from_le_bytes(addr.ip().octets()),
+            addr.port()
+        )),
+        SocketAddr::V6(_) => None,
+    }
+}
+
+fn parse_linux_proc_udp_snapshot_line(
+    line: &str,
+    local_key: &str,
+) -> Option<UdpKernelReceiveSnapshot> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let local_address = fields.get(1)?;
+    if *local_address != local_key {
+        return None;
+    }
+    let queue_pair = fields.get(4)?;
+    let (_, rx_queue_hex) = queue_pair.split_once(':')?;
+    let rx_queue_bytes = u64::from_str_radix(rx_queue_hex, 16).ok()?;
+    let drops = fields.last()?.parse::<u64>().ok()?;
+    Some(UdpKernelReceiveSnapshot {
+        rx_queue_bytes,
+        drops,
+    })
+}
+
+fn linux_udp_kernel_receive_snapshot(local_addr: SocketAddr) -> Option<UdpKernelReceiveSnapshot> {
+    let local_key = linux_proc_udp_key(local_addr)?;
+    let proc_udp = std::fs::read_to_string("/proc/net/udp").ok()?;
+    proc_udp
+        .lines()
+        .find_map(|line| parse_linux_proc_udp_snapshot_line(line, &local_key))
+}
+
 /// Native UDP endpoint for QUIC packet exchange.
 ///
 /// Integrates with the Asupersync reactor and provides cancel-correct
@@ -136,17 +197,29 @@ pub struct QuicUdpEndpoint {
 #[derive(Debug, Default)]
 pub struct EndpointMetrics {
     /// Total packets received.
-    pub packets_received: std::sync::atomic::AtomicU64,
+    pub packets_received: AtomicU64,
     /// Total packets sent.
-    pub packets_sent: std::sync::atomic::AtomicU64,
+    pub packets_sent: AtomicU64,
     /// Total bytes received.
-    pub bytes_received: std::sync::atomic::AtomicU64,
+    pub bytes_received: AtomicU64,
     /// Total bytes sent.
-    pub bytes_sent: std::sync::atomic::AtomicU64,
+    pub bytes_sent: AtomicU64,
+    /// Total receive batch calls that completed with at least one datagram.
+    pub receive_batches: AtomicU64,
+    /// Receive batch calls that filled the requested batch budget.
+    pub receive_full_batches: AtomicU64,
+    /// Largest datagram count returned by a receive batch.
+    pub max_receive_batch_packets: AtomicU64,
+    /// Datagrams that exactly filled the configured packet buffer and may have truncated.
+    pub receive_truncated_packets: AtomicU64,
+    /// Latest Linux `/proc/net/udp` receive queue byte sample, or 0 when unavailable.
+    pub kernel_rx_queue_bytes_latest: AtomicU64,
+    /// Latest Linux `/proc/net/udp` drop counter sample, or 0 when unavailable.
+    pub kernel_drops_latest: AtomicU64,
     /// Receive errors.
-    pub receive_errors: std::sync::atomic::AtomicU64,
+    pub receive_errors: AtomicU64,
     /// Send errors.
-    pub send_errors: std::sync::atomic::AtomicU64,
+    pub send_errors: AtomicU64,
 }
 
 /// Errors from endpoint operations.
@@ -328,8 +401,12 @@ impl QuicUdpEndpoint {
         };
 
         let mut packets = Vec::with_capacity(batch.packets.len());
+        let mut truncated_packets = 0usize;
         for packet in batch.packets {
             let bytes_read = packet.payload.len();
+            if packet.possibly_truncated {
+                truncated_packets = truncated_packets.saturating_add(1);
+            }
             let received = ReceivedPacket {
                 src_addr: packet.src_addr,
                 data: packet.payload,
@@ -339,25 +416,91 @@ impl QuicUdpEndpoint {
             packets.push(received);
             self.metrics
                 .packets_received
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(1, Ordering::Relaxed);
             self.metrics
                 .bytes_received
-                .fetch_add(bytes_read as u64, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(bytes_read as u64, Ordering::Relaxed);
+        }
+
+        let packet_count = packets.len();
+        let received_full_batch = packet_count == effective_max;
+        if packet_count > 0 {
+            self.metrics.receive_batches.fetch_add(1, Ordering::Relaxed);
+            if received_full_batch {
+                self.metrics
+                    .receive_full_batches
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            record_atomic_max(
+                &self.metrics.max_receive_batch_packets,
+                u64::try_from(packet_count).unwrap_or(u64::MAX),
+            );
+        }
+        if truncated_packets > 0 {
+            self.metrics.receive_truncated_packets.fetch_add(
+                u64::try_from(truncated_packets).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
         }
 
         if batch.report.error.is_some() {
+            self.metrics.receive_errors.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let kernel_snapshot = if std::env::var_os("ATP_QUIC_TRACE").is_some()
+            || std::env::var_os("ATP_RQ_TRACE").is_some()
+        {
+            linux_udp_kernel_receive_snapshot(self.local_addr)
+        } else {
+            None
+        };
+        if let Some(snapshot) = kernel_snapshot {
             self.metrics
-                .receive_errors
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .kernel_rx_queue_bytes_latest
+                .store(snapshot.rx_queue_bytes, Ordering::Relaxed);
+            self.metrics
+                .kernel_drops_latest
+                .store(snapshot.drops, Ordering::Relaxed);
         }
 
         let batch_duration = batch_start.elapsed();
-        cx.trace(&format!(
-            "endpoint: {}: received {} packets in {:?}",
-            self.endpoint_id,
-            packets.len(),
-            batch_duration
-        ));
+        let endpoint_id = self.endpoint_id.to_string();
+        let local_addr = self.local_addr.to_string();
+        let requested_max = max_packets.to_string();
+        let effective_max = effective_max.to_string();
+        let packet_count = packet_count.to_string();
+        let byte_count = batch.report.bytes_processed.to_string();
+        let duration_micros = batch_duration.as_micros().to_string();
+        let full_batch = received_full_batch.to_string();
+        let truncated_packets = truncated_packets.to_string();
+        let recv_requested = format!("{:?}", self.buffer_report.requested_recv_buffer_bytes);
+        let recv_applied = format!("{:?}", self.buffer_report.applied_recv_buffer_bytes);
+        let kernel_rx_queue = kernel_snapshot
+            .map(|snapshot| snapshot.rx_queue_bytes.to_string())
+            .unwrap_or_else(|| "unavailable".to_string());
+        let kernel_drops = kernel_snapshot
+            .map(|snapshot| snapshot.drops.to_string())
+            .unwrap_or_else(|| "unavailable".to_string());
+        let error = batch.report.error.as_deref().unwrap_or("none");
+        cx.trace_with_fields(
+            "quic_udp_endpoint.receive_batch",
+            &[
+                ("endpoint_id", endpoint_id.as_str()),
+                ("local_addr", local_addr.as_str()),
+                ("requested_max", requested_max.as_str()),
+                ("effective_max", effective_max.as_str()),
+                ("packets", packet_count.as_str()),
+                ("bytes", byte_count.as_str()),
+                ("duration_micros", duration_micros.as_str()),
+                ("full_batch", full_batch.as_str()),
+                ("truncated_packets", truncated_packets.as_str()),
+                ("recv_requested", recv_requested.as_str()),
+                ("recv_applied", recv_applied.as_str()),
+                ("kernel_rx_queue_bytes", kernel_rx_queue.as_str()),
+                ("kernel_drops", kernel_drops.as_str()),
+                ("error", error),
+            ],
+        );
 
         Ok(packets)
     }
@@ -509,6 +652,19 @@ mod tests {
     use crate::test_utils::run_test_with_cx;
 
     #[test]
+    fn default_config_uses_burst_tolerant_receive_buffer() {
+        let config = QuicUdpEndpointConfig::default();
+        assert_eq!(
+            config.socket_recv_buffer_size,
+            Some(QUIC_UDP_DEFAULT_RECV_BUFFER_BYTES)
+        );
+        assert_eq!(
+            config.socket_send_buffer_size,
+            Some(QUIC_UDP_DEFAULT_SEND_BUFFER_BYTES)
+        );
+    }
+
+    #[test]
     fn test_endpoint_bind_and_addresses() {
         run_test_with_cx(|cx| async move {
             let config = QuicUdpEndpointConfig::default();
@@ -621,7 +777,53 @@ mod tests {
                     .load(std::sync::atomic::Ordering::Relaxed),
                 10
             );
+            assert_eq!(
+                receiver_metrics
+                    .receive_batches
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                receiver_metrics
+                    .receive_full_batches
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                receiver_metrics
+                    .max_receive_batch_packets
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                receiver_metrics
+                    .receive_truncated_packets
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
         });
+    }
+
+    #[test]
+    fn linux_proc_udp_snapshot_parser_reads_rx_queue_and_drops() {
+        let local_addr: SocketAddr = "127.0.0.1:4660".parse().unwrap();
+        let local_key = linux_proc_udp_key(local_addr).expect("ipv4 proc key");
+        assert_eq!(local_key, "0100007F:1234");
+
+        let line = format!(
+            "  42: {local_key} 00000000:0000 07 00000000:0000002A 00:00000000 00000000 1000 0 12345 2 0000000000000000 9"
+        );
+        let snapshot =
+            parse_linux_proc_udp_snapshot_line(&line, &local_key).expect("snapshot parses");
+
+        assert_eq!(
+            snapshot,
+            UdpKernelReceiveSnapshot {
+                rx_queue_bytes: 42,
+                drops: 9,
+            }
+        );
+        assert!(parse_linux_proc_udp_snapshot_line(&line, "0100007F:5678").is_none());
     }
 
     #[test]
