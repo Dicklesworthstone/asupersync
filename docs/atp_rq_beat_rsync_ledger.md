@@ -3046,3 +3046,21 @@ Available win: encrypted-perfect 10.36s (4.8 MB/s) → toward nocrypto's 2.82s (
 ## MATRIX-137 (2026-06-27) — ★HARNESS FIX (memory metric now trustworthy) + the MATRIX-136 artifact ROOT-CAUSED and RESOLVED. The bogus 7.6–9.8 GB rsync RSS came from `run_matrix_cell.sh`'s `sample_rss` using `pgrep -f "rsync "` (too loose): on this box **rch (Remote Compilation Helper) shells out to `rsync`** to sync multi-GB cargo target dirs to the build workers, so during a fast perfect/good cell the sampler caught **rch's rsync (~9.7 GB VmRSS)** and `PEAK_RSS_KB=imax(S_PEAK,R_PEAK)` picked it over the clean `/usr/bin/time -v` value. ★FIX (committed, scripts/atp_bench only — no transport touched): scope the sampler pattern to this cell's netns peer — `rss_pat="rsync .*${HOST_IP}"` — which matches the cell's rsync client + rsyncd serving HOST_IP but excludes rch's rsync. `bash -n` clean.
 
 ★**Verified + honest memory numbers (50M/perfect+good nocrypto, post-fix):** rsyncd now reads a sane **~31 MB** (not 9.8 GB). And the real comparison: **50M/perfect nocrypto — atp 0.815s / RSS 11.3 MB vs rsyncd 1.23s / RSS 30.95 MB** ⇒ atp WINS wall AND uses **~2.7× LESS memory** (a real but modest edge, NOT the retracted 74×). 50M/good nocrypto: atp 10.46s/51.5 MB vs rsyncd 3.93s/31 MB (atp slower + slightly more mem on good). So the corrected memory story: atp has a **modest ~2.7× memory edge on small/clean**, parity-to-worse on good, and uses MORE on bad/rq (the ~190 MB B5 Vec-materialization, MATRIX-136). The scorecard memory column is now trustworthy for future runs. Evidence: run `20260627T2121*` (rsyncd RSS 30.95/31.08 MB sane; atp perfect 0.815s/11.3 MB win).
+
+## MATRIX-138 (2026-06-27) — ★HONEST CONSOLIDATED SCOREBOARD (50M, all 3 regimes × 3 tiers, trustworthy RSS post-MATRIX-137) + ★NEW REPRODUCIBLE BUG FOUND: perfect/auth 60s stall. Full grid with `atp_new7` (pacer-owned HEAD), reps1 survey (bad cells have reps3 in MATRIX-135):
+
+| cell | atp wall | atp RSS | rsync wall | rsync RSS | verdict |
+|---|---|---|---|---|---|
+| perfect/nocrypto | **0.82s** | 10.9 MB | 1.23s | 30.9 MB | ★atp WIN (wall + ~2.8× mem) |
+| perfect/auth | **60.56s** | 10.0 MB | 1.25s | 17.1 MB | ★★BUG (48× loss, see below) |
+| perfect/encrypted | 13.06s | 19.7 MB | 1.25s | 17.0 MB | atp loss (CPU/AES-GCM-bound), mem ~tie |
+| good/nocrypto | 12.16s | 51 MB | 4.23s | 34.5 MB | atp loss |
+| good/auth | 20.97s | 49 MB | 4.36s | 21 MB | atp loss |
+| good/encrypted | 26.67s | 54.5 MB | 4.25s | 21 MB | atp loss |
+| bad/nocrypto | 14.86s | 190 MB | 14.64s | 31 MB | ~TIE wall; atp 6× mem |
+| bad/auth | 17.67s | 192 MB | 17.86s | 17 MB | ★atp WIN wall (marginal); 11× mem |
+| bad/encrypted | 47.99s | 79 MB | 18.37s | 17 MB | atp 2.6× loss (quic overshoot+AES, MATRIX-135) |
+
+★**Honest summary:** atp WINS perfect/nocrypto (wall+mem) and ties/edges bad/nocrypto+bad/auth (its lossy home turf). atp LOSES all good cells and clean encrypted (CPU/AES-GCM-bound, established) and is far behind on bad/encrypted (the pacer-overshoot outlier, lever pending). Memory: atp lighter on perfect (10–20 MB vs 17–31), much heavier on bad/rq (~190 MB, B5).
+
+★★**NEW BUG (reproducible, dead-exact): 50M/perfect AUTH = 60.5s × 3** (60.557/60.562/60.496, variance <0.1s, rounds=0, sha-ok, RSS 10 MB) vs rsync ~0.85s — a ~60–70× loss on CLEAN AUTHENTICATED transfers. The data moves fine (sha-ok, tiny RSS); *completion* blocks ~60s. It is **perfect-link-specific** (auth/bad=17.7s, auth/good=20.9s complete promptly) and **auth-specific** (nocrypto/perfect=0.82s). Root-cause candidate: `transport_rq/mod.rs:155/158` `DEFAULT_ACCEPT_TIMEOUT`/`DEFAULT_CONNECT_TIMEOUT = Duration::from_secs(60)` — on a sub-second perfect-link auth transfer, an accept/connect wait (likely the auth control/handshake channel) is NOT cancelled on transfer completion and runs to the full 60s timeout; on lossy links the netem delay changes the race so it completes normally. This was HIDDEN because prior auth benching was bad/good only. Filed as a new bead + routed. ★Highest-EV note for the swarm: fixing this turns perfect/auth from a 60× loss into a likely WIN (the data already arrives in <1s; nocrypto/perfect already wins at 0.82s). Evidence: runs `20260627T2144*` (full grid) + `20260627T2150*` (perfect/auth reps3 = 60.5s × 3).
