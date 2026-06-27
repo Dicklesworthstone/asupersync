@@ -2437,18 +2437,29 @@ impl NativeQuicAimdPacer {
         if sent == 0 {
             return;
         }
-        let loss = need
-            .round_loss_fraction
-            .filter(|loss| loss.is_finite())
-            .unwrap_or_else(|| {
-                let observed = need
-                    .round_symbols_observed
-                    .or(need.round_symbols_accepted)
-                    .unwrap_or(0)
-                    .min(sent);
+        // Sender-side DELIVERY loss: symbols sent vs symbols the receiver OBSERVED on
+        // the wire. This is the only signal that sees QUEUE/WIRE DROPS. The receiver's
+        // `round_loss_fraction` counts loss only AMONG ARRIVED symbols, so during a
+        // ~98% queue overflow it reads ~0.0000 and AIMD never trips its backoff — the
+        // sender keeps flooding the overflowing queue until PTO timeout / non-convergence
+        // (MATRIX-123/124/125, bead asupersync-atp-dataplane-redesign-317hxr.2.5.1).
+        // Drive AIMD from delivery loss; keep the receiver fraction only as a floor (it
+        // can exceed delivery loss when arrived symbols are themselves corrupt/duplicate).
+        let delivery_loss = need
+            .round_symbols_observed
+            .or(need.round_symbols_accepted)
+            .map(|observed| {
+                let observed = observed.min(sent);
                 (1.0 - observed as f64 / sent as f64).clamp(0.0, 0.90)
-            })
-            .clamp(0.0, 0.90);
+            });
+        let receiver_loss = need.round_loss_fraction.filter(|loss| loss.is_finite());
+        let loss = match (delivery_loss, receiver_loss) {
+            (Some(delivered), Some(received)) => delivered.max(received),
+            (Some(delivered), None) => delivered,
+            (None, Some(received)) => received,
+            (None, None) => 0.0,
+        }
+        .clamp(0.0, 0.90);
         self.last_round_loss_fraction = loss;
         if loss > super::QUIC_AIMD_LOSS_DECREASE_THRESHOLD {
             let base = self
@@ -4194,6 +4205,51 @@ mod tests {
             infer_missing_round_complete_symbols(6, 4, Some(&need)),
             4,
             "stale/out-of-round NeedMore state does not contaminate another round"
+        );
+    }
+
+    #[test]
+    fn quic_aimd_backs_off_on_queue_drop_with_blind_receiver_loss() {
+        // MATRIX-123/124/125 (bead asupersync-atp-dataplane-redesign-317hxr.2.5.1):
+        // during a ~98% queue overflow the receiver's round_loss_fraction reads ~0
+        // (it counts loss only among ARRIVED symbols). The sender-side delivery loss
+        // (sent vs observed) must drive AIMD so the cap backs off instead of flooding
+        // the overflowing queue until PTO timeout.
+        let cx = Cx::for_testing();
+        let mut aimd = NativeQuicAimdPacer::default();
+        aimd.record_spray(1000, 50_000_000);
+        let need = QuicNeedMore {
+            feedback_round: 1,
+            pending: vec![0],
+            round_symbols_observed: Some(20), // only 2% arrived -> 98% dropped
+            round_loss_fraction: Some(0.0),   // receiver blind to the drop
+            ..QuicNeedMore::default()
+        };
+        aimd.observe_need_more(&cx, &need);
+        assert!(
+            aimd.last_round_loss_fraction >= 0.5,
+            "sender-side delivery loss must surface the queue drop, got {}",
+            aimd.last_round_loss_fraction
+        );
+        assert!(
+            aimd.cap_bps().is_some(),
+            "a ~98% drop must trip the AIMD multiplicative-decrease cap (no flood)"
+        );
+
+        // Clean delivery (observed ~= sent) must NOT spuriously back off.
+        let mut clean = NativeQuicAimdPacer::default();
+        clean.record_spray(1000, 50_000_000);
+        let clean_need = QuicNeedMore {
+            feedback_round: 1,
+            round_symbols_observed: Some(1000),
+            round_loss_fraction: Some(0.0),
+            ..QuicNeedMore::default()
+        };
+        clean.observe_need_more(&cx, &clean_need);
+        assert!(
+            clean.last_round_loss_fraction <= f64::EPSILON,
+            "full delivery must register ~0 loss, got {}",
+            clean.last_round_loss_fraction
         );
     }
 
