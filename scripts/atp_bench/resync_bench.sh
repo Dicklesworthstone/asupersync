@@ -63,6 +63,7 @@ PORT_BASE="${PORT_BASE:-41000}"
 TIMEOUT_S="${TIMEOUT_S:-300}"
 ATP_RECV_LISTEN_TIMEOUT_MS="${ATP_RECV_LISTEN_TIMEOUT_MS:-30000}"
 ATP_RECV_ACCEPT_TIMEOUT_SECS="${ATP_RECV_ACCEPT_TIMEOUT_SECS:-$(((ATP_RECV_LISTEN_TIMEOUT_MS + 999) / 1000))}"
+ATP_DELTA_SIDECAR_READY_TIMEOUT_S="${ATP_DELTA_SIDECAR_READY_TIMEOUT_S:-5}"
 RECEIVER_READY_SLEEP="${RECEIVER_READY_SLEEP:-0.75}"
 RSS_SAMPLE_INTERVAL="${RSS_SAMPLE_INTERVAL:-0.2}"
 RQ_AUTH_LAB="${RQ_AUTH_LAB:---rq-allow-unauthenticated-lab}"
@@ -144,18 +145,28 @@ if not (state.get("chunk_signatures") or (state.get("manifest_hex") and state.ge
 PY
 }
 probe_atp_delta_sidecar() {
-    local host="$1" port="$2" out="$3"
-    ip netns exec "$NS" python3 - "$host" "$port" "$out" <<'PY'
-import json, socket, sys
-host, port, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-with socket.create_connection((host, port), timeout=5.0) as sock:
-    sock.settimeout(5.0)
-    chunks = []
-    while True:
-        chunk = sock.recv(65536)
-        if not chunk:
-            break
-        chunks.append(chunk)
+    local host="$1" port="$2" out="$3" ready_timeout_s="${4:-$ATP_DELTA_SIDECAR_READY_TIMEOUT_S}"
+    ip netns exec "$NS" python3 - "$host" "$port" "$out" "$ready_timeout_s" <<'PY'
+import json, socket, sys, time
+host, port, out, ready_timeout_s = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+deadline = time.monotonic() + max(0.1, ready_timeout_s)
+last_error = None
+while True:
+    try:
+        with socket.create_connection((host, port), timeout=1.0) as sock:
+            sock.settimeout(5.0)
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        break
+    except OSError as exc:
+        last_error = exc
+        if time.monotonic() >= deadline:
+            raise SystemExit(f"ATP delta sidecar {host}:{port} unavailable after {ready_timeout_s:.3f}s: {last_error}")
+        time.sleep(0.1)
 payload = b"".join(chunks).strip()
 if not payload:
     raise SystemExit("ATP delta sidecar returned empty state")
@@ -338,12 +349,13 @@ resync_atp() {
         --listen "0.0.0.0:${port}" "${recv_args[@]}" --once --peer-id "$r_tag" \
         --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
         --listen-timeout-ms "$ATP_RECV_LISTEN_TIMEOUT_MS" \
+        --accept-timeout-secs "$ATP_RECV_ACCEPT_TIMEOUT_SECS" \
         >"$rl" 2>"$rt" &
     local recv_pid=$!
     sample_peak_rss "$s_tag" "$s_stop" "$s_out" & local samp=$!
     sleep "$RECEIVER_READY_SLEEP"
     local sidecar_port=$((port + 1)) probe_status=0
-    probe_atp_delta_sidecar "$HOST_IP" "$sidecar_port" "$case_dir/atp_delta_sidecar_state.json"
+    probe_atp_delta_sidecar "$HOST_IP" "$sidecar_port" "$case_dir/atp_delta_sidecar_state.json" "$ATP_DELTA_SIDECAR_READY_TIMEOUT_S"
     probe_status=$?
     if [ "$probe_status" != "0" ]; then
         log "ATP delta sidecar ${HOST_IP}:${sidecar_port} unavailable or empty; aborting measured ATP re-sync"
@@ -463,6 +475,7 @@ run_file_cell() {
     timeout "$TIMEOUT_S" "$BIN" recv "$atp_dest" --listen "0.0.0.0:${port}" --transport rq --once \
         --peer-id "init-recv-${port}" --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
         --symbol-size "$SYMBOL_SIZE" --listen-timeout-ms "$ATP_RECV_LISTEN_TIMEOUT_MS" \
+        --accept-timeout-secs "$ATP_RECV_ACCEPT_TIMEOUT_SECS" \
         $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
     local ip_pid=$!; sleep "$RECEIVER_READY_SLEEP"
     local init_send_status init_recv_status
@@ -522,6 +535,7 @@ run_tree_rename_cell() {
     timeout "$TIMEOUT_S" "$BIN" recv "$atp_dest" --listen "0.0.0.0:${port}" --transport rq --once \
         --peer-id "init-tree-recv-${port}" --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
         --symbol-size "$SYMBOL_SIZE" --listen-timeout-ms "$ATP_RECV_LISTEN_TIMEOUT_MS" \
+        --accept-timeout-secs "$ATP_RECV_ACCEPT_TIMEOUT_SECS" \
         $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
     local ip_pid=$!; sleep "$RECEIVER_READY_SLEEP"
     local init_send_status init_recv_status
@@ -564,7 +578,7 @@ run_tree_rename_cell() {
 
 main() {
     log "resync_bench start -> $RESULTS (git $GIT_HEAD)"
-    log "timeouts: process=${TIMEOUT_S}s atp-recv-listen=${ATP_RECV_LISTEN_TIMEOUT_MS}ms"
+    log "timeouts: process=${TIMEOUT_S}s atp-recv-listen=${ATP_RECV_LISTEN_TIMEOUT_MS}ms atp-sidecar-ready=${ATP_DELTA_SIDECAR_READY_TIMEOUT_S}s"
     setup_netns
     local port_off=0
     for spec in $SIZES; do

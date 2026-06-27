@@ -90,6 +90,9 @@ const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES 
 const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
 const DEFAULT_RECV_ACCEPT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_RECV_LISTEN_TIMEOUT_MS: u64 = 0;
+const DIRECT_DELTA_SIDECAR_CONNECT_ATTEMPT_MS: u64 = 750;
+const DIRECT_DELTA_SIDECAR_CONNECT_DEADLINE_MS: u64 = 5_000;
+const DIRECT_DELTA_SIDECAR_CONNECT_RETRY_SLEEP_MS: u64 = 50;
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -1947,8 +1950,7 @@ fn fetch_remote_delta_state(
 }
 
 fn fetch_direct_delta_state(state_addr: SocketAddr) -> Result<Option<DeltaCliState>, String> {
-    let mut stream = std::net::TcpStream::connect_timeout(&state_addr, Duration::from_millis(750))
-        .map_err(|err| format!("connect: {err}"))?;
+    let mut stream = connect_direct_delta_state_sidecar(state_addr)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|err| format!("set read timeout: {err}"))?;
@@ -1977,8 +1979,7 @@ fn fetch_direct_subchunk_signatures(
         return Ok(Vec::new());
     }
 
-    let mut stream = std::net::TcpStream::connect_timeout(&state_addr, Duration::from_millis(750))
-        .map_err(|err| format!("connect: {err}"))?;
+    let mut stream = connect_direct_delta_state_sidecar(state_addr)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|err| format!("set read timeout: {err}"))?;
@@ -2019,6 +2020,40 @@ fn fetch_direct_subchunk_signatures(
         ));
     }
     Ok(response.signatures)
+}
+
+fn connect_direct_delta_state_sidecar(
+    state_addr: SocketAddr,
+) -> Result<std::net::TcpStream, String> {
+    let attempt_timeout = Duration::from_millis(DIRECT_DELTA_SIDECAR_CONNECT_ATTEMPT_MS);
+    let retry_sleep = Duration::from_millis(DIRECT_DELTA_SIDECAR_CONNECT_RETRY_SLEEP_MS);
+    let deadline = Duration::from_millis(DIRECT_DELTA_SIDECAR_CONNECT_DEADLINE_MS);
+    let start = Instant::now();
+    loop {
+        match std::net::TcpStream::connect_timeout(&state_addr, attempt_timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(err) if retryable_delta_state_connect_error(&err) && start.elapsed() < deadline => {
+                thread::sleep(retry_sleep);
+            }
+            Err(err) => {
+                return Err(format!(
+                    "connect to receiver delta sidecar {state_addr} after {}ms: {err}",
+                    start.elapsed().as_millis()
+                ));
+            }
+        }
+    }
+}
+
+fn retryable_delta_state_connect_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::AddrNotAvailable
+    )
 }
 
 fn remote_delta_state_path(remote_path: &str) -> String {
@@ -5515,6 +5550,27 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
         let max: SocketAddr = "127.0.0.1:65535".parse().unwrap();
         assert!(delta_state_addr(max).is_none());
+    }
+
+    #[test]
+    fn delta_sidecar_retry_filter_only_retries_transient_connect_failures() {
+        use std::io::{Error, ErrorKind};
+
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::TimedOut,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::AddrNotAvailable,
+        ] {
+            assert!(retryable_delta_state_connect_error(&Error::from(kind)));
+        }
+        assert!(!retryable_delta_state_connect_error(&Error::from(
+            ErrorKind::PermissionDenied,
+        )));
+        assert!(!retryable_delta_state_connect_error(&Error::from(
+            ErrorKind::InvalidInput,
+        )));
     }
 
     #[test]
