@@ -46,10 +46,11 @@ pub use handshake::{
     BondingReceiverControlPlane,
 };
 pub use receiver::{
-    BondedBlockCompletionPath, BondedBlockCoverage, BondedBlockProgressMetrics,
-    BondedBlockSourceHoles, BondedDonorIngressStats, BondedDonorProgressMetrics,
-    BondedReceiverFeedbackAction, BondedReceiverFeedbackPlan, BondedReceiverIngressStats,
-    BondedReceiverLiveProgressMetrics, BondedReceiverProgressSnapshot,
-    BondedReceiverRetentionPolicy, BondedReceiverRetentionRejectReason, BondedReceiverSymbolSet,
-    BondedSymbolDisposition, BondedSymbolKey,
+    ATP_BOND_TRACE_ENV, BONDING_RECEIVER_PROGRESS_TRACE_EVENT, BondedBlockCompletionPath,
+    BondedBlockCoverage, BondedBlockProgressMetrics, BondedBlockSourceHoles,
+    BondedDonorIngressStats, BondedDonorProgressMetrics, BondedReceiverFeedbackAction,
+    BondedReceiverFeedbackPlan, BondedReceiverIngressStats, BondedReceiverLiveProgressMetrics,
+    BondedReceiverProgressSnapshot, BondedReceiverRetentionPolicy,
+    BondedReceiverRetentionRejectReason, BondedReceiverSymbolSet, BondedSymbolDisposition,
+    BondedSymbolKey,
 };

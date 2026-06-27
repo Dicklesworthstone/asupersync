@@ -9,7 +9,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::cx::Cx;
 use crate::types::{ObjectId, Symbol, SymbolId, SymbolKind};
+
+/// Environment variable that enables human-readable bonded receiver trace lines.
+pub const ATP_BOND_TRACE_ENV: &str = "ATP_BOND_TRACE";
+
+/// Structured trace event emitted for bonded receiver live progress.
+pub const BONDING_RECEIVER_PROGRESS_TRACE_EVENT: &str = "atp_bond.receiver.progress";
 
 /// Decoder identity for one bonded RaptorQ symbol.
 ///
@@ -329,6 +336,18 @@ pub enum BondedBlockCompletionPath {
     RepairDecode,
 }
 
+impl BondedBlockCompletionPath {
+    /// Stable trace/display token for this completion path.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Incomplete => "incomplete",
+            Self::SourceMemcpy => "source_memcpy",
+            Self::RepairDecode => "repair_decode",
+        }
+    }
+}
+
 /// Machine-readable per-block receiver progress row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BondedBlockProgressMetrics {
@@ -389,6 +408,124 @@ pub struct BondedReceiverLiveProgressMetrics {
     pub need_more_action_count: usize,
     /// Per-donor Close frames materialized by the current aggregate plan.
     pub close_action_count: usize,
+}
+
+impl BondedReceiverLiveProgressMetrics {
+    /// Aggregate duplicate rate in parts-per-million.
+    #[must_use]
+    pub fn duplicate_rate_ppm(&self) -> u64 {
+        self.aggregate.duplicate_rate_ppm()
+    }
+
+    /// Emit the structured progress event and, when `ATP_BOND_TRACE` is set, a
+    /// deterministic human-readable receiver timeline.
+    pub fn trace_progress(&self, cx: &Cx, phase: &str) {
+        let donors = self.donors.len().to_string();
+        let blocks = self.blocks.len().to_string();
+        let symbols_received = self.aggregate.symbols_received.to_string();
+        let symbols_accepted = self.aggregate.symbols_accepted.to_string();
+        let duplicate_symbols = self.aggregate.duplicate_symbols.to_string();
+        let duplicate_rate_ppm = self.duplicate_rate_ppm().to_string();
+        let source_symbols_accepted = self.aggregate.source_symbols_accepted.to_string();
+        let repair_symbols_accepted = self.aggregate.repair_symbols_accepted.to_string();
+        let retention_rejects = self.aggregate.symbols_rejected_by_retention.to_string();
+        let source_memcpy_blocks = self.source_memcpy_blocks.to_string();
+        let repair_decode_blocks = self.repair_decode_blocks.to_string();
+        let incomplete_blocks = self.incomplete_blocks.to_string();
+        let total_deficit_symbols = self.total_deficit_symbols.to_string();
+        let total_missing_source_symbols = self.total_missing_source_symbols.to_string();
+        let feedback_action_count = self.feedback_action_count.to_string();
+        let need_more_action_count = self.need_more_action_count.to_string();
+        let close_action_count = self.close_action_count.to_string();
+        cx.trace_with_fields(
+            BONDING_RECEIVER_PROGRESS_TRACE_EVENT,
+            &[
+                ("phase", phase),
+                ("donors", donors.as_str()),
+                ("blocks", blocks.as_str()),
+                ("symbols_received", symbols_received.as_str()),
+                ("symbols_accepted", symbols_accepted.as_str()),
+                ("duplicate_symbols", duplicate_symbols.as_str()),
+                ("duplicate_rate_ppm", duplicate_rate_ppm.as_str()),
+                ("source_symbols_accepted", source_symbols_accepted.as_str()),
+                ("repair_symbols_accepted", repair_symbols_accepted.as_str()),
+                ("retention_rejects", retention_rejects.as_str()),
+                ("source_memcpy_blocks", source_memcpy_blocks.as_str()),
+                ("repair_decode_blocks", repair_decode_blocks.as_str()),
+                ("incomplete_blocks", incomplete_blocks.as_str()),
+                ("total_deficit_symbols", total_deficit_symbols.as_str()),
+                (
+                    "total_missing_source_symbols",
+                    total_missing_source_symbols.as_str(),
+                ),
+                ("feedback_actions", feedback_action_count.as_str()),
+                ("need_more_actions", need_more_action_count.as_str()),
+                ("close_actions", close_action_count.as_str()),
+            ],
+        );
+
+        if std::env::var_os(ATP_BOND_TRACE_ENV).is_some() {
+            for line in self.trace_lines(phase) {
+                eprintln!("[ATP_BOND_TRACE] {line}");
+            }
+        }
+    }
+
+    /// Deterministic human timeline rows for tests, logs, and diagnostic UIs.
+    #[must_use]
+    pub fn trace_lines(&self, phase: &str) -> Vec<String> {
+        let mut lines = Vec::with_capacity(
+            1usize
+                .saturating_add(self.donors.len())
+                .saturating_add(self.blocks.len()),
+        );
+        lines.push(format!(
+            "receiver phase={phase} donors={} blocks={} accepted={}/{} duplicate_rate_ppm={} source={} repair={} retention_rejects={} source_memcpy_blocks={} repair_decode_blocks={} incomplete_blocks={} total_deficit_symbols={} missing_source_symbols={} feedback_actions={} need_more_actions={} close_actions={}",
+            self.donors.len(),
+            self.blocks.len(),
+            self.aggregate.symbols_accepted,
+            self.aggregate.symbols_received,
+            self.duplicate_rate_ppm(),
+            self.aggregate.source_symbols_accepted,
+            self.aggregate.repair_symbols_accepted,
+            self.aggregate.symbols_rejected_by_retention,
+            self.source_memcpy_blocks,
+            self.repair_decode_blocks,
+            self.incomplete_blocks,
+            self.total_deficit_symbols,
+            self.total_missing_source_symbols,
+            self.feedback_action_count,
+            self.need_more_action_count,
+            self.close_action_count,
+        ));
+        for donor in &self.donors {
+            lines.push(format!(
+                "receiver donor={} received={} accepted={} duplicates={} duplicate_rate_ppm={} source={} repair={} retention_rejects={}",
+                donor.donor_index,
+                donor.stats.symbols_received,
+                donor.stats.symbols_accepted,
+                donor.stats.duplicate_symbols,
+                donor.duplicate_rate_ppm,
+                donor.stats.source_symbols_accepted,
+                donor.stats.repair_symbols_accepted,
+                donor.stats.symbols_rejected_by_retention,
+            ));
+        }
+        for block in &self.blocks {
+            lines.push(format!(
+                "receiver block object={:?} sbn={} target={} accepted={} deficit={} source_symbols={} missing_source={} completion_path={}",
+                block.object_id,
+                block.sbn,
+                block.target_symbols,
+                block.accepted_symbols,
+                block.deficit_symbols,
+                block.source_symbols,
+                block.missing_source_count(),
+                block.completion_path.as_str(),
+            ));
+        }
+        lines
+    }
 }
 
 impl BondedReceiverFeedbackPlan {
@@ -1276,6 +1413,50 @@ mod tests {
         assert_eq!(metrics.feedback_action_count, 12);
         assert_eq!(metrics.need_more_action_count, 12);
         assert_eq!(metrics.close_action_count, 0);
+    }
+
+    #[test]
+    fn completion_paths_have_stable_trace_tokens() {
+        assert_eq!(BondedBlockCompletionPath::Incomplete.as_str(), "incomplete");
+        assert_eq!(
+            BondedBlockCompletionPath::SourceMemcpy.as_str(),
+            "source_memcpy"
+        );
+        assert_eq!(
+            BondedBlockCompletionPath::RepairDecode.as_str(),
+            "repair_decode"
+        );
+    }
+
+    #[test]
+    fn live_progress_metrics_trace_lines_cover_aggregate_donors_blocks_and_feedback() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(22);
+
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Source);
+        set.record_key(2, BondedSymbolKey::new(object_id, 0, 3), SymbolKind::Repair);
+        set.record_key(3, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Source);
+        set.record_key(0, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+
+        let metrics = set.live_progress_metrics([(object_id, 0, 3), (object_id, 1, 2)], false);
+        let lines = metrics.trace_lines("need_more");
+
+        assert!(lines[0].contains("receiver phase=need_more donors=4 blocks=2 accepted=4/5"));
+        assert!(lines[0].contains("duplicate_rate_ppm=200000"));
+        assert!(lines[0].contains("need_more_actions=12"));
+        assert!(lines[0].contains("close_actions=0"));
+        assert!(lines.iter().any(|line| line.contains("donor=3")
+            && line.contains("duplicates=1")
+            && line.contains("duplicate_rate_ppm=1000000")));
+        assert!(lines.iter().any(|line| line.contains("block object=")
+            && line.contains("sbn=0")
+            && line.contains("missing_source=1")
+            && line.contains("completion_path=repair_decode")));
+        assert!(lines.iter().any(|line| line.contains("block object=")
+            && line.contains("sbn=1")
+            && line.contains("deficit=1")
+            && line.contains("completion_path=incomplete")));
     }
 
     #[test]
