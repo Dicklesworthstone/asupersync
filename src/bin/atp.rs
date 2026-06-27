@@ -88,6 +88,7 @@ const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
 const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
+const DEFAULT_RECV_LISTEN_TIMEOUT_MS: u64 = 60_000;
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -286,6 +287,9 @@ struct RecvArgs {
     /// Maximum transfer size in bytes.
     #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
     max_bytes: u64,
+    /// Maximum milliseconds a one-shot receiver waits for the sender to connect.
+    #[arg(long, default_value_t = DEFAULT_RECV_LISTEN_TIMEOUT_MS)]
+    listen_timeout_ms: u64,
     /// Worker threads for the local runtime.
     #[arg(long, default_value_t = 4)]
     workers: usize,
@@ -424,6 +428,13 @@ fn tcp_config(max_bytes: u64, enable_delta: bool) -> TransferConfig {
         enable_delta,
         ..TransferConfig::default()
     }
+}
+
+fn recv_listen_timeout(args: &RecvArgs) -> Result<Duration, String> {
+    if args.listen_timeout_ms == 0 {
+        return Err("--listen-timeout-ms must be greater than 0".to_string());
+    }
+    Ok(Duration::from_millis(args.listen_timeout_ms))
 }
 
 fn rq_config(
@@ -842,6 +853,7 @@ fn quic_config_recv(
         max_block_size: args.max_block_size.effective(args.symbol_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
+        accept_timeout: recv_listen_timeout(args)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         ..QuicConfig::default()
     };
@@ -4199,7 +4211,8 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
         ),
         Transport::Tcp => {
-            let cfg = tcp_config(args.max_bytes, !args.no_delta);
+            let mut cfg = tcp_config(args.max_bytes, !args.no_delta);
+            cfg.accept_timeout = recv_listen_timeout(&args)?;
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
                 asupersync::fs::create_dir_all(&dest)
@@ -4263,7 +4276,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             }))
         }
         Transport::Rq => {
-            let cfg = rq_config(
+            let mut cfg = rq_config(
                 args.max_bytes,
                 args.symbol_size,
                 1,
@@ -4274,6 +4287,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 args.rq_auth_key_hex.as_deref(),
                 args.rq_allow_unauthenticated_lab,
             )?;
+            cfg.accept_timeout = recv_listen_timeout(&args)?;
             let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
@@ -4768,6 +4782,19 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         let recv_zero = RecvArgs::try_parse_from(["recv", "/tmp/dest", "--max-block-size", "0"])
             .expect("recv parser should accept zero max-block-size sentinel");
         assert_eq!(recv_zero.max_block_size, MaxBlockSizeArg::Auto);
+
+        let recv_timeout_ms = RecvArgs::try_parse_from([
+            "recv",
+            "/tmp/dest",
+            "--once",
+            "--listen-timeout-ms",
+            "1500",
+        ])
+        .expect("recv parser should accept millisecond listen timeout override");
+        assert_eq!(
+            recv_listen_timeout(&recv_timeout_ms),
+            Ok(Duration::from_millis(1500))
+        );
     }
 
     #[test]

@@ -148,6 +148,15 @@ pub const DEFAULT_UDP_FANOUT: usize = 1;
 /// matrices live in memory in v1).
 pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Default maximum time a one-shot RQ receiver waits for the control connection.
+///
+/// This matches the TCP transport's fail-closed accept bound so scripted
+/// `atp recv --once` users cannot hang forever when the sender never connects.
+pub const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default maximum time an RQ sender waits to open the TCP control connection.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Maximum number of files a single transfer manifest may declare. This bounds
 /// receiver bookkeeping derived from attacker-controlled control-plane JSON.
 const MAX_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
@@ -415,6 +424,8 @@ pub struct RqConfig {
     pub udp_fanout: usize,
     /// Maximum total bytes a single transfer may carry.
     pub max_transfer_bytes: u64,
+    /// Maximum time a one-shot receiver waits for the TCP control accept.
+    pub accept_timeout: Duration,
     /// Maximum fountain feedback rounds before failing closed.
     pub max_feedback_rounds: u32,
     /// Receiver-side quiet window after each `ObjectComplete` frame.
@@ -473,6 +484,7 @@ impl Default for RqConfig {
             round0_loss_target: 0.0,
             udp_fanout: DEFAULT_UDP_FANOUT,
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
+            accept_timeout: DEFAULT_ACCEPT_TIMEOUT,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
             round_tail_drain: DEFAULT_ROUND_TAIL_DRAIN,
             source_retransmit_rounds: DEFAULT_SOURCE_RETRANSMIT_ROUNDS,
@@ -4540,7 +4552,19 @@ pub async fn send_path(
         control_source_stream_eligible(total_bytes, &config, symbol_auth_enabled);
 
     // Control plane: TCP connect + handshake.
-    let stream = TcpStream::connect(addr).await?;
+    let stream =
+        match crate::time::timeout(cx.now(), DEFAULT_CONNECT_TIMEOUT, TcpStream::connect(addr))
+            .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => return Err(RqError::Io(err)),
+            Err(_elapsed) => {
+                return Err(RqError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("connect to {addr} timed out after {DEFAULT_CONNECT_TIMEOUT:?}"),
+                )));
+            }
+        };
     if prefer_control_source_stream {
         tune_control_stream_for_bulk_source(&stream);
     }
@@ -6207,7 +6231,22 @@ pub async fn receive_once(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, RqError> {
-    let (stream, peer) = control_listener.accept().await?;
+    let (stream, peer) = match crate::time::timeout(
+        cx.now(),
+        config.accept_timeout,
+        control_listener.accept(),
+    )
+    .await
+    {
+        Ok(Ok(accepted)) => accepted,
+        Ok(Err(err)) => return Err(RqError::Io(err)),
+        Err(_elapsed) => {
+            return Err(RqError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("accept timed out after {:?}", config.accept_timeout),
+            )));
+        }
+    };
     receive_connection(cx, stream, peer, udp_bind_ip, dest_dir, config, peer_id).await
 }
 

@@ -60,7 +60,9 @@ else
 fi
 CIDR="${CIDR:-24}"
 PORT_BASE="${PORT_BASE:-41000}"
-TIMEOUT_S="${TIMEOUT_S:-3600}"
+TIMEOUT_S="${TIMEOUT_S:-300}"
+ATP_RECV_LISTEN_TIMEOUT_MS="${ATP_RECV_LISTEN_TIMEOUT_MS:-30000}"
+ATP_RECV_ACCEPT_TIMEOUT_SECS="${ATP_RECV_ACCEPT_TIMEOUT_SECS:-$(((ATP_RECV_LISTEN_TIMEOUT_MS + 999) / 1000))}"
 RECEIVER_READY_SLEEP="${RECEIVER_READY_SLEEP:-0.75}"
 RSS_SAMPLE_INTERVAL="${RSS_SAMPLE_INTERVAL:-0.2}"
 RQ_AUTH_LAB="${RQ_AUTH_LAB:---rq-allow-unauthenticated-lab}"
@@ -335,6 +337,7 @@ resync_atp() {
     timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$dest_dir" \
         --listen "0.0.0.0:${port}" "${recv_args[@]}" --once --peer-id "$r_tag" \
         --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
+        --listen-timeout-ms "$ATP_RECV_LISTEN_TIMEOUT_MS" \
         >"$rl" 2>"$rt" &
     local recv_pid=$!
     sample_peak_rss "$s_tag" "$s_stop" "$s_out" & local samp=$!
@@ -357,6 +360,12 @@ resync_atp() {
         "${send_args[@]}" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" >"$sl" 2>"$st"
     ss=$?
     finish="$(now_s)"; after="$(ns_wire_bytes)"
+    local sender_noop=0
+    if [ "$ss" = "0" ] && grep -Eq '"mode"[[:space:]]*:[[:space:]]*"already_in_sync"' "$sl"; then
+        sender_noop=1
+        log "ATP sender reported already_in_sync; no transfer connection is expected"
+        kill -0 "$recv_pid" 2>/dev/null && kill "$recv_pid" 2>/dev/null
+    fi
     if [ "$ss" = "0" ] && grep -Eq "using full-object transfer|full-object fallback" "$st"; then
         log "ATP sender used graceful full-object transfer after delta planner rejected package; scoring by sha and wire bytes"
     fi
@@ -372,6 +381,9 @@ resync_atp() {
         kill -0 "$recv_pid" 2>/dev/null && kill "$recv_pid" 2>/dev/null
     fi
     wait "$recv_pid"; rs=$?
+    if [ "$sender_noop" = "1" ]; then
+        rs=0
+    fi
     touch "$s_stop"; wait "$samp" 2>/dev/null
     set -e
     # Default the RSS field to 0 when /usr/bin/time produced no "Maximum resident
@@ -450,7 +462,8 @@ run_file_cell() {
     set +e
     timeout "$TIMEOUT_S" "$BIN" recv "$atp_dest" --listen "0.0.0.0:${port}" --transport rq --once \
         --peer-id "init-recv-${port}" --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
-        --symbol-size "$SYMBOL_SIZE" $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
+        --symbol-size "$SYMBOL_SIZE" --listen-timeout-ms "$ATP_RECV_LISTEN_TIMEOUT_MS" \
+        $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
     local ip_pid=$!; sleep "$RECEIVER_READY_SLEEP"
     local init_send_status init_recv_status
     ip netns exec "$NS" timeout "$TIMEOUT_S" "$BIN" send "$atp_src" "${HOST_IP}:${port}" --transport rq \
@@ -466,7 +479,10 @@ run_file_cell() {
     fi
     require_atp_delta_state "$atp_dest"
     mutate_file "$atp_src" "$change"
-    local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+1))" "$case_dir")"
+    # The initial receiver owns base+1 for its delta-state sidecar. Use base+2
+    # for the measured resync control listener so the second receive never races
+    # stale sidecar/TIME_WAIT state from the seed sync.
+    local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+2))" "$case_dir")"
     # shellcheck disable=SC2086
     set -- $fields; local a_wire="${1:-0}" a_wall="${2:-0}" a_rss="${3:-0}" a_sc="${4:-1}"
     local a_src_sha a_dst_sha; a_src_sha="$(sha256_file "$atp_src")"; a_dst_sha="$(sha256_file "$atp_dest/$(basename "$atp_src")")"
@@ -505,7 +521,8 @@ run_tree_rename_cell() {
     set +e
     timeout "$TIMEOUT_S" "$BIN" recv "$atp_dest" --listen "0.0.0.0:${port}" --transport rq --once \
         --peer-id "init-tree-recv-${port}" --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
-        --symbol-size "$SYMBOL_SIZE" $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
+        --symbol-size "$SYMBOL_SIZE" --listen-timeout-ms "$ATP_RECV_LISTEN_TIMEOUT_MS" \
+        $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
     local ip_pid=$!; sleep "$RECEIVER_READY_SLEEP"
     local init_send_status init_recv_status
     ip netns exec "$NS" timeout "$TIMEOUT_S" "$BIN" send "$atp_src" "${HOST_IP}:${port}" --transport rq \
@@ -521,7 +538,8 @@ run_tree_rename_cell() {
     fi
     require_atp_delta_state "$atp_dest"
     mutate_tree_rename "$atp_src"
-    local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+1))" "$case_dir")"
+    # Keep measured resync off the seed receiver's sidecar port (base+1).
+    local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+2))" "$case_dir")"
     # shellcheck disable=SC2086
     set -- $fields; local a_wire="${1:-0}" a_wall="${2:-0}" a_rss="${3:-0}" a_sc="${4:-1}"
     local a_src_sha a_dst_sha; a_src_sha="$(tree_digest "$atp_src")"; a_dst_sha="$(tree_digest "$atp_dest/$(basename "$atp_src")")"
@@ -546,6 +564,7 @@ run_tree_rename_cell() {
 
 main() {
     log "resync_bench start -> $RESULTS (git $GIT_HEAD)"
+    log "timeouts: process=${TIMEOUT_S}s atp-recv-listen=${ATP_RECV_LISTEN_TIMEOUT_MS}ms"
     setup_netns
     local port_off=0
     for spec in $SIZES; do
