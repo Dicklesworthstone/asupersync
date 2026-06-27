@@ -739,6 +739,16 @@ fn rate_window_bytes(bytes_per_sec: u64, rtt: Duration) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
+fn duration_for_rate_window(bytes: u64, bytes_per_sec: u64) -> Duration {
+    if bytes == 0 || bytes_per_sec == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = u128::from(bytes)
+        .saturating_mul(1_000_000_000)
+        .div_ceil(u128::from(bytes_per_sec));
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
 fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -747,6 +757,7 @@ struct RqSprayPacer {
     controller: CongestionController,
     pacing: RqSprayPacing,
     round0_ramp: Option<RqRound0CleanPacingRamp>,
+    small_clean_burst: Option<RqSmallCleanBurstPacer>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -754,6 +765,21 @@ struct RqRound0CleanPacingRamp {
     sent_datagrams: u64,
     next_step_bytes: u64,
     max_rate_bytes_per_sec: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RqSmallCleanBurstPacer {
+    remaining_in_burst: u32,
+    next_burst_at: Option<Instant>,
+}
+
+impl RqSmallCleanBurstPacer {
+    fn new() -> Self {
+        Self {
+            remaining_in_burst: 0,
+            next_burst_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -851,12 +877,13 @@ impl RqSprayPacer {
                 pacing.max_burst_size,
             );
         }
-        Self::new_with_round0_ramp(pacing, round0_ramp)
+        Self::new_with_round0_ramp(pacing, round0_ramp, force_clean_ramp)
     }
 
     fn new_with_round0_ramp(
         pacing: RqSprayPacing,
         round0_ramp: Option<RqRound0CleanPacingRamp>,
+        small_clean_burst: bool,
     ) -> Self {
         let mut controller = CongestionController::new(CongestionConfig::default());
         Self::configure_controller(&mut controller, pacing);
@@ -864,6 +891,7 @@ impl RqSprayPacer {
             controller,
             pacing,
             round0_ramp,
+            small_clean_burst: small_clean_burst.then(RqSmallCleanBurstPacer::new),
         }
     }
 
@@ -879,6 +907,7 @@ impl RqSprayPacer {
     fn configure(&mut self, pacing: RqSprayPacing) {
         self.pacing = pacing;
         self.round0_ramp = None;
+        self.small_clean_burst = None;
         Self::configure_controller(&mut self.controller, pacing);
     }
 
@@ -906,6 +935,10 @@ impl RqSprayPacer {
     }
 
     async fn before_send(&mut self, cx: &Cx) -> Result<(), RqError> {
+        if self.small_clean_burst.is_some() {
+            return self.before_small_clean_burst_send(cx).await;
+        }
+
         loop {
             let now = Instant::now();
             if self.controller.try_consume_send_budget(now) {
@@ -918,6 +951,38 @@ impl RqSprayPacer {
             crate::time::sleep(cx.now(), wait).await;
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         }
+    }
+
+    async fn before_small_clean_burst_send(&mut self, cx: &Cx) -> Result<(), RqError> {
+        let pacing = self.pacing;
+        let burst_symbols = pacing
+            .max_burst_size
+            .max(u32::try_from(RQ_SEND_BATCH_PER_SOCKET).unwrap_or(u32::MAX));
+        let Some(burst) = self.small_clean_burst.as_mut() else {
+            return Ok(());
+        };
+
+        if burst.remaining_in_burst > 0 {
+            burst.remaining_in_burst = burst.remaining_in_burst.saturating_sub(1);
+            return Ok(());
+        }
+
+        while let Some(next_burst_at) = burst.next_burst_at {
+            let now = Instant::now();
+            let Some(wait) = next_burst_at.checked_duration_since(now) else {
+                break;
+            };
+            let wait = wait.clamp(RQ_PACING_MIN_PAUSE, RQ_PACING_MAX_PAUSE);
+            crate::time::sleep(cx.now(), wait).await;
+            cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        }
+
+        let burst_bytes =
+            u64::from(pacing.datagram_bytes.max(1)).saturating_mul(u64::from(burst_symbols.max(1)));
+        let burst_interval = duration_for_rate_window(burst_bytes, pacing.rate_bytes_per_sec());
+        burst.next_burst_at = Instant::now().checked_add(burst_interval);
+        burst.remaining_in_burst = burst_symbols.saturating_sub(1);
+        Ok(())
     }
 }
 
@@ -2722,6 +2787,10 @@ where
         use std::pin::Pin;
         use std::task::Poll;
 
+        if self.stashed.is_some() {
+            return Ok(None);
+        }
+
         if let Some(frame) = self
             .codec
             .decode(&mut self.rbuf)
@@ -2755,6 +2824,44 @@ where
             .decode(&mut self.rbuf)
             .map_err(|e| RqError::Frame(e.to_string()))
     }
+}
+
+async fn drain_sender_close_after_proof<S>(cx: &Cx, control: &mut FrameTransport<S>, phase: &str)
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    if cx.is_cancel_requested() {
+        return;
+    }
+
+    for _ in 0..4 {
+        let frame = match control.try_recv_ready().await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(err) => {
+                rqtrace!("receiver: sender Close after Proof unavailable phase={phase}: {err}");
+                return;
+            }
+        };
+        match frame.frame_type() {
+            FrameType::Close => {
+                rqtrace!("receiver: drained sender Close after Proof phase={phase}");
+                return;
+            }
+            FrameType::ObjectComplete | FrameType::KeepAlive => {
+                rqtrace!(
+                    "receiver: draining late {:?} after Proof phase={phase}",
+                    frame.frame_type()
+                );
+            }
+            other => {
+                rqtrace!("receiver: ignoring post-Proof frame {other:?} phase={phase}");
+                return;
+            }
+        }
+    }
+
+    rqtrace!("receiver: no ready sender Close after Proof phase={phase}");
 }
 
 fn tune_control_stream_for_bulk_source(stream: &TcpStream) {
@@ -6680,33 +6787,7 @@ pub async fn receive_connection(
                     control
                         .send(&json_frame(FrameType::Proof, &receipt)?)
                         .await?;
-                    for _ in 0..4 {
-                        match control.recv().await {
-                            Ok(frame) if frame.frame_type() == FrameType::Close => break,
-                            Ok(frame)
-                                if matches!(
-                                    frame.frame_type(),
-                                    FrameType::ObjectComplete | FrameType::KeepAlive
-                                ) =>
-                            {
-                                rqtrace!(
-                                    "receiver: draining late {:?} while waiting for sender Close",
-                                    frame.frame_type()
-                                );
-                            }
-                            Ok(frame) => {
-                                rqtrace!(
-                                    "receiver: expected sender Close after Proof, got {:?}",
-                                    frame.frame_type()
-                                );
-                                break;
-                            }
-                            Err(err) => {
-                                rqtrace!("receiver: sender Close after Proof unavailable: {err}");
-                                break;
-                            }
-                        }
-                    }
+                    drain_sender_close_after_proof(cx, &mut control, "udp-round").await;
                     if !receipt.committed {
                         return Err(RqError::Integrity(
                             receipt
@@ -6962,33 +7043,7 @@ where
                 control
                     .send(&json_frame(FrameType::Proof, &receipt)?)
                     .await?;
-                for _ in 0..4 {
-                    match control.recv().await {
-                        Ok(frame) if frame.frame_type() == FrameType::Close => break,
-                        Ok(frame)
-                            if matches!(
-                                frame.frame_type(),
-                                FrameType::ObjectComplete | FrameType::KeepAlive
-                            ) =>
-                        {
-                            rqtrace!(
-                                "receiver: draining late {:?} while waiting for sender Close",
-                                frame.frame_type()
-                            );
-                        }
-                        Ok(frame) => {
-                            rqtrace!(
-                                "receiver: expected sender Close after Proof, got {:?}",
-                                frame.frame_type()
-                            );
-                            break;
-                        }
-                        Err(err) => {
-                            rqtrace!("receiver: sender Close after Proof unavailable: {err}");
-                            break;
-                        }
-                    }
-                }
+                drain_sender_close_after_proof(cx, control, "control-source").await;
                 if !receipt.committed {
                     return Err(RqError::Integrity(
                         receipt
@@ -13313,12 +13368,51 @@ mod tests {
             RQ_COLD_START_PACING_BPS
         );
         assert!(!round0_clean_ramp_enabled(&config, adjusted.pacing));
-        let pacer = RqSprayPacer::new_round0(
+        let mut pacer = RqSprayPacer::new_round0(
             adjusted.pacing,
             &config,
             small_clean_source_only_round0(50 * 1024 * 1024, &config),
         );
         assert!(pacer.round0_ramp.is_some());
+        assert!(
+            pacer.small_clean_burst.is_some(),
+            "small clean UDP source-only sprays must use coarse burst pacing so sub-ms timer \
+             wakes cannot stretch 50M/perfect auth to the 60s timeout floor"
+        );
+        let burst_symbols = adjusted
+            .pacing
+            .max_burst_size
+            .max(u32::try_from(RQ_SEND_BATCH_PER_SOCKET).unwrap_or(u32::MAX));
+        let burst_bytes =
+            u64::from(adjusted.pacing.datagram_bytes).saturating_mul(u64::from(burst_symbols));
+        assert!(
+            duration_for_rate_window(burst_bytes, adjusted.pacing.rate_bytes_per_sec())
+                > RQ_PACING_MIN_PAUSE,
+            "small-clean burst pacing should sleep once per UDP batch, not once per symbol"
+        );
+
+        pacer.configure(RqSprayPacing::from_rate(
+            RQ_COLD_START_PACING_BPS / 2,
+            config.symbol_size,
+            RQ_ADAPTIVE_BURST_SYMBOLS,
+            Some(Duration::from_millis(200)),
+            true,
+        ));
+        assert!(
+            pacer.small_clean_burst.is_none(),
+            "feedback/retry rounds must return to the normal per-datagram controller"
+        );
+
+        let large_clean_pacer = RqSprayPacer::new_round0(
+            RqSprayPacing::cold_start(config.symbol_size),
+            &config,
+            false,
+        );
+        assert!(large_clean_pacer.round0_ramp.is_some());
+        assert!(
+            large_clean_pacer.small_clean_burst.is_none(),
+            "large clean transfers keep the existing clean ramp without the small-transfer burst shim"
+        );
     }
 
     #[test]
@@ -13567,6 +13661,57 @@ mod tests {
         ) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Ready(Ok(()))
         }
+    }
+
+    #[derive(Default)]
+    struct PendingCloseControlIo;
+
+    impl crate::io::AsyncRead for PendingCloseControlIo {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl crate::io::AsyncWrite for PendingCloseControlIo {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn proof_close_drain_does_not_inherit_accept_timeout() {
+        let cx = Cx::for_testing();
+        let mut control = FrameTransport::new(PendingCloseControlIo);
+        let started = Instant::now();
+
+        futures_lite::future::block_on(drain_sender_close_after_proof(&cx, &mut control, "test"));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "post-Proof close drain must not wait for the 60s accept/connect timeout"
+        );
     }
 
     #[test]

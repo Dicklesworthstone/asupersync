@@ -21,6 +21,7 @@ use asupersync::net::atp::transport_rq::{
     ReceiveReport, RqConfig, RqError, SendReport, receive_once, send_path,
 };
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::security::SecurityContext;
 
 const PROFILE_TRANSFER_BYTES: usize = 1024 * 1024 * 1024;
 const PROFILE_PEAK_RSS_GROWTH_CEILING: u64 = 64 * 1024 * 1024;
@@ -44,6 +45,16 @@ fn test_config() -> RqConfig {
         ..RqConfig::default()
     }
     .allow_unauthenticated_for_trusted_transport()
+}
+
+fn auth_test_config() -> RqConfig {
+    RqConfig {
+        max_block_size: 64 * 1024,
+        repair_overhead: 1.0,
+        round_tail_drain: std::time::Duration::from_millis(5),
+        ..RqConfig::default()
+    }
+    .with_symbol_auth(SecurityContext::for_testing(138))
 }
 
 fn profile_config() -> RqConfig {
@@ -185,6 +196,42 @@ fn single_file_roundtrip_is_byte_identical() {
 
     let got = std::fs::read(dst_dir.join("payload.bin")).expect("received file");
     assert_eq!(got, payload, "received bytes must be identical");
+}
+
+#[test]
+fn authenticated_perfect_roundtrip_does_not_wait_for_close_timeout() {
+    let root = unique_tmp("auth_perfect");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let payload: Vec<u8> = (0..65_507u32)
+        .map(|i| (i.wrapping_mul(1_103_515_245).rotate_left(7) >> 11) as u8)
+        .collect();
+    let src_file = src_dir.join("auth-payload.bin");
+    std::fs::write(&src_file, &payload).unwrap();
+
+    let started = std::time::Instant::now();
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), auth_test_config());
+    let send = run_sender(addr, src_file, auth_test_config()).expect("authenticated send succeeds");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("authenticated receive succeeds");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "auth perfect completion should not wait for a 60s close/accept timeout; elapsed={elapsed:?}"
+    );
+    assert!(send.receipt.committed);
+    assert!(send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(send.feedback_rounds, 0);
+    assert!(recv.committed);
+    assert_eq!(recv.feedback_rounds, 0);
+    let got = std::fs::read(dst_dir.join("auth-payload.bin")).expect("received auth file");
+    assert_eq!(got, payload, "authenticated received bytes must match");
 }
 
 #[test]
