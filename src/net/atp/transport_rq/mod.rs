@@ -86,7 +86,7 @@ use crate::net::atp::transport_common::{
 use crate::net::{TcpListener, TcpStream, UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::security::tag::TAG_SIZE;
-use crate::security::{AuthenticationTag, SecurityContext};
+use crate::security::{AuthMode, AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use adaptive::{AdaptiveController, AdaptivePolicy, BlockPlan, PathEstimate, PathSignalSample};
@@ -324,6 +324,10 @@ const RQ_MAX_ROUND_REPAIR_OVERHEAD: f64 = 1.0;
 const RQ_INBOUND_PUMP_BATCH: usize = 512;
 /// Maximum full batches drained after the first ready batch in one pump turn.
 const RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
+/// Minimum authenticated UDP batch worth sending through the blocking pool.
+const RQ_AUTH_VERIFY_PARALLEL_MIN_SYMBOLS: usize = 32;
+/// Aim for this many HMAC verifications per blocking-pool task.
+const RQ_AUTH_VERIFY_TARGET_CHUNK_SYMBOLS: usize = 32;
 /// Hard ceiling on one entry's queued RQ repair-decode jobs.
 ///
 /// A single large file is split into many independent bounded-K source blocks.
@@ -3782,6 +3786,7 @@ fn encode_symbol_datagram(
     out
 }
 
+#[derive(Debug, Clone, Copy)]
 struct ParsedDatagram {
     entry: u32,
     sbn: u8,
@@ -7240,98 +7245,34 @@ fn source_progress_for_pending(
     progress
 }
 
-async fn feed_symbol_with_cx(
+async fn feed_pipeline_auth_symbol_with_cx(
     cx: &Cx,
     dec: &mut EntryDecoder,
     parsed: &ParsedDatagram,
-    payload: &[u8],
+    auth: AuthenticatedSymbol,
     symbol_size: u16,
     symbol_auth: Option<&SecurityContext>,
+    preverified: bool,
     allow_spawn_decode: bool,
     transfer_decode_width: usize,
     trace_intake: bool,
 ) -> Result<RqSymbolFeed, RqError> {
-    if dec.complete {
-        return Ok(RqSymbolFeed::default());
-    }
-    if payload.len() != usize::from(symbol_size) {
-        // RaptorQ symbols are fixed-size; ignore malformed/truncated payloads.
-        // (The final block's short tail is zero-padded by the encoder, so all
-        // emitted symbols are symbol_size bytes.)
-        return Ok(RqSymbolFeed::default());
-    }
     let mut feed = RqSymbolFeed::default();
-    let mut pipeline_auth = None;
-    if dec.source_streaming && parsed.kind.is_source() {
-        if let Some(tag) = parsed.auth_tag {
-            let Some(context) = symbol_auth else {
-                return Ok(feed);
-            };
-            let sym = Symbol::new(
-                SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
-                payload.to_vec(),
-                parsed.kind,
-            );
-            let mut auth = AuthenticatedSymbol::from_parts(sym, tag);
-            let auth_start = trace_intake.then(Instant::now);
-            if context.verify_authenticated_symbol(&mut auth).is_err() {
-                feed.source_auth_micros = feed
-                    .source_auth_micros
-                    .saturating_add(elapsed_micros_since(auth_start));
-                rqtrace!(
-                    "receiver: entry {} rejected source-streamed sbn={} esi={} auth tag",
-                    dec.index,
-                    parsed.sbn,
-                    parsed.esi
-                );
-                return Ok(feed);
-            }
-            feed.source_auth_micros = feed
-                .source_auth_micros
-                .saturating_add(elapsed_micros_since(auth_start));
-            if auth.is_verified() {
-                let persist_start = trace_intake.then(Instant::now);
-                feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
-                feed.source_persist_micros = feed
-                    .source_persist_micros
-                    .saturating_add(elapsed_micros_since(persist_start));
-                return Ok(feed);
-            }
-            pipeline_auth = Some(auth);
-        } else if symbol_auth.is_some() {
-            return Ok(feed);
-        } else {
-            let persist_start = trace_intake.then(Instant::now);
-            feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
-            feed.source_persist_micros = feed
-                .source_persist_micros
-                .saturating_add(elapsed_micros_since(persist_start));
-            return Ok(feed);
-        }
-    }
     if dec.pipeline.is_none() {
         return Ok(feed);
     }
-    let auth = if let Some(auth) = pipeline_auth {
-        auth
-    } else {
-        let sym = Symbol::new(
-            SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
-            payload.to_vec(),
-            parsed.kind,
-        );
-        if let Some(tag) = parsed.auth_tag {
-            AuthenticatedSymbol::from_parts(sym, tag)
-        } else {
-            AuthenticatedSymbol::new_unauthenticated(sym)
-        }
-    };
     let pipeline_start = trace_intake.then(Instant::now);
-    let result = dec
-        .pipeline
-        .as_mut()
-        .expect("checked above")
-        .feed_streaming_block_deferred(auth);
+    let result = if preverified {
+        dec.pipeline
+            .as_mut()
+            .expect("checked above")
+            .feed_preverified_streaming_block_deferred(auth)
+    } else {
+        dec.pipeline
+            .as_mut()
+            .expect("checked above")
+            .feed_streaming_block_deferred(auth)
+    };
     feed.pipeline_feed_micros = feed
         .pipeline_feed_micros
         .saturating_add(elapsed_micros_since(pipeline_start));
@@ -7463,6 +7404,119 @@ async fn feed_symbol_with_cx(
             .saturating_add(elapsed_micros_since(seed_start));
     }
     feed.accepted = accepted;
+    Ok(feed)
+}
+
+async fn feed_symbol_with_cx(
+    cx: &Cx,
+    dec: &mut EntryDecoder,
+    parsed: &ParsedDatagram,
+    payload: &[u8],
+    symbol_size: u16,
+    symbol_auth: Option<&SecurityContext>,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
+    trace_intake: bool,
+) -> Result<RqSymbolFeed, RqError> {
+    if dec.complete {
+        return Ok(RqSymbolFeed::default());
+    }
+    if payload.len() != usize::from(symbol_size) {
+        // RaptorQ symbols are fixed-size; ignore malformed/truncated payloads.
+        // (The final block's short tail is zero-padded by the encoder, so all
+        // emitted symbols are symbol_size bytes.)
+        return Ok(RqSymbolFeed::default());
+    }
+    let mut feed = RqSymbolFeed::default();
+    let mut pipeline_auth = None;
+    if dec.source_streaming && parsed.kind.is_source() {
+        if let Some(tag) = parsed.auth_tag {
+            let Some(context) = symbol_auth else {
+                return Ok(feed);
+            };
+            let sym = Symbol::new(
+                SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
+                payload.to_vec(),
+                parsed.kind,
+            );
+            let mut auth = AuthenticatedSymbol::from_parts(sym, tag);
+            let auth_start = trace_intake.then(Instant::now);
+            if context.verify_authenticated_symbol(&mut auth).is_err() {
+                feed.source_auth_micros = feed
+                    .source_auth_micros
+                    .saturating_add(elapsed_micros_since(auth_start));
+                rqtrace!(
+                    "receiver: entry {} rejected source-streamed sbn={} esi={} auth tag",
+                    dec.index,
+                    parsed.sbn,
+                    parsed.esi
+                );
+                return Ok(feed);
+            }
+            feed.source_auth_micros = feed
+                .source_auth_micros
+                .saturating_add(elapsed_micros_since(auth_start));
+            if auth.is_verified() {
+                let persist_start = trace_intake.then(Instant::now);
+                feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
+                feed.source_persist_micros = feed
+                    .source_persist_micros
+                    .saturating_add(elapsed_micros_since(persist_start));
+                return Ok(feed);
+            }
+            pipeline_auth = Some(auth);
+        } else if symbol_auth.is_some() {
+            return Ok(feed);
+        } else {
+            let persist_start = trace_intake.then(Instant::now);
+            feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
+            feed.source_persist_micros = feed
+                .source_persist_micros
+                .saturating_add(elapsed_micros_since(persist_start));
+            return Ok(feed);
+        }
+    }
+    let auth = if let Some(auth) = pipeline_auth {
+        auth
+    } else {
+        let sym = Symbol::new(
+            SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
+            payload.to_vec(),
+            parsed.kind,
+        );
+        if let Some(tag) = parsed.auth_tag {
+            AuthenticatedSymbol::from_parts(sym, tag)
+        } else {
+            AuthenticatedSymbol::new_unauthenticated(sym)
+        }
+    };
+    let pipeline_feed = feed_pipeline_auth_symbol_with_cx(
+        cx,
+        dec,
+        parsed,
+        auth,
+        symbol_size,
+        symbol_auth,
+        false,
+        allow_spawn_decode,
+        transfer_decode_width,
+        trace_intake,
+    )
+    .await?;
+    feed.pipeline_feed_micros = feed
+        .pipeline_feed_micros
+        .saturating_add(pipeline_feed.pipeline_feed_micros);
+    feed.block_persist_micros = feed
+        .block_persist_micros
+        .saturating_add(pipeline_feed.block_persist_micros);
+    feed.decode_dispatch_micros = feed
+        .decode_dispatch_micros
+        .saturating_add(pipeline_feed.decode_dispatch_micros);
+    feed.source_seed_micros = feed
+        .source_seed_micros
+        .saturating_add(pipeline_feed.source_seed_micros);
+    feed.decode_stats.merge(pipeline_feed.decode_stats);
+    feed.accepted = pipeline_feed.accepted;
     Ok(feed)
 }
 
@@ -7738,22 +7792,32 @@ async fn seed_source_streaming_pipeline(
             payload,
             SymbolKind::Source,
         );
-        let auth_symbol = if symbol_auth.is_some() {
+        let preverified_source_seed = symbol_auth.is_some();
+        let auth_symbol = if preverified_source_seed {
             let tag = auth_tag.ok_or_else(|| {
                 RqError::Authentication(format!(
                     "entry {} source seed missing verified auth tag for sbn={sbn} esi={esi}",
                     dec.index
                 ))
             })?;
-            AuthenticatedSymbol::from_parts(symbol, tag)
+            // Source-streaming tags are stored only after receiver-boundary
+            // verification succeeds, so seeding the FEC pipeline must not pay a
+            // second serial HMAC over the same staged source symbol.
+            AuthenticatedSymbol::new_verified(symbol, tag)
         } else {
             AuthenticatedSymbol::new_unauthenticated(symbol)
         };
-        let result = dec
-            .pipeline
-            .as_mut()
-            .expect("checked above")
-            .feed_streaming_block_deferred(auth_symbol);
+        let result = if preverified_source_seed {
+            dec.pipeline
+                .as_mut()
+                .expect("checked above")
+                .feed_preverified_streaming_block_deferred(auth_symbol)
+        } else {
+            dec.pipeline
+                .as_mut()
+                .expect("checked above")
+                .feed_streaming_block_deferred(auth_symbol)
+        };
         if result.is_ok() {
             dec.source_blocks[sbn].pipeline_seeded[esi] = true;
         }
@@ -8883,6 +8947,73 @@ impl PlainSourceBatchRun {
     }
 }
 
+#[derive(Clone)]
+struct AuthSourceBatchSymbol {
+    decoder_index: usize,
+    object_id: ObjectId,
+    sbn: usize,
+    sbn_wire: u8,
+    esi: usize,
+    esi_wire: u32,
+    offset: u64,
+    take: usize,
+    payload: Vec<u8>,
+    auth_tag: AuthenticationTag,
+    parse_micros: u64,
+}
+
+struct VerifiedAuthSourceBatchSymbol {
+    symbol: AuthSourceBatchSymbol,
+    verified: bool,
+}
+
+struct AuthSourceBatchRun {
+    decoder_index: usize,
+    sbn: usize,
+    first_esi: usize,
+    next_esi: usize,
+    offset: u64,
+    data: Vec<u8>,
+    auth_tags: Vec<AuthenticationTag>,
+    symbols: u64,
+}
+
+impl AuthSourceBatchRun {
+    fn new(symbol: AuthSourceBatchSymbol) -> Self {
+        let mut run = Self {
+            decoder_index: symbol.decoder_index,
+            sbn: symbol.sbn,
+            first_esi: symbol.esi,
+            next_esi: symbol.esi,
+            offset: symbol.offset,
+            data: Vec::with_capacity(symbol.take),
+            auth_tags: Vec::with_capacity(1),
+            symbols: 0,
+        };
+        run.absorb(symbol);
+        run
+    }
+
+    fn can_absorb(&self, symbol: &AuthSourceBatchSymbol) -> bool {
+        if self.decoder_index != symbol.decoder_index
+            || self.sbn != symbol.sbn
+            || self.next_esi != symbol.esi
+        {
+            return false;
+        }
+        self.offset
+            .checked_add(u64::try_from(self.data.len()).unwrap_or(u64::MAX))
+            == Some(symbol.offset)
+    }
+
+    fn absorb(&mut self, symbol: AuthSourceBatchSymbol) {
+        self.next_esi = symbol.esi.saturating_add(1);
+        self.symbols = self.symbols.saturating_add(1);
+        self.data.extend_from_slice(&symbol.payload[..symbol.take]);
+        self.auth_tags.push(symbol.auth_tag);
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct RqDecodeRoundStats {
     attempts: u64,
@@ -9153,6 +9284,17 @@ fn rate_per_second(units: u64, elapsed_micros: u64) -> u64 {
     u64::try_from(rate).unwrap_or(u64::MAX)
 }
 
+fn rq_auth_verify_width_for_cx(cx: &Cx, symbols: usize) -> usize {
+    if symbols < RQ_AUTH_VERIFY_PARALLEL_MIN_SYMBOLS {
+        return 1;
+    }
+    if cx.blocking_pool_handle().is_none() {
+        return 1;
+    }
+    let chunks_by_size = symbols.div_ceil(RQ_AUTH_VERIFY_TARGET_CHUNK_SYMBOLS).max(1);
+    rq_decode_core_limit_for_cx(cx).min(chunks_by_size).max(1)
+}
+
 async fn feed_datagram_to_decoders(
     cx: &Cx,
     buf: &[u8],
@@ -9407,6 +9549,280 @@ async fn try_feed_plain_source_datagram_batch(
     Some(Ok(stats))
 }
 
+fn authenticated_source_batch_symbols(
+    batch: &crate::net::UdpRecvBatch,
+    tag: u64,
+    decoders: &[EntryDecoder],
+    symbol_size: u16,
+    trace_intake: bool,
+) -> Option<Vec<AuthSourceBatchSymbol>> {
+    let mut symbols = Vec::with_capacity(batch.packets.len());
+    let symbol_size = usize::from(symbol_size);
+    if symbol_size == 0 {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    for packet in &batch.packets {
+        let parse_start = trace_intake.then(Instant::now);
+        let (parsed, payload) =
+            parse_symbol_datagram_payload(&packet.payload, packet.payload.len(), tag, true)?;
+        let parse_micros = elapsed_micros_since(parse_start);
+        if !parsed.kind.is_source() || payload.len() != symbol_size {
+            return None;
+        }
+        let auth_tag = parsed.auth_tag?;
+        let decoder_index = decoder_position_for_entry(decoders, parsed.entry)?;
+        let decoder = &decoders[decoder_index];
+        if decoder.complete || !decoder.source_streaming {
+            return None;
+        }
+        let sbn = usize::from(parsed.sbn);
+        let esi = usize::try_from(parsed.esi).ok()?;
+        if !seen.insert((decoder_index, sbn, esi)) {
+            return None;
+        }
+        let within_block = esi.checked_mul(symbol_size)?;
+        let block = decoder.source_blocks.get(sbn)?;
+        if block.complete || esi >= block.k || block.received[esi] || within_block >= block.len {
+            return None;
+        }
+        let take = symbol_size.min(block.len - within_block);
+        let offset = block.start.checked_add(u64::try_from(within_block).ok()?)?;
+        symbols.push(AuthSourceBatchSymbol {
+            decoder_index,
+            object_id: decoder.object_id,
+            sbn,
+            sbn_wire: parsed.sbn,
+            esi,
+            esi_wire: parsed.esi,
+            offset,
+            take,
+            payload: payload.to_vec(),
+            auth_tag,
+            parse_micros,
+        });
+    }
+    Some(symbols)
+}
+
+fn verify_auth_source_batch_chunk(
+    context: SecurityContext,
+    symbols: Vec<AuthSourceBatchSymbol>,
+) -> Vec<VerifiedAuthSourceBatchSymbol> {
+    symbols
+        .into_iter()
+        .map(|mut symbol| {
+            let auth_symbol = Symbol::new(
+                SymbolId::new(symbol.object_id, symbol.sbn_wire, symbol.esi_wire),
+                symbol.payload.clone(),
+                SymbolKind::Source,
+            );
+            let mut auth = AuthenticatedSymbol::from_parts(auth_symbol, symbol.auth_tag);
+            let verified =
+                context.verify_authenticated_symbol(&mut auth).is_ok() && auth.is_verified();
+            if verified {
+                symbol.payload = auth.into_symbol().into_data();
+            }
+            VerifiedAuthSourceBatchSymbol { symbol, verified }
+        })
+        .collect()
+}
+
+async fn verify_auth_source_batch_symbols(
+    cx: &Cx,
+    context: &SecurityContext,
+    symbols: Vec<AuthSourceBatchSymbol>,
+    trace_intake: bool,
+) -> Result<(Vec<VerifiedAuthSourceBatchSymbol>, u64), RqError> {
+    let auth_start = trace_intake.then(Instant::now);
+    let width = rq_auth_verify_width_for_cx(cx, symbols.len());
+    if width <= 1 {
+        return Ok((
+            verify_auth_source_batch_chunk(context.clone(), symbols),
+            elapsed_micros_since(auth_start),
+        ));
+    }
+    let chunk_len = symbols
+        .len()
+        .div_ceil(width)
+        .max(RQ_AUTH_VERIFY_TARGET_CHUNK_SYMBOLS);
+    let mut pending = Vec::new();
+    for chunk in symbols.chunks(chunk_len) {
+        let chunk = chunk.to_vec();
+        let inline_chunk = chunk.clone();
+        let spawn_context = context.clone();
+        let inline_context = context.clone();
+        match cx.spawn_blocking(move |_child| verify_auth_source_batch_chunk(spawn_context, chunk))
+        {
+            Ok(handle) => pending.push(Ok(handle)),
+            Err(_) => pending.push(Err(verify_auth_source_batch_chunk(
+                inline_context,
+                inline_chunk,
+            ))),
+        }
+    }
+    let mut verified = Vec::new();
+    for pending_chunk in pending {
+        match pending_chunk {
+            Ok(mut handle) => verified.extend(handle.join(cx).await.map_err(|join_err| {
+                RqError::Authentication(format!(
+                    "RQ source auth verification worker failed: {join_err:?}"
+                ))
+            })?),
+            Err(mut inline) => verified.append(&mut inline),
+        }
+    }
+    Ok((verified, elapsed_micros_since(auth_start)))
+}
+
+async fn persist_auth_source_batch_run(
+    dec: &mut EntryDecoder,
+    run: &AuthSourceBatchRun,
+) -> Result<u64, RqError> {
+    if run.symbols == 0 {
+        return Ok(0);
+    }
+    let Some(block) = dec.source_blocks.get(run.sbn) else {
+        return Ok(0);
+    };
+    if block.complete || run.next_esi > block.k {
+        return Ok(0);
+    }
+    let expected_tags = run.next_esi.saturating_sub(run.first_esi);
+    if run.auth_tags.len() != expected_tags {
+        return Err(RqError::Coding(format!(
+            "entry {} authenticated source batch tag count mismatch: have {} expected {}",
+            dec.index,
+            run.auth_tags.len(),
+            expected_tags
+        )));
+    }
+    for esi in run.first_esi..run.next_esi {
+        if block.received[esi] {
+            return Ok(0);
+        }
+    }
+    write_source_staging_range(dec, run.offset, &run.data).await?;
+    let completed_now = {
+        let block = &mut dec.source_blocks[run.sbn];
+        for (tag_index, esi) in (run.first_esi..run.next_esi).enumerate() {
+            if block.received[esi] {
+                continue;
+            }
+            block.received[esi] = true;
+            block.auth_tags[esi] = Some(run.auth_tags[tag_index]);
+            block.received_count = block.received_count.saturating_add(1);
+        }
+        if block.received_count == block.k {
+            block.complete = true;
+            dec.bytes_written = dec
+                .bytes_written
+                .checked_add(u64::try_from(block.len).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    RqError::Coding(format!("entry {} byte counter overflow", dec.index))
+                })?;
+            true
+        } else {
+            false
+        }
+    };
+    if completed_now {
+        rqtrace!(
+            "receiver: entry {} completed source-streamed block {} from auth-source batch",
+            dec.index,
+            run.sbn
+        );
+    }
+    if source_streaming_entry_complete(dec) {
+        dec.complete = true;
+        dec.pipeline = None;
+        close_cached_entry_staging_file(dec).await?;
+    }
+    Ok(run.symbols)
+}
+
+async fn flush_auth_source_batch_run(
+    stats: &mut RqDatagramRoundStats,
+    decoders: &mut [EntryDecoder],
+    run: Option<AuthSourceBatchRun>,
+    trace_intake: bool,
+) -> Result<(), RqError> {
+    let Some(run) = run else {
+        return Ok(());
+    };
+    let persist_start = trace_intake.then(Instant::now);
+    let accepted = persist_auth_source_batch_run(&mut decoders[run.decoder_index], &run).await?;
+    let persist_micros = elapsed_micros_since(persist_start);
+    stats.accepted = stats.accepted.saturating_add(accepted);
+    stats.source_accepted = stats.source_accepted.saturating_add(accepted);
+    stats.feed_micros = stats.feed_micros.saturating_add(persist_micros);
+    stats.source_persist_micros = stats.source_persist_micros.saturating_add(persist_micros);
+    Ok(())
+}
+
+async fn try_feed_authenticated_source_datagram_batch(
+    cx: &Cx,
+    batch: &crate::net::UdpRecvBatch,
+    tag: u64,
+    context: &SecurityContext,
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+    trace_intake: bool,
+) -> Option<Result<RqDatagramRoundStats, RqError>> {
+    if context.mode() == AuthMode::Disabled {
+        return None;
+    }
+    let symbols =
+        authenticated_source_batch_symbols(batch, tag, decoders, symbol_size, trace_intake)?;
+    let mut stats = RqDatagramRoundStats::default();
+    for symbol in &symbols {
+        stats.observed = stats.observed.saturating_add(1);
+        stats.source_observed = stats.source_observed.saturating_add(1);
+        stats.payload_bytes = stats
+            .payload_bytes
+            .saturating_add(u64::try_from(symbol.payload.len()).unwrap_or(u64::MAX));
+        stats.parse_micros = stats.parse_micros.saturating_add(symbol.parse_micros);
+    }
+    let (verified, auth_micros) =
+        match verify_auth_source_batch_symbols(cx, context, symbols, trace_intake).await {
+            Ok(verified) => verified,
+            Err(err) => return Some(Err(err)),
+        };
+    stats.source_auth_micros = stats.source_auth_micros.saturating_add(auth_micros);
+    stats.feed_micros = stats.feed_micros.saturating_add(auth_micros);
+    let mut run = None;
+    for verified_symbol in verified {
+        let symbol = verified_symbol.symbol;
+        if !verified_symbol.verified {
+            rqtrace!(
+                "receiver: entry {} rejected source-streamed batch sbn={} esi={} auth tag",
+                decoders[symbol.decoder_index].index,
+                symbol.sbn,
+                symbol.esi
+            );
+            continue;
+        }
+        let starts_new_run = run
+            .as_ref()
+            .is_some_and(|active: &AuthSourceBatchRun| !active.can_absorb(&symbol));
+        if starts_new_run
+            && let Err(err) =
+                flush_auth_source_batch_run(&mut stats, decoders, run.take(), trace_intake).await
+        {
+            return Some(Err(err));
+        }
+        if let Some(active) = run.as_mut() {
+            active.absorb(symbol);
+        } else {
+            run = Some(AuthSourceBatchRun::new(symbol));
+        }
+    }
+    if let Err(err) = flush_auth_source_batch_run(&mut stats, decoders, run, trace_intake).await {
+        return Some(Err(err));
+    }
+    Some(Ok(stats))
+}
+
 async fn feed_datagram_batch_to_decoders(
     cx: &Cx,
     batch: &crate::net::UdpRecvBatch,
@@ -9428,7 +9844,24 @@ async fn feed_datagram_batch_to_decoders(
         stats.record_decode_stats(drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?);
         return Ok(stats);
     }
-
+    if auth_required
+        && rq_pending_decode_jobs(decoders) == 0
+        && let Some(context) = symbol_auth
+        && let Some(result) = try_feed_authenticated_source_datagram_batch(
+            cx,
+            batch,
+            tag,
+            context,
+            decoders,
+            symbol_size,
+            trace_intake,
+        )
+        .await
+    {
+        let mut stats = result?;
+        stats.record_decode_stats(drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?);
+        return Ok(stats);
+    }
     let mut stats = RqDatagramRoundStats::default();
     for packet in &batch.packets {
         stats.record(
@@ -10235,6 +10668,35 @@ mod tests {
             budget.effective,
             budget.core_limit.min(budget.memory_limit),
             "500M geometry should use the receiver blocking-pool width instead of collapsing to host available_parallelism"
+        );
+    }
+
+    #[test]
+    fn auth_verify_width_uses_receiver_blocking_pool_without_decode_size_gate() {
+        let no_pool_cx = Cx::for_testing();
+        assert_eq!(
+            rq_auth_verify_width_for_cx(&no_pool_cx, RQ_AUTH_VERIFY_PARALLEL_MIN_SYMBOLS),
+            1,
+            "lab/no-pool contexts must verify inline instead of trying to spawn"
+        );
+
+        let pool = crate::runtime::blocking_pool::BlockingPool::new(4, 4);
+        let cx = Cx::new(
+            crate::types::RegionId::new_for_test(41, 1),
+            crate::types::TaskId::new_for_test(41, 0),
+            crate::types::Budget::INFINITE,
+        )
+        .with_blocking_pool_handle(Some(pool.handle()));
+
+        assert_eq!(
+            rq_auth_verify_width_for_cx(&cx, 512),
+            3,
+            "auth verification must use blocking-pool CPU width even for 50M-class transfers where repair decode is size-gated"
+        );
+        assert_eq!(
+            rq_auth_verify_width_for_cx(&cx, RQ_AUTH_VERIFY_PARALLEL_MIN_SYMBOLS - 1),
+            1,
+            "tiny batches should stay inline"
         );
     }
 
@@ -12085,6 +12547,19 @@ mod tests {
         (parsed, payload)
     }
 
+    fn signed_source_datagram(
+        ctx: &SecurityContext,
+        object_id: ObjectId,
+        esi: u32,
+        data: Vec<u8>,
+        tag: Option<AuthenticationTag>,
+    ) -> Vec<u8> {
+        let sym = Symbol::new(SymbolId::new(object_id, 0, esi), data, SymbolKind::Source);
+        let signed = ctx.sign_symbol(&sym);
+        let auth_tag = tag.as_ref().unwrap_or_else(|| signed.tag());
+        encode_symbol_datagram(0xA77E, 0, &sym, Some(auth_tag))
+    }
+
     fn udp_recv_batch(datagrams: Vec<Vec<u8>>) -> crate::net::UdpRecvBatch {
         let src_addr = "127.0.0.1:9000".parse().expect("socket addr");
         crate::net::UdpRecvBatch {
@@ -12324,6 +12799,100 @@ mod tests {
         assert_eq!(
             std::fs::read(staging_path).expect("read plain-source batch"),
             data
+        );
+    }
+
+    #[test]
+    fn authenticated_source_datagram_batch_verifies_in_chunks_and_rejects_bad_tag() {
+        let ctx = SecurityContext::for_testing(0xA17E);
+        let tag = 0xA77E;
+        let object_id = entry_object_id("auth-source-batch-run", 0);
+        let symbol_size = 4u16;
+        let symbols = RQ_AUTH_VERIFY_TARGET_CHUNK_SYMBOLS * 2;
+        let data: Vec<u8> = (0..symbols * usize::from(symbol_size))
+            .map(|byte| u8::try_from((byte % 251) + 1).expect("bounded byte"))
+            .collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let decoder = source_streaming_test_decoder(
+            object_id,
+            staging_path.clone(),
+            u64::try_from(data.len()).expect("test size fits"),
+            symbol_size,
+        );
+
+        let bad_esi = symbols / 2;
+        let bad_start = bad_esi * usize::from(symbol_size);
+        let bad_symbol = Symbol::new(
+            SymbolId::new(object_id, 0, u32::try_from(bad_esi).expect("esi fits")),
+            data[bad_start..bad_start + usize::from(symbol_size)].to_vec(),
+            SymbolKind::Source,
+        );
+        let good_bad_slot = ctx.sign_symbol(&bad_symbol);
+        let mut bad_tag = *good_bad_slot.tag().as_bytes();
+        bad_tag[0] ^= 0x80;
+
+        let datagrams = data
+            .chunks(usize::from(symbol_size))
+            .enumerate()
+            .map(|(esi, chunk)| {
+                signed_source_datagram(
+                    &ctx,
+                    object_id,
+                    u32::try_from(esi).expect("esi fits"),
+                    chunk.to_vec(),
+                    (esi == bad_esi).then_some(AuthenticationTag::from_bytes(bad_tag)),
+                )
+            })
+            .collect();
+        let batch = udp_recv_batch(datagrams);
+        let pool = crate::runtime::blocking_pool::BlockingPool::new(4, 4);
+        let cx = Cx::new(
+            crate::types::RegionId::new_for_test(51, 1),
+            crate::types::TaskId::new_for_test(51, 0),
+            crate::types::Budget::INFINITE,
+        )
+        .with_blocking_pool_handle(Some(pool.handle()));
+        assert!(
+            rq_auth_verify_width_for_cx(&cx, symbols) > 1,
+            "test fixture must exercise chunked auth verification"
+        );
+        let mut decoders = vec![decoder];
+
+        let stats = futures_lite::future::block_on(feed_datagram_batch_to_decoders(
+            &cx,
+            &batch,
+            tag,
+            true,
+            Some(&ctx),
+            &mut decoders,
+            symbol_size,
+            false,
+        ))
+        .expect("feed auth source datagram batch");
+
+        let decoder = decoders.pop().expect("decoder");
+        assert_eq!(stats.observed, u64::try_from(symbols).unwrap());
+        assert_eq!(stats.source_observed, u64::try_from(symbols).unwrap());
+        assert_eq!(stats.accepted, u64::try_from(symbols - 1).unwrap());
+        assert_eq!(stats.source_accepted, u64::try_from(symbols - 1).unwrap());
+        assert_eq!(stats.pipeline_feed_micros, 0);
+        assert!(
+            !decoder.complete,
+            "tampered source must leave block incomplete"
+        );
+        assert_eq!(decoder.bytes_written, 0);
+        assert_eq!(decoder.source_blocks[0].received_count, symbols - 1);
+        assert_eq!(decoder.source_blocks[0].auth_tags[bad_esi], None);
+        let staged = std::fs::read(staging_path).expect("read auth-source batch");
+        assert_eq!(
+            &staged[bad_start..bad_start + usize::from(symbol_size)],
+            &[0, 0, 0, 0]
+        );
+        assert_eq!(&staged[..bad_start], &data[..bad_start]);
+        assert_eq!(
+            &staged[bad_start + usize::from(symbol_size)..],
+            &data[bad_start + usize::from(symbol_size)..]
         );
     }
 

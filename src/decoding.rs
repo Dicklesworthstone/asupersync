@@ -142,6 +142,12 @@ enum FeedDecodeMode {
     Deferred,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedAuthPolicy {
+    VerifyInPipeline,
+    CallerVerified,
+}
+
 /// Result of a feed that may defer the CPU-heavy RaptorQ solve to a blocking
 /// worker.
 #[derive(Debug)]
@@ -529,7 +535,12 @@ impl DecodingPipeline {
         &mut self,
         auth_symbol: AuthenticatedSymbol,
     ) -> Result<DeferredSymbolAcceptResult, DecodingError> {
-        self.feed_with_retention_and_mode(auth_symbol, true, FeedDecodeMode::Deferred)
+        self.feed_with_retention_and_mode(
+            auth_symbol,
+            true,
+            FeedDecodeMode::Deferred,
+            FeedAuthPolicy::VerifyInPipeline,
+        )
     }
 
     /// Feeds a streaming symbol and returns an owned decode job when the block
@@ -540,7 +551,32 @@ impl DecodingPipeline {
         &mut self,
         auth_symbol: AuthenticatedSymbol,
     ) -> Result<DeferredSymbolAcceptResult, DecodingError> {
-        self.feed_with_retention_and_mode(auth_symbol, false, FeedDecodeMode::Deferred)
+        self.feed_with_retention_and_mode(
+            auth_symbol,
+            false,
+            FeedDecodeMode::Deferred,
+            FeedAuthPolicy::VerifyInPipeline,
+        )
+    }
+
+    /// Feeds a streaming symbol that the caller has already authenticated with
+    /// the same security context guarding this receive pipeline.
+    ///
+    /// This is intentionally `pub(crate)` and separate from the normal feed
+    /// methods: a bare verified bit is not generally transferable between
+    /// trust domains, but transport-level batch verifiers can prove the tag once
+    /// at the receiver boundary and then preserve decoder ordering without a
+    /// second serial HMAC.
+    pub(crate) fn feed_preverified_streaming_block_deferred(
+        &mut self,
+        auth_symbol: AuthenticatedSymbol,
+    ) -> Result<DeferredSymbolAcceptResult, DecodingError> {
+        self.feed_with_retention_and_mode(
+            auth_symbol,
+            false,
+            FeedDecodeMode::Deferred,
+            FeedAuthPolicy::CallerVerified,
+        )
     }
 
     fn feed_with_retention(
@@ -552,6 +588,7 @@ impl DecodingPipeline {
             auth_symbol,
             retain_decoded_block,
             FeedDecodeMode::Inline,
+            FeedAuthPolicy::VerifyInPipeline,
         )? {
             DeferredSymbolAcceptResult::Immediate(result) => Ok(result),
             DeferredSymbolAcceptResult::Decode(job) => Ok(SymbolAcceptResult::DecodingStarted {
@@ -565,8 +602,15 @@ impl DecodingPipeline {
         mut auth_symbol: AuthenticatedSymbol,
         retain_decoded_block: bool,
         mode: FeedDecodeMode,
+        auth_policy: FeedAuthPolicy,
     ) -> Result<DeferredSymbolAcceptResult, DecodingError> {
-        if self.config.verify_auth {
+        if matches!(auth_policy, FeedAuthPolicy::CallerVerified) {
+            if !auth_symbol.is_verified() {
+                return Ok(DeferredSymbolAcceptResult::Immediate(
+                    SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed),
+                ));
+            }
+        } else if self.config.verify_auth {
             match &self.auth_context {
                 Some(ctx) => {
                     if ctx.verify_authenticated_symbol(&mut auth_symbol).is_err()
