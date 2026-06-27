@@ -371,9 +371,17 @@ run_rsync() {  # $1=transport: daemon|ssh
     local sl="$CASE_DIR/rsync.log" st="$CASE_DIR/rsync.time"
     local r_stop="$CASE_DIR/r_stop" r_out="$CASE_DIR/r_rss" s_stop="$CASE_DIR/s_stop" s_out="$CASE_DIR/s_rss"
     local start finish status; TIMED_OUT=false
+    # Scope the RSS sampler to THIS cell's rsync (client + rsyncd serving HOST_IP),
+    # NOT every "rsync " on the box. rch (Remote Compilation Helper) shells out to
+    # rsync to sync multi-GB cargo target dirs to the build workers; a bare
+    # `pgrep -f "rsync "` caught rch's rsync (~9.7 GB VmRSS) during fast perfect/good
+    # cells and reported it as rsync's peak RSS (the bogus 7.6-9.8 GB readings that
+    # produced the retracted "74-81x less memory" claim, ledger MATRIX-136). HOST_IP
+    # is this cell's netns veth peer, unique to the bench, so it excludes rch.
+    local rss_pat="rsync .*${HOST_IP}"
     set +e
-    sample_rss "rsync " "$r_stop" "$r_out" & local r_samp=$!
-    sample_rss "rsync " "$s_stop" "$s_out" & local s_samp=$!
+    sample_rss "$rss_pat" "$r_stop" "$r_out" & local r_samp=$!
+    sample_rss "$rss_pat" "$s_stop" "$s_out" & local s_samp=$!
     start="$(now_s)"
     if [ "$kind" = "daemon" ]; then
         local root="$CASE_DIR/rsyncd_root"; mkdir -p "$root"
