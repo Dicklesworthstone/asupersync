@@ -325,6 +325,12 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
         extra_send=(--streams "$STREAMS")
         rq_loss_args=(--rq-round0-loss-pct "$(netem_loss_pct)")
     fi
+    # Optional sender bandwidth cap (bytes/sec). Set ATP_SEND_BWLIMIT to pace the
+    # sender at/below the link rate — diagnostic for round-0 overrun on rate-capped
+    # links (MATRIX-123). Applies to all transports (quic/auto honor --bwlimit).
+    if [ -n "${ATP_SEND_BWLIMIT:-}" ]; then
+        extra_send+=(--bwlimit "$ATP_SEND_BWLIMIT")
+    fi
 
     set +e
     timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$recv_dir" \
