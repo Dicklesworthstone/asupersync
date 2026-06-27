@@ -1663,6 +1663,31 @@ impl NativeQuicConnection {
         space: PacketNumberSpace,
         max_frame_bytes: usize,
     ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        self.generate_frames_inner(cx, space, max_frame_bytes, true)
+    }
+
+    /// Generate non-DATAGRAM frames only, leaving queued application DATAGRAMs
+    /// buffered for a later data-plane send attempt.
+    ///
+    /// ATP's native lossy sender uses this when DATAGRAM congestion accounting
+    /// says no more data packets fit, but ACK/control/STREAM frames still need
+    /// to make forward progress.
+    pub fn generate_non_datagram_frames(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        max_frame_bytes: usize,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        self.generate_frames_inner(cx, space, max_frame_bytes, false)
+    }
+
+    fn generate_frames_inner(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        max_frame_bytes: usize,
+        include_datagrams: bool,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
         checkpoint(cx)?;
         let mut frames = Vec::new();
         let mut used = 0usize;
@@ -1732,45 +1757,47 @@ impl NativeQuicConnection {
                 }
             }
 
-            while let Some(payload) = self.outbound_datagrams.pop_front() {
-                let frame = QuicFrame::Datagram { data: payload };
-                let mut encoded = BytesMut::new();
-                frame.encode(&mut encoded)?;
-                let frame_len = encoded.len();
-                if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
-                    let QuicFrame::Datagram { data } = frame else {
-                        unreachable!("frame was just constructed as a DATAGRAM");
-                    };
-                    self.outbound_datagrams.push_front(data);
-                    break;
-                }
-                used = used.saturating_add(frame_len);
-                self.datagrams_sent = self.datagrams_sent.saturating_add(1);
-                let size_s = frame_len.to_string();
-                let total_sent_s = self.datagrams_sent.to_string();
-                let queue_len_s = self.outbound_datagrams.len().to_string();
-                let pn_hint_s = self.next_packet_numbers[2].to_string();
-                quic_trace(
-                    cx,
-                    "ATP_QUIC_TRACE datagram_send_emit",
-                    &[
-                        ("reason", "emitted"),
-                        ("encoded_len", size_s.as_str()),
-                        ("queue_len", queue_len_s.as_str()),
-                        ("total_sent", total_sent_s.as_str()),
-                        ("pn", pn_hint_s.as_str()),
-                    ],
-                );
-                quictrace!(
-                    "event=datagram_send_emit reason=emitted encoded_len={} queue_len={} total_sent={} pn={}",
-                    frame_len,
-                    self.outbound_datagrams.len(),
-                    self.datagrams_sent,
-                    self.next_packet_numbers[2]
-                );
-                frames.push(frame);
-                if used >= max_frame_bytes {
-                    break;
+            if include_datagrams {
+                while let Some(payload) = self.outbound_datagrams.pop_front() {
+                    let frame = QuicFrame::Datagram { data: payload };
+                    let mut encoded = BytesMut::new();
+                    frame.encode(&mut encoded)?;
+                    let frame_len = encoded.len();
+                    if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
+                        let QuicFrame::Datagram { data } = frame else {
+                            unreachable!("frame was just constructed as a DATAGRAM");
+                        };
+                        self.outbound_datagrams.push_front(data);
+                        break;
+                    }
+                    used = used.saturating_add(frame_len);
+                    self.datagrams_sent = self.datagrams_sent.saturating_add(1);
+                    let size_s = frame_len.to_string();
+                    let total_sent_s = self.datagrams_sent.to_string();
+                    let queue_len_s = self.outbound_datagrams.len().to_string();
+                    let pn_hint_s = self.next_packet_numbers[2].to_string();
+                    quic_trace(
+                        cx,
+                        "ATP_QUIC_TRACE datagram_send_emit",
+                        &[
+                            ("reason", "emitted"),
+                            ("encoded_len", size_s.as_str()),
+                            ("queue_len", queue_len_s.as_str()),
+                            ("total_sent", total_sent_s.as_str()),
+                            ("pn", pn_hint_s.as_str()),
+                        ],
+                    );
+                    quictrace!(
+                        "event=datagram_send_emit reason=emitted encoded_len={} queue_len={} total_sent={} pn={}",
+                        frame_len,
+                        self.outbound_datagrams.len(),
+                        self.datagrams_sent,
+                        self.next_packet_numbers[2]
+                    );
+                    frames.push(frame);
+                    if used >= max_frame_bytes {
+                        break;
+                    }
                 }
             }
         }
@@ -3250,6 +3277,34 @@ mod tests {
         assert_eq!(emitted, datagram_count);
         assert_eq!(conn.pending_outbound_datagram_count(), 0);
         assert_eq!(conn.datagrams_sent(), datagram_count as u64);
+    }
+
+    #[test]
+    fn non_datagram_generation_leaves_application_datagrams_queued() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.queue_ping(&cx).expect("queue control ping");
+        conn.send_datagram(&cx, Bytes::from_static(b"symbol"))
+            .expect("queue outbound datagram");
+
+        let frames = conn
+            .generate_non_datagram_frames(&cx, PacketNumberSpace::ApplicationData, 65_000)
+            .expect("non-datagram frames should generate");
+
+        assert_eq!(frames, vec![QuicFrame::Ping]);
+        assert_eq!(conn.pending_outbound_datagram_count(), 1);
+        assert_eq!(conn.datagrams_sent(), 0);
+
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65_000)
+            .expect("queued datagram should remain sendable");
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, QuicFrame::Datagram { .. }))
+        );
+        assert_eq!(conn.pending_outbound_datagram_count(), 0);
+        assert_eq!(conn.datagrams_sent(), 1);
     }
 
     #[test]

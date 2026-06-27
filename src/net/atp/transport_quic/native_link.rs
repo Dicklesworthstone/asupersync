@@ -232,6 +232,11 @@ const QUIC_CLEAN_SPRAY_BURST_FLOOR_SYMBOLS: usize = 32;
 /// `bad` (2%) and `broken` (10%) stay above this ceiling and keep per-symbol
 /// pacing to preserve loss granularity on constrained links.
 const QUIC_CLEAN_SPRAY_MAX_LOSS_RATE: f64 = 0.01;
+/// Clean jumbo coalescing is for low-loss, low-RTT LAN-style paths. On the
+/// 50M/bad encrypted cell the handshake RTT is ~80ms; treating that as clean
+/// packed 54 symbols into one ~63 KiB UDP datagram, so one shaped-link packet
+/// loss erased a whole symbol group and stalled recovery behind cwnd.
+const QUIC_CLEAN_COALESCING_MAX_RTT_S: f64 = 0.050;
 
 /// Minimum owed pacing time worth parking the async timer for on the clean-link
 /// spray. Per-flush owed time is often sub-millisecond; parking that each flush
@@ -1031,6 +1036,63 @@ fn trace_quic_data_plane_congestion_limited(
     );
 }
 
+fn queued_fountain_feedback_count(pending: &VecDeque<Frame>) -> usize {
+    pending
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame.frame_type(),
+                FrameType::ObjectRequest | FrameType::Proof
+            )
+        })
+        .count()
+}
+
+fn trace_quic_initial_spray_cut_for_feedback(
+    cx: &Cx,
+    sent_symbols: u64,
+    queued_feedback: usize,
+    pending_datagrams: usize,
+    bytes_in_flight: u64,
+    congestion_window: u64,
+    entry_index: u32,
+    sbn: u8,
+    repair_cursor: usize,
+) {
+    let sent_symbols_s = sent_symbols.to_string();
+    let queued_feedback_s = queued_feedback.to_string();
+    let pending_datagrams_s = pending_datagrams.to_string();
+    let bytes_in_flight_s = bytes_in_flight.to_string();
+    let congestion_window_s = congestion_window.to_string();
+    let entry_index_s = entry_index.to_string();
+    let sbn_s = sbn.to_string();
+    let repair_cursor_s = repair_cursor.to_string();
+    cx.trace_with_fields(
+        "atp_quic.sender.initial_spray_feedback_cut",
+        &[
+            ("sent_symbols", sent_symbols_s.as_str()),
+            ("queued_feedback", queued_feedback_s.as_str()),
+            ("pending_datagrams", pending_datagrams_s.as_str()),
+            ("bytes_in_flight", bytes_in_flight_s.as_str()),
+            ("congestion_window", congestion_window_s.as_str()),
+            ("entry", entry_index_s.as_str()),
+            ("sbn", sbn_s.as_str()),
+            ("repair_cursor", repair_cursor_s.as_str()),
+        ],
+    );
+    quic_rqtrace!(
+        "sender: initial_spray_feedback_cut sent_symbols={} queued_feedback={} pending_datagrams={} bytes_in_flight={} congestion_window={} entry={} sbn={} repair_cursor={}",
+        sent_symbols,
+        queued_feedback,
+        pending_datagrams,
+        bytes_in_flight,
+        congestion_window,
+        entry_index,
+        sbn,
+        repair_cursor,
+    );
+}
+
 /// Un-clamped pacing owed-time for `bytes` at `rate_bps` (≈ bytes/rate seconds).
 /// Unlike `super::pacing_pause_for_bytes`, this does NOT floor at
 /// `QUIC_SPRAY_MIN_PAUSE`, so sub-millisecond owed time can be accrued as pacing
@@ -1076,6 +1138,11 @@ fn coalesced_spray_flush_symbol_limit(
     } else {
         full_packet_multiple
     }
+}
+
+fn quic_clean_spray_coalescing_allowed(pacing: &QuicSprayPacingDecision) -> bool {
+    pacing.path_loss_rate < QUIC_CLEAN_SPRAY_MAX_LOSS_RATE
+        && pacing.path_rtt_s <= QUIC_CLEAN_COALESCING_MAX_RTT_S
 }
 
 fn clean_gso_flush_symbol_cap(
@@ -1169,6 +1236,8 @@ pub struct QuicLink {
     /// Auth-posture-aware symbol DATAGRAM frame width used to align paced
     /// sender flushes to full protected packets.
     max_symbol_frames_per_packet: usize,
+    /// Current symbol DATAGRAM frames allowed per protected spray packet.
+    spray_max_datagram_frames_per_packet: usize,
     /// Configured upper bound on symbols queued before a protected packet flush.
     max_spray_symbols_per_flush: usize,
     symbol_datagram_frame_len: usize,
@@ -1339,11 +1408,27 @@ impl NativeReceiveTraceCounters {
         cx.trace_with_fields(
             "atp_quic.receive.decoded",
             &[
-                ("transfer_id", transfer_id),
                 ("symbols_accepted", symbols_accepted_text.as_str()),
                 ("feedback_rounds", feedback_rounds_text.as_str()),
                 ("decode_count", decode_count_text.as_str()),
                 ("decode_micros", decode_micros_text.as_str()),
+                ("datagrams_received", datagrams_received_text.as_str()),
+                (
+                    "datagrams_dropped_on_receive",
+                    datagrams_dropped_on_receive_text.as_str(),
+                ),
+                ("pending_datagrams", pending_datagrams_text.as_str()),
+                ("reorder_occupancy", pending_datagrams_text.as_str()),
+                (
+                    "pending_received_packets",
+                    pending_received_packets_text.as_str(),
+                ),
+                ("transfer_id", transfer_id),
+            ],
+        );
+        cx.trace_with_fields(
+            "atp_quic.receive.socket",
+            &[
                 ("udp_packets_received", udp_packets_received_text.as_str()),
                 (
                     "one_rtt_packets_ingested",
@@ -1356,17 +1441,6 @@ impl NativeReceiveTraceCounters {
                 (
                     "unprotect_packets_dropped",
                     unprotect_packets_dropped_text.as_str(),
-                ),
-                ("datagrams_received", datagrams_received_text.as_str()),
-                (
-                    "datagrams_dropped_on_receive",
-                    datagrams_dropped_on_receive_text.as_str(),
-                ),
-                ("pending_datagrams", pending_datagrams_text.as_str()),
-                ("reorder_occupancy", pending_datagrams_text.as_str()),
-                (
-                    "pending_received_packets",
-                    pending_received_packets_text.as_str(),
                 ),
                 (
                     "inbound_datagram_capacity",
@@ -1393,6 +1467,7 @@ impl NativeReceiveTraceCounters {
                     udp_kernel_rx_queue_bytes_text.as_str(),
                 ),
                 ("udp_kernel_drops", udp_kernel_drops_text.as_str()),
+                ("transfer_id", transfer_id),
             ],
         );
     }
@@ -1657,7 +1732,8 @@ impl QuicLink {
             self.max_spray_symbols_per_flush,
             self.max_symbol_frames_per_packet,
         );
-        let max_flush_symbols = if pacing.path_loss_rate < QUIC_CLEAN_SPRAY_MAX_LOSS_RATE {
+        let clean_coalescing = quic_clean_spray_coalescing_allowed(pacing);
+        let max_flush_symbols = if clean_coalescing {
             clean_flush_cap
         } else {
             self.max_spray_symbols_per_flush
@@ -1666,8 +1742,31 @@ impl QuicLink {
             pacing.max_burst_symbols,
             self.max_symbol_frames_per_packet,
             max_flush_symbols,
-            pacing.path_loss_rate,
+            if clean_coalescing {
+                pacing.path_loss_rate
+            } else {
+                QUIC_CLEAN_SPRAY_MAX_LOSS_RATE
+            },
             QUIC_CLEAN_GSO_PACKETS_PER_FLUSH,
+        )
+    }
+
+    fn update_spray_packet_coalescing(&mut self, pacing: &QuicSprayPacingDecision) {
+        self.spray_max_datagram_frames_per_packet = if quic_clean_spray_coalescing_allowed(pacing) {
+            self.max_symbol_frames_per_packet.max(1)
+        } else {
+            1
+        };
+    }
+
+    fn spray_frame_payload_limit(&self) -> usize {
+        let frame_budget = self
+            .symbol_datagram_frame_len
+            .saturating_mul(self.spray_max_datagram_frames_per_packet.max(1))
+            .saturating_add(ONE_RTT_COALESCED_CONTROL_HEADROOM);
+        frame_budget.clamp(
+            self.symbol_datagram_frame_len.max(1),
+            self.max_app_payload.max(1),
         )
     }
 
@@ -1679,7 +1778,7 @@ impl QuicLink {
         let bytes = u64::try_from(symbols.max(1))
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(self.symbol_datagram_frame_len).unwrap_or(u64::MAX));
-        if pacing.path_loss_rate >= QUIC_CLEAN_SPRAY_MAX_LOSS_RATE {
+        if !quic_clean_spray_coalescing_allowed(pacing) {
             // Lossy path keeps the clamped per-flush sleep (conservative pacing /
             // loss granularity on constrained links).
             if symbols == pacing.max_burst_symbols {
@@ -1842,26 +1941,38 @@ impl QuicLink {
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let pending_datagrams = self.conn.pending_outbound_datagram_count();
-            if self.role == StreamRole::Client
+            let data_plane_blocked = self.role == StreamRole::Client
                 && pending_datagrams > 0
                 && !self
                     .conn
                     .transport()
-                    .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES)
-            {
+                    .can_send(QUIC_DATA_PLANE_CONGESTION_PACKET_BYTES);
+            if data_plane_blocked {
                 trace_quic_data_plane_congestion_limited(
                     cx,
                     pending_datagrams,
                     self.conn.transport().bytes_in_flight(),
                     self.conn.transport().congestion_window_bytes(),
                 );
-                break;
             }
-            let frames = self.conn.generate_frames(
-                cx,
-                PacketNumberSpace::ApplicationData,
-                self.max_app_payload,
-            )?;
+            let max_frame_bytes = if pending_datagrams > 0 && !data_plane_blocked {
+                self.spray_frame_payload_limit()
+            } else {
+                self.max_app_payload
+            };
+            let frames = if data_plane_blocked {
+                self.conn.generate_non_datagram_frames(
+                    cx,
+                    PacketNumberSpace::ApplicationData,
+                    self.max_app_payload,
+                )?
+            } else {
+                self.conn.generate_frames(
+                    cx,
+                    PacketNumberSpace::ApplicationData,
+                    max_frame_bytes,
+                )?
+            };
             if frames.is_empty() {
                 break;
             }
@@ -2014,6 +2125,14 @@ impl QuicLink {
 
     fn last_flushed_stream_frames(&self) -> Vec<SentControlStreamFrame> {
         self.last_flushed_stream_frames.clone()
+    }
+
+    fn pending_fountain_feedback_count(&self) -> usize {
+        queued_fountain_feedback_count(&self.pending_control_frames)
+    }
+
+    fn has_pending_fountain_feedback(&self) -> bool {
+        self.pending_fountain_feedback_count() > 0
     }
 
     async fn retransmit_stream_frames(
@@ -2404,6 +2523,9 @@ impl QuicLink {
             *liveness_elapsed = (*liveness_elapsed).saturating_add(liveness_poll_elapsed);
             self.sender_handoff
                 .record_queue_full_flush(liveness_poll_elapsed);
+            if self.has_pending_fountain_feedback() {
+                return Ok(());
+            }
 
             let pause =
                 self.pause_after_symbol_flush(pending_before_flush.min(flush_symbols), pacing);
@@ -2433,6 +2555,7 @@ impl QuicLink {
         }
 
         let trace_start = Instant::now();
+        self.update_spray_packet_coalescing(pacing);
         let flush_symbols = self.paced_flush_symbol_limit(pacing);
         let mut flushes = 0usize;
         let mut flushed_packets = 0usize;
@@ -2738,6 +2861,7 @@ fn link_from_handshake(
         max_app_payload,
         max_datagram_frames_per_packet,
         max_symbol_frames_per_packet,
+        spray_max_datagram_frames_per_packet: max_symbol_frames_per_packet,
         max_spray_symbols_per_flush: config.max_spray_symbols_per_flush.max(1),
         symbol_datagram_frame_len: send_symbol_frame_len,
         pending_received_packets: VecDeque::new(),
@@ -3087,15 +3211,24 @@ async fn spray_round(
     let mut sent = 0u64;
     let mut sprayed = 0u64;
     let mut cursor_updates = Vec::new();
+    let mut stopped_for_feedback = false;
     // Keep the native sender handoff continuous across source blocks; high-BDP
     // and future fanout paths need paced windows, not per-block partial flushes.
     let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
-    for index in pending {
+    'entries: for index in pending {
         let Some(entry) = encoders.iter_mut().find(|entry| entry.index == *index) else {
             continue;
         };
+        if with_source && link.has_pending_fountain_feedback() {
+            stopped_for_feedback = true;
+            break;
+        }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         for block_idx in 0..entry.block_count(config)? {
+            if with_source && link.has_pending_fountain_feedback() {
+                stopped_for_feedback = true;
+                break 'entries;
+            }
             let sbn = u8::try_from(block_idx).map_err(|_| {
                 QuicTransportError::Integrity("source block index exceeded u8 range".to_string())
             })?;
@@ -3130,10 +3263,14 @@ async fn spray_round(
                     repair_count,
                 ))
             };
+            let mut emitted_repair_symbols = 0usize;
             for encoded_symbol in encoded {
                 let symbol = encoded_symbol
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
+                if symbol.kind().is_repair() {
+                    emitted_repair_symbols = emitted_repair_symbols.saturating_add(1);
+                }
                 // Deterministic test-only symbol loss: skip on the initial spray only,
                 // so the receiver must drive a repair round, and never on a repair round
                 // (otherwise it could fail to converge). Control frames are unaffected.
@@ -3172,12 +3309,33 @@ async fn spray_round(
                     }
                     handoff_batch.clear();
                     handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
+                    if with_source && link.has_pending_fountain_feedback() {
+                        stopped_for_feedback = true;
+                        break;
+                    }
                 }
+            }
+            if stopped_for_feedback {
+                let repair_cursor =
+                    already.saturating_add(emitted_repair_symbols.min(repair_count));
+                cursor_updates.push((entry_index, sbn, repair_cursor));
+                trace_quic_initial_spray_cut_for_feedback(
+                    cx,
+                    sent,
+                    link.pending_fountain_feedback_count(),
+                    link.conn.pending_outbound_datagram_count(),
+                    link.conn.transport().bytes_in_flight(),
+                    link.conn.transport().congestion_window_bytes(),
+                    entry_index,
+                    sbn,
+                    repair_cursor,
+                );
+                break 'entries;
             }
             cursor_updates.push((entry_index, sbn, target_repair));
         }
     }
-    if !handoff_batch.is_empty() {
+    if !stopped_for_feedback && !handoff_batch.is_empty() {
         link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
             .await?;
         let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
@@ -5157,6 +5315,27 @@ mod tests {
     }
 
     #[test]
+    fn queued_fountain_feedback_count_ignores_liveness_and_round_markers() {
+        fn empty_frame(ty: FrameType) -> Frame {
+            Frame::new(
+                crate::net::atp::protocol::frames::ProtocolVersion::CURRENT,
+                ty,
+                Vec::new(),
+            )
+            .expect("valid empty test frame")
+        }
+
+        let pending = VecDeque::from([
+            empty_frame(FrameType::KeepAlive),
+            empty_frame(FrameType::ObjectComplete),
+            empty_frame(FrameType::ObjectRequest),
+            empty_frame(FrameType::Proof),
+        ]);
+
+        assert_eq!(queued_fountain_feedback_count(&pending), 2);
+    }
+
+    #[test]
     fn one_rtt_header_round_trips() {
         for pn in [0u64, 1, 41, 255, 65_536, u64::from(u32::MAX), u64::MAX] {
             let header = encode_one_rtt_header(pn);
@@ -5299,6 +5478,34 @@ mod tests {
     }
 
     #[test]
+    fn clean_coalescing_requires_low_loss_and_low_rtt() {
+        let mut pacing = QuicSprayPacingDecision {
+            max_burst_symbols: 2,
+            pause_after_burst: Duration::from_millis(1),
+            pacing_rate_bps: 12_000_000,
+            cwnd_symbols: 10,
+            cwnd_share_symbols: 10,
+            loss_backoff: 1.0,
+            responsiveness_backoff: 1.0,
+            path_rtt_s: 0.025,
+            path_cwnd_bytes: 12_000,
+            path_loss_rate: 0.0,
+            limiter: super::super::QuicSprayPacingLimiter::CongestionWindow,
+        };
+        assert!(quic_clean_spray_coalescing_allowed(&pacing));
+
+        pacing.path_rtt_s = 0.080;
+        assert!(
+            !quic_clean_spray_coalescing_allowed(&pacing),
+            "50M/bad encrypted should not pack a full symbol group into one jumbo UDP packet"
+        );
+
+        pacing.path_rtt_s = 0.025;
+        pacing.path_loss_rate = QUIC_CLEAN_SPRAY_MAX_LOSS_RATE;
+        assert!(!quic_clean_spray_coalescing_allowed(&pacing));
+    }
+
+    #[test]
     fn clean_gso_flush_cap_batches_full_protected_packets_when_default_cap_allows_one() {
         assert_eq!(
             clean_gso_flush_symbol_cap(54, 54),
@@ -5374,35 +5581,17 @@ mod tests {
 
     #[test]
     fn lossy_spray_flush_limit_preserves_pacing_burst() {
-        let mild_loss = 0.001;
+        let loss = QUIC_CLEAN_SPRAY_MAX_LOSS_RATE;
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(
-                1,
-                51,
-                54,
-                mild_loss,
-                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
-            ),
+            coalesced_spray_flush_symbol_limit(1, 51, 54, loss, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             1
         );
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(
-                50,
-                51,
-                54,
-                mild_loss,
-                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
-            ),
+            coalesced_spray_flush_symbol_limit(50, 51, 54, loss, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             50
         );
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(
-                54,
-                51,
-                54,
-                mild_loss,
-                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
-            ),
+            coalesced_spray_flush_symbol_limit(54, 51, 54, loss, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             51
         );
         assert_eq!(
@@ -5410,19 +5599,13 @@ mod tests {
                 128,
                 51,
                 256,
-                mild_loss,
+                loss,
                 QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
             ),
             102
         );
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(
-                0,
-                51,
-                54,
-                mild_loss,
-                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
-            ),
+            coalesced_spray_flush_symbol_limit(0, 51, 54, loss, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             1
         );
     }
@@ -5518,25 +5701,55 @@ mod tests {
         assert_eq!(entry.get_field("feedback_rounds"), Some("2"));
         assert_eq!(entry.get_field("decode_count"), Some("4"));
         assert_eq!(entry.get_field("decode_micros"), Some("55"));
-        assert_eq!(entry.get_field("udp_packets_received"), Some("17"));
-        assert_eq!(entry.get_field("one_rtt_packets_ingested"), Some("16"));
-        assert_eq!(entry.get_field("non_one_rtt_packets_dropped"), Some("1"));
-        assert_eq!(entry.get_field("unprotect_packets_dropped"), Some("2"));
         assert_eq!(entry.get_field("datagrams_received"), Some("12"));
         assert_eq!(entry.get_field("datagrams_dropped_on_receive"), Some("0"));
         assert_eq!(entry.get_field("pending_datagrams"), Some("3"));
         assert_eq!(entry.get_field("reorder_occupancy"), Some("3"));
         assert_eq!(entry.get_field("pending_received_packets"), Some("2"));
-        assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("4096"));
-        assert_eq!(entry.get_field("inbound_datagram_available"), Some("4093"));
-        assert_eq!(entry.get_field("inbound_pump_batch_limit"), Some("512"));
+        let socket_entry = entries
+            .iter()
+            .find(|entry| entry.message() == "atp_quic.receive.socket")
+            .expect("receive socket trace entry");
+        assert_eq!(socket_entry.level(), crate::observability::LogLevel::Trace);
+        assert_eq!(socket_entry.get_field("transfer_id"), Some("transfer-g3"));
+        assert_eq!(socket_entry.get_field("udp_packets_received"), Some("17"));
         assert_eq!(
-            entry.get_field("udp_recv_buffer_requested"),
+            socket_entry.get_field("one_rtt_packets_ingested"),
+            Some("16")
+        );
+        assert_eq!(
+            socket_entry.get_field("non_one_rtt_packets_dropped"),
+            Some("1")
+        );
+        assert_eq!(
+            socket_entry.get_field("unprotect_packets_dropped"),
+            Some("2")
+        );
+        assert_eq!(
+            socket_entry.get_field("inbound_datagram_capacity"),
+            Some("4096")
+        );
+        assert_eq!(
+            socket_entry.get_field("inbound_datagram_available"),
+            Some("4093")
+        );
+        assert_eq!(
+            socket_entry.get_field("inbound_pump_batch_limit"),
+            Some("512")
+        );
+        assert_eq!(
+            socket_entry.get_field("udp_recv_buffer_requested"),
             Some("16777216")
         );
-        assert_eq!(entry.get_field("udp_recv_buffer_applied"), Some("33554432"));
-        assert_eq!(entry.get_field("udp_kernel_rx_queue_bytes"), Some("4096"));
-        assert_eq!(entry.get_field("udp_kernel_drops"), Some("7"));
+        assert_eq!(
+            socket_entry.get_field("udp_recv_buffer_applied"),
+            Some("33554432")
+        );
+        assert_eq!(
+            socket_entry.get_field("udp_kernel_rx_queue_bytes"),
+            Some("4096")
+        );
+        assert_eq!(socket_entry.get_field("udp_kernel_drops"), Some("7"));
     }
 
     #[cfg(target_os = "linux")]
