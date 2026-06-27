@@ -7661,7 +7661,8 @@ mod tests {
 
     #[test]
     fn native_block_drain_consumes_more_than_one_symbol_batch_per_call() {
-        let (cx, _client, mut server) = established_pair();
+        let (cx, _client, server_api) = established_pair();
+        let mut server = server_api.inner().clone();
         let config = QuicConfig {
             symbol_size: 128,
             max_block_size: 128,
@@ -7726,7 +7727,8 @@ mod tests {
 
     #[test]
     fn native_block_drain_honors_batch_limit_for_socket_interleave() {
-        let (cx, _client, mut server) = established_pair();
+        let (cx, _client, server_api) = established_pair();
+        let mut server = server_api.inner().clone();
         let config = QuicConfig {
             symbol_size: 128,
             max_block_size: 128,
