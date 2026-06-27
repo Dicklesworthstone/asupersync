@@ -11,8 +11,8 @@
 //! - multiple datagrams in one packet are delivered in arrival (FIFO) order;
 //! - an empty datagram payload still round-trips through the recv API;
 //! - the bounded inbound queue never evicts already-buffered payloads: once full,
-//!   processing fails with typed backpressure and the retained set is exactly the
-//!   original accepted prefix.
+//!   newly-arrived payloads are counted as receive drops and the retained set is
+//!   exactly the original accepted prefix.
 //!
 //! Scope: node-local receive path on committed `HEAD` plus this slice's new
 //! codec + handler + Cx-aware `poll_recv_datagram` waker layer. The A1 send
@@ -194,7 +194,7 @@ fn empty_datagram_payload_is_delivered() {
 }
 
 #[test]
-fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
+fn inbound_queue_drops_new_overflow_without_evicting_buffered_datagrams() {
     let cx = Cx::for_testing();
     let mut conn = fresh_connection();
 
@@ -202,8 +202,8 @@ fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
     // big-endian index so we can reconstruct exactly which symbols survived.
     let fill_count = conn.inbound_datagram_capacity();
     assert!(
-        fill_count >= 2048,
-        "receive queue must cover four full native QUIC pump batches"
+        fill_count >= 46_000,
+        "receive queue must cover a 50 MiB encrypted symbol round before repair"
     );
     let frames: Vec<QuicFrame> = (0..fill_count)
         .map(|i| QuicFrame::Datagram {
@@ -235,19 +235,14 @@ fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
                 .to_be_bytes(),
         ),
     }]);
-    let err = conn
-        .process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 4, &overflow, 0)
-        .expect_err("full receive queue must apply backpressure instead of evicting");
-    assert!(matches!(
-        err,
-        NativeQuicConnectionError::DatagramReceiveQueueFull { capacity } if capacity == fill_count
-    ));
+    conn.process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 4, &overflow, 0)
+        .expect("full receive queue treats new unreliable datagram as counted loss");
     assert_eq!(
         conn.datagrams_received(),
         u64::try_from(fill_count).expect("fill count fits u64")
     );
     assert_eq!(conn.pending_datagram_count(), fill_count);
-    assert_eq!(conn.datagrams_dropped_on_receive(), 0);
+    assert_eq!(conn.datagrams_dropped_on_receive(), 1);
 
     // Drain and decode the retained indices in delivery order.
     let mut drained = Vec::new();
@@ -257,9 +252,9 @@ fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
     }
     assert_eq!(drained.len(), fill_count);
 
-    // No-evict backpressure: the retained set is exactly the accepted prefix
-    // [0, fill_count). The overflow payload is not inserted and no survivor is
-    // displaced.
+    // No-evict overflow handling: the retained set is exactly the accepted
+    // prefix [0, fill_count). The overflow payload is not inserted and no
+    // survivor is displaced.
     assert_eq!(drained[0], 0);
     assert_eq!(
         *drained.last().expect("non-empty"),
@@ -268,6 +263,68 @@ fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
     assert!(
         drained.windows(2).all(|w| w[1] == w[0] + 1),
         "retained indices must be a gap-free prefix"
+    );
+}
+
+#[test]
+fn inbound_queue_partial_overflow_accepts_capacity_and_counts_tail_drop() {
+    let cx = Cx::for_testing();
+    let mut conn = fresh_connection();
+    let fill_count = conn.inbound_datagram_capacity();
+    let prefill_count = fill_count - 1;
+    let frames: Vec<QuicFrame> = (0..prefill_count)
+        .map(|i| QuicFrame::Datagram {
+            data: Bytes::copy_from_slice(
+                &u32::try_from(i).expect("test index fits u32").to_be_bytes(),
+            ),
+        })
+        .collect();
+
+    conn.process_packet_payload(
+        &cx,
+        PacketNumberSpace::ApplicationData,
+        5,
+        &encode_packet(&frames),
+        0,
+    )
+    .expect("prefill receive queue with one remaining slot");
+    assert_eq!(conn.pending_datagram_count(), prefill_count);
+    assert_eq!(conn.inbound_datagram_remaining_capacity(), 1);
+
+    let accepted_tail = u32::try_from(prefill_count).expect("accepted tail index fits u32");
+    let dropped_tail = u32::try_from(fill_count).expect("dropped tail index fits u32");
+    let overflow = encode_packet(&[
+        QuicFrame::Datagram {
+            data: Bytes::copy_from_slice(&accepted_tail.to_be_bytes()),
+        },
+        QuicFrame::Datagram {
+            data: Bytes::copy_from_slice(&dropped_tail.to_be_bytes()),
+        },
+    ]);
+    conn.process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 6, &overflow, 0)
+        .expect("partial receive capacity accepts prefix and counts overflow tail");
+
+    assert_eq!(conn.pending_datagram_count(), fill_count);
+    assert_eq!(
+        conn.datagrams_received(),
+        u64::try_from(fill_count).expect("count fits u64")
+    );
+    assert_eq!(conn.datagrams_dropped_on_receive(), 1);
+
+    let mut drained = Vec::new();
+    while let Some(d) = conn.recv_datagram() {
+        let arr: [u8; 4] = d.as_ref().try_into().expect("4-byte index payload");
+        drained.push(u32::from_be_bytes(arr));
+    }
+    assert_eq!(drained.len(), fill_count);
+    assert_eq!(
+        *drained.last().expect("non-empty"),
+        accepted_tail,
+        "the first overflow-batch payload should fill the last slot"
+    );
+    assert!(
+        !drained.contains(&dropped_tail),
+        "the tail payload beyond capacity must be counted as loss, not queued"
     );
 }
 
