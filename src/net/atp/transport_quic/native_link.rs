@@ -2209,10 +2209,12 @@ impl QuicLink {
                     u64::try_from(packet_len).unwrap_or(u64::MAX).max(1)
                 };
                 let packet_number = if uses_paced_data_plane {
-                    self.conn.record_paced_data_plane_packet_sent(
+                    self.conn.on_packet_sent(
                         cx,
+                        PacketNumberSpace::ApplicationData,
                         accounting_bytes,
                         ack_eliciting,
+                        false,
                         self.clock,
                     )?
                 } else {
@@ -5518,8 +5520,6 @@ mod tests {
             "native QUIC cwnd remains observable while the RaptorQ pacer owns admission"
         );
         let overflow_accounting = data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET);
-        let datagram_tracks_recovery =
-            data_plane_packet_tracks_recovery_in_flight(core::slice::from_ref(&datagram));
         assert!(
             data_plane_packet_uses_paced_recovery(core::slice::from_ref(&datagram)),
             "pure ATP DATAGRAM packets must use the RaptorQ data-plane pacer as send authority"
@@ -5529,11 +5529,12 @@ mod tests {
             "pure ATP DATAGRAM packets must not require NewReno admission"
         );
         let overflow_pn = conn
-            .record_paced_data_plane_packet_sent(
+            .on_packet_sent(
                 &cx,
+                PacketNumberSpace::ApplicationData,
                 overflow_accounting,
                 true,
-                datagram_tracks_recovery,
+                false,
                 (initial_packet_credits + 1) * CLOCK_STEP_MICROS,
             )
             .expect("MATRIX-132: ATP pacer, not QUIC cwnd, admits the next DATAGRAM");
@@ -5597,17 +5598,16 @@ mod tests {
         );
 
         let datagram_accounting = data_plane_packet_accounting_bytes(ATP_QUIC_UDP_MAX_PACKET);
-        let datagram_tracks_recovery =
-            data_plane_packet_tracks_recovery_in_flight(core::slice::from_ref(&datagram));
         assert!(data_plane_packet_uses_paced_recovery(
             core::slice::from_ref(&datagram)
         ));
         let datagram_pn = conn
-            .record_paced_data_plane_packet_sent(
+            .on_packet_sent(
                 &cx,
+                PacketNumberSpace::ApplicationData,
                 datagram_accounting,
                 true,
-                datagram_tracks_recovery,
+                false,
                 (initial_packet_credits + 1) * CLOCK_STEP_MICROS,
             )
             .expect("pure ATP DATAGRAM packet admission is owned by the spray pacer");

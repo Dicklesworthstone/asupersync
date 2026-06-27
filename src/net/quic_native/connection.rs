@@ -934,13 +934,13 @@ impl NativeQuicConnection {
     /// Track a paced ATP data-plane packet for recovery telemetry.
     ///
     /// ATP's RaptorQ pacer owns DATAGRAM admission, so this records ACK/loss/RTT
-    /// state without letting the QUIC NewReno cwnd reject a paced fountain send.
+    /// state without letting the QUIC NewReno cwnd reject or account the send as
+    /// in-flight congestion-window debt.
     pub(crate) fn record_paced_data_plane_packet_sent(
         &mut self,
         cx: &Cx,
         bytes: u64,
         ack_eliciting: bool,
-        in_flight: bool,
         time_sent_micros: u64,
     ) -> Result<u64, NativeQuicConnectionError> {
         self.on_packet_sent_inner(
@@ -948,7 +948,7 @@ impl NativeQuicConnection {
             PacketNumberSpace::ApplicationData,
             bytes,
             ack_eliciting,
-            in_flight,
+            false,
             time_sent_micros,
             false,
         )

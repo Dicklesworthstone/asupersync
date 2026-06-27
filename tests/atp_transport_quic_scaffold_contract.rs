@@ -352,7 +352,7 @@ fn adaptive_arm_is_visible_on_public_send_path_trace() {
 }
 
 #[test]
-fn spray_pacing_policy_is_public_and_bounded_by_path_signals() {
+fn spray_pacing_policy_is_public_and_uses_cwnd_as_telemetry() {
     let config = QuicConfig {
         symbol_size: 1024,
         max_spray_symbols_per_flush: 32,
@@ -363,7 +363,9 @@ fn spray_pacing_policy_is_public_and_bounded_by_path_signals() {
         quic_spray_pacing_decision_from_config(&config, quic_pacing_signal(0.040, 12_000, 0.0));
     let high_cwnd =
         quic_spray_pacing_decision_from_config(&config, quic_pacing_signal(0.040, 768 * 1024, 0.0));
-    assert!(high_cwnd.max_burst_symbols > low_cwnd.max_burst_symbols);
+    assert_eq!(high_cwnd.max_burst_symbols, low_cwnd.max_burst_symbols);
+    assert_eq!(high_cwnd.pacing_rate_bps, low_cwnd.pacing_rate_bps);
+    assert!(high_cwnd.cwnd_symbols > low_cwnd.cwnd_symbols);
     assert!(high_cwnd.max_burst_symbols <= config.max_spray_symbols_per_flush);
 
     let lossy = quic_spray_pacing_decision_from_config(
@@ -371,6 +373,7 @@ fn spray_pacing_policy_is_public_and_bounded_by_path_signals() {
         quic_pacing_signal(0.040, 768 * 1024, 0.35),
     );
     assert_eq!(lossy.limiter, QuicSprayPacingLimiter::LossBackoff);
+    assert!(lossy.congestion_loss_rate > 0.0);
     assert!(lossy.pacing_rate_bps < high_cwnd.pacing_rate_bps);
 
     let bwlimited = quic_spray_pacing_decision_from_config(
