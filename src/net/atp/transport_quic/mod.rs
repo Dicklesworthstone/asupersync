@@ -7704,7 +7704,7 @@ mod tests {
             &mut decoders,
             &config,
             &mut decode_stats,
-            NativeSymbolDrainMode::JoinPendingDecodes,
+            NativeSymbolDrainMode::ReadyOnly,
             usize::MAX,
         ))
         .expect("drain queued native symbols");
