@@ -281,9 +281,11 @@ impl Worker {
                 }
 
                 if backoff < SPIN_LIMIT {
+                    crate::runtime::metrics::record_worker_spin();
                     std::hint::spin_loop();
                     backoff += 1;
                 } else if backoff < SPIN_LIMIT + YIELD_LIMIT {
+                    crate::runtime::metrics::record_sched_yield();
                     std::thread::yield_now();
                     backoff += 1;
                 } else {
@@ -913,6 +915,7 @@ impl Parker {
             return;
         }
 
+        crate::runtime::metrics::record_worker_park();
         self.inner.waiting.fetch_add(1, Ordering::Release);
         // br-asupersync-re7cz3: Dekker-style store-load barrier. The
         // cross-atomic pair below — park's `waiting` store + `notified`
@@ -965,6 +968,7 @@ impl Parker {
             return;
         }
 
+        crate::runtime::metrics::record_worker_park();
         self.inner.waiting.fetch_add(1, Ordering::Release);
         // br-asupersync-re7cz3: see fence comment in park(). Same
         // Dekker-style pairing required here so park_timeout doesn't
@@ -1003,6 +1007,7 @@ impl Parker {
             // park() fast-path check.  No mutex or condvar needed.
             return;
         }
+        crate::runtime::metrics::record_worker_unpark();
         // br-asupersync-re7cz3: Dekker-style store-load barrier — see the
         // matching fence in park()/park_timeout(). Without this, unpark's
         // load on `waiting` could be reordered ahead of the CAS publish on

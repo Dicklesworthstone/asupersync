@@ -461,6 +461,7 @@ impl<T: TimeSource> TimerDriver<T> {
         let mut wheel = self.wheel.lock();
         let now = self.clock.now();
         wheel.synchronize(now);
+        crate::runtime::metrics::record_timer_registered();
         wheel.register(deadline, waker)
     }
 
@@ -475,6 +476,8 @@ impl<T: TimeSource> TimerDriver<T> {
         let now = self.clock.now();
         wheel.synchronize(now);
         if wheel.cancel(handle) {
+            crate::runtime::metrics::record_timer_cancelled();
+            crate::runtime::metrics::record_timer_registered();
             wheel.register(deadline, waker)
         } else {
             *handle
@@ -485,7 +488,11 @@ impl<T: TimeSource> TimerDriver<T> {
     ///
     /// Returns true if the timer was active and is now cancelled.
     pub fn cancel(&self, handle: &TimerHandle) -> bool {
-        self.wheel.lock().cancel(handle)
+        let cancelled = self.wheel.lock().cancel(handle);
+        if cancelled {
+            crate::runtime::metrics::record_timer_cancelled();
+        }
+        cancelled
     }
 
     /// Returns the next deadline that will fire, if any.
@@ -508,6 +515,9 @@ impl<T: TimeSource> TimerDriver<T> {
         // re-enter the timer driver.
         let expired_wakers = self.collect_expired(now);
         let fired = expired_wakers.len();
+        if fired > 0 {
+            crate::runtime::metrics::record_timers_fired(fired as u64);
+        }
 
         // Wake them outside the lock. Catch panics to ensure all
         // wakers are attempted even if one panics.

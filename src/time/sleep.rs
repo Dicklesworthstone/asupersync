@@ -696,6 +696,7 @@ impl Future for Sleep {
                         let completed = Arc::new(AtomicBool::new(false));
                         let completed_for_thread = Arc::clone(&completed);
                         let ready_for_thread = Arc::clone(&self.ready);
+                        crate::runtime::metrics::record_timer_thread_spawned();
                         // ubs:ignore - intentional detach by dropping JoinHandle in Drop to avoid blocking executor
                         let handle = std::thread::spawn(move || {
                             // Allow prompt cancellation via `unpark()`.

@@ -4516,10 +4516,12 @@ impl ThreeLaneWorker {
                 if self.global.has_runnable_work(now) {
                     match self.advance_empty_backoff() {
                         EmptyBackoffAction::Spin => {
+                            crate::runtime::metrics::record_worker_spin();
                             std::hint::spin_loop();
                             break;
                         }
                         EmptyBackoffAction::Yield => {
+                            crate::runtime::metrics::record_sched_yield();
                             std::thread::yield_now();
                             break;
                         }
@@ -4529,9 +4531,11 @@ impl ThreeLaneWorker {
 
                 match self.advance_empty_backoff() {
                     EmptyBackoffAction::Spin => {
+                        crate::runtime::metrics::record_worker_spin();
                         std::hint::spin_loop();
                     }
                     EmptyBackoffAction::Yield => {
+                        crate::runtime::metrics::record_sched_yield();
                         std::thread::yield_now();
                     }
                     EmptyBackoffAction::Park if self.enable_parking => {

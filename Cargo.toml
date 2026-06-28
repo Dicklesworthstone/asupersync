@@ -63,6 +63,12 @@ nightly-outcome-try = []
 # yet.
 messaging-fabric = []
 waker-profiling = []
+# Feature-gated runtime instrumentation counters (timer-thread spawns,
+# sched_yield calls, worker spins/parks/unparks, live timer population) for the
+# scheduler/timer CPU-efficiency overhaul. Zero cost when disabled: every
+# `runtime::metrics::record_*` helper inlines to an empty body and
+# `runtime::metrics::snapshot()` returns all-zero. Bench/tests opt in.
+runtime-metrics = []
 # Explicit opt-in for experimental browser-targeted builds.
 # This does not imply full wasm parity; it only enables guarded compilation paths.
 wasm-browser-preview = []
@@ -586,6 +592,14 @@ required-features = ["criterion-benches"]
 name = "scheduler_benchmark"
 harness = false
 required-features = ["test-internals", "criterion-benches"]
+
+# Scheduler CPU/churn baseline harness (custom main, not criterion) for the
+# runtime-cpu-overhaul epic. Reads runtime::metrics counters, so it is gated on
+# the `runtime-metrics` feature.
+[[bench]]
+name = "scheduler_cpu_churn"
+harness = false
+required-features = ["runtime-metrics", "test-internals"]
 
 [[bench]]
 name = "cancel_storm"

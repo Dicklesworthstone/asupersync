@@ -141,6 +141,8 @@ pub mod io_op;
 pub mod kernel;
 /// Pure opt-in memory-residency recommendation engine.
 pub mod memory_residency;
+/// Feature-gated runtime instrumentation counters (timer/sched_yield/park).
+pub mod metrics;
 pub mod obligation_table;
 pub mod panic_isolation;
 pub mod pool_sizing;
