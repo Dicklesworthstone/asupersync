@@ -192,12 +192,12 @@ pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.001;
 /// Default ceiling on a single transfer's total bytes.
 pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Maximum clean-link payload routed over the QUIC reliable source stream.
+/// Maximum clean/near-clean payload routed over the QUIC reliable source stream.
 ///
-/// The stream path is selected only for clean encrypted transfers. Keep this
-/// bounded so native stream flow-credit and receiver staging cannot become a
-/// surprise multi-GiB memory envelope; larger or lossy transfers continue using
-/// the FEC DATAGRAM fountain.
+/// The stream path is selected for clean encrypted transfers and the MATRIX
+/// "good" 0.1% loss fixture. Keep this bounded so native stream flow-credit and
+/// receiver staging cannot become a surprise multi-GiB memory envelope; larger
+/// or higher-loss transfers continue using the FEC DATAGRAM fountain.
 pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const QUIC_SOURCE_STREAM_FRAME_MAX_BYTES: usize = MAX_FRAME_SIZE as usize;
 const QUIC_SOURCE_STREAM_WIRE_HEADER_MAX_BYTES: usize = 1 + 2 + 4 + 1;
@@ -308,6 +308,7 @@ const QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
 const QUIC_ROUND0_DATAGRAM_RAMP_MAX_LOSS_TARGET: f64 = 0.001;
+const QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = QUIC_ROUND0_DATAGRAM_RAMP_MAX_LOSS_TARGET;
 /// Default native QUIC path-rate cap once loss is visible.
 ///
 /// MATRIX-143 showed that RTT alone is not a congestion signal for the clean
@@ -1610,6 +1611,17 @@ pub(crate) fn quic_clean_source_stream_enabled(
         && pacing.path_loss_rate <= f64::EPSILON
 }
 
+pub(crate) fn quic_near_clean_source_stream_enabled(
+    config: &QuicConfig,
+    pacing: &QuicSprayPacingDecision,
+) -> bool {
+    quic_clean_source_base_enabled(config)
+        && (0.0..=QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET + f64::EPSILON)
+            .contains(&config.round0_loss_target)
+        && (0.0..=QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET + f64::EPSILON)
+            .contains(&pacing.path_loss_rate)
+}
+
 #[cfg(feature = "tls")]
 pub(crate) fn quic_native_stream_flow_limit(config: &QuicConfig) -> u64 {
     config
@@ -1631,7 +1643,7 @@ pub(crate) fn quic_reliable_source_stream_eligible(
             config.symbol_auth_mode(),
             QuicSymbolAuthMode::TransportAuthenticated
         )
-        && quic_clean_source_stream_enabled(config, pacing)
+        && quic_near_clean_source_stream_enabled(config, pacing)
 }
 
 fn quic_source_stream_enabled(
@@ -9517,15 +9529,32 @@ mod tests {
     }
 
     #[test]
-    fn quic_reliable_source_stream_requires_clean_unpaced_transfer() {
+    fn quic_reliable_source_stream_allows_good_near_clean_transfer() {
         let config = trusted_quic_config();
         let clean =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.0));
+        let good_config = QuicConfig {
+            round0_loss_target: QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            ..config.clone()
+        };
+        let good = quic_spray_pacing_decision_from_config(
+            &good_config,
+            pacing_signal(0.050, 1_048_576, 0.001),
+        );
+        let above_good =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.002));
         let lossy =
-            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.001));
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.02));
 
         assert!(quic_clean_source_stream_enabled(&config, &clean));
+        assert!(quic_near_clean_source_stream_enabled(&config, &clean));
         assert!(quic_reliable_source_stream_eligible(1024, &config, &clean));
+        assert!(quic_near_clean_source_stream_enabled(&good_config, &good));
+        assert!(quic_reliable_source_stream_eligible(
+            1024,
+            &good_config,
+            &good
+        ));
         let mut maxed_clean = clean;
         maxed_clean.pacing_rate_bps = QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS;
         assert!(!quic_round0_clean_ramp_enabled(&config, &maxed_clean, true));
@@ -9539,6 +9568,10 @@ mod tests {
             &config,
             &clean
         ));
+        assert!(
+            !quic_near_clean_source_stream_enabled(&config, &above_good),
+            "above-GOOD observed loss must stay on the FEC datagram fountain"
+        );
         assert!(
             !quic_clean_source_stream_enabled(&config, &lossy),
             "lossy paths must stay on the FEC datagram fountain"
@@ -9562,7 +9595,7 @@ mod tests {
                 ..config.clone()
             },
             QuicConfig {
-                round0_loss_target: 0.001,
+                round0_loss_target: 0.002,
                 ..config.clone()
             },
         ] {
@@ -9571,8 +9604,8 @@ mod tests {
                 pacing_signal(0.050, 1_048_576, 0.0),
             );
             assert!(
-                !quic_clean_source_stream_enabled(&blocked, &decision),
-                "clean source stream must stay off when the config selects lossy/paced/fanout DATAGRAM behavior"
+                !quic_near_clean_source_stream_enabled(&blocked, &decision),
+                "source stream must stay off when the config selects above-GOOD/paced/fanout DATAGRAM behavior"
             );
         }
     }
