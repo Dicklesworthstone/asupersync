@@ -4030,7 +4030,7 @@ async fn send_native_source_stream_entries_pumped(
             streamed = streamed.saturating_add(n_u64);
             queued_since_flush = queued_since_flush.saturating_add(n_u64);
             if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
-                drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
+                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
                 queued_since_flush = 0;
             }
         }

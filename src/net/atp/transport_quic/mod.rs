@@ -307,6 +307,7 @@ const QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 // until central A/B proves a higher encrypted sender rate is good-safe.
 const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
+const QUIC_ROUND0_DATAGRAM_RAMP_MAX_LOSS_TARGET: f64 = 0.001;
 /// Default native QUIC path-rate cap once loss is visible.
 ///
 /// MATRIX-143 showed that RTT alone is not a congestion signal for the clean
@@ -1579,19 +1580,32 @@ pub(crate) fn quic_round0_clean_ramp_enabled(
 ) -> bool {
     let max_pacing_bps = quic_round0_clean_ramp_max_pacing_bps(pacing);
     with_source
-        && quic_clean_source_stream_enabled(config, pacing)
+        && quic_round0_datagram_ramp_enabled(config, pacing)
         && pacing.pacing_rate_bps < max_pacing_bps
+}
+
+fn quic_clean_source_base_enabled(config: &QuicConfig) -> bool {
+    config.debug_drop_one_in == 0
+        && config.bwlimit_bps.is_none()
+        && quic_effective_datagram_fanout(config, usize::MAX) == 1
+        && config.repair_overhead.is_finite()
+        && config.repair_overhead <= QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD
+}
+
+fn quic_round0_datagram_ramp_enabled(
+    config: &QuicConfig,
+    pacing: &QuicSprayPacingDecision,
+) -> bool {
+    quic_clean_source_base_enabled(config)
+        && config.round0_loss_target <= QUIC_ROUND0_DATAGRAM_RAMP_MAX_LOSS_TARGET
+        && pacing.path_loss_rate <= f64::EPSILON
 }
 
 pub(crate) fn quic_clean_source_stream_enabled(
     config: &QuicConfig,
     pacing: &QuicSprayPacingDecision,
 ) -> bool {
-    config.debug_drop_one_in == 0
-        && config.bwlimit_bps.is_none()
-        && quic_effective_datagram_fanout(config, usize::MAX) == 1
-        && config.repair_overhead.is_finite()
-        && config.repair_overhead <= QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD
+    quic_clean_source_base_enabled(config)
         && (0.0..=f64::EPSILON).contains(&config.round0_loss_target)
         && pacing.path_loss_rate <= f64::EPSILON
 }
@@ -9457,6 +9471,14 @@ mod tests {
             quic_round0_clean_ramp_max_pacing_bps(&bad_rtt),
             QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
         );
+        let good_target = QuicConfig {
+            round0_loss_target: 0.001,
+            ..config.clone()
+        };
+        assert!(
+            quic_round0_clean_ramp_enabled(&good_target, &clean, true),
+            "MATRIX-148: the 0.1% good cell must keep the fast FEC DATAGRAM source-round ramp while source-stream stays disabled"
+        );
 
         for blocked in [
             QuicConfig {
@@ -9475,10 +9497,14 @@ mod tests {
                 datagram_fanout: 2,
                 ..config.clone()
             },
+            QuicConfig {
+                round0_loss_target: 0.02,
+                ..config.clone()
+            },
         ] {
             assert!(
                 !quic_round0_clean_ramp_enabled(&blocked, &clean, true),
-                "clean ramp must stay off for debug loss, operator caps, repair-heavy, and fanout configs"
+                "clean ramp must stay off for debug loss, operator caps, repair-heavy, fanout, and bad-link configs"
             );
         }
 
