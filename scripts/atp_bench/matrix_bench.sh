@@ -19,6 +19,8 @@ WORKLOADS="500K,5M,50M,500M,5G,tree_small,tree_big"
 REGIMES="perfect,good,bad,broken"
 TIERS="nocrypto,auth,encrypted"
 STREAMS_SWEEP="1"
+METHODS_FILTER=""
+FAIL_ON_MISMATCH=0
 
 usage() {
   cat <<'USAGE'
@@ -38,8 +40,10 @@ Options:
   --workloads CSV           workload list
   --regimes CSV             regime list
   --tiers CSV               crypto tier list
+  --methods CSV             method allowlist after tier expansion
   --streams CSV             ATP-RQ stream counts to sweep (default: 1)
   --reps N                  default reps per method/cell
+  --fail-on-mismatch        exit non-zero if score_matrix finds any failed row
   --help                    show this help
 
 Execution env for --run-cell-command:
@@ -101,6 +105,10 @@ while [[ $# -gt 0 ]]; do
       TIERS="${2:?missing CSV}"
       shift 2
       ;;
+    --methods)
+      METHODS_FILTER="${2:?missing CSV}"
+      shift 2
+      ;;
     --streams)
       STREAMS_SWEEP="${2:?missing CSV}"
       shift 2
@@ -108,6 +116,10 @@ while [[ $# -gt 0 ]]; do
     --reps)
       REPS_DEFAULT="${2:?missing reps}"
       shift 2
+      ;;
+    --fail-on-mismatch)
+      FAIL_ON_MISMATCH=1
+      shift
       ;;
     --help)
       usage
@@ -139,6 +151,18 @@ split_csv() {
   local value="$1"
   local -n out_ref="$2"
   IFS=',' read -r -a out_ref <<<"${value}"
+}
+
+method_allowed() {
+  local method="$1"
+  [[ -n "${METHODS_FILTER}" ]] || return 0
+  local allowed_methods
+  split_csv "${METHODS_FILTER}" allowed_methods
+  local allowed
+  for allowed in "${allowed_methods[@]}"; do
+    [[ "${method}" == "${allowed}" ]] && return 0
+  done
+  return 1
 }
 
 json_escape() {
@@ -422,6 +446,9 @@ main() {
         local reps
         reps="$(reps_for_cell "${workload}" "${regime}")"
         for method in "${methods[@]}"; do
+          if ! method_allowed "${method}"; then
+            continue
+          fi
           local method_streams=("${streams[@]}")
           if ! method_uses_stream_sweep "${method}"; then
             method_streams=(1)
@@ -445,6 +472,9 @@ main() {
     cat "${PLAN_JSONL}"
   elif [[ -f "${RESULTS_JSONL}" ]]; then
     python3 "${SCRIPT_DIR}/score_matrix.py" "${RESULTS_JSONL}" --out-md "${REPORT_MD}"
+    if [[ "${FAIL_ON_MISMATCH}" -eq 1 ]]; then
+      python3 "${SCRIPT_DIR}/score_matrix.py" "${RESULTS_JSONL}" --fail-on-mismatch
+    fi
   fi
 }
 

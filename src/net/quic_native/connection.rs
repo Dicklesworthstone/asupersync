@@ -559,6 +559,24 @@ impl NativeQuicConnection {
             });
     }
 
+    /// Whether any STREAM frames remain queued for packet assembly.
+    #[must_use]
+    pub fn has_pending_stream_frames(&self) -> bool {
+        self.streams.has_pending_stream_frames()
+    }
+
+    /// Number of queued STREAM frames waiting for packet assembly.
+    #[must_use]
+    pub fn pending_stream_frame_count(&self) -> usize {
+        self.streams.pending_stream_frame_count()
+    }
+
+    /// Queued STREAM payload bytes waiting for packet assembly.
+    #[must_use]
+    pub fn pending_stream_data_bytes(&self) -> u64 {
+        self.streams.pending_stream_data_bytes()
+    }
+
     /// Account bytes written to a stream.
     pub fn write_stream(
         &mut self,
@@ -2487,6 +2505,45 @@ mod tests {
             out.extend_from_slice(&chunk);
         }
         assert_eq!(out, payload.as_ref());
+    }
+
+    #[test]
+    fn pending_stream_frames_track_partial_packetization() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.write_stream_bytes(
+            &cx,
+            stream,
+            Bytes::from_static(b"source-stream-payload"),
+            true,
+        )
+        .expect("queue source stream bytes");
+
+        assert!(
+            conn.has_pending_stream_frames(),
+            "queued source bytes must be visible to drain loops"
+        );
+        let first = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 42)
+            .expect("first packet")
+            .into_iter()
+            .any(|frame| matches!(frame, QuicFrame::Stream { .. }));
+        assert!(first, "first packet should carry a STREAM frame");
+        assert!(
+            conn.has_pending_stream_frames(),
+            "partial packetization must leave the stream pending"
+        );
+        let second = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("final packet")
+            .into_iter()
+            .any(|frame| matches!(frame, QuicFrame::Stream { .. }));
+        assert!(second, "final packet should carry the STREAM tail");
+        assert!(
+            !conn.has_pending_stream_frames(),
+            "source-stream drain may finish only after queued STREAM frames clear"
+        );
     }
 
     #[test]

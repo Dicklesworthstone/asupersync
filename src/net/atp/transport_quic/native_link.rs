@@ -57,10 +57,11 @@ use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ServerConfig};
+use sha2::{Digest, Sha256};
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
-use crate::io::AsyncWriteExt;
+use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::datagram::congestion::{CongestionConfig, CongestionController};
 use crate::net::atp::protocol::frames::{Frame, FrameType};
@@ -280,6 +281,13 @@ const RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL: usize = 1;
 /// this grace covers the full-batch case where the kernel may still have more
 /// packets queued without charging a full idle timeout to every drain attempt.
 const INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
+/// Conservative headroom for 1-RTT short-header, AEAD tag, STREAM frame varints,
+/// and small control coalescing when sizing recovery-governed STREAM packets.
+const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 96;
+/// Bytes of source STREAM payload queued before giving the socket pump a turn.
+/// This keeps clean-stream sends from filling QUIC recovery cwnd and then
+/// failing closed before ACKs can advance the window.
+const QUIC_SOURCE_STREAM_FLUSH_BYTES: u64 = 32 * 1024;
 
 /// Control-plane PTO. When the receiver is awaiting repair after a NeedMore and the link goes idle,
 /// the NeedMore (receiver->sender) or the repair round (sender->receiver) was likely lost on the wire
@@ -2124,6 +2132,34 @@ impl QuicLink {
         Ok(())
     }
 
+    fn expire_app_data_loss_timeout(
+        &mut self,
+        cx: &Cx,
+        operation: &'static str,
+    ) -> Result<usize, QuicTransportError> {
+        let Some(deadline) = self.conn.pto_deadline_micros(cx, self.clock)? else {
+            return Ok(0);
+        };
+        self.clock = self.clock.max(deadline);
+        let event = self.conn.on_loss_timeout_expired(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            self.clock,
+        )?;
+        if event.lost_packets > 0 {
+            quic_rqtrace!(
+                "sender: app_data_loss_timeout operation={} lost_packets={} lost_bytes={} bytes_in_flight={} congestion_window={} pto_count={}",
+                operation,
+                event.lost_packets,
+                event.lost_bytes,
+                self.conn.transport().bytes_in_flight(),
+                self.conn.transport().congestion_window_bytes(),
+                self.conn.transport().pto_count(),
+            );
+        }
+        Ok(event.lost_packets)
+    }
+
     /// Drain all currently-pending application frames, protect each into a 1-RTT
     /// packet, and send the batch over UDP. Returns the number of packets sent.
     async fn flush(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
@@ -2163,10 +2199,29 @@ impl QuicLink {
                     self.max_app_payload,
                 )
             };
+            let max_frame_bytes = if pending_datagrams == 0 && self.conn.has_pending_stream_frames()
+            {
+                let transport = self.conn.transport();
+                let available = transport
+                    .congestion_window_bytes()
+                    .saturating_sub(transport.bytes_in_flight());
+                if available <= QUIC_STREAM_PACKET_OVERHEAD_BUDGET {
+                    break;
+                }
+                admission.max_frame_bytes.min(
+                    usize::try_from(available.saturating_sub(QUIC_STREAM_PACKET_OVERHEAD_BUDGET))
+                        .unwrap_or(usize::MAX),
+                )
+            } else {
+                admission.max_frame_bytes
+            };
+            if max_frame_bytes == 0 {
+                break;
+            }
             let frames = self.conn.generate_frames(
                 cx,
                 PacketNumberSpace::ApplicationData,
-                admission.max_frame_bytes,
+                max_frame_bytes,
             )?;
             if frames.is_empty() {
                 break;
@@ -3834,6 +3889,163 @@ fn parse_hello_ack(frame: &Frame) -> Result<QuicHelloAck, QuicTransportError> {
     Ok(ack)
 }
 
+async fn drive_native_source_stream_flush(
+    cx: &Cx,
+    link: &mut QuicLink,
+    idle_timeout: Duration,
+    drain_all: bool,
+) -> Result<(), QuicTransportError> {
+    let started = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut made_progress = false;
+    let mut recent_stream_frames = Vec::new();
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let pending_frames = link.conn.pending_stream_frame_count();
+        if pending_frames == 0 {
+            return Ok(());
+        }
+        let pending_bytes = link.conn.pending_stream_data_bytes();
+        let flushed = link.flush(cx).await?;
+        made_progress |= flushed > 0;
+        if flushed > 0 {
+            last_progress = Instant::now();
+            let frames = link.last_flushed_stream_frames();
+            if !frames.is_empty() {
+                recent_stream_frames = frames;
+            }
+        }
+        quic_rqtrace!(
+            "sender: native_source_stream_flush pending_frames={} pending_bytes={} flushed={} drain_all={} in_flight={} cwnd={}",
+            pending_frames,
+            pending_bytes,
+            flushed,
+            drain_all,
+            link.conn.transport().bytes_in_flight(),
+            link.conn.transport().congestion_window_bytes(),
+        );
+        if link.conn.pending_stream_frame_count() == 0 {
+            return Ok(());
+        }
+        let pump_timeout = if flushed == 0 || !drain_all {
+            INBOUND_PUMP_DRAIN_GRACE
+        } else {
+            Duration::ZERO
+        };
+        let pumped = link.pump_inbound_for(cx, pump_timeout).await?;
+        if pumped > 0 {
+            last_progress = Instant::now();
+        }
+        if link.conn.pending_stream_frame_count() == 0 {
+            return Ok(());
+        }
+        if !drain_all && made_progress {
+            return Ok(());
+        }
+        if flushed == 0
+            && pumped == 0
+            && last_progress.elapsed() >= NEEDMORE_PTO
+            && link.expire_app_data_loss_timeout(cx, "flush QUIC source stream")? > 0
+        {
+            if !recent_stream_frames.is_empty() {
+                let retransmitted = link
+                    .retransmit_stream_frames(cx, &recent_stream_frames, "source_stream_pto")
+                    .await?;
+                if retransmitted > 0 {
+                    last_progress = Instant::now();
+                    recent_stream_frames = link.last_flushed_stream_frames();
+                    continue;
+                }
+            }
+            last_progress = Instant::now();
+        }
+        if started.elapsed() >= idle_timeout {
+            return Err(QuicTransportError::Timeout {
+                operation: "flush QUIC source stream",
+                timeout: idle_timeout,
+            });
+        }
+    }
+}
+
+async fn send_native_source_stream_entries_pumped(
+    cx: &Cx,
+    link: &mut QuicLink,
+    stream: StreamId,
+    prepared: &QuicPreparedSource,
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let max_chunk = link
+        .max_app_payload
+        .saturating_sub(usize::try_from(QUIC_STREAM_PACKET_OVERHEAD_BUDGET).unwrap_or(usize::MAX))
+        .max(1);
+    let flush_chunk = usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap_or(usize::MAX);
+    let mut buf = vec![0_u8; config.chunk_size.max(1).min(max_chunk).min(flush_chunk)];
+    let mut streamed = 0u64;
+    let mut queued_since_flush = 0u64;
+
+    for entry in &prepared.entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        if entry.size == 0 {
+            continue;
+        }
+        let mut file = crate::fs::File::open(&entry.abs_path)
+            .await
+            .map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+            })?;
+        let mut hasher = Sha256::new();
+        let mut read = 0u64;
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let n = file.read(&mut buf).await.map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+            })?;
+            if n == 0 {
+                break;
+            }
+            read = read.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+            if read > entry.size {
+                return Err(QuicTransportError::Source(format!(
+                    "{} grew while streaming QUIC source bytes (read {read} bytes, manifest size {})",
+                    entry.abs_path.display(),
+                    entry.size
+                )));
+            }
+            hasher.update(&buf[..n]);
+            link.conn
+                .write_stream_bytes(cx, stream, Bytes::copy_from_slice(&buf[..n]), false)?;
+            let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
+            streamed = streamed.saturating_add(n_u64);
+            queued_since_flush = queued_since_flush.saturating_add(n_u64);
+            if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
+                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+                queued_since_flush = 0;
+            }
+        }
+        if read != entry.size {
+            return Err(QuicTransportError::Source(format!(
+                "{} changed while streaming QUIC source bytes (read {read} bytes, manifest size {})",
+                entry.abs_path.display(),
+                entry.size
+            )));
+        }
+        let got_sha = hex_encode(&hasher.finalize());
+        if got_sha != entry.sha256_hex {
+            return Err(QuicTransportError::Integrity(format!(
+                "{} changed while streaming QUIC source bytes (sha256 {got_sha}, manifest {})",
+                entry.abs_path.display(),
+                entry.sha256_hex
+            )));
+        }
+    }
+
+    link.conn
+        .write_stream_bytes(cx, stream, Bytes::new(), true)?;
+    drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
+    Ok(streamed)
+}
+
 /// Drive a full ATP-over-QUIC send over an established link: Hello, manifest,
 /// initial symbol spray, then the fountain feedback loop until Proof or the
 /// feedback-round budget is exhausted.
@@ -3894,21 +4106,15 @@ async fn run_sender_session(
     super::send_native_manifest(cx, &mut link.conn, &mut control, manifest)?;
     link.flush(cx).await?;
     if let Some(source_stream) = source_stream {
-        let bytes_streamed = super::send_native_source_stream_entries(
-            cx,
-            &mut link.conn,
-            source_stream,
-            prepared,
-            config,
-        )
-        .await?;
+        let bytes_streamed =
+            send_native_source_stream_entries_pumped(cx, link, source_stream, prepared, config)
+                .await?;
         if bytes_streamed != manifest.total_bytes {
             return Err(QuicTransportError::Integrity(format!(
                 "source stream sent {bytes_streamed} bytes, expected {}",
                 manifest.total_bytes
             )));
         }
-        link.flush(cx).await?;
         quic_rqtrace!(
             "sender: native_source_stream sent bytes={} stream={}",
             bytes_streamed,
@@ -4677,6 +4883,7 @@ async fn read_native_source_stream_chunk(
                 timeout: idle_timeout,
             });
         }
+        let _ = link.flush(cx).await?;
     }
 }
 
@@ -4924,6 +5131,7 @@ async fn run_receiver_session(
     let manifest: TransferManifest =
         super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
     super::validate_quic_manifest(&manifest, config)?;
+    link.flush(cx).await?;
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
     if let Some(source_stream) = source_stream {

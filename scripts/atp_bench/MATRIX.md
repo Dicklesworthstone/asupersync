@@ -64,6 +64,24 @@ python3 scripts/atp_bench/score_matrix.py "$RUN/results.jsonl" --out-md "$RUN/sc
 python3 scripts/atp_bench/score_matrix.py "$RUN/results.jsonl" --fail-on-mismatch
 ```
 
+### Focused Encrypted ATP Gate
+
+For QUIC/TLS source-stream changes, run the real netns ATP cells before closing
+the bead. This catches sender/receiver completion bugs that a CLI compile cannot:
+
+```bash
+sudo env BIN=/tmp/atp_bench/atp ATP_MATRIX_TIMEOUT=90 \
+  bash scripts/atp_bench/matrix_bench.sh \
+    --execute --generate-workloads \
+    --workloads 50M \
+    --regimes perfect,good \
+    --tiers encrypted \
+    --methods atp-quic-tls13 \
+    --reps 1 \
+    --fail-on-mismatch \
+    --run-cell-command 'bash scripts/atp_bench/run_matrix_cell.sh'
+```
+
 ## Integrity guarantees (why a failure can never read as a win)
 
 - **Every transfer is SHA-256 verified** (file: digest; tree: sorted per-file
