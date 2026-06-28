@@ -96,6 +96,84 @@ fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
+/// Process-global shared fallback timer (br-asupersync-runtime-cpu-overhaul-5vt09v.3.5).
+///
+/// A `Sleep` polled with no bound or ambient (`Cx`) timer driver used to spawn a
+/// dedicated OS thread *per Sleep* to drive its deadline. A heavy consumer that
+/// drives futures off the runtime's worker threads (so `Cx::current()` is `None`)
+/// therefore paid a `pthread_create`/`pthread_exit` for every timeout — the
+/// thread-per-`sleep` churn the frankenterm-gui profile caught (~37/sec).
+///
+/// This shared driver replaces that with ONE process-lifetime pump thread that
+/// owns the standard wall-clock [`TimerDriver`](super::driver::TimerDriver) and
+/// services every off-`Cx` sleep through the same wheel the runtime uses. It is
+/// started lazily on the first off-`Cx` wall-clock sleep and never joined.
+struct GlobalFallbackTimer {
+    driver: TimerDriverHandle,
+    pump: std::thread::Thread,
+}
+
+static GLOBAL_FALLBACK: OnceLock<GlobalFallbackTimer> = OnceLock::new();
+
+/// Idle park used by the pump when no timers are pending. It only bounds how
+/// long the pump sleeps when the wheel is empty; an arriving timer unparks the
+/// pump immediately (see `arm` handling in `Sleep::poll`), so this does not
+/// delay any registered deadline.
+const FALLBACK_PUMP_IDLE_PARK: Duration = Duration::from_millis(250);
+
+/// Returns the process-global shared fallback timer, starting its pump thread on
+/// first use.
+fn global_fallback_timer() -> &'static GlobalFallbackTimer {
+    GLOBAL_FALLBACK.get_or_init(|| {
+        let driver = TimerDriverHandle::with_wall_clock();
+        let pump_driver = driver.clone();
+        // One shared pump replaces N per-Sleep threads; count it once so the
+        // `timer_threads_spawned` churn signal reflects reality (1, not N).
+        crate::runtime::metrics::record_timer_thread_spawned();
+        // ubs:ignore - intentional process-lifetime daemon timer pump shared by all off-Cx sleeps
+        let handle = std::thread::Builder::new()
+            .name("asupersync-fallback-timer".to_string())
+            .spawn(move || fallback_pump_loop(&pump_driver))
+            .expect("spawn shared fallback timer pump");
+        GlobalFallbackTimer {
+            driver,
+            pump: handle.thread().clone(),
+        }
+    })
+}
+
+/// The shared fallback pump loop: fire due timers, then park until the next
+/// deadline (or `FALLBACK_PUMP_IDLE_PARK` when the wheel is empty). A newly
+/// armed sleep unparks this thread, so the park is recomputed against the
+/// sooner deadline without busy-polling.
+fn fallback_pump_loop(driver: &TimerDriverHandle) -> ! {
+    loop {
+        let _ = driver.process_timers();
+        let park = match driver.next_deadline() {
+            Some(deadline) => {
+                let now = driver.now().as_nanos();
+                let dl = deadline.as_nanos();
+                if dl > now {
+                    Duration::from_nanos(dl - now)
+                } else {
+                    // Already due; loop to fire it without parking.
+                    continue;
+                }
+            }
+            None => FALLBACK_PUMP_IDLE_PARK,
+        };
+        std::thread::park_timeout(park);
+    }
+}
+
+/// Whether `handle` is the process-global shared fallback driver.
+#[inline]
+fn is_global_fallback_driver(handle: &TimerDriverHandle) -> bool {
+    GLOBAL_FALLBACK
+        .get()
+        .is_some_and(|global| global.driver.ptr_eq(handle))
+}
+
 /// Returns the current wall clock time.
 ///
 /// This function returns the elapsed time since the first call to any
@@ -562,7 +640,19 @@ impl Future for Sleep {
         let timer_driver = self
             .bound_timer_driver
             .clone()
-            .or_else(|| ambient_timer_driver.clone());
+            .or_else(|| ambient_timer_driver.clone())
+            .or_else(|| {
+                // No bound or ambient (Cx) driver. For the common wall-clock
+                // case, route through the process-global shared fallback timer
+                // instead of spawning an OS thread per Sleep
+                // (br-asupersync-runtime-cpu-overhaul-5vt09v.3.5). A custom
+                // logical clock (`time_getter`) keeps the short-poll thread
+                // fallback below, since the wall-clock shared driver cannot
+                // observe an injected clock.
+                self.time_getter
+                    .is_none()
+                    .then(|| global_fallback_timer().driver.clone())
+            });
         let now = if let Some(timer) = self.bound_timer_driver.as_ref() {
             timer.now()
         } else if self.time_getter.is_some() {
@@ -626,6 +716,7 @@ impl Future for Sleep {
 
                     state.timer_driver = Some(timer.clone());
 
+                    let mut armed = false;
                     if state.timer_handle.is_none() {
                         // Register new timer
                         let handle = timer.register(
@@ -638,6 +729,7 @@ impl Future for Sleep {
                             });
                         }
                         state.timer_handle = Some(handle);
+                        armed = true;
                     } else if waker_changed {
                         // Update existing timer with new waker
                         if let Some(handle) = state.timer_handle.take() {
@@ -661,7 +753,16 @@ impl Future for Sleep {
                                 });
                             }
                             state.timer_handle = Some(new_handle);
+                            armed = true;
                         }
+                    }
+
+                    // If this Sleep just (re)armed on the process-global shared
+                    // fallback timer, wake its pump so it re-parks to the
+                    // possibly-sooner next deadline. Arming a sooner timer MUST
+                    // unpark the pump or the wakeup waits for the prior park.
+                    if armed && is_global_fallback_driver(timer) {
+                        global_fallback_timer().pump.unpark();
                     }
                 } else {
                     // No timer driver; cancel any existing registration.
@@ -2341,5 +2442,79 @@ mod tests {
         );
 
         crate::test_complete!("mr_cancellation_composition");
+    }
+
+    #[test]
+    fn off_cx_wall_clock_sleep_completes_via_shared_fallback() {
+        init_test("off_cx_wall_clock_sleep_completes_via_shared_fallback");
+        // No Cx is set on this thread, so Cx::current() is None: a wall-clock
+        // sleep must route through the process-global shared fallback timer
+        // (not a per-Sleep OS thread) and still fire
+        // (br-asupersync-runtime-cpu-overhaul-5vt09v.3.5).
+        crate::assert_with_log!(
+            Cx::current().is_none(),
+            "no ambient Cx",
+            true,
+            Cx::current().is_none()
+        );
+        let mut s = sleep(wall_now(), Duration::from_millis(20));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let give_up = Instant::now() + Duration::from_secs(2);
+        loop {
+            if Pin::new(&mut s).poll(&mut cx).is_ready() {
+                break;
+            }
+            crate::assert_with_log!(
+                Instant::now() < give_up,
+                "off-Cx sleep fired within 2s",
+                true,
+                Instant::now() < give_up
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        crate::test_complete!("off_cx_wall_clock_sleep_completes_via_shared_fallback");
+    }
+
+    #[cfg(feature = "runtime-metrics")]
+    #[test]
+    fn off_cx_sleeps_share_one_fallback_thread() {
+        init_test("off_cx_sleeps_share_one_fallback_thread");
+        // N off-Cx wall-clock sleeps must register with the single shared
+        // fallback driver, NOT spawn one OS thread each (the churn this fix
+        // targets). Counters are process-global and the suite runs in parallel,
+        // so assert robust bounds: registrations grow by >= N (they used the
+        // driver), and thread spawns grow by < N (not one-per-sleep).
+        let n: u64 = 8;
+        let before = crate::runtime::metrics::snapshot();
+        for _ in 0..n {
+            let mut s = sleep(wall_now(), Duration::from_millis(5));
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let give_up = Instant::now() + Duration::from_secs(2);
+            loop {
+                if Pin::new(&mut s).poll(&mut cx).is_ready() {
+                    break;
+                }
+                assert!(Instant::now() < give_up, "off-Cx sleep stalled");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let after = crate::runtime::metrics::snapshot();
+        let registered = after.timers_registered - before.timers_registered;
+        let spawned = after.timer_threads_spawned - before.timer_threads_spawned;
+        crate::assert_with_log!(
+            registered >= n,
+            "off-Cx sleeps registered with shared driver",
+            true,
+            registered >= n
+        );
+        crate::assert_with_log!(
+            spawned < n,
+            "shared pump, not one thread per sleep",
+            true,
+            spawned < n
+        );
+        crate::test_complete!("off_cx_sleeps_share_one_fallback_thread");
     }
 }
