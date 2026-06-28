@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const REPLAY_WINDOW_CAPACITY: usize = 1024;
 const REPLAY_WINDOW_SPAN: u64 = REPLAY_WINDOW_CAPACITY as u64 - 1;
+const PARALLEL_UNPROTECT_MIN_PACKETS: usize = 4;
+const PARALLEL_UNPROTECT_TARGET_CHUNK_PACKETS: usize = 8;
 
 #[cfg(any(test, feature = "test-internals"))]
 use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
@@ -30,6 +32,13 @@ pub struct PacketUnprotectionRequest<'a> {
     pub packet: &'a ProtectedPacket,
     /// Header bytes authenticated but not encrypted.
     pub associated_data: &'a [u8],
+}
+
+#[derive(Debug, Clone)]
+struct OwnedPacketUnprotectionRequest {
+    index: usize,
+    packet: ProtectedPacket,
+    associated_data: Vec<u8>,
 }
 
 /// ATP packet protection configuration.
@@ -153,6 +162,39 @@ impl PacketReplayWindow {
     fn len(&self) -> usize {
         self.seen.len()
     }
+}
+
+fn packet_unprotect_parallel_width_for_cx(cx: &Cx, packets: usize) -> usize {
+    if packets < PARALLEL_UNPROTECT_MIN_PACKETS {
+        return 1;
+    }
+    let Some(pool) = cx.blocking_pool_handle() else {
+        return 1;
+    };
+    let available_threads = pool
+        .current_max_threads()
+        .saturating_sub(pool.busy_threads())
+        .max(1);
+    let chunks_by_size = packets
+        .div_ceil(PARALLEL_UNPROTECT_TARGET_CHUNK_PACKETS)
+        .max(1);
+    available_threads.min(chunks_by_size).max(1)
+}
+
+fn unprotect_packet_chunk(
+    mut provider: Box<dyn QuicPacketProtectionProvider + Send + Sync>,
+    requests: Vec<OwnedPacketUnprotectionRequest>,
+) -> Vec<(usize, AtpOutcome<UnprotectedPacket>)> {
+    requests
+        .into_iter()
+        .map(|request| {
+            let result = provider
+                .unprotect_packet(&request.packet, &request.associated_data)
+                .map_err(map_tls_error_to_atp)
+                .into();
+            (request.index, result)
+        })
+        .collect()
 }
 
 impl AtpPacketProtection {
@@ -520,6 +562,118 @@ impl AtpPacketProtection {
             .collect()
     }
 
+    /// Unprotect a packet batch across the receiver blocking pool when safe.
+    ///
+    /// Anti-replay state remains serialized in this wrapper: packet numbers are
+    /// screened before dispatch, duplicate packet numbers within the same batch
+    /// fall back to the serial path, and the accepted replay window is updated
+    /// in receive order only after worker decrypts return successfully.
+    pub async fn unprotect_packets_parallel(
+        &mut self,
+        cx: &Cx,
+        requests: &[PacketUnprotectionRequest<'_>],
+    ) -> Vec<AtpOutcome<UnprotectedPacket>> {
+        let width = packet_unprotect_parallel_width_for_cx(cx, requests.len());
+        if width <= 1 || self.provider.clone_for_parallel_unprotect().is_none() {
+            return self.unprotect_packets(cx, requests);
+        }
+
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields(
+                "atp_packet_protection_unprotect_batch_parallel",
+                &[
+                    ("packets", &requests.len().to_string()),
+                    ("workers", &width.to_string()),
+                ],
+            );
+        }
+
+        let mut outcomes = Vec::with_capacity(requests.len());
+        outcomes.resize_with(requests.len(), || None);
+        let mut candidates = Vec::with_capacity(requests.len());
+        let mut batch_seen = BTreeSet::new();
+
+        for (index, request) in requests.iter().enumerate() {
+            let key = (request.packet.space, request.packet.packet_number);
+            if self
+                .accepted_packets
+                .get(&request.packet.space)
+                .is_some_and(|window| window.rejects(request.packet.packet_number))
+            {
+                outcomes[index] = Some(Outcome::err(AtpError::Auth(AuthError::ReplayedNonce)));
+                continue;
+            }
+            if !batch_seen.insert(key) {
+                return self.unprotect_packets(cx, requests);
+            }
+            candidates.push(OwnedPacketUnprotectionRequest {
+                index,
+                packet: request.packet.clone(),
+                associated_data: request.associated_data.to_vec(),
+            });
+        }
+
+        if candidates.is_empty() {
+            return outcomes
+                .into_iter()
+                .map(|outcome| outcome.expect("every request has a replay outcome"))
+                .collect();
+        }
+
+        let chunk_len = candidates
+            .len()
+            .div_ceil(width)
+            .max(PARALLEL_UNPROTECT_TARGET_CHUNK_PACKETS);
+        let mut pending = Vec::new();
+        for chunk in candidates.chunks(chunk_len) {
+            let Some(provider) = self.provider.clone_for_parallel_unprotect() else {
+                return self.unprotect_packets(cx, requests);
+            };
+            let chunk = chunk.to_vec();
+            let inline_chunk = chunk.clone();
+            match cx.spawn_blocking(move |_child| unprotect_packet_chunk(provider, chunk)) {
+                Ok(handle) => pending.push(Ok(handle)),
+                Err(_) => {
+                    let Some(provider) = self.provider.clone_for_parallel_unprotect() else {
+                        return self.unprotect_packets(cx, requests);
+                    };
+                    pending.push(Err(unprotect_packet_chunk(provider, inline_chunk)));
+                }
+            }
+        }
+
+        for pending_chunk in pending {
+            let chunk_results = match pending_chunk {
+                Ok(mut handle) => match handle.join(cx).await {
+                    Ok(results) => results,
+                    Err(_) => return self.unprotect_packets(cx, requests),
+                },
+                Err(results) => results,
+            };
+            for (index, outcome) in chunk_results {
+                outcomes[index] = Some(outcome);
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(requests.len());
+        for outcome in outcomes {
+            let outcome = outcome.expect("every unprotect request has an outcome");
+            match outcome {
+                Outcome::Ok(unprotected) => {
+                    let replay_window = self.accepted_packets.entry(unprotected.space).or_default();
+                    if replay_window.rejects(unprotected.packet_number) {
+                        ordered.push(Outcome::err(AtpError::Auth(AuthError::ReplayedNonce)));
+                    } else {
+                        replay_window.accept(unprotected.packet_number);
+                        ordered.push(Outcome::ok(unprotected));
+                    }
+                }
+                other => ordered.push(other),
+            }
+        }
+        ordered
+    }
+
     /// Unprotect a packet with ATP error handling.
     pub async fn unprotect_packet(
         &mut self,
@@ -609,34 +763,38 @@ impl AtpPacketProtection {
 
     /// Map QuicTlsError to AtpError with appropriate classification.
     fn map_tls_error(&self, error: QuicTlsError) -> AtpError {
-        match error {
-            QuicTlsError::HandshakeNotConfirmed
-            | QuicTlsError::InvalidTransition { .. }
-            | QuicTlsError::StalePeerKeyPhase(_)
-            | QuicTlsError::ServerCertificateUnverified => {
-                AtpError::Protocol(ProtocolError::SessionStateMismatch)
-            }
-            QuicTlsError::ServerIdentityRootStoreEmpty
-            | QuicTlsError::ServerCertificateChainEmpty
-            | QuicTlsError::InvalidServerName
-            | QuicTlsError::ServerCertificateRejected { .. } => {
-                AtpError::Auth(AuthError::InvalidCertificate)
-            }
-            QuicTlsError::MissingKeys { .. } | QuicTlsError::KeyDiscarded { .. } => {
-                AtpError::Protocol(ProtocolError::UnexpectedFrame)
-            }
-            QuicTlsError::BadPacketTag { .. } | QuicTlsError::WrongKeyPhase { .. } => {
-                AtpError::Protocol(ProtocolError::InvalidFrameType)
-            }
-            QuicTlsError::TranscriptMismatch { .. } => {
-                AtpError::Protocol(ProtocolError::ProtocolVersionMismatch)
-            }
-            QuicTlsError::HeaderProtectionSampleTooShort { .. } => {
-                AtpError::Protocol(ProtocolError::MalformedFrame)
-            }
-            QuicTlsError::CryptoProviderFailure { .. } => {
-                AtpError::Protocol(ProtocolError::InvalidFrameType)
-            }
+        map_tls_error_to_atp(error)
+    }
+}
+
+fn map_tls_error_to_atp(error: QuicTlsError) -> AtpError {
+    match error {
+        QuicTlsError::HandshakeNotConfirmed
+        | QuicTlsError::InvalidTransition { .. }
+        | QuicTlsError::StalePeerKeyPhase(_)
+        | QuicTlsError::ServerCertificateUnverified => {
+            AtpError::Protocol(ProtocolError::SessionStateMismatch)
+        }
+        QuicTlsError::ServerIdentityRootStoreEmpty
+        | QuicTlsError::ServerCertificateChainEmpty
+        | QuicTlsError::InvalidServerName
+        | QuicTlsError::ServerCertificateRejected { .. } => {
+            AtpError::Auth(AuthError::InvalidCertificate)
+        }
+        QuicTlsError::MissingKeys { .. } | QuicTlsError::KeyDiscarded { .. } => {
+            AtpError::Protocol(ProtocolError::UnexpectedFrame)
+        }
+        QuicTlsError::BadPacketTag { .. } | QuicTlsError::WrongKeyPhase { .. } => {
+            AtpError::Protocol(ProtocolError::InvalidFrameType)
+        }
+        QuicTlsError::TranscriptMismatch { .. } => {
+            AtpError::Protocol(ProtocolError::ProtocolVersionMismatch)
+        }
+        QuicTlsError::HeaderProtectionSampleTooShort { .. } => {
+            AtpError::Protocol(ProtocolError::MalformedFrame)
+        }
+        QuicTlsError::CryptoProviderFailure { .. } => {
+            AtpError::Protocol(ProtocolError::InvalidFrameType)
         }
     }
 }
@@ -740,6 +898,20 @@ mod tests {
             TaskId::testing_default(),
             Budget::INFINITE,
         )
+    }
+
+    fn test_cx_with_blocking_pool(
+        region_seed: u32,
+        threads: usize,
+    ) -> (crate::runtime::blocking_pool::BlockingPool, Cx<cap::All>) {
+        let pool = crate::runtime::blocking_pool::BlockingPool::new(threads, threads);
+        let cx = Cx::new(
+            RegionId::new_for_test(region_seed, 1),
+            TaskId::new_for_test(region_seed, 0),
+            Budget::INFINITE,
+        )
+        .with_blocking_pool_handle(Some(pool.handle()));
+        (pool, cx)
     }
 
     fn encoded_application_payload() -> Vec<u8> {
@@ -1109,6 +1281,184 @@ mod tests {
                 AtpError::Auth(AuthError::ReplayedNonce)
             );
             assert_eq!(protection.accepted_packet_count(), payloads.len());
+        });
+    }
+
+    #[test]
+    fn parallel_unprotect_width_uses_receiver_blocking_pool_capacity() {
+        let cx = test_cx();
+        assert_eq!(
+            packet_unprotect_parallel_width_for_cx(&cx, PARALLEL_UNPROTECT_MIN_PACKETS),
+            1,
+            "contexts without a receiver blocking pool must stay inline"
+        );
+
+        let (_pool, cx) = test_cx_with_blocking_pool(53, 4);
+        assert_eq!(
+            packet_unprotect_parallel_width_for_cx(&cx, PARALLEL_UNPROTECT_MIN_PACKETS - 1),
+            1,
+            "tiny socket batches should avoid offload overhead"
+        );
+        assert_eq!(
+            packet_unprotect_parallel_width_for_cx(&cx, 16),
+            2,
+            "width should scale with chunk count and available blocking threads"
+        );
+        assert_eq!(
+            packet_unprotect_parallel_width_for_cx(&cx, 64),
+            4,
+            "width should cap at the receiver blocking-pool capacity"
+        );
+    }
+
+    #[test]
+    fn unprotect_packets_parallel_preserves_order_and_fails_closed() {
+        futures_lite::future::block_on(async {
+            let (_pool, cx) = test_cx_with_blocking_pool(54, 4);
+            let mut protection =
+                deterministic_one_rtt_protection(&cx, b"one-rtt-parallel-unprotect-seed").await;
+            let payloads = (0..16)
+                .map(|idx| format!("parallel encrypted payload {idx}").into_bytes())
+                .collect::<Vec<_>>();
+            let associated_data = (0..16)
+                .map(|idx| format!("parallel short header pn={}", 500 + idx).into_bytes())
+                .collect::<Vec<_>>();
+            let protect_requests = payloads
+                .iter()
+                .zip(&associated_data)
+                .enumerate()
+                .map(|(idx, (payload, aad))| PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 500 + u64::try_from(idx).expect("idx fits"),
+                    associated_data: aad,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+
+            let mut protected = protection
+                .protect_packets(&cx, &protect_requests)
+                .expect("batch protects");
+            let tampered_index = 5;
+            protected[tampered_index].ciphertext[0] ^= 0x5a;
+            let unprotect_requests = protected
+                .iter()
+                .zip(&associated_data)
+                .map(|(packet, aad)| PacketUnprotectionRequest {
+                    packet,
+                    associated_data: aad,
+                })
+                .collect::<Vec<_>>();
+
+            let unprotected = protection
+                .unprotect_packets_parallel(&cx, &unprotect_requests)
+                .await;
+
+            assert_eq!(unprotected.len(), payloads.len());
+            for (idx, outcome) in unprotected.into_iter().enumerate() {
+                if idx == tampered_index {
+                    assert_eq!(
+                        outcome.expect_err("tampered packet must fail closed"),
+                        AtpError::Protocol(ProtocolError::InvalidFrameType)
+                    );
+                } else {
+                    let packet = outcome.expect("untampered packet decrypts");
+                    assert_eq!(packet.packet_number, protect_requests[idx].packet_number);
+                    assert_eq!(packet.plaintext, payloads[idx]);
+                }
+            }
+            assert_eq!(
+                protection.accepted_packet_count(),
+                payloads.len() - 1,
+                "failed authentication must not poison replay state"
+            );
+
+            let replay_request = [PacketUnprotectionRequest {
+                packet: &protected[0],
+                associated_data: &associated_data[0],
+            }];
+            let replay = protection
+                .unprotect_packets_parallel(&cx, &replay_request)
+                .await;
+            assert_eq!(
+                replay
+                    .into_iter()
+                    .next()
+                    .expect("one replay result")
+                    .expect_err("accepted packet number must be rejected on replay"),
+                AtpError::Auth(AuthError::ReplayedNonce)
+            );
+            assert_eq!(protection.accepted_packet_count(), payloads.len() - 1);
+        });
+    }
+
+    #[test]
+    fn unprotect_packets_parallel_applies_replay_window_in_order() {
+        futures_lite::future::block_on(async {
+            let (_pool, cx) = test_cx_with_blocking_pool(55, 4);
+            let mut protection =
+                deterministic_one_rtt_protection(&cx, b"one-rtt-parallel-replay-order-seed").await;
+            let packet_numbers = std::iter::once(2_000)
+                .chain(std::iter::once(0))
+                .chain(2_001..2_015)
+                .collect::<Vec<_>>();
+            assert_eq!(packet_numbers.len(), 16);
+            let payloads = packet_numbers
+                .iter()
+                .map(|pn| format!("parallel replay-order payload {pn}").into_bytes())
+                .collect::<Vec<_>>();
+            let associated_data = packet_numbers
+                .iter()
+                .map(|pn| format!("parallel replay-order short header pn={pn}").into_bytes())
+                .collect::<Vec<_>>();
+            let protect_requests = packet_numbers
+                .iter()
+                .zip(&payloads)
+                .zip(&associated_data)
+                .map(|((packet_number, payload), aad)| PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: *packet_number,
+                    associated_data: aad,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+
+            let protected = protection
+                .protect_packets(&cx, &protect_requests)
+                .expect("batch protects");
+            let unprotect_requests = protected
+                .iter()
+                .zip(&associated_data)
+                .map(|(packet, aad)| PacketUnprotectionRequest {
+                    packet,
+                    associated_data: aad,
+                })
+                .collect::<Vec<_>>();
+
+            let unprotected = protection
+                .unprotect_packets_parallel(&cx, &unprotect_requests)
+                .await;
+
+            assert_eq!(
+                unprotected[1]
+                    .clone()
+                    .expect_err("packet 0 must become stale after packet 2000 is accepted"),
+                AtpError::Auth(AuthError::ReplayedNonce)
+            );
+            for (idx, outcome) in unprotected.into_iter().enumerate() {
+                if idx == 1 {
+                    continue;
+                }
+                let packet = outcome.expect("non-stale packet decrypts");
+                assert_eq!(packet.packet_number, packet_numbers[idx]);
+                assert_eq!(packet.plaintext, payloads[idx]);
+            }
+            assert_eq!(
+                protection.accepted_packet_count(),
+                packet_numbers.len() - 1,
+                "stale packet must not poison replay state"
+            );
         });
     }
 

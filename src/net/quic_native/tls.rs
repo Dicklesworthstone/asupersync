@@ -540,6 +540,18 @@ pub trait QuicPacketProtectionProvider {
     /// Stable provider kind for redacted logs.
     fn provider_kind(&self) -> &'static str;
 
+    /// Clone a read-only provider snapshot for parallel packet unprotection.
+    ///
+    /// Packet protection keys are immutable for a given key phase, so providers
+    /// that can cheaply share those keys may return a clone here. Stateful
+    /// lifecycle operations (derive/update/discard) still require the canonical
+    /// mutable provider owned by the connection.
+    fn clone_for_parallel_unprotect(
+        &self,
+    ) -> Option<Box<dyn QuicPacketProtectionProvider + Send + Sync>> {
+        None
+    }
+
     /// Redaction-safe AEAD/provider metadata for performance diagnosis.
     fn aead_provider_profile(&self) -> QuicAeadProviderProfile {
         QuicAeadProviderProfile::unknown(self.provider_kind())
@@ -727,18 +739,21 @@ impl From<RustlsQuicProviderSide> for rustls::Side {
 }
 
 #[cfg(feature = "tls")]
+#[derive(Clone)]
 struct RustlsDirectionalKeys {
     header: Arc<dyn rustls::quic::HeaderProtectionKey>,
-    packet: Box<dyn rustls::quic::PacketKey>,
+    packet: Arc<dyn rustls::quic::PacketKey>,
 }
 
 #[cfg(feature = "tls")]
+#[derive(Clone)]
 struct RustlsProtectionKeys {
     local: RustlsDirectionalKeys,
     remote: RustlsDirectionalKeys,
 }
 
 #[cfg(feature = "tls")]
+#[derive(Clone)]
 struct RustlsKeySlot {
     snapshot: ProtectionKeySnapshot,
     keys: RustlsProtectionKeys,
@@ -753,6 +768,7 @@ struct RustlsKeySlot {
 /// external QUIC implementation; it is the internal crypto-provider boundary
 /// required by the native QUIC endpoint.
 #[cfg(feature = "tls")]
+#[derive(Clone)]
 pub struct RustlsQuicCryptoProvider {
     version: rustls::quic::Version,
     side: RustlsQuicProviderSide,
@@ -909,6 +925,12 @@ impl RustlsQuicCryptoProvider {
 impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
     fn provider_kind(&self) -> &'static str {
         "rustls-quic-ring"
+    }
+
+    fn clone_for_parallel_unprotect(
+        &self,
+    ) -> Option<Box<dyn QuicPacketProtectionProvider + Send + Sync>> {
+        Some(Box::new(self.clone()))
     }
 
     fn aead_provider_profile(&self) -> QuicAeadProviderProfile {
@@ -1092,11 +1114,11 @@ impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
         let updated_keys = RustlsProtectionKeys {
             local: RustlsDirectionalKeys {
                 header: local_header,
-                packet: packet_keys.local,
+                packet: Arc::from(packet_keys.local),
             },
             remote: RustlsDirectionalKeys {
                 header: remote_header,
-                packet: packet_keys.remote,
+                packet: Arc::from(packet_keys.remote),
             },
         };
         Ok(self.insert_protection_keys(space, next_phase, generation, updated_keys))
@@ -1126,11 +1148,11 @@ fn rustls_keys_from_full(keys: rustls::quic::Keys) -> RustlsProtectionKeys {
     RustlsProtectionKeys {
         local: RustlsDirectionalKeys {
             header: Arc::from(keys.local.header),
-            packet: keys.local.packet,
+            packet: Arc::from(keys.local.packet),
         },
         remote: RustlsDirectionalKeys {
             header: Arc::from(keys.remote.header),
-            packet: keys.remote.packet,
+            packet: Arc::from(keys.remote.packet),
         },
     }
 }
@@ -1265,6 +1287,12 @@ impl DeterministicQuicCryptoProvider {
 impl QuicPacketProtectionProvider for DeterministicQuicCryptoProvider {
     fn provider_kind(&self) -> &'static str {
         "deterministic-lab"
+    }
+
+    fn clone_for_parallel_unprotect(
+        &self,
+    ) -> Option<Box<dyn QuicPacketProtectionProvider + Send + Sync>> {
+        Some(Box::new(self.clone()))
     }
 
     fn aead_provider_profile(&self) -> QuicAeadProviderProfile {

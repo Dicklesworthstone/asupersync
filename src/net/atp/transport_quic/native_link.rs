@@ -2473,7 +2473,10 @@ impl QuicLink {
                 DecodedInboundPacket::NonOneRtt => None,
             })
             .collect::<Vec<_>>();
-        let unprotected = self.protection.unprotect_packets(cx, &requests);
+        let unprotected = self
+            .protection
+            .unprotect_packets_parallel(cx, &requests)
+            .await;
 
         let mut report = IngestPacketsReport::default();
         let mut unprotected = unprotected.into_iter();
