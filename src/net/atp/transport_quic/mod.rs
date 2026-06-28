@@ -1602,6 +1602,12 @@ fn quic_round0_datagram_ramp_enabled(
         && pacing.path_loss_rate <= f64::EPSILON
 }
 
+// Temporary unblock (franken_ocr bd-g00): this predicate has no caller yet on
+// non-Windows, so the crate's `deny(dead_code)` rejected it and blocked every
+// downstream path-dependency build. Silencing the lint (not gating with #[cfg],
+// which would change *when* it compiles) keeps the in-progress fn intact for its
+// future caller — remove this allow once it is wired up.
+#[allow(dead_code)]
 pub(crate) fn quic_clean_source_stream_enabled(
     config: &QuicConfig,
     pacing: &QuicSprayPacingDecision,
