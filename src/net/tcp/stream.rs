@@ -906,20 +906,30 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
-        if let Some(err) = socket.take_error()? {
-            return Poll::Ready(Err(err));
-        }
-
-        match socket.peer_addr() {
-            Ok(_) => Poll::Ready(Ok(())),
-            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+        match poll_connect_complete(socket) {
+            Ok(true) => Poll::Ready(Ok(())),
+            Ok(false) => {
                 if let Err(err) = rearm_connect_registration(&mut registration, cx) {
                     return Poll::Ready(Err(err));
+                }
+                if registration.is_some() {
+                    match poll_connect_complete(socket) {
+                        Ok(true) => return Poll::Ready(Ok(())),
+                        Ok(false) => {}
+                        Err(err) => return Poll::Ready(Err(err)),
+                    }
                 }
 
                 if registration.is_none() {
                     match driver.register(socket, Interest::WRITABLE, cx.waker().clone()) {
-                        Ok(new_reg) => registration = Some(new_reg),
+                        Ok(new_reg) => {
+                            registration = Some(new_reg);
+                            match poll_connect_complete(socket) {
+                                Ok(true) => return Poll::Ready(Ok(())),
+                                Ok(false) => {}
+                                Err(err) => return Poll::Ready(Err(err)),
+                            }
+                        }
                         Err(err) if err.kind() == io::ErrorKind::Unsupported => {
                             fallback = true;
                             return Poll::Ready(Ok(()));
@@ -932,6 +942,7 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
                     }
                 }
 
+                fallback_rewake(cx);
                 Poll::Pending
             }
             Err(err) => Poll::Ready(Err(err)),
@@ -945,6 +956,19 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     }
 
     Ok(registration)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_connect_complete(socket: &Socket) -> io::Result<bool> {
+    if let Some(err) = socket.take_error()? {
+        return Err(err);
+    }
+
+    match socket.peer_addr() {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotConnected => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 /// Re-arm a pending connect registration that uses oneshot reactor semantics.
