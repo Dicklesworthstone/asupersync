@@ -1440,12 +1440,14 @@ mod tests {
                 .unprotect_packets_parallel(&cx, &unprotect_requests)
                 .await;
 
-            assert_eq!(
-                unprotected[1]
-                    .clone()
-                    .expect_err("packet 0 must become stale after packet 2000 is accepted"),
-                AtpError::Auth(AuthError::ReplayedNonce)
-            );
+            match &unprotected[1] {
+                Outcome::Err(err) => assert_eq!(
+                    err,
+                    &AtpError::Auth(AuthError::ReplayedNonce),
+                    "packet 0 must become stale after packet 2000 is accepted"
+                ),
+                other => panic!("packet 0 must be replay-rejected, got {other:?}"),
+            }
             for (idx, outcome) in unprotected.into_iter().enumerate() {
                 if idx == 1 {
                     continue;
