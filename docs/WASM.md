@@ -556,6 +556,11 @@ Browser Edition runtime-construction API through `RuntimeBuilder::browser()`,
 but it is dispatcher-backed, fail-closed, and intentionally narrower than the
 shipped JS/TS Browser Edition packages.
 
+> For a focused, code-grounded how-to on this lane (target, features, build
+> steps, a minimal `RuntimeBuilder::browser()` example, and the explicit list of
+> what is and is not supported), see
+> [`wasm_rust_browser_lane.md`](./wasm_rust_browser_lane.md) (draft, issue #51).
+
 This matters because "the semantic core is portable" is weaker than "you can
 ship a stable browser app that constructs Asupersync runtimes directly from
 Rust consumer code." Today the repository supports a preview version of the
