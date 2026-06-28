@@ -81,9 +81,9 @@ use crate::net::quic_native::tls::{
     RustlsQuicCryptoProvider, TranscriptHash,
 };
 use crate::net::quic_native::{
-    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, OutgoingPacket,
-    PacketNumberSpace, QuicTransportMachine, QuicUdpEndpoint, QuicUdpEndpointConfig,
-    ReceivedPacket, StreamId, StreamRole, StreamTableError,
+    DEFAULT_MAX_PACKET_BYTES, NativeQuicConnection, NativeQuicConnectionConfig,
+    NativeQuicConnectionError, OutgoingPacket, PacketNumberSpace, QuicTransportMachine,
+    QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket, StreamId, StreamRole, StreamTableError,
 };
 use crate::net::{UDP_MAX_GSO_SEGMENTS, UdpSendBatchStrategy};
 use crate::security::SecurityContext;
@@ -288,6 +288,10 @@ const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 96;
 /// This keeps clean-stream sends from filling QUIC recovery cwnd and then
 /// failing closed before ACKs can advance the window.
 const QUIC_SOURCE_STREAM_FLUSH_BYTES: u64 = 32 * 1024;
+
+fn source_stream_max_frame_bytes() -> usize {
+    one_rtt_max_payload_for_udp_packet(DEFAULT_MAX_PACKET_BYTES).max(1)
+}
 
 /// Control-plane PTO. When the receiver is awaiting repair after a NeedMore and the link goes idle,
 /// the NeedMore (receiver->sender) or the repair round (sender->receiver) was likely lost on the wire
@@ -2208,10 +2212,15 @@ impl QuicLink {
                 if available <= QUIC_STREAM_PACKET_OVERHEAD_BUDGET {
                     break;
                 }
-                admission.max_frame_bytes.min(
-                    usize::try_from(available.saturating_sub(QUIC_STREAM_PACKET_OVERHEAD_BUDGET))
+                admission
+                    .max_frame_bytes
+                    .min(source_stream_max_frame_bytes())
+                    .min(
+                        usize::try_from(
+                            available.saturating_sub(QUIC_STREAM_PACKET_OVERHEAD_BUDGET),
+                        )
                         .unwrap_or(usize::MAX),
-                )
+                    )
             } else {
                 admission.max_frame_bytes
             };
@@ -4019,7 +4028,7 @@ async fn send_native_source_stream_entries_pumped(
             streamed = streamed.saturating_add(n_u64);
             queued_since_flush = queued_since_flush.saturating_add(n_u64);
             if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
-                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+                drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
                 queued_since_flush = 0;
             }
         }
