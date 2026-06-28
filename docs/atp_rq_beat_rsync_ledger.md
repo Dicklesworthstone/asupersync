@@ -3090,3 +3090,15 @@ Available win: encrypted-perfect 10.36s (4.8 MB/s) → toward nocrypto's 2.82s (
 - **tree_small/perfect/auth:** atp median ~2.6s (noisy 1.55–3.36, RSS ~11.5 MB) vs rsync-ssh ~1.06s — atp ~2.5× slower (the auth per-symbol CPU cost shows on small-file trees too — consistent with the MATRIX-139/140 unifying theme).
 
 ★Honest read: on many-small-files clean, atp is competitive-with-less-memory on nocrypto (+18% / 3.2× less mem) and loses on auth (~2.5×, auth CPU). Matches the broader pattern: nocrypto competitive, auth/encrypted lose on fast paths due to per-symbol CPU. ★Harness note (operators): tiny-cell reps auto-bump to 5 → budget ≥5× the per-cell wall, or pass `--reps`-aware timeouts; `100M` is NOT a valid workload (valid: 500K,5M,50M,500M,5G,tree_small,tree_big). ★No new swarm parallelization lever has landed yet (HEAD still ce8d0a9ab + my docs commits); the per-symbol-CPU parallelization program (icmhfw + quic-receive) remains the open path to the fast-link wins. Evidence: run `20260627T2331*` (tree_small/perfect nocrypto+auth reps5 partial).
+
+## MATRIX-142 (2026-06-28) — ★parallel-auth fix is a NO-OP → ★REFUTES the MATRIX-139 "auth wall = receiver HMAC verify" hypothesis (2nd refuted parallelization guess in a row). Swarm landed `1496420a4 fix(atp-rq): parallelize source auth receive batches` (bead icmhfw; moves RQ source-auth verify out of the serial receive loop into the receiver blocking pool, batched, fail-closed via `FeedAuthPolicy::CallerVerified`+`is_verified()`). Built committed HEAD `atp_new10` (b42e3db25, clean) + A/B 50M auth reps3:
+
+| 50M auth | atp median (was) | rsync median |
+|---|---|---|
+| perfect | **22.43s** (was 20.7s) | 0.85s |
+| good | **20.43s** (was 20.9s) | 4.25s |
+| bad | **18.33s** (was 17.7s, ~TIE) | 18.07s |
+
+**UNCHANGED across all regimes** — parallelizing the receiver-side auth verify did nothing. ⇒ the ~2.3 MB/s auth wall is NOT the receiver HMAC verify (MATRIX-139 mislocalized it). Two consecutive refuted parallelization guesses (rate-match MATRIX-140, parallel-auth here).
+
+★**Likely causes (to confirm by PROFILE, not another guess):** (a) the fix has a "minimum batch worth the blocking pool" threshold that the perfect-link source-streaming path never hits → stays serial; OR (b) the real cost is SENDER-side per-symbol auth (signing/keystream/nonce), which a receiver-side fix can't touch; OR (c) a per-symbol crypto setup (HKDF/key-derive) on either side. ★METHODOLOGY CORRECTION (per /profiling discipline): I have been routing hypotheses and A/B-refuting them; the right move now is to PROFILE the auth path (gdb-sample sender+receiver during a perfect/auth run, ~22s window) to produce a ranked hotspot BEFORE routing the next auth lever. Deferring the auth tier until profiled. ★The bigger gap (bad/encrypted 49s, transport_quic receive) awaits the separate parallel-quic-receive lever (follow-up bead noted by swarm in b42e3db25) — that one is independent of the auth path. Evidence: A/B run `20260628T0008*` (atp_new10 auth reps3 perfect 22.43/good 20.43/bad 18.33, all unchanged vs pre-fix).
