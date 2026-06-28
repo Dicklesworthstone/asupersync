@@ -47,8 +47,8 @@ fi
 echo "[validation] building + running scheduler_cpu_churn bench (via rch)..." >&2
 # Offload the build/run to RCH; the bench prints its JSON report to stdout.
 if command -v rch >/dev/null 2>&1; then
-    rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR_DEFAULT" CARGO_INCREMENTAL=0 \
-        "${BENCH_CMD[@]}" >"$CURRENT_RAW" 2>&1 || {
+    ( cd "$PROJECT_ROOT" && rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR_DEFAULT" CARGO_INCREMENTAL=0 \
+        "${BENCH_CMD[@]}" ) >"$CURRENT_RAW" 2>&1 || {
         echo "FATAL: bench run failed; see $CURRENT_RAW" >&2
         exit 2
     }
@@ -72,7 +72,17 @@ except ValueError:
     sys.stderr.write("FATAL: no JSON report found in bench output\n")
     sys.exit(2)
 start = raw.rfind('{', 0, key)
-obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+if start < 0:
+    sys.stderr.write("FATAL: malformed bench output (no JSON object before report key)\n")
+    sys.exit(2)
+try:
+    obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+except ValueError as exc:
+    sys.stderr.write(f"FATAL: could not parse bench JSON report: {exc}\n")
+    sys.exit(2)
+if "phases" not in obj:
+    sys.stderr.write("FATAL: bench JSON report has no 'phases'\n")
+    sys.exit(2)
 with open(sys.argv[2], 'w') as f:
     json.dump(obj, f, indent=2, sort_keys=True)
     f.write('\n')
@@ -106,16 +116,16 @@ for p in cur['phases']:
         f"{p['phase']}/{p['m']}", fmt('sched_yield_calls'), fmt('worker_spins'),
         fmt('timer_threads_spawned'),
         fmt('latency_p50_us'), fmt('latency_p99_us'),
-        f"{round(b.get('cpu_percent',0),1)}->{round(p['cpu_percent'],1)}"]))
+        f"{round(b.get('cpu_percent',0),1)}->{round(p.get('cpu_percent',0),1)}"]))
 
-    # HARD gates.
+    # HARD gates (use .get so a missing key never reads as a false regression).
     if p['phase'] == 'idle':
-        if p['sched_yield_calls'] > 0:
-            fails.append(f"idle sched_yield_calls={p['sched_yield_calls']} (>0: idle busy-spin reintroduced)")
-        if p['cpu_percent'] > idle_cpu_max:
-            fails.append(f"idle cpu_percent={p['cpu_percent']:.1f} (> {idle_cpu_max}: idle CPU regression)")
-    if p['timer_threads_spawned'] > timer_cap:
-        fails.append(f"{p['phase']}/{p['m']} timer_threads_spawned={p['timer_threads_spawned']} (> {timer_cap}: thread-per-sleep churn)")
+        if p.get('sched_yield_calls', 0) > 0:
+            fails.append(f"idle sched_yield_calls={p.get('sched_yield_calls', 0)} (>0: idle busy-spin reintroduced)")
+        if p.get('cpu_percent', 0.0) > idle_cpu_max:
+            fails.append(f"idle cpu_percent={p.get('cpu_percent', 0.0):.1f} (> {idle_cpu_max}: idle CPU regression)")
+    if p.get('timer_threads_spawned', 0) > timer_cap:
+        fails.append(f"{p['phase']}/{p['m']} timer_threads_spawned={p.get('timer_threads_spawned', 0)} (> {timer_cap}: thread-per-sleep churn)")
 
 print()
 if fails:

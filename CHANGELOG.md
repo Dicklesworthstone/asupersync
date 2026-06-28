@@ -56,8 +56,9 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
   usage-specific, not default-runtime defects. Replacing the load-path
   `sched_yield` with a userspace spin (Lever 2) was **bench-refuted and
   reverted**: `yield_now` cooperatively deschedules the worker and throttles the
-  backoff loop, whereas spinning keeps it hot and roughly doubled CPU
-  (7.4→13.5% at 256 tasks). The park clock-polling reduction (Lever 3) was found
+  backoff loop, whereas spinning keeps it hot — a deterministic ~2.7× increase in
+  spin-loop iterations, i.e. more CPU, not less, on a multi-worker
+  intermittent-work load. The park clock-polling reduction (Lever 3) was found
   already addressed (the multi-lane park reads the clock once per cycle; the
   single-thread worker parks on a constant timeout).
   (`br-asupersync-runtime-cpu-overhaul-5vt09v.4`, `.5`)
