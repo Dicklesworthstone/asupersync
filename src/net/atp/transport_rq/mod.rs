@@ -236,7 +236,7 @@ const RQ_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8;
 const RQ_CONTROL_SOURCE_AUTH_DATA_HEADER: usize = RQ_CONTROL_SOURCE_DATA_HEADER + TAG_SIZE;
 const RQ_CONTROL_SOURCE_AUTH_SYMBOL_DOMAIN: &[u8] =
     b"asupersync.atp.rq.control-source-data-auth.v1\0";
-/// Control-stream payload chunk for the clean source-stream lane.
+/// Control-stream payload chunk for the clean/near-clean source-stream lane.
 ///
 /// Fill each ATP frame to the largest safe no-extension `ObjectData` frame.
 /// A 500 MiB clean transfer becomes about 500 bounded control frames instead
@@ -308,6 +308,11 @@ const RQ_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM: f64 = 1.10;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
+/// Near-clean loss ceiling allowed onto the reliable control-source stream.
+///
+/// This matches the MATRIX "good" 0.1% loss fixture while keeping bad/lossy
+/// regimes on the FEC datagram fountain.
+const RQ_CONTROL_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = RQ_ROUND0_TARGET_LOSS_ENABLE_MIN / 5.0;
 /// Convert an explicit path-loss target into a conservative upper bound before
 /// feeding the RaptorQ overhead solver. At 2% loss this produces a ~3% sizing
 /// input, enough margin for one-round convergence without turning clean links
@@ -1926,16 +1931,25 @@ fn small_clean_source_only_round0(total_bytes: u64, config: &RqConfig) -> bool {
 fn clean_control_source_stream_round0(config: &RqConfig) -> bool {
     let loss_free_target = round0_source_first_loss_target(config)
         && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
+    control_source_stream_base_round0(config) && loss_free_target
+}
+
+fn near_clean_control_source_stream_round0(config: &RqConfig) -> bool {
+    let source_first_target = round0_source_first_loss_target(config)
+        && config.round0_loss_target <= RQ_CONTROL_SOURCE_STREAM_MAX_LOSS_TARGET + f64::EPSILON;
+    control_source_stream_base_round0(config) && source_first_target
+}
+
+fn control_source_stream_base_round0(config: &RqConfig) -> bool {
     config.debug_drop_one_in == 0
         && config.repair_overhead.is_finite()
         && config.repair_overhead <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD
-        && loss_free_target
 }
 
 fn control_source_stream_eligible(total_bytes: u64, config: &RqConfig) -> bool {
     total_bytes > 0
         && total_bytes <= config.max_transfer_bytes
-        && clean_control_source_stream_round0(config)
+        && near_clean_control_source_stream_round0(config)
 }
 
 fn apply_small_clean_round0_source_only(
@@ -6530,7 +6544,7 @@ pub async fn receive_connection(
 ) -> Result<ReceiveReport, RqError> {
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
-    let should_tune_for_bulk_source = clean_control_source_stream_round0(&config);
+    let should_tune_for_bulk_source = near_clean_control_source_stream_round0(&config);
     if should_tune_for_bulk_source {
         tune_control_stream_for_bulk_source(&stream);
     }
@@ -14312,7 +14326,7 @@ mod tests {
     }
 
     #[test]
-    fn control_source_stream_negotiates_for_clean_links_including_authenticated_large() {
+    fn control_source_stream_negotiates_for_clean_and_good_links_including_auth() {
         let clean = RqConfig {
             symbol_size: 1200,
             max_block_size: 512 * 1024,
@@ -14325,6 +14339,13 @@ mod tests {
             .with_symbol_auth(SecurityContext::for_testing(0xA7_51));
         let good = RqConfig {
             round0_loss_target: 0.001,
+            ..clean.clone()
+        };
+        let auth_good = good
+            .clone()
+            .with_symbol_auth(SecurityContext::for_testing(0xA7_52));
+        let near_clean_above_good = RqConfig {
+            round0_loss_target: RQ_CONTROL_SOURCE_STREAM_MAX_LOSS_TARGET * 1.5,
             ..clean.clone()
         };
         let lossy = RqConfig {
@@ -14351,7 +14372,12 @@ mod tests {
             50 * 1024 * 1024,
             &auth_clean
         ));
-        assert!(!control_source_stream_eligible(50 * 1024 * 1024, &good));
+        assert!(control_source_stream_eligible(50 * 1024 * 1024, &good));
+        assert!(control_source_stream_eligible(50 * 1024 * 1024, &auth_good));
+        assert!(!control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &near_clean_above_good
+        ));
         assert!(!control_source_stream_eligible(50 * 1024 * 1024, &lossy));
         assert!(!control_source_stream_eligible(
             50 * 1024 * 1024,
