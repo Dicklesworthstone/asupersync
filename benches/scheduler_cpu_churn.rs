@@ -60,7 +60,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
-use asupersync::runtime::builder::{Runtime, RuntimeBuilder};
+use asupersync::runtime::builder::RuntimeBuilder;
 use asupersync::runtime::metrics::{self, Metrics};
 use asupersync::time::sleep;
 

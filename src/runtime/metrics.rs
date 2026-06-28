@@ -45,21 +45,26 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub struct Metrics {
     /// OS threads spawned solely to drive a `Sleep`/timer future to completion.
     ///
-    /// This is the headline churn signal. The thread-per-`sleep` fallback in
-    /// `time::sleep` increments it on every spawn; after Lever 1 (the shared
-    /// timer subsystem) lands, this should stay `0` under the bench workload.
+    /// This is the headline churn signal. A `Sleep` polled off any timer driver
+    /// (`Cx::current().timer_driver()` is `None`) used to spawn one OS thread per
+    /// `Sleep`; the shared process-global fallback timer in `time::sleep` (Lever
+    /// 1) replaced that with a single pump thread, counted once here. A custom
+    /// logical clock still spawns a per-`Sleep` thread. Under a runtime whose
+    /// sleeps register with an installed driver this stays `0`.
     pub timer_threads_spawned: u64,
-    /// `sched_yield`/`thread::yield_now` calls in a worker's idle backoff path.
+    /// `sched_yield`/`thread::yield_now` calls in a worker's backoff path.
     ///
-    /// On an idle core `sched_yield` returns immediately, so a yield-loop is a
-    /// hot spin that burns a core for nothing. After Lever 2 (bounded
-    /// spin-then-park) this should be `0` in the idle path.
+    /// A worker that finds no ready work backs off as spin → yield → park; this
+    /// counts the yield phase. (Replacing these idle yields with spins was tried
+    /// and bench-refuted: `yield_now` cooperatively deschedules the worker and
+    /// throttles the backoff loop, whereas spinning keeps it hot and burns more
+    /// CPU — so the yield remains. See `runtime-cpu-overhaul-5vt09v.4`.)
     pub sched_yield_calls: u64,
-    /// Bounded `hint::spin_loop` iterations a worker performs before parking.
+    /// `hint::spin_loop` iterations a worker performs in its backoff spin phase.
     ///
-    /// Wired by Lever 2; the cheap in-userspace pause that replaces
-    /// `sched_yield`. A non-zero value here paired with a zero
-    /// [`sched_yield_calls`](Self::sched_yield_calls) is the success shape.
+    /// The cheap in-userspace pause the worker uses before it yields and then
+    /// parks. Both this and [`sched_yield_calls`](Self::sched_yield_calls) are
+    /// non-zero while a worker is actively backing off.
     pub worker_spins: u64,
     /// Times a worker parked (blocked) waiting for work or a timer deadline.
     pub worker_parks: u64,
