@@ -281,9 +281,11 @@ const RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL: usize = 1;
 /// this grace covers the full-batch case where the kernel may still have more
 /// packets queued without charging a full idle timeout to every drain attempt.
 const INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
-/// Conservative headroom for 1-RTT short-header, AEAD tag, STREAM frame varints,
-/// and small control coalescing when sizing recovery-governed STREAM packets.
-const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 96;
+/// Headroom for 1-RTT short-header, AEAD tag, and STREAM frame varints when
+/// sizing recovery-governed STREAM packets. `NativeQuicConnection` already
+/// reserves 32 frame bytes internally, so this must stay below the small cwnd
+/// tail observed at the 2400-byte floor.
+const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 48;
 /// Bytes of source STREAM payload queued before giving the socket pump a turn.
 /// This keeps clean-stream sends from filling QUIC recovery cwnd and then
 /// failing closed before ACKs can advance the window.
@@ -5951,6 +5953,20 @@ mod tests {
         let lossy = native_quic_path_signal_with_observed_loss(conn.transport(), 0.42);
         assert_eq!(lossy.congestion_window_bytes, native_cwnd);
         assert_eq!(lossy.loss_rate, 0.42);
+    }
+
+    #[test]
+    fn source_stream_packet_budget_allows_cwnd_floor_tail_progress() {
+        let observed_tail_bytes = 95u64;
+
+        assert!(
+            QUIC_STREAM_PACKET_OVERHEAD_BUDGET >= ONE_RTT_PACKET_OVERHEAD as u64,
+            "source STREAM packet budget must cover 1-RTT header/tag bytes"
+        );
+        assert!(
+            observed_tail_bytes.saturating_sub(QUIC_STREAM_PACKET_OVERHEAD_BUDGET) > 32,
+            "MATRIX-148: source STREAM flushing must leave enough frame budget to emit a tiny frame at the cwnd floor"
+        );
     }
 
     #[test]
