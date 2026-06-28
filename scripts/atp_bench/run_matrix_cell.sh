@@ -326,6 +326,8 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     local extra_send=()
     if [ "$transport" = "rq" ]; then
         extra_send=(--streams "$STREAMS")
+    fi
+    if [ "$transport" = "rq" ] || [ "$transport" = "quic" ]; then
         rq_loss_args=(--rq-round0-loss-pct "$(netem_loss_pct)")
     fi
     # Optional sender bandwidth cap (bytes/sec). Set ATP_SEND_BWLIMIT to pace the

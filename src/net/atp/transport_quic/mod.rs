@@ -192,6 +192,20 @@ pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.001;
 /// Default ceiling on a single transfer's total bytes.
 pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Maximum clean-link payload routed over the QUIC reliable source stream.
+///
+/// The stream path is selected only for clean encrypted transfers. Keep this
+/// bounded so native stream flow-credit and receiver staging cannot become a
+/// surprise multi-GiB memory envelope; larger or lossy transfers continue using
+/// the FEC DATAGRAM fountain.
+pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const QUIC_SOURCE_STREAM_FRAME_MAX_BYTES: usize = MAX_FRAME_SIZE as usize;
+const QUIC_SOURCE_STREAM_WIRE_HEADER_MAX_BYTES: usize = 1 + 2 + 4 + 1;
+const QUIC_SOURCE_STREAM_DATA_HEADER_BYTES: usize = 4 + 8;
+const QUIC_SOURCE_STREAM_CHUNK_BYTES: usize = QUIC_SOURCE_STREAM_FRAME_MAX_BYTES
+    - QUIC_SOURCE_STREAM_WIRE_HEADER_MAX_BYTES
+    - QUIC_SOURCE_STREAM_DATA_HEADER_BYTES;
+
 /// Default maximum time to wait for a connected peer to make protocol progress.
 ///
 /// Encrypted lossy transfers use this as the native NeedMore/repair convergence
@@ -314,6 +328,11 @@ const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MIN_BLOCK_SYMBOLS: usize = 128;
 const QUIC_FEEDBACK_FIRST_REPAIR_BURST_Z_ALPHA: f64 = 2.0;
 const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MARGIN_SYMBOLS: usize = 2;
 const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MAX_EXTRA_PER_BLOCK: usize = 32;
+const QUIC_SOURCE_STREAM_READ_CHUNK: usize = 256 * 1024;
+#[cfg(feature = "tls")]
+const QUIC_NATIVE_STREAM_FLOW_HEADROOM_BYTES: u64 = 1024 * 1024;
+#[cfg(feature = "tls")]
+const QUIC_NATIVE_STREAM_FLOW_MIN_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
@@ -334,6 +353,12 @@ pub struct QuicConfig {
     pub max_datagram_size: usize,
     /// Extra repair fraction sprayed in round 0 (`>= 1.0`).
     pub repair_overhead: f64,
+    /// Expected round-0 path loss fraction for benchmark/operator selection.
+    ///
+    /// A zero target means the link is being treated as clean, so native
+    /// QUIC/TLS may choose the reliable stream source path. Non-zero loss keeps
+    /// the transfer on the RaptorQ DATAGRAM fountain.
+    pub round0_loss_target: f64,
     /// Maximum total bytes a single transfer may carry.
     pub max_transfer_bytes: u64,
     /// Maximum time to wait for the next protocol frame before failing closed.
@@ -425,6 +450,7 @@ impl Default for QuicConfig {
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             max_datagram_size: DEFAULT_MAX_DATAGRAM_SIZE,
             repair_overhead: DEFAULT_REPAIR_OVERHEAD,
+            round0_loss_target: 0.0,
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
@@ -543,6 +569,12 @@ impl QuicConfig {
             return Err(QuicTransportError::Config(format!(
                 "repair_overhead ({}) must be >= 1.0",
                 self.repair_overhead
+            )));
+        }
+        if !self.round0_loss_target.is_finite() || !(0.0..1.0).contains(&self.round0_loss_target) {
+            return Err(QuicTransportError::Config(format!(
+                "round0_loss_target ({}) must be finite and in [0.0, 1.0)",
+                self.round0_loss_target
             )));
         }
         if self.max_transfer_bytes == 0 {
@@ -1547,13 +1579,55 @@ pub(crate) fn quic_round0_clean_ramp_enabled(
 ) -> bool {
     let max_pacing_bps = quic_round0_clean_ramp_max_pacing_bps(pacing);
     with_source
-        && config.debug_drop_one_in == 0
+        && quic_clean_source_stream_enabled(config, pacing)
+        && pacing.pacing_rate_bps < max_pacing_bps
+}
+
+pub(crate) fn quic_clean_source_stream_enabled(
+    config: &QuicConfig,
+    pacing: &QuicSprayPacingDecision,
+) -> bool {
+    config.debug_drop_one_in == 0
         && config.bwlimit_bps.is_none()
         && quic_effective_datagram_fanout(config, usize::MAX) == 1
         && config.repair_overhead.is_finite()
         && config.repair_overhead <= QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD
+        && (0.0..=f64::EPSILON).contains(&config.round0_loss_target)
         && pacing.path_loss_rate <= f64::EPSILON
-        && pacing.pacing_rate_bps < max_pacing_bps
+}
+
+#[cfg(feature = "tls")]
+pub(crate) fn quic_native_stream_flow_limit(config: &QuicConfig) -> u64 {
+    config
+        .max_transfer_bytes
+        .min(QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES)
+        .saturating_add(QUIC_NATIVE_STREAM_FLOW_HEADROOM_BYTES)
+        .max(QUIC_NATIVE_STREAM_FLOW_MIN_BYTES)
+}
+
+pub(crate) fn quic_reliable_source_stream_eligible(
+    total_bytes: u64,
+    config: &QuicConfig,
+    pacing: &QuicSprayPacingDecision,
+) -> bool {
+    total_bytes > 0
+        && total_bytes <= config.max_transfer_bytes
+        && total_bytes <= QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES
+        && matches!(
+            config.symbol_auth_mode(),
+            QuicSymbolAuthMode::TransportAuthenticated
+        )
+        && quic_clean_source_stream_enabled(config, pacing)
+}
+
+fn quic_source_stream_enabled(
+    total_bytes: u64,
+    config: &QuicConfig,
+    conn: &QuicConnection,
+) -> bool {
+    let pacing =
+        quic_spray_pacing_decision_from_config(config, quic_path_signal_from_connection(conn));
+    quic_reliable_source_stream_eligible(total_bytes, config, &pacing)
 }
 
 fn update_quic_pacing_pause(
@@ -1904,6 +1978,12 @@ struct QuicHello {
     max_block_size: u64,
     #[serde(default)]
     symbol_auth: bool,
+    #[serde(default)]
+    source_stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_stream_id: Option<u64>,
+    #[serde(default)]
+    total_bytes: u64,
 }
 
 #[allow(dead_code)]
@@ -1911,6 +1991,8 @@ struct QuicHello {
 struct QuicHelloAck {
     accepted: bool,
     peer_id: String,
+    #[serde(default)]
+    source_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -5411,6 +5493,17 @@ fn next_native_control_frame(
 
 #[allow(dead_code)]
 fn sender_hello(peer_id: &str, config: &QuicConfig, symbol_auth: bool) -> QuicHello {
+    sender_hello_with_source_stream(peer_id, config, symbol_auth, None, 0)
+}
+
+#[allow(dead_code)]
+fn sender_hello_with_source_stream(
+    peer_id: &str,
+    config: &QuicConfig,
+    symbol_auth: bool,
+    source_stream: Option<StreamId>,
+    total_bytes: u64,
+) -> QuicHello {
     QuicHello {
         protocol: ATP_QUIC_PROTOCOL,
         role: "sender".to_string(),
@@ -5418,6 +5511,9 @@ fn sender_hello(peer_id: &str, config: &QuicConfig, symbol_auth: bool) -> QuicHe
         symbol_size: config.symbol_size,
         max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
         symbol_auth,
+        source_stream: source_stream.is_some(),
+        source_stream_id: source_stream.map(|stream| stream.0),
+        total_bytes,
     }
 }
 
@@ -5466,7 +5562,50 @@ fn reject_hello_reason(
             hello.symbol_auth
         ));
     }
+    if let Some(reason) = reject_source_stream_hello_reason(hello) {
+        return Some(reason);
+    }
     None
+}
+
+fn reject_source_stream_hello_reason(hello: &QuicHello) -> Option<String> {
+    match (hello.source_stream, hello.source_stream_id) {
+        (false, None) => None,
+        (false, Some(id)) => Some(format!(
+            "source_stream_id {id} advertised while source_stream=false"
+        )),
+        (true, None) => Some("source_stream=true requires source_stream_id".to_string()),
+        (true, Some(id)) => {
+            if hello.total_bytes == 0 {
+                return Some("source_stream=true requires non-zero total_bytes".to_string());
+            }
+            if hello.total_bytes > QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES {
+                return Some(format!(
+                    "source stream transfer size {} exceeds stream cap {}",
+                    hello.total_bytes, QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES
+                ));
+            }
+            let stream = StreamId(id);
+            if stream == first_client_bidi_stream() {
+                return Some("source stream must not reuse the control stream".to_string());
+            }
+            if stream.direction() != StreamDirection::Bidirectional
+                || stream.is_local_for(StreamRole::Server)
+            {
+                return Some(format!(
+                    "source stream id {id} must be a client-initiated bidirectional stream"
+                ));
+            }
+            None
+        }
+    }
+}
+
+fn source_stream_from_hello(hello: &QuicHello) -> Result<Option<StreamId>, QuicTransportError> {
+    if let Some(reason) = reject_source_stream_hello_reason(hello) {
+        return Err(QuicTransportError::HandshakeRejected(reason));
+    }
+    Ok(hello.source_stream_id.map(StreamId))
 }
 
 // B2/B3 coroutine helpers are exercised by deterministic loopback tests before
@@ -5506,9 +5645,13 @@ fn receive_sender_hello_and_ack(
     let hello: QuicHello = parse_json(&frame)?;
     let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
     let accepted = reason.is_none();
+    let accepted_source_stream = accepted
+        && hello.source_stream
+        && quic_source_stream_enabled(hello.total_bytes, config, conn);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
+        source_stream: accepted_source_stream,
         reason: reason.clone(),
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
@@ -5538,9 +5681,13 @@ fn receive_native_sender_hello_and_ack(
     let hello: QuicHello = parse_json(&frame)?;
     let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
     let accepted = reason.is_none();
+    let accepted_source_stream = accepted
+        && hello.source_stream
+        && quic_native_source_stream_enabled(hello.total_bytes, config, conn);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
+        source_stream: accepted_source_stream,
         reason: reason.clone(),
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
@@ -5559,10 +5706,12 @@ fn send_native_sender_hello(
     config: &QuicConfig,
     peer_id: &str,
     symbol_auth: bool,
+    source_stream: Option<StreamId>,
+    total_bytes: u64,
 ) -> Result<(), QuicTransportError> {
     let frame = json_frame(
         FrameType::Handshake,
-        &sender_hello(peer_id, config, symbol_auth),
+        &sender_hello_with_source_stream(peer_id, config, symbol_auth, source_stream, total_bytes),
     )?;
     control.send(cx, conn, &frame)
 }
@@ -5860,6 +6009,175 @@ fn native_symbol_datagram(
         .encode()
         .map_err(SymbolDatagramError::from)
         .map_err(QuicTransportError::from)
+}
+
+fn quic_native_source_stream_enabled(
+    total_bytes: u64,
+    config: &QuicConfig,
+    conn: &NativeQuicConnection,
+) -> bool {
+    let pacing = quic_spray_pacing_decision_from_config(
+        config,
+        quic_path_signal_from_native_connection(conn),
+    );
+    quic_reliable_source_stream_eligible(total_bytes, config, &pacing)
+}
+
+async fn send_native_source_stream_entries(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    stream: StreamId,
+    prepared: &QuicPreparedSource,
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let mut streamed = 0u64;
+    let mut buf = vec![0_u8; config.chunk_size.max(1).min(QUIC_SOURCE_STREAM_CHUNK_BYTES)];
+    for entry in &prepared.entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        if entry.size == 0 {
+            continue;
+        }
+        let mut file = crate::fs::File::open(&entry.abs_path)
+            .await
+            .map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+            })?;
+        let mut hasher = Sha256::new();
+        let mut read = 0u64;
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let n = file.read(&mut buf).await.map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+            })?;
+            if n == 0 {
+                break;
+            }
+            read = read.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+            if read > entry.size {
+                return Err(QuicTransportError::Source(format!(
+                    "{} grew while streaming QUIC source bytes (read {read} bytes, manifest size {})",
+                    entry.abs_path.display(),
+                    entry.size
+                )));
+            }
+            hasher.update(&buf[..n]);
+            conn.write_stream_bytes(cx, stream, Bytes::copy_from_slice(&buf[..n]), false)?;
+            streamed = streamed.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        }
+        if read != entry.size {
+            return Err(QuicTransportError::Source(format!(
+                "{} changed while streaming QUIC source bytes (read {read} bytes, manifest size {})",
+                entry.abs_path.display(),
+                entry.size
+            )));
+        }
+        let got_sha = hex_encode(&hasher.finalize());
+        if got_sha != entry.sha256_hex {
+            return Err(QuicTransportError::Integrity(format!(
+                "{} changed while streaming QUIC source bytes (sha256 {got_sha}, manifest {})",
+                entry.abs_path.display(),
+                entry.sha256_hex
+            )));
+        }
+    }
+    conn.write_stream_bytes(cx, stream, Bytes::new(), true)?;
+    Ok(streamed)
+}
+
+fn mark_quic_decoder_complete_from_stream(
+    decoder: &mut QuicEntryDecoder,
+    entry: &ManifestEntry,
+    bytes: Vec<u8>,
+) -> Result<(), QuicTransportError> {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if len != entry.size {
+        return Err(QuicTransportError::Integrity(format!(
+            "source stream entry {} has {} bytes, expected {}",
+            entry.index, len, entry.size
+        )));
+    }
+    let got_sha = sha256_hex(&bytes);
+    if got_sha != entry.sha256_hex {
+        return Err(QuicTransportError::Integrity(format!(
+            "source stream entry {} sha256 {got_sha}, expected {}",
+            entry.index, entry.sha256_hex
+        )));
+    }
+    decoder.pending_decodes.clear();
+    decoder.pipeline = None;
+    decoder.data = bytes;
+    decoder.complete = true;
+    Ok(())
+}
+
+async fn receive_native_source_stream_entries(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    stream: StreamId,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let mut received = 0u64;
+    for entry in &manifest.entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let expected_len =
+            usize::try_from(entry.size).map_err(|_| QuicTransportError::TooLarge {
+                size: entry.size,
+                max: usize::MAX as u64,
+            })?;
+        let decoder = decoders
+            .iter_mut()
+            .find(|decoder| decoder.index == entry.index)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "source stream for unknown manifest entry {}",
+                    entry.index
+                ))
+            })?;
+        if expected_len == 0 {
+            mark_quic_decoder_complete_from_stream(decoder, entry, Vec::new())?;
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(expected_len);
+        while bytes.len() < expected_len {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let remaining = expected_len - bytes.len();
+            let chunk_len = remaining
+                .min(config.chunk_size.max(1))
+                .min(QUIC_SOURCE_STREAM_READ_CHUNK);
+            let chunk = conn.read_stream_bytes(cx, stream, chunk_len)?;
+            if chunk.is_empty() {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source stream ended before entry {} completed ({} of {} bytes)",
+                    entry.index,
+                    bytes.len(),
+                    expected_len
+                )));
+            }
+            received = received.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+            bytes.extend_from_slice(&chunk);
+        }
+        mark_quic_decoder_complete_from_stream(decoder, entry, bytes)?;
+    }
+    let extra = conn.read_stream_bytes(cx, stream, 1)?;
+    if !extra.is_empty() {
+        return Err(QuicTransportError::Integrity(
+            "source stream carried bytes beyond the manifest total".to_string(),
+        ));
+    }
+    if !conn.is_stream_read_eof(stream)? {
+        return Err(QuicTransportError::Integrity(
+            "source stream did not finish after manifest bytes".to_string(),
+        ));
+    }
+    if received != manifest.total_bytes {
+        return Err(QuicTransportError::Integrity(format!(
+            "source stream delivered {received} bytes, expected {}",
+            manifest.total_bytes
+        )));
+    }
+    Ok(received)
 }
 
 #[allow(dead_code)]
@@ -6229,20 +6547,35 @@ async fn send_native_prepared_source_manifest_symbols_complete(
     control: &mut NativeQuicFrameTransport,
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
+    source_stream: Option<StreamId>,
 ) -> Result<(Vec<QuicEntryEncoder>, u64), QuicTransportError> {
     let config = prepared.effective_config(config);
     config.validate()?;
     validate_quic_manifest(&prepared.manifest, &config)?;
     let mut encoders = encoders_from_prepared_source(cx, prepared, &config).await?;
-    let symbols_sent = send_native_manifest_symbols_complete(
-        cx,
-        conn,
-        control,
-        &prepared.manifest,
-        &mut encoders,
-        &config,
-    )
-    .await?;
+    let symbols_sent = if let Some(stream) = source_stream {
+        send_native_manifest(cx, conn, control, &prepared.manifest)?;
+        let streamed =
+            send_native_source_stream_entries(cx, conn, stream, prepared, &config).await?;
+        if streamed != prepared.manifest.total_bytes {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream sent {streamed} bytes, expected {}",
+                prepared.manifest.total_bytes
+            )));
+        }
+        send_native_object_complete(cx, conn, control, 0)?;
+        0
+    } else {
+        send_native_manifest_symbols_complete(
+            cx,
+            conn,
+            control,
+            &prepared.manifest,
+            &mut encoders,
+            &config,
+        )
+        .await?
+    };
     Ok((encoders, symbols_sent))
 }
 
@@ -6385,6 +6718,12 @@ where
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
     let mut control = NativeQuicFrameTransport::open(cx, conn)?;
+    let offered_source_stream =
+        if quic_native_source_stream_enabled(prepared.manifest.total_bytes, &config, conn) {
+            Some(conn.open_local_bidi(cx)?)
+        } else {
+            None
+        };
 
     send_native_sender_hello(
         cx,
@@ -6393,9 +6732,20 @@ where
         &config,
         peer_id,
         symbol_auth_enabled,
+        offered_source_stream,
+        prepared.manifest.total_bytes,
     )?;
     drive_peer(NativeSenderDrivePoint::HelloSent, conn)?;
-    receive_native_sender_hello_ack(cx, conn, &mut control)?;
+    let ack = receive_native_sender_hello_ack(cx, conn, &mut control)?;
+    let source_stream = match (offered_source_stream, ack.source_stream) {
+        (Some(stream), true) => Some(stream),
+        (None, true) => {
+            return Err(QuicTransportError::HandshakeRejected(
+                "receiver accepted an unoffered QUIC source stream".to_string(),
+            ));
+        }
+        _ => None,
+    };
 
     let (mut encoders, symbols_sent) = send_native_prepared_source_manifest_symbols_complete(
         cx,
@@ -6403,6 +6753,7 @@ where
         &mut control,
         prepared,
         &config,
+        source_stream,
     )
     .await?;
     drive_peer(NativeSenderDrivePoint::ObjectCompleteSent, conn)?;
@@ -7356,7 +7707,7 @@ async fn receive_established_native_connection(
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
-    receive_native_sender_hello_and_ack(
+    let hello = receive_native_sender_hello_and_ack(
         cx,
         &mut connection,
         &mut control,
@@ -7364,6 +7715,13 @@ async fn receive_established_native_connection(
         peer_id,
         symbol_auth_enabled,
     )?;
+    let source_stream = if hello.source_stream
+        && quic_native_source_stream_enabled(hello.total_bytes, &config, &connection)
+    {
+        source_stream_from_hello(&hello)?
+    } else {
+        None
+    };
     let manifest = receive_native_manifest(cx, &mut connection, &mut control)?;
     validate_quic_manifest(&manifest, &config)?;
     let mut decoders = decoders_from_manifest(&manifest, &config)?;
@@ -7372,23 +7730,54 @@ async fn receive_established_native_connection(
     let mut feedback_rounds = 0u32;
     let mut decode_stats = QuicDecodeStats::default();
 
-    loop {
-        if receive_native_symbol_round(
+    if let Some(stream) = source_stream {
+        if hello.total_bytes != manifest.total_bytes {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream hello total_bytes {} did not match manifest total_bytes {}",
+                hello.total_bytes, manifest.total_bytes
+            )));
+        }
+        let streamed = receive_native_source_stream_entries(
             cx,
             &mut connection,
-            &mut control,
+            stream,
             &manifest,
             &mut decoders,
             &config,
-            &aggregator,
-            &mut symbols_accepted,
-            &mut feedback_rounds,
-            &mut decode_stats,
         )
-        .await?
-        .is_none()
-        {
-            break;
+        .await?;
+        if streamed != manifest.total_bytes {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream delivered {streamed} bytes, expected {}",
+                manifest.total_bytes
+            )));
+        }
+        let complete = receive_native_object_complete(cx, &mut connection, &mut control)?;
+        if complete.round_symbols_sent != 0 {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream round reported {} datagram symbols",
+                complete.round_symbols_sent
+            )));
+        }
+    } else {
+        loop {
+            if receive_native_symbol_round(
+                cx,
+                &mut connection,
+                &mut control,
+                &manifest,
+                &mut decoders,
+                &config,
+                &aggregator,
+                &mut symbols_accepted,
+                &mut feedback_rounds,
+                &mut decode_stats,
+            )
+            .await?
+            .is_none()
+            {
+                break;
+            }
         }
     }
 
@@ -9102,6 +9491,67 @@ mod tests {
     }
 
     #[test]
+    fn quic_reliable_source_stream_requires_clean_unpaced_transfer() {
+        let config = trusted_quic_config();
+        let clean =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.0));
+        let lossy =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.001));
+
+        assert!(quic_clean_source_stream_enabled(&config, &clean));
+        assert!(quic_reliable_source_stream_eligible(1024, &config, &clean));
+        let mut maxed_clean = clean;
+        maxed_clean.pacing_rate_bps = QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS;
+        assert!(!quic_round0_clean_ramp_enabled(&config, &maxed_clean, true));
+        assert!(
+            quic_reliable_source_stream_eligible(1024, &config, &maxed_clean),
+            "reliable stream selection must not depend on DATAGRAM ramp headroom"
+        );
+        assert!(!quic_reliable_source_stream_eligible(0, &config, &clean));
+        assert!(!quic_reliable_source_stream_eligible(
+            QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES + 1,
+            &config,
+            &clean
+        ));
+        assert!(
+            !quic_clean_source_stream_enabled(&config, &lossy),
+            "lossy paths must stay on the FEC datagram fountain"
+        );
+
+        for blocked in [
+            QuicConfig {
+                debug_drop_one_in: 11,
+                ..config.clone()
+            },
+            QuicConfig {
+                bwlimit_bps: Some(8 * 1024 * 1024),
+                ..config.clone()
+            },
+            QuicConfig {
+                repair_overhead: 1.25,
+                ..config.clone()
+            },
+            QuicConfig {
+                datagram_fanout: 2,
+                ..config.clone()
+            },
+            QuicConfig {
+                round0_loss_target: 0.001,
+                ..config.clone()
+            },
+        ] {
+            let decision = quic_spray_pacing_decision_from_config(
+                &blocked,
+                pacing_signal(0.050, 1_048_576, 0.0),
+            );
+            assert!(
+                !quic_clean_source_stream_enabled(&blocked, &decision),
+                "clean source stream must stay off when the config selects lossy/paced/fanout DATAGRAM behavior"
+            );
+        }
+    }
+
+    #[test]
     fn quic_round0_clean_ramp_additively_updates_rate_and_pause() {
         let config = QuicConfig {
             max_spray_symbols_per_flush: 54,
@@ -9945,6 +10395,9 @@ mod tests {
             symbol_size: DEFAULT_SYMBOL_SIZE,
             max_block_size: u64::try_from(DEFAULT_MAX_BLOCK_SIZE).unwrap_or(u64::MAX),
             symbol_auth: true,
+            source_stream: false,
+            source_stream_id: None,
+            total_bytes: 0,
         };
         let hello_frame = json_frame(FrameType::Handshake, &hello).expect("hello frame");
         assert_eq!(hello_frame.version(), ProtocolVersion::CURRENT);
@@ -9957,6 +10410,7 @@ mod tests {
         let ack = QuicHelloAck {
             accepted: false,
             peer_id: "peer-b".to_string(),
+            source_stream: false,
             reason: Some("unsupported protocol".to_string()),
         };
         let ack_frame = json_frame(FrameType::HandshakeAck, &ack).expect("ack frame");
@@ -10899,6 +11353,188 @@ mod tests {
             &mut client_to_server_pn,
             DEFAULT_MAX_PACKET_BYTES,
             8_004,
+        )
+        .expect("deliver native close");
+        let close = next_native_control_frame(
+            &cx,
+            &mut native_server,
+            &mut receiver_control,
+            "receive native close",
+        )
+        .expect("native receiver sees close");
+        assert_eq!(close.frame_type(), FrameType::Close);
+    }
+
+    #[test]
+    fn native_sender_body_streams_clean_source_and_receives_proof() {
+        let (cx, client, server) = established_pair();
+        let mut native_client = client.inner().clone();
+        let mut native_server = server.inner().clone();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(root.join("nested")).expect("create nested dir");
+        let alpha = varied_bytes(384, 73);
+        let beta = varied_bytes(640, 79);
+        std::fs::write(root.join("alpha.bin"), &alpha).expect("write alpha");
+        std::fs::write(root.join("nested/beta.bin"), &beta).expect("write beta");
+        let config = QuicConfig {
+            chunk_size: 29,
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("source manifest prepares from disk");
+        let transfer_config = prepared.effective_config(&config);
+        let mut receiver_control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+        let mut source_stream = None;
+        let mut client_to_server_pn = 0u64;
+        let mut server_to_client_pn = 0u64;
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let dest = tempfile::tempdir().expect("dest dir");
+        let mut receiver_committed = false;
+
+        let report = block_on(send_prepared_source_over_established_native_connection(
+            &cx,
+            &mut native_client,
+            peer,
+            &prepared,
+            &transfer_config,
+            "sender-peer",
+            |drive_point, sender| {
+                match drive_point {
+                    NativeSenderDrivePoint::HelloSent => {
+                        pump_native_until_idle(
+                            &cx,
+                            sender,
+                            &mut native_server,
+                            &mut client_to_server_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_100,
+                        )?;
+                        let hello = receive_native_sender_hello_and_ack(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                            &transfer_config,
+                            "receiver-peer",
+                            false,
+                        )?;
+                        assert_eq!(hello.peer_id, "sender-peer");
+                        assert!(hello.source_stream);
+                        let stream = source_stream_from_hello(&hello)?
+                            .expect("clean source stream id must be advertised");
+                        assert_ne!(stream, first_client_bidi_stream());
+                        source_stream = Some(stream);
+                        pump_native_until_idle(
+                            &cx,
+                            &mut native_server,
+                            sender,
+                            &mut server_to_client_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_101,
+                        )?;
+                    }
+                    NativeSenderDrivePoint::ObjectCompleteSent => {
+                        assert!(!receiver_committed, "receiver should commit only once");
+                        pump_native_until_idle(
+                            &cx,
+                            sender,
+                            &mut native_server,
+                            &mut client_to_server_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_102,
+                        )?;
+
+                        let received_manifest = receive_native_manifest(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                        )?;
+                        assert_eq!(received_manifest, prepared.manifest);
+                        let mut decoders =
+                            decoders_from_manifest(&received_manifest, &transfer_config)?;
+                        let streamed = block_on(receive_native_source_stream_entries(
+                            &cx,
+                            &mut native_server,
+                            source_stream.expect("source stream negotiated"),
+                            &received_manifest,
+                            &mut decoders,
+                            &transfer_config,
+                        ))?;
+                        assert_eq!(streamed, received_manifest.total_bytes);
+                        let complete = receive_native_object_complete(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                        )?;
+                        assert_eq!(complete.round_symbols_sent, 0);
+                        assert!(
+                            pending_entries(&decoders).is_empty(),
+                            "streamed source bytes should mark every decoder complete"
+                        );
+
+                        let (receipt, committed_paths) = block_on(commit_decoded_entries(
+                            &cx,
+                            dest.path(),
+                            &received_manifest,
+                            &decoders,
+                            0,
+                            0,
+                            QuicDecodeStats::default(),
+                            &transfer_config,
+                        ))?;
+                        assert!(receipt.committed);
+                        assert_eq!(committed_paths.len(), 2);
+                        assert_eq!(
+                            std::fs::read(dest.path().join("payload/alpha.bin"))
+                                .expect("read alpha"),
+                            alpha
+                        );
+                        assert_eq!(
+                            std::fs::read(dest.path().join("payload/nested/beta.bin"))
+                                .expect("read beta"),
+                            beta
+                        );
+
+                        send_native_proof(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                            &receipt,
+                        )?;
+                        pump_native_until_idle(
+                            &cx,
+                            &mut native_server,
+                            sender,
+                            &mut server_to_client_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_103,
+                        )?;
+                        receiver_committed = true;
+                    }
+                }
+                Ok(())
+            },
+        ))
+        .expect("native clean source stream returns proof report");
+
+        assert!(receiver_committed);
+        assert_eq!(report.transfer_id, prepared.manifest.transfer_id);
+        assert_eq!(report.bytes_sent, 1_024);
+        assert_eq!(report.files, 2);
+        assert_eq!(report.symbols_sent, 0);
+        assert_eq!(report.feedback_rounds, 0);
+        assert!(report.receipt.committed);
+
+        pump_native_until_idle(
+            &cx,
+            &mut native_client,
+            &mut native_server,
+            &mut client_to_server_pn,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_104,
         )
         .expect("deliver native close");
         let close = next_native_control_frame(
@@ -12464,6 +13100,80 @@ mod tests {
     }
 
     #[test]
+    fn quic_control_handshake_accepts_clean_source_stream_id() {
+        let config = trusted_quic_config();
+        let source_stream = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
+        let hello =
+            sender_hello_with_source_stream("sender-peer", &config, false, Some(source_stream), 9);
+
+        assert_eq!(
+            source_stream_from_hello(&hello).expect("valid source stream"),
+            Some(source_stream)
+        );
+        assert!(
+            reject_hello_reason(&hello, &config, false).is_none(),
+            "client-initiated source stream must be accepted when the rest of the hello matches"
+        );
+    }
+
+    #[test]
+    fn quic_control_handshake_rejects_invalid_source_stream_ids() {
+        let config = trusted_quic_config();
+        let mut hello = sender_hello_with_source_stream(
+            "sender-peer",
+            &config,
+            false,
+            Some(StreamId::local(
+                StreamRole::Client,
+                StreamDirection::Bidirectional,
+                1,
+            )),
+            9,
+        );
+
+        hello.source_stream = true;
+        hello.source_stream_id = None;
+        assert!(matches!(
+            source_stream_from_hello(&hello),
+            Err(QuicTransportError::HandshakeRejected(reason))
+                if reason.contains("source_stream_id")
+        ));
+
+        hello.source_stream = false;
+        hello.source_stream_id =
+            Some(StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1).0);
+        assert!(matches!(
+            source_stream_from_hello(&hello),
+            Err(QuicTransportError::HandshakeRejected(reason))
+                if reason.contains("source_stream=false")
+        ));
+
+        hello.source_stream = true;
+        hello.source_stream_id = Some(first_client_bidi_stream().0);
+        assert!(matches!(
+            source_stream_from_hello(&hello),
+            Err(QuicTransportError::HandshakeRejected(reason))
+                if reason.contains("control stream")
+        ));
+
+        hello.source_stream_id =
+            Some(StreamId::local(StreamRole::Server, StreamDirection::Bidirectional, 0).0);
+        assert!(matches!(
+            source_stream_from_hello(&hello),
+            Err(QuicTransportError::HandshakeRejected(reason))
+                if reason.contains("client-initiated")
+        ));
+
+        hello.source_stream_id =
+            Some(StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 0).0);
+        assert!(matches!(
+            source_stream_from_hello(&hello),
+            Err(QuicTransportError::HandshakeRejected(reason))
+                if reason.contains("bidirectional")
+        ));
+    }
+
+    #[test]
     fn quic_control_handshake_rejects_wrong_protocol_and_reports_reason() {
         let (cx, mut client, mut server) = established_pair();
         let config = trusted_quic_config();
@@ -12478,6 +13188,9 @@ mod tests {
             symbol_size: config.symbol_size,
             max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
             symbol_auth: false,
+            source_stream: false,
+            source_stream_id: None,
+            total_bytes: 0,
         };
         let frame = json_frame(FrameType::Handshake, &bad_hello).expect("bad hello frame");
         sender_control
@@ -12534,6 +13247,9 @@ mod tests {
             symbol_size: config.symbol_size.saturating_div(2).max(1),
             max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
             symbol_auth: false,
+            source_stream: false,
+            source_stream_id: None,
+            total_bytes: 0,
         };
 
         let reason = reject_hello_reason(&bad_hello, &config, false)
