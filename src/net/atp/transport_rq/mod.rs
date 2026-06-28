@@ -233,6 +233,9 @@ const RQ_CONTROL_SOURCE_FRAME_MAX_BYTES: usize = MAX_FRAME_SIZE as usize;
 /// version(1) + ObjectData type(2) + large payload length(4) + extension count(1).
 const RQ_CONTROL_SOURCE_WIRE_HEADER_MAX_BYTES: usize = 1 + 2 + 4 + 1;
 const RQ_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8;
+const RQ_CONTROL_SOURCE_AUTH_DATA_HEADER: usize = RQ_CONTROL_SOURCE_DATA_HEADER + TAG_SIZE;
+const RQ_CONTROL_SOURCE_AUTH_SYMBOL_DOMAIN: &[u8] =
+    b"asupersync.atp.rq.control-source-data-auth.v1\0";
 /// Control-stream payload chunk for the clean source-stream lane.
 ///
 /// Fill each ATP frame to the largest safe no-extension `ObjectData` frame.
@@ -241,6 +244,9 @@ const RQ_CONTROL_SOURCE_DATA_HEADER: usize = 4 + 8;
 const RQ_CONTROL_SOURCE_CHUNK_BYTES: usize = RQ_CONTROL_SOURCE_FRAME_MAX_BYTES
     - RQ_CONTROL_SOURCE_WIRE_HEADER_MAX_BYTES
     - RQ_CONTROL_SOURCE_DATA_HEADER;
+const RQ_CONTROL_SOURCE_AUTH_CHUNK_BYTES: usize = RQ_CONTROL_SOURCE_FRAME_MAX_BYTES
+    - RQ_CONTROL_SOURCE_WIRE_HEADER_MAX_BYTES
+    - RQ_CONTROL_SOURCE_AUTH_DATA_HEADER;
 /// Flush cadence for bulk `ObjectData` frames on the reliable control stream.
 ///
 /// Handshake, feedback, proof, and close frames still flush immediately through
@@ -453,11 +459,14 @@ pub struct RqConfig {
     /// Test-only: deterministically drop 1-in-N sprayed source symbols on the
     /// sender to exercise the repair/feedback path. 0 disables.
     pub debug_drop_one_in: u32,
-    /// Optional per-symbol authentication context for UDP RaptorQ datagrams.
+    /// Optional per-symbol authentication context for UDP RaptorQ datagrams and
+    /// clean-link control-source `ObjectData` frames.
     ///
     /// When present, senders append a tag for each symbol and receivers verify
-    /// every symbol before decoding. The TCP control channel and manifest still
-    /// need their own authenticated transport to claim full anti-forgery.
+    /// every symbol before decoding. Control-source data frames are also tagged
+    /// and fail closed before staging writes. The TCP handshake, manifest, and
+    /// feedback frames still need their own authenticated transport to claim full
+    /// anti-forgery for the whole control plane.
     pub symbol_auth_context: Option<SecurityContext>,
     /// Explicit escape hatch for loopback/lab callers that run over a trusted
     /// transport and accept integrity-vs-manifest only.
@@ -859,8 +868,8 @@ fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
     // paths before the first feedback frame can produce a delivery-rate cap.
     let loss_free_target = round0_source_first_loss_target(config)
         && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
-    // Authenticated symbols cannot use the unauthenticated control-source
-    // stream, so clean round 0 must still ramp on the UDP symbol path.
+    // Clean UDP fallback still ramps when the control-source stream is not
+    // selected, for example debug-drop or non-clean transfer regimes.
     config.debug_drop_one_in == 0
         && config.repair_overhead <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD
         && loss_free_target
@@ -1923,15 +1932,10 @@ fn clean_control_source_stream_round0(config: &RqConfig) -> bool {
         && loss_free_target
 }
 
-fn control_source_stream_eligible(
-    total_bytes: u64,
-    config: &RqConfig,
-    symbol_auth_enabled: bool,
-) -> bool {
+fn control_source_stream_eligible(total_bytes: u64, config: &RqConfig) -> bool {
     total_bytes > 0
         && total_bytes <= config.max_transfer_bytes
         && clean_control_source_stream_round0(config)
-        && !symbol_auth_enabled
 }
 
 fn apply_small_clean_round0_source_only(
@@ -2748,11 +2752,13 @@ where
 
     async fn send_control_source_data_unflushed(
         &mut self,
+        transfer_id: &str,
         entry: u32,
         offset: u64,
         data: &[u8],
+        symbol_auth: Option<&SecurityContext>,
     ) -> Result<usize, RqError> {
-        let bytes = control_source_data_wire_frame(entry, offset, data)?;
+        let bytes = control_source_data_wire_frame(transfer_id, entry, offset, data, symbol_auth)?;
         let len = bytes.len();
         self.stream.write_all(&bytes).await?;
         Ok(len)
@@ -2892,26 +2898,129 @@ fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError>
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
 }
 
-#[cfg(test)]
-fn control_source_data_frame(entry: u32, offset: u64, data: &[u8]) -> Result<Frame, RqError> {
-    let mut payload = Vec::with_capacity(RQ_CONTROL_SOURCE_DATA_HEADER + data.len());
-    payload.extend_from_slice(&entry.to_be_bytes());
+fn control_source_data_chunk_bytes(auth_enabled: bool) -> usize {
+    if auth_enabled {
+        RQ_CONTROL_SOURCE_AUTH_CHUNK_BYTES
+    } else {
+        RQ_CONTROL_SOURCE_CHUNK_BYTES
+    }
+}
+
+fn control_source_data_auth_tag_bytes(auth_enabled: bool) -> usize {
+    if auth_enabled { TAG_SIZE } else { 0 }
+}
+
+fn control_source_data_auth_symbol(
+    transfer_id: &str,
+    entry: u32,
+    offset: u64,
+    data: &[u8],
+) -> Symbol {
+    let entry_id = entry_object_id(transfer_id, entry);
+    let object_id = ObjectId::new(
+        entry_id.high() ^ 0xC057_DA7A_AA71_0001,
+        entry_id.low() ^ 0xA771_C057_5EED_0001,
+    );
+    let mut payload =
+        Vec::with_capacity(RQ_CONTROL_SOURCE_AUTH_SYMBOL_DOMAIN.len() + 8 + data.len());
+    payload.extend_from_slice(RQ_CONTROL_SOURCE_AUTH_SYMBOL_DOMAIN);
     payload.extend_from_slice(&offset.to_be_bytes());
     payload.extend_from_slice(data);
+    Symbol::new(SymbolId::new(object_id, 0, 0), payload, SymbolKind::Source)
+}
+
+fn sign_control_source_data_tag(
+    context: &SecurityContext,
+    transfer_id: &str,
+    entry: u32,
+    offset: u64,
+    data: &[u8],
+) -> AuthenticationTag {
+    let symbol = control_source_data_auth_symbol(transfer_id, entry, offset, data);
+    context.sign_symbol_tag(&symbol)
+}
+
+fn verify_control_source_data_tag(
+    context: &SecurityContext,
+    transfer_id: &str,
+    entry: u32,
+    offset: u64,
+    data: &[u8],
+    tag: AuthenticationTag,
+) -> Result<(), RqError> {
+    let symbol = control_source_data_auth_symbol(transfer_id, entry, offset, data);
+    let mut auth = AuthenticatedSymbol::from_parts(symbol, tag);
+    if context.verify_authenticated_symbol(&mut auth).is_ok() && auth.is_verified() {
+        Ok(())
+    } else {
+        Err(RqError::Authentication(format!(
+            "control source ObjectData authentication failed for entry {entry} offset {offset}"
+        )))
+    }
+}
+
+fn control_source_data_payload(
+    transfer_id: &str,
+    entry: u32,
+    offset: u64,
+    data: &[u8],
+    symbol_auth: Option<&SecurityContext>,
+) -> Vec<u8> {
+    let auth_len = control_source_data_auth_tag_bytes(symbol_auth.is_some());
+    let mut payload = Vec::with_capacity(RQ_CONTROL_SOURCE_DATA_HEADER + auth_len + data.len());
+    payload.extend_from_slice(&entry.to_be_bytes());
+    payload.extend_from_slice(&offset.to_be_bytes());
+    if let Some(context) = symbol_auth {
+        let tag = sign_control_source_data_tag(context, transfer_id, entry, offset, data);
+        payload.extend_from_slice(tag.as_bytes());
+    }
+    payload.extend_from_slice(data);
+    payload
+}
+
+#[cfg(test)]
+fn control_source_data_frame(entry: u32, offset: u64, data: &[u8]) -> Result<Frame, RqError> {
+    control_source_data_frame_with_auth("control-source-test", entry, offset, data, None)
+}
+
+#[cfg(test)]
+fn control_source_data_frame_with_auth(
+    transfer_id: &str,
+    entry: u32,
+    offset: u64,
+    data: &[u8],
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<Frame, RqError> {
+    let payload = control_source_data_payload(transfer_id, entry, offset, data, symbol_auth);
     Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, payload)
         .map_err(|e| RqError::Frame(e.to_string()))
 }
 
 fn control_source_data_wire_frame(
+    transfer_id: &str,
     entry: u32,
     offset: u64,
     data: &[u8],
+    symbol_auth: Option<&SecurityContext>,
 ) -> Result<BytesMut, RqError> {
+    let auth_len = control_source_data_auth_tag_bytes(symbol_auth.is_some());
     let payload_len = RQ_CONTROL_SOURCE_DATA_HEADER
-        .checked_add(data.len())
+        .checked_add(auth_len)
+        .and_then(|len| len.checked_add(data.len()))
         .ok_or_else(|| {
             RqError::Frame("control source ObjectData payload length overflow".into())
         })?;
+    let max_payload_len = RQ_CONTROL_SOURCE_DATA_HEADER
+        .checked_add(auth_len)
+        .and_then(|len| len.checked_add(control_source_data_chunk_bytes(symbol_auth.is_some())))
+        .ok_or_else(|| {
+            RqError::Frame("control source ObjectData payload length overflow".into())
+        })?;
+    if payload_len > max_payload_len {
+        return Err(RqError::Frame(format!(
+            "control source ObjectData payload too large: {payload_len} bytes (max {max_payload_len})"
+        )));
+    }
     let payload_len_u64 = u64::try_from(payload_len)
         .map_err(|_| RqError::Frame("control source ObjectData payload too large".into()))?;
     let header_len = control_frame_header_len(
@@ -2934,9 +3043,13 @@ fn control_source_data_wire_frame(
     encode_control_frame_varint(&mut wire, FrameType::ObjectData as u64)?;
     encode_control_frame_varint(&mut wire, payload_len_u64)?;
     encode_control_frame_varint(&mut wire, 0)?;
-    wire.extend_from_slice(&entry.to_be_bytes());
-    wire.extend_from_slice(&offset.to_be_bytes());
-    wire.extend_from_slice(data);
+    wire.extend_from_slice(&control_source_data_payload(
+        transfer_id,
+        entry,
+        offset,
+        data,
+        symbol_auth,
+    ));
     debug_assert_eq!(wire.len(), total_len);
     Ok(wire)
 }
@@ -2974,7 +3087,11 @@ struct ControlSourceData<'a> {
     data: &'a [u8],
 }
 
-fn parse_control_source_data_frame(frame: &Frame) -> Result<ControlSourceData<'_>, RqError> {
+fn parse_control_source_data_frame<'a>(
+    frame: &'a Frame,
+    transfer_id: &str,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<ControlSourceData<'a>, RqError> {
     let payload = frame.payload();
     if payload.len() < RQ_CONTROL_SOURCE_DATA_HEADER {
         return Err(RqError::Frame(format!(
@@ -2983,10 +3100,33 @@ fn parse_control_source_data_frame(frame: &Frame) -> Result<ControlSourceData<'_
     }
     let entry = u32::from_be_bytes(payload[0..4].try_into().expect("entry header width"));
     let offset = u64::from_be_bytes(payload[4..12].try_into().expect("offset header width"));
+    let data = if let Some(context) = symbol_auth {
+        if payload.len() < RQ_CONTROL_SOURCE_AUTH_DATA_HEADER {
+            return Err(RqError::Authentication(format!(
+                "authenticated ObjectData frame shorter than {RQ_CONTROL_SOURCE_AUTH_DATA_HEADER}-byte source auth header"
+            )));
+        }
+        let mut tag_bytes = [0u8; TAG_SIZE];
+        tag_bytes.copy_from_slice(
+            &payload[RQ_CONTROL_SOURCE_DATA_HEADER..RQ_CONTROL_SOURCE_AUTH_DATA_HEADER],
+        );
+        let data = &payload[RQ_CONTROL_SOURCE_AUTH_DATA_HEADER..];
+        verify_control_source_data_tag(
+            context,
+            transfer_id,
+            entry,
+            offset,
+            data,
+            AuthenticationTag::from_bytes(tag_bytes),
+        )?;
+        data
+    } else {
+        &payload[RQ_CONTROL_SOURCE_DATA_HEADER..]
+    };
     Ok(ControlSourceData {
         entry,
         offset,
-        data: &payload[RQ_CONTROL_SOURCE_DATA_HEADER..],
+        data,
     })
 }
 
@@ -4662,8 +4802,7 @@ pub async fn send_path(
         merkle_root_hex: merkle_root_hex.clone(),
         entries: manifest_entries,
     };
-    let prefer_control_source_stream =
-        control_source_stream_eligible(total_bytes, &config, symbol_auth_enabled);
+    let prefer_control_source_stream = control_source_stream_eligible(total_bytes, &config);
 
     // Control plane: TCP connect + handshake.
     let stream =
@@ -4757,7 +4896,14 @@ pub async fn send_path(
         .await?;
 
     if control_source_stream {
-        let bytes_streamed = stream_control_source_entries(cx, &mut control, &encoders).await?;
+        let bytes_streamed = stream_control_source_entries(
+            cx,
+            &mut control,
+            &encoders,
+            &transfer_id,
+            symbol_auth.as_ref(),
+        )
+        .await?;
         if bytes_streamed != total_bytes {
             return Err(RqError::Source(format!(
                 "control source stream sent {bytes_streamed} bytes, expected {total_bytes}"
@@ -6005,11 +6151,13 @@ async fn stream_control_source_entries<S>(
     cx: &Cx,
     control: &mut FrameTransport<S>,
     encoders: &[EntryEncoder],
+    transfer_id: &str,
+    symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    let mut buf = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES];
+    let mut buf = vec![0u8; control_source_data_chunk_bytes(symbol_auth.is_some())];
     let mut bytes_streamed = 0u64;
     let mut chunks = 0u64;
     let mut pending_flush_bytes = 0usize;
@@ -6049,7 +6197,13 @@ where
                 )));
             }
             let written = control
-                .send_control_source_data_unflushed(enc.index, offset, &buf[..n])
+                .send_control_source_data_unflushed(
+                    transfer_id,
+                    enc.index,
+                    offset,
+                    &buf[..n],
+                    symbol_auth,
+                )
                 .await?;
             pending_flush_bytes = pending_flush_bytes.saturating_add(written);
             if pending_flush_bytes >= RQ_CONTROL_SOURCE_FLUSH_BYTES {
@@ -6376,8 +6530,7 @@ pub async fn receive_connection(
 ) -> Result<ReceiveReport, RqError> {
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
-    let should_tune_for_bulk_source =
-        clean_control_source_stream_round0(&config) && !symbol_auth_enabled;
+    let should_tune_for_bulk_source = clean_control_source_stream_round0(&config);
     if should_tune_for_bulk_source {
         tune_control_stream_for_bulk_source(&stream);
     }
@@ -6395,7 +6548,7 @@ pub async fn receive_connection(
     let accepted = hello.protocol == ATP_RQ_PROTOCOL && hello.symbol_auth == symbol_auth_enabled;
     let control_source_stream = accepted
         && hello.prefer_control_source_stream
-        && control_source_stream_eligible(hello.total_bytes, &config, symbol_auth_enabled);
+        && control_source_stream_eligible(hello.total_bytes, &config);
 
     let (udp, udp_ports, udp_port) = if control_source_stream {
         rqtrace!(
@@ -6592,6 +6745,7 @@ pub async fn receive_connection(
             cx,
             &mut control,
             &manifest,
+            symbol_auth.as_ref(),
             &mut decoders,
             dest_dir,
             peer,
@@ -6951,9 +7105,11 @@ pub async fn receive_connection(
 
 async fn apply_control_source_data_frame(
     frame: &Frame,
+    transfer_id: &str,
+    symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
 ) -> Result<usize, RqError> {
-    let data = parse_control_source_data_frame(frame)?;
+    let data = parse_control_source_data_frame(frame, transfer_id, symbol_auth)?;
     let pos = decoder_position_for_entry(decoders, data.entry).ok_or_else(|| {
         RqError::Frame(format!(
             "control source ObjectData for unknown entry {}",
@@ -6998,6 +7154,7 @@ async fn receive_control_source_stream<S>(
     cx: &Cx,
     control: &mut FrameTransport<S>,
     manifest: &TransferManifest,
+    symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
     dest_dir: &Path,
     peer: SocketAddr,
@@ -7012,7 +7169,13 @@ where
         let frame = control.recv().await?;
         match frame.frame_type() {
             FrameType::ObjectData => {
-                let n = apply_control_source_data_frame(&frame, decoders).await?;
+                let n = apply_control_source_data_frame(
+                    &frame,
+                    &manifest.transfer_id,
+                    symbol_auth,
+                    decoders,
+                )
+                .await?;
                 bytes_streamed =
                     bytes_streamed.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
                 chunks = chunks.saturating_add(1);
@@ -13974,20 +14137,16 @@ mod tests {
                 > RQ_PACING_MIN_PAUSE,
             "small-clean burst pacing should sleep once per UDP batch, not once per symbol"
         );
-        assert!(!control_source_stream_eligible(
-            50 * 1024 * 1024,
-            &config,
-            true
-        ));
-        let auth_udp_pacer = RqSprayPacer::new_round0(
+        assert!(control_source_stream_eligible(50 * 1024 * 1024, &config));
+        let fallback_udp_pacer = RqSprayPacer::new_round0(
             adjusted.pacing,
             &config,
             small_clean_source_only_round0(50 * 1024 * 1024, &config),
         );
         assert!(
-            auth_udp_pacer.round0_ramp.is_some(),
-            "authenticated clean RQ must still take the UDP clean-ramp path when control-source \
-             streaming is intentionally unavailable"
+            fallback_udp_pacer.round0_ramp.is_some(),
+            "clean RQ fallback must still take the UDP clean-ramp path when control-source \
+             streaming is unavailable"
         );
 
         pacer.configure(RqSprayPacing::from_rate(
@@ -14015,7 +14174,7 @@ mod tests {
     }
 
     #[test]
-    fn matrix143_authenticated_clean_udp_round0_ramps_from_low_adaptive_seed() {
+    fn matrix145_authenticated_clean_control_source_stream_is_eligible() {
         let config = RqConfig {
             symbol_size: 1200,
             max_block_size: 512 * 1024,
@@ -14040,21 +14199,17 @@ mod tests {
 
         assert!(!small_clean_source_only_round0(total_bytes, &config));
         assert!(symbol_auth_enabled);
-        assert!(!control_source_stream_eligible(
-            total_bytes,
-            &config,
-            symbol_auth_enabled
-        ));
+        assert!(control_source_stream_eligible(total_bytes, &config));
         assert!(
             round0_clean_ramp_enabled(&config, low_seed),
-            "MATRIX-143: clean authenticated UDP round 0 must not stay pinned at a low adaptive seed"
+            "MATRIX-145 fallback: clean authenticated UDP round 0 must not stay pinned at a low adaptive seed"
         );
 
         let pacer = RqSprayPacer::new_round0(low_seed, &config, false);
         assert!(pacer.round0_ramp.is_some());
         assert!(
             pacer.small_clean_burst.is_none(),
-            "authenticated UDP remains on the normal symbol path; only pacing should ramp"
+            "authenticated UDP fallback remains on the normal symbol path; only pacing should ramp"
         );
     }
 
@@ -14157,7 +14312,7 @@ mod tests {
     }
 
     #[test]
-    fn control_source_stream_negotiates_for_clean_unauthenticated_including_large() {
+    fn control_source_stream_negotiates_for_clean_links_including_authenticated_large() {
         let clean = RqConfig {
             symbol_size: 1200,
             max_block_size: 512 * 1024,
@@ -14165,6 +14320,9 @@ mod tests {
             round0_loss_target: 0.0,
             ..RqConfig::default()
         };
+        let auth_clean = clean
+            .clone()
+            .with_symbol_auth(SecurityContext::for_testing(0xA7_51));
         let good = RqConfig {
             round0_loss_target: 0.001,
             ..clean.clone()
@@ -14186,60 +14344,47 @@ mod tests {
             ..clean.clone()
         };
 
-        assert!(control_source_stream_eligible(
-            50 * 1024 * 1024,
-            &clean,
-            false
-        ));
-        assert!(control_source_stream_eligible(
-            500 * 1024 * 1024,
-            &clean,
-            false
-        ));
+        assert!(control_source_stream_eligible(50 * 1024 * 1024, &clean));
+        assert!(control_source_stream_eligible(500 * 1024 * 1024, &clean));
         assert!(!small_clean_source_only_round0(500 * 1024 * 1024, &clean));
-        assert!(!control_source_stream_eligible(
+        assert!(control_source_stream_eligible(
             50 * 1024 * 1024,
-            &clean,
-            true
+            &auth_clean
         ));
+        assert!(!control_source_stream_eligible(50 * 1024 * 1024, &good));
+        assert!(!control_source_stream_eligible(50 * 1024 * 1024, &lossy));
         assert!(!control_source_stream_eligible(
             50 * 1024 * 1024,
-            &good,
-            false
-        ));
-        assert!(!control_source_stream_eligible(
-            50 * 1024 * 1024,
-            &lossy,
-            false
+            &explicit_repair
         ));
         assert!(!control_source_stream_eligible(
             50 * 1024 * 1024,
-            &explicit_repair,
-            false
+            &debug_drop
         ));
-        assert!(!control_source_stream_eligible(
-            50 * 1024 * 1024,
-            &debug_drop,
-            false
-        ));
-        assert!(!control_source_stream_eligible(
-            500 * 1024 * 1024,
-            &capped,
-            false
-        ));
+        assert!(!control_source_stream_eligible(500 * 1024 * 1024, &capped));
     }
 
     #[test]
     fn control_source_data_frame_roundtrips_entry_offset_and_payload() {
-        let frame = control_source_data_frame(7, 123_456, b"payload").expect("frame");
+        let frame = control_source_data_frame_with_auth(
+            "control-source-test",
+            7,
+            123_456,
+            b"payload",
+            None,
+        )
+        .expect("frame");
         assert_eq!(frame.frame_type(), FrameType::ObjectData);
 
-        let parsed = parse_control_source_data_frame(&frame).expect("parse");
+        let parsed =
+            parse_control_source_data_frame(&frame, "control-source-test", None).expect("parse");
         assert_eq!(parsed.entry, 7);
         assert_eq!(parsed.offset, 123_456);
         assert_eq!(parsed.data, b"payload");
         let canonical = frame.to_wire_bytes().expect("canonical wire");
-        let direct = control_source_data_wire_frame(7, 123_456, b"payload").expect("direct wire");
+        let direct =
+            control_source_data_wire_frame("control-source-test", 7, 123_456, b"payload", None)
+                .expect("direct wire");
         assert_eq!(direct.as_ref(), canonical.as_slice());
         assert!(
             frame.encoded_len()
@@ -14250,9 +14395,13 @@ mod tests {
     #[test]
     fn control_source_data_chunk_stays_within_frame_cap() {
         let payload = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES];
-        let frame = control_source_data_frame(7, 123_456, &payload).expect("frame");
+        let frame =
+            control_source_data_frame_with_auth("control-source-test", 7, 123_456, &payload, None)
+                .expect("frame");
         let canonical = frame.to_wire_bytes().expect("canonical wire");
-        let direct = control_source_data_wire_frame(7, 123_456, &payload).expect("direct wire");
+        let direct =
+            control_source_data_wire_frame("control-source-test", 7, 123_456, &payload, None)
+                .expect("direct wire");
         let max_frame_size =
             usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap();
 
@@ -14261,7 +14410,120 @@ mod tests {
         assert_eq!(canonical.len(), max_frame_size);
         assert_eq!(direct.as_ref(), canonical.as_slice());
         let too_large = vec![0u8; RQ_CONTROL_SOURCE_CHUNK_BYTES + 1];
-        assert!(control_source_data_wire_frame(7, 123_456, &too_large).is_err());
+        assert!(
+            control_source_data_wire_frame("control-source-test", 7, 123_456, &too_large, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn authenticated_control_source_data_rejects_tampered_payload() {
+        let context = SecurityContext::for_testing(0x145);
+        let frame = control_source_data_frame_with_auth(
+            "matrix-145",
+            7,
+            123_456,
+            b"payload",
+            Some(&context),
+        )
+        .expect("authenticated frame");
+
+        let parsed = parse_control_source_data_frame(&frame, "matrix-145", Some(&context))
+            .expect("authenticated parse");
+        assert_eq!(parsed.entry, 7);
+        assert_eq!(parsed.offset, 123_456);
+        assert_eq!(parsed.data, b"payload");
+        assert_eq!(
+            frame.payload().len(),
+            RQ_CONTROL_SOURCE_AUTH_DATA_HEADER + b"payload".len()
+        );
+
+        let mut tampered = frame.payload().to_vec();
+        let last = tampered.last_mut().expect("payload byte");
+        *last ^= 0x01;
+        let tampered_frame = Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, tampered)
+            .expect("tampered frame");
+        assert!(matches!(
+            parse_control_source_data_frame(&tampered_frame, "matrix-145", Some(&context)),
+            Err(RqError::Authentication(_))
+        ));
+    }
+
+    #[test]
+    fn authenticated_control_source_data_chunk_stays_within_frame_cap() {
+        let ctx = SecurityContext::for_testing(0xA7_52);
+        let payload = vec![0u8; RQ_CONTROL_SOURCE_AUTH_CHUNK_BYTES];
+        let frame = control_source_data_frame_with_auth(
+            "matrix145-auth-cap",
+            7,
+            123_456,
+            &payload,
+            Some(&ctx),
+        )
+        .expect("frame");
+        let canonical = frame.to_wire_bytes().expect("canonical wire");
+        let direct =
+            control_source_data_wire_frame("matrix145-auth-cap", 7, 123_456, &payload, Some(&ctx))
+                .expect("direct wire");
+        let max_frame_size =
+            usize::try_from(crate::net::atp::protocol::frames::MAX_FRAME_SIZE).unwrap();
+
+        assert_eq!(frame.encoded_len(), max_frame_size);
+        assert_eq!(canonical.len(), max_frame_size);
+        assert_eq!(direct.as_ref(), canonical.as_slice());
+        let too_large = vec![0u8; RQ_CONTROL_SOURCE_AUTH_CHUNK_BYTES + 1];
+        assert!(
+            control_source_data_wire_frame(
+                "matrix145-auth-cap",
+                7,
+                123_456,
+                &too_large,
+                Some(&ctx),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn authenticated_control_source_data_rejects_tampered_byte_before_write() {
+        let ctx = SecurityContext::for_testing(0xA7_53);
+        let transfer_id = "matrix145-auth-tamper";
+        let payload = b"payload".to_vec();
+        let frame = control_source_data_frame_with_auth(transfer_id, 0, 0, &payload, Some(&ctx))
+            .expect("signed frame");
+        let mut tampered_payload = frame.payload().to_vec();
+        *tampered_payload.last_mut().expect("payload byte") ^= 0x80;
+        let tampered = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectData,
+            tampered_payload,
+        )
+        .expect("tampered frame");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let decoder = source_streaming_test_decoder(
+            entry_object_id(transfer_id, 0),
+            staging_path.clone(),
+            u64::try_from(payload.len()).expect("test payload length fits"),
+            4,
+        );
+        let mut decoders = vec![decoder];
+
+        let err = futures_lite::future::block_on(apply_control_source_data_frame(
+            &tampered,
+            transfer_id,
+            Some(&ctx),
+            &mut decoders,
+        ))
+        .expect_err("tampered control-source byte must reject");
+
+        assert!(matches!(err, RqError::Authentication(_)));
+        assert_eq!(decoders[0].bytes_written, 0);
+        assert!(!decoders[0].complete);
+        assert!(
+            !staging_path.exists(),
+            "tampered authenticated control-source frame must not write staging bytes"
+        );
     }
 
     #[derive(Default)]
@@ -14376,9 +14638,13 @@ mod tests {
         let canonical = frame.to_wire_bytes().expect("canonical wire");
         let mut control = FrameTransport::new(CountingControlIo::default());
 
-        let written = futures_lite::future::block_on(
-            control.send_control_source_data_unflushed(7, 123_456, b"payload"),
-        )
+        let written = futures_lite::future::block_on(control.send_control_source_data_unflushed(
+            "control-source-test",
+            7,
+            123_456,
+            b"payload",
+            None,
+        ))
         .expect("send");
 
         assert_eq!(written, canonical.len());
