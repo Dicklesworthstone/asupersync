@@ -14,6 +14,54 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 ## [Unreleased]
 
+### Runtime scheduler/timer CPU efficiency (`runtime-cpu-overhaul`)
+
+> Live profiling of a heavy consumer (a terminal-multiplexer GUI) localized
+> 25–65% CPU to the asupersync runtime even while the application itself was
+> wait-bound. This work added the measurement substrate, fixed the one real
+> defect it surfaced, and recorded the refuted hypotheses so they are not
+> re-attempted. (`br-asupersync-runtime-cpu-overhaul-5vt09v`)
+
+- **Runtime instrumentation counters** behind a new, zero-cost `runtime-metrics`
+  feature. `runtime::metrics::snapshot()` exposes timer-thread spawns,
+  `sched_yield` calls, worker spins/parks/unparks, and the live timer population
+  (registered/fired/cancelled plus a derived `active_timers` gauge). Every
+  `record_*` helper inlines to a no-op and `snapshot()` returns all-zero when the
+  feature is off, so release builds pay nothing.
+  ([`12c926ef8`](https://github.com/Dicklesworthstone/asupersync/commit/12c926ef8),
+  `br-asupersync-runtime-cpu-overhaul-5vt09v.1`)
+- **Scheduler CPU/churn benchmark and recorded baseline**
+  (`benches/scheduler_cpu_churn.rs`,
+  `artifacts/scheduler_cpu_churn/baseline.json`): an M-sweep idle+load harness
+  that mimics the profiled scheduler shape, reads the counters, and measures
+  process CPU, OS-thread high-water, and wakeup-latency p50/p99/p999. A committed
+  regression gate (`scripts/run_scheduler_cpu_churn_validation.sh`) fails on
+  idle busy-spin, idle-CPU, or thread-per-`sleep` churn regressions.
+  ([`12c926ef8`](https://github.com/Dicklesworthstone/asupersync/commit/12c926ef8),
+  [`cae8c1540`](https://github.com/Dicklesworthstone/asupersync/commit/cae8c1540),
+  `br-asupersync-runtime-cpu-overhaul-5vt09v.2`, `.6.1`)
+- **Shared process-global fallback timer** (`time::sleep`): a `Sleep` polled with
+  no installed timer driver (`Cx::current().timer_driver()` is `None`) used to
+  spawn one OS thread per `Sleep` to drive its deadline — the thread-per-`sleep`
+  churn the profile caught (~37/sec) for sleeps driven off the runtime's worker
+  threads. It now registers with a single process-lifetime pump thread that
+  shares the standard wall-clock timer wheel; a per-`Sleep` thread is kept only
+  for custom logical clocks. Behavior-preserving — the default `Cx`-driver path
+  is unchanged.
+  ([`b67dec457`](https://github.com/Dicklesworthstone/asupersync/commit/b67dec457),
+  `br-asupersync-runtime-cpu-overhaul-5vt09v.3`)
+- **Empirical findings recorded (no code shipped):** the benchmark proved the
+  default multi-threaded runtime is healthy — `timer_threads_spawned == 0`, 0%
+  idle CPU, and zero idle `sched_yield` — so the profiled pathologies are
+  usage-specific, not default-runtime defects. Replacing the load-path
+  `sched_yield` with a userspace spin (Lever 2) was **bench-refuted and
+  reverted**: `yield_now` cooperatively deschedules the worker and throttles the
+  backoff loop, whereas spinning keeps it hot and roughly doubled CPU
+  (7.4→13.5% at 256 tasks). The park clock-polling reduction (Lever 3) was found
+  already addressed (the multi-lane park reads the clock once per cycle; the
+  single-thread worker parks on a constant timeout).
+  (`br-asupersync-runtime-cpu-overhaul-5vt09v.4`, `.5`)
+
 ## [v0.3.5] -- 2026-06-18
 
 > Dependency-refresh and release-train patch for Rust workspace crates and
