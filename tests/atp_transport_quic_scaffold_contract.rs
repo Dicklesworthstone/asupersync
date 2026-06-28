@@ -370,11 +370,12 @@ fn spray_pacing_policy_is_public_and_uses_cwnd_as_telemetry() {
 
     let high_rtt =
         quic_spray_pacing_decision_from_config(&config, quic_pacing_signal(0.080, 768 * 1024, 0.0));
-    assert_eq!(high_rtt.limiter, QuicSprayPacingLimiter::PathRateMatch);
-    assert!(
-        high_rtt.pacing_rate_bps <= 6 * 1024 * 1024,
-        "high-RTT encrypted paths should rate-match near the 50 mbit matrix link instead of inheriting the clean cold-start rate"
+    assert_ne!(
+        high_rtt.limiter,
+        QuicSprayPacingLimiter::PathRateMatch,
+        "MATRIX-143: RTT alone must not pin clean encrypted round 0 below the ramp"
     );
+    assert_eq!(high_rtt.pacing_rate_bps, high_cwnd.pacing_rate_bps);
 
     let lossy = quic_spray_pacing_decision_from_config(
         &config,

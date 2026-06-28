@@ -293,15 +293,13 @@ const QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 // until central A/B proves a higher encrypted sender rate is good-safe.
 const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
-/// Default native QUIC path-rate cap for the 50M/bad encrypted matrix cell.
+/// Default native QUIC path-rate cap once loss is visible.
 ///
-/// MATRIX-135 showed that the pacer-owned QUIC data plane converges but wastes
-/// encrypted CPU by ramping to 24 MiB/s over a 50 mbit shaped path. A high RTT
-/// or already-visible delivery loss is enough evidence that the path is not the
-/// clean LAN/good fixture, so cap the default spray near the 50 mbit pipe unless
-/// an operator supplies an even lower `bwlimit`.
+/// MATRIX-143 showed that RTT alone is not a congestion signal for the clean
+/// encrypted tier: the transfer is mostly parked at cold-start speed. Keep the
+/// cap for paths with observed loss, but let loss-free round 0 take the clean
+/// ramp even when the handshake RTT is high.
 const QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS: u64 = 6 * 1024 * 1024;
-const QUIC_RATE_MATCHED_RTT_MIN_S: f64 = 0.060;
 const QUIC_RATE_MATCHED_LOSS_MIN: f64 = 0.010;
 const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
@@ -804,9 +802,9 @@ pub struct QuicSprayPacingInput {
     /// Optional transport-selected path-rate cap in bytes per second.
     ///
     /// Unlike `bandwidth_limit_bps`, this is not an operator directive. It is
-    /// the native QUIC sender's default rate-match guard for high-RTT/lossy
+    /// the native QUIC sender's default rate-match guard for loss-visible
     /// paths, so the encrypted data plane does not spend AES-GCM on symbols far
-    /// beyond the shaped link rate.
+    /// beyond the shaped link rate once congestion is observable.
     pub path_rate_limit_bps: Option<u64>,
     /// Loss fraction expected to be absorbed by RaptorQ repair before treating
     /// path loss as congestion.
@@ -1061,9 +1059,7 @@ pub fn quic_spray_pacing_decision_from_config_with_cpu(
 }
 
 fn quic_default_path_rate_limit_bps(path: &QuicPathSignalSample) -> Option<u64> {
-    (path.smoothed_rtt_s >= QUIC_RATE_MATCHED_RTT_MIN_S
-        || path.loss_rate >= QUIC_RATE_MATCHED_LOSS_MIN)
-        .then_some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
+    (path.loss_rate >= QUIC_RATE_MATCHED_LOSS_MIN).then_some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
 }
 
 /// Bound the configured QUIC DATAGRAM fan-out by connection and CPU capacity.
@@ -1539,7 +1535,7 @@ impl QuicRound0CleanPacingRamp {
 
 pub(crate) fn quic_round0_clean_ramp_max_pacing_bps(pacing: &QuicSprayPacingDecision) -> u64 {
     match pacing.limiter {
-        QuicSprayPacingLimiter::PathRateMatch => pacing.pacing_rate_bps,
+        QuicSprayPacingLimiter::BandwidthLimit => pacing.pacing_rate_bps,
         _ => QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
     }
 }
@@ -8986,12 +8982,12 @@ mod tests {
 
         let high_rtt =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.080, 1_048_576, 0.0));
-        assert_eq!(high_rtt.limiter, QuicSprayPacingLimiter::PathRateMatch);
-        assert_eq!(
-            high_rtt.pacing_rate_bps, QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS,
-            "50M/bad-style RTT should rate-match the encrypted pacer near the shaped link instead of inheriting the 24 MiB/s cold-start"
+        assert_ne!(
+            high_rtt.limiter,
+            QuicSprayPacingLimiter::PathRateMatch,
+            "MATRIX-143: RTT alone must not pin clean encrypted round 0 below the ramp"
         );
-        assert!(high_rtt.pacing_rate_bps < large_cwnd.pacing_rate_bps);
+        assert_eq!(high_rtt.pacing_rate_bps, large_cwnd.pacing_rate_bps);
 
         let lossy =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.40));
@@ -9064,11 +9060,13 @@ mod tests {
 
         assert!(quic_round0_clean_ramp_enabled(&config, &clean, true));
         assert!(!quic_round0_clean_ramp_enabled(&config, &clean, false));
-        assert!(!quic_round0_clean_ramp_enabled(&config, &bad_rtt, true));
+        assert!(
+            quic_round0_clean_ramp_enabled(&config, &bad_rtt, true),
+            "MATRIX-143: clean encrypted round 0 must ramp even with high handshake RTT"
+        );
         assert_eq!(
             quic_round0_clean_ramp_max_pacing_bps(&bad_rtt),
-            bad_rtt.pacing_rate_bps,
-            "path-rate matched bad-link sprays must not ramp past their selected cap"
+            QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
         );
 
         for blocked in [

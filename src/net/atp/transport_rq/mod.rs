@@ -859,11 +859,13 @@ fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
     // paths before the first feedback frame can produce a delivery-rate cap.
     let loss_free_target = round0_source_first_loss_target(config)
         && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
+    // Authenticated symbols cannot use the unauthenticated control-source
+    // stream, so clean round 0 must still ramp on the UDP symbol path.
     config.debug_drop_one_in == 0
-        && config.repair_overhead <= 1.0
+        && config.repair_overhead <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD
         && loss_free_target
         && !pacing.loss_detected
-        && pacing.rate_bytes_per_sec() == RQ_COLD_START_PACING_BPS
+        && pacing.rate_bytes_per_sec() <= RQ_COLD_START_PACING_BPS
 }
 
 impl RqSprayPacer {
@@ -10912,6 +10914,19 @@ mod tests {
         let pacing = RqSprayPacing::cold_start(clean.symbol_size);
 
         assert!(round0_clean_ramp_enabled(&clean, pacing));
+        assert!(round0_clean_ramp_enabled(
+            &RqConfig {
+                repair_overhead: RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD,
+                ..clean.clone()
+            },
+            RqSprayPacing::from_rate(
+                RQ_COLD_START_PACING_BPS / 4,
+                clean.symbol_size,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                None,
+                false,
+            )
+        ));
 
         for blocked in [
             RqConfig {
@@ -13936,7 +13951,7 @@ mod tests {
             adjusted.pacing.rate_bytes_per_sec(),
             RQ_COLD_START_PACING_BPS
         );
-        assert!(!round0_clean_ramp_enabled(&config, adjusted.pacing));
+        assert!(round0_clean_ramp_enabled(&config, adjusted.pacing));
         let mut pacer = RqSprayPacer::new_round0(
             adjusted.pacing,
             &config,
@@ -13958,6 +13973,21 @@ mod tests {
             duration_for_rate_window(burst_bytes, adjusted.pacing.rate_bytes_per_sec())
                 > RQ_PACING_MIN_PAUSE,
             "small-clean burst pacing should sleep once per UDP batch, not once per symbol"
+        );
+        assert!(!control_source_stream_eligible(
+            50 * 1024 * 1024,
+            &config,
+            true
+        ));
+        let auth_udp_pacer = RqSprayPacer::new_round0(
+            adjusted.pacing,
+            &config,
+            small_clean_source_only_round0(50 * 1024 * 1024, &config),
+        );
+        assert!(
+            auth_udp_pacer.round0_ramp.is_some(),
+            "authenticated clean RQ must still take the UDP clean-ramp path when control-source \
+             streaming is intentionally unavailable"
         );
 
         pacer.configure(RqSprayPacing::from_rate(
@@ -13981,6 +14011,50 @@ mod tests {
         assert!(
             large_clean_pacer.small_clean_burst.is_none(),
             "large clean transfers keep the existing clean ramp without the small-transfer burst shim"
+        );
+    }
+
+    #[test]
+    fn matrix143_authenticated_clean_udp_round0_ramps_from_low_adaptive_seed() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD,
+            round0_loss_target: 0.0,
+            max_transfer_bytes: 1024 * 1024 * 1024,
+            ..RqConfig::default()
+        }
+        .with_symbol_auth(SecurityContext::for_testing(0xA7_50));
+        let total_bytes = 500 * 1024 * 1024;
+        let low_seed = RqSprayPacing::from_rate(
+            RQ_COLD_START_PACING_BPS / 4,
+            config.symbol_size,
+            RQ_ADAPTIVE_BURST_SYMBOLS,
+            None,
+            false,
+        );
+        let symbol_auth_enabled = config
+            .symbol_auth_context()
+            .expect("auth config is valid")
+            .is_some();
+
+        assert!(!small_clean_source_only_round0(total_bytes, &config));
+        assert!(symbol_auth_enabled);
+        assert!(!control_source_stream_eligible(
+            total_bytes,
+            &config,
+            symbol_auth_enabled
+        ));
+        assert!(
+            round0_clean_ramp_enabled(&config, low_seed),
+            "MATRIX-143: clean authenticated UDP round 0 must not stay pinned at a low adaptive seed"
+        );
+
+        let pacer = RqSprayPacer::new_round0(low_seed, &config, false);
+        assert!(pacer.round0_ramp.is_some());
+        assert!(
+            pacer.small_clean_burst.is_none(),
+            "authenticated UDP remains on the normal symbol path; only pacing should ramp"
         );
     }
 
