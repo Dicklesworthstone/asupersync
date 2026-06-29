@@ -542,6 +542,17 @@ impl DecodingPipeline {
         Ok(())
     }
 
+    /// The effective per-block symbol-accept cap (`0` means unbounded).
+    ///
+    /// With `max_buffered_symbols == 0`, [`set_object_params`](Self::set_object_params)
+    /// sizes this to cover K (plus repair slack) via `configure_auto_buffer_limit`;
+    /// with a fixed nonzero `max_buffered_symbols` it stays at that value and does
+    /// not scale with K.
+    #[must_use]
+    pub fn block_accept_cap(&self) -> usize {
+        self.symbols.max_per_block()
+    }
+
     /// Feeds a received authenticated symbol into the pipeline.
     pub fn feed(
         &mut self,
@@ -1991,6 +2002,62 @@ mod tests {
         let ok = result == expected;
         crate::assert_with_log!(ok, "invalid metadata", expected, result);
         crate::test_complete!("reject_invalid_metadata_esi_out_of_range");
+    }
+
+    #[test]
+    fn auto_buffer_limit_scales_per_block_cap_to_k() {
+        init_test("auto_buffer_limit_scales_per_block_cap_to_k");
+        // A single block with K > the fixed 8192 default. With
+        // max_buffered_symbols == 0, set_object_params must size the per-block
+        // accept cap to cover K (configure_auto_buffer_limit); with the fixed
+        // default it stays at 8192 and would reject legitimately-received
+        // symbols past 8192 so the block never decodes (the receive_object /
+        // erasure / recovery class of bug).
+        let big_k: u16 = 16_384;
+        let object_size = u64::from(big_k) * 8;
+        let max_block_size = usize::try_from(object_size).expect("fits usize");
+        let object_id = ObjectId::new_for_test(99);
+
+        let mut auto = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 8,
+            max_block_size,
+            repair_overhead: 1.05,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        auto.set_object_params(ObjectParams::new(object_id, object_size, 8, 1, big_k))
+            .expect("params");
+        let auto_cap = auto.block_accept_cap();
+        crate::assert_with_log!(
+            auto_cap >= usize::from(big_k),
+            "auto-sized per-block cap covers K",
+            usize::from(big_k),
+            auto_cap
+        );
+
+        let mut fixed = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 8,
+            max_block_size,
+            repair_overhead: 1.05,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        fixed
+            .set_object_params(ObjectParams::new(object_id, object_size, 8, 1, big_k))
+            .expect("params");
+        let fixed_cap = fixed.block_accept_cap();
+        crate::assert_with_log!(
+            fixed_cap == 8192,
+            "fixed default does not scale with K (the bug)",
+            8192,
+            fixed_cap
+        );
+
+        crate::test_complete!("auto_buffer_limit_scales_per_block_cap_to_k");
     }
 
     #[test]

@@ -227,6 +227,12 @@ impl SymbolSet {
         self.threshold_config.max_per_block = max_per_block;
     }
 
+    /// The current per-block symbol-accept cap (`0` means unbounded).
+    #[must_use]
+    pub fn max_per_block(&self) -> usize {
+        self.threshold_config.max_per_block
+    }
+
     /// Returns true if a symbol is present.
     #[inline]
     #[must_use]

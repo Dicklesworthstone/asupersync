@@ -1315,6 +1315,24 @@ fn parse_dns_response(
         }
     }
 
+    // RFC 1035 §4.1.1 / RFC 2181 §9: a truncated response (TC=1) must have its
+    // content ignored and the query retried over a larger channel (TCP). Do NOT
+    // parse the necessarily-incomplete answer section — a UDP datagram cut at
+    // the 512-byte boundary leaves a partial trailing RR (or an `answer_count`
+    // that exceeds the RRs actually present), so `parse_dns_answer` would run
+    // off the end and return an error that escapes `send_udp_dns_query` and
+    // aborts `query_nameserver` *before* its `if response.truncated` TCP
+    // fallback — permanently losing records that TCP would have delivered. The
+    // id and question were already validated above, so return the verified
+    // header with no answers and let the caller escalate to TCP.
+    if truncated {
+        return Ok(ParsedDnsResponse {
+            truncated,
+            rcode,
+            answers: Vec::new(),
+        });
+    }
+
     // Cap pre-allocation to prevent attacker-controlled answer_count
     // from causing excessive memory allocation (max 512 answers is
     // well beyond any legitimate DNS response).
@@ -2200,6 +2218,35 @@ mod tests {
         );
 
         crate::test_complete!("parse_dns_response_rejects_mismatched_question");
+    }
+
+    #[test]
+    fn parse_dns_response_truncated_does_not_error_on_incomplete_answers() {
+        init_test("parse_dns_response_truncated_does_not_error_on_incomplete_answers");
+
+        // A TC=1 (truncated) response whose answer section is cut off: header
+        // claims ANCOUNT=5 but no answer RRs are present. parse_dns_response must
+        // honor TC and return Ok (so query_nameserver can fall back to TCP),
+        // NOT error out trying to parse the missing answers — otherwise the
+        // RFC-mandated TCP retry is bypassed and resolvable records are lost.
+        let id = 0x4242;
+        let query = build_dns_query("example.test", DnsQueryType::A, id).expect("build query");
+        let mut resp = query.clone();
+        resp[2] |= 0x82; // set QR (response) + TC (truncated)
+        resp[6] = 0x00; // ANCOUNT high
+        resp[7] = 0x05; // ANCOUNT low = 5, but zero answer bytes follow
+
+        let parsed = parse_dns_response(&resp, id, None)
+            .expect("a truncated response must parse to Ok, not Err");
+        crate::assert_with_log!(parsed.truncated, "TC flag observed", true, parsed.truncated);
+        crate::assert_with_log!(
+            parsed.answers.is_empty(),
+            "no answers parsed from a truncated response",
+            true,
+            parsed.answers.is_empty()
+        );
+
+        crate::test_complete!("parse_dns_response_truncated_does_not_error_on_incomplete_answers");
     }
 
     #[test]

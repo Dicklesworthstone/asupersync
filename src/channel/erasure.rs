@@ -364,6 +364,10 @@ pub fn decode_message_authenticated(
     let config = DecodingConfig {
         symbol_size: header.symbol_size,
         max_block_size: usize::from(source_symbols) * usize::from(header.symbol_size),
+        // Size the per-block accept cap to K via `set_object_params` rather than
+        // the fixed 8192 default, which would reject legitimately-received
+        // symbols (and never decode) for a message with K > 8192 source symbols.
+        max_buffered_symbols: 0,
         ..DecodingConfig::default()
     };
 

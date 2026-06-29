@@ -325,6 +325,13 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
             // strict mode fails closed before decode and ReceiveOutcome can
             // report whether consumed symbols were actually verified.
             verify_auth: false,
+            // Let `set_object_params` size the per-block accept cap to K (via
+            // `configure_auto_buffer_limit`). The fixed default (8192) does NOT
+            // scale with K, so for a valid large-K config (e.g. symbol_size 64,
+            // 1 MiB blocks -> K=16384) it would reject legitimately-received
+            // symbols past 8192 and starve the decoder. Mirrors what the live
+            // QUIC/RQ transports already pass.
+            max_buffered_symbols: 0,
             ..Default::default()
         };
 
