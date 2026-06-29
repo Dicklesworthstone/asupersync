@@ -209,8 +209,9 @@ fn warn_missing_timer_driver_once() {
             "br-asupersync-runtime-cpu-overhaul-5vt09v.3.5: a Sleep was polled with no bound or \
              ambient (Cx) timer driver; routing through the process-global shared fallback timer. \
              Install a timer driver so timers are driven by the runtime's worker/wheel and stay \
-             replay-deterministic in the lab runtime (RuntimeBuilder installs one by default, or \
-             call RuntimeBuilder::enable_time() / Sleep::with_timer_driver(...))."
+             replay-deterministic in the lab runtime: run sleeps inside a runtime task \
+             (RuntimeBuilder installs a wall-clock driver by default and tasks inherit it via Cx), \
+             or build the runtime with RuntimeBuilder::enable_time()."
         );
     }
 }
@@ -2564,24 +2565,28 @@ mod tests {
         crate::test_complete!("off_cx_sleeps_share_one_fallback_thread");
     }
 
-    #[cfg(feature = "runtime-metrics")]
     #[test]
     fn sleep_with_driver_registers_without_spawning_thread() {
         init_test("sleep_with_driver_registers_without_spawning_thread");
         // Positive counterpart to the off-Cx fallback tests: a Sleep polled WITH
-        // a bound timer driver must register on the wheel and spawn ZERO OS
-        // threads. This is the premise of the whole fix — when a driver IS
-        // installed (the normal RuntimeBuilder / enable_time path) there is no
-        // per-Sleep churn (br-asupersync-runtime-cpu-overhaul-5vt09v.3.6).
+        // a bound timer driver must register on that driver's wheel and create
+        // NO per-Sleep fallback OS thread. This is the premise of the whole fix
+        // — when a driver IS installed (the normal RuntimeBuilder / enable_time
+        // path) there is no per-Sleep churn
+        // (br-asupersync-runtime-cpu-overhaul-5vt09v.3.6).
+        //
+        // Both assertions are driver-local / per-Sleep (NOT the process-global
+        // timer_threads_spawned counter), so they stay deterministic under the
+        // parallel test runner — a concurrent test cannot perturb this driver's
+        // pending count or this Sleep's fallback slot.
         let driver = TimerDriverHandle::with_wall_clock();
         let deadline = Time::from_nanos(
             driver.now().as_nanos() + duration_to_nanos(Duration::from_millis(100)),
         );
-        let before = crate::runtime::metrics::snapshot();
         let mut s = Sleep::with_timer_driver(deadline, driver.clone());
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        // First poll registers on the wheel and returns Pending (no thread spawn).
+        // First poll registers on the driver's wheel and returns Pending.
         let first = Pin::new(&mut s).poll(&mut cx);
         crate::assert_with_log!(
             first.is_pending(),
@@ -2589,20 +2594,21 @@ mod tests {
             true,
             first.is_pending()
         );
-        let mid = crate::runtime::metrics::snapshot();
-        let spawned = mid.timer_threads_spawned - before.timer_threads_spawned;
         crate::assert_with_log!(
-            spawned == 0,
-            "driver-backed sleep spawns no OS thread",
-            0u64,
-            spawned
+            driver.pending_count() == 1,
+            "driver-backed sleep registered exactly one timer on the wheel",
+            1usize,
+            driver.pending_count()
         );
-        let registered = mid.timers_registered - before.timers_registered;
+        // The whole point: a driver-backed sleep takes the timer-driver poll
+        // branch and never reaches the no-driver `std::thread::spawn` path, so
+        // its per-Sleep fallback slot stays empty.
+        let no_fallback = s.state.lock().fallback.is_none();
         crate::assert_with_log!(
-            registered >= 1,
-            "driver-backed sleep registered on the wheel",
+            no_fallback,
+            "driver-backed sleep created no per-Sleep fallback thread",
             true,
-            registered >= 1
+            no_fallback
         );
         // Drive it to completion through the (passive) wall-clock driver so the
         // registration is cleaned up and we prove it still fires.
