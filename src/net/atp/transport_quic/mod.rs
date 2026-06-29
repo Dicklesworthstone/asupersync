@@ -311,7 +311,14 @@ const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 /// This is intentionally separate from the DATAGRAM clean-ramp cap: stream
 /// bytes are reliable and authenticated by QUIC/TLS, while lossy DATAGRAM
 /// fountains keep the lower probe cap and AIMD feedback loop.
-#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+///
+/// Reserved for the reliable-source-stream pacing wiring; not yet referenced.
+/// The previous `cfg_attr(not(feature = "tls"), allow(dead_code))` only
+/// suppressed the lint in the default (no-`tls`) build — enabling `tls`
+/// (e.g. via `tls-webpki-roots` for an HTTPS-only consumer that never touches
+/// QUIC) re-exposed it as `deny(dead_code)`. Allow it unconditionally until the
+/// pacing site lands; the attribute becomes a harmless no-op once it is used.
+#[allow(dead_code)]
 pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS: u64 = QUIC_AIMD_MAX_RATE_BPS;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
 const QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = 0.001;
