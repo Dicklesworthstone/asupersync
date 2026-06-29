@@ -565,6 +565,12 @@ impl NativeQuicConnection {
         self.streams.has_pending_stream_frames()
     }
 
+    /// Whether one STREAM has frames queued for packet assembly.
+    #[must_use]
+    pub fn has_pending_stream_frames_for(&self, id: StreamId) -> bool {
+        self.streams.has_pending_stream_frames_for(id)
+    }
+
     /// Number of queued STREAM frames waiting for packet assembly.
     #[must_use]
     pub fn pending_stream_frame_count(&self) -> usize {
@@ -575,6 +581,12 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn pending_stream_data_bytes(&self) -> u64 {
         self.streams.pending_stream_data_bytes()
+    }
+
+    /// Queued STREAM payload bytes waiting for packet assembly on one stream.
+    #[must_use]
+    pub fn pending_stream_data_bytes_for(&self, id: StreamId) -> u64 {
+        self.streams.pending_stream_data_bytes_for(id)
     }
 
     /// Account bytes written to a stream.
@@ -1731,6 +1743,96 @@ impl NativeQuicConnection {
         self.generate_frames_inner(cx, space, max_frame_bytes, false)
     }
 
+    /// Generate only STREAM frames for one application stream.
+    ///
+    /// This is used by ATP's paced source-stream bulk path, where coalescing
+    /// unrelated control STREAM or flow-control frames into the same large packet
+    /// would make the packet NewReno-governed instead of ATP-pacer-governed.
+    pub fn generate_stream_frames_for(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        stream: StreamId,
+        max_frame_bytes: usize,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        if space != PacketNumberSpace::ApplicationData {
+            return Ok(Vec::new());
+        }
+
+        let mut frames = Vec::new();
+        let mut used = 0usize;
+
+        let mut deferred_control = VecDeque::new();
+        while let Some(frame) = self.pending_control_frames.pop_front() {
+            if frame_is_ack_eliciting(&frame) {
+                deferred_control.push_back(frame);
+                continue;
+            }
+            let mut encoded = BytesMut::new();
+            frame.encode(&mut encoded)?;
+            let frame_len = encoded.len();
+            if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
+                deferred_control.push_front(frame);
+                break;
+            }
+            used = used.saturating_add(frame_len);
+            frames.push(frame);
+            if used >= max_frame_bytes {
+                break;
+            }
+        }
+        for frame in deferred_control.into_iter().rev() {
+            self.pending_control_frames.push_front(frame);
+        }
+
+        while used.saturating_add(32) <= max_frame_bytes {
+            let payload_budget = max_frame_bytes.saturating_sub(used).saturating_sub(32);
+            let Some(payload) = self.streams.pop_stream_frame_for(stream, payload_budget) else {
+                break;
+            };
+            let frame = QuicFrame::Stream {
+                stream_id: VarInt::from_u64_unchecked(payload.stream_id.0),
+                offset: (payload.offset != 0).then_some(VarInt::from_u64_unchecked(payload.offset)),
+                data: payload.data.clone(),
+                fin: payload.fin,
+            };
+            let mut encoded = BytesMut::new();
+            frame.encode(&mut encoded)?;
+            let frame_len = encoded.len();
+            if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
+                self.streams
+                    .requeue_unemitted_stream_frame(payload)
+                    .map_err(map_stream_table_error)?;
+                break;
+            }
+            used = used.saturating_add(frame_len);
+            if let QuicFrame::Stream {
+                stream_id,
+                offset,
+                data,
+                fin,
+            } = &frame
+            {
+                self.trace_stream_frame(
+                    cx,
+                    "send",
+                    StreamId(stream_id.value()),
+                    offset.map_or(0, VarInt::value),
+                    data.len(),
+                    *fin,
+                    payload.retransmit,
+                );
+            }
+            frames.push(frame);
+            if used >= max_frame_bytes {
+                break;
+            }
+        }
+
+        Ok(frames)
+    }
+
     fn generate_frames_inner(
         &mut self,
         cx: &Cx,
@@ -2524,6 +2626,10 @@ mod tests {
             conn.has_pending_stream_frames(),
             "queued source bytes must be visible to drain loops"
         );
+        assert!(
+            conn.has_pending_stream_frames_for(stream),
+            "queued source bytes must be visible by stream id"
+        );
         let first = conn
             .generate_frames(&cx, PacketNumberSpace::ApplicationData, 42)
             .expect("first packet")
@@ -2543,6 +2649,81 @@ mod tests {
         assert!(
             !conn.has_pending_stream_frames(),
             "source-stream drain may finish only after queued STREAM frames clear"
+        );
+        assert!(
+            !conn.has_pending_stream_frames_for(stream),
+            "stream-id predicate must clear with the stream queue"
+        );
+    }
+
+    #[test]
+    fn generate_stream_frames_for_drains_only_requested_stream() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let source = conn.open_local_bidi(&cx).expect("source stream");
+        let control = conn.open_local_bidi(&cx).expect("control stream");
+        conn.pending_control_frames.push_back(QuicFrame::Ack {
+            largest_acknowledged: VarInt::from_u64_unchecked(7),
+            ack_delay: VarInt::from_u64_unchecked(0),
+            ack_range_count: VarInt::from_u64_unchecked(0),
+            first_ack_range: VarInt::from_u64_unchecked(0),
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        });
+        conn.pending_control_frames.push_back(QuicFrame::MaxData {
+            maximum_data: VarInt::from_u64_unchecked(4096),
+        });
+        conn.write_stream_bytes(&cx, control, Bytes::from_static(b"control"), true)
+            .expect("queue control stream");
+        conn.write_stream_bytes(&cx, source, Bytes::from_static(b"source"), true)
+            .expect("queue source stream");
+
+        let frames = conn
+            .generate_stream_frames_for(&cx, PacketNumberSpace::ApplicationData, source, 128)
+            .expect("source-only packet");
+        assert!(
+            frames.iter().all(|frame| matches!(
+                frame,
+                QuicFrame::Stream { stream_id, .. } if stream_id.value() == source.0
+            ) || matches!(
+                frame,
+                QuicFrame::Ack { .. } | QuicFrame::Padding { .. }
+            )),
+            "source-only generator must not coalesce other stream or ack-eliciting control frames"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, QuicFrame::Ack { .. })),
+            "source-only generator should still coalesce non-ack-eliciting ACK frames"
+        );
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| matches!(frame, QuicFrame::MaxData { .. })),
+            "source-only generator must defer ack-eliciting control frames"
+        );
+        assert!(!conn.has_pending_stream_frames_for(source));
+        assert!(
+            conn.has_pending_stream_frames_for(control),
+            "control stream must stay queued for the normal generator"
+        );
+
+        let control_frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("control packet");
+        assert!(
+            control_frames
+                .iter()
+                .any(|frame| matches!(frame, QuicFrame::MaxData { .. })),
+            "normal generator should drain deferred ack-eliciting control frames"
+        );
+        assert!(
+            control_frames.iter().any(|frame| matches!(
+                frame,
+                QuicFrame::Stream { stream_id, .. } if stream_id.value() == control.0
+            )),
+            "normal generator should still drain the deferred control stream"
         );
     }
 

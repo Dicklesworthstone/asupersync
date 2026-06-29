@@ -179,6 +179,16 @@ fn authenticated_configs(seed: u64) -> Configs {
     Configs { send, recv }
 }
 
+fn transport_authenticated_configs() -> Configs {
+    let mut send = QuicConfig::default().use_transport_authenticated_symbols();
+    send.client_tls = Some(client_tls());
+    tighten_timeouts(&mut send);
+    let mut recv = QuicConfig::default().use_transport_authenticated_symbols();
+    recv.server_tls = Some(server_tls());
+    tighten_timeouts(&mut recv);
+    Configs { send, recv }
+}
+
 /// Run a full send_path -> receive_on_endpoint transfer over real loopback UDP.
 fn run_transfer(
     send_cfg: QuicConfig,
@@ -287,6 +297,54 @@ fn real_udp_quic_transfer_single_file_authenticated() {
     let committed = dst.path().join("payload.bin");
     assert_eq!(
         std::fs::read(&committed).expect("read committed file"),
+        payload,
+        "committed bytes must match the source"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
+#[test]
+fn real_udp_quic_good_transport_auth_uses_reliable_source_stream() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("good-stream.bin");
+    let payload: Vec<u8> = (0..16384u32)
+        .map(|i| (i.wrapping_mul(19).wrapping_add(7) % 251) as u8)
+        .collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.round0_loss_target = 0.001;
+    cfg.recv.round0_loss_target = 0.001;
+    let (send, recv) = run_transfer(cfg.send, cfg.recv, &source, dst.path());
+
+    let send = send.expect("GOOD transport-auth source stream send_path completes");
+    let recv = recv.expect("GOOD transport-auth source stream receiver commits");
+    assert!(recv.committed, "receiver must commit");
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.files, 1);
+    assert_eq!(recv.files, 1);
+    assert_eq!(send.bytes_sent, payload.len() as u64);
+    assert_eq!(recv.bytes_received, payload.len() as u64);
+    assert!(
+        send.symbols_sent > 0,
+        "GOOD transport-auth transfers should send source bytes on the reliable stream plus a small FEC repair tail"
+    );
+    assert!(
+        recv.symbols_accepted > 0,
+        "receiver should feed source-stream symbols through the RaptorQ decoder"
+    );
+    assert!(
+        recv.decode_count > 0,
+        "source-stream bytes should complete through the block decoder before commit"
+    );
+    assert_eq!(
+        recv.feedback_rounds, 0,
+        "GOOD transport-auth source-stream transfer should not need fountain repair"
+    );
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(
+        std::fs::read(dst.path().join("good-stream.bin")).expect("read committed"),
         payload,
         "committed bytes must match the source"
     );

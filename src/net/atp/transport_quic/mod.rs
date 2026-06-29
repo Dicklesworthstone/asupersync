@@ -329,6 +329,8 @@ const QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS: u64 = 6 * 1024 * 1024;
 const QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS: u64 = 1152 * 1024;
 const QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN: f64 = 0.010;
 const QUIC_RATE_MATCHED_BROKEN_LINK_LOSS_MIN: f64 = 0.030;
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+const QUIC_AIMD_LOSS_TARGET_DECREASE_MARGIN: f64 = 0.030;
 const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
@@ -1125,6 +1127,33 @@ fn quic_default_path_rate_limit_bps(path: &QuicPathSignalSample) -> Option<u64> 
     } else {
         None
     }
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) fn quic_loss_target_pacing_cap_bps(config: &QuicConfig) -> Option<u64> {
+    let loss = config.round0_loss_target;
+    if !loss.is_finite() {
+        return None;
+    }
+    if loss > QUIC_RATE_MATCHED_BROKEN_LINK_LOSS_MIN {
+        Some(QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS)
+    } else if loss >= QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN {
+        Some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
+    } else {
+        None
+    }
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) fn quic_aimd_loss_decrease_threshold(config: &QuicConfig) -> f64 {
+    let expected_loss = if quic_loss_target_pacing_cap_bps(config).is_some() {
+        config.round0_loss_target
+    } else {
+        0.0
+    };
+    (expected_loss + QUIC_AIMD_LOSS_TARGET_DECREASE_MARGIN)
+        .max(QUIC_AIMD_LOSS_DECREASE_THRESHOLD)
+        .clamp(0.0, 0.90)
 }
 
 /// Bound the configured QUIC DATAGRAM fan-out by connection and CPU capacity.
@@ -2100,6 +2129,22 @@ struct QuicNeedMore {
     /// Gap between the requested repair symbols and the loss-compensated target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repair_request_gap_to_target_symbols: Option<u64>,
+    /// Aggregate decoder rank across pending entries after this round.
+    ///
+    /// Unlike `round_symbols_observed`, this is confirmed useful progress. The
+    /// native sender uses rank deltas as the lossy datagram congestion signal
+    /// when receiver arrival loss is blind to queue overflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_rank: Option<u64>,
+    /// Aggregate rank columns (`rank + rank_deficit`) across pending blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_rank_columns: Option<u64>,
+    /// Aggregate rank deficit across pending blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_rank_deficit: Option<u64>,
+    /// Decode jobs still in flight when the feedback was generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_decode_jobs: Option<u64>,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -2754,6 +2799,57 @@ fn quic_pending_decode_jobs(decoders: &[QuicEntryDecoder]) -> usize {
         .iter()
         .map(|decoder| decoder.pending_decodes.len())
         .sum()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct QuicPendingDecodeProgress {
+    pending_decode_jobs: u64,
+    rank: u64,
+    rank_columns: u64,
+    rank_deficit: u64,
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn quic_pending_decode_progress(
+    decoders: &[QuicEntryDecoder],
+    pending: &[u32],
+    config: &QuicConfig,
+) -> QuicPendingDecodeProgress {
+    let mut progress = QuicPendingDecodeProgress::default();
+    for decoder in decoders
+        .iter()
+        .filter(|decoder| pending.contains(&decoder.index))
+    {
+        progress.pending_decode_jobs = progress
+            .pending_decode_jobs
+            .saturating_add(usize_to_u64_saturating(decoder.pending_decodes.len()));
+        let Some(pipeline) = decoder.pipeline.as_ref() else {
+            continue;
+        };
+        for block_index in 0..quic_decoder_block_count(decoder, config) {
+            let Some(sbn) = u8::try_from(block_index).ok() else {
+                continue;
+            };
+            let Some(status) = pipeline.block_status(sbn) else {
+                continue;
+            };
+            let Some(rank) = status.rank else {
+                continue;
+            };
+            let deficit = status.rank_deficit.unwrap_or(0);
+            progress.rank = progress.rank.saturating_add(usize_to_u64_saturating(rank));
+            progress.rank_columns = progress.rank_columns.saturating_add(
+                usize_to_u64_saturating(rank).saturating_add(usize_to_u64_saturating(deficit)),
+            );
+            progress.rank_deficit = progress
+                .rank_deficit
+                .saturating_add(usize_to_u64_saturating(deficit));
+        }
+    }
+    progress
 }
 
 fn quic_block_decode_pending(decoder: &QuicEntryDecoder, block_sbn: u8) -> bool {
@@ -7650,6 +7746,7 @@ async fn receive_native_symbol_round(
     } else {
         Vec::new()
     };
+    let progress = quic_pending_decode_progress(decoders, &pending, config);
     let need = QuicNeedMore {
         feedback_round: round,
         pending,
@@ -7663,6 +7760,10 @@ async fn receive_native_symbol_round(
             repair_accounting.loss_compensated_target_symbols,
         ),
         repair_request_gap_to_target_symbols: Some(repair_accounting.request_gap_to_target_symbols),
+        pending_rank: Some(progress.rank),
+        pending_rank_columns: Some(progress.rank_columns),
+        pending_rank_deficit: Some(progress.rank_deficit),
+        pending_decode_jobs: Some(progress.pending_decode_jobs),
     };
     let pending_count = need.pending.len().to_string();
     let block_request_count = need.repair_blocks.len().to_string();
@@ -12115,6 +12216,7 @@ mod tests {
             repair_base_deficit_symbols: None,
             repair_loss_compensated_target_symbols: None,
             repair_request_gap_to_target_symbols: None,
+            ..QuicNeedMore::default()
         };
         send_need_more(&cx, &mut server, &mut receiver_control, &second)
             .expect("send second need-more");

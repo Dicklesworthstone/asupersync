@@ -48,7 +48,7 @@
 //! recovery remains out of scope for this pump. Deterministic symbol loss for
 //! tests is injected before a symbol is sprayed ([`QuicConfig::debug_drop_one_in`]).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,7 +63,10 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
-use crate::net::atp::datagram::congestion::{CongestionConfig, CongestionController};
+use crate::net::atp::datagram::congestion::{
+    CongestionConfig, CongestionController, DatagramRateConfig, DatagramRateController,
+    DatagramRateDecision, DatagramRateSample,
+};
 use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{
@@ -81,15 +84,15 @@ use crate::net::quic_native::tls::{
     RustlsQuicCryptoProvider, TranscriptHash,
 };
 use crate::net::quic_native::{
-    DEFAULT_MAX_PACKET_BYTES, NativeQuicConnection, NativeQuicConnectionConfig,
+    AckRange as NativeAckRange, NativeQuicConnection, NativeQuicConnectionConfig,
     NativeQuicConnectionError, OutgoingPacket, PacketNumberSpace, QuicTransportMachine,
     QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket, StreamId, StreamRole, StreamTableError,
 };
 use crate::net::{UDP_MAX_GSO_SEGMENTS, UdpSendBatchStrategy};
-use crate::security::SecurityContext;
 use crate::security::tag::TAG_SIZE;
+use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::outcome::Outcome;
-use crate::types::symbol::Symbol;
+use crate::types::symbol::{Symbol, SymbolId, SymbolKind};
 
 use super::{
     NativeQuicFrameTransport, QuicBlockRepairRequest, QuicConfig, QuicControlReply,
@@ -287,12 +290,25 @@ const INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
 /// tail observed at the 2400-byte floor.
 const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 48;
 /// Bytes of source STREAM payload queued before giving the socket pump a turn.
-/// This keeps clean-stream sends from filling QUIC recovery cwnd and then
-/// failing closed before ACKs can advance the window.
-const QUIC_SOURCE_STREAM_FLUSH_BYTES: u64 = 32 * 1024;
+/// GOOD source-stream sends stay inside the native QUIC packet envelope: larger
+/// packets amplified loss tails on shaped netns links, while this envelope keeps
+/// the repair tail small and avoids IP fragmentation.
+const QUIC_SOURCE_STREAM_FLUSH_BYTES: u64 = 512 * 1024;
+const QUIC_SOURCE_STREAM_PACKET_BYTES: usize = 8 * 1024;
+const QUIC_SOURCE_STREAM_REPAIR_LOSS_MULTIPLIER: f64 = 4.0;
 
 fn source_stream_max_frame_bytes() -> usize {
-    one_rtt_max_payload_for_udp_packet(DEFAULT_MAX_PACKET_BYTES).max(1)
+    one_rtt_max_payload_for_udp_packet(QUIC_SOURCE_STREAM_PACKET_BYTES).max(1)
+}
+
+fn source_stream_pacing_interval(frame_bytes: usize, pacing_rate_bps: u64) -> Duration {
+    let bytes = u128::try_from(frame_bytes.max(1)).unwrap_or(u128::MAX);
+    let rate = u128::from(pacing_rate_bps.max(1));
+    let nanos = bytes
+        .saturating_mul(1_000_000_000)
+        .saturating_add(rate.saturating_sub(1))
+        / rate;
+    Duration::from_nanos(u64::try_from(nanos.max(1)).unwrap_or(u64::MAX))
 }
 
 /// Control-plane PTO. When the receiver is awaiting repair after a NeedMore and the link goes idle,
@@ -301,6 +317,14 @@ fn source_stream_max_frame_bytes() -> usize {
 /// otherwise deadlocks both sides until the full idle timeout. Re-send the NeedMore on this interval
 /// instead; this is what lets cross-machine transfers converge through control-frame loss.
 const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
+/// Fast retry cadence for GOOD-regime source STREAM recovery. This is scoped
+/// away from NeedMore/fountain control so lossy DATAGRAM convergence keeps its
+/// conservative round-boundary behavior.
+const SOURCE_STREAM_PTO: Duration = Duration::from_millis(200);
+const QUIC_LOSS_TARGET_PROGRESS_STALL_RATIO: f64 = 0.50;
+const QUIC_LOSS_TARGET_PROGRESS_LOSS_MARGIN: f64 = 0.01;
+const QUIC_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM: f64 = 1.25;
+const QUIC_STILL_VIABLE_FEEDBACK_GRACE_ROUNDS: u32 = 8;
 /// Bounded terminal Proof retransmits. This uses STREAM-offset requeue, not a
 /// duplicate higher-offset Proof, so it fills the receiver->sender stream gap
 /// that otherwise leaves the sender waiting until its idle timeout.
@@ -572,7 +596,8 @@ fn next_feedback_round_or_no_convergence(
     max_feedback_rounds: u32,
     pending_entries: usize,
 ) -> Result<u32, QuicTransportError> {
-    if pending_entries > 0 && feedback_rounds >= max_feedback_rounds {
+    let fail_closed_rounds = still_viable_feedback_fail_closed_rounds(max_feedback_rounds);
+    if pending_entries > 0 && feedback_rounds >= fail_closed_rounds {
         return Err(QuicTransportError::NoConvergence {
             rounds: feedback_rounds,
             pending: pending_entries,
@@ -585,6 +610,109 @@ fn next_feedback_round_or_no_convergence(
 struct SentControlStreamFrame {
     stream: StreamId,
     offset: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ReceivedSourceStreamFrame {
+    offset: u64,
+    data: Bytes,
+    fin: bool,
+}
+
+fn acked_packet_ranges_from_frames(
+    frames: &[QuicFrame],
+) -> Result<Vec<NativeAckRange>, NativeQuicConnectionError> {
+    let mut ranges = Vec::new();
+    for frame in frames {
+        if let QuicFrame::Ack {
+            largest_acknowledged,
+            first_ack_range,
+            ack_ranges,
+            ..
+        } = frame
+        {
+            ranges.extend(ack_frame_packet_ranges(
+                largest_acknowledged.value(),
+                first_ack_range.value(),
+                ack_ranges,
+            )?);
+        }
+    }
+    Ok(ranges)
+}
+
+fn ack_frame_packet_ranges(
+    largest_acknowledged: u64,
+    first_ack_range: u64,
+    ack_ranges: &[crate::net::atp::protocol::quic_frames::AckRange],
+) -> Result<Vec<NativeAckRange>, NativeQuicConnectionError> {
+    let first_smallest = largest_acknowledged.checked_sub(first_ack_range).ok_or(
+        NativeQuicConnectionError::InvalidState("ACK first range exceeds largest packet number"),
+    )?;
+    let mut ranges = vec![
+        NativeAckRange::new(largest_acknowledged, first_smallest).ok_or(
+            NativeQuicConnectionError::InvalidState("invalid ACK first range"),
+        )?,
+    ];
+    let mut previous_smallest = first_smallest;
+
+    for range in ack_ranges {
+        let next_largest = previous_smallest
+            .checked_sub(range.gap.value().saturating_add(2))
+            .ok_or(NativeQuicConnectionError::InvalidState(
+                "ACK range gap underflowed packet number space",
+            ))?;
+        let next_smallest = next_largest
+            .checked_sub(range.ack_range_length.value())
+            .ok_or(NativeQuicConnectionError::InvalidState(
+                "ACK range length exceeds largest packet number",
+            ))?;
+        ranges.push(
+            NativeAckRange::new(next_largest, next_smallest)
+                .ok_or(NativeQuicConnectionError::InvalidState("invalid ACK range"))?,
+        );
+        previous_smallest = next_smallest;
+    }
+
+    Ok(ranges)
+}
+
+fn packet_in_ack_ranges(packet_number: u64, ranges: &[NativeAckRange]) -> bool {
+    ranges
+        .iter()
+        .any(|range| packet_number >= range.smallest && packet_number <= range.largest)
+}
+
+const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_PACKET_THRESHOLD: u64 = 3;
+const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 4;
+const QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES: usize = 4;
+
+fn packet_lost_by_ack_gap(packet_number: u64, acked_ranges: &[NativeAckRange]) -> bool {
+    let Some(largest_acked) = acked_ranges.iter().map(|range| range.largest).max() else {
+        return false;
+    };
+    packet_number.saturating_add(QUIC_SOURCE_STREAM_FAST_RETRANSMIT_PACKET_THRESHOLD)
+        <= largest_acked
+        && !packet_in_ack_ranges(packet_number, acked_ranges)
+}
+
+fn dedup_stream_frames_for_retransmit(
+    mut frames: Vec<SentControlStreamFrame>,
+) -> Vec<SentControlStreamFrame> {
+    frames.sort_by_key(|frame| (frame.stream.0, frame.offset));
+    frames.dedup();
+    frames
+}
+
+fn tail_stream_frames_for_retransmit(
+    frames: &[SentControlStreamFrame],
+    max_frames: usize,
+) -> Vec<SentControlStreamFrame> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let start = frames.len().saturating_sub(max_frames.max(1));
+    dedup_stream_frames_for_retransmit(frames[start..].to_vec())
 }
 
 struct NativeQuicSpraySymbol {
@@ -619,7 +747,8 @@ fn feedback_round_for_need_or_no_convergence(
     } else {
         requested_feedback_round
     };
-    if pending_entries > 0 && response_feedback_round > max_feedback_rounds {
+    let fail_closed_rounds = still_viable_feedback_fail_closed_rounds(max_feedback_rounds);
+    if pending_entries > 0 && response_feedback_round > fail_closed_rounds {
         return Err(QuicTransportError::NoConvergence {
             rounds: feedback_rounds,
             pending: pending_entries,
@@ -629,6 +758,10 @@ fn feedback_round_for_need_or_no_convergence(
         feedback_rounds.max(response_feedback_round),
         response_feedback_round,
     ))
+}
+
+fn still_viable_feedback_fail_closed_rounds(max_feedback_rounds: u32) -> u32 {
+    max_feedback_rounds.saturating_add(QUIC_STILL_VIABLE_FEEDBACK_GRACE_ROUNDS)
 }
 
 fn send_native_object_complete_for_round(
@@ -1078,8 +1211,33 @@ fn data_plane_packet_uses_paced_recovery(frames: &[QuicFrame]) -> bool {
     frames_have_datagram(frames) && !frames_require_quic_recovery_in_flight(frames)
 }
 
-fn data_plane_packet_tracks_recovery_in_flight(frames: &[QuicFrame]) -> bool {
-    !data_plane_packet_uses_paced_recovery(frames)
+fn source_stream_packet_uses_paced_recovery(
+    frames: &[QuicFrame],
+    source_stream: Option<StreamId>,
+) -> bool {
+    let Some(source_stream) = source_stream else {
+        return false;
+    };
+    let mut has_source_stream_data = false;
+    for frame in frames {
+        match frame {
+            QuicFrame::Stream { stream_id, .. } if stream_id.value() == source_stream.0 => {
+                has_source_stream_data = true;
+            }
+            frame if frame_is_ack_eliciting_for_recovery(frame) => return false,
+            _ => {}
+        }
+    }
+    has_source_stream_data
+}
+
+fn packet_uses_paced_recovery(frames: &[QuicFrame], source_stream: Option<StreamId>) -> bool {
+    data_plane_packet_uses_paced_recovery(frames)
+        || source_stream_packet_uses_paced_recovery(frames, source_stream)
+}
+
+fn packet_tracks_recovery_in_flight(frames: &[QuicFrame], source_stream: Option<StreamId>) -> bool {
+    !packet_uses_paced_recovery(frames, source_stream)
         && frames.iter().any(frame_is_ack_eliciting_for_recovery)
 }
 
@@ -1185,6 +1343,25 @@ fn trace_quic_data_plane_pacer_limited(
     );
 }
 
+fn promote_source_stream_pacing(
+    pacing: &mut QuicSprayPacingDecision,
+    config: &QuicConfig,
+    symbol_datagram_frame_len: usize,
+) {
+    if config.bwlimit_bps.is_none() && super::quic_near_clean_source_stream_enabled(config, pacing)
+    {
+        let max_rate = super::QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS;
+        if pacing.pacing_rate_bps < max_rate {
+            pacing.pacing_rate_bps = max_rate;
+            super::update_quic_pacing_pause(
+                pacing,
+                symbol_datagram_frame_len,
+                config.max_spray_symbols_per_flush,
+            );
+        }
+    }
+}
+
 fn queued_fountain_feedback_count(pending: &VecDeque<Frame>) -> usize {
     pending
         .iter()
@@ -1253,6 +1430,9 @@ struct NativeDataPlanePacer {
     controller: CongestionController,
     symbol_frame_bytes: u32,
     pacing_rate_bps: u64,
+    byte_pacer_next_send_at: Option<Instant>,
+    byte_pacer_burst_bytes: usize,
+    byte_pacer_burst_remaining: usize,
 }
 
 impl NativeDataPlanePacer {
@@ -1264,6 +1444,9 @@ impl NativeDataPlanePacer {
             controller: CongestionController::new(CongestionConfig::default()),
             symbol_frame_bytes,
             pacing_rate_bps: rate_bytes_per_sec.max(1),
+            byte_pacer_next_send_at: None,
+            byte_pacer_burst_bytes: symbol_frame_len.max(1).saturating_mul(burst_symbols.max(1)),
+            byte_pacer_burst_remaining: 0,
         };
         pacer.controller.configure_for_path_rate(
             pacer.pacing_rate_bps.saturating_mul(8).max(1),
@@ -1275,6 +1458,13 @@ impl NativeDataPlanePacer {
 
     fn configure(&mut self, pacing: &QuicSprayPacingDecision) {
         self.pacing_rate_bps = pacing.pacing_rate_bps.max(1);
+        self.byte_pacer_next_send_at = None;
+        let symbol_frame_bytes = usize::try_from(self.symbol_frame_bytes)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        self.byte_pacer_burst_bytes =
+            symbol_frame_bytes.saturating_mul(pacing.max_burst_symbols.max(1));
+        self.byte_pacer_burst_remaining = 0;
         self.controller.configure_for_path_rate(
             self.pacing_rate_bps.saturating_mul(8).max(1),
             self.symbol_frame_bytes,
@@ -1284,6 +1474,31 @@ impl NativeDataPlanePacer {
             data_plane_pacer_rtt(pacing),
             pacing.congestion_loss_rate > 0.0,
         );
+    }
+
+    fn configure_with_shared_decision(
+        &mut self,
+        pacing: &QuicSprayPacingDecision,
+        shared_decision: Option<DatagramRateDecision>,
+    ) {
+        self.configure(pacing);
+        if let Some(decision) = shared_decision {
+            self.controller.configure_from_rate_decision(
+                decision,
+                self.symbol_frame_bytes,
+                u32::try_from(pacing.max_burst_symbols.max(1)).unwrap_or(u32::MAX),
+            );
+        }
+    }
+
+    fn configure_source_stream(&mut self, pacing: &QuicSprayPacingDecision) {
+        self.configure(pacing);
+        self.byte_pacer_burst_bytes = self
+            .byte_pacer_burst_bytes
+            .max(source_stream_max_frame_bytes())
+            .max(usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap_or(usize::MAX));
+        self.byte_pacer_burst_remaining = 0;
+        self.byte_pacer_next_send_at = None;
     }
 
     async fn before_send(
@@ -1313,6 +1528,52 @@ impl NativeDataPlanePacer {
             crate::time::sleep(cx.now(), wait).await;
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         }
+    }
+
+    async fn before_send_bytes(
+        &mut self,
+        cx: &Cx,
+        frame_bytes: usize,
+        pending_datagrams: usize,
+        bytes_in_flight: u64,
+        congestion_window: u64,
+    ) -> Result<(), QuicTransportError> {
+        while let Some(next_send_at) = self.byte_pacer_next_send_at {
+            let now = Instant::now();
+            if now >= next_send_at {
+                break;
+            }
+            let wait = next_send_at.duration_since(now).clamp(
+                QUIC_DATA_PLANE_PACER_MIN_PAUSE,
+                QUIC_DATA_PLANE_PACER_MAX_PAUSE,
+            );
+            trace_quic_data_plane_pacer_limited(
+                cx,
+                pending_datagrams,
+                wait,
+                self.pacing_rate_bps,
+                bytes_in_flight,
+                congestion_window,
+            );
+            crate::time::sleep(cx.now(), wait).await;
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        }
+
+        let now = Instant::now();
+        let pacer_bytes = frame_bytes.max(1);
+        if self.byte_pacer_burst_remaining == 0 {
+            self.byte_pacer_burst_remaining = self.byte_pacer_burst_bytes.max(pacer_bytes);
+        }
+        self.byte_pacer_burst_remaining =
+            self.byte_pacer_burst_remaining.saturating_sub(pacer_bytes);
+        if self.byte_pacer_burst_remaining == 0 {
+            let interval = source_stream_pacing_interval(
+                self.byte_pacer_burst_bytes.max(pacer_bytes),
+                self.pacing_rate_bps,
+            );
+            self.byte_pacer_next_send_at = Some(now.checked_add(interval).unwrap_or(now));
+        }
+        Ok(())
     }
 }
 
@@ -1467,6 +1728,10 @@ pub struct QuicLink {
     beacons: BeaconScheduler,
     pending_control_frames: VecDeque<Frame>,
     last_flushed_stream_frames: Vec<SentControlStreamFrame>,
+    in_flight_stream_frames: BTreeMap<u64, Vec<SentControlStreamFrame>>,
+    latest_stream_ack_ranges: Vec<NativeAckRange>,
+    received_source_stream_frames: VecDeque<ReceivedSourceStreamFrame>,
+    paced_source_stream: Option<StreamId>,
     udp_packets_received: u64,
     one_rtt_packets_ingested: u64,
     non_one_rtt_packets_dropped: u64,
@@ -2003,7 +2268,7 @@ impl QuicLink {
         operation: &'static str,
     ) -> Result<usize, QuicTransportError> {
         let mut total_flushed = 0usize;
-        let mut idle_waits = 0usize;
+        let mut last_progress = Instant::now();
 
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -2021,16 +2286,19 @@ impl QuicLink {
             let pumped = self.pump_inbound_for(cx, NEEDMORE_PTO).await?;
             self.service_decoded_spray_liveness(cx, control).await?;
             let after = self.conn.pending_outbound_datagram_count();
-            if flushed == 0 && pumped == 0 && after >= before {
-                idle_waits = idle_waits.saturating_add(1);
-                if idle_waits >= 2 {
+            if flushed > 0 || pumped > 0 || after < before {
+                last_progress = Instant::now();
+            } else {
+                self.release_expired_data_plane_loss(cx, after)?;
+                if self.conn.pending_outbound_datagram_count() == 0 {
+                    return Ok(total_flushed);
+                }
+                if last_progress.elapsed() >= self.idle_timeout {
                     return Err(QuicTransportError::Timeout {
                         operation,
-                        timeout: NEEDMORE_PTO.saturating_mul(2),
+                        timeout: self.idle_timeout,
                     });
                 }
-            } else {
-                idle_waits = 0;
             }
         }
     }
@@ -2173,6 +2441,7 @@ impl QuicLink {
             packet_number: u64,
             header: [u8; ONE_RTT_HEADER_LEN],
             payload: BytesMut,
+            stream_frames: Vec<SentControlStreamFrame>,
         }
 
         let pending_before_flush = self.conn.pending_outbound_datagram_count();
@@ -2205,8 +2474,15 @@ impl QuicLink {
                     self.max_app_payload,
                 )
             };
-            let max_frame_bytes = if pending_datagrams == 0 && self.conn.has_pending_stream_frames()
-            {
+            let paced_source_stream_pending = pending_datagrams == 0
+                && self
+                    .paced_source_stream
+                    .is_some_and(|stream| self.conn.has_pending_stream_frames_for(stream));
+            let max_frame_bytes = if paced_source_stream_pending {
+                admission
+                    .max_frame_bytes
+                    .min(source_stream_max_frame_bytes())
+            } else if pending_datagrams == 0 && self.conn.has_pending_stream_frames() {
                 let transport = self.conn.transport();
                 let available = transport
                     .congestion_window_bytes()
@@ -2229,14 +2505,48 @@ impl QuicLink {
             if max_frame_bytes == 0 {
                 break;
             }
-            let frames = self.conn.generate_frames(
-                cx,
-                PacketNumberSpace::ApplicationData,
-                max_frame_bytes,
-            )?;
+            if paced_source_stream_pending {
+                let source_stream = self
+                    .paced_source_stream
+                    .expect("paced source stream checked above");
+                let frame_bytes =
+                    usize::try_from(self.conn.pending_stream_data_bytes_for(source_stream))
+                        .unwrap_or(usize::MAX)
+                        .min(max_frame_bytes)
+                        .max(1);
+                let bytes_in_flight = self.conn.transport().bytes_in_flight();
+                let congestion_window = self.conn.transport().congestion_window_bytes();
+                self.data_plane_pacer
+                    .before_send_bytes(
+                        cx,
+                        frame_bytes,
+                        self.conn.pending_stream_frame_count(),
+                        bytes_in_flight,
+                        congestion_window,
+                    )
+                    .await?;
+            }
+            let frames = if paced_source_stream_pending {
+                let source_stream = self
+                    .paced_source_stream
+                    .expect("paced source stream checked above");
+                self.conn.generate_stream_frames_for(
+                    cx,
+                    PacketNumberSpace::ApplicationData,
+                    source_stream,
+                    max_frame_bytes,
+                )?
+            } else {
+                self.conn.generate_frames(
+                    cx,
+                    PacketNumberSpace::ApplicationData,
+                    max_frame_bytes,
+                )?
+            };
             if frames.is_empty() {
                 break;
             }
+            let mut packet_stream_frames = Vec::new();
             for frame in &frames {
                 if let crate::net::atp::protocol::quic_frames::QuicFrame::Stream {
                     stream_id,
@@ -2244,10 +2554,12 @@ impl QuicLink {
                     ..
                 } = frame
                 {
-                    flushed_stream_frames.push(SentControlStreamFrame {
+                    let stream_frame = SentControlStreamFrame {
                         stream: StreamId(stream_id.value()),
                         offset: offset.map_or(0, |offset| offset.value()),
-                    });
+                    };
+                    flushed_stream_frames.push(stream_frame);
+                    packet_stream_frames.push(stream_frame);
                 }
             }
             let packet_datagram_frames = frames
@@ -2267,14 +2579,16 @@ impl QuicLink {
             let packet_number = if self.role == StreamRole::Client {
                 self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
                 let ack_eliciting = frames.iter().any(frame_is_ack_eliciting_for_recovery);
-                let uses_paced_data_plane = data_plane_packet_uses_paced_recovery(&frames);
-                let tracks_quic_recovery = data_plane_packet_tracks_recovery_in_flight(&frames);
-                let accounting_bytes = if uses_paced_data_plane {
+                let uses_paced_recovery =
+                    packet_uses_paced_recovery(&frames, self.paced_source_stream);
+                let tracks_quic_recovery =
+                    packet_tracks_recovery_in_flight(&frames, self.paced_source_stream);
+                let accounting_bytes = if uses_paced_recovery {
                     data_plane_packet_accounting_bytes(packet_len)
                 } else {
                     u64::try_from(packet_len).unwrap_or(u64::MAX).max(1)
                 };
-                let packet_number = if uses_paced_data_plane {
+                let packet_number = if uses_paced_recovery {
                     self.conn.on_packet_sent(
                         cx,
                         PacketNumberSpace::ApplicationData,
@@ -2309,6 +2623,7 @@ impl QuicLink {
                 packet_number,
                 header,
                 payload,
+                stream_frames: packet_stream_frames,
             });
         }
         let generate_elapsed = generate_started.elapsed();
@@ -2370,6 +2685,12 @@ impl QuicLink {
                     report.packets_processed, count
                 )));
             }
+            for plain in &plain_packets {
+                if !plain.stream_frames.is_empty() {
+                    self.in_flight_stream_frames
+                        .insert(plain.packet_number, plain.stream_frames.clone());
+                }
+            }
             trace_quic_flush_coalescing(
                 cx,
                 count,
@@ -2398,6 +2719,90 @@ impl QuicLink {
 
     fn last_flushed_stream_frames(&self) -> Vec<SentControlStreamFrame> {
         self.last_flushed_stream_frames.clone()
+    }
+
+    fn record_received_source_stream_frames(&mut self, frames: &[QuicFrame]) {
+        let Some(source_stream) = self.paced_source_stream else {
+            return;
+        };
+
+        for frame in frames {
+            let QuicFrame::Stream {
+                stream_id,
+                offset,
+                data,
+                fin,
+            } = frame
+            else {
+                continue;
+            };
+            if stream_id.value() != source_stream.0 || (data.is_empty() && !*fin) {
+                continue;
+            }
+            self.received_source_stream_frames
+                .push_back(ReceivedSourceStreamFrame {
+                    offset: offset.map_or(0, |offset| offset.value()),
+                    data: data.clone(),
+                    fin: *fin,
+                });
+        }
+    }
+
+    fn drain_received_source_stream_frames(&mut self) -> Vec<ReceivedSourceStreamFrame> {
+        self.received_source_stream_frames.drain(..).collect()
+    }
+
+    fn apply_source_stream_ack_ranges(
+        &mut self,
+        cx: &Cx,
+        acked_ranges: &[NativeAckRange],
+    ) -> Result<(usize, usize), QuicTransportError> {
+        let _ = cx;
+        if acked_ranges.is_empty() || self.in_flight_stream_frames.is_empty() {
+            return Ok((0, 0));
+        }
+        self.latest_stream_ack_ranges = acked_ranges.to_vec();
+        let before = self.in_flight_stream_frames.len();
+        self.in_flight_stream_frames
+            .retain(|packet_number, _frames| !packet_in_ack_ranges(*packet_number, acked_ranges));
+        let removed = before.saturating_sub(self.in_flight_stream_frames.len());
+        Ok((removed, 0))
+    }
+
+    fn drain_ack_gap_lost_stream_frames_for_retransmit(
+        &mut self,
+        acked_ranges: &[NativeAckRange],
+    ) -> Vec<SentControlStreamFrame> {
+        if acked_ranges.is_empty() || self.in_flight_stream_frames.is_empty() {
+            return Vec::new();
+        }
+
+        let mut retained = BTreeMap::new();
+        let mut lost = Vec::new();
+        let mut lost_packets = 0usize;
+        for (packet_number, frames) in std::mem::take(&mut self.in_flight_stream_frames) {
+            if lost_packets < QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS
+                && packet_lost_by_ack_gap(packet_number, acked_ranges)
+            {
+                lost_packets = lost_packets.saturating_add(1);
+                lost.extend(frames);
+            } else {
+                retained.insert(packet_number, frames);
+            }
+        }
+        self.in_flight_stream_frames = retained;
+        dedup_stream_frames_for_retransmit(lost)
+    }
+
+    fn drain_in_flight_stream_frames_for_retransmit(&mut self) -> Vec<SentControlStreamFrame> {
+        if self.in_flight_stream_frames.is_empty() {
+            return Vec::new();
+        }
+        let frames = std::mem::take(&mut self.in_flight_stream_frames)
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        dedup_stream_frames_for_retransmit(frames)
     }
 
     fn pending_fountain_feedback_count(&self) -> usize {
@@ -2431,6 +2836,12 @@ impl QuicLink {
                 ("stream_frames", frames_s.as_str()),
                 ("packets", packets_s.as_str()),
             ],
+        );
+        quic_rqtrace!(
+            "sender: stream_retransmit reason={} stream_frames={} packets={}",
+            reason,
+            frames.len(),
+            retransmitted
         );
         Ok(retransmitted)
     }
@@ -2466,6 +2877,8 @@ impl QuicLink {
             self.mark_peer_activity();
             return Ok(false);
         }
+        let decoded_frames = NativeQuicConnection::decode_frames(plaintext)?;
+        let acked_stream_ranges = acked_packet_ranges_from_frames(&decoded_frames)?;
         self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
         match self.conn.process_packet_payload(
             cx,
@@ -2475,6 +2888,8 @@ impl QuicLink {
             self.clock,
         ) {
             Ok(()) => {
+                self.apply_source_stream_ack_ranges(cx, &acked_stream_ranges)?;
+                self.record_received_source_stream_frames(&decoded_frames);
                 self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
                 self.mark_peer_activity();
                 Ok(true)
@@ -2754,6 +3169,7 @@ impl QuicLink {
         &self,
         config: &QuicConfig,
         aimd_cap_bps: Option<u64>,
+        shared_decision: Option<DatagramRateDecision>,
         observed_loss: f64,
     ) -> QuicSprayPacingDecision {
         let mut config = config.clone();
@@ -2761,7 +3177,20 @@ impl QuicLink {
             config.bwlimit_bps = Some(config.bwlimit_bps.map_or(cap, |existing| existing.min(cap)));
         }
         let path = native_quic_path_signal_with_observed_loss(self.conn.transport(), observed_loss);
-        super::quic_spray_pacing_decision_from_config(&config, path)
+        let mut pacing = super::quic_spray_pacing_decision_from_config(&config, path);
+        NativeQuicAimdPacer::apply_shared_decision_to_pacing(
+            shared_decision,
+            &mut pacing,
+            self.symbol_datagram_frame_len,
+            &config,
+        );
+        pacing
+    }
+
+    fn source_stream_pacing_decision(&self, config: &QuicConfig) -> QuicSprayPacingDecision {
+        let mut pacing = self.spray_pacing_decision(config, None, None, config.round0_loss_target);
+        promote_source_stream_pacing(&mut pacing, config, self.symbol_datagram_frame_len);
+        pacing
     }
 
     fn spray_handoff_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
@@ -2816,6 +3245,7 @@ impl QuicLink {
         tag: u64,
         symbols: &[NativeQuicSpraySymbol],
         pacing: &QuicSprayPacingDecision,
+        shared_decision: Option<DatagramRateDecision>,
     ) -> Result<(), QuicTransportError> {
         if symbols.is_empty() {
             return Ok(());
@@ -2823,7 +3253,8 @@ impl QuicLink {
 
         let trace_start = Instant::now();
         self.update_spray_packet_coalescing(pacing);
-        self.data_plane_pacer.configure(pacing);
+        self.data_plane_pacer
+            .configure_with_shared_decision(pacing, shared_decision);
         let flush_symbols = self.paced_flush_symbol_limit(pacing);
         let mut flushes = 0usize;
         let mut flushed_packets = 0usize;
@@ -3036,12 +3467,18 @@ impl QuicLink {
         frames: &[SentControlStreamFrame],
         reason: &'static str,
     ) -> Result<Frame, QuicTransportError> {
-        if frames.is_empty() {
+        if frames.is_empty() && self.in_flight_stream_frames.is_empty() {
             return self.next_control_frame(cx, control, operation).await;
         }
 
         let max_attempts = needmore_pto_attempt_budget(self.idle_timeout);
+        let pto = if reason == "source_stream_completion_pto" {
+            SOURCE_STREAM_PTO
+        } else {
+            NEEDMORE_PTO
+        };
         let mut attempts = 0u32;
+        let mut last_retransmit = Instant::now();
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             if let Some(frame) = self.pending_control_frames.pop_front() {
@@ -3051,9 +3488,23 @@ impl QuicLink {
                 return Ok(frame);
             }
             self.flush(cx).await?;
-            let pumped = self.pump_inbound_for(cx, NEEDMORE_PTO).await?;
-            if pumped > 0 {
-                attempts = 0;
+            let pumped = self.pump_inbound_for(cx, pto).await?;
+            if pumped > 0 && reason == "source_stream_completion_pto" {
+                let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
+                let retransmit_frames =
+                    self.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges);
+                if !retransmit_frames.is_empty() {
+                    self.retransmit_stream_frames(
+                        cx,
+                        &retransmit_frames,
+                        "source_stream_ack_gap_retransmit",
+                    )
+                    .await?;
+                    last_retransmit = Instant::now();
+                }
+                continue;
+            }
+            if pumped > 0 && last_retransmit.elapsed() < pto {
                 continue;
             }
 
@@ -3064,7 +3515,25 @@ impl QuicLink {
                     timeout: self.idle_timeout,
                 });
             }
-            self.retransmit_stream_frames(cx, frames, reason).await?;
+            let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
+            let mut retransmit_frames = if reason == "source_stream_completion_pto" {
+                self.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges)
+            } else {
+                self.drain_in_flight_stream_frames_for_retransmit()
+            };
+            if retransmit_frames.is_empty() {
+                retransmit_frames = if reason == "source_stream_completion_pto" {
+                    tail_stream_frames_for_retransmit(
+                        frames,
+                        QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES,
+                    )
+                } else {
+                    frames.to_vec()
+                };
+            }
+            self.retransmit_stream_frames(cx, &retransmit_frames, reason)
+                .await?;
+            last_retransmit = Instant::now();
         }
     }
 }
@@ -3189,6 +3658,10 @@ fn link_from_handshake(
         beacons: BeaconScheduler::new(1, Instant::now()),
         pending_control_frames: VecDeque::new(),
         last_flushed_stream_frames: Vec::new(),
+        in_flight_stream_frames: BTreeMap::new(),
+        latest_stream_ack_ranges: Vec::new(),
+        received_source_stream_frames: VecDeque::new(),
+        paced_source_stream: None,
         udp_packets_received: 0,
         one_rtt_packets_ingested: 0,
         non_one_rtt_packets_dropped: 0,
@@ -3377,17 +3850,50 @@ async fn accept(
 
 // ─── Sender session ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct NativeQuicAimdPacer {
-    cap_bps: Option<u64>,
+    controller: DatagramRateController,
+    controller_config: DatagramRateConfig,
+    last_decision: Option<DatagramRateDecision>,
+    shared_cap_active: bool,
+    sample_clock_micros: u64,
     last_round_symbols_sent: u64,
     last_round_pacing_rate_bps: u64,
+    last_round_send_wall: Duration,
+    last_round_rtt: Option<Duration>,
     last_round_loss_fraction: f64,
+    last_pending_rank: Option<u64>,
+    last_pending_rank_deficit: Option<u64>,
+}
+
+impl Default for NativeQuicAimdPacer {
+    fn default() -> Self {
+        let controller_config = quic_datagram_rate_config(&QuicConfig::default());
+        Self {
+            controller: DatagramRateController::new(controller_config),
+            controller_config,
+            last_decision: None,
+            shared_cap_active: false,
+            sample_clock_micros: 0,
+            last_round_symbols_sent: 0,
+            last_round_pacing_rate_bps: 0,
+            last_round_send_wall: Duration::ZERO,
+            last_round_rtt: None,
+            last_round_loss_fraction: 0.0,
+            last_pending_rank: None,
+            last_pending_rank_deficit: None,
+        }
+    }
 }
 
 impl NativeQuicAimdPacer {
     fn cap_bps(&self) -> Option<u64> {
-        self.cap_bps
+        self.shared_cap_active
+            .then(|| {
+                self.last_decision
+                    .map(|decision| decision.pacing_bytes_per_s)
+            })
+            .flatten()
     }
 
     /// Sender-observed delivery loss from the last completed round. Used to seed
@@ -3395,6 +3901,60 @@ impl NativeQuicAimdPacer {
     /// disables after a high delivery loss instead of re-arming and flooding.
     fn observed_loss(&self) -> f64 {
         self.last_round_loss_fraction
+    }
+
+    fn shared_decision(&self) -> Option<DatagramRateDecision> {
+        self.last_decision
+    }
+
+    fn apply_shared_decision_to_pacing(
+        shared_decision: Option<DatagramRateDecision>,
+        pacing: &mut QuicSprayPacingDecision,
+        symbol_frame_len: usize,
+        config: &QuicConfig,
+    ) {
+        let Some(decision) = shared_decision else {
+            return;
+        };
+        let symbol_bytes = u64::try_from(symbol_frame_len.max(1))
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let fanout = config.datagram_fanout.max(1);
+        let shared_rate = decision.pacing_bytes_per_s.max(1);
+        pacing.pacing_rate_bps = pacing.pacing_rate_bps.min(shared_rate).max(1);
+        let inflight_symbols = usize::try_from(
+            decision
+                .inflight_limit_bytes
+                .checked_div(symbol_bytes)
+                .unwrap_or(0)
+                .max(1),
+        )
+        .unwrap_or(usize::MAX);
+        let budget_symbols = usize::try_from(
+            decision
+                .send_budget_bytes
+                .checked_div(symbol_bytes)
+                .unwrap_or(0)
+                .max(1),
+        )
+        .unwrap_or(usize::MAX);
+        pacing.cwnd_symbols = inflight_symbols;
+        pacing.cwnd_share_symbols = (inflight_symbols / fanout).max(1);
+        pacing.burst_cap_share_symbols = pacing.burst_cap_share_symbols.min(budget_symbols).max(1);
+        pacing.max_burst_symbols = pacing.max_burst_symbols.min(budget_symbols).max(1);
+        pacing.path_cwnd_bytes = decision.inflight_limit_bytes.max(symbol_bytes);
+        let sender_loss = f64::from(decision.sender_loss_fraction_ppm) / 1_000_000.0;
+        pacing.path_loss_rate = pacing.path_loss_rate.max(sender_loss);
+        pacing.congestion_loss_rate = pacing.congestion_loss_rate.max(sender_loss);
+        if sender_loss > 0.0 {
+            pacing.limiter = super::QuicSprayPacingLimiter::LossBackoff;
+        }
+        super::update_quic_pacing_pause(
+            pacing,
+            symbol_frame_len,
+            config.max_spray_symbols_per_flush,
+        );
+        pacing.max_burst_symbols = pacing.max_burst_symbols.min(budget_symbols).max(1);
     }
 
     fn sender_delivery_loss_for_repair(&self, receiver_loss: Option<f64>) -> Option<f64> {
@@ -3409,13 +3969,169 @@ impl NativeQuicAimdPacer {
         (sender_loss > receiver_loss + f64::EPSILON).then_some(sender_loss)
     }
 
-    fn record_spray(&mut self, symbols_sent: u64, pacing_rate_bps: u64) {
+    fn record_spray(&mut self, symbols_sent: u64, pacing_rate_bps: u64, send_wall: Duration) {
         self.last_round_symbols_sent = symbols_sent;
         self.last_round_pacing_rate_bps = pacing_rate_bps;
+        self.last_round_send_wall = send_wall;
+        self.last_round_rtt = None;
+    }
+
+    fn record_spray_with_pacing(
+        &mut self,
+        symbols_sent: u64,
+        pacing: &QuicSprayPacingDecision,
+        send_wall: Duration,
+    ) {
+        self.record_spray(symbols_sent, pacing.pacing_rate_bps, send_wall);
+        self.last_round_rtt = duration_from_secs(pacing.path_rtt_s);
+    }
+
+    fn lossy_repair_feedback_enabled(config: &QuicConfig) -> bool {
+        super::quic_loss_target_pacing_cap_bps(config).is_some()
+    }
+
+    fn last_round_send_wall_s(&self) -> f64 {
+        self.last_round_send_wall.as_secs_f64().max(0.000_001)
+    }
+
+    fn round_payload_bps(&self, symbols: u64, config: &QuicConfig) -> f64 {
+        symbols.saturating_mul(u64::from(config.symbol_size.max(1))) as f64
+            / self.last_round_send_wall_s()
+    }
+
+    fn receiver_delivery_bps(&self, need: &QuicNeedMore, config: &QuicConfig) -> Option<f64> {
+        need.round_symbols_observed
+            .or(need.round_symbols_accepted)
+            .map(|observed| {
+                self.round_payload_bps(observed.min(self.last_round_symbols_sent), config)
+            })
+    }
+
+    fn progress_delivery_bps(&mut self, config: &QuicConfig, need: &QuicNeedMore) -> Option<f64> {
+        if !Self::lossy_repair_feedback_enabled(config) {
+            self.last_pending_rank = need.pending_rank;
+            self.last_pending_rank_deficit = need.pending_rank_deficit;
+            return None;
+        }
+        let progress_accounted = need.pending_rank.is_some()
+            || need.pending_rank_columns.is_some()
+            || need.pending_rank_deficit.is_some()
+            || need.pending_decode_jobs.is_some();
+        let rank_delta = need.pending_rank.map(|rank| {
+            let delta = self
+                .last_pending_rank
+                .map_or(rank, |previous| rank.saturating_sub(previous));
+            self.last_pending_rank = Some(rank);
+            delta
+        });
+        let deficit_delta = need.pending_rank_deficit.and_then(|deficit| {
+            let delta = self
+                .last_pending_rank_deficit
+                .map(|previous| previous.saturating_sub(deficit));
+            self.last_pending_rank_deficit = Some(deficit);
+            delta
+        });
+        let progress_symbols = rank_delta.unwrap_or(0).max(deficit_delta.unwrap_or(0));
+        if progress_symbols == 0 {
+            progress_accounted.then_some(0.0)
+        } else {
+            Some(self.round_payload_bps(progress_symbols, config))
+        }
+    }
+
+    fn progress_congestion_loss(
+        config: &QuicConfig,
+        progress_delivery_bps: f64,
+        offered_bps: f64,
+    ) -> Option<f64> {
+        if !Self::lossy_repair_feedback_enabled(config)
+            || !offered_bps.is_finite()
+            || offered_bps <= 0.0
+        {
+            return None;
+        }
+        let delivery_ratio = (progress_delivery_bps / offered_bps).clamp(0.0, 1.0);
+        if delivery_ratio >= QUIC_LOSS_TARGET_PROGRESS_STALL_RATIO {
+            return None;
+        }
+        Some(
+            (1.0 - delivery_ratio)
+                .max(
+                    super::quic_aimd_loss_decrease_threshold(config)
+                        + QUIC_LOSS_TARGET_PROGRESS_LOSS_MARGIN,
+                )
+                .clamp(0.0, 0.90),
+        )
+    }
+
+    fn ensure_controller_config(&mut self, config: &QuicConfig) {
+        let desired = quic_datagram_rate_config(config);
+        if desired != self.controller_config {
+            self.controller = DatagramRateController::new(desired);
+            self.controller_config = desired;
+            self.last_decision = None;
+            self.shared_cap_active = false;
+            self.sample_clock_micros = 0;
+        }
+    }
+
+    fn observe_shared_controller(
+        &mut self,
+        config: &QuicConfig,
+        need: &QuicNeedMore,
+        delivered_payload_bytes: u64,
+        loss: f64,
+    ) -> DatagramRateDecision {
+        self.ensure_controller_config(config);
+        let symbol_bytes = u64::from(config.symbol_size.max(1));
+        let sent_payload_bytes = self
+            .last_round_symbols_sent
+            .saturating_mul(symbol_bytes.max(1));
+        let lost_bytes = ((sent_payload_bytes as f64) * loss.clamp(0.0, 1.0))
+            .ceil()
+            .clamp(0.0, sent_payload_bytes as f64) as u64;
+        let delivered_payload_bytes = delivered_payload_bytes.min(sent_payload_bytes);
+        let bytes_in_flight = sent_payload_bytes.saturating_sub(delivered_payload_bytes);
+        let receiver_credit_bytes = quic_need_more_receiver_credit_bytes(config, need);
+        let receiver_window_bytes =
+            receiver_credit_bytes.map(|credit| credit.saturating_add(bytes_in_flight));
+        let rtt_micros = self
+            .last_round_rtt
+            .map(duration_micros_u64)
+            .unwrap_or_else(|| duration_micros_u64(self.last_round_send_wall))
+            .max(1);
+        if self.sample_clock_micros == 0 {
+            self.sample_clock_micros = 1;
+            let _ = self.controller.observe(DatagramRateSample {
+                now_micros: self.sample_clock_micros,
+                sent_bytes: 1,
+                acked_bytes: 1,
+                lost_bytes: 0,
+                bytes_in_flight: 0,
+                rtt_micros: Some(rtt_micros),
+                receiver_credit_bytes: None,
+                receiver_window_bytes: None,
+            });
+        }
+        let send_wall_micros = duration_micros_u64(self.last_round_send_wall).max(1);
+        self.sample_clock_micros = self.sample_clock_micros.saturating_add(send_wall_micros);
+        let sample = DatagramRateSample {
+            now_micros: self.sample_clock_micros,
+            sent_bytes: sent_payload_bytes,
+            acked_bytes: delivered_payload_bytes,
+            lost_bytes,
+            bytes_in_flight,
+            rtt_micros: Some(rtt_micros),
+            receiver_credit_bytes,
+            receiver_window_bytes,
+        };
+        let decision = self.controller.observe(sample);
+        self.last_decision = Some(decision);
+        decision
     }
 
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    fn observe_need_more(&mut self, cx: &Cx, need: &QuicNeedMore) {
+    fn observe_need_more(&mut self, cx: &Cx, config: &QuicConfig, need: &QuicNeedMore) {
         let sent = self.last_round_symbols_sent;
         if sent == 0 {
             return;
@@ -3436,36 +4152,44 @@ impl NativeQuicAimdPacer {
                 (1.0 - observed as f64 / sent as f64).clamp(0.0, 0.90)
             });
         let receiver_loss = need.round_loss_fraction.filter(|loss| loss.is_finite());
-        let loss = match (delivery_loss, receiver_loss) {
+        let wire_loss = match (delivery_loss, receiver_loss) {
             (Some(delivered), Some(received)) => delivered.max(received),
             (Some(delivered), None) => delivered,
             (None, Some(received)) => received,
             (None, None) => 0.0,
         }
         .clamp(0.0, 0.90);
-        self.last_round_loss_fraction = loss;
-        if loss > super::QUIC_AIMD_LOSS_DECREASE_THRESHOLD {
-            let base = self
-                .cap_bps
-                .unwrap_or(self.last_round_pacing_rate_bps)
-                .max(super::QUIC_AIMD_MIN_RATE_BPS);
-            let loss_responsive_factor = (1.0 - loss).clamp(super::QUIC_SPRAY_MIN_BACKOFF, 1.0);
-            let decrease_factor =
-                super::QUIC_AIMD_MULTIPLICATIVE_DECREASE.min(loss_responsive_factor);
-            let reduced = (base as f64 * decrease_factor).ceil() as u64;
-            self.cap_bps =
-                Some(reduced.clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS));
-        } else if loss <= super::QUIC_AIMD_CLEAN_INCREASE_THRESHOLD
-            && let Some(cap) = self.cap_bps
-        {
-            self.cap_bps = Some(
-                cap.saturating_add(super::QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
-                    .clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS),
-            );
-        }
+        let progress_delivery_bps = self.progress_delivery_bps(config, need);
+        let offered_bps = self.round_payload_bps(sent, config).max(1.0);
+        let progress_loss = progress_delivery_bps
+            .and_then(|delivery_bps| {
+                Self::progress_congestion_loss(config, delivery_bps, offered_bps)
+            })
+            .unwrap_or(0.0);
+        let loss = wire_loss.max(progress_loss).clamp(0.0, 0.90);
+        let observed_delivery_bps =
+            progress_delivery_bps.or_else(|| self.receiver_delivery_bps(need, config));
+        let delivered_payload_bytes = observed_delivery_bps
+            .map(|bps| {
+                (bps * self.last_round_send_wall_s())
+                    .ceil()
+                    .clamp(0.0, u64::MAX as f64) as u64
+            })
+            .unwrap_or_else(|| {
+                need.round_symbols_observed
+                    .or(need.round_symbols_accepted)
+                    .unwrap_or(0)
+                    .min(sent)
+                    .saturating_mul(u64::from(config.symbol_size.max(1)))
+            });
+        let decision = self.observe_shared_controller(config, need, delivered_payload_bytes, loss);
+        self.last_round_loss_fraction =
+            (f64::from(decision.sender_loss_fraction_ppm) / 1_000_000.0).max(loss);
+        self.shared_cap_active =
+            self.last_round_loss_fraction > super::quic_aimd_loss_decrease_threshold(config);
 
         let cap = self
-            .cap_bps
+            .cap_bps()
             .map_or_else(|| "none".to_string(), |cap| cap.to_string());
         let sent = sent.to_string();
         let observed = need
@@ -3474,16 +4198,85 @@ impl NativeQuicAimdPacer {
             .unwrap_or(0)
             .to_string();
         let loss = format!("{:.4}", self.last_round_loss_fraction);
+        let progress_delivery = progress_delivery_bps
+            .map(|bps| format!("{bps:.0}"))
+            .unwrap_or_else(|| "none".to_string());
+        let offered = format!("{offered_bps:.0}");
+        let pending_rank = need.pending_rank.unwrap_or(0).to_string();
+        let pending_rank_columns = need.pending_rank_columns.unwrap_or(0).to_string();
+        let pending_rank_deficit = need.pending_rank_deficit.unwrap_or(0).to_string();
+        let pending_decode_jobs = need.pending_decode_jobs.unwrap_or(0).to_string();
+        let shared_cwnd_bytes = decision.cwnd_bytes.to_string();
+        let shared_inflight_limit_bytes = decision.inflight_limit_bytes.to_string();
         cx.trace_with_fields(
             "atp_quic.spray.aimd_feedback",
             &[
                 ("round_symbols_sent", sent.as_str()),
                 ("round_symbols_observed", observed.as_str()),
                 ("round_loss_fraction", loss.as_str()),
+                ("progress_delivery_bps", progress_delivery.as_str()),
+                ("offered_bps", offered.as_str()),
+                ("pending_rank", pending_rank.as_str()),
+                ("pending_rank_columns", pending_rank_columns.as_str()),
+                ("pending_rank_deficit", pending_rank_deficit.as_str()),
+                ("pending_decode_jobs", pending_decode_jobs.as_str()),
+                ("shared_cwnd_bytes", shared_cwnd_bytes.as_str()),
+                (
+                    "shared_inflight_limit_bytes",
+                    shared_inflight_limit_bytes.as_str(),
+                ),
                 ("aimd_cap_bps", cap.as_str()),
             ],
         );
     }
+}
+
+fn quic_datagram_rate_config(config: &QuicConfig) -> DatagramRateConfig {
+    let initial = super::quic_loss_target_pacing_cap_bps(config)
+        .unwrap_or(super::QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64)
+        .clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS);
+    let max_pacing = super::quic_loss_target_pacing_cap_bps(config)
+        .unwrap_or(super::QUIC_AIMD_MAX_RATE_BPS)
+        .clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS);
+    DatagramRateConfig {
+        initial_pacing_bytes_per_s: initial,
+        min_pacing_bytes_per_s: super::QUIC_AIMD_MIN_RATE_BPS,
+        max_pacing_bytes_per_s: max_pacing,
+        initial_cwnd_bytes: 256 * 1024,
+        min_cwnd_bytes: 16 * 1024,
+        max_cwnd_bytes: 16 * 1024 * 1024,
+        pacing_gain: 1.0,
+        cwnd_gain: 2.0,
+        loss_backoff_threshold: super::quic_aimd_loss_decrease_threshold(config),
+        loss_backoff_factor: super::QUIC_AIMD_MULTIPLICATIVE_DECREASE,
+        loss_delivery_headroom: QUIC_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM,
+        receiver_window_gain: 1.0,
+        min_receiver_window_bytes: 16 * 1024,
+        max_receiver_window_bytes: 16 * 1024 * 1024,
+        min_rtt_window_micros: 10_000_000,
+    }
+}
+
+fn duration_from_secs(seconds: f64) -> Option<Duration> {
+    (seconds.is_finite() && seconds > 0.0).then(|| Duration::from_secs_f64(seconds))
+}
+
+fn duration_micros_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn quic_need_more_receiver_credit_bytes(config: &QuicConfig, need: &QuicNeedMore) -> Option<u64> {
+    let symbol_bytes = u64::from(config.symbol_size.max(1));
+    let requested = need_more_requested_symbol_count(need);
+    let deficit = need
+        .pending_rank_deficit
+        .or(need.repair_base_deficit_symbols)
+        .unwrap_or(0);
+    let credit_symbols = deficit
+        .saturating_mul(2)
+        .max(requested)
+        .max((!need.pending.is_empty()).then_some(32).unwrap_or(0));
+    (credit_symbols > 0).then_some(credit_symbols.saturating_mul(symbol_bytes))
 }
 
 /// Spray a round of symbols for the `pending` entries over a live link, pacing on
@@ -3506,7 +4299,12 @@ async fn spray_round(
     let tag = super::transfer_tag(&manifest.transfer_id);
     let repair_batch = super::repair_batch_per_block(config);
     let drop_one_in = config.debug_drop_one_in;
-    let mut pacing = link.spray_pacing_decision(config, aimd.cap_bps(), aimd.observed_loss());
+    let mut pacing = link.spray_pacing_decision(
+        config,
+        aimd.cap_bps(),
+        aimd.shared_decision(),
+        aimd.observed_loss(),
+    );
     let clean_ramp_max_pacing_bps = super::quic_round0_clean_ramp_max_pacing_bps(&pacing);
     let mut clean_ramp =
         super::quic_round0_clean_ramp_enabled(config, &pacing, with_source).then(|| {
@@ -3528,6 +4326,7 @@ async fn spray_round(
     }
     pacing.trace_epoch(cx, u64::from(!with_source));
     link.reset_sender_handoff_trace();
+    let send_start = Instant::now();
     let mut sent = 0u64;
     let mut sprayed = 0u64;
     let mut cursor_updates = Vec::new();
@@ -3606,8 +4405,15 @@ async fn spray_round(
                 });
                 let handoff_limit = link.spray_handoff_symbol_limit(&pacing);
                 if handoff_batch.len() >= handoff_limit {
-                    link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-                        .await?;
+                    link.spray_symbol_batch(
+                        cx,
+                        control,
+                        tag,
+                        &handoff_batch,
+                        &pacing,
+                        aimd.shared_decision(),
+                    )
+                    .await?;
                     let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
                     sent = sent.saturating_add(batch_len);
                     for _ in 0..handoff_batch.len() {
@@ -3656,8 +4462,15 @@ async fn spray_round(
         }
     }
     if !stopped_for_feedback && !handoff_batch.is_empty() {
-        link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-            .await?;
+        link.spray_symbol_batch(
+            cx,
+            control,
+            tag,
+            &handoff_batch,
+            &pacing,
+            aimd.shared_decision(),
+        )
+        .await?;
         let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
         sent = sent.saturating_add(batch_len);
         for _ in 0..handoff_batch.len() {
@@ -3683,7 +4496,7 @@ async fn spray_round(
             entry.set_repair_cursor(sbn, target_repair);
         }
     }
-    aimd.record_spray(sent, pacing.pacing_rate_bps);
+    aimd.record_spray_with_pacing(sent, &pacing, send_start.elapsed());
     link.finish_paced_spray_round(cx, control, sent, &pacing)
         .await?;
     Ok(sent)
@@ -3702,9 +4515,15 @@ async fn spray_source_requests(
     aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(config, aimd.cap_bps(), aimd.observed_loss());
+    let pacing = link.spray_pacing_decision(
+        config,
+        aimd.cap_bps(),
+        aimd.shared_decision(),
+        aimd.observed_loss(),
+    );
     pacing.trace_epoch(cx, 2);
     link.reset_sender_handoff_trace();
+    let send_start = Instant::now();
     let mut sent = 0u64;
     let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
     for request in requests {
@@ -3748,19 +4567,33 @@ async fn spray_source_requests(
             auth_tag,
         });
         if handoff_batch.len() >= link.spray_handoff_symbol_limit(&pacing) {
-            link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-                .await?;
+            link.spray_symbol_batch(
+                cx,
+                control,
+                tag,
+                &handoff_batch,
+                &pacing,
+                aimd.shared_decision(),
+            )
+            .await?;
             sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
             handoff_batch.clear();
             handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
         }
     }
     if !handoff_batch.is_empty() {
-        link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-            .await?;
+        link.spray_symbol_batch(
+            cx,
+            control,
+            tag,
+            &handoff_batch,
+            &pacing,
+            aimd.shared_decision(),
+        )
+        .await?;
         sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
     }
-    aimd.record_spray(sent, pacing.pacing_rate_bps);
+    aimd.record_spray_with_pacing(sent, &pacing, send_start.elapsed());
     link.finish_paced_spray_round(cx, control, sent, &pacing)
         .await?;
     Ok(sent)
@@ -3779,9 +4612,15 @@ async fn spray_block_repair_requests(
     aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(config, aimd.cap_bps(), aimd.observed_loss());
+    let pacing = link.spray_pacing_decision(
+        config,
+        aimd.cap_bps(),
+        aimd.shared_decision(),
+        aimd.observed_loss(),
+    );
     pacing.trace_epoch(cx, 3);
     link.reset_sender_handoff_trace();
+    let send_start = Instant::now();
     let mut sent = 0u64;
     let mut cursor_updates = Vec::with_capacity(requests.len());
     let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
@@ -3837,8 +4676,15 @@ async fn spray_block_repair_requests(
             });
             emitted_for_request = emitted_for_request.saturating_add(1);
             if handoff_batch.len() >= link.spray_handoff_symbol_limit(&pacing) {
-                link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-                    .await?;
+                link.spray_symbol_batch(
+                    cx,
+                    control,
+                    tag,
+                    &handoff_batch,
+                    &pacing,
+                    aimd.shared_decision(),
+                )
+                .await?;
                 sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
                 handoff_batch.clear();
                 handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
@@ -3863,8 +4709,15 @@ async fn spray_block_repair_requests(
         );
     }
     if !handoff_batch.is_empty() {
-        link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-            .await?;
+        link.spray_symbol_batch(
+            cx,
+            control,
+            tag,
+            &handoff_batch,
+            &pacing,
+            aimd.shared_decision(),
+        )
+        .await?;
         sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
     }
     for (enc_index, sbn, target_repair) in cursor_updates {
@@ -3875,7 +4728,7 @@ async fn spray_block_repair_requests(
         };
         enc.set_repair_cursor(sbn, target_repair);
     }
-    aimd.record_spray(sent, pacing.pacing_rate_bps);
+    aimd.record_spray_with_pacing(sent, &pacing, send_start.elapsed());
     link.finish_paced_spray_round(cx, control, sent, &pacing)
         .await?;
     Ok(sent)
@@ -3946,6 +4799,23 @@ async fn drive_native_source_stream_flush(
         let pumped = link.pump_inbound_for(cx, pump_timeout).await?;
         if pumped > 0 {
             last_progress = Instant::now();
+            let latest_stream_ack_ranges = link.latest_stream_ack_ranges.clone();
+            let retransmit_frames =
+                link.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges);
+            if !retransmit_frames.is_empty() {
+                let retransmitted = link
+                    .retransmit_stream_frames(
+                        cx,
+                        &retransmit_frames,
+                        "source_stream_ack_gap_retransmit",
+                    )
+                    .await?;
+                if retransmitted > 0 {
+                    last_progress = Instant::now();
+                    recent_stream_frames = link.last_flushed_stream_frames();
+                    continue;
+                }
+            }
         }
         if link.conn.pending_stream_frame_count() == 0 {
             return Ok(());
@@ -3953,14 +4823,15 @@ async fn drive_native_source_stream_flush(
         if !drain_all && made_progress {
             return Ok(());
         }
-        if flushed == 0
-            && pumped == 0
-            && last_progress.elapsed() >= NEEDMORE_PTO
-            && link.expire_app_data_loss_timeout(cx, "flush QUIC source stream")? > 0
-        {
-            if !recent_stream_frames.is_empty() {
+        if flushed == 0 && pumped == 0 && last_progress.elapsed() >= SOURCE_STREAM_PTO {
+            let _ = link.expire_app_data_loss_timeout(cx, "flush QUIC source stream")?;
+            let mut retransmit_frames = link.drain_in_flight_stream_frames_for_retransmit();
+            if retransmit_frames.is_empty() {
+                retransmit_frames = recent_stream_frames.clone();
+            }
+            if !retransmit_frames.is_empty() {
                 let retransmitted = link
-                    .retransmit_stream_frames(cx, &recent_stream_frames, "source_stream_pto")
+                    .retransmit_stream_frames(cx, &retransmit_frames, "source_stream_pto")
                     .await?;
                 if retransmitted > 0 {
                     last_progress = Instant::now();
@@ -3991,7 +4862,7 @@ async fn send_native_source_stream_entries_pumped(
         .saturating_sub(usize::try_from(QUIC_STREAM_PACKET_OVERHEAD_BUDGET).unwrap_or(usize::MAX))
         .max(1);
     let flush_chunk = usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap_or(usize::MAX);
-    let mut buf = vec![0_u8; config.chunk_size.max(1).min(max_chunk).min(flush_chunk)];
+    let mut buf = vec![0_u8; max_chunk.min(flush_chunk).max(1)];
     let mut streamed = 0u64;
     let mut queued_since_flush = 0u64;
 
@@ -4030,7 +4901,7 @@ async fn send_native_source_stream_entries_pumped(
             streamed = streamed.saturating_add(n_u64);
             queued_since_flush = queued_since_flush.saturating_add(n_u64);
             if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
-                drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
+                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
                 queued_since_flush = 0;
             }
         }
@@ -4055,6 +4926,55 @@ async fn send_native_source_stream_entries_pumped(
         .write_stream_bytes(cx, stream, Bytes::new(), true)?;
     drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
     Ok(streamed)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn source_stream_repair_tail_requests(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+) -> Result<Vec<QuicBlockRepairRequest>, QuicTransportError> {
+    let mut requests = Vec::new();
+    for entry in &manifest.entries {
+        for block_idx in 0..super::block_count_for_len(entry.size, config)? {
+            let sbn = u8::try_from(block_idx).map_err(|_| QuicTransportError::TooLarge {
+                size: entry.size,
+                max: u64::try_from(config.max_block_size.max(1))
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::from(u8::MAX) + 1),
+            })?;
+            let block_start = u64::from(sbn)
+                .saturating_mul(u64::try_from(config.max_block_size.max(1)).unwrap_or(u64::MAX));
+            let block_len = usize::try_from(
+                entry
+                    .size
+                    .saturating_sub(block_start)
+                    .min(u64::try_from(config.max_block_size.max(1)).unwrap_or(u64::MAX)),
+            )
+            .unwrap_or(usize::MAX);
+            let block_source_symbols = block_len
+                .min(config.max_block_size.max(1))
+                .div_ceil(usize::from(config.symbol_size.max(1)))
+                .max(1);
+            let configured_overhead = (config.repair_overhead - 1.0).max(0.0);
+            let loss_floor =
+                config.round0_loss_target.max(0.0) * QUIC_SOURCE_STREAM_REPAIR_LOSS_MULTIPLIER;
+            let repair_fraction = configured_overhead.max(loss_floor);
+            let repair = ((block_source_symbols as f64) * repair_fraction).ceil() as usize;
+            if repair == 0 {
+                continue;
+            }
+            requests.push(QuicBlockRepairRequest {
+                entry: entry.index,
+                sbn,
+                symbols: u32::try_from(repair).unwrap_or(u32::MAX),
+            });
+        }
+    }
+    Ok(requests)
 }
 
 /// Drive a full ATP-over-QUIC send over an established link: Hello, manifest,
@@ -4117,66 +5037,325 @@ async fn run_sender_session(
     super::send_native_manifest(cx, &mut link.conn, &mut control, manifest)?;
     link.flush(cx).await?;
     if let Some(source_stream) = source_stream {
-        let bytes_streamed =
-            send_native_source_stream_entries_pumped(cx, link, source_stream, prepared, config)
-                .await?;
-        if bytes_streamed != manifest.total_bytes {
-            return Err(QuicTransportError::Integrity(format!(
-                "source stream sent {bytes_streamed} bytes, expected {}",
-                manifest.total_bytes
-            )));
-        }
+        let previous_paced_source_stream = link.paced_source_stream.replace(source_stream);
+        let source_pacing = link.source_stream_pacing_decision(config);
+        source_pacing.trace_epoch(cx, 0);
+        link.data_plane_pacer
+            .configure_source_stream(&source_pacing);
         quic_rqtrace!(
-            "sender: native_source_stream sent bytes={} stream={}",
-            bytes_streamed,
-            source_stream.0
+            "sender: native_source_stream_pacing rate_bps={} burst_symbols={} burst_bytes={} frame_bytes={}",
+            source_pacing.pacing_rate_bps,
+            source_pacing.max_burst_symbols,
+            link.data_plane_pacer.byte_pacer_burst_bytes,
+            source_stream_max_frame_bytes(),
         );
-        send_native_object_complete_for_round(cx, &mut link.conn, &mut control, 0, 0)?;
-        link.flush(cx).await?;
-        loop {
-            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            let reply_frame = link
-                .next_control_frame(cx, &mut control, "receive stream-source proof")
-                .await?;
-            match reply_frame.frame_type() {
-                FrameType::Proof => {
-                    let receipt = super::parse_json::<ReceiveReceipt>(&reply_frame)?;
-                    super::send_native_close(cx, &mut link.conn, &mut control)?;
-                    link.flush(cx).await?;
-                    if !receipt.committed {
-                        return Err(QuicTransportError::Integrity(
-                            receipt
-                                .reason
-                                .clone()
-                                .unwrap_or_else(|| "receiver did not commit".to_string()),
-                        ));
+        let source_result: Result<SendReport, QuicTransportError> = async {
+            let mut encoders = super::encoders_from_prepared_source(cx, prepared, config).await?;
+            let repair_tail_requests = source_stream_repair_tail_requests(manifest, config)?;
+            let mut tail_aimd = NativeQuicAimdPacer::default();
+            let bytes_streamed =
+                send_native_source_stream_entries_pumped(cx, link, source_stream, prepared, config)
+                    .await?;
+            if bytes_streamed != manifest.total_bytes {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source stream sent {bytes_streamed} bytes, expected {}",
+                    manifest.total_bytes
+                )));
+            }
+            quic_rqtrace!(
+                "sender: native_source_stream sent bytes={} stream={}",
+                bytes_streamed,
+                source_stream.0
+            );
+            let repair_tail_symbols = if repair_tail_requests.is_empty() {
+                0
+            } else {
+                spray_block_repair_requests(
+                    cx,
+                    link,
+                    &mut control,
+                    manifest,
+                    &mut encoders,
+                    &repair_tail_requests,
+                    config,
+                    symbol_auth.as_ref(),
+                    &mut tail_aimd,
+                )
+                .await?
+            };
+            quic_rqtrace!(
+                "sender: native_source_stream_repair_tail symbols={} blocks={}",
+                repair_tail_symbols,
+                repair_tail_requests.len()
+            );
+            let mut symbols_sent = repair_tail_symbols;
+            let mut feedback_rounds = 0u32;
+            send_native_object_complete_for_round(
+                cx,
+                &mut link.conn,
+                &mut control,
+                0,
+                repair_tail_symbols,
+            )?;
+            link.flush(cx).await?;
+            // Keep the source stream marked as ATP-paced through proof wait:
+            // PTO retransmits of lost source STREAM frames must not fall back
+            // under NewReno cwnd after the initial source send returns.
+            let mut source_completion_frames = link.last_flushed_stream_frames();
+            loop {
+                cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                let reply_frame = link
+                    .next_control_frame_with_stream_pto(
+                        cx,
+                        &mut control,
+                        "receive stream-source proof",
+                        &source_completion_frames,
+                        "source_stream_completion_pto",
+                    )
+                    .await?;
+                match reply_frame.frame_type() {
+                    FrameType::Proof => {
+                        let receipt = super::parse_json::<ReceiveReceipt>(&reply_frame)?;
+                        super::send_native_close(cx, &mut link.conn, &mut control)?;
+                        link.flush(cx).await?;
+                        if !receipt.committed {
+                            return Err(QuicTransportError::Integrity(
+                                receipt
+                                    .reason
+                                    .clone()
+                                    .unwrap_or_else(|| "receiver did not commit".to_string()),
+                            ));
+                        }
+                        return Ok(SendReport {
+                            transfer_id: manifest.transfer_id.clone(),
+                            bytes_sent: manifest.total_bytes,
+                            files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                            symbols_sent,
+                            feedback_rounds,
+                            merkle_root_hex: manifest.merkle_root_hex.clone(),
+                            receipt,
+                            peer: link.peer,
+                        });
                     }
-                    return Ok(SendReport {
-                        transfer_id: manifest.transfer_id.clone(),
-                        bytes_sent: manifest.total_bytes,
-                        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
-                        symbols_sent: 0,
-                        feedback_rounds: 0,
-                        merkle_root_hex: manifest.merkle_root_hex.clone(),
-                        receipt,
-                        peer: link.peer,
-                    });
-                }
-                FrameType::KeepAlive => continue,
-                FrameType::ObjectRequest => {
-                    return Err(QuicTransportError::Integrity(
-                        "receiver requested RaptorQ repair after native source-stream transfer"
-                            .to_string(),
-                    ));
-                }
-                got => {
-                    return Err(QuicTransportError::Unexpected {
-                        got,
-                        expected: "Proof | KeepAlive",
-                    });
+                    FrameType::KeepAlive => continue,
+                    FrameType::ObjectRequest => {
+                        let need = super::parse_json::<QuicNeedMore>(&reply_frame)?;
+                        let (next_feedback_round, response_feedback_round) =
+                            feedback_round_for_need_or_no_convergence(
+                                feedback_rounds,
+                                config.max_feedback_rounds,
+                                need.feedback_round,
+                                need.pending.len(),
+                            )?;
+                        tail_aimd.observe_need_more(cx, config, &need);
+                        feedback_rounds = next_feedback_round;
+                        let requested_repair_symbols = need_more_repair_symbol_count(&need);
+                        let base_deficit_symbols =
+                            need_more_base_deficit_symbols(&need, requested_repair_symbols);
+                        let sender_delivery_loss_for_repair =
+                            tail_aimd.sender_delivery_loss_for_repair(need.round_loss_fraction);
+                        let loss_compensated_target_symbols =
+                            loss_compensated_repair_target(
+                                base_deficit_symbols,
+                                need.round_loss_fraction,
+                            );
+                        let sender_loss_compensated_target_symbols =
+                            sender_delivery_loss_for_repair
+                                .map(|loss| {
+                                    loss_compensated_repair_target(
+                                        base_deficit_symbols,
+                                        Some(loss),
+                                    )
+                                })
+                                .unwrap_or(base_deficit_symbols);
+                        let loss_compensated_target_symbols =
+                            need_more_loss_compensated_target_symbols(&need, base_deficit_symbols)
+                                .max(loss_compensated_target_symbols)
+                                .max(sender_loss_compensated_target_symbols);
+                        let repair_blocks_to_send = if need.repair_blocks.is_empty() {
+                            Vec::new()
+                        } else {
+                            delivery_loss_compensated_repair_blocks(
+                                &need.repair_blocks,
+                                sender_delivery_loss_for_repair,
+                            )
+                        };
+                        let repair_symbols_to_emit =
+                            repair_block_symbol_count(&repair_blocks_to_send);
+                        let loss_compensated_target_symbols =
+                            loss_compensated_target_symbols.max(repair_symbols_to_emit);
+                        let request_gap_to_target = need
+                            .repair_request_gap_to_target_symbols
+                            .unwrap_or_else(|| {
+                                loss_compensated_target_symbols
+                                    .saturating_sub(requested_repair_symbols)
+                            });
+                        let repair_detail = repair_block_trace_summary(&need.repair_blocks);
+                        let sender_delivery_loss_for_repair_trace =
+                            sender_delivery_loss_for_repair.unwrap_or(0.0);
+                        quic_rqtrace!(
+                            "sender: native_source_stream NeedMore round={feedback_rounds} pending={} repair_blocks={} base_deficit_symbols={} requested_repair_symbols={} repair_symbols_to_emit={} loss_compensated_target_symbols={} request_gap_to_target={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} sender_delivery_loss_for_repair={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
+                            need.pending.len(),
+                            need.repair_blocks.len(),
+                            base_deficit_symbols,
+                            requested_repair_symbols,
+                            repair_symbols_to_emit,
+                            loss_compensated_target_symbols,
+                            request_gap_to_target,
+                            need.source_symbols.len(),
+                            need.round_symbols_observed.unwrap_or(0),
+                            need.round_symbols_accepted.unwrap_or(0),
+                            need.round_loss_fraction.unwrap_or(0.0),
+                            sender_delivery_loss_for_repair_trace,
+                            config.max_feedback_rounds,
+                            feedback_rounds > config.max_feedback_rounds,
+                            super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                            symbols_sent,
+                            tail_aimd.last_round_symbols_sent,
+                            tail_aimd.last_round_pacing_rate_bps,
+                            repair_detail,
+                        );
+                        trace_repair_block_deficits(
+                            "native_source_stream_sender",
+                            feedback_rounds,
+                            &need.repair_blocks,
+                        );
+                        super::trace_quic_sender_need_more(
+                            cx,
+                            feedback_rounds,
+                            symbols_sent,
+                            tail_aimd.last_round_symbols_sent,
+                            &need,
+                            config,
+                            None,
+                            tail_aimd.cap_bps(),
+                        );
+                        if need.pending.is_empty()
+                            && need.repair_blocks.is_empty()
+                            && need.source_symbols.is_empty()
+                        {
+                            super::trace_quic_sender_repair_round(
+                                cx,
+                                feedback_rounds,
+                                super::quic_need_more_response_mode(&need),
+                                symbols_sent,
+                                0,
+                                &need,
+                            );
+                            send_native_object_complete_for_round(
+                                cx,
+                                &mut link.conn,
+                                &mut control,
+                                response_feedback_round,
+                                0,
+                            )?;
+                            link.flush(cx).await?;
+                            source_completion_frames = link.last_flushed_stream_frames();
+                            continue;
+                        }
+                        super::validate_need_more_feedback(manifest, config, &need)?;
+                        let symbols_before = symbols_sent;
+                        let response_mode = super::quic_need_more_response_mode(&need);
+                        let sent = if !need.repair_blocks.is_empty() {
+                            spray_block_repair_requests(
+                                cx,
+                                link,
+                                &mut control,
+                                manifest,
+                                &mut encoders,
+                                &repair_blocks_to_send,
+                                config,
+                                symbol_auth.as_ref(),
+                                &mut tail_aimd,
+                            )
+                            .await?
+                        } else if need.source_symbols.is_empty() {
+                            let fallback_pending = need.pending.iter().copied().collect();
+                            spray_round(
+                                cx,
+                                link,
+                                &mut control,
+                                manifest,
+                                &mut encoders,
+                                &fallback_pending,
+                                config,
+                                symbol_auth.as_ref(),
+                                false,
+                                &mut tail_aimd,
+                            )
+                            .await?
+                        } else {
+                            spray_source_requests(
+                                cx,
+                                link,
+                                &mut control,
+                                manifest,
+                                &encoders,
+                                &need.source_symbols,
+                                config,
+                                symbol_auth.as_ref(),
+                                &mut tail_aimd,
+                            )
+                            .await?
+                        };
+                        if !need.repair_blocks.is_empty() && sent != repair_symbols_to_emit {
+                            return Err(QuicTransportError::Integrity(format!(
+                                "sender emitted {sent} repair symbols for loss-compensated repair target {repair_symbols_to_emit}"
+                            )));
+                        }
+                        symbols_sent = symbols_sent.saturating_add(sent);
+                        trace_native_repair_accounting(
+                            cx,
+                            "native_source_stream_sender",
+                            feedback_rounds,
+                            base_deficit_symbols,
+                            requested_repair_symbols,
+                            loss_compensated_target_symbols,
+                            Some(sent),
+                            &need,
+                        );
+                        super::trace_quic_sender_repair_round(
+                            cx,
+                            feedback_rounds,
+                            response_mode,
+                            symbols_before,
+                            sent,
+                            &need,
+                        );
+                        link.flush(cx).await?;
+                        let handoff_phase = if need.repair_blocks.is_empty() {
+                            "source_stream_source_requests"
+                        } else {
+                            "source_stream_repair_blocks"
+                        };
+                        link.trace_sender_handoff_summary(cx, handoff_phase, sent);
+                        send_native_object_complete_for_round(
+                            cx,
+                            &mut link.conn,
+                            &mut control,
+                            response_feedback_round,
+                            sent,
+                        )?;
+                        link.flush(cx).await?;
+                        source_completion_frames = link.last_flushed_stream_frames();
+                        if !need.repair_blocks.is_empty() {
+                            let _ = link
+                                .drop_duplicate_need_more_resends(cx, &mut control, &need)
+                                .await?;
+                        }
+                    }
+                    got => {
+                        return Err(QuicTransportError::Unexpected {
+                            got,
+                            expected: "Proof | ObjectRequest | KeepAlive",
+                        });
+                    }
                 }
             }
         }
+        .await;
+        link.paced_source_stream = previous_paced_source_stream;
+        return source_result;
     }
 
     let mut encoders = super::encoders_from_prepared_source(cx, prepared, config).await?;
@@ -4254,7 +5433,7 @@ async fn run_sender_session(
                         need.feedback_round,
                         need.pending.len(),
                     )?;
-                aimd.observe_need_more(cx, &need);
+                aimd.observe_need_more(cx, config, &need);
                 feedback_rounds = next_feedback_round;
                 let requested_repair_symbols = need_more_repair_symbol_count(&need);
                 let base_deficit_symbols =
@@ -4361,10 +5540,20 @@ async fn run_sender_session(
                     )
                     .await?
                 } else if need.source_symbols.is_empty() {
-                    return Err(QuicTransportError::Integrity(
-                        "receiver NeedMore listed pending entries without targeted repair/source deficits"
-                            .to_string(),
-                    ));
+                    let fallback_pending = need.pending.iter().copied().collect();
+                    spray_round(
+                        cx,
+                        link,
+                        &mut control,
+                        manifest,
+                        &mut encoders,
+                        &fallback_pending,
+                        config,
+                        symbol_auth.as_ref(),
+                        false,
+                        &mut aimd,
+                    )
+                    .await?
                 } else {
                     spray_source_requests(
                         cx,
@@ -4686,6 +5875,10 @@ impl NativeReceiverIntakeStats {
         let round_symbols_observed = need.round_symbols_observed.unwrap_or(0).to_string();
         let round_symbols_accepted = need.round_symbols_accepted.unwrap_or(0).to_string();
         let round_loss_fraction = format!("{:.4}", need.round_loss_fraction.unwrap_or(0.0));
+        let pending_rank = need.pending_rank.unwrap_or(0).to_string();
+        let pending_rank_columns = need.pending_rank_columns.unwrap_or(0).to_string();
+        let pending_rank_deficit = need.pending_rank_deficit.unwrap_or(0).to_string();
+        let pending_decode_jobs = need.pending_decode_jobs.unwrap_or(0).to_string();
         let repair_block_requests = super::quic_repair_block_request_summary(&need.repair_blocks);
         let repair_symbol_round_cap = super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
         let repair_block_request_cap =
@@ -4712,6 +5905,10 @@ impl NativeReceiverIntakeStats {
                 ("round_symbols_observed", round_symbols_observed.as_str()),
                 ("round_symbols_accepted", round_symbols_accepted.as_str()),
                 ("round_loss_fraction", round_loss_fraction.as_str()),
+                ("pending_rank", pending_rank.as_str()),
+                ("pending_rank_columns", pending_rank_columns.as_str()),
+                ("pending_rank_deficit", pending_rank_deficit.as_str()),
+                ("pending_decode_jobs", pending_decode_jobs.as_str()),
                 ("repair_block_requests", repair_block_requests.as_str()),
                 ("repair_symbol_round_cap", repair_symbol_round_cap.as_str()),
                 (
@@ -4869,6 +6066,7 @@ async fn commit_staged_entries(
     ))
 }
 
+#[allow(dead_code)]
 async fn read_native_source_stream_chunk(
     cx: &Cx,
     link: &mut QuicLink,
@@ -4898,85 +6096,460 @@ async fn read_native_source_stream_chunk(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SourceSymbolKey {
+    entry: u32,
+    sbn: u8,
+    esi: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceStreamEntryPlan {
+    entry: u32,
+    stream_start: u64,
+    size: u64,
+}
+
+impl SourceStreamEntryPlan {
+    fn stream_end(self) -> u64 {
+        self.stream_start.saturating_add(self.size)
+    }
+}
+
+struct PartialSourceSymbol {
+    data: Vec<u8>,
+    received: Vec<bool>,
+    received_count: usize,
+}
+
+impl PartialSourceSymbol {
+    fn new(symbol_size: usize, expected_len: usize) -> Self {
+        Self {
+            data: vec![0; symbol_size],
+            received: vec![false; expected_len],
+            received_count: 0,
+        }
+    }
+
+    fn push_fragment(
+        &mut self,
+        offset: usize,
+        fragment: &[u8],
+    ) -> Result<bool, QuicTransportError> {
+        if offset.saturating_add(fragment.len()) > self.received.len() {
+            return Err(QuicTransportError::Integrity(
+                "source stream frame crossed a RaptorQ source-symbol boundary".to_string(),
+            ));
+        }
+        for (idx, byte) in fragment.iter().enumerate() {
+            let pos = offset + idx;
+            if !self.received[pos] {
+                self.data[pos] = *byte;
+                self.received[pos] = true;
+                self.received_count = self.received_count.saturating_add(1);
+            }
+        }
+        Ok(self.received_count == self.received.len())
+    }
+}
+
+struct NativeSourceStreamSymbolIntake {
+    plans: Vec<SourceStreamEntryPlan>,
+    partials: BTreeMap<SourceSymbolKey, PartialSourceSymbol>,
+    fed: BTreeSet<SourceSymbolKey>,
+    total_bytes: u64,
+    fin_seen: bool,
+}
+
+impl NativeSourceStreamSymbolIntake {
+    fn new(manifest: &TransferManifest) -> Result<Self, QuicTransportError> {
+        let mut stream_start = 0u64;
+        let mut plans = Vec::with_capacity(manifest.entries.len());
+        for entry in &manifest.entries {
+            plans.push(SourceStreamEntryPlan {
+                entry: entry.index,
+                stream_start,
+                size: entry.size,
+            });
+            stream_start = stream_start.checked_add(entry.size).ok_or_else(|| {
+                QuicTransportError::TooLarge {
+                    size: manifest.total_bytes,
+                    max: u64::MAX,
+                }
+            })?;
+        }
+        if stream_start != manifest.total_bytes {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream manifest total {} did not match entry sum {stream_start}",
+                manifest.total_bytes
+            )));
+        }
+        Ok(Self {
+            plans,
+            partials: BTreeMap::new(),
+            fed: BTreeSet::new(),
+            total_bytes: manifest.total_bytes,
+            fin_seen: false,
+        })
+    }
+
+    fn fin_seen(&self) -> bool {
+        self.fin_seen
+    }
+
+    fn feed_stream_frame(
+        &mut self,
+        cx: &Cx,
+        decoders: &mut [super::QuicEntryDecoder],
+        config: &QuicConfig,
+        decode_stats: &mut super::QuicDecodeStats,
+        completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+        frame: &ReceivedSourceStreamFrame,
+    ) -> Result<u64, QuicTransportError> {
+        let frame_len = u64::try_from(frame.data.len()).unwrap_or(u64::MAX);
+        let frame_end = frame.offset.checked_add(frame_len).ok_or_else(|| {
+            QuicTransportError::Integrity("source stream frame offset overflow".to_string())
+        })?;
+        if frame_end > self.total_bytes {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream carried bytes beyond the manifest total: end={frame_end}, total={}",
+                self.total_bytes
+            )));
+        }
+        if frame.fin {
+            if frame_end != self.total_bytes {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source stream FIN at offset {frame_end}, expected {}",
+                    self.total_bytes
+                )));
+            }
+            self.fin_seen = true;
+        }
+        if frame.data.is_empty() {
+            return Ok(0);
+        }
+        self.feed_global_bytes(
+            cx,
+            decoders,
+            config,
+            decode_stats,
+            completed_backlog,
+            frame.offset,
+            frame.data.as_ref(),
+        )
+    }
+
+    fn feed_global_bytes(
+        &mut self,
+        cx: &Cx,
+        decoders: &mut [super::QuicEntryDecoder],
+        config: &QuicConfig,
+        decode_stats: &mut super::QuicDecodeStats,
+        completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+        stream_offset: u64,
+        bytes: &[u8],
+    ) -> Result<u64, QuicTransportError> {
+        let mut accepted = 0u64;
+        let mut consumed = 0usize;
+        while consumed < bytes.len() {
+            let absolute = stream_offset
+                .checked_add(u64::try_from(consumed).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    QuicTransportError::Integrity("source stream offset overflow".to_string())
+                })?;
+            let Some(plan) = self
+                .plans
+                .iter()
+                .copied()
+                .find(|plan| absolute >= plan.stream_start && absolute < plan.stream_end())
+            else {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source stream frame offset {absolute} outside manifest entries"
+                )));
+            };
+            let entry_offset = absolute.saturating_sub(plan.stream_start);
+            let available_in_entry =
+                usize::try_from(plan.stream_end().saturating_sub(absolute)).unwrap_or(usize::MAX);
+            let take = (bytes.len() - consumed).min(available_in_entry);
+            accepted = accepted.saturating_add(self.feed_entry_bytes(
+                cx,
+                decoders,
+                config,
+                decode_stats,
+                completed_backlog,
+                plan,
+                entry_offset,
+                &bytes[consumed..consumed + take],
+            )?);
+            consumed += take;
+        }
+        Ok(accepted)
+    }
+
+    fn feed_entry_bytes(
+        &mut self,
+        cx: &Cx,
+        decoders: &mut [super::QuicEntryDecoder],
+        config: &QuicConfig,
+        decode_stats: &mut super::QuicDecodeStats,
+        completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+        plan: SourceStreamEntryPlan,
+        entry_offset: u64,
+        bytes: &[u8],
+    ) -> Result<u64, QuicTransportError> {
+        let symbol_size = usize::from(config.symbol_size.max(1));
+        let symbol_size_u64 = u64::try_from(symbol_size).unwrap_or(u64::MAX);
+        let max_block_size = u64::try_from(config.max_block_size.max(1)).unwrap_or(u64::MAX);
+        let mut accepted = 0u64;
+        let mut consumed = 0usize;
+        while consumed < bytes.len() {
+            let offset = entry_offset
+                .checked_add(u64::try_from(consumed).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    QuicTransportError::Integrity("entry source stream offset overflow".to_string())
+                })?;
+            let block_index = offset / max_block_size;
+            let sbn = u8::try_from(block_index).map_err(|_| QuicTransportError::TooLarge {
+                size: plan.size,
+                max: max_block_size.saturating_mul(u64::from(u8::MAX) + 1),
+            })?;
+            let block_start = block_index.saturating_mul(max_block_size);
+            let block_len = plan.size.saturating_sub(block_start).min(max_block_size);
+            let block_offset = offset.saturating_sub(block_start);
+            let esi_u64 = block_offset / symbol_size_u64;
+            let esi = u32::try_from(esi_u64).map_err(|_| {
+                QuicTransportError::Integrity("source symbol ESI exceeded u32 range".to_string())
+            })?;
+            let symbol_offset_u64 = block_offset % symbol_size_u64;
+            let symbol_start = esi_u64.saturating_mul(symbol_size_u64);
+            let expected_len = usize::try_from(
+                block_len
+                    .saturating_sub(symbol_start)
+                    .min(symbol_size_u64)
+                    .max(1),
+            )
+            .unwrap_or(usize::MAX);
+            let symbol_offset = usize::try_from(symbol_offset_u64).unwrap_or(usize::MAX);
+            let available_in_symbol = expected_len.saturating_sub(symbol_offset);
+            let take = (bytes.len() - consumed).min(available_in_symbol);
+            if take == 0 {
+                return Err(QuicTransportError::Integrity(
+                    "source stream symbol split made no progress".to_string(),
+                ));
+            }
+            accepted = accepted.saturating_add(self.feed_symbol_fragment(
+                cx,
+                decoders,
+                config,
+                decode_stats,
+                completed_backlog,
+                SourceSymbolKey {
+                    entry: plan.entry,
+                    sbn,
+                    esi,
+                },
+                symbol_size,
+                expected_len,
+                symbol_offset,
+                &bytes[consumed..consumed + take],
+            )?);
+            consumed += take;
+        }
+        Ok(accepted)
+    }
+
+    fn feed_symbol_fragment(
+        &mut self,
+        cx: &Cx,
+        decoders: &mut [super::QuicEntryDecoder],
+        config: &QuicConfig,
+        decode_stats: &mut super::QuicDecodeStats,
+        completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+        key: SourceSymbolKey,
+        symbol_size: usize,
+        expected_len: usize,
+        symbol_offset: usize,
+        fragment: &[u8],
+    ) -> Result<u64, QuicTransportError> {
+        if self.fed.contains(&key) {
+            return Ok(0);
+        }
+        let complete = {
+            let partial = self
+                .partials
+                .entry(key)
+                .or_insert_with(|| PartialSourceSymbol::new(symbol_size, expected_len));
+            partial.push_fragment(symbol_offset, fragment)?
+        };
+        if !complete {
+            return Ok(0);
+        }
+        let partial = self.partials.remove(&key).ok_or_else(|| {
+            QuicTransportError::Integrity("completed source symbol disappeared".to_string())
+        })?;
+        self.fed.insert(key);
+        let decoder_index = decoders
+            .iter()
+            .position(|decoder| decoder.index == key.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "source stream symbol for unknown manifest entry {}",
+                    key.entry
+                ))
+            })?;
+        let symbol = Symbol::new(
+            SymbolId::new(decoders[decoder_index].object_id, key.sbn, key.esi),
+            partial.data,
+            SymbolKind::Source,
+        );
+        let transfer_decode_width = super::quic_transfer_decode_width(decoders, config);
+        let allow_spawn_decode = super::quic_pending_decode_jobs(decoders) < transfer_decode_width;
+        let (accepted, decoded) = super::feed_authenticated_symbol_take_block_deferred(
+            cx,
+            &mut decoders[decoder_index],
+            AuthenticatedSymbol::new_unauthenticated(symbol),
+            config,
+            decode_stats,
+            allow_spawn_decode,
+            transfer_decode_width,
+        )?;
+        if let Some(block) = decoded {
+            completed_backlog.push(block);
+        }
+        Ok(u64::from(accepted))
+    }
+}
+
+async fn drain_native_source_stream_tap_frames(
+    cx: &Cx,
+    link: &mut QuicLink,
+    intake: &mut NativeSourceStreamSymbolIntake,
+    decoders: &mut [super::QuicEntryDecoder],
+    config: &QuicConfig,
+    decode_stats: &mut super::QuicDecodeStats,
+    completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+) -> Result<(usize, u64), QuicTransportError> {
+    let frames = link.drain_received_source_stream_frames();
+    let mut accepted = 0u64;
+    for frame in &frames {
+        accepted = accepted.saturating_add(intake.feed_stream_frame(
+            cx,
+            decoders,
+            config,
+            decode_stats,
+            completed_backlog,
+            frame,
+        )?);
+    }
+    if !frames.is_empty() {
+        let transfer_decode_width = super::quic_transfer_decode_width(decoders, config);
+        let allow_spawn_decode = super::quic_pending_decode_jobs(decoders) < transfer_decode_width;
+        completed_backlog.extend(
+            super::drain_ready_quic_decodes_with_blocks(
+                cx,
+                decoders,
+                config,
+                decode_stats,
+                allow_spawn_decode,
+                transfer_decode_width,
+            )
+            .await?,
+        );
+    }
+    Ok((frames.len(), accepted))
+}
+
 async fn receive_native_source_stream_entries_pumped(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
     stream: StreamId,
     manifest: &TransferManifest,
+    staged: &mut [QuicStagedEntryReceive],
     decoders: &mut [super::QuicEntryDecoder],
     config: &QuicConfig,
-) -> Result<u64, QuicTransportError> {
-    let mut received = 0u64;
-    for entry in &manifest.entries {
+) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
+    let _ = stream;
+    let mut intake = NativeSourceStreamSymbolIntake::new(manifest)?;
+    let mut symbols_accepted = 0u64;
+    let mut decode_stats = super::QuicDecodeStats::default();
+    let mut intake_stats = NativeReceiverIntakeStats::default();
+    let mut completed_backlog = Vec::new();
+    let mut last_progress = Instant::now();
+    loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let expected_len =
-            usize::try_from(entry.size).map_err(|_| QuicTransportError::TooLarge {
-                size: entry.size,
-                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
-            })?;
-        let decoder = decoders
-            .iter_mut()
-            .find(|decoder| decoder.index == entry.index)
-            .ok_or_else(|| {
-                QuicTransportError::Integrity(format!(
-                    "source stream for unknown manifest entry {}",
-                    entry.index
-                ))
-            })?;
-        let mut bytes = Vec::with_capacity(expected_len);
-        while bytes.len() < expected_len {
-            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            let remaining = expected_len - bytes.len();
-            let chunk_len = remaining
-                .min(config.chunk_size.max(1))
-                .min(super::QUIC_SOURCE_STREAM_READ_CHUNK);
-            let chunk =
-                read_native_source_stream_chunk(cx, link, stream, chunk_len, config.idle_timeout)
-                    .await?;
-            if chunk.is_empty() {
-                return Err(QuicTransportError::Integrity(format!(
-                    "source stream ended before entry {} completed ({} of {} bytes)",
-                    entry.index,
-                    bytes.len(),
-                    expected_len
-                )));
-            }
-            received = received.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-            bytes.extend_from_slice(&chunk);
-        }
-        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if len != entry.size {
-            return Err(QuicTransportError::Integrity(format!(
-                "source stream entry {} has {} bytes, expected {}",
-                entry.index, len, entry.size
-            )));
-        }
-        let got_sha = super::sha256_hex(&bytes);
-        if got_sha != entry.sha256_hex {
-            return Err(QuicTransportError::Integrity(format!(
-                "source stream entry {} sha256 {got_sha}, expected {}",
-                entry.index, entry.sha256_hex
-            )));
-        }
-        decoder.pending_decodes.clear();
-        decoder.pipeline = None;
-        decoder.data = bytes;
-        decoder.complete = true;
-    }
 
-    let extra = read_native_source_stream_chunk(cx, link, stream, 1, config.idle_timeout).await?;
-    if !extra.is_empty() {
-        return Err(QuicTransportError::Integrity(
-            "source stream carried bytes beyond the manifest total".to_string(),
-        ));
+        let (stream_frames, stream_symbols) = drain_native_source_stream_tap_frames(
+            cx,
+            link,
+            &mut intake,
+            decoders,
+            config,
+            &mut decode_stats,
+            &mut completed_backlog,
+        )
+        .await?;
+        if stream_frames > 0 || stream_symbols > 0 {
+            symbols_accepted = symbols_accepted.saturating_add(stream_symbols);
+            last_progress = Instant::now();
+        }
+
+        let (observed, accepted) = drain_native_receiver_symbol_queue(
+            cx,
+            link,
+            manifest,
+            decoders,
+            config,
+            &mut decode_stats,
+            &mut intake_stats,
+            &mut completed_backlog,
+            super::NativeSymbolDrainMode::ReadyOnly,
+            RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
+        )
+        .await?;
+        if observed > 0 || accepted > 0 {
+            symbols_accepted = symbols_accepted.saturating_add(accepted);
+            last_progress = Instant::now();
+            send_native_keep_alive(cx, &mut link.conn, control)?;
+        }
+
+        write_completed_native_blocks(
+            cx,
+            link,
+            control,
+            manifest,
+            staged,
+            config,
+            &mut intake_stats,
+            &mut completed_backlog,
+        )
+        .await?;
+        if super::pending_entries(decoders).is_empty() && intake.fin_seen() {
+            flush_cached_quic_staging_files(staged).await?;
+            return Ok((manifest.total_bytes, symbols_accepted, decode_stats));
+        }
+
+        link.flush(cx).await?;
+        let pump_started = Instant::now();
+        let pumped_packets = link
+            .pump_inbound_for_with_drain_budget(
+                cx,
+                SOURCE_STREAM_PTO,
+                RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
+            )
+            .await?;
+        intake_stats.record_pump(pump_started.elapsed(), pumped_packets);
+        if pumped_packets > 0 {
+            last_progress = Instant::now();
+            continue;
+        }
+        if last_progress.elapsed() >= config.idle_timeout {
+            return Err(QuicTransportError::Timeout {
+                operation: "receive QUIC source stream",
+                timeout: config.idle_timeout,
+            });
+        }
     }
-    if received != manifest.total_bytes {
-        return Err(QuicTransportError::Integrity(format!(
-            "source stream delivered {received} bytes, expected {}",
-            manifest.total_bytes
-        )));
-    }
-    Ok(received)
 }
 
 async fn drain_native_receiver_symbol_queue(
@@ -5145,85 +6718,6 @@ async fn run_receiver_session(
     link.flush(cx).await?;
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
-    if let Some(source_stream) = source_stream {
-        if hello.total_bytes != manifest.total_bytes {
-            return Err(QuicTransportError::Integrity(format!(
-                "source stream hello total_bytes {} did not match manifest total_bytes {}",
-                hello.total_bytes, manifest.total_bytes
-            )));
-        }
-        if !super::quic_native_source_stream_enabled(manifest.total_bytes, config, &link.conn) {
-            return Err(QuicTransportError::Integrity(format!(
-                "sender advertised QUIC source stream {} for a non-clean or oversized transfer",
-                source_stream.0
-            )));
-        }
-        let bytes_received = receive_native_source_stream_entries_pumped(
-            cx,
-            link,
-            source_stream,
-            &manifest,
-            &mut decoders,
-            config,
-        )
-        .await?;
-        quic_rqtrace!(
-            "receiver: native_source_stream received bytes={} stream={}",
-            bytes_received,
-            source_stream.0
-        );
-        let complete_frame = link
-            .next_control_frame(cx, &mut control, "receive source-stream object-complete")
-            .await?;
-        if complete_frame.frame_type() != FrameType::ObjectComplete {
-            return Err(QuicTransportError::Unexpected {
-                got: complete_frame.frame_type(),
-                expected: "ObjectComplete",
-            });
-        }
-        let complete = super::parse_quic_round_complete(&complete_frame)?;
-        if complete.round != 0 || complete.round_symbols_sent != 0 {
-            return Err(QuicTransportError::Integrity(format!(
-                "source-stream ObjectComplete must be round=0 symbols=0, got round={} symbols={}",
-                complete.round, complete.round_symbols_sent
-            )));
-        }
-        let (receipt, committed_paths) = super::commit_decoded_entries(
-            cx,
-            dest_dir,
-            &manifest,
-            &decoders,
-            0,
-            0,
-            super::QuicDecodeStats::default(),
-            config,
-        )
-        .await?;
-        send_native_proof_until_close(cx, link, &mut control, &receipt, config).await?;
-        let _ = super::send_native_close(cx, &mut link.conn, &mut control);
-        let _ = link.flush(cx).await;
-        if !receipt.committed {
-            return Err(QuicTransportError::Integrity(
-                receipt
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "receiver did not commit".to_string()),
-            ));
-        }
-        return Ok(ReceiveReport {
-            transfer_id: manifest.transfer_id.clone(),
-            bytes_received: receipt.bytes_received,
-            files: receipt.files,
-            committed: true,
-            symbols_accepted: 0,
-            feedback_rounds: 0,
-            decode_count: 0,
-            decode_micros: 0,
-            committed_paths,
-            peer: link.peer,
-        });
-    }
-
     let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
     let staging_nonce = quic_staging_nonce_hex()?;
     let staging_dir = dest_dir.join(format!(
@@ -5248,6 +6742,104 @@ async fn run_receiver_session(
             )
         })
         .collect::<Vec<_>>();
+    if let Some(source_stream) = source_stream {
+        let previous_paced_source_stream = link.paced_source_stream.replace(source_stream);
+        let source_receive_result: Result<ReceiveReport, QuicTransportError> = async {
+            if hello.total_bytes != manifest.total_bytes {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source stream hello total_bytes {} did not match manifest total_bytes {}",
+                    hello.total_bytes, manifest.total_bytes
+                )));
+            }
+            if !super::quic_native_source_stream_enabled(manifest.total_bytes, config, &link.conn) {
+                return Err(QuicTransportError::Integrity(format!(
+                    "sender advertised QUIC source stream {} for a non-clean or oversized transfer",
+                    source_stream.0
+                )));
+            }
+            let (bytes_received, symbols_accepted, decode_stats) =
+                receive_native_source_stream_entries_pumped(
+                    cx,
+                    link,
+                    &mut control,
+                    source_stream,
+                    &manifest,
+                    &mut staged,
+                    &mut decoders,
+                    config,
+                )
+                .await?;
+            quic_rqtrace!(
+                "receiver: native_source_stream received bytes={} stream={} symbols_accepted={} decode_count={}",
+                bytes_received,
+                source_stream.0,
+                symbols_accepted,
+                decode_stats.decode_count
+            );
+            let complete_frame = link
+                .next_control_frame(cx, &mut control, "receive source-stream object-complete")
+                .await?;
+            if complete_frame.frame_type() != FrameType::ObjectComplete {
+                return Err(QuicTransportError::Unexpected {
+                    got: complete_frame.frame_type(),
+                    expected: "ObjectComplete",
+                });
+            }
+            let complete = super::parse_quic_round_complete(&complete_frame)?;
+            if complete.round != 0 {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source-stream ObjectComplete must be round=0, got round={} symbols={}",
+                    complete.round, complete.round_symbols_sent
+                )));
+            }
+            let (mut receipt, committed_paths) = commit_staged_entries(
+                cx,
+                link,
+                &mut control,
+                dest_dir,
+                &manifest,
+                &mut staged,
+                config,
+            )
+            .await?;
+            receipt.symbols_accepted = symbols_accepted;
+            receipt.feedback_rounds = 0;
+            receipt.decode_count = decode_stats.decode_count;
+            receipt.decode_micros = decode_stats.decode_micros;
+            send_native_proof_until_close(cx, link, &mut control, &receipt, config).await?;
+            let _ = super::send_native_close(cx, &mut link.conn, &mut control);
+            let _ = link.flush(cx).await;
+            if !receipt.committed {
+                return Err(QuicTransportError::Integrity(
+                    receipt
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "receiver did not commit".to_string()),
+                ));
+            }
+            Ok(ReceiveReport {
+                transfer_id: manifest.transfer_id.clone(),
+                bytes_received: receipt.bytes_received,
+                files: receipt.files,
+                committed: true,
+                symbols_accepted: receipt.symbols_accepted,
+                feedback_rounds: receipt.feedback_rounds,
+                decode_count: receipt.decode_count,
+                decode_micros: receipt.decode_micros,
+                committed_paths,
+                peer: link.peer,
+            })
+        }
+        .await;
+        link.paced_source_stream = previous_paced_source_stream;
+        for staged_entry in &mut staged {
+            let _ = staged_entry.close_cached_staging_file().await;
+        }
+        let _ = crate::fs::remove_dir_all(&staging_dir).await;
+        staging_guard.disarm();
+        return source_receive_result;
+    }
+
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
     let mut decode_stats = super::QuicDecodeStats::default();
@@ -5508,6 +7100,7 @@ async fn run_receiver_session(
                 round_loss_fraction,
                 next_feedback_round,
             );
+            let progress = super::quic_pending_decode_progress(&decoders, &pending, config);
             let need = QuicNeedMore {
                 feedback_round: next_feedback_round,
                 pending,
@@ -5523,6 +7116,10 @@ async fn run_receiver_session(
                 repair_request_gap_to_target_symbols: Some(
                     repair_accounting.request_gap_to_target_symbols,
                 ),
+                pending_rank: Some(progress.rank),
+                pending_rank_columns: Some(progress.rank_columns),
+                pending_rank_deficit: Some(progress.rank_deficit),
+                pending_decode_jobs: Some(progress.pending_decode_jobs),
             };
             intake_stats.trace_need_more(cx, next_feedback_round, &need);
             let requested_repair_symbols = need_more_repair_symbol_count(&need);
@@ -5715,6 +7312,7 @@ mod tests {
     use super::*;
     use crate::bytes::Bytes;
     use crate::net::atp::protocol::quic_frames::QuicFrame;
+    use crate::net::quic_native::{DEFAULT_MAX_PACKET_BYTES, StreamDirection};
 
     fn established_native_test_conn() -> NativeQuicConnection {
         let cx = Cx::for_testing();
@@ -5740,15 +7338,21 @@ mod tests {
 
     #[test]
     fn native_feedback_round_budget_rejects_pending_round_after_cap() {
-        let err = next_feedback_round_or_no_convergence(1, 1, 2)
-            .expect_err("second pending feedback round exceeds max_feedback_rounds=1");
+        assert_eq!(
+            next_feedback_round_or_no_convergence(1, 1, 2)
+                .expect("first still-viable grace round should not fast-fail"),
+            2
+        );
+        let fail_closed_rounds = still_viable_feedback_fail_closed_rounds(1);
+        let err = next_feedback_round_or_no_convergence(fail_closed_rounds, 1, 2)
+            .expect_err("pending feedback beyond bounded grace fails closed");
 
         assert!(matches!(
             err,
             QuicTransportError::NoConvergence {
-                rounds: 1,
+                rounds,
                 pending: 2,
-            }
+            } if rounds == fail_closed_rounds
         ));
     }
 
@@ -5795,15 +7399,26 @@ mod tests {
 
     #[test]
     fn native_sender_feedback_round_rejects_pending_round_beyond_cap() {
-        let err = feedback_round_for_need_or_no_convergence(8, 8, 9, 1)
-            .expect_err("receiver-assigned round beyond max_feedback_rounds fails closed");
+        assert_eq!(
+            feedback_round_for_need_or_no_convergence(8, 8, 9, 1)
+                .expect("first still-viable sender grace round should not fast-fail"),
+            (9, 9)
+        );
+        let fail_closed_rounds = still_viable_feedback_fail_closed_rounds(8);
+        let err = feedback_round_for_need_or_no_convergence(
+            fail_closed_rounds,
+            8,
+            fail_closed_rounds.saturating_add(1),
+            1,
+        )
+        .expect_err("receiver-assigned round beyond bounded grace fails closed");
 
         assert!(matches!(
             err,
             QuicTransportError::NoConvergence {
-                rounds: 8,
+                rounds,
                 pending: 1,
-            }
+            } if rounds == fail_closed_rounds
         ));
     }
 
@@ -5857,8 +7472,12 @@ mod tests {
         // (sent vs observed) must drive AIMD so the cap backs off instead of flooding
         // the overflowing queue until PTO timeout.
         let cx = Cx::for_testing();
+        let config = QuicConfig {
+            max_spray_symbols_per_flush: 64,
+            ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+        };
         let mut aimd = NativeQuicAimdPacer::default();
-        aimd.record_spray(1000, 50_000_000);
+        aimd.record_spray(1000, 50_000_000, Duration::from_millis(1));
         let need = QuicNeedMore {
             feedback_round: 1,
             pending: vec![0],
@@ -5866,7 +7485,7 @@ mod tests {
             round_loss_fraction: Some(0.0),   // receiver blind to the drop
             ..QuicNeedMore::default()
         };
-        aimd.observe_need_more(&cx, &need);
+        aimd.observe_need_more(&cx, &config, &need);
         assert!(
             aimd.last_round_loss_fraction >= 0.5,
             "sender-side delivery loss must surface the queue drop, got {}",
@@ -5876,26 +7495,184 @@ mod tests {
             aimd.cap_bps().is_some(),
             "a ~98% drop must trip the AIMD multiplicative-decrease cap (no flood)"
         );
+        let cap = aimd
+            .cap_bps()
+            .expect("severe sender-observed delivery loss should arm the shared cap");
+        let half_cold_start = ((super::super::QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S
+            * super::super::QUIC_AIMD_MULTIPLICATIVE_DECREASE)
+            .ceil()) as u64;
+        assert!(
+            cap <= half_cold_start,
+            "severe sender-observed delivery loss must cut below half-rate, got {cap}"
+        );
+        let conn = established_native_test_conn();
+        let lossy = super::super::quic_spray_pacing_decision_from_config(
+            &config,
+            native_quic_path_signal_with_observed_loss(conn.transport(), aimd.observed_loss()),
+        );
         assert_eq!(
-            aimd.cap_bps(),
-            Some(5_000_000),
-            "severe sender-observed delivery loss must cut below half-rate, got {:?}",
-            aimd.cap_bps()
+            lossy.limiter,
+            super::super::QuicSprayPacingLimiter::LossBackoff,
+            "sender-side delivery loss must shape the next pacing decision, not only trace metadata"
+        );
+        assert!(
+            !super::super::quic_round0_clean_ramp_enabled(&config, &lossy, true),
+            "Bug A: sender-side delivery loss must keep the clean ramp from re-arming"
         );
         // Clean delivery (observed ~= sent) must NOT spuriously back off.
         let mut clean = NativeQuicAimdPacer::default();
-        clean.record_spray(1000, 50_000_000);
+        clean.record_spray(1000, 50_000_000, Duration::from_millis(1));
         let clean_need = QuicNeedMore {
             feedback_round: 1,
             round_symbols_observed: Some(1000),
             round_loss_fraction: Some(0.0),
             ..QuicNeedMore::default()
         };
-        clean.observe_need_more(&cx, &clean_need);
+        clean.observe_need_more(&cx, &config, &clean_need);
         assert!(
             clean.last_round_loss_fraction <= f64::EPSILON,
             "full delivery must register ~0 loss, got {}",
             clean.last_round_loss_fraction
+        );
+    }
+
+    #[test]
+    fn matrix164_native_quic_shared_rate_decision_caps_next_pacing_epoch() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 1200,
+            max_spray_symbols_per_flush: 128,
+            round0_loss_target: 0.10,
+            datagram_fanout: 1,
+            ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+        };
+        let mut aimd = NativeQuicAimdPacer::default();
+        aimd.record_spray(10_000, 64 * 1024 * 1024, Duration::from_secs(1));
+        let need = QuicNeedMore {
+            feedback_round: 1,
+            pending: vec![0],
+            round_symbols_observed: Some(1_000),
+            round_loss_fraction: Some(0.0),
+            ..QuicNeedMore::default()
+        };
+
+        aimd.observe_need_more(&cx, &config, &need);
+        let decision = aimd
+            .shared_decision()
+            .expect("NeedMore should feed the shared datagram controller");
+        assert!(
+            decision.sender_loss_fraction_ppm >= 900_000,
+            "shared controller must see sender-side queue overflow"
+        );
+        assert!(
+            decision.loss_limited,
+            "sender-observed overflow must put the shared controller in loss backoff"
+        );
+
+        let conn = established_native_test_conn();
+        let mut pacing = super::super::quic_spray_pacing_decision_from_config(
+            &config,
+            native_quic_path_signal_with_observed_loss(conn.transport(), 0.0),
+        );
+        let uncapped_rate = pacing.pacing_rate_bps;
+        let uncapped_burst = pacing.max_burst_symbols;
+        NativeQuicAimdPacer::apply_shared_decision_to_pacing(
+            Some(decision),
+            &mut pacing,
+            usize::from(config.symbol_size.max(1)),
+            &config,
+        );
+
+        let symbol_bytes = u64::from(config.symbol_size.max(1));
+        let budget_symbols = usize::try_from(
+            decision
+                .send_budget_bytes
+                .checked_div(symbol_bytes)
+                .unwrap_or(0)
+                .max(1),
+        )
+        .unwrap_or(usize::MAX);
+        assert!(
+            pacing.pacing_rate_bps <= decision.pacing_bytes_per_s,
+            "native QUIC pacing must consume the shared controller rate cap"
+        );
+        assert!(
+            pacing.pacing_rate_bps <= uncapped_rate,
+            "shared controller may only tighten the native pacing epoch"
+        );
+        assert!(
+            pacing.max_burst_symbols <= budget_symbols,
+            "native QUIC burst must respect shared cwnd/receiver send budget"
+        );
+        assert!(
+            pacing.max_burst_symbols <= uncapped_burst,
+            "shared controller may only tighten the native burst epoch"
+        );
+        assert_eq!(
+            pacing.limiter,
+            super::super::QuicSprayPacingLimiter::LossBackoff,
+            "sender-side overflow must disable the clean/unbounded pacing path"
+        );
+    }
+
+    #[test]
+    fn quic_aimd_backs_off_when_rank_progress_stalls_despite_zero_loss() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+        };
+
+        let mut stalled = NativeQuicAimdPacer::default();
+        stalled.record_spray(10_000, 50_000_000, Duration::from_millis(800));
+        let stalled_need = QuicNeedMore {
+            feedback_round: 1,
+            pending: vec![0],
+            round_symbols_observed: Some(10_000),
+            round_symbols_accepted: Some(10_000),
+            round_loss_fraction: Some(0.0),
+            pending_rank: Some(100),
+            pending_rank_columns: Some(43_700),
+            pending_rank_deficit: Some(43_600),
+            pending_decode_jobs: Some(0),
+            ..QuicNeedMore::default()
+        };
+        stalled.observe_need_more(&cx, &config, &stalled_need);
+        assert!(
+            stalled.last_round_loss_fraction
+                > super::super::quic_aimd_loss_decrease_threshold(&config),
+            "rank-progress stall must override underreported receiver arrival loss"
+        );
+        assert_eq!(
+            stalled.cap_bps(),
+            Some(super::super::QUIC_AIMD_MIN_RATE_BPS),
+            "stalled rank progress should back off to the sender-side delivery floor"
+        );
+
+        let mut healthy = NativeQuicAimdPacer::default();
+        healthy.record_spray(10_000, 50_000_000, Duration::from_millis(1_000));
+        let healthy_need = QuicNeedMore {
+            feedback_round: 1,
+            pending: vec![0],
+            round_symbols_observed: Some(10_000),
+            round_symbols_accepted: Some(10_000),
+            round_loss_fraction: Some(0.0),
+            pending_rank: Some(8_500),
+            pending_rank_columns: Some(43_700),
+            pending_rank_deficit: Some(35_200),
+            pending_decode_jobs: Some(0),
+            ..QuicNeedMore::default()
+        };
+        healthy.observe_need_more(&cx, &config, &healthy_need);
+        assert_eq!(
+            healthy.last_round_loss_fraction, 0.0,
+            "healthy rank progress should not manufacture congestion loss"
+        );
+        assert_eq!(
+            healthy.cap_bps(),
+            None,
+            "healthy rank progress should keep the native QUIC cap unarmed"
         );
     }
 
@@ -6049,7 +7826,7 @@ mod tests {
             "pure ATP DATAGRAM packets must use the RaptorQ data-plane pacer as send authority"
         );
         assert!(
-            !data_plane_packet_tracks_recovery_in_flight(core::slice::from_ref(&datagram)),
+            !packet_tracks_recovery_in_flight(core::slice::from_ref(&datagram), None),
             "pure ATP DATAGRAM packets must not require NewReno admission"
         );
         let overflow_pn = conn
@@ -6159,14 +7936,184 @@ mod tests {
     }
 
     #[test]
+    fn native_source_stream_bulk_admission_is_pacer_not_newreno_cwnd() {
+        let cx = Cx::for_testing();
+        let source_stream = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
+        let other_stream = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 3);
+        let source_frame = QuicFrame::Stream {
+            stream_id: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(
+                source_stream.0,
+            ),
+            offset: None,
+            data: Bytes::from_static(b"source"),
+            fin: false,
+        };
+        let other_frame = QuicFrame::Stream {
+            stream_id: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(
+                other_stream.0,
+            ),
+            offset: None,
+            data: Bytes::from_static(b"control"),
+            fin: false,
+        };
+
+        assert!(source_stream_packet_uses_paced_recovery(
+            core::slice::from_ref(&source_frame),
+            Some(source_stream)
+        ));
+        assert!(!packet_tracks_recovery_in_flight(
+            core::slice::from_ref(&source_frame),
+            Some(source_stream)
+        ));
+        assert!(!source_stream_packet_uses_paced_recovery(
+            core::slice::from_ref(&other_frame),
+            Some(source_stream)
+        ));
+        assert!(packet_tracks_recovery_in_flight(
+            core::slice::from_ref(&other_frame),
+            Some(source_stream)
+        ));
+        let mixed_source_and_control = [source_frame.clone(), QuicFrame::Ping];
+        assert!(!source_stream_packet_uses_paced_recovery(
+            &mixed_source_and_control,
+            Some(source_stream)
+        ));
+        assert!(packet_tracks_recovery_in_flight(
+            &mixed_source_and_control,
+            Some(source_stream)
+        ));
+
+        let mut conn = established_native_test_conn();
+        let initial_cwnd = conn.transport().congestion_window_bytes();
+        let initial_packet_credits = initial_cwnd / QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES;
+        for idx in 0..initial_packet_credits {
+            conn.on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES,
+                true,
+                true,
+                (idx + 1) * CLOCK_STEP_MICROS,
+            )
+            .expect("setup packet should fill the native recovery cwnd");
+        }
+        assert_eq!(conn.transport().bytes_in_flight(), initial_cwnd);
+        assert!(!conn.transport().can_send(1));
+
+        let source_accounting = data_plane_packet_accounting_bytes(source_stream_max_frame_bytes());
+        let source_tracks_in_flight = packet_tracks_recovery_in_flight(
+            core::slice::from_ref(&source_frame),
+            Some(source_stream),
+        );
+        let pn = conn
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                source_accounting,
+                true,
+                source_tracks_in_flight,
+                (initial_packet_credits + 1) * CLOCK_STEP_MICROS,
+            )
+            .expect("marked source STREAM packet should use ATP-paced admission");
+        assert_eq!(pn, initial_packet_credits);
+        assert_eq!(
+            conn.transport().bytes_in_flight(),
+            initial_cwnd,
+            "bulk source STREAM packets must not grow NewReno bytes_in_flight past cwnd"
+        );
+    }
+
+    #[test]
+    fn native_source_stream_pacing_uses_stream_ceiling_for_good_path() {
+        let good_config = QuicConfig {
+            round0_loss_target: super::super::QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            max_spray_symbols_per_flush: 54,
+            ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+        };
+        let mut pacing = QuicSprayPacingDecision {
+            max_burst_symbols: 4,
+            pause_after_burst: Duration::from_millis(1),
+            pacing_rate_bps: super::super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+            cwnd_symbols: 4,
+            cwnd_share_symbols: 4,
+            burst_cap_share_symbols: 4,
+            loss_backoff: 1.0,
+            responsiveness_backoff: 1.0,
+            path_rtt_s: 0.025,
+            path_cwnd_bytes: 12_000,
+            path_loss_rate: super::super::QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            fec_loss_budget: 0.0,
+            congestion_loss_rate: 0.0,
+            limiter: super::super::QuicSprayPacingLimiter::PacingRate,
+        };
+        promote_source_stream_pacing(&mut pacing, &good_config, 1200);
+
+        assert_eq!(
+            pacing.pacing_rate_bps,
+            super::super::QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS,
+            "GOOD source STREAM pacing must not inherit the lower DATAGRAM clean-ramp cap"
+        );
+
+        let capped_config = QuicConfig {
+            bwlimit_bps: Some(super::super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS),
+            ..good_config
+        };
+        let mut capped = pacing;
+        capped.pacing_rate_bps = super::super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS;
+        promote_source_stream_pacing(&mut capped, &capped_config, 1200);
+        assert_eq!(
+            capped.pacing_rate_bps,
+            super::super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+            "operator bandwidth caps must still bound source STREAM pacing"
+        );
+    }
+
+    #[test]
+    fn native_source_stream_repair_tail_has_good_loss_floor() {
+        let config = QuicConfig {
+            repair_overhead: 1.0,
+            round0_loss_target: super::super::QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            symbol_size: 1141,
+            max_block_size: 512 * 1024,
+            ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+        };
+        let manifest = TransferManifest {
+            transfer_id: "goodtail".to_string(),
+            root_name: "goodtail.bin".to_string(),
+            is_directory: false,
+            total_bytes: 1024 * 1024,
+            merkle_root_hex: "00".repeat(32),
+            metadata_root_hex: None,
+            delta_manifest: None,
+            entries: vec![crate::net::atp::transport_tcp::ManifestEntry {
+                index: 0,
+                rel_path: "goodtail.bin".to_string(),
+                size: 1024 * 1024,
+                sha256_hex: "11".repeat(32),
+                metadata: None,
+            }],
+        };
+
+        let requests =
+            source_stream_repair_tail_requests(&manifest, &config).expect("tail requests");
+
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests.iter().all(|request| request.symbols == 2),
+            "GOOD source-stream tail should not collapse to zero when CLI repair_overhead is 1.0"
+        );
+    }
+
+    #[test]
     fn quic_sender_delivery_loss_compensates_blind_repair_requests() {
         // MATRIX-127: Bug B/A made AIMD see sender-side delivery loss, but repair
         // sizing must use that same signal. Otherwise a receiver with
         // round_loss_fraction=0.0 still asks for the raw deficit only, even after a
         // massive queue drop.
         let cx = Cx::for_testing();
+        let config = QuicConfig::default().allow_unauthenticated_for_trusted_transport();
         let mut aimd = NativeQuicAimdPacer::default();
-        aimd.record_spray(1_000, 50_000_000);
+        aimd.record_spray(1_000, 50_000_000, Duration::from_millis(1));
         let need = QuicNeedMore {
             feedback_round: 1,
             pending: vec![0],
@@ -6180,7 +8127,7 @@ mod tests {
             ..QuicNeedMore::default()
         };
 
-        aimd.observe_need_more(&cx, &need);
+        aimd.observe_need_more(&cx, &config, &need);
         let sender_loss = aimd.sender_delivery_loss_for_repair(need.round_loss_fraction);
         assert!(
             sender_loss.is_some_and(|loss| loss >= 0.5),
@@ -6299,6 +8246,81 @@ mod tests {
         assert_eq!(
             one_rtt_max_payload_for_udp_packet(ONE_RTT_PACKET_OVERHEAD - 1),
             0
+        );
+        assert_eq!(
+            source_stream_max_frame_bytes(),
+            one_rtt_max_payload_for_udp_packet(QUIC_SOURCE_STREAM_PACKET_BYTES),
+            "ATP-paced source STREAM packets should use the configured native QUIC envelope"
+        );
+        assert_eq!(
+            QUIC_SOURCE_STREAM_PACKET_BYTES,
+            8 * 1024,
+            "GOOD source STREAM packets should use the middle envelope, not the native MTU floor or jumbo UDP ceiling"
+        );
+        assert!(
+            source_stream_max_frame_bytes() > DEFAULT_MAX_PACKET_BYTES,
+            "source STREAM middle envelope should reduce receiver packet rate below the native MTU floor"
+        );
+        assert!(
+            QUIC_SOURCE_STREAM_FLUSH_BYTES
+                > u64::try_from(source_stream_max_frame_bytes()).unwrap(),
+            "source STREAM flush windows should contain multiple native-envelope packets"
+        );
+        let interval = source_stream_pacing_interval(
+            QUIC_SOURCE_STREAM_FLUSH_BYTES as usize,
+            64 * 1024 * 1024,
+        );
+        assert!(
+            (Duration::from_millis(7)..=Duration::from_millis(9)).contains(&interval),
+            "source STREAM flush bursts should pace near the reliable-stream ceiling"
+        );
+        let pacing = QuicSprayPacingDecision {
+            max_burst_symbols: 4,
+            pause_after_burst: Duration::from_millis(1),
+            pacing_rate_bps: 24 * 1024 * 1024,
+            cwnd_symbols: 4,
+            cwnd_share_symbols: 4,
+            burst_cap_share_symbols: 4,
+            loss_backoff: 1.0,
+            responsiveness_backoff: 1.0,
+            path_rtt_s: 0.025,
+            path_cwnd_bytes: 12_000,
+            path_loss_rate: 0.001,
+            fec_loss_budget: 0.0,
+            congestion_loss_rate: 0.0,
+            limiter: super::super::QuicSprayPacingLimiter::PacingRate,
+        };
+        let mut pacer = NativeDataPlanePacer::new(1200, 4, pacing.pacing_rate_bps);
+        pacer.configure(&pacing);
+        assert_eq!(pacer.byte_pacer_burst_bytes, 4 * 1200);
+        pacer.configure_source_stream(&pacing);
+        assert_eq!(
+            pacer.byte_pacer_burst_bytes,
+            usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap(),
+            "source STREAM byte pacing should burst by the producer flush window, not symbol burst"
+        );
+        let first_packet = source_stream_max_frame_bytes();
+        let second_packet = source_stream_max_frame_bytes();
+        let packet_budget_before = pacer.byte_pacer_burst_remaining;
+        let cx = Cx::for_testing();
+        futures_lite::future::block_on(async {
+            pacer
+                .before_send_bytes(&cx, first_packet, 0, 0, 0)
+                .await
+                .expect("first source STREAM packet should consume byte budget");
+            pacer
+                .before_send_bytes(&cx, second_packet, 0, 0, 0)
+                .await
+                .expect("second source STREAM packet should consume byte budget");
+        });
+        assert_eq!(packet_budget_before, 0);
+        assert_eq!(
+            pacer.byte_pacer_burst_remaining,
+            usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES)
+                .unwrap()
+                .saturating_sub(first_packet)
+                .saturating_sub(second_packet),
+            "source STREAM pacing must charge actual frame bytes, not rounded symbol units"
         );
     }
 
@@ -6770,6 +8792,119 @@ mod tests {
         assert_eq!(
             need_more_pto_mode(&recorded),
             NeedMorePtoMode::RetransmitRecorded
+        );
+    }
+
+    #[test]
+    fn source_stream_ack_ranges_extract_sparse_packet_ranges() {
+        let ack = QuicFrame::Ack {
+            largest_acknowledged: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(10),
+            ack_delay: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(0),
+            ack_range_count: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(1),
+            first_ack_range: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(2),
+            ack_ranges: vec![crate::net::atp::protocol::quic_frames::AckRange {
+                gap: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(1),
+                ack_range_length: crate::net::atp::protocol::varint::VarInt::from_u64_unchecked(1),
+            }],
+            ecn_counts: None,
+        };
+
+        let ranges = acked_packet_ranges_from_frames(&[ack]).expect("ACK ranges decode");
+
+        assert_eq!(
+            ranges,
+            vec![
+                NativeAckRange::new(10, 8).expect("first ACK range"),
+                NativeAckRange::new(5, 4).expect("second ACK range"),
+            ]
+        );
+        assert!(packet_in_ack_ranges(10, &ranges));
+        assert!(packet_in_ack_ranges(8, &ranges));
+        assert!(packet_in_ack_ranges(4, &ranges));
+        assert!(!packet_in_ack_ranges(7, &ranges));
+        assert!(!packet_in_ack_ranges(11, &ranges));
+        assert!(packet_lost_by_ack_gap(6, &ranges));
+        assert!(packet_lost_by_ack_gap(7, &ranges));
+        assert!(!packet_lost_by_ack_gap(8, &ranges));
+        assert!(!packet_lost_by_ack_gap(10, &ranges));
+        assert!(!packet_lost_by_ack_gap(11, &ranges));
+    }
+
+    #[test]
+    fn source_stream_retransmit_frames_are_sorted_and_deduplicated() {
+        let stream = StreamId(4);
+        let frames = vec![
+            SentControlStreamFrame {
+                stream,
+                offset: 4096,
+            },
+            SentControlStreamFrame {
+                stream,
+                offset: 1024,
+            },
+            SentControlStreamFrame {
+                stream,
+                offset: 4096,
+            },
+            SentControlStreamFrame {
+                stream: StreamId(8),
+                offset: 0,
+            },
+        ];
+
+        assert_eq!(
+            dedup_stream_frames_for_retransmit(frames),
+            vec![
+                SentControlStreamFrame {
+                    stream,
+                    offset: 1024,
+                },
+                SentControlStreamFrame {
+                    stream,
+                    offset: 4096,
+                },
+                SentControlStreamFrame {
+                    stream: StreamId(8),
+                    offset: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn source_stream_completion_pto_retransmits_only_tail_frames() {
+        let stream = StreamId(4);
+        let frames = (0..8)
+            .map(|idx| SentControlStreamFrame {
+                stream,
+                offset: idx * 1024,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            tail_stream_frames_for_retransmit(
+                &frames,
+                QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES,
+            ),
+            vec![
+                SentControlStreamFrame {
+                    stream,
+                    offset: 4096,
+                },
+                SentControlStreamFrame {
+                    stream,
+                    offset: 5120,
+                },
+                SentControlStreamFrame {
+                    stream,
+                    offset: 6144,
+                },
+                SentControlStreamFrame {
+                    stream,
+                    offset: 7168,
+                },
+            ],
+            "completion PTO should not replay the whole final source-stream flush window"
         );
     }
 

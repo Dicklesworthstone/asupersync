@@ -74,7 +74,10 @@ use crate::net::atp::bonding::{
     BondTransferDescriptor, BondedDonorSymbolEmission, DonorAssignment, schedule_bonded_donor_spray,
 };
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
-use crate::net::atp::datagram::congestion::{CongestionConfig, CongestionController};
+use crate::net::atp::datagram::congestion::{
+    CongestionConfig, CongestionController, DatagramRateConfig, DatagramRateController,
+    DatagramRateDecision, DatagramRateSample,
+};
 use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
@@ -270,6 +273,7 @@ const RQ_BROKEN_LINK_ROUND0_LOSS_MAX: f64 = RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD;
 const RQ_BROKEN_LINK_ROUND0_PACING_BPS: u64 = 1152 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
+const RQ_RECEIVER_FLOW_CONTROL_WINDOW_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
 const RQ_PACING_MAX_PAUSE: Duration = Duration::from_millis(250);
 const RQ_ADAPTIVE_MIN_SAMPLES: u32 = 1;
@@ -765,6 +769,20 @@ fn rate_window_bytes(bytes_per_sec: u64, rtt: Duration) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
+fn rq_receiver_flow_credit_bytes(config: &RqConfig, pending_bytes: u64) -> u64 {
+    let symbol_bytes = u64::from(config.symbol_size.max(1));
+    let datagram_bytes = symbol_bytes
+        .saturating_add(u64::try_from(AUTH_DGRAM_HEADER).unwrap_or(u64::MAX))
+        .max(1);
+    let min_window = datagram_bytes
+        .saturating_mul(u64::try_from(RQ_ADAPTIVE_BURST_SYMBOLS).unwrap_or(u64::MAX))
+        .max(symbol_bytes);
+    if pending_bytes == 0 {
+        return RQ_RECEIVER_FLOW_CONTROL_WINDOW_MAX_BYTES.max(min_window);
+    }
+    pending_bytes.clamp(min_window, RQ_RECEIVER_FLOW_CONTROL_WINDOW_MAX_BYTES)
+}
+
 fn duration_for_rate_window(bytes: u64, bytes_per_sec: u64) -> Duration {
     if bytes == 0 || bytes_per_sec == 0 {
         return Duration::ZERO;
@@ -782,6 +800,7 @@ fn duration_millis_u64(duration: Duration) -> u64 {
 struct RqSprayPacer {
     controller: CongestionController,
     pacing: RqSprayPacing,
+    shared_decision: Option<DatagramRateDecision>,
     round0_ramp: Option<RqRound0CleanPacingRamp>,
     small_clean_burst: Option<RqSmallCleanBurstPacer>,
 }
@@ -916,29 +935,47 @@ impl RqSprayPacer {
         small_clean_burst: bool,
     ) -> Self {
         let mut controller = CongestionController::new(CongestionConfig::default());
-        Self::configure_controller(&mut controller, pacing);
+        Self::configure_controller(&mut controller, pacing, None);
         Self {
             controller,
             pacing,
+            shared_decision: None,
             round0_ramp,
             small_clean_burst: small_clean_burst.then(RqSmallCleanBurstPacer::new),
         }
     }
 
-    fn configure_controller(controller: &mut CongestionController, pacing: RqSprayPacing) {
-        controller.configure_for_path_rate(
-            pacing.path_rate_bps,
-            pacing.datagram_bytes,
-            pacing.max_burst_size,
-        );
+    fn configure_controller(
+        controller: &mut CongestionController,
+        pacing: RqSprayPacing,
+        shared_decision: Option<DatagramRateDecision>,
+    ) {
+        if let Some(decision) = shared_decision {
+            controller.configure_from_rate_decision(
+                decision,
+                pacing.datagram_bytes,
+                pacing.max_burst_size,
+            );
+        } else {
+            controller.configure_for_path_rate(
+                pacing.path_rate_bps,
+                pacing.datagram_bytes,
+                pacing.max_burst_size,
+            );
+        }
         controller.update_congestion_feedback(pacing.rtt, pacing.loss_detected);
     }
 
-    fn configure(&mut self, pacing: RqSprayPacing) {
+    fn configure_with_shared_decision(
+        &mut self,
+        pacing: RqSprayPacing,
+        shared_decision: Option<DatagramRateDecision>,
+    ) {
         self.pacing = pacing;
+        self.shared_decision = shared_decision;
         self.round0_ramp = None;
         self.small_clean_burst = None;
-        Self::configure_controller(&mut self.controller, pacing);
+        Self::configure_controller(&mut self.controller, pacing, shared_decision);
     }
 
     fn pacing(&self) -> RqSprayPacing {
@@ -950,7 +987,7 @@ impl RqSprayPacer {
             return;
         };
         if let Some(report) = ramp.observe_datagram(&mut self.pacing) {
-            Self::configure_controller(&mut self.controller, self.pacing);
+            Self::configure_controller(&mut self.controller, self.pacing, self.shared_decision);
             rqtrace!(
                 "sender: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} path_rate_bps={} next_step_bytes={} max_rate_Bps={}",
                 report.sent_datagrams,
@@ -1318,6 +1355,9 @@ impl RqReceiverUdpFanout {
 
 struct RqAdaptiveSendState {
     controller: AdaptiveController,
+    shared_rate: DatagramRateController,
+    shared_rate_decision: Option<DatagramRateDecision>,
+    shared_rate_clock_micros: u64,
     loss_detector: AtpLossDetector,
     beacons: BeaconScheduler,
     est: PathEstimate,
@@ -1349,6 +1389,29 @@ struct RqNeedMoreProgress {
     pending_rank_columns: Option<u64>,
     pending_rank_deficit: Option<u64>,
     pending_decode_jobs: Option<u64>,
+}
+
+fn rq_shared_rate_config(config: &RqConfig) -> DatagramRateConfig {
+    let initial = round0_bad_link_pacing_bps(config).unwrap_or(RQ_COLD_START_PACING_BPS);
+    let symbol_bytes = u64::from(config.symbol_size.max(1));
+    DatagramRateConfig {
+        initial_pacing_bytes_per_s: initial,
+        min_pacing_bytes_per_s: RQ_MIN_PACING_BPS,
+        max_pacing_bytes_per_s: RQ_MAX_PACING_BPS,
+        initial_cwnd_bytes: symbol_bytes
+            .saturating_mul(u64::try_from(RQ_ADAPTIVE_BURST_SYMBOLS).unwrap_or(u64::MAX)),
+        min_cwnd_bytes: symbol_bytes.max(1),
+        max_cwnd_bytes: RQ_RECEIVER_FLOW_CONTROL_WINDOW_MAX_BYTES,
+        pacing_gain: 1.0,
+        cwnd_gain: 2.0,
+        loss_backoff_threshold: aimd_loss_decrease_threshold(config),
+        loss_backoff_factor: RQ_AIMD_MULTIPLICATIVE_DECREASE,
+        loss_delivery_headroom: RQ_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM,
+        receiver_window_gain: 1.0,
+        min_receiver_window_bytes: symbol_bytes.max(1),
+        max_receiver_window_bytes: RQ_RECEIVER_FLOW_CONTROL_WINDOW_MAX_BYTES,
+        min_rtt_window_micros: 10_000_000,
+    }
 }
 
 impl RqDeliverySampleKind {
@@ -1393,6 +1456,9 @@ impl RqAdaptiveSendState {
         controller.update_estimate(est);
         Self {
             controller,
+            shared_rate: DatagramRateController::new(rq_shared_rate_config(config)),
+            shared_rate_decision: None,
+            shared_rate_clock_micros: 0,
             loss_detector: AtpLossDetector::new(),
             beacons: BeaconScheduler::new(seed, Instant::now()),
             est,
@@ -1469,6 +1535,13 @@ impl RqAdaptiveSendState {
         if let Some(cap) = self.loss_pacing_cap_bps {
             rate = rate.min(self.loss_pacing_cap_for_current_regime(cap, config));
         }
+        if let Some(decision) = self.shared_rate_decision {
+            rate = rate.min(
+                decision
+                    .pacing_bytes_per_s
+                    .max(aimd_decrease_floor_bps(config)),
+            );
+        }
         if self.regime_shift || self.pacing_loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
             repair_overhead = repair_overhead.max(1.03);
             if !self.aimd_feedback_seen {
@@ -1486,6 +1559,10 @@ impl RqAdaptiveSendState {
                 self.pacing_loss_ema > 0.0,
             ),
         }
+    }
+
+    fn shared_rate_decision(&self) -> Option<DatagramRateDecision> {
+        self.shared_rate_decision
     }
 
     fn round0_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
@@ -1636,6 +1713,11 @@ impl RqAdaptiveSendState {
             symbol_payload_bytes,
             send_wall_s,
         );
+        let progress_delivery_bytes = progress_delivery_bps.map(|delivery_bps| {
+            (delivery_bps * send_wall_s)
+                .ceil()
+                .clamp(0.0, sent_payload_bytes as f64) as u64
+        });
         let progress_congestion_loss = progress_delivery_bps
             .and_then(|delivery_bps| {
                 loss_target_progress_congestion_loss(config, delivery_bps, offered_bps)
@@ -1645,6 +1727,17 @@ impl RqAdaptiveSendState {
         let observed_delivery_bps = progress_delivery_bps
             .unwrap_or(receiver_delivery_bps)
             .max(1.0);
+        let delivered_payload_bytes = progress_delivery_bytes
+            .unwrap_or(useful_bytes)
+            .min(sent_payload_bytes);
+        self.observe_shared_rate(
+            config,
+            sent_payload_bytes,
+            delivered_payload_bytes,
+            pending_bytes,
+            send_wall,
+            control_wait,
+        );
         if sent_this_round != 0 && feeds_pacing_estimator {
             self.apply_aimd_feedback(config, pacing_loss_sample, Some(observed_delivery_bps));
         }
@@ -1751,6 +1844,55 @@ impl RqAdaptiveSendState {
                 },
             );
         }
+    }
+
+    fn observe_shared_rate(
+        &mut self,
+        config: &RqConfig,
+        sent_payload_bytes: u64,
+        delivered_payload_bytes: u64,
+        pending_bytes: u64,
+        send_wall: Duration,
+        control_wait: Duration,
+    ) {
+        if sent_payload_bytes == 0 {
+            return;
+        }
+        let rtt_micros = u64::try_from(control_wait.as_micros())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        if self.shared_rate_clock_micros == 0 {
+            self.shared_rate_clock_micros = 1;
+            let _ = self.shared_rate.observe(DatagramRateSample {
+                now_micros: self.shared_rate_clock_micros,
+                sent_bytes: 1,
+                acked_bytes: 1,
+                lost_bytes: 0,
+                bytes_in_flight: 0,
+                rtt_micros: Some(rtt_micros),
+                receiver_credit_bytes: None,
+                receiver_window_bytes: None,
+            });
+        }
+        let elapsed_micros = u64::try_from(send_wall.as_micros())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        self.shared_rate_clock_micros =
+            self.shared_rate_clock_micros.saturating_add(elapsed_micros);
+        let receiver_credit = rq_receiver_flow_credit_bytes(config, pending_bytes);
+        let sample_sent_bytes = sent_payload_bytes.max(1);
+        let sample_delivered_bytes = delivered_payload_bytes.min(sample_sent_bytes);
+        let bytes_in_flight = sample_sent_bytes.saturating_sub(sample_delivered_bytes);
+        self.shared_rate_decision = Some(self.shared_rate.observe(DatagramRateSample {
+            now_micros: self.shared_rate_clock_micros,
+            sent_bytes: sample_sent_bytes,
+            acked_bytes: sample_delivered_bytes,
+            lost_bytes: bytes_in_flight,
+            bytes_in_flight,
+            rtt_micros: Some(rtt_micros),
+            receiver_credit_bytes: Some(receiver_credit),
+            receiver_window_bytes: Some(receiver_credit.saturating_add(bytes_in_flight)),
+        }));
     }
 
     fn progress_delivery_bps(
@@ -1886,6 +2028,14 @@ impl RqAdaptiveSendState {
         let sent_payload_bytes =
             sent_this_round.saturating_mul(u64::from(config.symbol_size.max(1)));
         let bw_sample = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
+        self.observe_shared_rate(
+            config,
+            sent_payload_bytes,
+            sent_payload_bytes,
+            sent_payload_bytes,
+            send_wall,
+            control_wait,
+        );
         self.apply_aimd_feedback(config, 0.0, Some(bw_sample));
         self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
             bw_sample
@@ -5380,7 +5530,10 @@ pub async fn send_path(
                 } else {
                     adaptive.round_tuning(&config)
                 };
-                pacer.configure(round_tuning.pacing);
+                pacer.configure_with_shared_decision(
+                    round_tuning.pacing,
+                    adaptive.shared_rate_decision(),
+                );
                 let loss_pacing_cap_bps = adaptive.loss_pacing_cap_bps.unwrap_or(0);
                 rqtrace!(
                     "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} measured_repair_overhead={:.4} fallback_trigger={} aimd_rate_bps={} loss_pacing_cap_bps={} send_wall_ms={} control_wait_ms={} delivery_rate_bps={:.0} bw_ema_bps={:.0} bw_trough_bps={:.0} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
@@ -7937,6 +8090,9 @@ async fn dispatch_decode_job(
             dec.index,
             block_sbn
         );
+        if let Some(pipeline) = dec.pipeline.as_mut() {
+            pipeline.restore_decode_job(job);
+        }
         return Ok(DecodeDispatchOutcome::new(
             DecodeDispatch::Queued,
             decode_stats,
@@ -7988,6 +8144,9 @@ async fn dispatch_decode_job(
             block_sbn
         );
         if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
+            if let Some(pipeline) = dec.pipeline.as_mut() {
+                pipeline.restore_decode_job(job);
+            }
             return Ok(DecodeDispatchOutcome::new(
                 DecodeDispatch::NoProgress,
                 decode_stats,
@@ -8005,6 +8164,9 @@ async fn dispatch_decode_job(
             block_sbn
         );
         if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
+            if let Some(pipeline) = dec.pipeline.as_mut() {
+                pipeline.restore_decode_job(job);
+            }
             return Ok(DecodeDispatchOutcome::new(
                 DecodeDispatch::NoProgress,
                 decode_stats,
@@ -8062,11 +8224,15 @@ async fn dispatch_decode_job(
                 block_sbn
             );
             if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
+                if let Some(pipeline) = dec.pipeline.as_mut() {
+                    pipeline.restore_decode_job(retry_job);
+                }
                 return Ok(DecodeDispatchOutcome::new(
                     DecodeDispatch::NoProgress,
                     decode_stats,
                 ));
             }
+            let restore_job = retry_job.clone();
             match cx.spawn_blocking(move |_child| run_block_decode_job(retry_job)) {
                 Ok(handle) => {
                     dec.pending_decodes
@@ -8090,7 +8256,7 @@ async fn dispatch_decode_job(
                         block_sbn
                     );
                     if let Some(pipeline) = dec.pipeline.as_mut() {
-                        pipeline.cancel_decode_job(block_sbn);
+                        pipeline.restore_decode_job(restore_job);
                     }
                     Ok(DecodeDispatchOutcome::new(
                         DecodeDispatch::NoProgress,
@@ -10377,6 +10543,9 @@ async fn queue_stale_decode_retry(
         return Ok(stats);
     }
     if block_decode_pending(dec, block_sbn) {
+        if let Some(pipeline) = dec.pipeline.as_mut() {
+            pipeline.restore_decode_job(job);
+        }
         return Ok(stats);
     }
 
@@ -10415,7 +10584,7 @@ async fn queue_stale_decode_retry(
             stats.record_entry_cap_saturation();
         }
         if let Some(pipeline) = dec.pipeline.as_mut() {
-            pipeline.cancel_decode_job(block_sbn);
+            pipeline.restore_decode_job(job);
         }
         rqtrace!(
             "receiver: entry {} deferred stale decode retry for block {} because decode width is saturated (entry_cap={entry_decode_width})",
@@ -10457,7 +10626,7 @@ async fn queue_stale_decode_retry(
         Err(err) => {
             stats.record_spawn_denial();
             if let Some(pipeline) = dec.pipeline.as_mut() {
-                pipeline.cancel_decode_job(block_sbn);
+                pipeline.restore_decode_job(inline_job);
             }
             rqtrace!(
                 "receiver: entry {} deferred stale decode retry for block {} after spawn denial: {err:?}",
@@ -11445,13 +11614,16 @@ mod tests {
         let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config, false);
         assert!(pacer.round0_ramp.is_some());
 
-        pacer.configure(RqSprayPacing::from_rate(
-            RQ_COLD_START_PACING_BPS / 2,
-            1200,
-            RQ_ADAPTIVE_BURST_SYMBOLS,
-            Some(Duration::from_millis(200)),
-            true,
-        ));
+        pacer.configure_with_shared_decision(
+            RqSprayPacing::from_rate(
+                RQ_COLD_START_PACING_BPS / 2,
+                1200,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                Some(Duration::from_millis(200)),
+                true,
+            ),
+            None,
+        );
 
         assert!(pacer.round0_ramp.is_none());
         assert_eq!(
@@ -12106,6 +12278,84 @@ mod tests {
             tuning.pacing.path_rate_bps,
             state.aimd_rate_bps.saturating_mul(8),
             "AIMD decrease must cap the next sender spray instead of acting as a one-shot sample"
+        );
+    }
+
+    #[test]
+    fn rq_shared_rate_decision_caps_next_pacer_burst() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = u64::from(config.symbol_size) * 2;
+        let digests = [EntryDigest {
+            rel_path: "receiver-credit.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"receiver-credit"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            1_000,
+            Some(0.0),
+            RqDeliverySampleKind::InitialOrRepair,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            total_bytes,
+        );
+
+        let decision = state
+            .shared_rate_decision()
+            .expect("NeedMore should feed shared datagram-rate controller");
+        let expected_credit = rq_receiver_flow_credit_bytes(&config, total_bytes);
+        assert!(
+            decision.sender_loss_fraction_ppm >= 900_000,
+            "shared controller must see sender-side queue overflow"
+        );
+        assert_eq!(
+            decision.receiver_credit_bytes,
+            Some(expected_credit),
+            "pending receiver bytes should be translated into the controller receiver credit"
+        );
+        assert_eq!(
+            decision.receiver_window_bytes,
+            Some(expected_credit.saturating_add(decision.bytes_in_flight)),
+            "receiver window should include still-outstanding sender payload plus remaining credit"
+        );
+        assert!(
+            decision.send_budget_bytes <= expected_credit,
+            "receiver credit must clip the immediate shared send budget"
+        );
+
+        let tuning = state.round_tuning(&config);
+        assert!(
+            tuning.pacing.rate_bytes_per_sec() <= decision.pacing_bytes_per_s,
+            "RQ round tuning must consume the shared controller's pacing cap"
+        );
+
+        let mut pacer = RqSprayPacer::new_round0(tuning.pacing, &config, false);
+        pacer.configure_with_shared_decision(tuning.pacing, Some(decision));
+        let now = Instant::now();
+        let mut immediate_budget = 0u32;
+        while pacer.controller.try_consume_send_budget(now) {
+            immediate_budget = immediate_budget.saturating_add(1);
+            assert!(
+                immediate_budget <= 2,
+                "receiver-limited shared decision reopened burst {immediate_budget}"
+            );
+        }
+        assert!(
+            immediate_budget <= 2,
+            "shared receiver credit should bound immediate RQ burst, got {immediate_budget}"
         );
     }
 
@@ -14565,13 +14815,16 @@ mod tests {
              streaming is unavailable"
         );
 
-        pacer.configure(RqSprayPacing::from_rate(
-            RQ_COLD_START_PACING_BPS / 2,
-            config.symbol_size,
-            RQ_ADAPTIVE_BURST_SYMBOLS,
-            Some(Duration::from_millis(200)),
-            true,
-        ));
+        pacer.configure_with_shared_decision(
+            RqSprayPacing::from_rate(
+                RQ_COLD_START_PACING_BPS / 2,
+                config.symbol_size,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                Some(Duration::from_millis(200)),
+                true,
+            ),
+            None,
+        );
         assert!(
             pacer.small_clean_burst.is_none(),
             "feedback/retry rounds must return to the normal per-datagram controller"

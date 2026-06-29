@@ -180,8 +180,14 @@ impl BlockDecodeJob {
 #[derive(Debug)]
 enum BlockDecodeResolution {
     Complete(Vec<u8>),
-    Retry(RejectReason),
-    Failed(RejectReason),
+    Retry {
+        reason: RejectReason,
+        symbols: Vec<Symbol>,
+    },
+    Failed {
+        reason: RejectReason,
+        symbols: Vec<Symbol>,
+    },
 }
 
 /// Which path produced a block-decode outcome.
@@ -208,9 +214,18 @@ pub(crate) struct BlockDecodeOutcome {
 /// Runs an owned block-decode job. Intended for `Cx::spawn_blocking`.
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
+    let BlockDecodeJob {
+        sbn,
+        plan,
+        symbols,
+        source_symbols,
+        symbol_size,
+        retain_decoded_block,
+    } = job;
+    let input_symbols = symbols.len();
     let started = Instant::now();
-    let source_complete = (job.source_symbols >= job.plan.k)
-        .then(|| complete_block_data_from_source_symbols(&job.plan, &job.symbols))
+    let source_complete = (source_symbols >= plan.k)
+        .then(|| complete_block_data_from_source_symbols(&plan, &symbols))
         .flatten();
     let (kind, resolution) = match source_complete {
         Some(data) => (
@@ -218,29 +233,36 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
             BlockDecodeResolution::Complete(data),
         ),
         None => {
-            let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
+            let resolution = match decode_block_data(&plan, &symbols, symbol_size) {
                 Ok(data) => BlockDecodeResolution::Complete(data),
-                Err(DecodingError::InsufficientSymbols { .. }) => {
-                    BlockDecodeResolution::Retry(RejectReason::InsufficientRank)
-                }
-                Err(DecodingError::MatrixInversionFailed { .. }) => {
-                    BlockDecodeResolution::Retry(RejectReason::InconsistentEquations)
-                }
-                Err(DecodingError::InconsistentMetadata { .. }) => {
-                    BlockDecodeResolution::Failed(RejectReason::InvalidMetadata)
-                }
-                Err(DecodingError::SymbolSizeMismatch { .. }) => {
-                    BlockDecodeResolution::Failed(RejectReason::SymbolSizeMismatch)
-                }
-                Err(_) => BlockDecodeResolution::Failed(RejectReason::InconsistentEquations),
+                Err(DecodingError::InsufficientSymbols { .. }) => BlockDecodeResolution::Retry {
+                    reason: RejectReason::InsufficientRank,
+                    symbols,
+                },
+                Err(DecodingError::MatrixInversionFailed { .. }) => BlockDecodeResolution::Retry {
+                    reason: RejectReason::InconsistentEquations,
+                    symbols,
+                },
+                Err(DecodingError::InconsistentMetadata { .. }) => BlockDecodeResolution::Failed {
+                    reason: RejectReason::InvalidMetadata,
+                    symbols,
+                },
+                Err(DecodingError::SymbolSizeMismatch { .. }) => BlockDecodeResolution::Failed {
+                    reason: RejectReason::SymbolSizeMismatch,
+                    symbols,
+                },
+                Err(_) => BlockDecodeResolution::Failed {
+                    reason: RejectReason::InconsistentEquations,
+                    symbols,
+                },
             };
             (BlockDecodeKind::RaptorQRepair, resolution)
         }
     };
     BlockDecodeOutcome {
-        sbn: job.sbn,
-        input_symbols: job.symbols.len(),
-        retain_decoded_block: job.retain_decoded_block,
+        sbn,
+        input_symbols,
+        retain_decoded_block,
         kind,
         elapsed: started.elapsed().max(Duration::from_nanos(1)),
         resolution,
@@ -412,6 +434,7 @@ pub struct DecodingPipeline {
     symbols: SymbolSet,
     accepted_symbols_total: usize,
     block_symbol_counts: HashMap<u8, PipelineBlockCounts>,
+    inflight_decode_symbols: HashSet<SymbolId>,
     blocks: HashMap<u8, BlockDecoder>,
     completed_blocks: HashSet<u8>,
     object_id: Option<ObjectId>,
@@ -448,6 +471,7 @@ impl DecodingPipeline {
             symbols: SymbolSet::with_config(threshold),
             accepted_symbols_total: 0,
             block_symbol_counts: HashMap::new(),
+            inflight_decode_symbols: HashSet::new(),
             blocks: HashMap::new(),
             completed_blocks: HashSet::new(),
             object_id: None,
@@ -678,6 +702,11 @@ impl DecodingPipeline {
         if self.completed_blocks.contains(&sbn) {
             return Ok(DeferredSymbolAcceptResult::Immediate(
                 SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded),
+            ));
+        }
+        if self.inflight_decode_symbols.contains(&symbol_id) {
+            return Ok(DeferredSymbolAcceptResult::Immediate(
+                SymbolAcceptResult::Duplicate,
             ));
         }
         if kind.is_repair() && !self.symbols.contains(&symbol_id) {
@@ -947,7 +976,11 @@ impl DecodingPipeline {
         })
     }
 
-    fn prepare_decode_job(&self, sbn: u8, retain_decoded_block: bool) -> Option<BlockDecodeJob> {
+    fn prepare_decode_job(
+        &mut self,
+        sbn: u8,
+        retain_decoded_block: bool,
+    ) -> Option<BlockDecodeJob> {
         let block_plan = self.block_plan(sbn)?.clone();
         if block_plan.k == 0 {
             return None;
@@ -968,10 +1001,12 @@ impl DecodingPipeline {
             return None;
         }
 
-        let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
+        let symbols = self.symbols.take_block_symbols(sbn);
         if symbols.len() < block_plan.k {
+            self.restore_decode_symbols(sbn, symbols);
             return None;
         }
+        self.remember_decode_job_symbols(&symbols);
 
         Some(BlockDecodeJob {
             sbn,
@@ -1040,13 +1075,15 @@ impl DecodingPipeline {
                     data: block_data,
                 }
             }
-            BlockDecodeResolution::Retry(reason) => {
+            BlockDecodeResolution::Retry { reason, symbols } => {
+                self.restore_decode_symbols(sbn, symbols);
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
                 SymbolAcceptResult::Rejected(reason)
             }
-            BlockDecodeResolution::Failed(reason) => {
+            BlockDecodeResolution::Failed { reason, symbols } => {
+                self.restore_decode_symbols(sbn, symbols);
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Failed;
                 }
@@ -1100,10 +1137,11 @@ impl DecodingPipeline {
                     data: block_data,
                 })
             }
-            BlockDecodeResolution::Retry(reason) => {
+            BlockDecodeResolution::Retry { reason, symbols } => {
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
+                self.restore_decode_symbols(sbn, symbols);
                 let current_symbols = self.symbols.symbols_for_block(sbn).count();
                 if current_symbols > input_symbols {
                     if let Some(job) = self.prepare_decode_job(sbn, retain_decoded_block) {
@@ -1115,7 +1153,8 @@ impl DecodingPipeline {
                 }
                 DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(reason))
             }
-            BlockDecodeResolution::Failed(reason) => {
+            BlockDecodeResolution::Failed { reason, symbols } => {
+                self.restore_decode_symbols(sbn, symbols);
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Failed;
                 }
@@ -1133,6 +1172,37 @@ impl DecodingPipeline {
                 block.state = BlockDecodingState::Collecting;
             }
         }
+    }
+
+    pub(crate) fn restore_decode_job(&mut self, job: BlockDecodeJob) {
+        let sbn = job.sbn;
+        if self.completed_blocks.contains(&sbn) {
+            for symbol in &job.symbols {
+                self.inflight_decode_symbols.remove(&symbol.id());
+            }
+            return;
+        }
+        self.cancel_decode_job(sbn);
+        self.restore_decode_symbols(sbn, job.symbols);
+    }
+
+    fn remember_decode_job_symbols(&mut self, symbols: &[Symbol]) {
+        for symbol in symbols {
+            self.inflight_decode_symbols.insert(symbol.id());
+        }
+    }
+
+    fn restore_decode_symbols(&mut self, sbn: u8, symbols: Vec<Symbol>) {
+        for symbol in symbols {
+            self.inflight_decode_symbols.remove(&symbol.id());
+            debug_assert_eq!(symbol.sbn(), sbn);
+            let _ = self.symbols.restore_retained(symbol);
+        }
+    }
+
+    fn forget_inflight_decode_symbols_for_block(&mut self, sbn: u8) {
+        self.inflight_decode_symbols
+            .retain(|symbol_id| symbol_id.sbn() != sbn);
     }
 
     fn try_complete_from_source_symbols(&self, block_plan: &BlockPlan) -> Option<Vec<u8>> {
@@ -1161,6 +1231,7 @@ impl DecodingPipeline {
             block.decoded = retained_block;
         }
         self.completed_blocks.insert(sbn);
+        self.forget_inflight_decode_symbols_for_block(sbn);
         self.symbols.clear_block(sbn);
         self.block_symbol_counts.remove(&sbn);
     }
@@ -1201,7 +1272,7 @@ impl DecodingPipeline {
                     break;
                 };
                 let id = SymbolId::new(object_id, plan.sbn, esi);
-                if !self.symbols.contains(&id) {
+                if !self.symbols.contains(&id) && !self.inflight_decode_symbols.contains(&id) {
                     missing.push(MissingSourceSymbol { sbn: plan.sbn, esi });
                     if limit != 0 && missing.len() >= limit {
                         return missing;
@@ -3621,6 +3692,8 @@ mod tests {
         let DeferredSymbolAcceptResult::Decode(job) = started else {
             panic!("repair should start deferred decode");
         };
+        let stale_sbn = job.sbn();
+        let stale_symbols = job.symbols.clone();
 
         let buffered = decoder
             .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
@@ -3636,12 +3709,15 @@ mod tests {
         );
 
         let stale_retry = BlockDecodeOutcome {
-            sbn: job.sbn(),
-            input_symbols: 2,
+            sbn: stale_sbn,
+            input_symbols: stale_symbols.len(),
             retain_decoded_block: false,
             kind: BlockDecodeKind::RaptorQRepair,
             elapsed: Duration::ZERO,
-            resolution: BlockDecodeResolution::Retry(RejectReason::InconsistentEquations),
+            resolution: BlockDecodeResolution::Retry {
+                reason: RejectReason::InconsistentEquations,
+                symbols: stale_symbols,
+            },
         };
         let retry = decoder.finish_decode_job_deferred(stale_retry);
         let DeferredSymbolAcceptResult::Decode(retry_job) = retry else {

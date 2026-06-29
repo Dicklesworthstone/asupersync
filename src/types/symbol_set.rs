@@ -274,6 +274,64 @@ impl SymbolSet {
             .filter(move |symbol| symbol.sbn() == sbn)
     }
 
+    /// Restores a previously accepted symbol without applying per-block intake
+    /// limits again.
+    ///
+    /// Deferred decode jobs temporarily move symbols out of the receive set so
+    /// the pipeline does not keep a second payload copy while a blocking solve
+    /// owns the job. If that solve is stale or fails, the same accepted symbols
+    /// must be put back exactly as retained input, not treated as fresh network
+    /// intake that can trip the cap.
+    pub(crate) fn restore_retained(&mut self, symbol: Symbol) -> bool {
+        let id = symbol.id();
+        if self.symbols.contains_key(&id) {
+            return false;
+        }
+
+        let size = Self::estimate_symbol_size(&symbol);
+        self.total_bytes = self.total_bytes.saturating_add(size);
+        if self.memory_budget.is_some() {
+            self.memory_remaining = self.memory_remaining.saturating_sub(size);
+        }
+
+        let sbn = id.sbn();
+        let progress = self.block_counts.entry(sbn).or_insert(BlockProgress {
+            sbn,
+            source_symbols: 0,
+            repair_symbols: 0,
+            k: None,
+            threshold_reached: false,
+        });
+        match symbol.kind() {
+            SymbolKind::Source => progress.source_symbols += 1,
+            SymbolKind::Repair => progress.repair_symbols += 1,
+        }
+        progress.threshold_reached = Self::calculate_threshold(progress, &self.threshold_config);
+
+        self.symbols.insert(id, symbol);
+        self.total_count = self.total_count.saturating_add(1);
+        true
+    }
+
+    /// Moves all currently retained symbols for a block out of the set.
+    ///
+    /// The block's configured `K` is preserved so new arrivals while the decode
+    /// job is in flight still have correct threshold metadata.
+    pub(crate) fn take_block_symbols(&mut self, sbn: u8) -> Vec<Symbol> {
+        let ids: Vec<SymbolId> = self
+            .symbols
+            .iter()
+            .filter_map(|(id, symbol)| (symbol.sbn() == sbn).then_some(*id))
+            .collect();
+        let mut symbols = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(symbol) = self.remove(&id) {
+                symbols.push(symbol);
+            }
+        }
+        symbols
+    }
+
     /// Returns block progress for a given block.
     #[inline]
     #[must_use]

@@ -1165,6 +1165,14 @@ impl StreamTable {
             .any(QuicStream::has_pending_stream_frames)
     }
 
+    /// Whether one stream has queued STREAM frames awaiting packet assembly.
+    #[must_use]
+    pub fn has_pending_stream_frames_for(&self, id: StreamId) -> bool {
+        self.streams
+            .get(&id)
+            .is_some_and(QuicStream::has_pending_stream_frames)
+    }
+
     /// Number of queued STREAM frames waiting for packet assembly.
     #[must_use]
     pub fn pending_stream_frame_count(&self) -> usize {
@@ -1180,6 +1188,28 @@ impl StreamTable {
         self.streams.values().fold(0u64, |acc, stream| {
             acc.saturating_add(stream.pending_stream_data_bytes())
         })
+    }
+
+    /// Queued STREAM payload bytes for one stream.
+    #[must_use]
+    pub fn pending_stream_data_bytes_for(&self, id: StreamId) -> u64 {
+        self.streams
+            .get(&id)
+            .map_or(0, QuicStream::pending_stream_data_bytes)
+    }
+
+    /// Pop the next queued STREAM frame for one stream.
+    pub fn pop_stream_frame_for(
+        &mut self,
+        id: StreamId,
+        max_data_len: usize,
+    ) -> Option<StreamFramePayload> {
+        if max_data_len == 0 {
+            return None;
+        }
+        self.stream_mut(id)
+            .ok()?
+            .pop_pending_stream_frame(max_data_len)
     }
 
     /// Pop the next queued STREAM frame, splitting payload bytes to `max_data_len`.

@@ -133,7 +133,9 @@ mod raptorq_decoder_metamorphic_tests {
                     ReceivedSymbol::source(symbol.esi(), symbol.data().to_vec())
                 }
                 asupersync::types::SymbolKind::Repair => {
-                    let (columns, coefficients) = decoder.repair_equation(symbol.esi());
+                    let (columns, coefficients) = decoder
+                        .repair_equation(symbol.esi())
+                        .expect("repair ESI should produce a valid RaptorQ equation");
                     ReceivedSymbol::repair(
                         symbol.esi(),
                         columns,
