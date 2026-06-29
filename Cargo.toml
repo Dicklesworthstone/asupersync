@@ -37,11 +37,12 @@ include = [
     "!src/observability/otel_conformance_tests.rs",
     "!src/subsystem_mutation_testing.rs",
     "!**/real_*_e2e_tests.rs",
-    # Keep the published tarball under crates.io's 10 MiB cap: standalone test
-    # files, metamorphic/conformance suites, and insta snapshots are never
-    # compiled when asupersync is consumed as a library dependency.
+    # Keep the published tarball under crates.io's 10 MiB cap: standalone
+    # `*_tests.rs` suites (metamorphic/conformance/etc.) and insta snapshots
+    # are cfg(test)-gated and never compiled when asupersync is consumed as a
+    # library dependency. (Singular `*_test.rs` files are NOT excluded — some
+    # are real `mod`-referenced modules, e.g. sync/lock_ordering_test.rs.)
     "!**/*_tests.rs",
-    "!**/*_test.rs",
     "!**/snapshots/**",
     "!src/bin/io_cap_budget_profile.rs",
     "!src/bin/verify_blocked_elimination.rs",
