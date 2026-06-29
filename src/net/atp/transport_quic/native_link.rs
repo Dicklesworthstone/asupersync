@@ -65,7 +65,7 @@ use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::datagram::congestion::{
     CongestionConfig, CongestionController, DatagramRateConfig, DatagramRateController,
-    DatagramRateDecision, DatagramRateSample,
+    DatagramRateDecision, DatagramRateSample, DatagramSendAdmission,
 };
 use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
@@ -324,6 +324,8 @@ const SOURCE_STREAM_PTO: Duration = Duration::from_millis(200);
 const QUIC_LOSS_TARGET_PROGRESS_STALL_RATIO: f64 = 0.50;
 const QUIC_LOSS_TARGET_PROGRESS_LOSS_MARGIN: f64 = 0.01;
 const QUIC_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM: f64 = 1.25;
+/// Conservative RTT used before ACK samples establish the real lossy-path RTprop.
+const QUIC_LOSSY_COLD_START_RTT_MICROS: u64 = 200_000;
 const QUIC_STILL_VIABLE_FEEDBACK_GRACE_ROUNDS: u32 = 8;
 /// Bounded terminal Proof retransmits. This uses STREAM-offset requeue, not a
 /// duplicate higher-offset Proof, so it fills the receiver->sender stream gap
@@ -610,6 +612,12 @@ fn next_feedback_round_or_no_convergence(
 struct SentControlStreamFrame {
     stream: StreamId,
     offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SentDatagramPacket {
+    payload_bytes: u64,
+    time_sent_micros: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1152,6 +1160,13 @@ fn frames_have_datagram(frames: &[QuicFrame]) -> bool {
     frames
         .iter()
         .any(|frame| matches!(frame, QuicFrame::Datagram { .. }))
+}
+
+fn datagram_frame_count(frames: &[QuicFrame]) -> usize {
+    frames
+        .iter()
+        .filter(|frame| matches!(frame, QuicFrame::Datagram { .. }))
+        .count()
 }
 
 fn frames_require_quic_recovery_in_flight(frames: &[QuicFrame]) -> bool {
@@ -1720,6 +1735,8 @@ pub struct QuicLink {
     spray_max_datagram_frames_per_packet: usize,
     /// Configured upper bound on symbols queued before a protected packet flush.
     max_spray_symbols_per_flush: usize,
+    /// RaptorQ payload bytes represented by one ATP DATAGRAM symbol.
+    symbol_payload_bytes: u64,
     symbol_datagram_frame_len: usize,
     data_plane_pacer: NativeDataPlanePacer,
     pending_received_packets: VecDeque<ReceivedPacket>,
@@ -1730,6 +1747,9 @@ pub struct QuicLink {
     last_flushed_stream_frames: Vec<SentControlStreamFrame>,
     in_flight_stream_frames: BTreeMap<u64, Vec<SentControlStreamFrame>>,
     latest_stream_ack_ranges: Vec<NativeAckRange>,
+    in_flight_datagram_packets: BTreeMap<u64, SentDatagramPacket>,
+    datagram_bytes_in_flight: u64,
+    pending_datagram_rate_samples: VecDeque<DatagramRateSample>,
     received_source_stream_frames: VecDeque<ReceivedSourceStreamFrame>,
     paced_source_stream: Option<StreamId>,
     udp_packets_received: u64,
@@ -2442,6 +2462,8 @@ impl QuicLink {
             header: [u8; ONE_RTT_HEADER_LEN],
             payload: BytesMut,
             stream_frames: Vec<SentControlStreamFrame>,
+            datagram_payload_bytes: u64,
+            time_sent_micros: u64,
         }
 
         let pending_before_flush = self.conn.pending_outbound_datagram_count();
@@ -2562,15 +2584,10 @@ impl QuicLink {
                     packet_stream_frames.push(stream_frame);
                 }
             }
-            let packet_datagram_frames = frames
-                .iter()
-                .filter(|frame| {
-                    matches!(
-                        frame,
-                        crate::net::atp::protocol::quic_frames::QuicFrame::Datagram { .. }
-                    )
-                })
-                .count();
+            let packet_datagram_frames = datagram_frame_count(&frames);
+            let datagram_payload_bytes = u64::try_from(packet_datagram_frames)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(self.symbol_payload_bytes);
             let mut payload = BytesMut::new();
             NativeQuicConnection::encode_frames(&frames, &mut payload)?;
             let packet_len = ONE_RTT_HEADER_LEN
@@ -2624,6 +2641,8 @@ impl QuicLink {
                 header,
                 payload,
                 stream_frames: packet_stream_frames,
+                datagram_payload_bytes,
+                time_sent_micros: self.clock,
             });
         }
         let generate_elapsed = generate_started.elapsed();
@@ -2686,6 +2705,11 @@ impl QuicLink {
                 )));
             }
             for plain in &plain_packets {
+                self.record_sent_datagram_packet(
+                    plain.packet_number,
+                    plain.datagram_payload_bytes,
+                    plain.time_sent_micros,
+                );
                 if !plain.stream_frames.is_empty() {
                     self.in_flight_stream_frames
                         .insert(plain.packet_number, plain.stream_frames.clone());
@@ -2767,6 +2791,249 @@ impl QuicLink {
             .retain(|packet_number, _frames| !packet_in_ack_ranges(*packet_number, acked_ranges));
         let removed = before.saturating_sub(self.in_flight_stream_frames.len());
         Ok((removed, 0))
+    }
+
+    fn datagram_payload_bytes_for_frames(&self, datagram_frames: usize) -> u64 {
+        u64::try_from(datagram_frames)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(self.symbol_payload_bytes.max(1))
+    }
+
+    fn queued_datagram_payload_bytes(&self, extra_symbols: usize) -> u64 {
+        let queued = self
+            .conn
+            .pending_outbound_datagram_count()
+            .saturating_add(extra_symbols);
+        self.datagram_payload_bytes_for_frames(queued)
+    }
+
+    fn datagram_bytes_in_flight_with_pending(&self, extra_symbols: usize) -> u64 {
+        self.datagram_bytes_in_flight
+            .saturating_add(self.queued_datagram_payload_bytes(extra_symbols))
+    }
+
+    fn record_sent_datagram_packet(
+        &mut self,
+        packet_number: u64,
+        payload_bytes: u64,
+        time_sent_micros: u64,
+    ) {
+        if payload_bytes == 0 {
+            return;
+        }
+        if let Some(previous) = self.in_flight_datagram_packets.insert(
+            packet_number,
+            SentDatagramPacket {
+                payload_bytes,
+                time_sent_micros,
+            },
+        ) {
+            self.datagram_bytes_in_flight = self
+                .datagram_bytes_in_flight
+                .saturating_sub(previous.payload_bytes);
+        }
+        self.datagram_bytes_in_flight = self.datagram_bytes_in_flight.saturating_add(payload_bytes);
+    }
+
+    fn apply_datagram_ack_ranges(&mut self, cx: &Cx, acked_ranges: &[NativeAckRange]) {
+        if acked_ranges.is_empty() || self.in_flight_datagram_packets.is_empty() {
+            return;
+        }
+
+        let now_micros = self.clock.max(1);
+        let mut retained = BTreeMap::new();
+        let mut acked_bytes = 0u64;
+        let mut lost_bytes = 0u64;
+        let mut rtt_micros: Option<u64> = None;
+        let mut acked_packets = 0usize;
+        let mut lost_packets = 0usize;
+
+        for (packet_number, packet) in std::mem::take(&mut self.in_flight_datagram_packets) {
+            if packet_in_ack_ranges(packet_number, acked_ranges) {
+                acked_packets = acked_packets.saturating_add(1);
+                acked_bytes = acked_bytes.saturating_add(packet.payload_bytes);
+                self.datagram_bytes_in_flight = self
+                    .datagram_bytes_in_flight
+                    .saturating_sub(packet.payload_bytes);
+                let sample_rtt = now_micros.saturating_sub(packet.time_sent_micros).max(1);
+                rtt_micros = Some(rtt_micros.map_or(sample_rtt, |rtt: u64| rtt.min(sample_rtt)));
+            } else if packet_lost_by_ack_gap(packet_number, acked_ranges) {
+                lost_packets = lost_packets.saturating_add(1);
+                lost_bytes = lost_bytes.saturating_add(packet.payload_bytes);
+                self.datagram_bytes_in_flight = self
+                    .datagram_bytes_in_flight
+                    .saturating_sub(packet.payload_bytes);
+            } else {
+                retained.insert(packet_number, packet);
+            }
+        }
+
+        self.in_flight_datagram_packets = retained;
+        if acked_bytes == 0 && lost_bytes == 0 {
+            return;
+        }
+
+        let sent_bytes = acked_bytes.saturating_add(lost_bytes).max(1);
+        let sample = DatagramRateSample {
+            now_micros,
+            sent_bytes,
+            acked_bytes,
+            lost_bytes,
+            bytes_in_flight: self.datagram_bytes_in_flight,
+            rtt_micros,
+            receiver_credit_bytes: None,
+            receiver_window_bytes: None,
+        };
+        self.pending_datagram_rate_samples.push_back(sample);
+
+        if cx.trace_buffer().is_some() {
+            let acked_packets_s = acked_packets.to_string();
+            let lost_packets_s = lost_packets.to_string();
+            let acked_bytes_s = acked_bytes.to_string();
+            let lost_bytes_s = lost_bytes.to_string();
+            let sent_bytes_s = sent_bytes.to_string();
+            let in_flight_s = self.datagram_bytes_in_flight.to_string();
+            let rtt_s = rtt_micros
+                .map(|rtt| rtt.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            cx.trace_with_fields(
+                "atp_quic.datagram.ack_sample",
+                &[
+                    ("acked_packets", acked_packets_s.as_str()),
+                    ("lost_packets", lost_packets_s.as_str()),
+                    ("sent_bytes", sent_bytes_s.as_str()),
+                    ("acked_bytes", acked_bytes_s.as_str()),
+                    ("lost_bytes", lost_bytes_s.as_str()),
+                    ("bytes_in_flight", in_flight_s.as_str()),
+                    ("rtt_micros", rtt_s.as_str()),
+                ],
+            );
+        }
+    }
+
+    fn drain_datagram_rate_samples(&mut self) -> Vec<DatagramRateSample> {
+        self.pending_datagram_rate_samples.drain(..).collect()
+    }
+
+    fn observe_pending_datagram_rate_samples(
+        &mut self,
+        cx: &Cx,
+        config: &QuicConfig,
+        aimd: &mut NativeQuicAimdPacer,
+    ) -> Option<DatagramRateDecision> {
+        let mut latest = None;
+        for sample in self.drain_datagram_rate_samples() {
+            latest = Some(aimd.observe_datagram_ack_sample(cx, config, sample));
+        }
+        latest
+    }
+
+    async fn wait_for_datagram_send_admission(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+        config: &QuicConfig,
+        aimd: &mut NativeQuicAimdPacer,
+        pacing: &mut QuicSprayPacingDecision,
+        local_pending_symbols: usize,
+        payload_bytes: u64,
+    ) -> Result<(), QuicTransportError> {
+        let mut last_progress = Instant::now();
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if self
+                .observe_pending_datagram_rate_samples(cx, config, aimd)
+                .is_some()
+            {
+                *pacing = self.spray_pacing_decision(
+                    config,
+                    aimd.cap_bps(),
+                    aimd.shared_decision(),
+                    aimd.observed_loss(),
+                );
+                self.update_spray_packet_coalescing(pacing);
+                self.data_plane_pacer
+                    .configure_with_shared_decision(pacing, aimd.shared_decision());
+            }
+            let committed_payload_bytes =
+                self.datagram_bytes_in_flight_with_pending(local_pending_symbols);
+            let admission = aimd.datagram_send_admission(
+                config,
+                self.clock.max(1),
+                committed_payload_bytes,
+                payload_bytes.max(1),
+            );
+            if admission.is_send() {
+                return Ok(());
+            }
+
+            let admission_kind = match admission {
+                DatagramSendAdmission::Send => "send",
+                DatagramSendAdmission::Wait { .. } => "wait",
+                DatagramSendAdmission::CwndBlocked { .. } => "cwnd_blocked",
+                DatagramSendAdmission::ReceiverWindowBlocked { .. } => "receiver_window_blocked",
+            };
+            let committed_s = committed_payload_bytes.to_string();
+            let in_flight_s = self.datagram_bytes_in_flight.to_string();
+            let queued_s = self.conn.pending_outbound_datagram_count().to_string();
+            let local_pending_s = local_pending_symbols.to_string();
+            let payload_s = payload_bytes.to_string();
+            cx.trace_with_fields(
+                "atp_quic.spray.shared_cwnd_blocked",
+                &[
+                    ("admission", admission_kind),
+                    ("committed_payload_bytes", committed_s.as_str()),
+                    ("datagram_bytes_in_flight", in_flight_s.as_str()),
+                    ("queued_datagrams", queued_s.as_str()),
+                    ("local_pending_symbols", local_pending_s.as_str()),
+                    ("payload_bytes", payload_s.as_str()),
+                ],
+            );
+
+            if let Some(wait_micros) = admission.retry_after_micros() {
+                let wait = Duration::from_micros(wait_micros).clamp(
+                    QUIC_DATA_PLANE_PACER_MIN_PAUSE,
+                    QUIC_DATA_PLANE_PACER_MAX_PAUSE,
+                );
+                crate::time::sleep(cx.now(), wait).await;
+                self.clock = self.clock.saturating_add(duration_micros_u64(wait).max(1));
+                continue;
+            }
+
+            let before = self.datagram_bytes_in_flight;
+            let flushed = self.flush(cx).await?;
+            let pumped = self.pump_inbound_for(cx, NEEDMORE_PTO).await?;
+            self.service_decoded_spray_liveness(cx, control).await?;
+            if self
+                .observe_pending_datagram_rate_samples(cx, config, aimd)
+                .is_some()
+            {
+                *pacing = self.spray_pacing_decision(
+                    config,
+                    aimd.cap_bps(),
+                    aimd.shared_decision(),
+                    aimd.observed_loss(),
+                );
+                self.update_spray_packet_coalescing(pacing);
+                self.data_plane_pacer
+                    .configure_with_shared_decision(pacing, aimd.shared_decision());
+            }
+            if flushed > 0 || pumped > 0 || self.datagram_bytes_in_flight < before {
+                last_progress = Instant::now();
+                continue;
+            }
+
+            if last_progress.elapsed() >= self.idle_timeout {
+                return Err(QuicTransportError::Timeout {
+                    operation: "quic datagram shared cwnd admission",
+                    timeout: self.idle_timeout,
+                });
+            }
+            crate::time::sleep(cx.now(), QUIC_DATA_PLANE_PACER_MIN_PAUSE).await;
+            self.clock = self
+                .clock
+                .saturating_add(duration_micros_u64(QUIC_DATA_PLANE_PACER_MIN_PAUSE).max(1));
+        }
     }
 
     fn drain_ack_gap_lost_stream_frames_for_retransmit(
@@ -2889,6 +3156,7 @@ impl QuicLink {
         ) {
             Ok(()) => {
                 self.apply_source_stream_ack_ranges(cx, &acked_stream_ranges)?;
+                self.apply_datagram_ack_ranges(cx, &acked_stream_ranges);
                 self.record_received_source_stream_frames(&decoded_frames);
                 self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
                 self.mark_peer_activity();
@@ -3205,8 +3473,10 @@ impl QuicLink {
         &mut self,
         cx: &Cx,
         control: &mut NativeQuicFrameTransport,
+        config: &QuicConfig,
+        aimd: &mut NativeQuicAimdPacer,
         flush_symbols: usize,
-        _pacing: &QuicSprayPacingDecision,
+        pacing: &mut QuicSprayPacingDecision,
         flushes: &mut usize,
         flushed_packets: &mut usize,
         flush_elapsed: &mut Duration,
@@ -3223,6 +3493,20 @@ impl QuicLink {
 
             let liveness_start = Instant::now();
             self.service_spray_liveness(cx, control).await?;
+            if self
+                .observe_pending_datagram_rate_samples(cx, config, aimd)
+                .is_some()
+            {
+                *pacing = self.spray_pacing_decision(
+                    config,
+                    aimd.cap_bps(),
+                    aimd.shared_decision(),
+                    aimd.observed_loss(),
+                );
+                self.update_spray_packet_coalescing(pacing);
+                self.data_plane_pacer
+                    .configure_with_shared_decision(pacing, aimd.shared_decision());
+            }
             let liveness_poll_elapsed = liveness_start.elapsed();
             *liveness_elapsed = (*liveness_elapsed).saturating_add(liveness_poll_elapsed);
             self.sender_handoff
@@ -3244,17 +3528,29 @@ impl QuicLink {
         control: &mut NativeQuicFrameTransport,
         tag: u64,
         symbols: &[NativeQuicSpraySymbol],
-        pacing: &QuicSprayPacingDecision,
-        shared_decision: Option<DatagramRateDecision>,
+        config: &QuicConfig,
+        pacing: &mut QuicSprayPacingDecision,
+        aimd: &mut NativeQuicAimdPacer,
     ) -> Result<(), QuicTransportError> {
         if symbols.is_empty() {
             return Ok(());
         }
 
         let trace_start = Instant::now();
+        if self
+            .observe_pending_datagram_rate_samples(cx, config, aimd)
+            .is_some()
+        {
+            *pacing = self.spray_pacing_decision(
+                config,
+                aimd.cap_bps(),
+                aimd.shared_decision(),
+                aimd.observed_loss(),
+            );
+        }
         self.update_spray_packet_coalescing(pacing);
         self.data_plane_pacer
-            .configure_with_shared_decision(pacing, shared_decision);
+            .configure_with_shared_decision(pacing, aimd.shared_decision());
         let flush_symbols = self.paced_flush_symbol_limit(pacing);
         let mut flushes = 0usize;
         let mut flushed_packets = 0usize;
@@ -3267,6 +3563,8 @@ impl QuicLink {
             self.flush_symbol_queue_until_below_limit(
                 cx,
                 control,
+                config,
+                aimd,
                 flush_symbols,
                 pacing,
                 &mut flushes,
@@ -3280,13 +3578,27 @@ impl QuicLink {
 
         let mut encoded_bytes = 0usize;
         let mut payloads = Vec::with_capacity(symbols.len());
+        let symbol_payload_bytes = self.symbol_payload_bytes;
         for item in symbols {
+            self.wait_for_datagram_send_admission(
+                cx,
+                control,
+                config,
+                aimd,
+                pacing,
+                payloads.len(),
+                symbol_payload_bytes,
+            )
+            .await?;
             let pending_datagrams = self
                 .conn
                 .pending_outbound_datagram_count()
                 .saturating_add(payloads.len());
-            let bytes_in_flight = self.conn.transport().bytes_in_flight();
-            let congestion_window = self.conn.transport().congestion_window_bytes();
+            let bytes_in_flight = self.datagram_bytes_in_flight_with_pending(payloads.len());
+            let congestion_window = aimd.shared_decision().map_or_else(
+                || self.conn.transport().congestion_window_bytes(),
+                |decision| decision.inflight_limit_bytes,
+            );
             self.data_plane_pacer
                 .before_send(cx, pending_datagrams, bytes_in_flight, congestion_window)
                 .await?;
@@ -3318,6 +3630,8 @@ impl QuicLink {
             self.flush_symbol_queue_until_below_limit(
                 cx,
                 control,
+                config,
+                aimd,
                 flush_symbols,
                 pacing,
                 &mut flushes,
@@ -3645,6 +3959,7 @@ fn link_from_handshake(
         max_symbol_frames_per_packet,
         spray_max_datagram_frames_per_packet: max_symbol_frames_per_packet,
         max_spray_symbols_per_flush: config.max_spray_symbols_per_flush.max(1),
+        symbol_payload_bytes: u64::from(config.symbol_size.max(1)),
         symbol_datagram_frame_len: send_symbol_frame_len,
         data_plane_pacer: NativeDataPlanePacer::new(
             send_symbol_frame_len,
@@ -3660,6 +3975,9 @@ fn link_from_handshake(
         last_flushed_stream_frames: Vec::new(),
         in_flight_stream_frames: BTreeMap::new(),
         latest_stream_ack_ranges: Vec::new(),
+        in_flight_datagram_packets: BTreeMap::new(),
+        datagram_bytes_in_flight: 0,
+        pending_datagram_rate_samples: VecDeque::new(),
         received_source_stream_frames: VecDeque::new(),
         paced_source_stream: None,
         udp_packets_received: 0,
@@ -4130,6 +4448,108 @@ impl NativeQuicAimdPacer {
         decision
     }
 
+    fn observe_datagram_ack_sample(
+        &mut self,
+        cx: &Cx,
+        config: &QuicConfig,
+        sample: DatagramRateSample,
+    ) -> DatagramRateDecision {
+        self.ensure_controller_config(config);
+        self.sample_clock_micros = self.sample_clock_micros.max(sample.now_micros);
+        let decision = self.controller.observe(sample);
+        self.last_decision = Some(decision);
+        self.last_round_loss_fraction = f64::from(decision.sender_loss_fraction_ppm) / 1_000_000.0;
+        self.shared_cap_active = decision.loss_limited
+            || decision.flow_control_limited
+            || self.last_round_loss_fraction > super::quic_aimd_loss_decrease_threshold(config);
+
+        let now_micros = sample.now_micros.to_string();
+        let sent_bytes = sample.sent_bytes.to_string();
+        let acked_bytes = sample.acked_bytes.to_string();
+        let lost_bytes = sample.lost_bytes.to_string();
+        let bytes_in_flight = sample.bytes_in_flight.to_string();
+        let rtt_micros = sample
+            .rtt_micros
+            .map_or_else(|| "none".to_string(), |rtt| rtt.to_string());
+        let pacing_bytes_per_s = decision.pacing_bytes_per_s.to_string();
+        let delivery_rate_bytes_per_s = decision.delivery_rate_bytes_per_s.to_string();
+        let sender_loss_fraction_ppm = decision.sender_loss_fraction_ppm.to_string();
+        let cwnd_bytes = decision.cwnd_bytes.to_string();
+        let inflight_limit_bytes = decision.inflight_limit_bytes.to_string();
+        let send_budget_bytes = decision.send_budget_bytes.to_string();
+        let loss_limited = if decision.loss_limited {
+            "true"
+        } else {
+            "false"
+        };
+        cx.trace_with_fields(
+            "atp_quic.spray.ack_clock_feedback",
+            &[
+                ("now_micros", now_micros.as_str()),
+                ("sent_bytes", sent_bytes.as_str()),
+                ("acked_bytes", acked_bytes.as_str()),
+                ("lost_bytes", lost_bytes.as_str()),
+                ("bytes_in_flight", bytes_in_flight.as_str()),
+                ("rtt_micros", rtt_micros.as_str()),
+                ("pacing_bytes_per_s", pacing_bytes_per_s.as_str()),
+                (
+                    "delivery_rate_bytes_per_s",
+                    delivery_rate_bytes_per_s.as_str(),
+                ),
+                (
+                    "sender_loss_fraction_ppm",
+                    sender_loss_fraction_ppm.as_str(),
+                ),
+                ("loss_limited", loss_limited),
+                ("cwnd_bytes", cwnd_bytes.as_str()),
+                ("inflight_limit_bytes", inflight_limit_bytes.as_str()),
+                ("send_budget_bytes", send_budget_bytes.as_str()),
+            ],
+        );
+        decision
+    }
+
+    fn observe_datagram_ack_samples(
+        &mut self,
+        cx: &Cx,
+        config: &QuicConfig,
+        samples: Vec<DatagramRateSample>,
+    ) -> usize {
+        let mut observed = 0usize;
+        for sample in samples {
+            self.observe_datagram_ack_sample(cx, config, sample);
+            observed = observed.saturating_add(1);
+        }
+        observed
+    }
+
+    fn datagram_send_admission(
+        &mut self,
+        config: &QuicConfig,
+        now_micros: u64,
+        bytes_in_flight: u64,
+        bytes: u64,
+    ) -> DatagramSendAdmission {
+        self.ensure_controller_config(config);
+        let now_micros = now_micros.max(1);
+        let bytes = bytes.max(1);
+        let admission = self
+            .controller
+            .admit_send(now_micros, bytes_in_flight, bytes, None, None);
+        if !admission.is_send() {
+            return admission;
+        }
+        if self
+            .controller
+            .try_send(now_micros, bytes_in_flight, bytes, None)
+        {
+            DatagramSendAdmission::Send
+        } else {
+            self.controller
+                .admit_send(now_micros, bytes_in_flight, bytes, None, None)
+        }
+    }
+
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn observe_need_more(&mut self, cx: &Cx, config: &QuicConfig, need: &QuicNeedMore) {
         let sent = self.last_round_symbols_sent;
@@ -4252,22 +4672,58 @@ impl NativeQuicAimdPacer {
     }
 }
 
+fn refresh_datagram_ack_clocked_pacing(
+    cx: &Cx,
+    link: &mut QuicLink,
+    config: &QuicConfig,
+    aimd: &mut NativeQuicAimdPacer,
+    pacing: &mut QuicSprayPacingDecision,
+    trace_epoch: u64,
+) -> usize {
+    let observed =
+        aimd.observe_datagram_ack_samples(cx, config, link.drain_datagram_rate_samples());
+    if observed == 0 {
+        return 0;
+    }
+
+    *pacing = link.spray_pacing_decision(
+        config,
+        aimd.cap_bps(),
+        aimd.shared_decision(),
+        aimd.observed_loss(),
+    );
+    link.update_spray_packet_coalescing(pacing);
+    link.data_plane_pacer
+        .configure_with_shared_decision(pacing, aimd.shared_decision());
+    pacing.trace_epoch(cx, trace_epoch);
+    observed
+}
+
 fn quic_datagram_rate_config(config: &QuicConfig) -> DatagramRateConfig {
-    let initial = super::quic_loss_target_pacing_cap_bps(config)
+    let loss_target_cap = super::quic_loss_target_pacing_cap_bps(config);
+    let initial = loss_target_cap
         .unwrap_or(super::QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64)
         .clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS);
-    let max_pacing = super::quic_loss_target_pacing_cap_bps(config)
+    let max_pacing = loss_target_cap
         .unwrap_or(super::QUIC_AIMD_MAX_RATE_BPS)
         .clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS);
+    let initial_cwnd = if loss_target_cap.is_some() {
+        initial
+            .saturating_mul(QUIC_LOSSY_COLD_START_RTT_MICROS)
+            .div_ceil(1_000_000)
+            .clamp(16 * 1024, 256 * 1024)
+    } else {
+        256 * 1024
+    };
     DatagramRateConfig {
         initial_pacing_bytes_per_s: initial,
         min_pacing_bytes_per_s: super::QUIC_AIMD_MIN_RATE_BPS,
         max_pacing_bytes_per_s: max_pacing,
-        initial_cwnd_bytes: 256 * 1024,
+        initial_cwnd_bytes: initial_cwnd,
         min_cwnd_bytes: 16 * 1024,
         max_cwnd_bytes: 16 * 1024 * 1024,
         pacing_gain: 1.0,
-        cwnd_gain: 2.0,
+        cwnd_gain: 1.0,
         loss_backoff_threshold: super::quic_aimd_loss_decrease_threshold(config),
         loss_backoff_factor: super::QUIC_AIMD_MULTIPLICATIVE_DECREASE,
         loss_delivery_headroom: QUIC_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM,
@@ -4326,6 +4782,7 @@ async fn spray_round(
         aimd.shared_decision(),
         aimd.observed_loss(),
     );
+    refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 1);
     let clean_ramp_max_pacing_bps = super::quic_round0_clean_ramp_max_pacing_bps(&pacing);
     let mut clean_ramp =
         super::quic_round0_clean_ramp_enabled(config, &pacing, with_source).then(|| {
@@ -4431,10 +4888,17 @@ async fn spray_round(
                         control,
                         tag,
                         &handoff_batch,
-                        &pacing,
-                        aimd.shared_decision(),
+                        config,
+                        &mut pacing,
+                        aimd,
                     )
                     .await?;
+                    if refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 4)
+                        > 0
+                        && !super::quic_round0_clean_ramp_enabled(config, &pacing, with_source)
+                    {
+                        let _ = clean_ramp.take();
+                    }
                     let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
                     sent = sent.saturating_add(batch_len);
                     for _ in 0..handoff_batch.len() {
@@ -4453,6 +4917,12 @@ async fn spray_round(
                                 );
                             }
                         }
+                    }
+                    if refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 4)
+                        > 0
+                        && aimd.observed_loss() >= QUIC_CLEAN_SPRAY_MAX_LOSS_RATE
+                    {
+                        let _ = clean_ramp.take();
                     }
                     handoff_batch.clear();
                     handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
@@ -4483,15 +4953,13 @@ async fn spray_round(
         }
     }
     if !stopped_for_feedback && !handoff_batch.is_empty() {
-        link.spray_symbol_batch(
-            cx,
-            control,
-            tag,
-            &handoff_batch,
-            &pacing,
-            aimd.shared_decision(),
-        )
-        .await?;
+        link.spray_symbol_batch(cx, control, tag, &handoff_batch, config, &mut pacing, aimd)
+            .await?;
+        if refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 4) > 0
+            && !super::quic_round0_clean_ramp_enabled(config, &pacing, with_source)
+        {
+            let _ = clean_ramp.take();
+        }
         let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
         sent = sent.saturating_add(batch_len);
         for _ in 0..handoff_batch.len() {
@@ -4510,6 +4978,11 @@ async fn spray_round(
                     );
                 }
             }
+        }
+        if refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 4) > 0
+            && aimd.observed_loss() >= QUIC_CLEAN_SPRAY_MAX_LOSS_RATE
+        {
+            let _ = clean_ramp.take();
         }
     }
     for (entry_index, sbn, target_repair) in cursor_updates {
@@ -4536,12 +5009,13 @@ async fn spray_source_requests(
     aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(
+    let mut pacing = link.spray_pacing_decision(
         config,
         aimd.cap_bps(),
         aimd.shared_decision(),
         aimd.observed_loss(),
     );
+    refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 2);
     pacing.trace_epoch(cx, 2);
     link.reset_sender_handoff_trace();
     let send_start = Instant::now();
@@ -4588,30 +5062,18 @@ async fn spray_source_requests(
             auth_tag,
         });
         if handoff_batch.len() >= link.spray_handoff_symbol_limit(&pacing) {
-            link.spray_symbol_batch(
-                cx,
-                control,
-                tag,
-                &handoff_batch,
-                &pacing,
-                aimd.shared_decision(),
-            )
-            .await?;
+            link.spray_symbol_batch(cx, control, tag, &handoff_batch, config, &mut pacing, aimd)
+                .await?;
+            refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 2);
             sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
             handoff_batch.clear();
             handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
         }
     }
     if !handoff_batch.is_empty() {
-        link.spray_symbol_batch(
-            cx,
-            control,
-            tag,
-            &handoff_batch,
-            &pacing,
-            aimd.shared_decision(),
-        )
-        .await?;
+        link.spray_symbol_batch(cx, control, tag, &handoff_batch, config, &mut pacing, aimd)
+            .await?;
+        refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 2);
         sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
     }
     aimd.record_spray_with_pacing(sent, &pacing, send_start.elapsed());
@@ -4633,12 +5095,13 @@ async fn spray_block_repair_requests(
     aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(
+    let mut pacing = link.spray_pacing_decision(
         config,
         aimd.cap_bps(),
         aimd.shared_decision(),
         aimd.observed_loss(),
     );
+    refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 3);
     pacing.trace_epoch(cx, 3);
     link.reset_sender_handoff_trace();
     let send_start = Instant::now();
@@ -4702,10 +5165,12 @@ async fn spray_block_repair_requests(
                     control,
                     tag,
                     &handoff_batch,
-                    &pacing,
-                    aimd.shared_decision(),
+                    config,
+                    &mut pacing,
+                    aimd,
                 )
                 .await?;
+                refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 3);
                 sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
                 handoff_batch.clear();
                 handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
@@ -4730,15 +5195,9 @@ async fn spray_block_repair_requests(
         );
     }
     if !handoff_batch.is_empty() {
-        link.spray_symbol_batch(
-            cx,
-            control,
-            tag,
-            &handoff_batch,
-            &pacing,
-            aimd.shared_decision(),
-        )
-        .await?;
+        link.spray_symbol_batch(cx, control, tag, &handoff_batch, config, &mut pacing, aimd)
+            .await?;
+        refresh_datagram_ack_clocked_pacing(cx, link, config, aimd, &mut pacing, 3);
         sent = sent.saturating_add(u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX));
     }
     for (enc_index, sbn, target_repair) in cursor_updates {
@@ -7637,6 +8096,35 @@ mod tests {
             pacing.limiter,
             super::super::QuicSprayPacingLimiter::LossBackoff,
             "sender-side overflow must disable the clean/unbounded pacing path"
+        );
+    }
+
+    #[test]
+    fn matrix168_lossy_quic_datagram_config_uses_conservative_bdp_cwnd() {
+        let clean = quic_datagram_rate_config(&QuicConfig::default());
+        assert_eq!(
+            clean.initial_cwnd_bytes,
+            256 * 1024,
+            "clean/default paths keep the historical cold-start cwnd"
+        );
+
+        let broken = QuicConfig {
+            round0_loss_target: 0.10,
+            ..QuicConfig::default()
+        };
+        let lossy = quic_datagram_rate_config(&broken);
+        let expected_bdp = lossy
+            .initial_pacing_bytes_per_s
+            .saturating_mul(QUIC_LOSSY_COLD_START_RTT_MICROS)
+            .div_ceil(1_000_000);
+        assert_eq!(
+            lossy.initial_cwnd_bytes,
+            expected_bdp.clamp(16 * 1024, 256 * 1024),
+            "lossy cold-start cwnd should begin at the seeded BDP envelope"
+        );
+        assert!(
+            lossy.initial_cwnd_bytes < clean.initial_cwnd_bytes,
+            "broken/high-loss presets should not inherit the clean 256 KiB initial burst"
         );
     }
 

@@ -1591,6 +1591,79 @@ mod tests {
     }
 
     #[test]
+    fn matrix168_ack_clocked_ten_percent_loss_converges_and_bounds_inflight() {
+        let link_payload_bytes_per_s = 1_250_000u64;
+        let ack_interval_micros = 100_000u64;
+        let rtt_micros = 200_000u64;
+        let sent_per_ack = link_payload_bytes_per_s * ack_interval_micros / 1_000_000;
+        let lost_per_ack = sent_per_ack / 10;
+        let acked_per_ack = sent_per_ack - lost_per_ack;
+        let steady_inflight = link_payload_bytes_per_s * rtt_micros / 1_000_000;
+        let mut controller = DatagramRateController::new(DatagramRateConfig {
+            initial_pacing_bytes_per_s: link_payload_bytes_per_s,
+            max_pacing_bytes_per_s: 10_000_000,
+            initial_cwnd_bytes: steady_inflight,
+            cwnd_gain: 1.0,
+            loss_backoff_threshold: 0.13,
+            ..matrix162_rate_config()
+        });
+
+        let mut decision = None;
+        for ack in 1..=24u64 {
+            decision = Some(controller.observe(DatagramRateSample {
+                now_micros: ack * ack_interval_micros,
+                sent_bytes: sent_per_ack,
+                acked_bytes: acked_per_ack,
+                lost_bytes: lost_per_ack,
+                bytes_in_flight: steady_inflight,
+                rtt_micros: Some(rtt_micros),
+                receiver_credit_bytes: None,
+                receiver_window_bytes: None,
+            }));
+        }
+
+        let decision = decision.expect("synthetic ACK stream should produce a decision");
+        assert!(
+            (1_000_000..=1_300_000).contains(&decision.pacing_bytes_per_s),
+            "ACK-clocked 10% loss should converge near delivered bottleneck rate, got {}",
+            decision.pacing_bytes_per_s
+        );
+        assert!(
+            (200_000..=300_000).contains(&decision.inflight_limit_bytes),
+            "cwnd should settle near BtlBw x RTprop, got {}",
+            decision.inflight_limit_bytes
+        );
+        assert_eq!(
+            decision.bytes_in_flight, steady_inflight,
+            "transport-provided bytes-in-flight must be preserved in decisions"
+        );
+        assert!(
+            decision.send_budget_bytes
+                <= decision
+                    .inflight_limit_bytes
+                    .saturating_sub(steady_inflight),
+            "send budget must subtract already in-flight DATAGRAM bytes"
+        );
+        assert!(
+            !decision.loss_limited,
+            "expected-profile 10% loss should converge by ACK clock, not halve every ACK"
+        );
+        assert!(
+            matches!(
+                controller.admit_send(
+                    decision.min_rtt_micros.unwrap_or(rtt_micros),
+                    decision.inflight_limit_bytes,
+                    sent_per_ack,
+                    None,
+                    None,
+                ),
+                DatagramSendAdmission::CwndBlocked { .. }
+            ),
+            "cwnd admission must block another burst once BDP-derived in-flight is full"
+        );
+    }
+
+    #[test]
     fn test_congestion_controller_creation() {
         let config = CongestionConfig::default();
         let controller = CongestionController::new(config);
