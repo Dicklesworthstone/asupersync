@@ -25,6 +25,11 @@ use asupersync::net::quic_native::{
 use asupersync::time::{timeout, wall_now};
 use futures_lite::future::{block_on, zip};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use std::io::ErrorKind;
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 // Canonical CA + leaf chain (P-256), leaf has SAN DNS:localhost / IP:127.0.0.1 and
@@ -74,6 +79,82 @@ fn leaf_key() -> PrivateKeyDer<'static> {
     rustls_pemfile::private_key(&mut reader)
         .expect("read key pem")
         .expect("one key")
+}
+
+struct HandshakeDropProxy {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl HandshakeDropProxy {
+    fn spawn(server_addr: SocketAddr) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind handshake drop proxy");
+        socket
+            .set_nonblocking(true)
+            .expect("handshake proxy nonblocking");
+        let addr = socket.local_addr().expect("handshake proxy addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            run_handshake_drop_proxy(socket, server_addr, thread_stop);
+        });
+        Self {
+            addr,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for HandshakeDropProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = UdpSocket::bind("127.0.0.1:0")
+            .and_then(|socket| socket.send_to(&[0], self.addr).map(|_| ()));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn run_handshake_drop_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Arc<AtomicBool>) {
+    let mut client_addr = None;
+    let mut dropped_client_initial = false;
+    let mut dropped_server_flight = false;
+    let started = Instant::now();
+    let mut buf = vec![0u8; 65_535];
+
+    while !stop.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(15) {
+        loop {
+            match socket.recv_from(&mut buf) {
+                Ok((len, src)) => {
+                    let from_server = src == server_addr;
+                    let target = if from_server {
+                        let Some(client) = client_addr else {
+                            continue;
+                        };
+                        client
+                    } else {
+                        client_addr = Some(src);
+                        server_addr
+                    };
+                    if !from_server && !dropped_client_initial {
+                        dropped_client_initial = true;
+                        continue;
+                    }
+                    if from_server && !dropped_server_flight {
+                        dropped_server_flight = true;
+                        continue;
+                    }
+                    let _ = socket.send_to(&buf[..len], target);
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => return,
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[test]
@@ -158,6 +239,80 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
             server.peer_transport_parameters(),
             Some(b"client-transport-params".as_slice())
         );
+    });
+}
+
+#[test]
+fn real_tls13_handshake_survives_dropped_initial_flights() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig {
+            max_packet_size: 16384,
+            ..QuicUdpEndpointConfig::default()
+        };
+        let mut client_ep =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .expect("bind client UDP");
+        let mut server_ep = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+            .await
+            .expect("bind server UDP");
+        let server_addr = server_ep.local_addr();
+        let proxy = HandshakeDropProxy::spawn(server_addr);
+
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let server_cfg = server_config(
+            vec![parse_one_cert(LEAF_CERT_PEM)],
+            leaf_key(),
+            alpn.clone(),
+        )
+        .expect("server config");
+        let client_cfg =
+            client_config(vec![parse_one_cert(CA_CERT_PEM)], alpn).expect("client config");
+
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-transport-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server =
+            QuicHandshakeDriver::server(server_cfg, b"server-transport-params".to_vec())
+                .expect("server driver");
+
+        let dcid =
+            ConnectionId::new(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18]).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+
+        let (client_result, server_result) = zip(
+            client_handshake_over_udp(
+                &cx,
+                &mut client_ep,
+                proxy.addr,
+                &mut client,
+                dcid,
+                client_scid,
+            ),
+            server_handshake_over_udp(&cx, &mut server_ep, &mut server, dcid, server_scid),
+        )
+        .await;
+
+        client_result.expect("client handshake completed after PTO retransmit");
+        let learned_peer = server_result.expect("server handshake completed after PTO retransmit");
+        assert_eq!(
+            learned_peer, proxy.addr,
+            "server should learn the proxy as its UDP peer in this loss fixture"
+        );
+        assert!(
+            client.is_complete(),
+            "client not complete after lossy handshake"
+        );
+        assert!(
+            server.is_complete(),
+            "server not complete after lossy handshake"
+        );
+        assert!(client.one_rtt_keys_installed() && server.one_rtt_keys_installed());
     });
 }
 

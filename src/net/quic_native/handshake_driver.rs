@@ -55,12 +55,13 @@ use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-/// Per-receive timeout while driving a handshake over UDP. Generous for loopback
-/// and a slow real-internet RTT; a timeout aborts the handshake (fail-closed).
-const HANDSHAKE_RECV_TIMEOUT: Duration = Duration::from_secs(10);
+/// Handshake PTO while driving the QUIC/TLS handshake over UDP. A timeout
+/// retransmits the last handshake flight instead of aborting immediately.
+const HANDSHAKE_PTO: Duration = Duration::from_millis(1_500);
 /// Bound on handshake round trips before giving up (defends against a peer that
 /// never converges).
 const HANDSHAKE_MAX_FLIGHTS: usize = 64;
+const HANDSHAKE_SERVER_NO_PEER_IDLE_LIMIT: usize = 8;
 
 /// AEAD authentication tag length for the QUIC AES-128-GCM suite.
 const QUIC_AEAD_TAG_LEN: usize = 16;
@@ -76,6 +77,14 @@ fn handshake_failure(code: &'static str) -> QuicTlsError {
         provider: "rustls-quic-handshake",
         code,
     }
+}
+
+pub(crate) fn is_stale_handshake_packet_error(error: &QuicTlsError) -> bool {
+    matches!(
+        error,
+        QuicTlsError::CryptoProviderFailure { provider, code }
+            if *provider == "rustls-quic-handshake" && *code == "packet_unprotect"
+    )
 }
 
 fn invalid_certificate(error: CertificateError) -> RustlsError {
@@ -255,6 +264,8 @@ pub struct QuicHandshakeDriver {
     one_rtt_keys_installed: bool,
     /// Per-level cumulative CRYPTO send offset (indexed Initial=0/Handshake=1/OneRtt=2).
     crypto_send_offset: [u64; 3],
+    /// Largest inbound packet number already fed into rustls for Initial/Handshake.
+    handshake_recv_largest_packet_number: [Option<u64>; 2],
 }
 
 fn level_index(level: HandshakeLevel) -> usize {
@@ -270,6 +281,14 @@ fn level_protection_space(level: HandshakeLevel) -> PacketProtectionSpace {
         HandshakeLevel::Initial => PacketProtectionSpace::Initial,
         HandshakeLevel::Handshake => PacketProtectionSpace::Handshake,
         HandshakeLevel::OneRtt => PacketProtectionSpace::OneRtt,
+    }
+}
+
+fn handshake_packet_space_index(space: PacketProtectionSpace) -> Option<usize> {
+    match space {
+        PacketProtectionSpace::Initial => Some(0),
+        PacketProtectionSpace::Handshake => Some(1),
+        PacketProtectionSpace::ZeroRtt | PacketProtectionSpace::OneRtt => None,
     }
 }
 
@@ -314,6 +333,7 @@ impl QuicHandshakeDriver {
             handshake_keys_installed: false,
             one_rtt_keys_installed: false,
             crypto_send_offset: [0; 3],
+            handshake_recv_largest_packet_number: [None, None],
         }
     }
 
@@ -407,6 +427,12 @@ impl QuicHandshakeDriver {
         let Some(space) = long_packet_type_space(long_header.packet_type) else {
             return Err(handshake_failure("unexpected_long_packet_type"));
         };
+        if let Some(index) = handshake_packet_space_index(space)
+            && self.handshake_recv_largest_packet_number[index]
+                .is_some_and(|largest| long_header.packet_number <= largest)
+        {
+            return Ok(peer_src_cid);
+        }
         if consumed > packet.len() {
             return Err(handshake_failure("packet_header_overrun"));
         }
@@ -449,6 +475,9 @@ impl QuicHandshakeDriver {
                 Some(_) => {}
                 None => break,
             }
+        }
+        if let Some(index) = handshake_packet_space_index(space) {
+            self.handshake_recv_largest_packet_number[index] = Some(long_header.packet_number);
         }
         Ok(peer_src_cid)
     }
@@ -559,7 +588,8 @@ impl QuicHandshakeDriver {
     /// Pump pending outbound handshake segments, assemble + protect each as a
     /// long-header packet to `peer`, and send them over `endpoint`. OneRtt-level
     /// segments (post-handshake tickets) belong to the 1-RTT data plane and are
-    /// skipped. Returns the number of packets sent.
+    /// skipped. Returns the sent packet flight so the caller can retransmit it on
+    /// a handshake PTO.
     async fn send_pending_flight(
         &mut self,
         cx: &Cx,
@@ -568,7 +598,7 @@ impl QuicHandshakeDriver {
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
         packet_number: &mut u64,
-    ) -> Result<usize, QuicTlsError> {
+    ) -> Result<Vec<OutgoingPacket>, QuicTlsError> {
         let segments = self.pump_outbound()?;
         let mut packets = Vec::new();
         for segment in segments {
@@ -584,15 +614,29 @@ impl QuicHandshakeDriver {
                 send_time: None,
             });
         }
-        let sent = packets.len();
         if !packets.is_empty() {
             endpoint
                 .send_batch(cx, &packets)
                 .await
                 .map_err(|_| handshake_failure("udp_send"))?;
         }
-        Ok(sent)
+        Ok(packets)
     }
+}
+
+async fn retransmit_handshake_flight(
+    cx: &Cx,
+    endpoint: &mut QuicUdpEndpoint,
+    packets: &[OutgoingPacket],
+) -> Result<bool, QuicTlsError> {
+    if packets.is_empty() {
+        return Ok(false);
+    }
+    endpoint
+        .send_batch(cx, packets)
+        .await
+        .map_err(|_| handshake_failure("udp_send"))?;
+    Ok(true)
 }
 
 /// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`, talking to
@@ -610,7 +654,7 @@ pub async fn client_handshake_over_udp(
 ) -> Result<(), QuicTlsError> {
     driver.install_initial_keys(dcid.as_bytes())?;
     let mut packet_number = 0u64;
-    driver
+    let mut last_flight = driver
         .send_pending_flight(
             cx,
             endpoint,
@@ -625,23 +669,32 @@ pub async fn client_handshake_over_udp(
         if driver.is_complete() {
             return Ok(());
         }
-        let received = match crate::time::timeout(
-            cx.now(),
-            HANDSHAKE_RECV_TIMEOUT,
-            endpoint.receive_batch(cx, 16),
-        )
-        .await
-        {
-            Ok(Ok(packets)) => packets,
-            Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
-            Err(_) => return Err(handshake_failure("client_handshake_recv_timeout")),
-        };
+        let received =
+            match crate::time::timeout(cx.now(), HANDSHAKE_PTO, endpoint.receive_batch(cx, 16))
+                .await
+            {
+                Ok(Ok(packets)) => packets,
+                Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
+                Err(_) => {
+                    if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
+                        continue;
+                    }
+                    return Err(handshake_failure("client_handshake_recv_timeout"));
+                }
+            };
         // Pump after EACH packet: e.g. after the server's Initial (ServerHello)
         // the client must pump to install Handshake keys BEFORE it can unprotect
         // the server's Handshake-level flight that may arrive in the same batch.
         for packet in &received {
-            driver.recv_handshake_packet(&packet.data)?;
-            driver
+            match driver.recv_handshake_packet(&packet.data) {
+                Ok(_) => {}
+                Err(err) if is_stale_handshake_packet_error(&err) => {
+                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+            let sent = driver
                 .send_pending_flight(
                     cx,
                     endpoint,
@@ -651,6 +704,11 @@ pub async fn client_handshake_over_udp(
                     &mut packet_number,
                 )
                 .await?;
+            if !sent.is_empty() {
+                last_flight = sent;
+            } else if !driver.is_complete() {
+                let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+            }
         }
     }
 
@@ -676,6 +734,8 @@ pub async fn server_handshake_over_udp(
     driver.install_initial_keys(dcid.as_bytes())?;
     let mut packet_number = 0u64;
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
+    let mut last_flight = Vec::new();
+    let mut no_peer_idle_timeouts = 0usize;
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
@@ -683,26 +743,47 @@ pub async fn server_handshake_over_udp(
                 .map(|(addr, _)| addr)
                 .ok_or_else(|| handshake_failure("server_handshake_no_peer"));
         }
-        let received = match crate::time::timeout(
-            cx.now(),
-            HANDSHAKE_RECV_TIMEOUT,
-            endpoint.receive_batch(cx, 16),
-        )
-        .await
-        {
-            Ok(Ok(packets)) => packets,
-            Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
-            Err(_) => return Err(handshake_failure("server_handshake_recv_timeout")),
-        };
+        let received =
+            match crate::time::timeout(cx.now(), HANDSHAKE_PTO, endpoint.receive_batch(cx, 16))
+                .await
+            {
+                Ok(Ok(packets)) => packets,
+                Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
+                Err(_) => {
+                    if peer.is_none() {
+                        no_peer_idle_timeouts = no_peer_idle_timeouts.saturating_add(1);
+                        if no_peer_idle_timeouts >= HANDSHAKE_SERVER_NO_PEER_IDLE_LIMIT {
+                            return Err(handshake_failure("server_handshake_recv_timeout"));
+                        }
+                        continue;
+                    }
+                    if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
+                        continue;
+                    }
+                    return Err(handshake_failure("server_handshake_recv_timeout"));
+                }
+            };
+        if !received.is_empty() {
+            no_peer_idle_timeouts = 0;
+        }
         // Pump after EACH packet so newly-derived keys are installed before the
         // next packet is processed (symmetry with the client side).
         for packet in &received {
-            let peer_scid = driver.recv_handshake_packet(&packet.data)?;
+            let peer_scid = match driver.recv_handshake_packet(&packet.data) {
+                Ok(peer_scid) => peer_scid,
+                Err(err) if is_stale_handshake_packet_error(&err) => {
+                    if peer.is_some() {
+                        let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             if peer.is_none() {
                 peer = Some((packet.src_addr, peer_scid));
             }
             if let Some((addr, client_cid)) = peer {
-                driver
+                let sent = driver
                     .send_pending_flight(
                         cx,
                         endpoint,
@@ -712,6 +793,11 @@ pub async fn server_handshake_over_udp(
                         &mut packet_number,
                     )
                     .await?;
+                if !sent.is_empty() {
+                    last_flight = sent;
+                } else if !driver.is_complete() {
+                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                }
             }
         }
     }
