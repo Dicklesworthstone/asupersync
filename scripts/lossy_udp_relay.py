@@ -25,6 +25,10 @@ Usage:
     lossy_udp_relay.py --listen 127.0.0.1:19700 --target 127.0.0.1:19701 \
         --loss 0.05 [--loss-ctrl 0.0] [--seed 1] [--ready-file /tmp/r.ready]
 
+    # 10 mbit/s sender->receiver cap, without touching loopback qdisc:
+    lossy_udp_relay.py --listen 127.0.0.1:19700 --target 127.0.0.1:19701 \
+        --loss 0.10 --delay-ms 200 --mbit 10 --rate-max-queue-ms 300
+
 Prints a one-line JSON stats summary to stdout on clean shutdown (SIGTERM/SIGINT)
 and periodically to stderr. Exit 0 on clean shutdown.
 """
@@ -44,12 +48,51 @@ def parse_addr(s: str):
     return (host, int(port))
 
 
+def mbit_to_bytes_per_sec(mbit: float) -> int:
+    if mbit <= 0.0:
+        return 0
+    return max(1, int((mbit * 1_000_000.0) / 8.0))
+
+
+class RateLimiter:
+    def __init__(self, bytes_per_sec: int, burst_bytes: int, max_queue_ms: int):
+        self.bytes_per_sec = max(0, int(bytes_per_sec))
+        self.burst_bytes = max(1, int(burst_bytes))
+        self.max_queue_s = max(0.0, float(max_queue_ms) / 1000.0)
+        self.next_send_at = 0.0
+
+    def schedule(self, now: float, size: int):
+        if self.bytes_per_sec <= 0:
+            return now
+        burst_window = self.burst_bytes / float(self.bytes_per_sec)
+        self.next_send_at = max(self.next_send_at, now - burst_window)
+        due = max(now, self.next_send_at)
+        if due - now > self.max_queue_s:
+            return None
+        self.next_send_at = due + max(1, size) / float(self.bytes_per_sec)
+        return due
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--listen", required=True, help="HOST:PORT the sender targets")
     ap.add_argument("--target", required=True, help="HOST:PORT of the real receiver")
     ap.add_argument("--loss", type=float, default=0.0, help="drop prob, data dir (sender->target)")
     ap.add_argument("--loss-ctrl", type=float, default=0.0, help="drop prob, ctrl dir (target->sender)")
+    ap.add_argument("--delay-ms", type=float, default=0.0, help="base one-way delay for data packets")
+    ap.add_argument("--delay-ctrl-ms", type=float, default=0.0, help="base one-way delay for control packets")
+    ap.add_argument("--mbit", type=float, default=0.0,
+                    help="sender->target rate cap in decimal megabits/sec; 10 means 1.25 MB/s")
+    ap.add_argument("--mbit-ctrl", type=float, default=0.0,
+                    help="target->sender rate cap in decimal megabits/sec")
+    ap.add_argument("--rate-bytes-per-sec", type=int, default=0,
+                    help="sender->target rate cap in bytes/sec; overrides --mbit when nonzero")
+    ap.add_argument("--rate-ctrl-bytes-per-sec", type=int, default=0,
+                    help="target->sender rate cap in bytes/sec; overrides --mbit-ctrl when nonzero")
+    ap.add_argument("--rate-burst-bytes", type=int, default=16 * 1024,
+                    help="token-bucket burst size for rate-capped directions")
+    ap.add_argument("--rate-max-queue-ms", type=int, default=300,
+                    help="drop a datagram when rate shaping would queue it longer than this")
     ap.add_argument("--loss-scope", choices=["1rtt", "all"], default="1rtt",
                     help="which sender->target packets are drop-eligible: '1rtt' = only QUIC short-header "
                          "(1-RTT app data) packets, never the handshake (default — isolates data-plane "
@@ -61,6 +104,10 @@ def main() -> int:
 
     listen = parse_addr(args.listen)
     target = parse_addr(args.target)
+    data_rate = args.rate_bytes_per_sec or mbit_to_bytes_per_sec(args.mbit)
+    ctrl_rate = args.rate_ctrl_bytes_per_sec or mbit_to_bytes_per_sec(args.mbit_ctrl)
+    data_limiter = RateLimiter(data_rate, args.rate_burst_bytes, args.rate_max_queue_ms)
+    ctrl_limiter = RateLimiter(ctrl_rate, args.rate_burst_bytes, args.rate_max_queue_ms)
 
     # one socket faces the sender (bound to LISTEN), one faces the receiver (ephemeral).
     s_in = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -78,10 +125,16 @@ def main() -> int:
         "listen": args.listen, "target": args.target, "loss": args.loss,
         "loss_ctrl": args.loss_ctrl, "seed": args.seed,
         "loss_scope": args.loss_scope,
+        "delay_ms": args.delay_ms, "delay_ctrl_ms": args.delay_ctrl_ms,
+        "rate_bytes_per_sec": data_rate, "rate_ctrl_bytes_per_sec": ctrl_rate,
+        "rate_burst_bytes": args.rate_burst_bytes, "rate_max_queue_ms": args.rate_max_queue_ms,
         "data_fwd": 0, "data_drop": 0, "data_bytes": 0,
+        "data_rate_drop": 0, "data_rate_delay": 0,
         "handshake_fwd": 0,  # long-header (Initial/Handshake/0-RTT) pkts, sender->target, never dropped under 1rtt scope
         "ctrl_fwd": 0, "ctrl_drop": 0, "ctrl_bytes": 0,
+        "ctrl_rate_drop": 0, "ctrl_rate_delay": 0,
     }
+    pending = []
 
     running = {"v": True}
 
@@ -104,6 +157,39 @@ def main() -> int:
     def on_signal(_signum, _frame):
         running["v"] = False
 
+    def queue_or_send(sock, payload, addr, limiter, delay_ms, fwd_key, bytes_key, rate_drop_key, rate_delay_key):
+        now = time.time()
+        due = limiter.schedule(now, len(payload))
+        if due is None:
+            stats[rate_drop_key] += 1
+            return
+        due += max(0.0, float(delay_ms) / 1000.0)
+        if due > now:
+            pending.append((due, sock, payload, addr, fwd_key, bytes_key))
+            stats[rate_delay_key] += 1
+            return
+        try:
+            sock.sendto(payload, addr)
+            stats[fwd_key] += 1
+            stats[bytes_key] += len(payload)
+        except OSError:
+            pass
+
+    def flush_pending():
+        now = time.time()
+        kept = []
+        for due, sock, payload, addr, fwd_key, bytes_key in pending:
+            if due > now:
+                kept.append((due, sock, payload, addr, fwd_key, bytes_key))
+                continue
+            try:
+                sock.sendto(payload, addr)
+                stats[fwd_key] += 1
+                stats[bytes_key] += len(payload)
+            except OSError:
+                pass
+        pending[:] = kept
+
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
@@ -113,13 +199,17 @@ def main() -> int:
                 f.write("ready\n")
         except OSError:
             pass
-    sys.stderr.write(f"relay listening {args.listen} -> {args.target} loss={args.loss} ctrl={args.loss_ctrl}\n")
+    sys.stderr.write(
+        f"relay listening {args.listen} -> {args.target} loss={args.loss} ctrl={args.loss_ctrl} "
+        f"rate_Bps={data_rate} ctrl_rate_Bps={ctrl_rate}\n"
+    )
     sys.stderr.flush()
 
     last_stats = time.time()
     while running["v"]:
+        flush_pending()
         try:
-            ready, _, _ = select.select([s_in, s_out], [], [], 0.5)
+            ready, _, _ = select.select([s_in, s_out], [], [], 0.05 if pending else 0.5)
         except (InterruptedError, OSError):
             break
         for sock in ready:
@@ -143,12 +233,16 @@ def main() -> int:
                 if args.loss > 0.0 and drop_eligible and rng_data.random() < args.loss:
                     stats["data_drop"] += 1
                     continue
-                try:
-                    s_out.sendto(data, target)
-                    stats["data_fwd"] += 1
-                    stats["data_bytes"] += len(data)
-                except OSError:
-                    pass
+                if drop_eligible:
+                    queue_or_send(
+                        s_out, data, target, data_limiter, args.delay_ms,
+                        "data_fwd", "data_bytes", "data_rate_drop", "data_rate_delay",
+                    )
+                else:
+                    queue_or_send(
+                        s_out, data, target, RateLimiter(0, 1, 0), 0,
+                        "data_fwd", "data_bytes", "data_rate_drop", "data_rate_delay",
+                    )
             else:
                 # target -> sender (CONTROL/feedback direction)
                 if sender_addr is None:
@@ -156,20 +250,21 @@ def main() -> int:
                 if args.loss_ctrl > 0.0 and rng_ctrl.random() < args.loss_ctrl:
                     stats["ctrl_drop"] += 1
                     continue
-                try:
-                    s_in.sendto(data, sender_addr)
-                    stats["ctrl_fwd"] += 1
-                    stats["ctrl_bytes"] += len(data)
-                except OSError:
-                    pass
+                queue_or_send(
+                    s_in, data, sender_addr, ctrl_limiter, args.delay_ctrl_ms,
+                    "ctrl_fwd", "ctrl_bytes", "ctrl_rate_drop", "ctrl_rate_delay",
+                )
+        flush_pending()
         now = time.time()
         if now - last_stats >= 5.0:
             sys.stderr.write(
                 f"relay stats data fwd={stats['data_fwd']} drop={stats['data_drop']} "
-                f"ctrl fwd={stats['ctrl_fwd']} drop={stats['ctrl_drop']}\n")
+                f"rate_drop={stats['data_rate_drop']} ctrl fwd={stats['ctrl_fwd']} "
+                f"drop={stats['ctrl_drop']} ctrl_rate_drop={stats['ctrl_rate_drop']}\n")
             sys.stderr.flush()
             last_stats = now
 
+    flush_pending()
     emit_stats()
     return 0
 

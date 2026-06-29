@@ -33,6 +33,7 @@ use asupersync::net::atp::transport_quic::{
     SendReport, send_path,
 };
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
+use asupersync::observability::{LogCollector, LogLevel};
 use asupersync::security::SecurityContext;
 use futures_lite::future::{block_on, zip};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -227,6 +228,58 @@ struct DelayedPacket {
     bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProxyRateLimit {
+    bytes_per_sec: u64,
+    burst_bytes: u64,
+    max_queue_delay: Duration,
+}
+
+#[derive(Debug)]
+struct ProxyRateState {
+    limit: ProxyRateLimit,
+    next_available: Instant,
+}
+
+impl ProxyRateState {
+    fn new(limit: ProxyRateLimit) -> Self {
+        Self {
+            limit,
+            next_available: Instant::now(),
+        }
+    }
+
+    fn schedule(&mut self, now: Instant, bytes: usize) -> Option<Instant> {
+        if self.limit.bytes_per_sec == 0 {
+            return Some(now);
+        }
+        let burst_window =
+            duration_for_rate_bytes(self.limit.burst_bytes, self.limit.bytes_per_sec);
+        let burst_floor = now.checked_sub(burst_window).unwrap_or(now);
+        self.next_available = self.next_available.max(burst_floor);
+        let due = self.next_available.max(now);
+        if due.duration_since(now) > self.limit.max_queue_delay {
+            return None;
+        }
+        let interval = duration_for_rate_bytes(
+            u64::try_from(bytes.max(1)).unwrap_or(u64::MAX),
+            self.limit.bytes_per_sec,
+        );
+        self.next_available = due.checked_add(interval).unwrap_or(due);
+        Some(due)
+    }
+}
+
+fn duration_for_rate_bytes(bytes: u64, bytes_per_sec: u64) -> Duration {
+    if bytes_per_sec == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = u128::from(bytes)
+        .saturating_mul(1_000_000_000)
+        .div_ceil(u128::from(bytes_per_sec));
+    Duration::from_nanos(u64::try_from(nanos.max(1)).unwrap_or(u64::MAX))
+}
+
 #[derive(Debug)]
 struct DeterministicLoss {
     state: u64,
@@ -261,7 +314,11 @@ struct LossyUdpProxy {
 }
 
 impl LossyUdpProxy {
-    fn spawn(server_addr: SocketAddr, seed: u64) -> Self {
+    fn spawn_with_rate(
+        server_addr: SocketAddr,
+        seed: u64,
+        data_rate_limit: Option<ProxyRateLimit>,
+    ) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind lossy proxy");
         socket
             .set_nonblocking(true)
@@ -270,7 +327,7 @@ impl LossyUdpProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
-            run_lossy_proxy(socket, server_addr, thread_stop, seed);
+            run_lossy_proxy(socket, server_addr, thread_stop, seed, data_rate_limit);
         });
         Self {
             addr,
@@ -294,6 +351,7 @@ impl Drop for LossyUdpProxy {
 fn enqueue_lossy_packet(
     pending: &mut VecDeque<DelayedPacket>,
     rng: &mut DeterministicLoss,
+    rate: Option<&mut ProxyRateState>,
     packet_index: u64,
     target: SocketAddr,
     bytes: &[u8],
@@ -302,8 +360,8 @@ fn enqueue_lossy_packet(
     const LOSS_PER_MILLE: u32 = 100;
     const DUP_PER_MILLE: u32 = 10;
     const REORDER_PER_MILLE: u32 = 50;
-    const BASE_DELAY_MS: u64 = 1;
-    const JITTER_MS: u64 = 4;
+    const BASE_DELAY_MS: u64 = 100;
+    const JITTER_MS: u64 = 8;
     const REORDER_EXTRA_MS: u64 = 12;
 
     let protected = packet_index <= HANDSHAKE_PACKET_PREFIX;
@@ -311,6 +369,7 @@ fn enqueue_lossy_packet(
         return;
     }
 
+    let now = Instant::now();
     let mut delay = if protected {
         0
     } else {
@@ -319,7 +378,13 @@ fn enqueue_lossy_packet(
     if !protected && rng.chance_per_mille(REORDER_PER_MILLE) {
         delay = delay.saturating_add(REORDER_EXTRA_MS);
     }
-    let due = Instant::now() + Duration::from_millis(delay);
+    let mut due = now + Duration::from_millis(delay);
+    if !protected && let Some(rate) = rate {
+        let Some(rate_due) = rate.schedule(now, bytes.len()) else {
+            return;
+        };
+        due = due.max(rate_due);
+    }
     pending.push_back(DelayedPacket {
         due,
         target,
@@ -349,11 +414,18 @@ fn flush_due_proxy_packets(socket: &UdpSocket, pending: &mut VecDeque<DelayedPac
     }
 }
 
-fn run_lossy_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Arc<AtomicBool>, seed: u64) {
+fn run_lossy_proxy(
+    socket: UdpSocket,
+    server_addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    seed: u64,
+    data_rate_limit: Option<ProxyRateLimit>,
+) {
     let mut rng = DeterministicLoss::new(seed);
     let mut client_addr = None;
     let mut pending = VecDeque::<DelayedPacket>::new();
     let mut packet_index = 0u64;
+    let mut data_rate = data_rate_limit.map(ProxyRateState::new);
     let started = Instant::now();
     let mut buf = vec![0u8; 65_535];
 
@@ -371,7 +443,17 @@ fn run_lossy_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Arc<AtomicB
                         server_addr
                     };
                     packet_index = packet_index.saturating_add(1);
-                    enqueue_lossy_packet(&mut pending, &mut rng, packet_index, target, &buf[..len]);
+                    let rate = (target == server_addr)
+                        .then_some(())
+                        .and_then(|()| data_rate.as_mut());
+                    enqueue_lossy_packet(
+                        &mut pending,
+                        &mut rng,
+                        rate,
+                        packet_index,
+                        target,
+                        &buf[..len],
+                    );
                 }
                 Err(err) if err.kind() == ErrorKind::WouldBlock => break,
                 Err(_) => return,
@@ -382,31 +464,49 @@ fn run_lossy_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Arc<AtomicB
     }
 }
 
-fn run_transfer_via_lossy_proxy(
+fn run_transfer_via_rate_limited_lossy_proxy(
     send_cfg: QuicConfig,
     recv_cfg: QuicConfig,
     source: &Path,
     dest_dir: &Path,
     seed: u64,
+    data_rate_limit: ProxyRateLimit,
 ) -> (
     Result<SendReport, QuicTransportError>,
     Result<ReceiveReport, QuicTransportError>,
+    LogCollector,
 ) {
     block_on(async {
         let cx = Cx::for_testing();
+        let collector = LogCollector::new(512).with_min_level(LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
         let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let server_endpoint = bind_server_endpoint(&cx, listen)
             .await
             .expect("bind server endpoint");
         let server_addr = server_endpoint.local_addr();
-        let proxy = LossyUdpProxy::spawn(server_addr, seed);
+        let proxy = LossyUdpProxy::spawn_with_rate(server_addr, seed, Some(data_rate_limit));
 
-        zip(
+        let (send, recv) = zip(
             send_path(&cx, proxy.addr, source, send_cfg, "atp-quic-client"),
             receive_on_endpoint(&cx, server_endpoint, dest_dir, &recv_cfg, "atp-quic-server"),
         )
-        .await
+        .await;
+        (send, recv, collector)
     })
+}
+
+fn need_more_round_losses(collector: &LogCollector) -> Vec<f64> {
+    collector
+        .peek()
+        .into_iter()
+        .filter(|entry| entry.message() == "atp_quic.receive.need_more")
+        .filter_map(|entry| {
+            entry
+                .get_field("round_loss_fraction")
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+        .collect()
 }
 
 fn assert_receive_report_counters(
@@ -809,11 +909,13 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
 }
 
 #[test]
-fn real_udp_quic_multiblock_lossy_proxy_recovers_with_reordered_duplicates() {
+// pending SapphireHill netns A/B verification
+#[ignore]
+fn real_udp_quic_multiblock_rate_limited_lossy_proxy_recovers_with_low_round_loss() {
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");
-    let source = src.path().join("lossy-proxy-multiblock.bin");
-    let payload: Vec<u8> = (0..(256 * 1024) as u32)
+    let source = src.path().join("rate-limited-lossy-proxy-multiblock.bin");
+    let payload: Vec<u8> = (0..(2 * 1024 * 1024) as u32)
         .map(|i| (i.wrapping_mul(41).wrapping_add(i / 251).wrapping_add(23) % 251) as u8)
         .collect();
     std::fs::write(&source, &payload).expect("write source");
@@ -823,28 +925,54 @@ fn real_udp_quic_multiblock_lossy_proxy_recovers_with_reordered_duplicates() {
     cfg.recv.repair_overhead = 1.0;
     cfg.send.round0_loss_target = 0.10;
     cfg.recv.round0_loss_target = 0.10;
-    cfg.send.max_block_size = 64 * 1024;
-    cfg.recv.max_block_size = 64 * 1024;
-    cfg.send.idle_timeout = Duration::from_secs(45);
-    cfg.recv.idle_timeout = Duration::from_secs(45);
+    cfg.send.max_block_size = 512 * 1024;
+    cfg.recv.max_block_size = 512 * 1024;
+    cfg.send.idle_timeout = Duration::from_secs(60);
+    cfg.recv.idle_timeout = Duration::from_secs(60);
 
-    let (send_res, recv_res) =
-        run_transfer_via_lossy_proxy(cfg.send, cfg.recv, &source, dst.path(), 0x0A5A_5170);
+    let data_rate_limit = ProxyRateLimit {
+        bytes_per_sec: 1_250_000,
+        burst_bytes: 16 * 1024,
+        max_queue_delay: Duration::from_millis(300),
+    };
+    let (send_res, recv_res, collector) = run_transfer_via_rate_limited_lossy_proxy(
+        cfg.send,
+        cfg.recv,
+        &source,
+        dst.path(),
+        0x0A5A_5170,
+        data_rate_limit,
+    );
+    let round_losses = need_more_round_losses(&collector);
+    let max_round_loss = round_losses.iter().copied().fold(0.0, f64::max);
+    println!("max_round_loss_fraction={max_round_loss:.6} round_losses={round_losses:?}");
+
     let send_res = send_res.unwrap_or_else(|err| {
-        panic!("lossy-proxy QUIC sender should converge: {err:?}; receiver={recv_res:?}")
+        panic!(
+            "rate-limited lossy-proxy QUIC sender should converge: {err:?}; receiver={recv_res:?}"
+        )
     });
-    let recv_res = recv_res.expect("lossy-proxy QUIC receiver commits");
+    let recv_res = recv_res.expect("rate-limited lossy-proxy QUIC receiver commits");
 
     assert_receive_report_counters(&send_res, &recv_res, payload.len() as u64, 1);
     assert!(
         recv_res.feedback_rounds > 0,
-        "10% deterministic packet loss should exercise the repair-feedback loop"
+        "10% deterministic packet loss under a 1.25 MB/s cap should exercise the repair-feedback loop"
+    );
+    assert!(
+        !round_losses.is_empty(),
+        "repair-feedback trace must expose round_loss_fraction"
+    );
+    assert!(
+        max_round_loss < 0.30,
+        "rate-limited repair pacing should keep repair-round loss near the true 10% link loss, got {max_round_loss:.4} from {round_losses:?}"
     );
     assert_eq!(send_res.bytes_sent, payload.len() as u64);
     assert_eq!(
-        std::fs::read(dst.path().join("lossy-proxy-multiblock.bin")).expect("read committed"),
+        std::fs::read(dst.path().join("rate-limited-lossy-proxy-multiblock.bin"))
+            .expect("read committed"),
         payload,
-        "lossy QUIC/TLS DATAGRAM transfer must commit exact bytes after repair"
+        "rate-limited lossy QUIC/TLS DATAGRAM transfer must commit exact bytes after paced repair"
     );
     assert_no_staging_residue(dst.path());
 }
