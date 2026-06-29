@@ -88,6 +88,10 @@ const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
 const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
+const RQ_LOSSY_TAIL_DRAIN_ENABLE_LOSS: f64 = 0.005;
+const RQ_BROKEN_TAIL_DRAIN_ENABLE_LOSS: f64 = 0.05;
+const RQ_BAD_LINK_TAIL_DRAIN_MS: u64 = 40;
+const RQ_BROKEN_LINK_TAIL_DRAIN_MS: u64 = 100;
 const DEFAULT_RECV_ACCEPT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_RECV_LISTEN_TIMEOUT_MS: u64 = 0;
 const DIRECT_DELTA_SIDECAR_CONNECT_ATTEMPT_MS: u64 = 750;
@@ -466,6 +470,7 @@ fn rq_config(
 ) -> Result<RqConfig, String> {
     let max_block_size = normalize_max_block_size(symbol_size, max_block_size)?;
     let round0_loss_target = normalize_loss_pct(rq_round0_loss_pct, "--rq-round0-loss-pct")?;
+    let tail_drain_ms = calibrated_rq_tail_drain_ms(round0_loss_target, tail_drain_ms);
     let config = RqConfig {
         symbol_size,
         udp_fanout: streams.max(1),
@@ -493,6 +498,19 @@ fn normalize_loss_pct(value: f64, flag: &str) -> Result<f64, String> {
         return Err(format!("{flag} must be finite and in [0, 100)"));
     }
     Ok(value / 100.0)
+}
+
+fn calibrated_rq_tail_drain_ms(round0_loss_target: f64, requested_ms: u64) -> u64 {
+    if requested_ms == 0 {
+        return 0;
+    }
+    if round0_loss_target >= RQ_BROKEN_TAIL_DRAIN_ENABLE_LOSS {
+        requested_ms.max(RQ_BROKEN_LINK_TAIL_DRAIN_MS)
+    } else if round0_loss_target >= RQ_LOSSY_TAIL_DRAIN_ENABLE_LOSS {
+        requested_ms.max(RQ_BAD_LINK_TAIL_DRAIN_MS)
+    } else {
+        requested_ms
+    }
 }
 
 fn normalize_bwlimit_bps(bwlimit_bps: Option<u64>) -> Result<Option<u64>, String> {
@@ -4890,6 +4908,40 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert!(normalize_loss_pct(-0.1, "--rq-round0-loss-pct").is_err());
         assert!(normalize_loss_pct(100.0, "--rq-round0-loss-pct").is_err());
         assert!(normalize_loss_pct(f64::NAN, "--rq-round0-loss-pct").is_err());
+    }
+
+    #[test]
+    fn rq_tail_drain_calibrates_only_lossy_matrix_cells() {
+        assert_eq!(
+            calibrated_rq_tail_drain_ms(0.0, DEFAULT_ROUND_TAIL_DRAIN_MS),
+            DEFAULT_ROUND_TAIL_DRAIN_MS,
+            "clean cells should keep the short tail drain"
+        );
+        assert_eq!(
+            calibrated_rq_tail_drain_ms(0.001, DEFAULT_ROUND_TAIL_DRAIN_MS),
+            DEFAULT_ROUND_TAIL_DRAIN_MS,
+            "good/near-clean cells should not pay the lossy quiet window"
+        );
+        assert_eq!(
+            calibrated_rq_tail_drain_ms(0.02, DEFAULT_ROUND_TAIL_DRAIN_MS),
+            RQ_BAD_LINK_TAIL_DRAIN_MS,
+            "bad cells need enough quiet drain for delayed UDP tails"
+        );
+        assert_eq!(
+            calibrated_rq_tail_drain_ms(0.10, DEFAULT_ROUND_TAIL_DRAIN_MS),
+            RQ_BROKEN_LINK_TAIL_DRAIN_MS,
+            "broken cells need a wider quiet drain than the 2 ms clean default"
+        );
+        assert_eq!(
+            calibrated_rq_tail_drain_ms(0.10, 0),
+            0,
+            "an explicit zero still disables tail drain for diagnostics"
+        );
+        assert_eq!(
+            calibrated_rq_tail_drain_ms(0.10, 250),
+            250,
+            "operator-provided wider drains are preserved"
+        );
     }
 
     #[test]
