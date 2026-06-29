@@ -1303,11 +1303,18 @@ impl SymbolDeduplicator {
             return false;
         }
 
-        // Enforce max_symbols_per_object: stop recording beyond the limit.
+        // Enforce max_symbols_per_object: past the cap a symbol can no longer be
+        // recorded, so it can no longer be reliably de-duplicated. Claiming it is
+        // unique (as before) would let a re-presented duplicate be counted as
+        // fresh decode progress and re-fed to the decoder, so fail closed and
+        // treat the symbol as a duplicate instead. The membership test for
+        // already-recorded symbols above still rejects exact repeats up to the
+        // cap (fyihql). The cap default (10_000) is far above any realistic
+        // single-block RaptorQ symbol count.
         if state.seen.len() >= self.config.max_symbols_per_object {
             drop(objects);
-            self.unique_symbols.fetch_add(1, Ordering::Relaxed);
-            return true;
+            self.duplicates_detected.fetch_add(1, Ordering::Relaxed);
+            return false;
         }
 
         // Record new symbol
@@ -1403,6 +1410,21 @@ pub struct ReordererConfig {
 
     /// Maximum gap in sequence before giving up.
     pub max_sequence_gap: u32,
+
+    /// Fail-open backstop on the number of tracked `(object, block)` reorder
+    /// states. Past this cap, a brand-new object's symbols are delivered
+    /// immediately without buffering — no symbol is lost (RaptorQ symbols are
+    /// order-independent, so skipping reordering for an overflow object is
+    /// safe), and memory stays bounded under a flood of distinct object/block
+    /// ids. Sized generously, well above any realistic in-flight working set, so
+    /// it never bites normal transfers (s53kt5).
+    pub max_objects: usize,
+
+    /// Idle TTL after which an *empty* reorder state is reclaimed by
+    /// [`SymbolReorderer::prune`]. Bounds the otherwise unbounded per-object map
+    /// for objects/blocks that completed or were abandoned without an
+    /// `object_complete` clear (s53kt5).
+    pub entry_ttl: Time,
 }
 
 impl Default for ReordererConfig {
@@ -1412,6 +1434,8 @@ impl Default for ReordererConfig {
             max_wait_time: Time::from_millis(100),
             immediate_delivery: false,
             max_sequence_gap: 100,
+            max_objects: 65_536,
+            entry_ttl: Time::from_secs(300),
         }
     }
 }
@@ -1447,8 +1471,8 @@ struct ObjectReorderState {
     /// Buffered out-of-order symbols (keyed by unwrapped sequence).
     buffer: BTreeMap<u64, BufferedSymbol>,
 
-    /// Last delivery time.
-    #[allow(dead_code)]
+    /// Last delivery time. Read by [`SymbolReorderer::prune`] to reclaim empty,
+    /// idle reorder states.
     last_delivery: Time,
 }
 
@@ -1526,6 +1550,19 @@ impl SymbolReorderer {
         let seq = symbol.esi();
 
         let mut objects = self.objects.write();
+
+        // Fail-open backstop: past the per-reorderer object cap, do not create a
+        // new `(object, block)` reorder state. Deliver the symbol immediately
+        // instead — this bounds memory under a flood of distinct ids without
+        // dropping a symbol, since RaptorQ symbols are order-independent and the
+        // decoder tolerates any arrival order. The TTL prune keeps steady-state
+        // well below the cap, so this only triggers under pathological load
+        // (s53kt5).
+        if !objects.contains_key(&(object_id, sbn)) && objects.len() >= self.config.max_objects {
+            drop(objects);
+            return ReorderProcessResult::accepted(vec![symbol]);
+        }
+
         let state = objects
             .entry((object_id, sbn))
             .or_insert_with(ObjectReorderState::new);
@@ -1677,6 +1714,36 @@ impl SymbolReorderer {
 
         drop(objects);
         flushed
+    }
+
+    /// Reclaims reorder states that are *empty and idle* — i.e. hold no buffered
+    /// symbols and have seen no delivery within `entry_ttl`. These are the
+    /// `(object, block)` entries that completed or were abandoned without an
+    /// `object_complete` clear, which would otherwise accumulate forever (one
+    /// permanent entry per distinct id ever observed). Active streams (recent
+    /// delivery) and states still holding deliverable-but-not-yet-flushed
+    /// symbols are retained, so pruning never resets the sequence base of a live
+    /// stream. Returns the number of states dropped (s53kt5).
+    pub fn prune(&self, now: Time) -> usize {
+        let mut objects = self.objects.write();
+        let ttl_nanos = self.config.entry_ttl.as_nanos();
+
+        let mut pruned = 0;
+        objects.retain(|_, state| {
+            if !state.buffer.is_empty() {
+                return true;
+            }
+            let idle = now
+                .as_nanos()
+                .saturating_sub(state.last_delivery.as_nanos());
+            let keep = idle < ttl_nanos;
+            if !keep {
+                pruned += 1;
+            }
+            keep
+        });
+
+        pruned
     }
 
     /// Returns statistics.
@@ -2064,6 +2131,9 @@ impl MultipathAggregator {
 
         // Prune deduplicator
         self.dedup.prune(now);
+        // Prune the reorderer's per-(object, block) states so empty, idle
+        // entries do not accumulate without bound (s53kt5).
+        self.reorderer.prune(now);
 
         flushed
     }
@@ -3454,6 +3524,110 @@ mod tests {
         crate::test_complete!("test_reorderer_in_order");
     }
 
+    #[test]
+    fn reorderer_prune_reclaims_empty_idle_states() {
+        init_test("reorderer_prune_reclaims_empty_idle_states");
+        let config = ReordererConfig {
+            immediate_delivery: false,
+            entry_ttl: Time::from_secs(10),
+            ..Default::default()
+        };
+        let reorderer = SymbolReorderer::new(config);
+        let path = PathId(1);
+
+        // Deliver an in-order symbol so object (1,0) gets a state whose buffer is
+        // empty and whose last_delivery is set to t=1s.
+        let s = Symbol::new_for_test(1, 0, 0, &[0]);
+        let ready = reorderer.process(s, path, Time::from_secs(1));
+        crate::assert_with_log!(ready.len() == 1, "in-order delivered", 1, ready.len());
+        let tracked = reorderer.stats().objects_tracked;
+        crate::assert_with_log!(tracked == 1, "state created", 1, tracked);
+
+        // Not yet idle past the TTL: the state is retained.
+        let pruned_early = reorderer.prune(Time::from_secs(5));
+        crate::assert_with_log!(pruned_early == 0, "recent state retained", 0, pruned_early);
+        let tracked_early = reorderer.stats().objects_tracked;
+        crate::assert_with_log!(tracked_early == 1, "still tracked", 1, tracked_early);
+
+        // Empty and idle past the TTL: reclaimed.
+        let pruned = reorderer.prune(Time::from_secs(20));
+        crate::assert_with_log!(pruned == 1, "stale empty state reclaimed", 1, pruned);
+        let tracked_after = reorderer.stats().objects_tracked;
+        crate::assert_with_log!(tracked_after == 0, "map reclaimed", 0, tracked_after);
+
+        crate::test_complete!("reorderer_prune_reclaims_empty_idle_states");
+    }
+
+    #[test]
+    fn reorderer_prune_keeps_buffered_states() {
+        init_test("reorderer_prune_keeps_buffered_states");
+        let config = ReordererConfig {
+            immediate_delivery: false,
+            entry_ttl: Time::from_secs(10),
+            max_sequence_gap: 100,
+            ..Default::default()
+        };
+        let reorderer = SymbolReorderer::new(config);
+        let path = PathId(1);
+
+        // An out-of-order symbol (esi=5, base expects 0) is buffered, not
+        // delivered: the state is non-empty. Even far past the TTL, prune must
+        // keep it so a not-yet-deliverable symbol is never silently discarded.
+        let s = Symbol::new_for_test(1, 0, 5, &[5]);
+        let ready = reorderer.process(s, path, Time::from_secs(1));
+        crate::assert_with_log!(
+            ready.is_empty(),
+            "out-of-order buffered",
+            true,
+            ready.is_empty()
+        );
+
+        let pruned = reorderer.prune(Time::from_secs(100));
+        crate::assert_with_log!(pruned == 0, "buffered state retained", 0, pruned);
+        let tracked = reorderer.stats().objects_tracked;
+        crate::assert_with_log!(tracked == 1, "still tracked", 1, tracked);
+
+        crate::test_complete!("reorderer_prune_keeps_buffered_states");
+    }
+
+    #[test]
+    fn reorderer_max_objects_fails_open_without_dropping() {
+        init_test("reorderer_max_objects_fails_open_without_dropping");
+        let config = ReordererConfig {
+            immediate_delivery: false,
+            max_objects: 2,
+            ..Default::default()
+        };
+        let reorderer = SymbolReorderer::new(config);
+        let path = PathId(1);
+        let now = Time::ZERO;
+
+        // Two distinct objects fill the cap; each in-order symbol is delivered
+        // and creates a state.
+        for obj in 1..=2u64 {
+            let s = Symbol::new_for_test(obj, 0, 0, &[0]);
+            let ready = reorderer.process(s, path, now);
+            crate::assert_with_log!(ready.len() == 1, "delivered", 1, ready.len());
+        }
+        let at_cap = reorderer.stats().objects_tracked;
+        crate::assert_with_log!(at_cap == 2, "at cap", 2, at_cap);
+
+        // A third distinct object is past the cap: its symbol is still delivered
+        // (fail-open, no loss) but no new reorder state is created.
+        let s3 = Symbol::new_for_test(3, 0, 0, &[0]);
+        let ready3 = reorderer.process(s3, path, now);
+        crate::assert_with_log!(
+            ready3.len() == 1,
+            "over-cap symbol still delivered",
+            1,
+            ready3.len()
+        );
+        let after = reorderer.stats().objects_tracked;
+        crate::assert_with_log!(after == 2, "no new state past cap", 2, after);
+
+        crate::test_complete!("reorderer_max_objects_fails_open_without_dropping");
+    }
+
     // Test 9: Reorderer out-of-order buffering
     #[test]
     fn test_reorderer_out_of_order() {
@@ -4302,11 +4476,27 @@ mod tests {
             crate::assert_with_log!(unique, "symbol unique", true, unique);
         }
 
-        // 4th symbol for same object exceeds limit — treated as unique
-        // but not recorded.
+        // 4th symbol for the same object exceeds the limit. It cannot be
+        // recorded, so it must fail closed and be reported as a duplicate
+        // (fyihql) — claiming it unique would let a re-presented copy be counted
+        // as fresh decode progress.
         let s4 = Symbol::new_for_test(1, 0, 3, &[3]);
-        let result = dedup.check_and_record(&s4, path, Time::ZERO);
-        crate::assert_with_log!(result, "over-limit symbol treated as unique", true, result);
+        let first_over = dedup.check_and_record(&s4, path, Time::ZERO);
+        crate::assert_with_log!(
+            !first_over,
+            "over-limit symbol fails closed (duplicate)",
+            false,
+            first_over
+        );
+        // The SAME over-limit symbol presented again is still a duplicate, not a
+        // second "unique" — this is the false-progress bug being regressed.
+        let second_over = dedup.check_and_record(&s4, path, Time::ZERO);
+        crate::assert_with_log!(
+            !second_over,
+            "re-presented over-limit symbol stays a duplicate",
+            false,
+            second_over
+        );
 
         let stats = dedup.stats();
         crate::assert_with_log!(
@@ -4316,10 +4506,16 @@ mod tests {
             stats.symbols_tracked
         );
         crate::assert_with_log!(
-            stats.unique_symbols == 4,
-            "all unique symbols counted",
-            4,
+            stats.unique_symbols == 3,
+            "over-limit symbols are not counted unique",
+            3,
             stats.unique_symbols
+        );
+        crate::assert_with_log!(
+            stats.duplicates_detected == 2,
+            "both over-limit presentations counted as duplicates",
+            2,
+            stats.duplicates_detected
         );
 
         crate::test_complete!("dedup_enforces_max_symbols_per_object");
