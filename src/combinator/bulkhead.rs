@@ -645,6 +645,89 @@ impl Drop for BulkheadPermit<'_> {
 }
 
 // =========================================================================
+// Queued acquisition guard (RAII)
+// =========================================================================
+
+/// RAII guard for a *queued* bulkhead acquisition.
+///
+/// `enqueue` returns a bare entry id whose granted-but-unclaimed permit (or
+/// waiting slot) leaks unless the caller remembers to call `cancel_entry`. This
+/// guard makes that automatic: poll it with [`poll_claim`](Self::poll_claim) to
+/// obtain the [`BulkheadPermit`] once granted, and if it is dropped before the
+/// permit is claimed — e.g. the acquiring future is cancelled — it cancels the
+/// queue entry, releasing any granted-but-unclaimed permit so the slot is not
+/// leaked (5vzqse). The wait-stat timestamp used by a drop-time cancel is the
+/// enqueue time; the slot release itself is exact.
+#[derive(Debug)]
+pub struct QueuedAcquire<'a> {
+    bulkhead: &'a Bulkhead,
+    entry_id: u64,
+    enqueued_now: Time,
+    claimed: bool,
+}
+
+impl<'a> QueuedAcquire<'a> {
+    /// The id of the underlying queue entry.
+    #[must_use]
+    pub fn entry_id(&self) -> u64 {
+        self.entry_id
+    }
+
+    /// Poll the queued entry. Returns `Ok(Some(permit))` once granted (after
+    /// which this guard no longer cancels the entry on drop, since ownership has
+    /// passed to the returned [`BulkheadPermit`]), `Ok(None)` while still
+    /// waiting (keep polling), or `Err(..)` if the entry timed out or was
+    /// cancelled (already removed; the guard becomes a no-op on drop).
+    pub fn poll_claim(
+        &mut self,
+        now: Time,
+    ) -> Result<Option<BulkheadPermit<'a>>, BulkheadError<()>> {
+        let result = self.bulkhead.check_entry(self.entry_id, now);
+        match &result {
+            // Granted (permit handed out) or terminal error (entry removed):
+            // the entry is gone from the queue, so the drop-time cancel must not
+            // run (it would otherwise double-release or no-op spuriously).
+            Ok(Some(_)) | Err(_) => self.claimed = true,
+            Ok(None) => {}
+        }
+        result
+    }
+}
+
+impl Drop for QueuedAcquire<'_> {
+    fn drop(&mut self) {
+        if !self.claimed {
+            // The acquisition was abandoned before the permit was claimed.
+            // cancel_entry releases a granted-but-unclaimed permit (or dequeues a
+            // still-waiting entry), so no permit slot is leaked (5vzqse).
+            self.bulkhead.cancel_entry(self.entry_id, self.enqueued_now);
+        }
+    }
+}
+
+impl Bulkhead {
+    /// Enqueue an acquisition and return an RAII [`QueuedAcquire`] guard that
+    /// cannot leak a permit if the acquiring future is cancelled (5vzqse).
+    ///
+    /// Prefer this over the bare [`enqueue`](Self::enqueue) + manual
+    /// [`cancel_entry`](Self::cancel_entry) when the acquisition may be dropped
+    /// before its permit is claimed.
+    pub fn acquire_queued(
+        &self,
+        weight: u32,
+        now: Time,
+    ) -> Result<QueuedAcquire<'_>, BulkheadError<()>> {
+        let entry_id = self.enqueue(weight, now)?;
+        Ok(QueuedAcquire {
+            bulkhead: self,
+            entry_id,
+            enqueued_now: now,
+            claimed: false,
+        })
+    }
+}
+
+// =========================================================================
 // Error Types
 // =========================================================================
 
@@ -1009,6 +1092,43 @@ mod tests {
         assert!(
             claimed.is_some(),
             "queued entry should be claimable after process_queue"
+        );
+    }
+
+    #[test]
+    fn dropping_unclaimed_queued_acquire_releases_granted_permit() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            queue_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let now = Time::from_millis(0);
+
+        let permit = bh.try_acquire(1).unwrap();
+        let guard = bh.acquire_queued(1, now).expect("queued acquire");
+        let entry_id = guard.entry_id();
+        permit.release();
+
+        // Grant the queued entry; it now holds a granted-but-unclaimed permit.
+        assert_eq!(
+            bh.process_queue(now),
+            Some(entry_id),
+            "queued entry granted"
+        );
+        assert_eq!(bh.available(), 0, "grant consumed the released permit");
+
+        // Drop the guard WITHOUT claiming: the granted permit must be released,
+        // not leaked (5vzqse).
+        drop(guard);
+        assert_eq!(
+            bh.available(),
+            1,
+            "granted-but-unclaimed permit must be released on guard drop, not leaked",
+        );
+        assert!(
+            bh.try_acquire(1).is_some(),
+            "permit is reusable after the guard releases it",
         );
     }
 

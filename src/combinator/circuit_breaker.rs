@@ -563,6 +563,23 @@ impl CircuitBreaker {
         }
     }
 
+    /// Like [`should_allow`](Self::should_allow), but returns an RAII
+    /// [`PermitGuard`] that releases the permit's half-open probe slot on drop
+    /// if no outcome was recorded — so a cancelled or abandoned guarded
+    /// operation cannot leak a half-open probe and stall recovery (5vzqse).
+    /// Record the outcome via the guard's
+    /// [`record_success`](PermitGuard::record_success) /
+    /// [`record_failure`](PermitGuard::record_failure) /
+    /// [`record_ignored`](PermitGuard::record_ignored); dropping it without
+    /// recording is treated as ignored (neutral, frees the slot).
+    pub fn acquire_guarded(&self, now: Time) -> Result<PermitGuard<'_>, CircuitBreakerError<()>> {
+        let permit = self.should_allow(now)?;
+        Ok(PermitGuard {
+            breaker: self,
+            permit: Some(permit),
+        })
+    }
+
     /// Record a successful call.
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn record_success(&self, permit: Permit, now: Time) {
@@ -1109,6 +1126,75 @@ pub enum Permit {
 }
 
 // =========================================================================
+// Permit Guard (RAII)
+// =========================================================================
+
+/// RAII wrapper around a circuit-breaker [`Permit`].
+///
+/// `should_allow` hands back a bare [`Permit`] whose half-open probe slot leaks
+/// unless the caller remembers to pass it to one of `record_*`. This guard makes
+/// that automatic: record the call's outcome with
+/// [`record_success`](Self::record_success),
+/// [`record_failure`](Self::record_failure), or
+/// [`record_ignored`](Self::record_ignored); if the guard is dropped without any
+/// of those — e.g. the guarded future is cancelled — it records the call as
+/// ignored (neutral: frees a half-open probe slot without counting toward
+/// success/failure), preventing a leaked probe that would stall recovery
+/// (5vzqse). Obtain one via [`CircuitBreaker::acquire_guarded`].
+pub struct PermitGuard<'a> {
+    breaker: &'a CircuitBreaker,
+    permit: Option<Permit>,
+}
+
+impl std::fmt::Debug for PermitGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermitGuard")
+            .field("permit", &self.permit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PermitGuard<'_> {
+    /// The permit held by this guard (`None` once an outcome has been recorded).
+    #[must_use]
+    pub fn permit(&self) -> Option<Permit> {
+        self.permit
+    }
+
+    /// Record the guarded call as a success, consuming the guard.
+    pub fn record_success(mut self, now: Time) {
+        if let Some(permit) = self.permit.take() {
+            self.breaker.record_success(permit, now);
+        }
+    }
+
+    /// Record the guarded call as a failure, consuming the guard.
+    pub fn record_failure(mut self, error: &str, now: Time) {
+        if let Some(permit) = self.permit.take() {
+            self.breaker.record_failure(permit, error, now);
+        }
+    }
+
+    /// Record the guarded call as ignored (neutral), consuming the guard.
+    pub fn record_ignored(mut self) {
+        if let Some(permit) = self.permit.take() {
+            self.breaker.record_ignored(permit);
+        }
+    }
+}
+
+impl Drop for PermitGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(permit) = self.permit.take() {
+            // The outcome was never recorded (e.g. the guarded operation was
+            // cancelled). Release the (possibly half-open probe) slot neutrally
+            // so it is not leaked (5vzqse).
+            self.breaker.record_ignored(permit);
+        }
+    }
+}
+
+// =========================================================================
 // Builder Pattern
 // =========================================================================
 
@@ -1258,6 +1344,43 @@ mod tests {
     fn new_circuit_starts_closed() {
         let cb = CircuitBreaker::new(CircuitBreakerPolicy::default());
         assert_eq!(cb.state(), State::Closed { failures: 0 });
+    }
+
+    #[test]
+    fn dropping_unrecorded_permit_guard_releases_half_open_probe() {
+        let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_duration: Duration::from_millis(100),
+            half_open_max_probes: 1,
+            ..Default::default()
+        });
+        let t0 = Time::from_millis(0);
+
+        // Trip Closed -> Open with a single failure.
+        let permit = cb.should_allow(t0).expect("closed allows");
+        cb.record_failure(permit, "boom", t0);
+
+        // After open_duration, the next call probes (HalfOpen, probes_active = 1).
+        let t1 = Time::from_millis(150);
+        let guard = cb.acquire_guarded(t1).expect("half-open probe granted");
+        assert!(
+            matches!(guard.permit(), Some(Permit::Probe { .. })),
+            "first half-open call should receive a probe permit",
+        );
+
+        // Drop the guard WITHOUT recording an outcome: the probe slot must be
+        // freed (record_ignored), not leaked (5vzqse).
+        drop(guard);
+
+        // The freed slot must be re-acquirable; a leaked probe would make this
+        // fail with HalfOpenFull.
+        let guard2 = cb.acquire_guarded(t1);
+        assert!(
+            guard2.is_ok(),
+            "half-open probe slot must be free after dropping the unrecorded guard",
+        );
+        drop(guard2); // also released as ignored -> no leak either way
     }
 
     #[test]

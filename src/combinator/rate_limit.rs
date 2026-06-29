@@ -401,20 +401,36 @@ impl RateLimiter {
             }
         }
 
+        // Serialize against enqueue so a waiter that was just pushed to the wait
+        // queue — but whose `pending_queue_count` bump is not yet visible to the
+        // counter checks above — cannot have its FIFO turn barged by this fast
+        // path. Hold wait_queue.read() across the token consume (mirrors
+        // bulkhead::try_acquire), acquiring it BEFORE `state` to match the
+        // enqueue/process_queue lock order (wait_queue -> state) and avoid an
+        // AB-BA deadlock (d8ji01).
+        let wait_queue = self.wait_queue.read();
+        if wait_queue.iter().any(|entry| entry.result.is_none()) {
+            return false;
+        }
+
         let mut state = self.state.lock();
         let now_millis = now.as_millis();
 
         self.refill_inner(&mut state, now_millis);
 
-        if state.tokens >= cost {
+        let acquired = if state.tokens >= cost {
             state.tokens -= cost;
-            drop(state); // Release bucket lock immediately
-
-            self.total_allowed.fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
+        };
+        drop(state);
+        drop(wait_queue);
+
+        if acquired {
+            self.total_allowed.fetch_add(1, Ordering::Relaxed);
         }
+        acquired
     }
 
     /// Allocate a queue entry ID while reserving `IMMEDIATE_ACQUIRE_SENTINEL`
@@ -1366,6 +1382,42 @@ mod tests {
 
         // Zero cost should always succeed
         assert!(rl.try_acquire(0, now));
+    }
+
+    #[test]
+    fn try_acquire_defers_to_queued_waiter_when_count_lags() {
+        // enqueue() pushes a waiter onto the wait queue BEFORE it bumps
+        // pending_queue_count, so there is a window where the queue holds a
+        // waiting entry (result == None) but the counter still reads 0. A
+        // fast-path try_acquire must defer to that waiter for FIFO fairness, not
+        // barge its token (d8ji01). Reconstruct the window directly: a queued
+        // unprocessed entry with the counter left at 0, and tokens available.
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 10,
+            burst: 10,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+        let now = Time::from_millis(0);
+
+        rl.wait_queue.write().push_back(QueueEntry {
+            id: 1,
+            cost: 1,
+            enqueued_at_millis: 0,
+            deadline_millis: u64::MAX,
+            result: None,
+        });
+        assert_eq!(
+            rl.pending_queue_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "test models the window before enqueue bumps the count",
+        );
+
+        assert!(
+            !rl.try_acquire(1, now),
+            "try_acquire must defer to a queued waiter even when the count lags",
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@
 use crate::types::{RegionId, TaskId};
 use crate::util::CachePadded;
 use crossbeam_queue::SegQueue;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -279,6 +279,14 @@ impl LocalEpochPin {
                 .pin_start
                 .store(instant_to_nanos(Instant::now()).max(1), Ordering::Release);
             self.is_active.store(true, Ordering::Release);
+            // SeqCst fence after announcing the pin (mirrors crossbeam-epoch).
+            // The pin announce-store and the reclaimer's pin scan in
+            // `compute_safe_point` form a StoreLoad pair; only a pair of SeqCst
+            // fences gives them a single total order. Without this fence the
+            // reclaimer could advance the global epoch and miss this just-pinned
+            // reader, reclaiming an epoch it still observes (ppoy83). The
+            // reclaimer's matching fence is in `compute_safe_point`.
+            fence(Ordering::SeqCst);
             epoch
         } else {
             self.pinned_epoch.load(Ordering::Acquire)
@@ -434,6 +442,13 @@ impl SafePointDetector {
     fn compute_safe_point(&self) -> u64 {
         let mut min_epoch = u64::MAX;
 
+        // SeqCst fence before scanning the thread pins (mirrors crossbeam-epoch).
+        // Paired with the fence in `LocalEpochPin::pin`, this gives the pin
+        // announce-store and this scan-load a single total order, so the scan
+        // cannot be reordered ahead of a concurrent pin and miss an active
+        // reader — which would let a later reclamation free an epoch that reader
+        // still observes (ppoy83).
+        fence(Ordering::SeqCst);
         for pin in &self.thread_pins {
             if let Some(pinned) = pin.pinned_epoch() {
                 min_epoch = min_epoch.min(pinned);

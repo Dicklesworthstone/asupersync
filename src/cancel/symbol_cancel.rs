@@ -1796,13 +1796,35 @@ impl CleanupCoordinator {
                 self.pending.write().insert(object_id, restored_set);
             }
         } else {
-            // No pending symbols, but check cleanup buffer for symbols that arrived
-            // during a previous cleanup attempt
-            let buffered_symbol_count = self
-                .cleanup_buffer
-                .read()
-                .get(&object_id)
-                .map_or(0, Vec::len);
+            // No pending symbols. Decide completion under the SAME lock
+            // discipline as `restore_*` — hold `pending` -> `completed` ->
+            // `cleanup_buffer` across the empty-buffer check, the buffer removal,
+            // and the `completed` insert. `register_pending()` holds
+            // `pending.write()` for its entire body (checking `completed` and
+            // `cleanup_buffer` under it), so serializing here is what prevents a
+            // concurrently-registered symbol from being (a) dropped together
+            // with the buffer entry we remove, or (b) inserted into `pending`
+            // just before we mark the object completed and then stranded there
+            // forever after its handler is gone (qivp4o). The `> 0` restore path
+            // runs OUTSIDE this guard because `restore_*` re-acquires the chain.
+            let buffered_symbol_count = {
+                let _pending_guard = self.pending.write();
+                let mut completed = self.completed.write();
+                let mut cleanup_buffer = self.cleanup_buffer.write();
+                let count = cleanup_buffer.get(&object_id).map_or(0, Vec::len);
+                if count == 0 {
+                    cleanup_buffer.remove(&object_id);
+                    if result.completed && had_handler {
+                        // A registered handler with no pending or buffered
+                        // symbols still represents a fully completed cleanup
+                        // lifecycle. Record that completion so late
+                        // register_pending() calls cannot silently reopen the
+                        // object after its handler has been dropped.
+                        completed.insert(object_id);
+                    }
+                }
+                count
+            };
             if buffered_symbol_count > 0 {
                 let new_set = Self::empty_pending_set();
                 if let Some(handler) = handler {
@@ -1811,15 +1833,6 @@ impl CleanupCoordinator {
                     self.restore_pending_only_state(object_id, new_set);
                 }
                 result.completed = false; // Can't complete without symbols to clean
-            } else {
-                self.cleanup_buffer.write().remove(&object_id);
-            }
-            if result.completed && had_handler {
-                // A registered handler with no pending or buffered symbols still
-                // represents a fully completed cleanup lifecycle. Record that
-                // completion so late register_pending() calls cannot silently
-                // reopen the object after its handler has been dropped.
-                self.completed.write().insert(object_id);
             }
         }
 
@@ -3489,6 +3502,44 @@ mod tests {
             "retryable cleanup must continue accepting pending symbols"
         );
         assert_eq!(stats.pending_bytes, 5);
+    }
+
+    #[test]
+    fn cleanup_no_pending_branch_never_strands_concurrent_register() {
+        // Race a register_pending() against a cleanup() pass that takes the
+        // no-pending else-branch. Pre-fix (qivp4o) a symbol registered in the
+        // buffer-check -> buffer-remove -> completed-insert window could be
+        // inserted into `pending` and then stranded after the object was marked
+        // completed and its handler dropped. Post-fix the branch holds
+        // pending -> completed -> cleanup_buffer, so a cleanup that reports
+        // `completed` can NEVER leave a symbol stranded in `pending` (a symbol
+        // registered during the pass is instead handler-cleaned or leaves the
+        // object retryable with completed == false). This invariant is
+        // deterministic post-fix, so the test never flakes once fixed.
+        for i in 0..500 {
+            let coord = Arc::new(CleanupCoordinator::new());
+            let object_id = ObjectId::new_for_test(70);
+            coord.register_handler(object_id, CountingCleanupHandler);
+
+            let c2 = Arc::clone(&coord);
+            let producer = std::thread::spawn(move || {
+                c2.register_pending(
+                    object_id,
+                    Symbol::new_for_test(70, 0, 0, &[1, 2, 3]),
+                    Time::from_millis(1),
+                );
+            });
+            let result = coord.cleanup(object_id, None);
+            producer.join().expect("producer joins");
+
+            if result.completed {
+                assert_eq!(
+                    coord.stats().pending_symbols,
+                    0,
+                    "iter {i}: a completed cleanup stranded a concurrently-registered symbol",
+                );
+            }
+        }
     }
 
     #[test]
