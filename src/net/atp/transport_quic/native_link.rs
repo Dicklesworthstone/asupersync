@@ -4167,8 +4167,12 @@ impl NativeQuicAimdPacer {
             })
             .unwrap_or(0.0);
         let loss = wire_loss.max(progress_loss).clamp(0.0, 0.90);
-        let observed_delivery_bps =
-            progress_delivery_bps.or_else(|| self.receiver_delivery_bps(need, config));
+        let receiver_delivery_bps = self.receiver_delivery_bps(need, config);
+        let observed_delivery_bps = if progress_loss > 0.0 {
+            progress_delivery_bps.or(receiver_delivery_bps)
+        } else {
+            receiver_delivery_bps.or(progress_delivery_bps)
+        };
         let delivered_payload_bytes = observed_delivery_bps
             .map(|bps| {
                 (bps * self.last_round_send_wall_s())
