@@ -64,6 +64,337 @@ impl Default for CongestionConfig {
     }
 }
 
+/// Deterministic BBR-style rate controller configuration for ATP datagram
+/// transports.
+///
+/// RQ UDP and QUIC DATAGRAM senders feed the same sent/delivered byte samples,
+/// RTT, and receiver credit into this controller, then consume one pacing/cwnd
+/// decision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DatagramRateConfig {
+    /// Initial pacing rate in payload bytes per second.
+    pub initial_pacing_bytes_per_s: u64,
+    /// Lower bound for pacing rate in payload bytes per second.
+    pub min_pacing_bytes_per_s: u64,
+    /// Upper bound for pacing rate in payload bytes per second.
+    pub max_pacing_bytes_per_s: u64,
+    /// Initial congestion window in payload bytes.
+    pub initial_cwnd_bytes: u64,
+    /// Minimum congestion window in payload bytes.
+    pub min_cwnd_bytes: u64,
+    /// Maximum congestion window in payload bytes.
+    pub max_cwnd_bytes: u64,
+    /// Multiplier applied to the current delivery-rate estimate when pacing.
+    pub pacing_gain: f64,
+    /// Multiplier applied to the bandwidth-delay product for cwnd.
+    pub cwnd_gain: f64,
+    /// Sender-side loss fraction that triggers loss backoff.
+    pub loss_backoff_threshold: f64,
+    /// Multiplicative backoff applied when sender-side loss is above threshold.
+    pub loss_backoff_factor: f64,
+    /// Extra headroom over measured delivery rate after a loss backoff.
+    pub loss_delivery_headroom: f64,
+    /// Window after which the minimum RTT estimate may be refreshed upward.
+    pub min_rtt_window_micros: u64,
+}
+
+impl Default for DatagramRateConfig {
+    fn default() -> Self {
+        Self {
+            initial_pacing_bytes_per_s: 1024 * 1024,
+            min_pacing_bytes_per_s: 64 * 1024,
+            max_pacing_bytes_per_s: 256 * 1024 * 1024,
+            initial_cwnd_bytes: 256 * 1024,
+            min_cwnd_bytes: 16 * 1024,
+            max_cwnd_bytes: 16 * 1024 * 1024,
+            pacing_gain: 1.0,
+            cwnd_gain: 2.0,
+            loss_backoff_threshold: 0.02,
+            loss_backoff_factor: 0.50,
+            loss_delivery_headroom: 1.25,
+            min_rtt_window_micros: 10_000_000,
+        }
+    }
+}
+
+/// One ack-clocked feedback sample for the deterministic datagram rate
+/// controller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DatagramRateSample {
+    /// Monotonic sample timestamp in microseconds.
+    pub now_micros: u64,
+    /// Payload bytes sent in the sampled interval.
+    pub sent_bytes: u64,
+    /// Payload bytes acknowledged or otherwise confirmed delivered.
+    pub acked_bytes: u64,
+    /// Payload bytes explicitly declared lost by packet/loss detection.
+    pub lost_bytes: u64,
+    /// Latest RTT sample in microseconds.
+    pub rtt_micros: Option<u64>,
+    /// Receiver-advertised remaining flow-control credit in payload bytes.
+    pub receiver_credit_bytes: Option<u64>,
+}
+
+/// Deterministic pacing and inflight decision for one datagram send epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatagramRateDecision {
+    /// Payload pacing rate in bytes per second.
+    pub pacing_bytes_per_s: u64,
+    /// Payload pacing rate in bits per second for token-bucket adapters.
+    pub pacing_rate_bps: u64,
+    /// Congestion window in payload bytes before receiver-credit clipping.
+    pub cwnd_bytes: u64,
+    /// Current bottleneck delivery-rate estimate in payload bytes per second.
+    pub bottleneck_bytes_per_s: u64,
+    /// Effective inflight limit after receiver-credit clipping.
+    pub inflight_limit_bytes: u64,
+    /// Bytes available to send immediately under cwnd and receiver credit.
+    pub send_budget_bytes: u64,
+    /// Receiver-advertised remaining flow-control credit in payload bytes.
+    pub receiver_credit_bytes: Option<u64>,
+    /// Current windowed minimum RTT estimate in microseconds.
+    pub min_rtt_micros: Option<u64>,
+    /// Sender-side loss fraction from sent-vs-delivered evidence.
+    pub sender_loss_fraction_ppm: u32,
+    /// Ack-clocked delivery-rate estimate in payload bytes per second.
+    pub delivery_rate_bytes_per_s: u64,
+}
+
+/// Shared deterministic datagram congestion authority.
+#[derive(Debug, Clone)]
+pub struct DatagramRateController {
+    config: DatagramRateConfig,
+    pacing_bytes_per_s: u64,
+    bottleneck_bytes_per_s: u64,
+    cwnd_bytes: u64,
+    min_rtt_micros: Option<u64>,
+    min_rtt_stamp_micros: u64,
+    last_ack_micros: Option<u64>,
+    next_send_micros: Option<u64>,
+}
+
+impl DatagramRateController {
+    /// Create a deterministic datagram rate controller.
+    #[must_use]
+    pub fn new(config: DatagramRateConfig) -> Self {
+        let pacing_bytes_per_s = config.initial_pacing_bytes_per_s.clamp(
+            config.min_pacing_bytes_per_s.max(1),
+            config.max_pacing_bytes_per_s.max(1),
+        );
+        let cwnd_bytes = config
+            .initial_cwnd_bytes
+            .clamp(config.min_cwnd_bytes.max(1), config.max_cwnd_bytes.max(1));
+        Self {
+            config,
+            pacing_bytes_per_s,
+            bottleneck_bytes_per_s: pacing_bytes_per_s,
+            cwnd_bytes,
+            min_rtt_micros: None,
+            min_rtt_stamp_micros: 0,
+            last_ack_micros: None,
+            next_send_micros: None,
+        }
+    }
+
+    /// Observe one delivery/loss sample and return the new pacing decision.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    #[must_use]
+    pub fn observe(&mut self, sample: DatagramRateSample) -> DatagramRateDecision {
+        self.observe_min_rtt(sample);
+        let delivery_rate = self.delivery_rate_bytes_per_s(sample);
+        let sender_loss = sender_loss_fraction(sample);
+
+        if delivery_rate > 0 {
+            if sender_loss > self.config.loss_backoff_threshold {
+                self.bottleneck_bytes_per_s = self.bottleneck_bytes_per_s.min(delivery_rate);
+            } else {
+                self.bottleneck_bytes_per_s = self.bottleneck_bytes_per_s.max(delivery_rate);
+            }
+            let target = (self.bottleneck_bytes_per_s as f64
+                * finite_positive_or(self.config.pacing_gain, 1.0))
+            .ceil() as u64;
+            self.pacing_bytes_per_s = self.clamp_pacing(target);
+        }
+
+        if sender_loss > self.config.loss_backoff_threshold {
+            let multiplicative = (self.pacing_bytes_per_s as f64
+                * finite_positive_or(self.config.loss_backoff_factor, 0.5))
+            .ceil() as u64;
+            let delivery_backoff = if delivery_rate == 0 {
+                self.config.min_pacing_bytes_per_s
+            } else {
+                (delivery_rate as f64 * finite_positive_or(self.config.loss_delivery_headroom, 1.0))
+                    .ceil() as u64
+            };
+            self.pacing_bytes_per_s = self.clamp_pacing(multiplicative.min(delivery_backoff));
+        }
+
+        self.update_cwnd();
+        self.decision(sample, delivery_rate, sender_loss)
+    }
+
+    /// Return whether `bytes` may be sent with the given bytes already in flight.
+    #[must_use]
+    pub fn can_send(&self, bytes_in_flight: u64, bytes: u64, receiver_credit: Option<u64>) -> bool {
+        let inflight_limit = receiver_credit
+            .map_or(self.cwnd_bytes, |credit| self.cwnd_bytes.min(credit))
+            .max(1);
+        bytes_in_flight.saturating_add(bytes) <= inflight_limit
+    }
+
+    /// Consume one ack-clocked pacing slot if both pacing and cwnd allow it.
+    pub fn try_send(
+        &mut self,
+        now_micros: u64,
+        bytes_in_flight: u64,
+        bytes: u64,
+        receiver_credit: Option<u64>,
+    ) -> bool {
+        if !self.can_send(bytes_in_flight, bytes, receiver_credit) {
+            return false;
+        }
+        if self
+            .next_send_micros
+            .is_some_and(|deadline| now_micros < deadline)
+        {
+            return false;
+        }
+        self.next_send_micros = now_micros.checked_add(duration_micros_for_bytes(
+            bytes.max(1),
+            self.pacing_bytes_per_s,
+        ));
+        true
+    }
+
+    /// Deterministic pacing delay in microseconds until a send slot is available.
+    #[must_use]
+    pub fn time_until_send_micros(&self, now_micros: u64) -> u64 {
+        self.next_send_micros
+            .map_or(0, |deadline| deadline.saturating_sub(now_micros))
+    }
+
+    fn observe_min_rtt(&mut self, sample: DatagramRateSample) {
+        let Some(rtt) = sample.rtt_micros.filter(|rtt| *rtt > 0) else {
+            return;
+        };
+        let expired = sample.now_micros.saturating_sub(self.min_rtt_stamp_micros)
+            >= self.config.min_rtt_window_micros.max(1);
+        if self
+            .min_rtt_micros
+            .is_none_or(|min_rtt| rtt < min_rtt || expired)
+        {
+            self.min_rtt_micros = Some(rtt);
+            self.min_rtt_stamp_micros = sample.now_micros;
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn delivery_rate_bytes_per_s(&mut self, sample: DatagramRateSample) -> u64 {
+        if sample.acked_bytes == 0 {
+            return 0;
+        }
+        let elapsed_micros = self
+            .last_ack_micros
+            .map(|last| sample.now_micros.saturating_sub(last))
+            .filter(|elapsed| *elapsed > 0)
+            .or(self.min_rtt_micros)
+            .unwrap_or(1)
+            .max(1);
+        self.last_ack_micros = Some(sample.now_micros);
+        ((sample.acked_bytes as f64 * 1_000_000.0) / elapsed_micros as f64)
+            .ceil()
+            .clamp(1.0, u64::MAX as f64) as u64
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn update_cwnd(&mut self) {
+        let Some(min_rtt) = self.min_rtt_micros else {
+            self.cwnd_bytes = self.cwnd_bytes.clamp(
+                self.config.min_cwnd_bytes.max(1),
+                self.config.max_cwnd_bytes.max(1),
+            );
+            return;
+        };
+        let bdp = self.pacing_bytes_per_s as f64 * (min_rtt as f64 / 1_000_000.0);
+        let target = (bdp * finite_positive_or(self.config.cwnd_gain, 2.0)).ceil() as u64;
+        self.cwnd_bytes = target.clamp(
+            self.config.min_cwnd_bytes.max(1),
+            self.config.max_cwnd_bytes.max(1),
+        );
+    }
+
+    fn decision(
+        &self,
+        sample: DatagramRateSample,
+        delivery_rate: u64,
+        sender_loss: f64,
+    ) -> DatagramRateDecision {
+        let receiver_limit = sample.receiver_credit_bytes.unwrap_or(u64::MAX);
+        let inflight_limit = self.cwnd_bytes.min(receiver_limit).max(1);
+        DatagramRateDecision {
+            pacing_bytes_per_s: self.pacing_bytes_per_s,
+            pacing_rate_bps: self.pacing_bytes_per_s.saturating_mul(8),
+            cwnd_bytes: self.cwnd_bytes,
+            bottleneck_bytes_per_s: self.bottleneck_bytes_per_s,
+            inflight_limit_bytes: inflight_limit,
+            send_budget_bytes: inflight_limit,
+            receiver_credit_bytes: sample.receiver_credit_bytes,
+            min_rtt_micros: self.min_rtt_micros,
+            sender_loss_fraction_ppm: fraction_to_ppm(sender_loss),
+            delivery_rate_bytes_per_s: delivery_rate,
+        }
+    }
+
+    fn clamp_pacing(&self, value: u64) -> u64 {
+        value.clamp(
+            self.config.min_pacing_bytes_per_s.max(1),
+            self.config.max_pacing_bytes_per_s.max(1),
+        )
+    }
+}
+
+fn finite_positive_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sender_loss_fraction(sample: DatagramRateSample) -> f64 {
+    let sent_loss = if sample.sent_bytes == 0 {
+        0.0
+    } else {
+        sample
+            .sent_bytes
+            .saturating_sub(sample.acked_bytes.min(sample.sent_bytes)) as f64
+            / sample.sent_bytes as f64
+    };
+    let explicit_loss = if sample.lost_bytes == 0 {
+        0.0
+    } else {
+        let denominator = sample.acked_bytes.saturating_add(sample.lost_bytes).max(1);
+        sample.lost_bytes as f64 / denominator as f64
+    };
+    sent_loss.max(explicit_loss).clamp(0.0, 1.0)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn fraction_to_ppm(value: f64) -> u32 {
+    (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
+}
+
+fn duration_micros_for_bytes(bytes: u64, bytes_per_s: u64) -> u64 {
+    if bytes == 0 || bytes_per_s == 0 {
+        return 0;
+    }
+    let micros = u128::from(bytes)
+        .saturating_mul(1_000_000)
+        .div_ceil(u128::from(bytes_per_s));
+    u64::try_from(micros).unwrap_or(u64::MAX)
+}
+
 /// Congestion state for rate limiting
 #[derive(Debug, Clone)]
 struct CongestionState {
@@ -330,6 +661,29 @@ impl CongestionController {
         let datagrams_per_sec = (path_bps / bits_per_datagram).clamp(1, u64::from(u32::MAX));
         let rate = u32::try_from(datagrams_per_sec).unwrap_or(u32::MAX);
         self.configure_token_bucket(rate, max_burst_datagrams.max(1), Duration::ZERO);
+    }
+
+    /// Configure this token bucket from the shared ATP datagram rate decision.
+    ///
+    /// RQ, native QUIC DATAGRAM, and any future bonded donor should consume this
+    /// decision instead of carrying an independent rate model.
+    pub fn configure_from_rate_decision(
+        &mut self,
+        decision: DatagramRateDecision,
+        symbol_size_bytes: u32,
+        max_burst_datagrams: u32,
+    ) {
+        let symbol_bytes = u64::from(symbol_size_bytes.max(1));
+        if decision.send_budget_bytes < symbol_bytes {
+            self.configure_for_path_rate(decision.pacing_rate_bps.max(1), symbol_size_bytes, 1);
+            self.state.tokens = 0.0;
+            return;
+        }
+
+        let flow_limited_burst = (decision.send_budget_bytes / symbol_bytes)
+            .clamp(1, u64::from(max_burst_datagrams.max(1)));
+        let burst = u32::try_from(flow_limited_burst).unwrap_or(max_burst_datagrams.max(1));
+        self.configure_for_path_rate(decision.pacing_rate_bps.max(1), symbol_size_bytes, burst);
     }
 
     /// Try to consume one raw-datagram send budget unit.
@@ -634,6 +988,237 @@ mod tests {
         let frame = DatagramFrame::with_length(Bytes::from_static(b"test"));
         let metadata = DatagramMetadata::new("test").with_priority(priority);
         (frame, metadata)
+    }
+
+    fn matrix162_rate_config() -> DatagramRateConfig {
+        DatagramRateConfig {
+            initial_pacing_bytes_per_s: 1_000_000,
+            min_pacing_bytes_per_s: 64_000,
+            max_pacing_bytes_per_s: 100_000_000,
+            initial_cwnd_bytes: 128_000,
+            min_cwnd_bytes: 16_000,
+            max_cwnd_bytes: 8_000_000,
+            pacing_gain: 1.0,
+            cwnd_gain: 2.0,
+            loss_backoff_threshold: 0.02,
+            loss_backoff_factor: 0.50,
+            loss_delivery_headroom: 1.25,
+            min_rtt_window_micros: 1_000_000,
+        }
+    }
+
+    fn matrix162_rate_sample(
+        at_micros: u64,
+        sent_bytes: u64,
+        delivered_bytes: u64,
+        rtt_micros: u64,
+        receiver_credit_bytes: u64,
+    ) -> DatagramRateSample {
+        DatagramRateSample {
+            now_micros: at_micros,
+            sent_bytes,
+            acked_bytes: delivered_bytes,
+            lost_bytes: 0,
+            rtt_micros: Some(rtt_micros),
+            receiver_credit_bytes: (receiver_credit_bytes > 0).then_some(receiver_credit_bytes),
+        }
+    }
+
+    fn observe_rate(
+        controller: &mut DatagramRateController,
+        sample: DatagramRateSample,
+    ) -> DatagramRateDecision {
+        controller.observe(sample)
+    }
+
+    #[test]
+    fn matrix162_rate_controller_tracks_ack_clocked_bottleneck_bandwidth() {
+        let mut controller = DatagramRateController::new(matrix162_rate_config());
+
+        let clean = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(100_000, 100_000, 100_000, 100_000, 0),
+        );
+        assert_eq!(clean.bottleneck_bytes_per_s, 1_000_000);
+        assert_eq!(clean.pacing_bytes_per_s, 1_000_000);
+        assert_eq!(clean.pacing_rate_bps, 8_000_000);
+        assert_eq!(clean.min_rtt_micros, Some(100_000));
+        assert_eq!(clean.sender_loss_fraction_ppm, 0);
+
+        let faster = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(200_000, 200_000, 200_000, 120_000, 0),
+        );
+        assert_eq!(faster.bottleneck_bytes_per_s, 2_000_000);
+        assert_eq!(faster.pacing_bytes_per_s, 2_000_000);
+        assert_eq!(faster.pacing_rate_bps, 16_000_000);
+        assert_eq!(
+            faster.min_rtt_micros,
+            Some(100_000),
+            "higher RTT inside the min-RTT window must not replace the floor"
+        );
+        assert!(
+            faster.cwnd_bytes > clean.cwnd_bytes,
+            "cwnd should grow with the bottleneck-bandwidth estimate"
+        );
+    }
+
+    #[test]
+    fn matrix162_rate_controller_backs_off_on_sender_side_delivery_loss() {
+        let mut controller = DatagramRateController::new(matrix162_rate_config());
+        let clean = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(100_000, 100_000, 100_000, 100_000, 0),
+        );
+
+        let lossy = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(200_000, 1_000_000, 100_000, 110_000, 0),
+        );
+        assert!(
+            lossy.sender_loss_fraction_ppm >= 900_000,
+            "sender-side sent-vs-delivered loss must see queue overflow"
+        );
+        assert!(
+            lossy.pacing_bytes_per_s < clean.pacing_bytes_per_s,
+            "loss must back off the shared pacing authority"
+        );
+    }
+
+    #[test]
+    fn matrix162_rate_controller_tracks_windowed_min_rtt() {
+        let mut controller = DatagramRateController::new(matrix162_rate_config());
+
+        let floor = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(100_000, 100_000, 100_000, 100_000, 0),
+        );
+        assert_eq!(floor.min_rtt_micros, Some(100_000));
+
+        let in_window = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(600_000, 100_000, 100_000, 130_000, 0),
+        );
+        assert_eq!(
+            in_window.min_rtt_micros,
+            Some(100_000),
+            "higher RTT inside the window must not raise the floor"
+        );
+
+        let expired = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(1_300_000, 100_000, 100_000, 140_000, 0),
+        );
+        assert_eq!(
+            expired.min_rtt_micros,
+            Some(140_000),
+            "expired min-RTT windows may refresh upward"
+        );
+    }
+
+    #[test]
+    fn matrix162_rate_controller_caps_inflight_to_receiver_credit() {
+        let mut controller = DatagramRateController::new(matrix162_rate_config());
+        let decision = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(100_000, 1_000_000, 1_000_000, 100_000, 64_000),
+        );
+
+        assert_eq!(decision.receiver_credit_bytes, Some(64_000));
+        assert!(
+            decision.cwnd_bytes > 64_000,
+            "test sample should build a larger congestion window than receiver credit"
+        );
+        assert_eq!(
+            decision.inflight_limit_bytes, 64_000,
+            "receiver credit must cap the effective send window"
+        );
+    }
+
+    #[test]
+    fn matrix162_rate_controller_replays_deterministically() {
+        let samples = [
+            matrix162_rate_sample(100_000, 100_000, 100_000, 100_000, 0),
+            matrix162_rate_sample(200_000, 1_000_000, 100_000, 120_000, 0),
+            matrix162_rate_sample(1_400_000, 1_500_000, 1_500_000, 90_000, 0),
+        ];
+
+        let mut left = DatagramRateController::new(matrix162_rate_config());
+        let mut right = DatagramRateController::new(matrix162_rate_config());
+        let left_decisions: Vec<_> = samples
+            .iter()
+            .copied()
+            .map(|sample| observe_rate(&mut left, sample))
+            .collect();
+        let right_decisions: Vec<_> = samples
+            .iter()
+            .copied()
+            .map(|sample| observe_rate(&mut right, sample))
+            .collect();
+
+        assert_eq!(
+            left_decisions, right_decisions,
+            "explicit samples must replay to identical controller decisions"
+        );
+    }
+
+    #[test]
+    fn matrix162_rate_controller_enforces_send_slot_and_receiver_credit() {
+        let mut controller = DatagramRateController::new(matrix162_rate_config());
+        let decision = observe_rate(
+            &mut controller,
+            matrix162_rate_sample(100_000, 100_000, 100_000, 100_000, 64_000),
+        );
+
+        assert!(controller.can_send(0, 1200, decision.receiver_credit_bytes));
+        assert!(!controller.can_send(64_000, 1200, decision.receiver_credit_bytes));
+        assert!(controller.try_send(100_000, 0, 1200, decision.receiver_credit_bytes));
+        assert!(
+            !controller.try_send(100_000, 1200, 1200, decision.receiver_credit_bytes),
+            "second send at the same timestamp must wait for the pacing slot"
+        );
+        let wait = controller.time_until_send_micros(100_000);
+        assert!(wait > 0);
+        assert!(controller.try_send(100_000 + wait, 1200, 1200, decision.receiver_credit_bytes));
+    }
+
+    #[test]
+    fn matrix162_rate_controller_configures_shared_receiver_limited_budget() {
+        let mut rate = DatagramRateController::new(DatagramRateConfig {
+            initial_pacing_bytes_per_s: 48_000,
+            min_pacing_bytes_per_s: 48_000,
+            max_pacing_bytes_per_s: 48_000,
+            initial_cwnd_bytes: 16_000,
+            min_cwnd_bytes: 16_000,
+            max_cwnd_bytes: 16_000,
+            ..DatagramRateConfig::default()
+        });
+        let decision = rate.observe(DatagramRateSample {
+            now_micros: 100_000,
+            sent_bytes: 4 * 1200,
+            acked_bytes: 4 * 1200,
+            lost_bytes: 0,
+            rtt_micros: Some(100_000),
+            receiver_credit_bytes: Some(4 * 1200),
+        });
+
+        let mut controller = CongestionController::new(CongestionConfig::default());
+        controller.configure_from_rate_decision(decision, 1200, 32);
+        let now = Instant::now();
+
+        let mut burst = 0;
+        while controller.try_consume_send_budget(now) {
+            burst += 1;
+            assert!(
+                burst <= 4,
+                "receiver-limited shared decision allowed burst {burst}"
+            );
+        }
+        assert_eq!(
+            burst, 4,
+            "shared receiver credit should limit the legacy token budget"
+        );
+        assert!(controller.time_until_send_budget(now) > Duration::ZERO);
     }
 
     #[test]
