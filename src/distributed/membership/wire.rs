@@ -28,6 +28,14 @@ pub const WIRE_VERSION: u8 = 1;
 /// path-MTU-discovery result.
 pub const DEFAULT_MTU: usize = 1400;
 
+/// Minimum encoded size of a single gossip [`Rumor`], in bytes: a 1-byte tag, a
+/// 2-byte zero-length node name length prefix, and an 8-byte incarnation
+/// (`Rumor::Alive`/`Leave`; the `Suspect`/`Confirm` variants carry an extra
+/// node and are larger). Used to bound the gossip-vector pre-allocation against
+/// the actual datagram size so an attacker-controlled `u16` count cannot force a
+/// large eager allocation from a tiny datagram (see [`decode_packet`]).
+const MIN_RUMOR_BYTES: usize = 11;
+
 /// Errors produced while decoding (or over-budget encoding) a datagram.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
@@ -125,7 +133,15 @@ pub fn decode_packet(bytes: &[u8]) -> Result<Packet, WireError> {
     }
     let payload = decode_payload(&mut reader)?;
     let count = reader.read_u16()?;
-    let mut gossip = Vec::with_capacity(count as usize);
+    // Bound the pre-allocation to what the remaining bytes could actually hold.
+    // `count` is an untrusted u16 read straight off the (unauthenticated) UDP
+    // datagram; reserving `count` elements directly let a ~12-byte packet with
+    // count=0xFFFF force a ~4 MiB eager allocation (a ~350,000x amplification
+    // DoS) before the loop fails at EOF. Each rumor needs >= MIN_RUMOR_BYTES, so
+    // `remaining / MIN_RUMOR_BYTES` is the exact capacity for a well-formed
+    // packet and a hard bound (= datagram size) for a malformed one.
+    let capacity = (count as usize).min(reader.remaining() / MIN_RUMOR_BYTES);
+    let mut gossip = Vec::with_capacity(capacity);
     for _ in 0..count {
         gossip.push(decode_rumor(&mut reader)?);
     }
@@ -265,13 +281,20 @@ impl<'a> Reader<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
-        let remaining = self.bytes.len().saturating_sub(self.pos);
+        let remaining = self.remaining();
         if n > remaining {
             return Err(WireError::UnexpectedEof);
         }
         let slice = &self.bytes[self.pos..self.pos + n];
         self.pos += n;
         Ok(slice)
+    }
+
+    /// Number of bytes left to read. Used to bound trusted-of-nothing
+    /// length/count fields decoded from the wire against the actual datagram
+    /// size before any allocation.
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
     }
 
     fn read_u8(&mut self) -> Result<u8, WireError> {
@@ -390,6 +413,21 @@ mod tests {
             decode_packet(&[WIRE_VERSION, 0, 1, 2]),
             Err(WireError::UnexpectedEof)
         );
+    }
+
+    #[test]
+    fn decode_caps_gossip_capacity_to_remaining_bytes() {
+        // Off-wire allocation-amplification guard: a tiny datagram claiming the
+        // maximum gossip count (u16::MAX) must NOT eagerly reserve ~65535 rumor
+        // slots. The pre-allocation is bounded by remaining bytes / MIN_RUMOR_BYTES
+        // (here 0), so the decode fails cleanly at EOF with no giant allocation
+        // and no panic — pre-fix this forced a ~4 MiB reservation per 12-byte
+        // packet.
+        let mut dgram = vec![WIRE_VERSION, 0]; // version + Ping tag
+        dgram.extend_from_slice(&0u64.to_le_bytes()); // seq
+        dgram.extend_from_slice(&u16::MAX.to_le_bytes()); // gossip count = 65535
+        assert_eq!(dgram.len(), 12);
+        assert_eq!(decode_packet(&dgram), Err(WireError::UnexpectedEof));
     }
 
     #[test]

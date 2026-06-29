@@ -188,6 +188,19 @@ pub struct RegionHeap {
     stats: HeapStats,
 }
 
+/// Next generation for a freed slot, or `None` when the slot must be retired.
+///
+/// `HeapIndex.generation` is a `u32`. Recycling a slot at the maximum generation
+/// with `wrapping_add(1)` would wrap to 0 and, after a full `u32` of
+/// alloc/dealloc cycles on the same slot, re-issue a generation that a stale
+/// `HeapIndex` still holds — `get`/`get_mut`/`contains` would then accept the
+/// stale handle (ABA, returning the wrong allocation). Returning `None` at
+/// `u32::MAX` lets `dealloc` permanently retire the slot instead of wrapping,
+/// mirroring the `reactor/token.rs` retirement (br-asupersync-rtiu1s).
+const fn next_slot_generation(current: u32) -> Option<u32> {
+    current.checked_add(1)
+}
+
 impl std::fmt::Debug for RegionHeap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegionHeap")
@@ -357,24 +370,46 @@ impl RegionHeap {
             return false;
         };
 
-        let (size_hint, new_gen) = {
+        let (size_hint, next_gen) = {
             let HeapSlot::Occupied(entry) = slot else {
                 return false;
             };
             if entry.generation != index.generation {
                 return false;
             }
-            (entry.size_hint, entry.generation.wrapping_add(1))
+            (entry.size_hint, next_slot_generation(entry.generation))
         };
 
-        let old_slot = std::mem::replace(
-            slot,
-            HeapSlot::Vacant {
-                next_free: self.free_head,
-                generation: new_gen,
-            },
-        );
-        self.free_head = Some(index.index);
+        match next_gen {
+            Some(new_gen) => {
+                // Normal recycle: bump the generation and link the slot back
+                // onto the free list for reuse.
+                let old_slot = std::mem::replace(
+                    slot,
+                    HeapSlot::Vacant {
+                        next_free: self.free_head,
+                        generation: new_gen,
+                    },
+                );
+                self.free_head = Some(index.index);
+                drop(old_slot);
+            }
+            None => {
+                // Generation is at u32::MAX: permanently retire the slot rather
+                // than wrapping (ABA guard, mirrors reactor/token.rs). The slot
+                // is left Vacant at the max generation but is NOT linked into
+                // the free list, so `alloc` never reuses it; stale handles to it
+                // fail closed because it is no longer `Occupied`.
+                let old_slot = std::mem::replace(
+                    slot,
+                    HeapSlot::Vacant {
+                        next_free: None,
+                        generation: u32::MAX,
+                    },
+                );
+                drop(old_slot);
+            }
+        }
         self.len -= 1;
 
         // Update statistics
@@ -383,7 +418,6 @@ impl RegionHeap {
         self.stats.bytes_live = self.stats.bytes_live.saturating_sub(size_hint as u64);
         GLOBAL_ALLOC_COUNT.fetch_sub(1, Ordering::Relaxed);
 
-        drop(old_slot);
         true
     }
 
@@ -562,6 +596,17 @@ mod tests {
         }
 
         (left_log.snapshot(), right_log.snapshot())
+    }
+
+    #[test]
+    fn next_slot_generation_retires_at_max() {
+        // ABA guard: a slot at the maximum generation must be retired (None),
+        // never wrapped to 0 where a stale HeapIndex could be re-issued. Below
+        // the max it advances by exactly one. (Tested directly so the retirement
+        // decision is verified without 2^32 alloc/dealloc cycles.)
+        assert_eq!(next_slot_generation(0), Some(1));
+        assert_eq!(next_slot_generation(u32::MAX - 1), Some(u32::MAX));
+        assert_eq!(next_slot_generation(u32::MAX), None);
     }
 
     #[test]

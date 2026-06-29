@@ -63,6 +63,21 @@ pub(crate) fn reject_pseudo_headers_in_trailers(headers: &[Header]) -> Result<()
 /// caps the size even if max_header_list_size is very large (e.g. u32::MAX).
 const MAX_HEADER_FRAGMENT_SIZE: usize = 256 * 1024;
 
+/// Maximum number of HEADERS/CONTINUATION fragments accumulated for a single
+/// header block before the stream is rejected with `ENHANCE_YOUR_CALM`.
+///
+/// The byte cap ([`MAX_HEADER_FRAGMENT_SIZE`] / `max_header_fragment_size`)
+/// alone does NOT bound the fragment *count*: a peer can send an unbounded
+/// stream of zero-length CONTINUATION frames, each adding 0 bytes (so the byte
+/// cap never trips) while still pushing an entry onto `header_fragments`. That
+/// is the CONTINUATION-flood DoS (CVE-2024-27316 class) — unbounded `Vec<Bytes>`
+/// growth, bounded only by the connection-level CONTINUATION timeout, which
+/// bounds duration but not the memory accumulated within it. This count cap
+/// closes that bypass. 1024 is far above any legitimate fragmentation (a 256 KiB
+/// header block at the 16 KiB default frame size is ~16 frames) while keeping
+/// the retained `Bytes` entries trivially bounded.
+const MAX_HEADER_CONTINUATION_FRAGMENTS: usize = 1024;
+
 /// Maximum valid HTTP/2 stream ID (31-bit, MSB must be 0).
 const MAX_STREAM_ID: u32 = 0x7FFF_FFFF;
 
@@ -210,6 +225,12 @@ pub struct Stream {
     initial_headers_decoded: bool,
     /// Accumulated header block fragments.
     header_fragments: Vec<Bytes>,
+    /// Running total byte length of `header_fragments`, maintained O(1) on every
+    /// push so the accumulation cap can be enforced without re-summing the whole
+    /// vector each frame (the re-sum was O(N) per CONTINUATION frame = O(N^2)
+    /// over a fragmented header block — a CPU DoS amplifier). Invariant:
+    /// `header_fragments_bytes == header_fragments.iter().map(Bytes::len).sum()`.
+    header_fragments_bytes: usize,
     /// Max header list size (used to bound fragment accumulation).
     max_header_list_size: u32,
 }
@@ -262,6 +283,7 @@ impl Stream {
             headers_complete: true,
             initial_headers_decoded: false,
             header_fragments: Vec::new(),
+            header_fragments_bytes: 0,
             max_header_list_size,
         }
     }
@@ -683,9 +705,23 @@ impl Stream {
             ));
         }
 
-        // Check accumulated size to prevent DoS via unbounded CONTINUATION frames
-        let current_size: usize = self.header_fragments.iter().map(Bytes::len).sum();
-        if current_size.saturating_add(header_block.len()) > self.max_header_fragment_size() {
+        // Bound both the accumulated byte size AND the fragment count to prevent
+        // the CONTINUATION-flood DoS. The byte cap uses the O(1) running counter
+        // (re-summing the vector here was O(N^2) over a fragmented block); the
+        // count cap closes the zero-length-fragment bypass where empty frames
+        // add 0 bytes yet still grow the vector unbounded.
+        if self.header_fragments.len() >= MAX_HEADER_CONTINUATION_FRAGMENTS {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "too many header block fragments",
+            ));
+        }
+        if self
+            .header_fragments_bytes
+            .saturating_add(header_block.len())
+            > self.max_header_fragment_size()
+        {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::EnhanceYourCalm,
@@ -693,6 +729,9 @@ impl Stream {
             ));
         }
 
+        self.header_fragments_bytes = self
+            .header_fragments_bytes
+            .saturating_add(header_block.len());
         self.header_fragments.push(header_block);
         self.headers_complete = end_headers;
         Ok(())
@@ -700,21 +739,32 @@ impl Stream {
 
     /// Take accumulated header fragments.
     pub fn take_header_fragments(&mut self) -> Vec<Bytes> {
+        self.header_fragments_bytes = 0;
         std::mem::take(&mut self.header_fragments)
     }
 
     /// Add header fragment for accumulation.
     ///
-    /// Returns an error if the accumulated size would exceed the limit.
+    /// Returns an error if the accumulated size or fragment count would exceed
+    /// the limit (see [`Stream::recv_continuation`] for the rationale).
     pub fn add_header_fragment(&mut self, fragment: Bytes) -> Result<(), H2Error> {
-        let current_size: usize = self.header_fragments.iter().map(Bytes::len).sum();
-        if current_size.saturating_add(fragment.len()) > self.max_header_fragment_size() {
+        if self.header_fragments.len() >= MAX_HEADER_CONTINUATION_FRAGMENTS {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "too many header block fragments",
+            ));
+        }
+        if self.header_fragments_bytes.saturating_add(fragment.len())
+            > self.max_header_fragment_size()
+        {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::EnhanceYourCalm,
                 "accumulated header fragments too large",
             ));
         }
+        self.header_fragments_bytes = self.header_fragments_bytes.saturating_add(fragment.len());
         self.header_fragments.push(fragment);
         Ok(())
     }
@@ -798,6 +848,7 @@ impl Stream {
         self.error_code = Some(error_code);
         // Release buffered data to avoid holding memory until prune.
         self.header_fragments.clear();
+        self.header_fragments_bytes = 0;
         self.pending_data.clear();
     }
 
@@ -1506,6 +1557,43 @@ mod tests {
                 .add_header_fragment(Bytes::from(vec![0; 17]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn header_fragment_count_cap_rejects_zero_length_flood() {
+        // CONTINUATION-flood DoS (CVE-2024-27316 class): zero-length fragments
+        // add 0 bytes, so the byte cap never trips; the fragment-COUNT cap must
+        // bound them. With a large byte budget, exactly
+        // MAX_HEADER_CONTINUATION_FRAGMENTS empty fragments are accepted and the
+        // next is rejected — the vector cannot grow without bound.
+        let mut stream = Stream::new(1, 65535, u32::MAX); // 256 KiB byte budget
+        for i in 0..MAX_HEADER_CONTINUATION_FRAGMENTS {
+            stream
+                .add_header_fragment(Bytes::from_static(b""))
+                .unwrap_or_else(|_| panic!("empty fragment {i} should be under the count cap"));
+        }
+        assert!(
+            stream.add_header_fragment(Bytes::from_static(b"")).is_err(),
+            "fragment-count cap must reject the zero-length CONTINUATION flood"
+        );
+    }
+
+    #[test]
+    fn take_header_fragments_resets_byte_accounting() {
+        // The O(1) running byte counter must reset when fragments are taken, so a
+        // subsequent header block gets the full budget rather than a stale
+        // carried-over sum (which would falsely reject the next block).
+        let max_list_size = 8; // 4x => 32-byte budget
+        let mut stream = Stream::new(1, 65535, max_list_size);
+        stream
+            .add_header_fragment(Bytes::from(vec![0; 30]))
+            .unwrap();
+        let taken = stream.take_header_fragments();
+        assert_eq!(taken.len(), 1);
+        // Budget is fresh after take: a second 30-byte fragment must fit again.
+        stream
+            .add_header_fragment(Bytes::from(vec![0; 30]))
+            .expect("byte budget must reset after take_header_fragments");
     }
 
     #[test]

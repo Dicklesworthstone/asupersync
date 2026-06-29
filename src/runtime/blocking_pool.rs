@@ -1014,7 +1014,22 @@ fn blocking_pool_current_max_threads(inner: &BlockingPoolInner) -> usize {
 }
 
 fn blocking_pool_set_max_threads(inner: &BlockingPoolInner, requested: usize) -> usize {
-    let applied = requested.max(inner.min_threads).min(inner.max_threads);
+    // The live spawn cap must never reach 0 for a constructed pool. `max_threads`
+    // is asserted >= 1 at construction (a max_threads == 0 runtime simply has no
+    // pool and rejects `spawn_blocking`), and a pool that accepts work must be
+    // able to run at least one task. A 0 cap silently strands every submitted
+    // task: `maybe_spawn_thread_on_inner`'s `active < live_max` gate can never
+    // fire (0 < 0 is false), so the task is enqueued and a handle is returned,
+    // but no worker is ever created and the completion is never signalled —
+    // `wait()` hangs forever. This is reachable on any `min_threads == 0`
+    // elastic pool via `set_max_threads(0)` or a sizing-controller Resize to 0.
+    // Idle retirement to 0 *active* threads is governed by `min_threads`, not by
+    // this cap, so flooring the cap at 1 preserves elastic-to-zero behavior while
+    // guaranteeing on-demand spawn always works.
+    let applied = requested
+        .max(inner.min_threads)
+        .max(1)
+        .min(inner.max_threads);
     inner.live_max_threads.store(applied, Ordering::Relaxed);
     applied
 }
@@ -1546,6 +1561,30 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::Relaxed);
         });
 
+        handle.wait();
+        assert!(handle.is_done());
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn set_max_threads_never_strands_work_at_zero() {
+        // Regression: the live spawn cap must floor at 1 for a constructed pool
+        // (max_threads >= 1). Driving the cap to 0 on a min=0 elastic pool used
+        // to strand submitted tasks forever — accepted, handle returned, but no
+        // worker ever spawned (the `active < live_max` gate is `0 < 0`).
+        let pool = BlockingPool::new(0, 4); // elastic: 0 persistent, up to 4 on demand
+        let applied = pool.set_max_threads(0);
+        assert_eq!(applied, 1, "live spawn cap must floor at 1, not 0");
+        assert_eq!(pool.current_max_threads(), 1);
+
+        // End-to-end: with the cap floored, a submitted task still runs to
+        // completion (this `wait()` would hang forever pre-fix). The assertion
+        // above fails fast if the floor ever regresses, before reaching here.
+        let counter = Arc::new(AtomicI32::new(0));
+        let counter_clone = Arc::clone(&counter);
+        let handle = pool.spawn(move || {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+        });
         handle.wait();
         assert!(handle.is_done());
         assert_eq!(counter.load(Ordering::Relaxed), 1);
