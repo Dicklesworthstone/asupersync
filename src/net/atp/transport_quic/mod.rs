@@ -315,14 +315,20 @@ const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS: u64 = QUIC_AIMD_MAX_RATE_BPS;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
 const QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = 0.001;
-/// Default native QUIC path-rate cap once loss is visible.
+/// Default native QUIC path-rate caps once loss is visible.
 ///
 /// MATRIX-143 showed that RTT alone is not a congestion signal for the clean
 /// encrypted tier: the transfer is mostly parked at cold-start speed. Keep the
 /// cap for paths with observed loss, but let loss-free round 0 take the clean
 /// ramp even when the handshake RTT is high.
+///
+/// Mirror the RQ lossy matrix split: bad/2% is shaped near 50 mbit, while the
+/// broken/10% cell needs a 10 mbit-class first spray before sender-side AIMD has
+/// a NeedMore round to measure delivery loss.
 const QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS: u64 = 6 * 1024 * 1024;
-const QUIC_RATE_MATCHED_LOSS_MIN: f64 = 0.010;
+const QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS: u64 = 1152 * 1024;
+const QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN: f64 = 0.010;
+const QUIC_RATE_MATCHED_BROKEN_LINK_LOSS_MIN: f64 = 0.030;
 const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
@@ -1081,7 +1087,7 @@ pub fn quic_spray_pacing_decision_from_config_with_cpu(
     path: QuicPathSignalSample,
     cpu_parallelism: usize,
 ) -> QuicSprayPacingDecision {
-    let path = path.clamped();
+    let path = quic_loss_seeded_path_signal(config, path);
     quic_spray_pacing_decision(QuicSprayPacingInput {
         path,
         symbol_size: config.symbol_size,
@@ -1098,8 +1104,27 @@ pub fn quic_spray_pacing_decision_from_config_with_cpu(
     })
 }
 
+fn quic_loss_seeded_path_signal(
+    config: &QuicConfig,
+    path: QuicPathSignalSample,
+) -> QuicPathSignalSample {
+    let mut path = path.clamped();
+    if config.round0_loss_target.is_finite() {
+        path.loss_rate = path
+            .loss_rate
+            .max(config.round0_loss_target.clamp(0.0, 0.90));
+    }
+    path.clamped()
+}
+
 fn quic_default_path_rate_limit_bps(path: &QuicPathSignalSample) -> Option<u64> {
-    (path.loss_rate >= QUIC_RATE_MATCHED_LOSS_MIN).then_some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
+    if path.loss_rate > QUIC_RATE_MATCHED_BROKEN_LINK_LOSS_MIN {
+        Some(QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS)
+    } else if path.loss_rate >= QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN {
+        Some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
+    } else {
+        None
+    }
 }
 
 /// Bound the configured QUIC DATAGRAM fan-out by connection and CPU capacity.
@@ -9438,6 +9463,72 @@ mod tests {
         );
         assert!(pressured.pacing_rate_bps < large_cwnd.pacing_rate_bps);
         assert!(pressured.max_burst_symbols < large_cwnd.max_burst_symbols);
+    }
+
+    #[test]
+    fn quic_round0_loss_target_seeds_datagram_pacing_before_feedback() {
+        let config = QuicConfig {
+            symbol_size: 1024,
+            max_spray_symbols_per_flush: 64,
+            ..trusted_quic_config()
+        };
+        let clean =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.0));
+
+        let good_config = QuicConfig {
+            round0_loss_target: QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            ..config.clone()
+        };
+        let good = quic_spray_pacing_decision_from_config(
+            &good_config,
+            pacing_signal(0.050, 1_048_576, 0.0),
+        );
+        assert!(
+            (good.path_loss_rate - QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET).abs()
+                <= f64::EPSILON,
+            "GOOD encrypted should carry the configured loss hint into pacing telemetry"
+        );
+        assert_eq!(
+            good.pacing_rate_bps, clean.pacing_rate_bps,
+            "GOOD/0.1% must stay on the near-clean source-stream envelope, not the lossy DATAGRAM cap"
+        );
+
+        let bad_config = QuicConfig {
+            round0_loss_target: 0.02,
+            ..config.clone()
+        };
+        let bad = quic_spray_pacing_decision_from_config(
+            &bad_config,
+            pacing_signal(0.050, 1_048_576, 0.0),
+        );
+        assert!((bad.path_loss_rate - 0.02).abs() <= f64::EPSILON);
+        assert!(
+            bad.pacing_rate_bps <= QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS,
+            "bad/2% encrypted round 0 must enter the bad-link cap before NeedMore feedback: {bad:?}"
+        );
+        assert!(
+            bad.pacing_rate_bps > QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS,
+            "bad/2% should not inherit the narrower broken/10% cap: {bad:?}"
+        );
+
+        let broken_config = QuicConfig {
+            round0_loss_target: 0.10,
+            ..config
+        };
+        let broken = quic_spray_pacing_decision_from_config(
+            &broken_config,
+            pacing_signal(0.050, 1_048_576, 0.0),
+        );
+        assert!((broken.path_loss_rate - 0.10).abs() <= f64::EPSILON);
+        assert_eq!(broken.limiter, QuicSprayPacingLimiter::LossBackoff);
+        assert!(
+            broken.pacing_rate_bps <= QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS,
+            "broken/10% encrypted round 0 must pace near the 10 mbit pipe before sender-side AIMD feedback: {broken:?}"
+        );
+        assert!(
+            !quic_round0_clean_ramp_enabled(&broken_config, &broken, true),
+            "configured lossy encrypted cells must not re-enter the clean datagram ramp"
+        );
     }
 
     #[test]
