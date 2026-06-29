@@ -37,13 +37,20 @@ include = [
     "!src/observability/otel_conformance_tests.rs",
     "!src/subsystem_mutation_testing.rs",
     "!**/real_*_e2e_tests.rs",
-    # Keep the published tarball under crates.io's 10 MiB cap: standalone
-    # `*_tests.rs` suites (metamorphic/conformance/etc.) and insta snapshots
-    # are cfg(test)-gated and never compiled when asupersync is consumed as a
-    # library dependency. (Singular `*_test.rs` files are NOT excluded — some
-    # are real `mod`-referenced modules, e.g. sync/lock_ordering_test.rs.)
+    # Keep the published tarball under crates.io's 10 MiB cap: standalone test
+    # suites (`*_tests.rs` / `*_test.rs`) and insta `snapshots/` are cfg(test)-
+    # gated and not compiled when asupersync is consumed as a library
+    # dependency. The few test files that ARE unconditionally compiled into the
+    # lib (verified via dep-info under test-internals,tls-native-roots) are
+    # re-included immediately below so the published crate still builds.
     "!**/*_tests.rs",
+    "!**/*_test.rs",
     "!**/snapshots/**",
+    "src/atp/adapter/integration_tests.rs",
+    "src/obligation/metamorphic_tests.rs",
+    "src/observability/otlp_dst_clock_jump_audit_test.rs",
+    "src/sync/lock_ordering_test.rs",
+    "src/transport/half_close_conformance_tests.rs",
     "!src/bin/io_cap_budget_profile.rs",
     "!src/bin/verify_blocked_elimination.rs",
     "!src/bin/quic_conformance_report.rs",
