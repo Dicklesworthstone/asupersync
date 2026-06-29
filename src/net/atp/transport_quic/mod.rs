@@ -306,9 +306,15 @@ const QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 // Keep QUIC's first clean encrypted probe near the 200 Mbit "good" fixture
 // until central A/B proves a higher encrypted sender rate is good-safe.
 const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
+/// Reliable source STREAM pacing ceiling for clean/GOOD authenticated paths.
+///
+/// This is intentionally separate from the DATAGRAM clean-ramp cap: stream
+/// bytes are reliable and authenticated by QUIC/TLS, while lossy DATAGRAM
+/// fountains keep the lower probe cap and AIMD feedback loop.
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS: u64 = QUIC_AIMD_MAX_RATE_BPS;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
-const QUIC_ROUND0_DATAGRAM_RAMP_MAX_LOSS_TARGET: f64 = 0.001;
-const QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = QUIC_ROUND0_DATAGRAM_RAMP_MAX_LOSS_TARGET;
+const QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = 0.001;
 /// Default native QUIC path-rate cap once loss is visible.
 ///
 /// MATRIX-143 showed that RTT alone is not a congestion signal for the clean
@@ -1594,21 +1600,6 @@ fn quic_clean_source_base_enabled(config: &QuicConfig) -> bool {
 }
 
 fn quic_round0_datagram_ramp_enabled(
-    config: &QuicConfig,
-    pacing: &QuicSprayPacingDecision,
-) -> bool {
-    quic_clean_source_base_enabled(config)
-        && config.round0_loss_target <= QUIC_ROUND0_DATAGRAM_RAMP_MAX_LOSS_TARGET
-        && pacing.path_loss_rate <= f64::EPSILON
-}
-
-// Temporary unblock (franken_ocr bd-g00): this predicate has no caller yet on
-// non-Windows, so the crate's `deny(dead_code)` rejected it and blocked every
-// downstream path-dependency build. Silencing the lint (not gating with #[cfg],
-// which would change *when* it compiles) keeps the in-progress fn intact for its
-// future caller — remove this allow once it is wired up.
-#[allow(dead_code)]
-pub(crate) fn quic_clean_source_stream_enabled(
     config: &QuicConfig,
     pacing: &QuicSprayPacingDecision,
 ) -> bool {
@@ -9494,8 +9485,8 @@ mod tests {
             ..config.clone()
         };
         assert!(
-            quic_round0_clean_ramp_enabled(&good_target, &clean, true),
-            "MATRIX-148: the 0.1% good cell must keep the fast FEC DATAGRAM source-round ramp while source-stream stays disabled"
+            !quic_round0_clean_ramp_enabled(&good_target, &clean, true),
+            "Bug A: the DATAGRAM clean ramp must not engage once the configured target has any loss"
         );
 
         for blocked in [
@@ -9517,6 +9508,10 @@ mod tests {
             },
             QuicConfig {
                 round0_loss_target: 0.02,
+                ..config.clone()
+            },
+            QuicConfig {
+                round0_loss_target: 0.10,
                 ..config.clone()
             },
         ] {
@@ -9552,10 +9547,12 @@ mod tests {
         let lossy =
             quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.02));
 
-        assert!(quic_clean_source_stream_enabled(&config, &clean));
+        assert!((0.0..=f64::EPSILON).contains(&config.round0_loss_target));
+        assert!(clean.path_loss_rate <= f64::EPSILON);
         assert!(quic_near_clean_source_stream_enabled(&config, &clean));
         assert!(quic_reliable_source_stream_eligible(1024, &config, &clean));
         assert!(quic_near_clean_source_stream_enabled(&good_config, &good));
+        assert!(!(0.0..=f64::EPSILON).contains(&good_config.round0_loss_target));
         assert!(quic_reliable_source_stream_eligible(
             1024,
             &good_config,
@@ -9578,10 +9575,7 @@ mod tests {
             !quic_near_clean_source_stream_enabled(&config, &above_good),
             "above-GOOD observed loss must stay on the FEC datagram fountain"
         );
-        assert!(
-            !quic_clean_source_stream_enabled(&config, &lossy),
-            "lossy paths must stay on the FEC datagram fountain"
-        );
+        assert!(!quic_near_clean_source_stream_enabled(&config, &lossy));
 
         for blocked in [
             QuicConfig {
