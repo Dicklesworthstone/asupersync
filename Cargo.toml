@@ -37,6 +37,12 @@ include = [
     "!src/observability/otel_conformance_tests.rs",
     "!src/subsystem_mutation_testing.rs",
     "!**/real_*_e2e_tests.rs",
+    # Keep the published tarball under crates.io's 10 MiB cap: standalone test
+    # files, metamorphic/conformance suites, and insta snapshots are never
+    # compiled when asupersync is consumed as a library dependency.
+    "!**/*_tests.rs",
+    "!**/*_test.rs",
+    "!**/snapshots/**",
     "!src/bin/io_cap_budget_profile.rs",
     "!src/bin/verify_blocked_elimination.rs",
     "!src/bin/quic_conformance_report.rs",
@@ -495,7 +501,10 @@ proptest = "1.10"
 # Compile-fail contract for the capability-gated v2 spawn surface
 # (tests/compile_fail_spawn.rs); same version as asupersync-macros.
 trybuild = "1.0"
-conformance = { package = "asupersync-conformance", version = "0.3.5", path = "conformance", default-features = false }
+# Path-only (no version): the conformance crate is never published, so keep it
+# out of the published manifest. Dev-deps don't affect consumers; the path still
+# resolves locally for asupersync's own conformance test suite.
+conformance = { package = "asupersync-conformance", path = "conformance", default-features = false }
 tempfile = "3.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

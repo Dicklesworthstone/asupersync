@@ -18,7 +18,11 @@ quote = "1.0"
 proc-macro2 = "1.0"
 
 [dev-dependencies]
-asupersync = { version = "0.3.5", path = "..", default-features = false, features = ["test-internals"] }
+# Path-only (no version): breaks the publish-time dev-dependency cycle with the
+# asupersync root crate. Dev-deps don't affect consumers, and cargo omits a
+# version-less path dev-dep from the published manifest while still resolving it
+# locally via the path for this crate's own tests.
+asupersync = { path = "..", default-features = false, features = ["test-internals"] }
 trybuild = "1.0"
 
 [lints.rust]
