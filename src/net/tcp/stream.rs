@@ -53,7 +53,25 @@ pub struct TcpStream {
     inner: Arc<net::TcpStream>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     shutdown_on_drop: bool,
+    /// Windows-only retry budget for the transient post-connect `WSAENOTCONN`
+    /// (os error 10057). A non-blocking `connect()` is reported complete by
+    /// `getpeername` (see `connect_from_socket`), but the socket — notably
+    /// behind a Winsock LSP (antivirus / VPN / firewall) — can still be not
+    /// yet send-ready, so the first `send`/`recv` momentarily returns "not
+    /// connected". The poll paths treat that as retryable (exactly like
+    /// `WouldBlock`) until the connection settles, bounded by this counter so a
+    /// genuinely unconnectable socket still surfaces the error.
+    #[cfg(target_os = "windows")]
+    connect_settle_retries: u32,
 }
+
+/// Maximum number of poll-path retries of a transient post-connect
+/// `WSAENOTCONN` before it is surfaced as a hard error
+/// (see [`TcpStream::connect_settle_retries`]). A genuinely settling connection
+/// becomes send-ready well within this budget; the bound only guarantees that a
+/// socket that never connects cannot spin forever.
+#[cfg(target_os = "windows")]
+const MAX_CONNECT_SETTLE_RETRIES: u32 = 4096;
 
 /// Configuration for TCP Keepalive behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -265,6 +283,8 @@ impl TcpStream {
                 inner: Arc::new(stream),
                 registration: None,
                 shutdown_on_drop: true,
+                #[cfg(target_os = "windows")]
+                connect_settle_retries: 0,
             })
         }
     }
@@ -279,6 +299,8 @@ impl TcpStream {
             inner,
             registration,
             shutdown_on_drop: true,
+            #[cfg(target_os = "windows")]
+            connect_settle_retries: 0,
         }
     }
 
@@ -1041,9 +1063,27 @@ impl AsyncRead for TcpStream {
         match (&*inner).read(buf.unfilled()) {
             Ok(n) => {
                 buf.advance(n);
+                #[cfg(target_os = "windows")]
+                {
+                    this.connect_settle_retries = 0;
+                }
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = this.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            // Windows: tolerate the transient post-connect `WSAENOTCONN` on the
+            // first recv (see `connect_settle_retries`) — wait for readiness and
+            // retry instead of failing, bounded so a dead socket still errors.
+            #[cfg(target_os = "windows")]
+            Err(ref e)
+                if e.kind() == io::ErrorKind::NotConnected
+                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
+            {
+                this.connect_settle_retries += 1;
                 if let Err(err) = this.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(err));
                 }
@@ -1082,8 +1122,27 @@ impl AsyncReadVectored for TcpStream {
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).read_vectored(bufs) {
-            Ok(n) => Poll::Ready(Ok(n)),
+            Ok(n) => {
+                #[cfg(target_os = "windows")]
+                {
+                    this.connect_settle_retries = 0;
+                }
+                Poll::Ready(Ok(n))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = this.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            // Windows: tolerate the transient post-connect `WSAENOTCONN`
+            // (see `connect_settle_retries`); retry until the socket settles.
+            #[cfg(target_os = "windows")]
+            Err(ref e)
+                if e.kind() == io::ErrorKind::NotConnected
+                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
+            {
+                this.connect_settle_retries += 1;
                 if let Err(err) = this.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(err));
                 }
@@ -1122,8 +1181,31 @@ impl AsyncWrite for TcpStream {
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).write(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
+            Ok(n) => {
+                #[cfg(target_os = "windows")]
+                {
+                    this.connect_settle_retries = 0;
+                }
+                Poll::Ready(Ok(n))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            // Windows: a freshly-connected socket (notably behind a Winsock LSP)
+            // can momentarily report `WSAENOTCONN` (os error 10057) on the first
+            // send even though `getpeername` already declared connect complete.
+            // Treat it as "connect still settling": wait for writable and retry
+            // instead of failing the (e.g. TLS) handshake, bounded so a socket
+            // that never connects still surfaces the error.
+            #[cfg(target_os = "windows")]
+            Err(ref e)
+                if e.kind() == io::ErrorKind::NotConnected
+                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
+            {
+                this.connect_settle_retries += 1;
                 if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
                 }
@@ -1146,8 +1228,27 @@ impl AsyncWrite for TcpStream {
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).write_vectored(bufs) {
-            Ok(n) => Poll::Ready(Ok(n)),
+            Ok(n) => {
+                #[cfg(target_os = "windows")]
+                {
+                    this.connect_settle_retries = 0;
+                }
+                Poll::Ready(Ok(n))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            // Windows: tolerate the transient post-connect `WSAENOTCONN`
+            // (see `connect_settle_retries`); retry until the socket settles.
+            #[cfg(target_os = "windows")]
+            Err(ref e)
+                if e.kind() == io::ErrorKind::NotConnected
+                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
+            {
+                this.connect_settle_retries += 1;
                 if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
                 }
