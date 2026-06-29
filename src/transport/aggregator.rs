@@ -1303,18 +1303,18 @@ impl SymbolDeduplicator {
             return false;
         }
 
-        // Enforce max_symbols_per_object: past the cap a symbol can no longer be
-        // recorded, so it can no longer be reliably de-duplicated. Claiming it is
-        // unique (as before) would let a re-presented duplicate be counted as
-        // fresh decode progress and re-fed to the decoder, so fail closed and
-        // treat the symbol as a duplicate instead. The membership test for
-        // already-recorded symbols above still rejects exact repeats up to the
-        // cap (fyihql). The cap default (10_000) is far above any realistic
-        // single-block RaptorQ symbol count.
+        // Enforce max_symbols_per_object: stop *recording* beyond the limit, but
+        // still report the symbol as unique so it is delivered. The `seen` set
+        // is per-OBJECT (across all of its source blocks), so a multi-block
+        // transfer legitimately accumulates far more than the per-object cap;
+        // discarding symbols past the cap here would starve the RaptorQ decoder
+        // and break the transfer. Membership can no longer be tested past the
+        // cap, so consumers that count *unique* progress must de-duplicate by
+        // symbol id themselves (see `collect_fungible_symbols_until`, fyihql).
         if state.seen.len() >= self.config.max_symbols_per_object {
             drop(objects);
-            self.duplicates_detected.fetch_add(1, Ordering::Relaxed);
-            return false;
+            self.unique_symbols.fetch_add(1, Ordering::Relaxed);
+            return true;
         }
 
         // Record new symbol
@@ -1641,6 +1641,10 @@ impl SymbolReorderer {
         if deliver_late_unique {
             ready.push(symbol);
             self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
+            // Record the delivery so `prune` does not treat an actively
+            // late-delivering stream as idle and reclaim its sequence base
+            // (s53kt5).
+            state.last_delivery = now;
             drop(objects);
             return ReorderProcessResult::accepted(ready);
         }
@@ -1666,6 +1670,8 @@ impl SymbolReorderer {
         let mut flushed = Vec::with_capacity(4);
 
         for state in objects.values_mut() {
+            let flushed_before = flushed.len();
+
             // Find the highest sequence number that has timed out.
             // Any symbol with seq <= max_timeout_seq must be flushed to preserve order,
             // because we are about to advance next_expected past it.
@@ -1709,6 +1715,13 @@ impl SymbolReorderer {
                 flushed.push(buffered.symbol);
                 state.next_expected = state.next_expected.wrapping_add(1);
                 self.reordered_deliveries.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // If this state delivered any timed-out symbols, record the delivery
+            // so `prune` does not subsequently treat an actively flush-draining
+            // stream as idle and reclaim its sequence base mid-stream (s53kt5).
+            if flushed.len() > flushed_before {
+                state.last_delivery = now;
             }
         }
 
@@ -2075,6 +2088,15 @@ impl MultipathAggregator {
         let mut unique_symbols = 0usize;
         let mut duplicate_symbols = 0usize;
         let mut contributing_paths = BTreeSet::new();
+        // Count uniqueness by symbol id locally rather than trusting the
+        // deduplicator's verdict alone. Past its per-object cap the dedup can no
+        // longer record (and therefore no longer detect) symbols — it passes
+        // them through as "unique" so the decoder is never starved — so a
+        // re-presented duplicate would otherwise inflate `unique_symbols` and
+        // let the target be reached with fewer than `target_unique_symbols`
+        // distinct symbols (a false completion, fyihql). This set is bounded by
+        // `target_unique_symbols` because the loop stops once the target is met.
+        let mut counted: HashSet<SymbolId> = HashSet::new();
 
         for (symbol, path) in symbols {
             if unique_symbols >= target_unique_symbols {
@@ -2087,8 +2109,12 @@ impl MultipathAggregator {
             }
             if let Some(symbol) = result.ready {
                 if symbol.object_id() == object_id {
-                    unique_symbols = unique_symbols.saturating_add(1);
-                    contributing_paths.insert(path);
+                    if counted.insert(symbol.id()) {
+                        unique_symbols = unique_symbols.saturating_add(1);
+                        contributing_paths.insert(path);
+                    } else {
+                        duplicate_symbols = duplicate_symbols.saturating_add(1);
+                    }
                 }
             }
         }
@@ -3866,6 +3892,68 @@ mod tests {
     }
 
     #[test]
+    fn fungible_collection_does_not_count_over_cap_duplicates_as_progress() {
+        init_test("fungible_collection_does_not_count_over_cap_duplicates_as_progress");
+        // A per-object cap of 1 forces the dedup past its limit immediately:
+        // past the cap `check_and_record` passes every symbol through as unique
+        // (so the decoder is never starved), which means it can no longer detect
+        // a re-presented duplicate. Without local de-duplication that duplicate
+        // would inflate decode progress and let the target be reached with fewer
+        // than `target_unique_symbols` distinct symbols — a false completion
+        // (fyihql).
+        let config = AggregatorConfig {
+            dedup: DeduplicatorConfig {
+                max_symbols_per_object: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let aggregator = MultipathAggregator::new(config);
+        let p1 =
+            aggregator
+                .paths()
+                .create_path("p1", "localhost:1", PathCharacteristics::default());
+
+        let object_id = Symbol::new_for_test(7, 0, 0, &[0]).object_id();
+        // esi0 recorded (under cap); esi1 over cap (pass-through, unique); esi1
+        // AGAIN over cap (the duplicate that must NOT count); esi2 over cap.
+        let report = aggregator.collect_fungible_symbols_until(
+            object_id,
+            3,
+            [
+                (Symbol::new_for_test(7, 0, 0, &[0]), p1),
+                (Symbol::new_for_test(7, 0, 1, &[1]), p1),
+                (Symbol::new_for_test(7, 0, 1, &[1]), p1),
+                (Symbol::new_for_test(7, 0, 2, &[2]), p1),
+            ],
+            Time::ZERO,
+        );
+
+        // Exactly 3 DISTINCT symbols (esi0, esi1, esi2); the re-presented esi1
+        // is a duplicate, not a fourth unit of progress.
+        crate::assert_with_log!(
+            report.unique_symbols == 3,
+            "distinct unique count",
+            3,
+            report.unique_symbols
+        );
+        crate::assert_with_log!(
+            report.duplicate_symbols == 1,
+            "the over-cap repeat is counted as a duplicate",
+            1,
+            report.duplicate_symbols
+        );
+        crate::assert_with_log!(
+            report.complete,
+            "completes on 3 distinct symbols",
+            true,
+            report.complete
+        );
+
+        crate::test_complete!("fungible_collection_does_not_count_over_cap_duplicates_as_progress");
+    }
+
+    #[test]
     fn fungible_symbol_path_bypasses_reorder_buffer_for_raptorq() {
         init_test("fungible_symbol_path_bypasses_reorder_buffer_for_raptorq");
         let aggregator = MultipathAggregator::new(AggregatorConfig {
@@ -4476,26 +4564,19 @@ mod tests {
             crate::assert_with_log!(unique, "symbol unique", true, unique);
         }
 
-        // 4th symbol for the same object exceeds the limit. It cannot be
-        // recorded, so it must fail closed and be reported as a duplicate
-        // (fyihql) — claiming it unique would let a re-presented copy be counted
-        // as fresh decode progress.
+        // 4th symbol for the same object exceeds the limit: it is NOT recorded
+        // but is still reported unique (passed through), because the per-object
+        // `seen` set spans all of an object's blocks and discarding past-cap
+        // symbols would starve the RaptorQ decoder on any multi-block transfer.
+        // De-duplication of past-cap symbols is the consumer's responsibility
+        // (see collect_fungible_symbols_until, fyihql).
         let s4 = Symbol::new_for_test(1, 0, 3, &[3]);
-        let first_over = dedup.check_and_record(&s4, path, Time::ZERO);
+        let result = dedup.check_and_record(&s4, path, Time::ZERO);
         crate::assert_with_log!(
-            !first_over,
-            "over-limit symbol fails closed (duplicate)",
-            false,
-            first_over
-        );
-        // The SAME over-limit symbol presented again is still a duplicate, not a
-        // second "unique" — this is the false-progress bug being regressed.
-        let second_over = dedup.check_and_record(&s4, path, Time::ZERO);
-        crate::assert_with_log!(
-            !second_over,
-            "re-presented over-limit symbol stays a duplicate",
-            false,
-            second_over
+            result,
+            "over-limit symbol passed through as unique (not starved)",
+            true,
+            result
         );
 
         let stats = dedup.stats();
@@ -4506,16 +4587,10 @@ mod tests {
             stats.symbols_tracked
         );
         crate::assert_with_log!(
-            stats.unique_symbols == 3,
-            "over-limit symbols are not counted unique",
-            3,
+            stats.unique_symbols == 4,
+            "all unique symbols counted",
+            4,
             stats.unique_symbols
-        );
-        crate::assert_with_log!(
-            stats.duplicates_detected == 2,
-            "both over-limit presentations counted as duplicates",
-            2,
-            stats.duplicates_detected
         );
 
         crate::test_complete!("dedup_enforces_max_symbols_per_object");

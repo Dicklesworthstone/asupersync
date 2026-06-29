@@ -94,12 +94,19 @@ impl MembershipView {
         self.base
     }
 
-    /// The watchable event stream: events appended at or after `cursor` (an
-    /// absolute stream index). An observer remembers its old cursor plus the
-    /// returned slice's length as its new cursor, so it never re-processes an
-    /// event. A cursor past the end yields an empty slice; a cursor below
-    /// [`compact_base`](Self::compact_base) (the observer fell behind a
-    /// compaction) yields the full retained suffix so it can resynchronize.
+    /// The watchable event stream: events at or after `cursor` (an absolute
+    /// stream index). While `cursor >= compact_base()`, an observer advances its
+    /// cursor by the returned slice's length and never re-processes an event
+    /// (equivalently, it advances to [`event_count`](Self::event_count)). A
+    /// cursor at or past the end yields an empty slice.
+    ///
+    /// If `cursor < compact_base()` the observer lagged past a
+    /// [`compact`](Self::compact) and its missing events are gone: this returns
+    /// the full retained suffix as a *resync point*. Such an observer must adopt
+    /// [`event_count`](Self::event_count) as its new cursor — NOT
+    /// `cursor + len`, which would loop on the suffix — and reconcile current
+    /// membership from [`alive_peers`](Self::alive_peers). Callers that only ever
+    /// `compact` up to the minimum live-observer cursor never create this case.
     #[must_use]
     pub fn events_since(&self, cursor: usize) -> &[MembershipEvent] {
         let start = cursor.saturating_sub(self.base).min(self.log.len());

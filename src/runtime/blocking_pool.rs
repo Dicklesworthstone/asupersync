@@ -758,9 +758,10 @@ impl BlockingPool {
         let deadline = timeout_deadline(timeout, self.inner.time_getter);
 
         // Wait until no worker is active AND no retiring worker has a
-        // replacement hand-off in flight. A retiring worker that finds pending
-        // work announces `replacement_pending` *before* it decrements
-        // `active_threads`, so gating on both counters closes the race where a
+        // replacement hand-off in flight. Every retiring worker announces a
+        // possible hand-off in `replacement_pending` *before* it decrements
+        // `active_threads`, and clears it only after deciding whether to spawn a
+        // replacement, so gating on both counters closes the race where a
         // replacement worker is spawned just after we would otherwise have
         // declared a clean shutdown — which would leak the replacement's
         // never-joined handle (d679m7).
@@ -1239,37 +1240,41 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
                 }
 
                 if !self.retired_with_claim {
-                    // A spawn that linearized before shutdown may enqueue work
-                    // while this worker is already on the exit path. If this
-                    // was the last active worker, hand the task off before the
-                    // pool goes quiescent and strands the accepted work.
+                    // A spawn that linearized just before this worker exits may
+                    // enqueue work while the worker is already on its exit path.
+                    // If this was the last active worker, hand the task off to a
+                    // replacement before the pool goes quiescent and strands the
+                    // accepted work.
                     //
-                    // Announce the hand-off in `replacement_pending` *before*
-                    // decrementing `active_threads`, and clear it only *after*
-                    // the replacement spawn has been attempted. Otherwise a
-                    // concurrent `shutdown_and_wait` could observe
-                    // `active_threads == 0` in the gap between this decrement
-                    // and the replacement spawn, declare a clean shutdown, and
-                    // leak the replacement's (never-joined) handle (d679m7). By
-                    // the time the announcement is cleared, a successful spawn
-                    // has already bumped `active_threads` back above zero.
-                    let pending = blocking_pool_has_pending_work(self.inner);
-                    if pending {
-                        self.inner
-                            .replacement_pending
-                            .fetch_add(1, Ordering::Release);
-                    }
+                    // Bracket the whole decrement -> check -> spawn sequence in
+                    // `replacement_pending`, announced *unconditionally* before
+                    // the decrement and cleared only *after* the spawn decision.
+                    // Without this, a concurrent `shutdown_and_wait` could
+                    // observe `active_threads == 0` in the gap before a
+                    // replacement is spawned, declare a clean shutdown, and leak
+                    // the replacement's never-joined handle (d679m7).
+                    //
+                    // The pending check MUST stay *after* the decrement: that is
+                    // what makes the accepted-work hand-off race-free. If it ran
+                    // before the decrement, a task enqueued in between could be
+                    // missed by this worker while a concurrent enqueuer's
+                    // `maybe_spawn` still sees `active_threads == 1` (this worker
+                    // not yet retired) and declines to spawn — stranding the
+                    // task. Checking after the decrement guarantees that either
+                    // this worker observes the pending work, or any enqueuer
+                    // sees the decremented count and spawns the worker itself.
+                    self.inner
+                        .replacement_pending
+                        .fetch_add(1, Ordering::Release);
                     self.inner.active_threads.fetch_sub(1, Ordering::Release);
-                    if pending {
+                    if blocking_pool_has_pending_work(self.inner) {
                         maybe_spawn_thread_on_inner(self.inner);
-                        {
-                            let _guard = self.inner.mutex.lock();
-                            self.inner.condvar.notify_one();
-                        }
-                        self.inner
-                            .replacement_pending
-                            .fetch_sub(1, Ordering::Release);
+                        let _guard = self.inner.mutex.lock();
+                        self.inner.condvar.notify_one();
                     }
+                    self.inner
+                        .replacement_pending
+                        .fetch_sub(1, Ordering::Release);
                 }
             }
         }
