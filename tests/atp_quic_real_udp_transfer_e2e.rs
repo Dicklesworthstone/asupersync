@@ -545,6 +545,70 @@ fn real_udp_quic_good_transport_auth_uses_reliable_source_stream() {
     assert_no_staging_residue(dst.path());
 }
 
+fn assert_non_dividing_transport_auth_transfer(
+    max_block_size: usize,
+    file_name: &str,
+    len: usize,
+    round0_loss_target: f64,
+) {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join(file_name);
+    let payload: Vec<u8> = (0..len)
+        .map(|i| {
+            let byte = i.wrapping_mul(37).wrapping_add(i / 97).wrapping_add(13) % 251;
+            u8::try_from(byte).expect("byte pattern fits u8")
+        })
+        .collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.symbol_size = 1141;
+    cfg.recv.symbol_size = 1141;
+    cfg.send.max_block_size = max_block_size;
+    cfg.recv.max_block_size = max_block_size;
+    cfg.send.round0_loss_target = round0_loss_target;
+    cfg.recv.round0_loss_target = round0_loss_target;
+
+    let (send, recv) = run_transfer(cfg.send, cfg.recv, &source, dst.path());
+    let send = send.unwrap_or_else(|err| {
+        panic!(
+            "non-dividing QUIC/TLS send must not fail handshake for max_block_size={max_block_size}: {err:?}; receiver={recv:?}"
+        )
+    });
+    let recv = recv.expect("non-dividing QUIC/TLS receiver commits");
+
+    assert_receive_report_counters(&send, &recv, payload.len() as u64, 1);
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(
+        std::fs::read(dst.path().join(file_name)).expect("read committed non-dividing transfer"),
+        payload,
+        "committed bytes must match the source for non-dividing symbol geometry"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
+#[test]
+fn real_udp_quic_transport_auth_accepts_non_dividing_default_block_geometry() {
+    assert_non_dividing_transport_auth_transfer(
+        512 * 1024,
+        "nondividing-default.bin",
+        16 * 1024,
+        0.01,
+    );
+}
+
+#[test]
+fn real_udp_quic_transport_auth_accepts_non_dividing_4m_block_geometry() {
+    assert_non_dividing_transport_auth_transfer(
+        4 * 1024 * 1024,
+        "nondividing-4m.bin",
+        1024 * 1024,
+        0.01,
+    );
+}
+
 #[test]
 fn real_udp_quic_transfer_directory_tree_authenticated() {
     let src = tempfile::tempdir().expect("src dir");

@@ -7298,6 +7298,8 @@ async fn run_receiver_session(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    let config = super::effective_quic_receiver_config(config)?;
+    let config = &config;
     config.validate()?;
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
@@ -7974,6 +7976,8 @@ pub async fn receive_on_endpoint(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    let config = super::effective_quic_receiver_config(config)?;
+    let config = &config;
     config.validate()?;
     let server_tls = config.server_tls.as_ref().ok_or_else(|| {
         QuicTransportError::Config(

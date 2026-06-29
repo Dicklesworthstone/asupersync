@@ -2836,6 +2836,13 @@ fn effective_quic_config_for_largest_entry(
     Ok(config)
 }
 
+fn effective_quic_receiver_config(config: &QuicConfig) -> Result<QuicConfig, QuicTransportError> {
+    let mut config = config.clone();
+    config.max_block_size = quic_symbol_aligned_block_size(&config, config.max_block_size)?;
+    config.validate()?;
+    Ok(config)
+}
+
 #[cfg(test)]
 fn effective_quic_config_for_entries(
     config: &QuicConfig,
@@ -5799,7 +5806,16 @@ fn reject_hello_reason(
             hello.symbol_size, config.symbol_size
         ));
     }
-    let receiver_max_block_size = u64::try_from(config.max_block_size).unwrap_or(u64::MAX);
+    let receiver_max_block_size =
+        match quic_symbol_aligned_block_size(config, config.max_block_size) {
+            Ok(max_block_size) => u64::try_from(max_block_size).unwrap_or(u64::MAX),
+            Err(_) => {
+                return Some(
+                    "receiver max_block_size cannot be aligned to symbol_size without overflow"
+                        .to_string(),
+                );
+            }
+        };
     if hello.max_block_size != receiver_max_block_size {
         return Some(format!(
             "sender max_block_size ({}) must match receiver max_block_size ({receiver_max_block_size})",
@@ -5893,6 +5909,7 @@ fn receive_sender_hello_and_ack(
     peer_id: &str,
     expected_symbol_auth: bool,
 ) -> Result<QuicHello, QuicTransportError> {
+    let receiver_config = effective_quic_receiver_config(config)?;
     let frame = next_control_frame(cx, conn, control, "receive sender handshake")?;
     if frame.frame_type() != FrameType::Handshake {
         return Err(QuicTransportError::Unexpected {
@@ -5901,11 +5918,11 @@ fn receive_sender_hello_and_ack(
         });
     }
     let hello: QuicHello = parse_json(&frame)?;
-    let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
+    let reason = reject_hello_reason(&hello, &receiver_config, expected_symbol_auth);
     let accepted = reason.is_none();
     let accepted_source_stream = accepted
         && hello.source_stream
-        && quic_source_stream_enabled(hello.total_bytes, config, conn);
+        && quic_source_stream_enabled(hello.total_bytes, &receiver_config, conn);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
@@ -5929,6 +5946,7 @@ fn receive_native_sender_hello_and_ack(
     peer_id: &str,
     expected_symbol_auth: bool,
 ) -> Result<QuicHello, QuicTransportError> {
+    let receiver_config = effective_quic_receiver_config(config)?;
     let frame = next_native_control_frame(cx, conn, control, "receive sender handshake")?;
     if frame.frame_type() != FrameType::Handshake {
         return Err(QuicTransportError::Unexpected {
@@ -5937,11 +5955,11 @@ fn receive_native_sender_hello_and_ack(
         });
     }
     let hello: QuicHello = parse_json(&frame)?;
-    let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
+    let reason = reject_hello_reason(&hello, &receiver_config, expected_symbol_auth);
     let accepted = reason.is_none();
     let accepted_source_stream = accepted
         && hello.source_stream
-        && quic_native_source_stream_enabled(hello.total_bytes, config, conn);
+        && quic_native_source_stream_enabled(hello.total_bytes, &receiver_config, conn);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
@@ -7987,6 +8005,7 @@ async fn receive_established_native_connection(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    let config = effective_quic_receiver_config(&config)?;
     let mut control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
