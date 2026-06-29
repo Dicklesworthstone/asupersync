@@ -5595,10 +5595,10 @@ fn source_retransmit_needs_fec_fallback(
 /// cap for very large objects.
 const PARALLEL_ENCODE_MAX_BYTES: u64 = 112 * 1024 * 1024;
 const PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS: usize = 64;
-/// Large lossy objects need encode parallelism to keep the 50 mbit bad link fed,
-/// but they must not recreate the old full-transfer burst. Eight bounded
-/// RaptorQ blocks is enough CPU fanout for the target link while keeping peak
-/// sender symbol RAM well below the receiver's UDP buffer envelope.
+/// Lossy objects need encode parallelism to keep the 50 mbit bad link fed, but
+/// they must not recreate the old full-transfer burst. Eight bounded RaptorQ
+/// blocks is enough CPU fanout for the target link while keeping peak sender
+/// symbol RAM well below the receiver's UDP buffer envelope.
 const LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5610,13 +5610,13 @@ fn parallel_encode_plan_for_transfer(
     total_bytes: u64,
     config: &RqConfig,
 ) -> Option<ParallelEncodePlan> {
-    if total_bytes <= PARALLEL_ENCODE_MAX_BYTES {
-        Some(ParallelEncodePlan {
-            max_batch_blocks: PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS,
-        })
-    } else if round0_loss_target_repair_enabled(config) {
+    if round0_loss_target_repair_enabled(config) {
         Some(ParallelEncodePlan {
             max_batch_blocks: LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS,
+        })
+    } else if total_bytes <= PARALLEL_ENCODE_MAX_BYTES {
+        Some(ParallelEncodePlan {
+            max_batch_blocks: PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS,
         })
     } else {
         None
@@ -15195,6 +15195,7 @@ mod tests {
 
     #[test]
     fn large_lossy_round0_uses_bounded_parallel_encode_plan() {
+        let matrix_50m = 50_u64 * 1024 * 1024;
         let large = 500_u64 * 1024 * 1024;
 
         let clean = RqConfig {
@@ -15214,10 +15215,28 @@ mod tests {
             ..RqConfig::default()
         };
         assert_eq!(
+            parallel_encode_plan_for_transfer(matrix_50m, &bad),
+            Some(ParallelEncodePlan {
+                max_batch_blocks: LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS
+            }),
+            "50M bad-link matrix cells must use the bounded lossy encode window to cap sender RSS"
+        );
+        assert_eq!(
             parallel_encode_plan_for_transfer(large, &bad),
             Some(ParallelEncodePlan {
                 max_batch_blocks: LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS
             })
+        );
+        let broken = RqConfig {
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        assert_eq!(
+            parallel_encode_plan_for_transfer(matrix_50m, &broken),
+            Some(ParallelEncodePlan {
+                max_batch_blocks: LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS
+            }),
+            "50M broken-link matrix cells must use the bounded lossy encode window to cap sender RSS"
         );
         assert!(should_parallel_encode_source_blocks(
             MAX_RAPTORQ_SOURCE_BLOCKS,
