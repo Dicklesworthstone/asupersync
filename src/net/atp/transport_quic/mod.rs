@@ -173,12 +173,11 @@ pub const DEFAULT_SYMBOL_SIZE: u16 = 1024;
 
 /// Default RaptorQ source-block size in bytes for QUIC DATAGRAM transfers.
 ///
-/// With 1 KiB symbols this targets K ~= 4096 source symbols per block, so a
-/// 50 MiB object uses 13 blocks instead of the previous 100-block K512 plan.
-/// The sender carries this value in the QUIC Hello and the receiver rejects
-/// mismatches, so mixed-version peers fail closed instead of silently decoding
-/// with different block geometry.
-pub const DEFAULT_MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+/// With 1 KiB symbols this targets K ~= 512 source symbols per block. The sender
+/// carries this value in the QUIC Hello and the receiver rejects mismatches, so
+/// mixed-version peers fail closed instead of silently decoding with different
+/// block geometry.
+pub const DEFAULT_MAX_BLOCK_SIZE: usize = 512 * 1024;
 
 /// Default ceiling on a single QUIC DATAGRAM's application payload.
 ///
@@ -9194,15 +9193,15 @@ mod tests {
     }
 
     #[test]
-    fn quic_default_geometry_keeps_50m_to_thirteen_blocks() {
+    fn quic_default_geometry_keeps_50m_to_k512_blocks() {
         let config =
             effective_quic_config_for_largest_entry(&trusted_quic_config(), 50 * 1024 * 1024)
                 .expect("50MiB fixture must fit default QUIC geometry");
 
-        assert_eq!(config.max_block_size, 4 * 1024 * 1024);
+        assert_eq!(config.max_block_size, 512 * 1024);
         assert_eq!(
             block_count_for_len(50 * 1024 * 1024, &config).expect("block count"),
-            13
+            100
         );
     }
 

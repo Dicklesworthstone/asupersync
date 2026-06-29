@@ -88,7 +88,7 @@ const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
 const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
-const QUIC_AUTO_MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+const QUIC_AUTO_MAX_BLOCK_SIZE: usize = AUTO_MAX_BLOCK_SIZE;
 const RQ_LOSSY_TAIL_DRAIN_ENABLE_LOSS: f64 = 0.005;
 const RQ_BROKEN_TAIL_DRAIN_ENABLE_LOSS: f64 = 0.05;
 const RQ_BAD_LINK_TAIL_DRAIN_MS: u64 = 40;
@@ -4904,7 +4904,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn max_block_size_arg_auto_uses_quic_multimegabyte_default() {
+    fn max_block_size_arg_auto_uses_quic_bounded_decode_ceiling() {
         assert_eq!(
             MaxBlockSizeArg::Auto.effective_for_quic(1024),
             Ok(QUIC_AUTO_MAX_BLOCK_SIZE)
@@ -4913,7 +4913,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             MaxBlockSizeArg::Bytes(512 * 1024).effective_for_quic(1024),
             Ok(512 * 1024)
         );
-        assert!(QUIC_AUTO_MAX_BLOCK_SIZE > AUTO_MAX_BLOCK_SIZE);
+        assert_eq!(QUIC_AUTO_MAX_BLOCK_SIZE, AUTO_MAX_BLOCK_SIZE);
     }
 
     #[test]
