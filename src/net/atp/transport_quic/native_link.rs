@@ -524,6 +524,21 @@ fn trace_inferred_round_complete_symbols(
         observed_symbols,
         inferred_symbols,
     );
+    super::quic_progress(format_args!(
+        "receiver: object_complete_inferred round={expected_round} observed={observed_symbols} round_symbols_sent={inferred_symbols}"
+    ));
+}
+
+fn emit_receiver_round_block_symbols(
+    transfer_id: &str,
+    round: u32,
+    block_symbols: &BTreeMap<(u32, u8), (u64, u64)>,
+) {
+    for ((entry, sbn), (observed, accepted)) in block_symbols {
+        super::quic_progress(format_args!(
+            "receiver: block_symbols round={round} transfer={transfer_id} entry={entry} sbn={sbn} observed={observed} accepted={accepted}"
+        ));
+    }
 }
 
 #[allow(
@@ -3845,6 +3860,10 @@ impl QuicLink {
                     frames.to_vec()
                 };
             }
+            super::quic_progress(format_args!(
+                "control: stream_pto_retransmit reason={reason} attempt={attempts} frames={} operation={operation}",
+                retransmit_frames.len()
+            ));
             self.retransmit_stream_frames(cx, &retransmit_frames, reason)
                 .await?;
             last_retransmit = Instant::now();
@@ -4768,6 +4787,7 @@ async fn spray_round(
     manifest: &TransferManifest,
     encoders: &mut [QuicEntryEncoder],
     pending: &std::collections::BTreeSet<u32>,
+    round: u32,
     config: &QuicConfig,
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
@@ -4860,11 +4880,14 @@ async fn spray_round(
                     repair_count,
                 ))
             };
+            let mut generated_for_block = 0u64;
+            let mut queued_for_block = 0u64;
             let mut emitted_repair_symbols = 0usize;
             for encoded_symbol in encoded {
                 let symbol = encoded_symbol
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
+                generated_for_block = generated_for_block.saturating_add(1);
                 if symbol.kind().is_repair() {
                     emitted_repair_symbols = emitted_repair_symbols.saturating_add(1);
                 }
@@ -4875,6 +4898,7 @@ async fn spray_round(
                 if with_source && drop_one_in > 0 && sprayed % u64::from(drop_one_in) == 0 {
                     continue;
                 }
+                queued_for_block = queued_for_block.saturating_add(1);
                 let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol_tag(&symbol).as_bytes());
                 handoff_batch.push(NativeQuicSpraySymbol {
                     symbol,
@@ -4932,6 +4956,15 @@ async fn spray_round(
                     }
                 }
             }
+            let mode = if with_source {
+                "initial"
+            } else {
+                "fallback_repair"
+            };
+            super::quic_progress(format_args!(
+                "sender: block_spray round={round} transfer={} entry={entry_index} sbn={sbn} mode={mode} generated_symbols={generated_for_block} queued_symbols={queued_for_block} repair_symbols={emitted_repair_symbols} repair_cursor_before={already} repair_cursor_after={target_repair} pacing_rate_bps={}",
+                manifest.transfer_id, pacing.pacing_rate_bps
+            ));
             if stopped_for_feedback {
                 let repair_cursor =
                     already.saturating_add(emitted_repair_symbols.min(repair_count));
@@ -5004,6 +5037,7 @@ async fn spray_source_requests(
     manifest: &TransferManifest,
     encoders: &[QuicEntryEncoder],
     requests: &[QuicSourceSymbolRequest],
+    round: u32,
     config: &QuicConfig,
     symbol_auth: Option<&SecurityContext>,
     aimd: &mut NativeQuicAimdPacer,
@@ -5061,6 +5095,10 @@ async fn spray_source_requests(
             entry: request.entry,
             auth_tag,
         });
+        super::quic_progress(format_args!(
+            "sender: source_symbol round={round} transfer={} entry={} sbn={} esi={} queued_symbols=1 pacing_rate_bps={}",
+            manifest.transfer_id, request.entry, request.sbn, request.esi, pacing.pacing_rate_bps
+        ));
         if handoff_batch.len() >= link.spray_handoff_symbol_limit(&pacing) {
             link.spray_symbol_batch(cx, control, tag, &handoff_batch, config, &mut pacing, aimd)
                 .await?;
@@ -5090,6 +5128,7 @@ async fn spray_block_repair_requests(
     manifest: &TransferManifest,
     encoders: &mut [QuicEntryEncoder],
     requests: &[QuicBlockRepairRequest],
+    round: u32,
     config: &QuicConfig,
     symbol_auth: Option<&SecurityContext>,
     aimd: &mut NativeQuicAimdPacer,
@@ -5183,6 +5222,17 @@ async fn spray_block_repair_requests(
             )));
         }
         cursor_updates.push((enc_index, request.sbn, target_repair));
+        super::quic_progress(format_args!(
+            "sender: repair_block round={round} transfer={} entry={} sbn={} requested_symbols={} emitted_symbols={} repair_cursor_before={} repair_cursor_after={} pacing_rate_bps={}",
+            manifest.transfer_id,
+            entry_index,
+            request.sbn,
+            request.symbols,
+            emitted_for_request,
+            already,
+            target_repair,
+            pacing.pacing_rate_bps
+        ));
         quic_rqtrace!(
             "sender: repair_block entry={} sbn={} requested_symbols={} emitted_symbols={} repair_cursor_before={} repair_cursor_after={} pacing_rate_bps={}",
             entry_index,
@@ -5557,6 +5607,7 @@ async fn run_sender_session(
                     manifest,
                     &mut encoders,
                     &repair_tail_requests,
+                    0,
                     config,
                     symbol_auth.as_ref(),
                     &mut tail_aimd,
@@ -5744,6 +5795,7 @@ async fn run_sender_session(
                                 manifest,
                                 &mut encoders,
                                 &repair_blocks_to_send,
+                                feedback_rounds,
                                 config,
                                 symbol_auth.as_ref(),
                                 &mut tail_aimd,
@@ -5758,6 +5810,7 @@ async fn run_sender_session(
                                 manifest,
                                 &mut encoders,
                                 &fallback_pending,
+                                feedback_rounds,
                                 config,
                                 symbol_auth.as_ref(),
                                 false,
@@ -5772,6 +5825,7 @@ async fn run_sender_session(
                                 manifest,
                                 &encoders,
                                 &need.source_symbols,
+                                feedback_rounds,
                                 config,
                                 symbol_auth.as_ref(),
                                 &mut tail_aimd,
@@ -5849,6 +5903,7 @@ async fn run_sender_session(
         manifest,
         &mut encoders,
         &pending_all,
+        0,
         config,
         symbol_auth.as_ref(),
         true,
@@ -5860,12 +5915,25 @@ async fn run_sender_session(
     link.trace_sender_handoff_summary(cx, "initial_source", symbols_sent);
     send_native_object_complete_for_round(cx, &mut link.conn, &mut control, 0, symbols_sent)?;
     link.flush(cx).await?;
+    let mut completion_frames = link.last_flushed_stream_frames();
+    super::quic_progress(format_args!(
+        "sender: object_complete_sent round=0 transfer={} round_symbols_sent={} stream_frames={}",
+        manifest.transfer_id,
+        symbols_sent,
+        completion_frames.len()
+    ));
 
     let mut feedback_rounds = 0u32;
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let reply_frame = link
-            .next_control_frame(cx, &mut control, "receive proof or fountain feedback")
+            .next_control_frame_with_stream_pto(
+                cx,
+                &mut control,
+                "receive proof or fountain feedback",
+                &completion_frames,
+                "object_complete_pto",
+            )
             .await?;
         let reply = match reply_frame.frame_type() {
             FrameType::Proof => {
@@ -5884,6 +5952,15 @@ async fn run_sender_session(
         };
         match reply {
             QuicControlReply::Proof(receipt) => {
+                super::quic_progress(format_args!(
+                    "sender: proof_received transfer={} committed={} sha_ok={} merkle_ok={} feedback_rounds={} symbols_sent={}",
+                    manifest.transfer_id,
+                    receipt.committed,
+                    receipt.sha_ok,
+                    receipt.merkle_ok,
+                    feedback_rounds,
+                    symbols_sent
+                ));
                 super::send_native_close(cx, &mut link.conn, &mut control)?;
                 link.flush(cx).await?;
                 if !receipt.committed {
@@ -5948,6 +6025,19 @@ async fn run_sender_session(
                 let repair_detail = repair_block_trace_summary(&need.repair_blocks);
                 let sender_delivery_loss_for_repair_trace =
                     sender_delivery_loss_for_repair.unwrap_or(0.0);
+                super::quic_progress(format_args!(
+                    "sender: need_more_received round={feedback_rounds} transfer={} pending={} repair_blocks={} requested_repair_symbols={} repair_symbols_to_emit={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} repair_blocks_detail={}",
+                    manifest.transfer_id,
+                    need.pending.len(),
+                    need.repair_blocks.len(),
+                    requested_repair_symbols,
+                    repair_symbols_to_emit,
+                    need.source_symbols.len(),
+                    need.round_symbols_observed.unwrap_or(0),
+                    need.round_symbols_accepted.unwrap_or(0),
+                    need.round_loss_fraction.unwrap_or(0.0),
+                    repair_detail
+                ));
                 quic_rqtrace!(
                     "sender: NeedMore round={feedback_rounds} pending={} repair_blocks={} base_deficit_symbols={} requested_repair_symbols={} repair_symbols_to_emit={} loss_compensated_target_symbols={} request_gap_to_target={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} sender_delivery_loss_for_repair={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
                     need.pending.len(),
@@ -6001,6 +6091,13 @@ async fn run_sender_session(
                         0,
                     )?;
                     link.flush(cx).await?;
+                    completion_frames = link.last_flushed_stream_frames();
+                    super::quic_progress(format_args!(
+                        "sender: object_complete_sent round={} transfer={} round_symbols_sent=0 stream_frames={}",
+                        response_feedback_round,
+                        manifest.transfer_id,
+                        completion_frames.len()
+                    ));
                     continue;
                 }
                 super::validate_need_more_feedback(manifest, config, &need)?;
@@ -6014,6 +6111,7 @@ async fn run_sender_session(
                         manifest,
                         &mut encoders,
                         &repair_blocks_to_send,
+                        feedback_rounds,
                         config,
                         symbol_auth.as_ref(),
                         &mut aimd,
@@ -6028,6 +6126,7 @@ async fn run_sender_session(
                         manifest,
                         &mut encoders,
                         &fallback_pending,
+                        feedback_rounds,
                         config,
                         symbol_auth.as_ref(),
                         false,
@@ -6042,6 +6141,7 @@ async fn run_sender_session(
                         manifest,
                         &encoders,
                         &need.source_symbols,
+                        feedback_rounds,
                         config,
                         symbol_auth.as_ref(),
                         &mut aimd,
@@ -6095,6 +6195,14 @@ async fn run_sender_session(
                     sent,
                 )?;
                 link.flush(cx).await?;
+                completion_frames = link.last_flushed_stream_frames();
+                super::quic_progress(format_args!(
+                    "sender: object_complete_sent round={} transfer={} round_symbols_sent={} stream_frames={}",
+                    response_feedback_round,
+                    manifest.transfer_id,
+                    sent,
+                    completion_frames.len()
+                ));
                 if !need.repair_blocks.is_empty() {
                     let _ = link
                         .drop_duplicate_need_more_resends(cx, &mut control, &need)
@@ -6517,6 +6625,16 @@ async fn commit_staged_entries(
     let bytes_received = digests
         .iter()
         .fold(0u64, |acc, digest| acc.saturating_add(digest.size));
+    super::quic_progress(format_args!(
+        "receiver: commit_decision transfer={} committed={} sha_ok={} merkle_ok={} metadata_ok={} bytes_received={} files={}",
+        manifest.transfer_id,
+        committed,
+        sha_ok,
+        merkle_ok,
+        metadata_ok,
+        bytes_received,
+        manifest.entries.len()
+    ));
     Ok((
         ReceiveReceipt {
             committed,
@@ -6983,6 +7101,8 @@ async fn receive_native_source_stream_entries_pumped(
             &mut decode_stats,
             &mut intake_stats,
             &mut completed_backlog,
+            0,
+            None,
             super::NativeSymbolDrainMode::ReadyOnly,
             RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
         )
@@ -7041,6 +7161,8 @@ async fn drain_native_receiver_symbol_queue(
     decode_stats: &mut super::QuicDecodeStats,
     intake_stats: &mut NativeReceiverIntakeStats,
     completed_backlog: &mut Vec<super::QuicDecodedBlock>,
+    round: u32,
+    block_counts: Option<&mut BTreeMap<(u32, u8), (u64, u64)>>,
     drain_mode: super::NativeSymbolDrainMode,
     max_batches: usize,
 ) -> Result<(u64, u64), QuicTransportError> {
@@ -7052,6 +7174,8 @@ async fn drain_native_receiver_symbol_queue(
         decoders,
         config,
         decode_stats,
+        round,
+        block_counts,
         drain_mode,
         max_batches,
     )
@@ -7195,6 +7319,14 @@ async fn run_receiver_session(
     let manifest: TransferManifest =
         super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
     super::validate_quic_manifest(&manifest, config)?;
+    super::quic_progress(format_args!(
+        "receiver: manifest transfer={} total_bytes={} entries={} symbol_size={} max_block_size={}",
+        manifest.transfer_id,
+        manifest.total_bytes,
+        manifest.entries.len(),
+        config.symbol_size,
+        config.max_block_size
+    ));
     link.flush(cx).await?;
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
@@ -7349,6 +7481,7 @@ async fn run_receiver_session(
                 ..super::QuicRoundComplete::default()
             };
             let mut completed_backlog = Vec::new();
+            let mut round_block_symbols = BTreeMap::<(u32, u8), (u64, u64)>::new();
             loop {
                 let (observed, accepted) = drain_native_receiver_symbol_queue(
                     cx,
@@ -7359,6 +7492,8 @@ async fn run_receiver_session(
                     &mut decode_stats,
                     &mut intake_stats,
                     &mut completed_backlog,
+                    expected_round_complete,
+                    Some(&mut round_block_symbols),
                     super::NativeSymbolDrainMode::ReadyOnly,
                     RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
                 )
@@ -7391,6 +7526,11 @@ async fn run_receiver_session(
                     // Once all entries decode, Proof can complete the transfer even
                     // if the best-effort ObjectComplete control packet was dropped.
                     flush_cached_quic_staging_files(&mut staged).await?;
+                    emit_receiver_round_block_symbols(
+                        manifest.transfer_id.as_str(),
+                        expected_round_complete,
+                        &round_block_symbols,
+                    );
                     break 'rounds;
                 }
                 if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
@@ -7401,6 +7541,14 @@ async fn run_receiver_session(
                                 trace_stale_round_complete(cx, expected_round_complete, &complete);
                                 continue;
                             }
+                            super::quic_progress(format_args!(
+                                "receiver: object_complete_received round={} transfer={} round_symbols_sent={} observed={} accepted={}",
+                                complete.round,
+                                manifest.transfer_id,
+                                complete.round_symbols_sent,
+                                round_symbols_observed,
+                                round_symbols_accepted
+                            ));
                             round_complete = complete;
                             if pump_native_receiver_ready(cx, link, &mut intake_stats).await? > 0
                                 || link.conn.pending_datagram_count() > 0
@@ -7507,6 +7655,16 @@ async fn run_receiver_session(
                                 need_frames.len(),
                                 needmore_pto_max_attempts,
                             );
+                            super::quic_progress(format_args!(
+                                "receiver: need_more_pto round={} attempt={} pending={} repair_blocks={} requested_repair_symbols={} stream_frames={} max_attempts={}",
+                                feedback_rounds,
+                                needmore_pto_attempts,
+                                need.pending.len(),
+                                need.repair_blocks.len(),
+                                need_more_repair_symbol_count(&need),
+                                need_frames.len(),
+                                needmore_pto_max_attempts
+                            ));
                             match need_more_pto_mode(&need_frames) {
                                 NeedMorePtoMode::SendFresh => {
                                     super::send_native_need_more(
@@ -7532,6 +7690,11 @@ async fn run_receiver_session(
                 }
             }
 
+            emit_receiver_round_block_symbols(
+                manifest.transfer_id.as_str(),
+                expected_round_complete,
+                &round_block_symbols,
+            );
             flush_cached_quic_staging_files(&mut staged).await?;
             if round_complete.round_symbols_sent == 0 && round_symbols_observed > 0 {
                 let inferred_symbols = infer_missing_round_complete_symbols(
@@ -7643,6 +7806,20 @@ async fn run_receiver_session(
                 super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
                 repair_detail,
             );
+            super::quic_progress(format_args!(
+                "receiver: need_more_sent round={} transfer={} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} observed={} accepted={} round_symbols_sent={} round_loss_fraction={:.4} repair_blocks_detail={}",
+                next_feedback_round,
+                manifest.transfer_id,
+                need.pending.len(),
+                need.repair_blocks.len(),
+                requested_repair_symbols,
+                need.source_symbols.len(),
+                round_symbols_observed,
+                round_symbols_accepted,
+                round_complete.round_symbols_sent,
+                need.round_loss_fraction.unwrap_or(0.0),
+                repair_detail
+            ));
             trace_repair_block_deficits(
                 "receiver",
                 next_feedback_round,
@@ -7651,6 +7828,12 @@ async fn run_receiver_session(
             super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
             link.flush(cx).await?;
             let need_frames = link.last_flushed_stream_frames();
+            super::quic_progress(format_args!(
+                "receiver: need_more_flushed round={} transfer={} stream_frames={}",
+                next_feedback_round,
+                manifest.transfer_id,
+                need_frames.len()
+            ));
             // Remember it so the inner loop can re-send it on the control PTO if the repair round
             // does not arrive (lost NeedMore/repair); reset the per-round PTO budget.
             last_need = Some((need, need_frames));

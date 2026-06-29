@@ -127,6 +127,11 @@ fn quic_rqtrace(args: std::fmt::Arguments<'_>) {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn quic_progress(args: std::fmt::Arguments<'_>) {
+    eprintln!("[atp-quic] {args}");
+}
+
 // Reuse the manifest / receipt / report wire+value types so QUIC and TCP share
 // one schema (see module docs). These are the "reuse manifest/report/receipt"
 // half of the B1 acceptance.
@@ -7137,6 +7142,8 @@ async fn drain_native_symbol_datagrams_with_blocks(
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
     decode_stats: &mut QuicDecodeStats,
+    round: u32,
+    mut block_counts: Option<&mut std::collections::BTreeMap<(u32, u8), (u64, u64)>>,
     drain_mode: NativeSymbolDrainMode,
     max_batches: usize,
 ) -> Result<(u64, u64, Vec<QuicDecodedBlock>), QuicTransportError> {
@@ -7185,6 +7192,7 @@ async fn drain_native_symbol_datagrams_with_blocks(
             decoders[decoder_index].object_id,
             symbol_auth.as_ref(),
         )?;
+        let block_sbn = auth_symbol.symbol().sbn();
         let transfer_decode_width = quic_transfer_decode_width(decoders, config);
         let allow_spawn_decode = quic_pending_decode_jobs(decoders) < transfer_decode_width;
         let (was_accepted, block) = feed_authenticated_symbol_take_block_deferred(
@@ -7196,6 +7204,13 @@ async fn drain_native_symbol_datagrams_with_blocks(
             allow_spawn_decode,
             transfer_decode_width,
         )?;
+        if let Some(block_counts) = block_counts.as_deref_mut() {
+            let block_counts = block_counts.entry((envelope.entry, block_sbn)).or_default();
+            block_counts.0 = block_counts.0.saturating_add(1);
+            if was_accepted {
+                block_counts.1 = block_counts.1.saturating_add(1);
+            }
+        }
         if was_accepted {
             accepted = accepted.saturating_add(1);
         }
@@ -7260,6 +7275,15 @@ async fn drain_native_symbol_datagrams_with_blocks(
                 .await?,
             );
         }
+    }
+    for block in &completed {
+        quic_progress(format_args!(
+            "receiver: decode_complete round={round} transfer={} entry={} sbn={} bytes={}",
+            manifest.transfer_id,
+            block.entry,
+            block.sbn,
+            block.data.len()
+        ));
     }
     Ok((
         u64::try_from(drained).unwrap_or(u64::MAX),
@@ -8353,6 +8377,8 @@ mod tests {
             &mut decoders,
             &config,
             &mut decode_stats,
+            0,
+            None,
             NativeSymbolDrainMode::ReadyOnly,
             usize::MAX,
         ))
@@ -8419,6 +8445,8 @@ mod tests {
                 &mut decoders,
                 &config,
                 &mut decode_stats,
+                0,
+                None,
                 NativeSymbolDrainMode::ReadyOnly,
                 1,
             ))

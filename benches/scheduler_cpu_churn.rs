@@ -169,13 +169,19 @@ impl MetricsDelta {
             timer_threads_spawned: after
                 .timer_threads_spawned
                 .saturating_sub(before.timer_threads_spawned),
-            sched_yield_calls: after.sched_yield_calls.saturating_sub(before.sched_yield_calls),
+            sched_yield_calls: after
+                .sched_yield_calls
+                .saturating_sub(before.sched_yield_calls),
             worker_spins: after.worker_spins.saturating_sub(before.worker_spins),
             worker_parks: after.worker_parks.saturating_sub(before.worker_parks),
             worker_unparks: after.worker_unparks.saturating_sub(before.worker_unparks),
-            timers_registered: after.timers_registered.saturating_sub(before.timers_registered),
+            timers_registered: after
+                .timers_registered
+                .saturating_sub(before.timers_registered),
             timers_fired: after.timers_fired.saturating_sub(before.timers_fired),
-            timers_cancelled: after.timers_cancelled.saturating_sub(before.timers_cancelled),
+            timers_cancelled: after
+                .timers_cancelled
+                .saturating_sub(before.timers_cancelled),
             active_timers_end: after.active_timers,
         }
     }
@@ -236,7 +242,10 @@ fn measure_load(workers: usize, m: usize, dur: Duration) -> (PhaseResult, Vec<u6
 
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicUsize::new(0));
-    let durs: Vec<Duration> = DURS_MS.iter().map(|&ms| Duration::from_millis(ms)).collect();
+    let durs: Vec<Duration> = DURS_MS
+        .iter()
+        .map(|&ms| Duration::from_millis(ms))
+        .collect();
 
     let before = metrics::snapshot();
     let cpu0 = read_cpu_ticks();
@@ -319,7 +328,10 @@ fn measure_load(workers: usize, m: usize, dur: Duration) -> (PhaseResult, Vec<u6
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn main() {
