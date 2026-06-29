@@ -342,6 +342,11 @@ const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD: f64 = 0.50;
+const QUIC_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN;
+const QUIC_ROUND0_TARGET_LOSS_MARGIN_FRACTION: f64 = QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION;
+const QUIC_ROUND0_TARGET_LOSS_MARGIN_MIN: f64 = QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN;
+const QUIC_ROUND0_TARGET_REPAIR_ALPHA: f64 = 1e-6;
+const QUIC_ROUND0_TARGET_REPAIR_MAX_OVERHEAD: f64 = QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD;
 const QUIC_FEEDBACK_REPAIR_ESCALATE_AFTER_ROUNDS: u32 = 2;
 const QUIC_FEEDBACK_REPAIR_ESCALATE_MAX_EXTRA_PER_BLOCK: usize = 64;
 // On encrypted-good, the first NeedMore often reflects a sparse K-gap after
@@ -1104,7 +1109,7 @@ pub fn quic_spray_pacing_decision_from_config_with_cpu(
         datagram_fanout: quic_effective_datagram_fanout(config, cpu_parallelism),
         bandwidth_limit_bps: config.bwlimit_bps,
         path_rate_limit_bps: quic_default_path_rate_limit_bps(&path),
-        fec_loss_budget: (config.repair_overhead - 1.0).max(0.0),
+        fec_loss_budget: (quic_round0_loss_target_repair_overhead(config) - 1.0).max(0.0),
         machine_pressure: QuicMachinePressure {
             cpu_pressure: config.responsiveness_pressure,
             load_pressure: 0.0,
@@ -1161,6 +1166,38 @@ pub(crate) fn quic_aimd_loss_decrease_threshold(config: &QuicConfig) -> f64 {
     (expected_loss + QUIC_AIMD_LOSS_TARGET_DECREASE_MARGIN)
         .max(QUIC_AIMD_LOSS_DECREASE_THRESHOLD)
         .clamp(0.0, 0.90)
+}
+
+fn quic_fixed_block_k(config: &QuicConfig) -> u32 {
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let k = config.max_block_size.div_ceil(symbol_size).max(1);
+    u32::try_from(k).unwrap_or(u32::MAX)
+}
+
+fn quic_round0_loss_target_repair_enabled(config: &QuicConfig) -> bool {
+    let loss = config.round0_loss_target;
+    loss.is_finite() && loss >= QUIC_ROUND0_TARGET_LOSS_ENABLE_MIN
+}
+
+fn quic_round0_loss_target_loss_bar(config: &QuicConfig) -> f64 {
+    (config.round0_loss_target * (1.0 + QUIC_ROUND0_TARGET_LOSS_MARGIN_FRACTION)
+        + QUIC_ROUND0_TARGET_LOSS_MARGIN_MIN)
+        .clamp(0.0, QUIC_ROUND0_TARGET_REPAIR_MAX_OVERHEAD)
+}
+
+fn quic_round0_loss_target_repair_overhead(config: &QuicConfig) -> f64 {
+    if !quic_round0_loss_target_repair_enabled(config) {
+        return config.repair_overhead.max(1.0);
+    }
+    let loss_bar = quic_round0_loss_target_loss_bar(config);
+    let overhead = crate::net::atp::transport_rq::adaptive::decode_repair_overhead_for_target(
+        quic_fixed_block_k(config),
+        loss_bar,
+        QUIC_ROUND0_TARGET_REPAIR_ALPHA,
+        QUIC_ROUND0_TARGET_REPAIR_MAX_OVERHEAD,
+    )
+    .min(QUIC_ROUND0_TARGET_REPAIR_MAX_OVERHEAD);
+    config.repair_overhead.max(1.0 + overhead)
 }
 
 /// Bound the configured QUIC DATAGRAM fan-out by connection and CPU capacity.
@@ -3593,14 +3630,15 @@ fn encoding_pipeline(config: &QuicConfig) -> EncodingPipeline {
     clippy::cast_sign_loss
 )]
 fn initial_repair_per_block(data_len: usize, config: &QuicConfig) -> usize {
-    if config.repair_overhead <= 1.0 {
+    let repair_overhead = quic_round0_loss_target_repair_overhead(config);
+    if repair_overhead <= 1.0 {
         0
     } else {
         let block_source_symbols = data_len
             .min(config.max_block_size.max(1))
             .div_ceil(usize::from(config.symbol_size.max(1)))
             .max(1);
-        ((block_source_symbols as f64) * (config.repair_overhead - 1.0)).ceil() as usize
+        ((block_source_symbols as f64) * (repair_overhead - 1.0)).ceil() as usize
     }
 }
 
@@ -9628,7 +9666,11 @@ mod tests {
             pacing_signal(0.050, 1_048_576, 0.0),
         );
         assert!((broken.path_loss_rate - 0.10).abs() <= f64::EPSILON);
-        assert_eq!(broken.limiter, QuicSprayPacingLimiter::LossBackoff);
+        assert_eq!(broken.limiter, QuicSprayPacingLimiter::PathRateMatch);
+        assert!(
+            broken.fec_loss_budget >= 0.20,
+            "broken/10% encrypted round 0 must account for proactive FEC budget: {broken:?}"
+        );
         assert!(
             broken.pacing_rate_bps <= QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS,
             "broken/10% encrypted round 0 must pace near the 10 mbit pipe before sender-side AIMD feedback: {broken:?}"
@@ -9637,6 +9679,62 @@ mod tests {
             !quic_round0_clean_ramp_enabled(&broken_config, &broken, true),
             "configured lossy encrypted cells must not re-enter the clean datagram ramp"
         );
+    }
+
+    #[test]
+    fn quic_round0_loss_target_for_broken_link_seeds_bounded_repair() {
+        let config = QuicConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.10,
+            ..trusted_quic_config()
+        };
+
+        let overhead = quic_round0_loss_target_repair_overhead(&config);
+        let block_k =
+            usize::try_from(quic_fixed_block_k(&config)).expect("test block size fits usize");
+        let repair_symbols = initial_repair_per_block(config.max_block_size, &config);
+
+        assert!(
+            overhead > 1.20,
+            "broken/10% encrypted round 0 should receive proactive FEC"
+        );
+        assert!(
+            overhead <= 1.0 + QUIC_ROUND0_TARGET_REPAIR_MAX_OVERHEAD,
+            "round-0 target loss must stay within the bounded FEC envelope"
+        );
+        assert!(
+            repair_symbols >= block_k / 5,
+            "broken/10% encrypted round 0 should seed at least 20% repair: repair={repair_symbols}, k={block_k}"
+        );
+    }
+
+    #[test]
+    fn quic_round0_loss_target_preserves_near_clean_source_stream_budget() {
+        let config = QuicConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            ..trusted_quic_config()
+        };
+
+        assert_eq!(quic_round0_loss_target_repair_overhead(&config), 1.0);
+        assert_eq!(initial_repair_per_block(config.max_block_size, &config), 0);
+    }
+
+    #[test]
+    fn quic_round0_loss_target_respects_explicit_repair_overhead_floor() {
+        let config = QuicConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.35,
+            round0_loss_target: 0.02,
+            ..trusted_quic_config()
+        };
+
+        assert!(quic_round0_loss_target_repair_overhead(&config) >= 1.35);
     }
 
     #[test]

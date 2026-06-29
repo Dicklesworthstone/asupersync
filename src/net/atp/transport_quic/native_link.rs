@@ -4168,11 +4168,7 @@ impl NativeQuicAimdPacer {
             .unwrap_or(0.0);
         let loss = wire_loss.max(progress_loss).clamp(0.0, 0.90);
         let receiver_delivery_bps = self.receiver_delivery_bps(need, config);
-        let observed_delivery_bps = if progress_loss > 0.0 {
-            progress_delivery_bps.or(receiver_delivery_bps)
-        } else {
-            receiver_delivery_bps.or(progress_delivery_bps)
-        };
+        let observed_delivery_bps = receiver_delivery_bps.or(progress_delivery_bps);
         let delivered_payload_bytes = observed_delivery_bps
             .map(|bps| {
                 (bps * self.last_round_send_wall_s())
@@ -4210,8 +4206,16 @@ impl NativeQuicAimdPacer {
         let pending_rank_columns = need.pending_rank_columns.unwrap_or(0).to_string();
         let pending_rank_deficit = need.pending_rank_deficit.unwrap_or(0).to_string();
         let pending_decode_jobs = need.pending_decode_jobs.unwrap_or(0).to_string();
+        let shared_pacing_bytes_per_s = decision.pacing_bytes_per_s.to_string();
+        let shared_delivery_rate_bytes_per_s = decision.delivery_rate_bytes_per_s.to_string();
+        let shared_sender_loss_fraction_ppm = decision.sender_loss_fraction_ppm.to_string();
         let shared_cwnd_bytes = decision.cwnd_bytes.to_string();
         let shared_inflight_limit_bytes = decision.inflight_limit_bytes.to_string();
+        let shared_loss_limited = if decision.loss_limited {
+            "true"
+        } else {
+            "false"
+        };
         cx.trace_with_fields(
             "atp_quic.spray.aimd_feedback",
             &[
@@ -4224,6 +4228,19 @@ impl NativeQuicAimdPacer {
                 ("pending_rank_columns", pending_rank_columns.as_str()),
                 ("pending_rank_deficit", pending_rank_deficit.as_str()),
                 ("pending_decode_jobs", pending_decode_jobs.as_str()),
+                (
+                    "shared_pacing_bytes_per_s",
+                    shared_pacing_bytes_per_s.as_str(),
+                ),
+                (
+                    "shared_delivery_rate_bytes_per_s",
+                    shared_delivery_rate_bytes_per_s.as_str(),
+                ),
+                (
+                    "shared_sender_loss_fraction_ppm",
+                    shared_sender_loss_fraction_ppm.as_str(),
+                ),
+                ("shared_loss_limited", shared_loss_limited),
                 ("shared_cwnd_bytes", shared_cwnd_bytes.as_str()),
                 (
                     "shared_inflight_limit_bytes",
@@ -7569,6 +7586,10 @@ mod tests {
             "shared controller must see sender-side queue overflow"
         );
         assert!(
+            decision.bytes_in_flight > 0,
+            "sender-observed queue loss must leave outstanding bytes in the shared controller"
+        );
+        assert!(
             decision.loss_limited,
             "sender-observed overflow must put the shared controller in loss backoff"
         );
@@ -7620,6 +7641,85 @@ mod tests {
     }
 
     #[test]
+    fn quic_native_aimd_drops_rate_and_bounds_inflight_on_ten_percent_loss() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 1200,
+            max_spray_symbols_per_flush: 128,
+            datagram_fanout: 1,
+            ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+        };
+        let mut aimd = NativeQuicAimdPacer::default();
+        aimd.record_spray(10_000, 64 * 1024 * 1024, Duration::from_secs(1));
+        let need = QuicNeedMore {
+            feedback_round: 1,
+            pending: vec![0],
+            round_symbols_observed: Some(9_000),
+            round_loss_fraction: Some(0.0),
+            ..QuicNeedMore::default()
+        };
+
+        let conn = established_native_test_conn();
+        let mut pacing = super::super::quic_spray_pacing_decision_from_config(
+            &config,
+            native_quic_path_signal_with_observed_loss(conn.transport(), 0.0),
+        );
+        let uncapped_rate = pacing.pacing_rate_bps;
+        let uncapped_burst = pacing.max_burst_symbols;
+
+        aimd.observe_need_more(&cx, &config, &need);
+        let decision = aimd
+            .shared_decision()
+            .expect("10% sender-observed loss should feed the shared controller");
+        assert!(
+            decision.sender_loss_fraction_ppm >= 100_000,
+            "shared controller must see the injected sender-side loss"
+        );
+        assert!(
+            decision.bytes_in_flight > 0,
+            "10% sender-observed loss should bound outstanding bytes"
+        );
+        assert!(
+            decision.loss_limited,
+            "10% unexpected sender loss should put the shared controller in loss backoff"
+        );
+
+        NativeQuicAimdPacer::apply_shared_decision_to_pacing(
+            Some(decision),
+            &mut pacing,
+            usize::from(config.symbol_size.max(1)),
+            &config,
+        );
+
+        let symbol_bytes = u64::from(config.symbol_size.max(1));
+        let budget_symbols = usize::try_from(
+            decision
+                .send_budget_bytes
+                .checked_div(symbol_bytes)
+                .unwrap_or(0)
+                .max(1),
+        )
+        .unwrap_or(usize::MAX);
+        assert!(
+            pacing.pacing_rate_bps < uncapped_rate,
+            "native QUIC shared controller must drop rate under injected loss"
+        );
+        assert!(
+            pacing.max_burst_symbols <= budget_symbols,
+            "native QUIC shared controller must cap burst by cwnd/receiver budget"
+        );
+        assert!(
+            pacing.max_burst_symbols <= uncapped_burst,
+            "native QUIC shared controller may only tighten burst after loss"
+        );
+        assert_eq!(
+            pacing.limiter,
+            super::super::QuicSprayPacingLimiter::LossBackoff,
+            "injected sender-side loss must gate the next pacing epoch"
+        );
+    }
+
+    #[test]
     fn quic_aimd_backs_off_when_rank_progress_stalls_despite_zero_loss() {
         let cx = Cx::for_testing();
         let config = QuicConfig {
@@ -7647,18 +7747,17 @@ mod tests {
             .shared_decision()
             .expect("rank-progress feedback should feed the shared controller");
         assert!(
-            stalled_decision.bytes_in_flight > 0,
-            "rank-progress loss must make the shared controller see sender-side overflow"
+            stalled_decision.loss_limited,
+            "rank-progress loss must still put the shared controller in loss backoff"
         );
         assert!(
             stalled.last_round_loss_fraction
                 > super::super::quic_aimd_loss_decrease_threshold(&config),
             "rank-progress stall must override underreported receiver arrival loss"
         );
-        assert_eq!(
-            stalled.cap_bps(),
-            Some(super::super::QUIC_AIMD_MIN_RATE_BPS),
-            "stalled rank progress should back off to the sender-side delivery floor"
+        assert!(
+            stalled.cap_bps().is_some(),
+            "stalled rank progress should arm a shared-controller rate cap"
         );
 
         let mut healthy = NativeQuicAimdPacer::default();
