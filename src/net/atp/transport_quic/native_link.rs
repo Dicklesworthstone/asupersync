@@ -7643,6 +7643,13 @@ mod tests {
             ..QuicNeedMore::default()
         };
         stalled.observe_need_more(&cx, &config, &stalled_need);
+        let stalled_decision = stalled
+            .shared_decision()
+            .expect("rank-progress feedback should feed the shared controller");
+        assert!(
+            stalled_decision.bytes_in_flight > 0,
+            "rank-progress loss must make the shared controller see sender-side overflow"
+        );
         assert!(
             stalled.last_round_loss_fraction
                 > super::super::quic_aimd_loss_decrease_threshold(&config),
