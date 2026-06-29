@@ -295,6 +295,14 @@ struct BlockingPoolInner {
     live_max_threads: AtomicUsize,
     /// Current number of active threads.
     active_threads: AtomicUsize,
+    /// In-flight worker hand-offs: a retiring worker that observed pending work
+    /// announces a pending replacement here *before* it decrements
+    /// `active_threads`, and clears it only *after* the replacement spawn has
+    /// been attempted. This closes a shutdown race where `shutdown_and_wait`
+    /// could observe `active_threads == 0` in the window between the retiring
+    /// worker's decrement and the replacement spawn, declare a clean shutdown,
+    /// and leak the replacement's join handle (d679m7).
+    replacement_pending: AtomicUsize,
     /// Number of threads currently executing work.
     busy_threads: AtomicUsize,
     /// Number of pending tasks in queue.
@@ -527,6 +535,7 @@ impl BlockingPool {
             max_threads,
             live_max_threads: AtomicUsize::new(max_threads),
             active_threads: AtomicUsize::new(0),
+            replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
@@ -748,9 +757,16 @@ impl BlockingPool {
 
         let deadline = timeout_deadline(timeout, self.inner.time_getter);
 
-        // Wait for all threads to exit by monitoring active_threads counter.
-        // Threads decrement this counter when they exit the worker loop.
-        while self.inner.active_threads.load(Ordering::Acquire) > 0 {
+        // Wait until no worker is active AND no retiring worker has a
+        // replacement hand-off in flight. A retiring worker that finds pending
+        // work announces `replacement_pending` *before* it decrements
+        // `active_threads`, so gating on both counters closes the race where a
+        // replacement worker is spawned just after we would otherwise have
+        // declared a clean shutdown — which would leak the replacement's
+        // never-joined handle (d679m7).
+        while self.inner.active_threads.load(Ordering::Acquire) > 0
+            || self.inner.replacement_pending.load(Ordering::Acquire) > 0
+        {
             let remaining = timeout_remaining(deadline, self.inner.time_getter);
             if remaining.is_zero() {
                 return false;
@@ -763,7 +779,8 @@ impl BlockingPool {
             (self.inner.sleep_fn)(Duration::from_millis(10).min(remaining));
         }
 
-        // All threads have exited, now join the handles to clean up
+        // All workers have retired and no hand-off is pending, so every handle
+        // they published is final. Now join the handles to clean up.
         let handles = {
             let mut handles = self.inner.thread_handles.lock();
             drain_thread_handles(&mut handles)
@@ -1222,16 +1239,36 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
                 }
 
                 if !self.retired_with_claim {
-                    self.inner.active_threads.fetch_sub(1, Ordering::Relaxed);
-
                     // A spawn that linearized before shutdown may enqueue work
                     // while this worker is already on the exit path. If this
                     // was the last active worker, hand the task off before the
                     // pool goes quiescent and strands the accepted work.
-                    if blocking_pool_has_pending_work(self.inner) {
+                    //
+                    // Announce the hand-off in `replacement_pending` *before*
+                    // decrementing `active_threads`, and clear it only *after*
+                    // the replacement spawn has been attempted. Otherwise a
+                    // concurrent `shutdown_and_wait` could observe
+                    // `active_threads == 0` in the gap between this decrement
+                    // and the replacement spawn, declare a clean shutdown, and
+                    // leak the replacement's (never-joined) handle (d679m7). By
+                    // the time the announcement is cleared, a successful spawn
+                    // has already bumped `active_threads` back above zero.
+                    let pending = blocking_pool_has_pending_work(self.inner);
+                    if pending {
+                        self.inner
+                            .replacement_pending
+                            .fetch_add(1, Ordering::Release);
+                    }
+                    self.inner.active_threads.fetch_sub(1, Ordering::Release);
+                    if pending {
                         maybe_spawn_thread_on_inner(self.inner);
-                        let _guard = self.inner.mutex.lock();
-                        self.inner.condvar.notify_one();
+                        {
+                            let _guard = self.inner.mutex.lock();
+                            self.inner.condvar.notify_one();
+                        }
+                        self.inner
+                            .replacement_pending
+                            .fetch_sub(1, Ordering::Release);
                     }
                 }
             }
@@ -1532,6 +1569,7 @@ mod tests {
             max_threads: 4,
             live_max_threads: AtomicUsize::new(4),
             active_threads: AtomicUsize::new(0),
+            replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
@@ -1781,6 +1819,59 @@ mod tests {
         assert!(!result, "Expected timeout to return false");
         assert!(elapsed >= Duration::from_millis(50));
         assert!(elapsed < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn shutdown_and_wait_blocks_until_replacement_handoff_resolves() {
+        // A worker that retires with pending work hands the task off to a fresh
+        // replacement. It announces that hand-off in `replacement_pending`
+        // *before* it decrements `active_threads`, so there is a window where
+        // `active_threads == 0` yet a replacement (and its join handle) is still
+        // coming. shutdown_and_wait must keep waiting through that window;
+        // otherwise it reports a clean shutdown while leaking the replacement's
+        // never-joined handle (d679m7).
+        //
+        // Drive the window directly: announce a hand-off on a pool with no live
+        // workers and assert shutdown_and_wait does not complete until the
+        // hand-off is resolved. Pre-fix (gating only on `active_threads`) this
+        // returns immediately and the assertion below fails.
+        let pool = Arc::new(BlockingPool::new(0, 1));
+        pool.inner
+            .replacement_pending
+            .fetch_add(1, Ordering::Release);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let pool_w = Arc::clone(&pool);
+        let done_w = Arc::clone(&done);
+        let waiter = thread::spawn(move || {
+            let ok = pool_w.shutdown_and_wait(Duration::from_secs(5));
+            done_w.store(true, Ordering::Release);
+            ok
+        });
+
+        // While the hand-off is outstanding, shutdown_and_wait must keep waiting.
+        thread::sleep(Duration::from_millis(60));
+        assert!(
+            !done.load(Ordering::Acquire),
+            "shutdown_and_wait must block while a replacement hand-off is pending",
+        );
+
+        // Resolve the hand-off; shutdown_and_wait can now complete cleanly.
+        pool.inner
+            .replacement_pending
+            .fetch_sub(1, Ordering::Release);
+        let ok = waiter.join().expect("waiter thread joins");
+        assert!(ok, "clean shutdown once the replacement hand-off resolved");
+        assert_eq!(pool.active_threads(), 0);
+        assert_eq!(
+            pool.inner.replacement_pending.load(Ordering::Acquire),
+            0,
+            "no hand-off should remain outstanding",
+        );
+        assert!(
+            pool.inner.thread_handles.lock().is_empty(),
+            "no replacement handle should be left un-joined",
+        );
     }
 
     #[test]
@@ -2217,6 +2308,7 @@ mod tests {
             max_threads: 2,
             live_max_threads: AtomicUsize::new(2),
             active_threads: AtomicUsize::new(2),
+            replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
@@ -2322,6 +2414,7 @@ mod tests {
             max_threads: 2,
             live_max_threads: AtomicUsize::new(2),
             active_threads: AtomicUsize::new(2),
+            replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
@@ -2361,6 +2454,7 @@ mod tests {
             max_threads: 1,
             live_max_threads: AtomicUsize::new(1),
             active_threads: AtomicUsize::new(1),
+            replacement_pending: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),

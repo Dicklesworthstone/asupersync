@@ -15,9 +15,14 @@ use std::path::{Path, PathBuf};
 
 const KEY_STORE_SCHEMA_VERSION: u32 = 1;
 const FINGERPRINT_DOMAIN: &[u8] = b"ATP-IDENTITY-KEY-FINGERPRINT-V1\0";
-const MIN_SEED_DISTINCT_BYTES: usize = 8;
-const MIN_SEED_HAMMING_WEIGHT: u32 = 8;
-const MAX_SEED_HAMMING_WEIGHT: u32 = 248;
+// Seed-entropy sanity thresholds for 32-byte Ed25519 user seeds. Kept in parity
+// with the hardened `AuthKey` strength validator (`security::key`: 16/64/192,
+// br-asupersync-q3terg) so both identity-key paths reject the same class of
+// pathologically-low-entropy material (aasraf). These are a sanity guard, not
+// the security boundary — seeds come from a capability-explicit CSPRNG seam.
+const MIN_SEED_DISTINCT_BYTES: usize = 16;
+const MIN_SEED_HAMMING_WEIGHT: u32 = 64;
+const MAX_SEED_HAMMING_WEIGHT: u32 = 192;
 
 /// Stable fingerprint for a public identity key.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

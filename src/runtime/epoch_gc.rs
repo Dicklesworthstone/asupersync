@@ -1006,17 +1006,30 @@ impl EpochGC {
     /// accumulated cleanup work.
     ///
     /// Returns the number of cleanup work items processed.
+    ///
+    /// # Reclamation safety (aasraf)
+    ///
+    /// The "safe epoch" boundary used here is **time-gated**: it is whatever
+    /// `EpochCounter::try_advance` hands back, which is driven by elapsed time,
+    /// *not* by the minimum announced `LocalEpoch` across live threads
+    /// (`LocalEpoch::sync_to_global` / `is_behind` are currently unused). That is
+    /// sound today only because `CleanupWork` is self-contained (the registered
+    /// handlers are tracing/bookkeeping stubs, not pointer frees), so a thread
+    /// that is still lagging in an older epoch cannot observe freed memory. If
+    /// real epoch-protected pointer reclamation is ever attached to this queue,
+    /// the safe boundary MUST become `min(announced LocalEpoch)` instead of a
+    /// time-based estimate, or a lagging reader could see use-after-free.
     pub fn try_advance_and_cleanup(&self) -> usize {
         if !self.is_enabled() {
             return 0;
         }
 
         if let Some(new_epoch) = self.epoch_counter.try_advance() {
-            // Work enqueued while the global epoch was `new_epoch - 1` (or older)
-            // is now safe to reclaim: every thread that might have observed it
-            // has progressed to `new_epoch`. We pass `new_epoch` as the safe
-            // boundary so `process_safe_epochs` reclaims items with
-            // `epoch < new_epoch`.
+            // Reclaim work enqueued while the global epoch was `< new_epoch`.
+            // NOTE: `new_epoch` is a time-gated boundary, not a proof that every
+            // thread has progressed past the reclaimed epochs — see the
+            // reclamation-safety note on this method before attaching real
+            // pointer frees to `CleanupWork`.
             self.cleanup_queue.process_safe_epochs(new_epoch)
         } else {
             0

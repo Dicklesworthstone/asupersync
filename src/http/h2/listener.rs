@@ -1274,6 +1274,18 @@ fn dispatch_h2_request<F, Fut, R>(
 /// stage-1 warning immediately, the definitive stage-2 boundary one drain
 /// tick later, transport close at
 /// [`Connection::graceful_shutdown_complete`].
+/// Builds the inbound frame codec for a freshly-accepted connection, setting
+/// the decoder's accept limit to this listener's advertised
+/// `SETTINGS_MAX_FRAME_SIZE`. A fresh [`FrameCodec`] otherwise keeps the
+/// protocol default (16 KiB), which would reject conformant peer frames sized
+/// within a larger advertised limit. `max_frame_size` must be the LOCAL
+/// advertised value, never the peer's (br-asupersync-i1r9cw).
+fn frame_codec_for(max_frame_size: u32) -> FrameCodec {
+    let mut codec = FrameCodec::new();
+    codec.set_max_frame_size(max_frame_size);
+    codec
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn serve_h2_connection<F, Fut, R>(
@@ -1311,9 +1323,16 @@ where
     // the listener uses, so a virtual-time driver makes h2 deadlines (idle,
     // CONTINUATION, RST-window) deterministic in the lab runtime instead of the
     // connection silently reading the wall clock (br-asupersync-faekxk).
+    // Honor this listener's advertised SETTINGS_MAX_FRAME_SIZE as the inbound
+    // accept limit. Without this the codec keeps the protocol default (16 KiB)
+    // even when the local settings advertise a larger `max_frame_size`, so a
+    // conformant peer frame sized within the advertised limit would be wrongly
+    // rejected with FRAME_SIZE_ERROR. The accept limit is always the LOCAL
+    // advertised value, never the peer's (br-asupersync-i1r9cw).
+    let local_max_frame_size = settings.max_frame_size;
     let mut conn = Connection::server_with_time_getter(settings, time_getter);
     conn.queue_initial_settings();
-    let mut framed = Framed::new(stream, FrameCodec::new());
+    let mut framed = Framed::new(stream, frame_codec_for(local_max_frame_size));
 
     let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
     // Per-stream request assembly: headers arrive first, DATA accumulates
@@ -2816,6 +2835,43 @@ mod tests {
             );
             drop(guard);
         });
+    }
+
+    #[test]
+    fn frame_codec_for_honors_local_max_frame_size() {
+        use crate::bytes::BytesMut;
+        use crate::codec::Decoder;
+        use crate::http::h2::frame::DEFAULT_MAX_FRAME_SIZE;
+
+        // A conformant DATA frame on stream 1 whose payload (20000 bytes)
+        // exceeds the 16384 protocol default but fits inside a larger advertised
+        // SETTINGS_MAX_FRAME_SIZE. 9-byte header: length=20000 (0x004E20),
+        // type=DATA(0x0), flags=0, stream id=1.
+        let mut frame_bytes = vec![0x00, 0x4E, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        frame_bytes.resize(9 + 20_000, 0u8);
+
+        // The protocol-default accept limit (the pre-fix listener behavior)
+        // rejects the frame with FRAME_SIZE_ERROR.
+        let mut default_codec = frame_codec_for(DEFAULT_MAX_FRAME_SIZE);
+        let mut src = BytesMut::new();
+        src.extend_from_slice(&frame_bytes);
+        let err = default_codec
+            .decode(&mut src)
+            .expect_err("default 16 KiB accept limit must reject a 20000-byte frame");
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+
+        // A listener advertising max_frame_size=32768 accepts the same frame.
+        let mut wide_codec = frame_codec_for(32_768);
+        let mut src = BytesMut::new();
+        src.extend_from_slice(&frame_bytes);
+        let frame = wide_codec
+            .decode(&mut src)
+            .expect("decode succeeds under the advertised limit")
+            .expect("a full frame is available");
+        assert!(
+            matches!(frame, Frame::Data(_)),
+            "expected a DATA frame, got {frame:?}",
+        );
     }
 
     #[test]

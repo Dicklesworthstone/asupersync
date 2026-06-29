@@ -111,9 +111,17 @@ impl SlabToken {
         }
         #[cfg(target_pointer_width = "32")]
         {
-            Self {
-                index: (val & 0xFFFF) as u32,
-                generation: ((val >> 16) & 0xFFFF) as u32,
+            let index = (val & 0xFFFF) as u32;
+            let generation = ((val >> 16) & 0xFFFF) as u32;
+            // Index `0xFFFF` is reserved (live indices are `<= MAX_INDEX ==
+            // 0xFFFE`): it is the packed form of `invalid()`, so map it back to
+            // the canonical invalid token rather than a spurious live token
+            // (aasraf). This makes `from_usize(invalid().to_usize())` round-trip
+            // to `invalid()` on 32-bit.
+            if index == 0xFFFF {
+                Self::invalid()
+            } else {
+                Self { index, generation }
             }
         }
         #[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
@@ -137,18 +145,27 @@ impl SlabToken {
     pub const MAX_GENERATION: u32 = 0xFFFF;
 
     /// br-asupersync-rtiu1s — Maximum index value on 32-bit
-    /// platforms. Reduced from 0xFF_FFFF (16M slots) to 0xFFFF
+    /// platforms. Reduced from 0xFF_FFFF (16M slots) to 0xFFFE
     /// (64K slots) to make room for the widened generation field.
     /// 64K is comfortably above the typical I/O reactor working set
-    /// on a 32-bit host.
+    /// on a 32-bit host. The top index value `0xFFFF` is reserved as
+    /// the packed [`invalid`](Self::invalid) sentinel (aasraf) so a
+    /// live max-slot token can never alias it after a `usize`
+    /// round-trip; a live index is therefore `<= 0xFFFE`.
     #[cfg(target_pointer_width = "32")]
-    pub const MAX_INDEX: u32 = 0xFFFF;
+    pub const MAX_INDEX: u32 = 0xFFFE;
 
     /// Maximum index value on 64-bit platforms (lossless).
     #[cfg(target_pointer_width = "64")]
     pub const MAX_INDEX: u32 = u32::MAX;
 
     /// Returns an invalid token that will never match any slab entry.
+    ///
+    /// On 32-bit platforms the packed form (`to_usize`) folds to index bits
+    /// `0xFFFF`, which is reserved above [`MAX_INDEX`](Self::MAX_INDEX) so no
+    /// live token can produce it; [`from_usize`](Self::from_usize) maps it back
+    /// here, so the sentinel survives a `usize` round-trip without aliasing a
+    /// live max-slot token (aasraf).
     #[must_use]
     pub const fn invalid() -> Self {
         Self {

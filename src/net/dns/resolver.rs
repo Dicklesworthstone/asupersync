@@ -974,7 +974,7 @@ pub fn parse_resolv_conf_nameservers_for_test(contents: &str) -> Vec<SocketAddr>
 /// wire bytes (label compression pointer loops, oversized labels, truncated
 /// headers, malformed RR).
 pub fn parse_dns_response_for_fuzz(packet: &[u8], expected_id: u16) -> Result<(), DnsError> {
-    parse_dns_response(packet, expected_id).map(|_| ())
+    parse_dns_response(packet, expected_id, None).map(|_| ())
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -1242,7 +1242,30 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
     }))
 }
 
-fn parse_dns_response(packet: &[u8], expected_id: u16) -> Result<ParsedDnsResponse, DnsError> {
+/// Decodes the first question (name + qtype) from a DNS message, if present.
+///
+/// Used by the send paths to confirm a response echoes the question that was
+/// sent — basic off-path spoof resistance on top of the transaction id and the
+/// `connect()`ed socket (aasraf).
+fn first_question(packet: &[u8]) -> Option<(String, u16)> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let qdcount = u16::from_be_bytes([packet[4], packet[5]]);
+    if qdcount == 0 {
+        return None;
+    }
+    let mut offset = 12;
+    let name = decode_dns_name(packet, &mut offset).ok()?;
+    let qtype = read_u16(packet, &mut offset).ok()?;
+    Some((name, qtype))
+}
+
+fn parse_dns_response(
+    packet: &[u8],
+    expected_id: u16,
+    expected_question: Option<&(String, u16)>,
+) -> Result<ParsedDnsResponse, DnsError> {
     if packet.len() < 12 {
         return Err(DnsError::Protocol("DNS packet too short".to_string()));
     }
@@ -1267,10 +1290,29 @@ fn parse_dns_response(packet: &[u8], expected_id: u16) -> Result<ParsedDnsRespon
     let authority_count = usize::from(read_u16(packet, &mut offset)?);
     let additional_count = usize::from(read_u16(packet, &mut offset)?);
 
-    for _ in 0..question_count {
-        let _ = decode_dns_name(packet, &mut offset)?;
-        let _ = read_u16(packet, &mut offset)?;
-        let _ = read_u16(packet, &mut offset)?;
+    let mut first_seen: Option<(String, u16)> = None;
+    for index in 0..question_count {
+        let qname = decode_dns_name(packet, &mut offset)?;
+        let qtype = read_u16(packet, &mut offset)?;
+        let _qclass = read_u16(packet, &mut offset)?;
+        if index == 0 {
+            first_seen = Some((qname, qtype));
+        }
+    }
+
+    // Off-path spoof resistance: a genuine response echoes the question we
+    // asked. Reject any response whose first question does not match the sent
+    // query name (case-insensitively, per RFC 4343) and qtype (aasraf).
+    if let Some((exp_name, exp_qtype)) = expected_question {
+        let matches = matches!(
+            &first_seen,
+            Some((qname, qtype)) if qtype == exp_qtype && qname.eq_ignore_ascii_case(exp_name)
+        );
+        if !matches {
+            return Err(DnsError::Protocol(
+                "DNS response question does not match the query".to_string(),
+            ));
+        }
     }
 
     // Cap pre-allocation to prevent attacker-controlled answer_count
@@ -1352,7 +1394,8 @@ fn send_udp_dns_query(
 
     let mut packet = [0u8; 2048];
     let len = socket.recv(&mut packet).map_err(|err| dns_io_error(&err))?;
-    parse_dns_response(&packet[..len], expected_id)
+    let expected_question = first_question(query);
+    parse_dns_response(&packet[..len], expected_id, expected_question.as_ref())
 }
 
 fn send_tcp_dns_query(
@@ -1387,7 +1430,8 @@ fn send_tcp_dns_query(
         .read_exact(&mut packet)
         .map_err(|err| dns_io_error(&err))?;
     let _ = stream.shutdown(std::net::Shutdown::Both);
-    parse_dns_response(&packet, expected_id)
+    let expected_question = first_question(query);
+    parse_dns_response(&packet, expected_id, expected_question.as_ref())
 }
 
 fn query_nameserver(
@@ -2114,6 +2158,48 @@ mod tests {
         );
 
         crate::test_complete!("decode_dns_name_consumes_zero_terminator");
+    }
+
+    #[test]
+    fn parse_dns_response_rejects_mismatched_question() {
+        init_test("parse_dns_response_rejects_mismatched_question");
+
+        let id = 0x1234;
+        let query = build_dns_query("example.test", DnsQueryType::A, id).expect("build DNS query");
+        let expected = first_question(&query);
+        crate::assert_with_log!(
+            expected.is_some(),
+            "first_question decodes the sent question",
+            true,
+            expected.is_some()
+        );
+
+        // A response echoing the same question (QR bit set) is accepted.
+        let mut matching = query.clone();
+        matching[2] |= 0x80; // set QR: this is now a response
+        let ok = parse_dns_response(&matching, id, expected.as_ref()).is_ok();
+        crate::assert_with_log!(ok, "matching question accepted", true, ok);
+
+        // A response echoing a different question name is rejected.
+        let mut spoof =
+            build_dns_query("evil.test", DnsQueryType::A, id).expect("build spoof DNS query");
+        spoof[2] |= 0x80;
+        let rejected = matches!(
+            parse_dns_response(&spoof, id, expected.as_ref()),
+            Err(DnsError::Protocol(_))
+        );
+        crate::assert_with_log!(rejected, "mismatched question rejected", true, rejected);
+
+        // Without an expected question (e.g. the fuzz entry), the check is skipped.
+        let skipped = parse_dns_response(&spoof, id, None).is_ok();
+        crate::assert_with_log!(
+            skipped,
+            "no expected question skips the check",
+            true,
+            skipped
+        );
+
+        crate::test_complete!("parse_dns_response_rejects_mismatched_question");
     }
 
     #[test]

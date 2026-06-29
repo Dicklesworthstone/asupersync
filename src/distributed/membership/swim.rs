@@ -332,6 +332,8 @@ pub enum SwimConfigError {
     ZeroMaxPiggyback,
     /// `awareness_max` was below `1` (the health multiplier must be `>= 1`).
     AwarenessMaxTooSmall,
+    /// `max_members` was zero (not even the local seed peers could be tracked).
+    ZeroMaxMembers,
 }
 
 impl std::fmt::Display for SwimConfigError {
@@ -347,6 +349,7 @@ impl std::fmt::Display for SwimConfigError {
             Self::ZeroGossipRetransmitMult => "gossip_retransmit_mult must be >= 1",
             Self::ZeroMaxPiggyback => "max_piggyback must be >= 1",
             Self::AwarenessMaxTooSmall => "awareness_max must be >= 1",
+            Self::ZeroMaxMembers => "max_members must be >= 1",
         };
         f.write_str(msg)
     }
@@ -386,6 +389,17 @@ pub struct SwimConfig {
     pub max_piggyback: usize,
     /// Lifeguard local-health-multiplier cap.
     pub awareness_max: i32,
+    /// Fail-closed upper bound on the number of distinct tracked members.
+    ///
+    /// SWIM has no source authentication on its UDP transport, so a peer (or a
+    /// spoofed source) can gossip `Alive` rumors naming arbitrarily many
+    /// fabricated node ids. Without a bound, [`adopt`](SwimState::adopt) would
+    /// grow the members map (and re-flood each fabricated rumor) without limit.
+    /// New members learned past this cap are rejected and not re-disseminated,
+    /// which bounds both memory and gossip amplification. Updates to members
+    /// already tracked are unaffected. Raise this for clusters larger than the
+    /// default (qe0zdf).
+    pub max_members: usize,
 }
 
 impl Default for SwimConfig {
@@ -399,6 +413,10 @@ impl Default for SwimConfig {
             gossip_retransmit_mult: 4,
             max_piggyback: 8,
             awareness_max: 8,
+            // Generous default: well above any realistic cluster so legitimate
+            // membership is never rejected, while still bounding the unbounded
+            // growth/amplification an unauthenticated gossip flood could cause.
+            max_members: 65_536,
         }
     }
 }
@@ -429,6 +447,9 @@ impl SwimConfig {
         }
         if self.awareness_max < 1 {
             return Err(SwimConfigError::AwarenessMaxTooSmall);
+        }
+        if self.max_members == 0 {
+            return Err(SwimConfigError::ZeroMaxMembers);
         }
         Ok(())
     }
@@ -604,8 +625,9 @@ impl Swim {
         if peer == self.local || self.members.contains_key(&peer) {
             return;
         }
-        self.adopt(now, peer.clone(), MemberState::Alive, 0, None);
-        self.gossip.queue(Rumor::alive(peer, 0));
+        if self.adopt(now, peer.clone(), MemberState::Alive, 0, None) {
+            self.gossip.queue(Rumor::alive(peer, 0));
+        }
     }
 
     /// Declares that the local node is voluntarily leaving the cluster. Bumps
@@ -679,6 +701,11 @@ impl Swim {
 
     /// Records a state transition for `node`, emitting an event on a genuine
     /// change. Precedence must be checked by the caller.
+    ///
+    /// Returns `true` if the state was recorded. A brand-new member is rejected
+    /// (returning `false`, recording nothing) once the table already holds
+    /// `max_members` entries, so callers must not re-flood a rumor whose subject
+    /// was not adopted. Updates to already-tracked members are always recorded.
     fn adopt(
         &mut self,
         now: Millis,
@@ -686,8 +713,16 @@ impl Swim {
         state: MemberState,
         incarnation: u64,
         accuser: Option<NodeId>,
-    ) {
+    ) -> bool {
         let is_new = !self.members.contains_key(&node);
+        if is_new && self.members.len() >= self.config.max_members {
+            // Fail closed: refuse to grow the membership table past the
+            // configured bound. SWIM gossip is unauthenticated, so without this
+            // a spoofed flood of `Alive` rumors naming fabricated node ids would
+            // grow the map (and the re-flood amplification) without limit
+            // (qe0zdf).
+            return false;
+        }
         let prev_state = {
             let member = self
                 .members
@@ -719,6 +754,7 @@ impl Swim {
                 incarnation,
             });
         }
+        true
     }
 
     /// Applies a piggybacked rumor to the local view.
@@ -733,14 +769,18 @@ impl Swim {
             None => true,
         };
         if supersede {
-            self.adopt(
+            // Only re-disseminate the rumor if its subject was actually
+            // adopted — a rumor naming a fabricated node past `max_members` is
+            // dropped here rather than amplified cluster-wide (qe0zdf).
+            if self.adopt(
                 now,
                 node,
                 rumor.target_state(),
                 rumor.incarnation(),
                 rumor.accuser(),
-            );
-            self.gossip.queue(rumor.clone());
+            ) {
+                self.gossip.queue(rumor.clone());
+            }
         } else if let Rumor::Suspect {
             incarnation, from, ..
         } = rumor
@@ -786,8 +826,9 @@ impl Swim {
         if from == &self.local || self.members.contains_key(from) {
             return;
         }
-        self.adopt(now, from.clone(), MemberState::Alive, 0, None);
-        self.gossip.queue(Rumor::alive(from.clone(), 0));
+        if self.adopt(now, from.clone(), MemberState::Alive, 0, None) {
+            self.gossip.queue(Rumor::alive(from.clone(), 0));
+        }
     }
 
     fn handle_ack(&mut self, seq: u64, out: &mut Vec<Outgoing>) {
@@ -1058,6 +1099,7 @@ mod tests {
         assert_eq!(c.suspicion_max_timeout_mult, 6);
         assert_eq!(c.gossip_retransmit_mult, 4);
         assert_eq!(c.awareness_max, 8);
+        assert_eq!(c.max_members, 65_536);
     }
 
     #[test]
@@ -1099,6 +1141,63 @@ mod tests {
             bad(&|c| c.awareness_max = 0),
             Err(SwimConfigError::AwarenessMaxTooSmall)
         );
+        assert_eq!(
+            bad(&|c| c.max_members = 0),
+            Err(SwimConfigError::ZeroMaxMembers)
+        );
+    }
+
+    #[test]
+    fn members_capped_at_max_members_fail_closed() {
+        // SWIM gossip is unauthenticated, so a flood of fabricated node ids must
+        // not grow the members table (or the re-flood amplification) without
+        // limit. New members past `max_members` are rejected fail-closed, while
+        // updates to already-tracked members still apply (qe0zdf).
+        let mut config = cfg();
+        config.max_members = 3;
+        let mut s = Swim::new(node("local"), config, 1);
+
+        // Fill the table up to the cap via the join path.
+        for p in ["a", "b", "c"] {
+            s.add_peer(0, node(p));
+        }
+        assert_eq!(s.member_count(), 3);
+        let _ = s.drain_events();
+
+        // A brand-new node past the cap is rejected: not tracked, no event.
+        s.add_peer(0, node("d"));
+        assert_eq!(s.member_count(), 3, "join past the cap must be rejected");
+        assert!(
+            s.state_of(&node("d")).is_none(),
+            "rejected node must not be tracked",
+        );
+
+        // The gossip-driven path (the actual attack vector) is bounded too: a
+        // superseding Alive rumor about a fabricated node past the cap adopts
+        // nothing and emits no membership event to re-flood.
+        s.apply_rumor(0, &Rumor::alive(node("evil"), 9));
+        assert_eq!(
+            s.member_count(),
+            3,
+            "gossip about a new node past the cap is dropped"
+        );
+        assert!(s.state_of(&node("evil")).is_none());
+        let events = s.drain_events();
+        assert!(
+            events
+                .iter()
+                .all(|e| e.node != node("d") && e.node != node("evil")),
+            "no membership event for a rejected node (nothing to amplify)",
+        );
+
+        // An update to an already-tracked member still applies even at the cap.
+        s.apply_rumor(0, &Rumor::suspect(node("a"), 1, node("b")));
+        assert_eq!(
+            s.state_of(&node("a")),
+            Some(MemberState::Suspect),
+            "updates to existing members are unaffected by the cap",
+        );
+        assert_eq!(s.member_count(), 3);
     }
 
     // ---- precedence (exhaustive) -----------------------------------------

@@ -16,7 +16,13 @@
 //! - **Backpressure**: Sinks apply flow control to prevent memory exhaustion
 //! - **Reliability**: Transmission failures are detected and reported
 //! - **Efficiency**: Batch operations and waker deduplication minimize overhead
-//! - **Cancellation safety**: Partial sends are handled correctly on cancellation
+//! - **Cancellation behavior**: The one-phase `send` convenience future is
+//!   *not* cancel-safe — a symbol that has not yet been accepted by the sink
+//!   when the future is cancelled is dropped (the resulting [`SinkError`] does
+//!   not carry the un-sent payload). Callers that require cancel-safe, no-loss
+//!   delivery must use the two-phase reserve/commit channels in
+//!   [`crate::channel`] (`mpsc`/`oneshot`), which hand the value back on a
+//!   cancelled reservation instead of losing it (aasraf).
 
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::transport::error::SinkError;
@@ -149,6 +155,12 @@ impl<S: SymbolSink + ?Sized> SymbolSinkExt for S {}
 const SEND_ALL_COOPERATIVE_BUDGET: usize = 1024;
 
 /// Future for `send()`.
+///
+/// This one-phase send is *not* cancel-safe: if the future is cancelled (or the
+/// ambient `Cx` is cancelled) before the sink accepts the symbol, the symbol
+/// held in `symbol` is dropped and the returned [`SinkError`] does not carry it.
+/// For cancel-safe, no-loss delivery use the two-phase reserve/commit channels
+/// in [`crate::channel`] instead (aasraf).
 pub struct SendFuture<'a, S: ?Sized> {
     sink: &'a mut S,
     symbol: Option<AuthenticatedSymbol>,

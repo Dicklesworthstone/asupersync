@@ -30,8 +30,15 @@ use std::collections::BTreeMap;
 pub struct MembershipView {
     /// Latest known kind per node.
     states: BTreeMap<NodeId, MembershipKind>,
-    /// Append-only event log; observers track a cursor into it.
+    /// Retained suffix of the append-only event log; observers track an
+    /// absolute cursor into the stream (see [`base`](Self::base)).
     log: Vec<MembershipEvent>,
+    /// Number of events dropped from the front of the stream by
+    /// [`compact`](Self::compact). Cursors stay absolute across the whole
+    /// stream's history, so `log[i]` has absolute index `base + i`. Without
+    /// compaction this stays `0` and the view behaves as a plain append-only
+    /// log.
+    base: usize,
 }
 
 impl MembershipView {
@@ -71,20 +78,48 @@ impl MembershipView {
             .collect()
     }
 
-    /// The total number of events observed (the end cursor of the stream).
+    /// The total number of events observed (the end cursor of the stream),
+    /// including any prefix already dropped by [`compact`](Self::compact).
     #[must_use]
     pub fn event_count(&self) -> usize {
-        self.log.len()
+        self.base + self.log.len()
     }
 
-    /// The watchable event stream: events appended at or after `cursor`. An
-    /// observer remembers the returned slice's length plus its old cursor as its
-    /// new cursor, so it never re-processes an event. A cursor past the end
-    /// yields an empty slice.
+    /// The absolute cursor below which events have been dropped by
+    /// [`compact`](Self::compact). An observer whose cursor is `< compact_base`
+    /// has missed events and should reconcile against the current
+    /// [`alive_peers`](Self::alive_peers) snapshot.
+    #[must_use]
+    pub fn compact_base(&self) -> usize {
+        self.base
+    }
+
+    /// The watchable event stream: events appended at or after `cursor` (an
+    /// absolute stream index). An observer remembers its old cursor plus the
+    /// returned slice's length as its new cursor, so it never re-processes an
+    /// event. A cursor past the end yields an empty slice; a cursor below
+    /// [`compact_base`](Self::compact_base) (the observer fell behind a
+    /// compaction) yields the full retained suffix so it can resynchronize.
     #[must_use]
     pub fn events_since(&self, cursor: usize) -> &[MembershipEvent] {
-        let start = cursor.min(self.log.len());
+        let start = cursor.saturating_sub(self.base).min(self.log.len());
         &self.log[start..]
+    }
+
+    /// Drops the consumed event prefix strictly below `low_watermark` (an
+    /// absolute cursor — typically the minimum cursor across all live
+    /// observers), bounding the otherwise unbounded append-only log under
+    /// long-lived cluster churn. This is a no-op when nothing is below the
+    /// watermark. Observers whose cursor falls below the new
+    /// [`compact_base`](Self::compact_base) will receive the full retained
+    /// suffix from [`events_since`](Self::events_since) and should reconcile
+    /// against [`alive_peers`](Self::alive_peers) (aasraf).
+    pub fn compact(&mut self, low_watermark: usize) {
+        let drop = low_watermark.saturating_sub(self.base).min(self.log.len());
+        if drop > 0 {
+            self.log.drain(0..drop);
+            self.base += drop;
+        }
     }
 }
 
@@ -148,5 +183,39 @@ mod tests {
     fn cursor_past_end_is_empty() {
         let view = MembershipView::new();
         assert!(view.events_since(99).is_empty());
+    }
+
+    #[test]
+    fn compact_bounds_log_and_keeps_absolute_cursors() {
+        let mut view = MembershipView::new();
+        for kind in [
+            MembershipKind::Alive,
+            MembershipKind::Suspect,
+            MembershipKind::Dead,
+        ] {
+            view.apply(event("a", kind, 0));
+        }
+        view.apply(event("b", MembershipKind::Alive, 0));
+        assert_eq!(view.event_count(), 4);
+
+        // A caller up to cursor 2 compacts the consumed prefix.
+        view.compact(2);
+        assert_eq!(view.compact_base(), 2, "two events dropped from the front");
+        // The total stream cursor is unchanged — cursors stay absolute.
+        assert_eq!(view.event_count(), 4);
+        // An observer at the watermark still sees exactly the un-consumed tail.
+        let tail = view.events_since(2);
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].kind, MembershipKind::Dead);
+
+        // A laggard below the new base gets the full retained suffix to resync.
+        assert_eq!(view.events_since(0).len(), 2);
+
+        // Compaction never drops un-consumed events and is idempotent below base.
+        view.compact(2);
+        assert_eq!(view.compact_base(), 2);
+        // The membership snapshot is untouched by log compaction.
+        assert_eq!(view.kind_of(&node("a")), Some(MembershipKind::Dead));
+        assert_eq!(view.kind_of(&node("b")), Some(MembershipKind::Alive));
     }
 }
