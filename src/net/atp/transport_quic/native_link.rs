@@ -78,6 +78,7 @@ use crate::net::atp::transport_common::{
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::handshake_driver::{
     ATP_QUIC_ALPN, HandshakeLevel, QuicHandshakeDriver, client_handshake_over_udp,
+    is_stale_handshake_packet_error,
 };
 use crate::net::quic_native::tls::{
     PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket, ProtectionProof,
@@ -4067,7 +4068,7 @@ async fn send_server_handshake_flight(
     dst_cid: ConnectionId,
     src_cid: ConnectionId,
     packet_number: &mut u64,
-) -> Result<(), QuicTransportError> {
+) -> Result<Vec<OutgoingPacket>, QuicTransportError> {
     let segments = driver.pump_outbound().map_err(map_tls_error)?;
     let mut packets = Vec::new();
     for segment in segments {
@@ -4090,7 +4091,7 @@ async fn send_server_handshake_flight(
             .await
             .map_err(map_udp_error)?;
     }
-    Ok(())
+    Ok(packets)
 }
 
 /// Accept one QUIC client on a bound server `endpoint`: run the real TLS-1.3
@@ -4124,6 +4125,7 @@ async fn accept(
     let mut server_pn = 0u64;
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
     let mut early_data: Vec<ReceivedPacket> = Vec::new();
+    let mut last_flight: Vec<OutgoingPacket> = Vec::new();
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
@@ -4147,14 +4149,24 @@ async fn accept(
         };
         for packet in received {
             if is_long_header(&packet.data) {
-                let client_cid = driver
-                    .recv_handshake_packet(&packet.data)
-                    .map_err(map_tls_error)?;
+                let client_cid = match driver.recv_handshake_packet(&packet.data) {
+                    Ok(client_cid) => client_cid,
+                    Err(err) if is_stale_handshake_packet_error(&err) => {
+                        if !last_flight.is_empty() {
+                            endpoint
+                                .send_batch(cx, &last_flight)
+                                .await
+                                .map_err(map_udp_error)?;
+                        }
+                        continue;
+                    }
+                    Err(err) => return Err(map_tls_error(err)),
+                };
                 if peer.is_none() {
                     peer = Some((packet.src_addr, client_cid));
                 }
                 if let Some((addr, dst_cid)) = peer {
-                    send_server_handshake_flight(
+                    let sent = send_server_handshake_flight(
                         cx,
                         &mut endpoint,
                         &mut driver,
@@ -4164,6 +4176,14 @@ async fn accept(
                         &mut server_pn,
                     )
                     .await?;
+                    if !sent.is_empty() {
+                        last_flight = sent;
+                    } else if !driver.is_complete() && !last_flight.is_empty() {
+                        endpoint
+                            .send_batch(cx, &last_flight)
+                            .await
+                            .map_err(map_udp_error)?;
+                    }
                 }
             } else {
                 // The client completed the handshake first and is already sending
@@ -5740,7 +5760,8 @@ async fn run_sender_session(
                             sender_delivery_loss_for_repair_trace,
                             config.max_feedback_rounds,
                             feedback_rounds > config.max_feedback_rounds,
-                            super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                            need.repair_symbol_round_cap
+                                .unwrap_or(super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64),
                             symbols_sent,
                             tail_aimd.last_round_symbols_sent,
                             tail_aimd.last_round_pacing_rate_bps,
@@ -6054,7 +6075,8 @@ async fn run_sender_session(
                     sender_delivery_loss_for_repair_trace,
                     config.max_feedback_rounds,
                     feedback_rounds > config.max_feedback_rounds,
-                    super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                    need.repair_symbol_round_cap
+                        .unwrap_or(super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64),
                     symbols_sent,
                     aimd.last_round_symbols_sent,
                     aimd.last_round_pacing_rate_bps,
@@ -6468,7 +6490,10 @@ impl NativeReceiverIntakeStats {
         let pending_rank_deficit = need.pending_rank_deficit.unwrap_or(0).to_string();
         let pending_decode_jobs = need.pending_decode_jobs.unwrap_or(0).to_string();
         let repair_block_requests = super::quic_repair_block_request_summary(&need.repair_blocks);
-        let repair_symbol_round_cap = super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
+        let repair_symbol_round_cap = need
+            .repair_symbol_round_cap
+            .unwrap_or(super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64)
+            .to_string();
         let repair_block_request_cap =
             super::MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
         let drain_calls = self.drain_calls.to_string();
@@ -7736,10 +7761,12 @@ async fn run_receiver_session(
                 round_symbols_observed,
                 round_complete.round_symbols_sent,
             );
+            let repair_symbol_round_cap =
+                super::quic_repair_symbol_round_cap(config, round_loss_fraction);
             let (repair_blocks, repair_accounting) = super::block_repair_requests_with_accounting(
                 &decoders,
                 config,
-                super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                repair_symbol_round_cap,
                 round_loss_fraction,
                 next_feedback_round,
             );
@@ -7758,6 +7785,9 @@ async fn run_receiver_session(
                 ),
                 repair_request_gap_to_target_symbols: Some(
                     repair_accounting.request_gap_to_target_symbols,
+                ),
+                repair_symbol_round_cap: Some(
+                    u64::try_from(repair_symbol_round_cap).unwrap_or(u64::MAX),
                 ),
                 pending_rank: Some(progress.rank),
                 pending_rank_columns: Some(progress.rank_columns),
@@ -7803,7 +7833,7 @@ async fn run_receiver_session(
                 symbols_accepted,
                 config.max_feedback_rounds,
                 next_feedback_round > config.max_feedback_rounds,
-                super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                repair_symbol_round_cap,
                 repair_detail,
             );
             super::quic_progress(format_args!(

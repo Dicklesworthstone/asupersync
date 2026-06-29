@@ -88,6 +88,7 @@ const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
 const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
+const QUIC_AUTO_MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 const RQ_LOSSY_TAIL_DRAIN_ENABLE_LOSS: f64 = 0.005;
 const RQ_BROKEN_TAIL_DRAIN_ENABLE_LOSS: f64 = 0.05;
 const RQ_BAD_LINK_TAIL_DRAIN_MS: u64 = 40;
@@ -423,8 +424,20 @@ fn parse_max_block_size_bytes(value: &str) -> Result<usize, String> {
 
 impl MaxBlockSizeArg {
     fn effective(self, symbol_size: u16) -> Result<usize, String> {
+        self.effective_with_auto(symbol_size, AUTO_MAX_BLOCK_SIZE)
+    }
+
+    fn effective_for_quic(self, symbol_size: u16) -> Result<usize, String> {
+        self.effective_with_auto(symbol_size, QUIC_AUTO_MAX_BLOCK_SIZE)
+    }
+
+    fn effective_with_auto(
+        self,
+        symbol_size: u16,
+        auto_max_block_size: usize,
+    ) -> Result<usize, String> {
         match self {
-            Self::Auto => normalize_max_block_size(symbol_size, AUTO_MAX_BLOCK_SIZE),
+            Self::Auto => normalize_max_block_size(symbol_size, auto_max_block_size),
             Self::Bytes(bytes) => normalize_max_block_size(symbol_size, bytes),
         }
     }
@@ -843,7 +856,7 @@ fn quic_config_send(
 
     let base = QuicConfig {
         symbol_size: args.symbol_size,
-        max_block_size: args.max_block_size.effective(args.symbol_size)?,
+        max_block_size: args.max_block_size.effective_for_quic(args.symbol_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
         max_transfer_bytes: args.max_bytes,
@@ -885,7 +898,7 @@ fn quic_config_recv(
 
     let base = QuicConfig {
         symbol_size: args.symbol_size,
-        max_block_size: args.max_block_size.effective(args.symbol_size)?,
+        max_block_size: args.max_block_size.effective_for_quic(args.symbol_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
         max_transfer_bytes: args.max_bytes,
@@ -4888,6 +4901,19 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         );
         assert_eq!(MaxBlockSizeArg::Auto.remote_arg(), "auto");
         assert_eq!(MaxBlockSizeArg::Bytes(512 * 1024).remote_arg(), "524288");
+    }
+
+    #[test]
+    fn max_block_size_arg_auto_uses_quic_multimegabyte_default() {
+        assert_eq!(
+            MaxBlockSizeArg::Auto.effective_for_quic(1024),
+            Ok(QUIC_AUTO_MAX_BLOCK_SIZE)
+        );
+        assert_eq!(
+            MaxBlockSizeArg::Bytes(512 * 1024).effective_for_quic(1024),
+            Ok(512 * 1024)
+        );
+        assert!(QUIC_AUTO_MAX_BLOCK_SIZE > AUTO_MAX_BLOCK_SIZE);
     }
 
     #[test]

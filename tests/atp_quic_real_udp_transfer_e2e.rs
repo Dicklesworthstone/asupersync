@@ -152,7 +152,7 @@ struct Configs {
 // Loopback transfers complete in well under a second; tight timeouts keep any
 // regression from hanging the suite for the 60s production default.
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_BOUNDED_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
+const DEFAULT_QUIC_SOURCE_SYMBOLS_PER_BLOCK: usize = 4096;
 const LOSSY_PROXY_TIMEOUT: Duration = Duration::from_secs(75);
 
 fn tighten_timeouts(cfg: &mut QuicConfig) {
@@ -161,16 +161,16 @@ fn tighten_timeouts(cfg: &mut QuicConfig) {
     cfg.accept_timeout = TEST_TIMEOUT;
 }
 
-fn assert_default_bounded_k512(cfg: &QuicConfig) {
+fn assert_default_quic_k4096(cfg: &QuicConfig) {
     assert_eq!(cfg.symbol_size, DEFAULT_SYMBOL_SIZE);
     assert_eq!(cfg.max_block_size, DEFAULT_MAX_BLOCK_SIZE);
     assert_eq!(
         cfg.max_block_size / usize::from(cfg.symbol_size),
-        DEFAULT_BOUNDED_SOURCE_SYMBOLS_PER_BLOCK
+        DEFAULT_QUIC_SOURCE_SYMBOLS_PER_BLOCK
     );
     assert_eq!(
         DEFAULT_MAX_BLOCK_SIZE,
-        usize::from(DEFAULT_SYMBOL_SIZE) * DEFAULT_BOUNDED_SOURCE_SYMBOLS_PER_BLOCK
+        usize::from(DEFAULT_SYMBOL_SIZE) * DEFAULT_QUIC_SOURCE_SYMBOLS_PER_BLOCK
     );
 }
 
@@ -701,6 +701,42 @@ fn real_udp_quic_transfer_multiblock_authenticated() {
 }
 
 #[test]
+fn real_udp_quic_large_block_datagram_transfer_does_not_error() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("large-block.bin");
+    let payload: Vec<u8> = (0..(8 * 1024 * 1024) as u32)
+        .map(|i| (i.wrapping_mul(29).wrapping_add(i / 257).wrapping_add(17) % 251) as u8)
+        .collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.max_block_size = 8 * 1024 * 1024;
+    cfg.recv.max_block_size = 8 * 1024 * 1024;
+    cfg.send.symbol_size = 4096;
+    cfg.recv.symbol_size = 4096;
+    cfg.send.round0_loss_target = 0.10;
+    cfg.recv.round0_loss_target = 0.10;
+    cfg.send.repair_overhead = 1.05;
+    cfg.recv.repair_overhead = 1.05;
+
+    let (send_res, recv_res) = run_transfer(cfg.send, cfg.recv, &source, dst.path());
+    let send_res = send_res.unwrap_or_else(|err| {
+        panic!("explicit 8MiB QUIC block sender should not error: {err:?}; receiver={recv_res:?}")
+    });
+    let recv_res = recv_res.expect("explicit 8MiB QUIC block receiver commits");
+
+    assert_receive_report_counters(&send_res, &recv_res, payload.len() as u64, 1);
+    assert_eq!(send_res.bytes_sent, payload.len() as u64);
+    assert_eq!(
+        std::fs::read(dst.path().join("large-block.bin")).expect("read committed"),
+        payload,
+        "large-block QUIC DATAGRAM transfer must reconstruct exact bytes"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
+#[test]
 fn real_udp_quic_transfer_recovers_from_symbol_loss() {
     // Datagram loss -> K-of-N decode -> verify -> commit. The sender sprays a
     // generous repair tail and the link deliberately drops every 4th symbol; the
@@ -715,7 +751,7 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
     std::fs::write(&source, &payload).expect("write source");
 
     let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(0xC0FFEE));
-    assert_default_bounded_k512(&send);
+    assert_default_quic_k4096(&send);
     // 200% repair overhead so K-of-N recovery survives losing every 4th symbol.
     send.repair_overhead = 3.0;
     send.debug_drop_one_in = 4;
@@ -723,7 +759,7 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
     tighten_timeouts(&mut send);
 
     let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(0xC0FFEE));
-    assert_default_bounded_k512(&recv);
+    assert_default_quic_k4096(&recv);
     recv.repair_overhead = 3.0;
     recv.server_tls = Some(server_tls());
     tighten_timeouts(&mut recv);
@@ -757,8 +793,8 @@ fn real_udp_quic_multiblock_lossy_proxy_recovers_with_reordered_duplicates() {
     let mut cfg = authenticated_configs(0x0001_0CC2);
     cfg.send.repair_overhead = 1.0;
     cfg.recv.repair_overhead = 1.0;
-    cfg.send.round0_loss_target = 0.0;
-    cfg.recv.round0_loss_target = 0.0;
+    cfg.send.round0_loss_target = 0.10;
+    cfg.recv.round0_loss_target = 0.10;
     cfg.send.max_block_size = 64 * 1024;
     cfg.recv.max_block_size = 64 * 1024;
     cfg.send.idle_timeout = Duration::from_secs(45);

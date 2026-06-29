@@ -102,9 +102,6 @@ use crate::net::atp::transport_common::{
     flat_merkle_root_from_slices, hash_file_streaming, hex_encode, metadata_commitment,
     read_entry_metadata,
 };
-use crate::net::atp::transport_rq::{
-    RqConfig, RqError, effective_max_block_size_for_largest_entry as rq_effective_max_block_size,
-};
 use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
     QuicConnection, QuicPathStats, QuicTransportMachine, StreamDirection, StreamId, StreamRole,
@@ -174,14 +171,14 @@ pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 /// its envelope fits a single QUIC DATAGRAM well under a 1500-byte path MTU.
 pub const DEFAULT_SYMBOL_SIZE: u16 = 1024;
 
-/// Default RaptorQ source-block size in bytes.
+/// Default RaptorQ source-block size in bytes for QUIC DATAGRAM transfers.
 ///
-/// With 1 KiB symbols this targets K ~= 512 source symbols per block, matching
-/// the RQ transport's effective block plan for normal transfer entries. The
-/// sender carries this value in the QUIC Hello and the receiver rejects
+/// With 1 KiB symbols this targets K ~= 4096 source symbols per block, so a
+/// 50 MiB object uses 13 blocks instead of the previous 100-block K512 plan.
+/// The sender carries this value in the QUIC Hello and the receiver rejects
 /// mismatches, so mixed-version peers fail closed instead of silently decoding
 /// with different block geometry.
-pub const DEFAULT_MAX_BLOCK_SIZE: usize = 512 * 1024;
+pub const DEFAULT_MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
 /// Default ceiling on a single QUIC DATAGRAM's application payload.
 ///
@@ -243,7 +240,14 @@ const MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
 const MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND: usize = 16_384;
 
 /// Maximum targeted fresh repair symbols accepted in one feedback round.
+///
+/// This is a protocol safety ceiling. Lossy native QUIC paths use a dynamic,
+/// path-rate-matched lower cap before emitting `NeedMore`, so the repair round
+/// fits the pipe instead of self-dropping in the kernel queue.
 const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 1 << 20;
+const QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT: usize = 256;
+const QUIC_REPAIR_REQUEST_PACING_WINDOW_MILLIS: u64 = 2_000;
+const QUIC_REPAIR_REQUEST_MIN_SYMBOLS_PER_ROUND: usize = 64;
 
 /// Maximum native QUIC DATAGRAM symbols decoded before returning to the async
 /// receiver loop.
@@ -269,10 +273,10 @@ const QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 64;
 /// decode falls back to the existing inline path until ready jobs drain.
 const QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize = 64;
 /// Keep tiny encrypted tree entries on the inline decode path. A 50M encrypted
-/// bulk object still has enough independent K512 blocks to amortize blocking-pool
-/// dispatch; sub-8MiB entries usually do not.
+/// bulk object still has enough independent source blocks to amortize
+/// blocking-pool dispatch; sub-8MiB entries usually do not.
 const QUIC_PARALLEL_DECODE_MIN_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
-const QUIC_PARALLEL_DECODE_MIN_SOURCE_BLOCKS: usize = 32;
+const QUIC_PARALLEL_DECODE_MIN_SOURCE_BLOCKS: usize = 8;
 
 const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
@@ -1136,14 +1140,18 @@ fn quic_loss_seeded_path_signal(
     path.clamped()
 }
 
-fn quic_default_path_rate_limit_bps(path: &QuicPathSignalSample) -> Option<u64> {
-    if path.loss_rate > QUIC_RATE_MATCHED_BROKEN_LINK_LOSS_MIN {
+fn quic_loss_matched_pacing_cap_bps(loss_rate: f64) -> Option<u64> {
+    if loss_rate > QUIC_RATE_MATCHED_BROKEN_LINK_LOSS_MIN {
         Some(QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS)
-    } else if path.loss_rate >= QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN {
+    } else if loss_rate >= QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN {
         Some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
     } else {
         None
     }
+}
+
+fn quic_default_path_rate_limit_bps(path: &QuicPathSignalSample) -> Option<u64> {
+    quic_loss_matched_pacing_cap_bps(path.loss_rate)
 }
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
@@ -1152,13 +1160,7 @@ pub(crate) fn quic_loss_target_pacing_cap_bps(config: &QuicConfig) -> Option<u64
     if !loss.is_finite() {
         return None;
     }
-    if loss > QUIC_RATE_MATCHED_BROKEN_LINK_LOSS_MIN {
-        Some(QUIC_RATE_MATCHED_BROKEN_LINK_PACING_BPS)
-    } else if loss >= QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN {
-        Some(QUIC_RATE_MATCHED_BAD_LINK_PACING_BPS)
-    } else {
-        None
-    }
+    quic_loss_matched_pacing_cap_bps(loss)
 }
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
@@ -1177,6 +1179,34 @@ fn quic_fixed_block_k(config: &QuicConfig) -> u32 {
     let symbol_size = usize::from(config.symbol_size.max(1));
     let k = config.max_block_size.div_ceil(symbol_size).max(1);
     u32::try_from(k).unwrap_or(u32::MAX)
+}
+
+fn quic_repair_pacing_cap_bps(
+    config: &QuicConfig,
+    round_loss_fraction: Option<f64>,
+) -> Option<u64> {
+    [
+        config.bwlimit_bps,
+        quic_loss_target_pacing_cap_bps(config),
+        round_loss_fraction
+            .filter(|loss| loss.is_finite())
+            .and_then(quic_loss_matched_pacing_cap_bps),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
+fn quic_repair_symbol_round_cap(config: &QuicConfig, round_loss_fraction: Option<f64>) -> usize {
+    let Some(rate_bps) = quic_repair_pacing_cap_bps(config, round_loss_fraction) else {
+        return MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND;
+    };
+    let symbol_size = u64::from(config.symbol_size.max(1));
+    let window_bytes = rate_bps.saturating_mul(QUIC_REPAIR_REQUEST_PACING_WINDOW_MILLIS) / 1_000;
+    let window_symbols = usize::try_from(window_bytes / symbol_size).unwrap_or(usize::MAX);
+    window_symbols
+        .max(QUIC_REPAIR_REQUEST_MIN_SYMBOLS_PER_ROUND)
+        .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND)
 }
 
 fn quic_round0_loss_target_repair_enabled(config: &QuicConfig) -> bool {
@@ -2178,6 +2208,9 @@ struct QuicNeedMore {
     /// Gap between the requested repair symbols and the loss-compensated target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repair_request_gap_to_target_symbols: Option<u64>,
+    /// Dynamic per-round repair request cap used to build this feedback frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repair_symbol_round_cap: Option<u64>,
     /// Aggregate decoder rank across pending entries after this round.
     ///
     /// Unlike `round_symbols_observed`, this is confirmed useful progress. The
@@ -2303,6 +2336,20 @@ fn validate_need_more_feedback(
             return Err(QuicTransportError::Integrity(format!(
                 "receiver requested {repair_symbols} repair symbols in one feedback round (max {})",
                 MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND
+            )));
+        }
+    }
+    if let Some(cap) = need.repair_symbol_round_cap {
+        let cap = usize::try_from(cap).unwrap_or(usize::MAX);
+        if cap == 0 || cap > MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver reported invalid repair symbol round cap {cap} (max {})",
+                MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND
+            )));
+        }
+        if repair_symbols > cap {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested {repair_symbols} repair symbols above its reported round cap {cap}"
             )));
         }
     }
@@ -2736,33 +2783,47 @@ fn block_count_for_len(size: u64, config: &QuicConfig) -> Result<usize, QuicTran
     }
     let max_block = u64::try_from(config.max_block_size.max(1)).unwrap_or(u64::MAX);
     let blocks = size.div_ceil(max_block);
-    if blocks > u64::from(u8::MAX) + 1 {
+    if blocks > u64::try_from(QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT).unwrap_or(u64::MAX) {
         return Err(QuicTransportError::TooLarge {
             size,
-            max: max_block.saturating_mul(u64::from(u8::MAX) + 1),
+            max: max_block.saturating_mul(
+                u64::try_from(QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT).unwrap_or(u64::MAX),
+            ),
         });
     }
     usize::try_from(blocks).map_err(|_| QuicTransportError::TooLarge {
         size,
-        max: max_block.saturating_mul(u64::from(u8::MAX) + 1),
+        max: max_block
+            .saturating_mul(u64::try_from(QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT).unwrap_or(u64::MAX)),
     })
+}
+
+fn quic_symbol_aligned_block_size(
+    config: &QuicConfig,
+    bytes: usize,
+) -> Result<usize, QuicTransportError> {
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let units = bytes.max(symbol_size).div_ceil(symbol_size);
+    units
+        .checked_mul(symbol_size)
+        .ok_or_else(|| QuicTransportError::TooLarge {
+            size: u64::try_from(bytes).unwrap_or(u64::MAX),
+            max: u64::MAX,
+        })
 }
 
 fn effective_quic_max_block_size_for_largest_entry(
     config: &QuicConfig,
     max_entry_len: usize,
 ) -> Result<usize, QuicTransportError> {
-    let rq_config = RqConfig {
-        symbol_size: config.symbol_size,
-        max_block_size: config.max_block_size,
-        ..RqConfig::default()
-    };
-    rq_effective_max_block_size(&rq_config, max_entry_len).map_err(|err| match err {
-        RqError::TooLarge { size, max } => QuicTransportError::TooLarge { size, max },
-        other => QuicTransportError::Config(format!(
-            "[ASUP-E803] QUIC block-size planning failed: {other}"
-        )),
-    })
+    let configured = quic_symbol_aligned_block_size(config, config.max_block_size)?;
+    if max_entry_len == 0 {
+        return Ok(configured);
+    }
+    let min_for_source_block_count = max_entry_len.div_ceil(QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT);
+    let min_for_source_block_count =
+        quic_symbol_aligned_block_size(config, min_for_source_block_count)?;
+    Ok(configured.max(min_for_source_block_count))
 }
 
 fn effective_quic_config_for_largest_entry(
@@ -3204,7 +3265,8 @@ fn trace_quic_sender_need_more(
             need.repair_loss_compensated_target_symbols.unwrap_or(0),
             need.repair_request_gap_to_target_symbols.unwrap_or(0),
             config.max_feedback_rounds,
-            MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+            need.repair_symbol_round_cap
+                .unwrap_or(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64),
             MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND,
             quic_repair_block_request_summary(&need.repair_blocks),
             aimd_rate_bps
@@ -3239,7 +3301,10 @@ fn trace_quic_sender_need_more(
         .repair_request_gap_to_target_symbols
         .unwrap_or(0)
         .to_string();
-    let repair_symbol_round_cap = MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
+    let repair_symbol_round_cap = need
+        .repair_symbol_round_cap
+        .unwrap_or(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64)
+        .to_string();
     let repair_block_request_cap = MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
     let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
     let aimd_rate_bps = aimd_rate_bps.map_or_else(|| "none".to_string(), |rate| rate.to_string());
@@ -7803,10 +7868,11 @@ async fn receive_native_symbol_round(
     let round_loss_fraction =
         receiver_round_loss_fraction(round_stats.observed, round_complete.round_symbols_sent);
     let round = (*feedback_rounds).saturating_add(1);
+    let repair_symbol_round_cap = quic_repair_symbol_round_cap(config, round_loss_fraction);
     let (repair_blocks, repair_accounting) = block_repair_requests_with_accounting(
         decoders,
         config,
-        MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+        repair_symbol_round_cap,
         round_loss_fraction,
         round,
     );
@@ -7829,6 +7895,7 @@ async fn receive_native_symbol_round(
             repair_accounting.loss_compensated_target_symbols,
         ),
         repair_request_gap_to_target_symbols: Some(repair_accounting.request_gap_to_target_symbols),
+        repair_symbol_round_cap: Some(u64::try_from(repair_symbol_round_cap).unwrap_or(u64::MAX)),
         pending_rank: Some(progress.rank),
         pending_rank_columns: Some(progress.rank_columns),
         pending_rank_deficit: Some(progress.rank_deficit),
@@ -7850,7 +7917,7 @@ async fn receive_native_symbol_round(
     let round_symbols_accepted = round_stats.accepted.to_string();
     let round_loss_fraction = format!("{:.6}", need.round_loss_fraction.unwrap_or(0.0));
     let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
-    let repair_symbol_round_cap = MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
+    let repair_symbol_round_cap = repair_symbol_round_cap.to_string();
     let repair_block_request_cap = MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
     let repair_base_deficit = repair_accounting.base_deficit_symbols.to_string();
     let repair_loss_compensated_target = repair_accounting
@@ -9069,6 +9136,8 @@ mod tests {
         let size_50m = 50 * 1024 * 1024;
         let config_50m = effective_quic_config_for_largest_entry(&config, size_50m)
             .expect("50M fixture must fit default QUIC geometry");
+        let blocks_50m =
+            block_count_for_len(size_50m as u64, &config_50m).expect("50M block count");
         assert!(quic_should_parallel_decode_entry_geometry(
             size_50m as u64,
             config_50m.max_block_size
@@ -9084,8 +9153,8 @@ mod tests {
                 &config_50m,
                 QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
             ),
-            QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
-            "50M encrypted bulk geometry should use the full per-entry fanout window"
+            blocks_50m,
+            "50M encrypted bulk geometry should open one decode slot per source block"
         );
         assert_eq!(
             quic_entry_decode_width_budget_for_geometry(
@@ -9093,7 +9162,7 @@ mod tests {
                 config_50m.max_block_size,
                 QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
             ),
-            QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
+            blocks_50m,
             "50M encrypted bulk geometry should open the same fanout as the decoder helper"
         );
         assert_eq!(
@@ -9104,27 +9173,37 @@ mod tests {
     }
 
     #[test]
-    fn quic_block_sizer_reuses_rq_k512_plan_for_wide_configs() {
+    fn quic_block_sizer_honors_multimegabyte_configs() {
         let config = QuicConfig {
             max_block_size: 8 * 1024 * 1024,
             ..trusted_quic_config()
         };
         let effective = effective_quic_config_for_largest_entry(&config, 10 * 1024 * 1024)
-            .expect("normal 10MiB entry fits the bounded-K QUIC plan");
+            .expect("normal 10MiB entry fits the multi-MiB QUIC plan");
 
-        assert_eq!(
-            effective.max_block_size,
-            usize::from(effective.symbol_size) * 512
-        );
+        assert_eq!(effective.max_block_size, 8 * 1024 * 1024);
 
         let params = object_params_for(
-            entry_object_id("bounded-k512", 0),
+            entry_object_id("quic-multimeg-blocks", 0),
             10 * 1024 * 1024,
             effective.symbol_size,
             effective.max_block_size,
         );
-        assert_eq!(params.symbols_per_block, 512);
-        assert_eq!(params.source_blocks, 20);
+        assert_eq!(params.symbols_per_block, 8192);
+        assert_eq!(params.source_blocks, 2);
+    }
+
+    #[test]
+    fn quic_default_geometry_keeps_50m_to_thirteen_blocks() {
+        let config =
+            effective_quic_config_for_largest_entry(&trusted_quic_config(), 50 * 1024 * 1024)
+                .expect("50MiB fixture must fit default QUIC geometry");
+
+        assert_eq!(config.max_block_size, 4 * 1024 * 1024);
+        assert_eq!(
+            block_count_for_len(50 * 1024 * 1024, &config).expect("block count"),
+            13
+        );
     }
 
     #[test]
@@ -10479,7 +10558,7 @@ mod tests {
     }
 
     #[test]
-    fn quic_effective_block_size_reuses_rq_sizer_for_large_entries() {
+    fn quic_effective_block_size_preserves_explicit_large_blocks() {
         let config = QuicConfig {
             max_block_size: 8 * 1024 * 1024,
             ..trusted_quic_config()
@@ -10489,7 +10568,7 @@ mod tests {
         let transfer_config =
             effective_quic_config_for_entries(&config, &entries).expect("sized config");
 
-        assert_eq!(transfer_config.max_block_size, 512 * 1024);
+        assert_eq!(transfer_config.max_block_size, 8 * 1024 * 1024);
     }
 
     #[test]
@@ -10508,12 +10587,12 @@ mod tests {
             .expect("source manifest prepares");
         let transfer_config = prepared.effective_config(&config);
 
-        assert_eq!(prepared.max_block_size, 512 * 1024);
-        assert_eq!(transfer_config.max_block_size, 512 * 1024);
+        assert_eq!(prepared.max_block_size, 8 * 1024 * 1024);
+        assert_eq!(transfer_config.max_block_size, 8 * 1024 * 1024);
         assert_eq!(
             block_count_for_len(prepared.manifest.entries[0].size, &transfer_config)
                 .expect("block count"),
-            2
+            1
         );
     }
 
@@ -12026,6 +12105,51 @@ mod tests {
             quic_targeted_repair_symbols_for_round(1, None, 4, 9, 512),
             4,
             "the per-round symbol budget still caps escalated repair"
+        );
+    }
+
+    #[test]
+    fn quic_broken_link_repair_requests_are_path_rate_capped() {
+        let config = QuicConfig {
+            symbol_size: 1024,
+            max_block_size: 512 * 1024,
+            round0_loss_target: 0.10,
+            ..trusted_quic_config()
+        };
+        let cap = quic_repair_symbol_round_cap(&config, Some(0.90));
+        assert_eq!(
+            cap, 2_304,
+            "10 mbit-class broken-link repair cap should admit two seconds of 1KiB symbols"
+        );
+
+        let manifest = TransferManifest {
+            transfer_id: "repair-budget".to_string(),
+            root_name: "payload".to_string(),
+            is_directory: false,
+            total_bytes: 50 * 1024 * 1024,
+            merkle_root_hex: "00".repeat(32),
+            metadata_root_hex: None,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: "large.bin".to_string(),
+                size: 50 * 1024 * 1024,
+                sha256_hex: "00".repeat(32),
+                metadata: None,
+            }],
+            delta_manifest: None,
+        };
+        let decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let (requests, accounting) =
+            block_repair_requests_with_accounting(&decoders, &config, cap, Some(0.90), 1);
+
+        assert_eq!(accounting.requested_repair_symbols, cap as u64);
+        assert!(
+            accounting.request_gap_to_target_symbols > 0,
+            "capped NeedMore must leave unrequested deficit for later paced rounds"
+        );
+        assert!(
+            requests.len() < 100,
+            "broken-link NeedMore must not spray all K512 blocks in one feedback round"
         );
     }
 
