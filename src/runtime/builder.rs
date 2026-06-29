@@ -3004,6 +3004,26 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Enable wall-clock time for this runtime (tokio-compatible convenience).
+    ///
+    /// [`Self::build`] already installs a wall-clock timer driver by default, so
+    /// every standard runtime has one and spawned tasks inherit it through `Cx`.
+    /// This method exists as an explicit, discoverable opt-in (mirroring
+    /// `tokio::runtime::Builder::enable_time`) so consumers migrating from tokio
+    /// — or hardening against the off-driver `Sleep` fallback
+    /// (br-asupersync-runtime-cpu-overhaul-5vt09v.3.1 / .3.5) — have a named
+    /// method to reach for instead of constructing a [`TimerDriverHandle`] by
+    /// hand. It installs a wall-clock driver unless an explicit one was already
+    /// provided via [`Self::with_timer_driver`], so the two compose in any
+    /// order without clobbering a custom driver.
+    #[must_use]
+    pub fn enable_time(mut self) -> Self {
+        if self.timer_driver.is_none() {
+            self.timer_driver = Some(TimerDriverHandle::with_wall_clock());
+        }
+        self
+    }
+
     /// Provide an explicit entropy source for capability-based randomness.
     ///
     /// The runtime forks this source per task and wires it into task contexts,
@@ -6336,6 +6356,45 @@ worker_threads = 16
         assert!(
             Runtime::current_handle().is_none(),
             "current_handle should be None outside block_on"
+        );
+    }
+
+    #[test]
+    fn enable_time_installs_wall_clock_driver() {
+        // br-asupersync-runtime-cpu-overhaul-5vt09v.3.1: enable_time() is the
+        // discoverable opt-in that installs a wall-clock timer driver so a
+        // consumer cannot forget it (and so the off-driver Sleep fallback warn
+        // never has to fire). A fresh builder has no driver; enable_time()
+        // installs one.
+        init_test_logging();
+        let builder = RuntimeBuilder::new();
+        assert!(
+            builder.timer_driver.is_none(),
+            "fresh builder has no timer driver"
+        );
+        let builder = builder.enable_time();
+        assert!(
+            builder.timer_driver.is_some(),
+            "enable_time installs a wall-clock timer driver"
+        );
+    }
+
+    #[test]
+    fn enable_time_does_not_clobber_explicit_driver() {
+        // enable_time() must compose with with_timer_driver() in any order
+        // without overwriting an explicitly-provided driver
+        // (br-asupersync-runtime-cpu-overhaul-5vt09v.3.1).
+        init_test_logging();
+        let explicit = TimerDriverHandle::with_wall_clock();
+        let builder = RuntimeBuilder::new()
+            .with_timer_driver(explicit.clone())
+            .enable_time();
+        assert!(
+            builder
+                .timer_driver
+                .as_ref()
+                .is_some_and(|d| d.ptr_eq(&explicit)),
+            "enable_time must preserve an explicitly-provided driver"
         );
     }
 

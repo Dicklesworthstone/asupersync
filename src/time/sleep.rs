@@ -174,6 +174,47 @@ fn is_global_fallback_driver(handle: &TimerDriverHandle) -> bool {
         .is_some_and(|global| global.driver.ptr_eq(handle))
 }
 
+/// br-asupersync-runtime-cpu-overhaul-5vt09v.3.5: fired-once flag for the
+/// "no timer driver, falling back to the shared fallback timer" diagnostic.
+///
+/// The shared fallback timer (above) is a *valid* path for runtimes legitimately
+/// built without a timer driver, so taking it is not an error and must not panic
+/// (that would break standalone `sleep()` usage and the off-`Cx` fallback tests).
+/// But it is *also* exactly the symptom of a mis-configured consumer that forgot
+/// to install a timer driver (the frankenterm churn). We therefore surface it as
+/// a one-time WARN so the fallback shows up in logs instead of running silently,
+/// matching the established `br-asupersync-9nn568` fallback-warn idiom in
+/// `runtime::scheduler::three_lane`.
+static FALLBACK_TIMER_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` exactly once for a given flag — the first caller observes the
+/// `false -> true` transition, every later caller observes `true`. Factored out
+/// so the warn-once semantics can be unit-tested deterministically against a
+/// local flag without depending on process-global state or a `tracing`
+/// subscriber.
+#[inline]
+fn claim_first_call(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::Relaxed)
+}
+
+/// Emit the missing-timer-driver WARN at most once per process.
+///
+/// Called when a `Sleep` is polled with neither a bound nor an ambient (`Cx`)
+/// timer driver and routes through the process-global shared fallback timer.
+#[inline]
+fn warn_missing_timer_driver_once() {
+    if claim_first_call(&FALLBACK_TIMER_WARNED) {
+        crate::tracing_compat::warn!(
+            target: "asupersync::time::sleep",
+            "br-asupersync-runtime-cpu-overhaul-5vt09v.3.5: a Sleep was polled with no bound or \
+             ambient (Cx) timer driver; routing through the process-global shared fallback timer. \
+             Install a timer driver so timers are driven by the runtime's worker/wheel and stay \
+             replay-deterministic in the lab runtime (RuntimeBuilder installs one by default, or \
+             call RuntimeBuilder::enable_time() / Sleep::with_timer_driver(...))."
+        );
+    }
+}
+
 /// Returns the current wall clock time.
 ///
 /// This function returns the elapsed time since the first call to any
@@ -649,9 +690,14 @@ impl Future for Sleep {
                 // logical clock (`time_getter`) keeps the short-poll thread
                 // fallback below, since the wall-clock shared driver cannot
                 // observe an injected clock.
-                self.time_getter
-                    .is_none()
-                    .then(|| global_fallback_timer().driver.clone())
+                self.time_getter.is_none().then(|| {
+                    // Defense-in-depth: surface the missing timer driver once so a
+                    // mis-configured consumer is caught in logs instead of silently
+                    // running on the fallback
+                    // (br-asupersync-runtime-cpu-overhaul-5vt09v.3.5).
+                    warn_missing_timer_driver_once();
+                    global_fallback_timer().driver.clone()
+                })
             });
         let now = if let Some(timer) = self.bound_timer_driver.as_ref() {
             timer.now()
@@ -2516,5 +2562,83 @@ mod tests {
             spawned < n
         );
         crate::test_complete!("off_cx_sleeps_share_one_fallback_thread");
+    }
+
+    #[cfg(feature = "runtime-metrics")]
+    #[test]
+    fn sleep_with_driver_registers_without_spawning_thread() {
+        init_test("sleep_with_driver_registers_without_spawning_thread");
+        // Positive counterpart to the off-Cx fallback tests: a Sleep polled WITH
+        // a bound timer driver must register on the wheel and spawn ZERO OS
+        // threads. This is the premise of the whole fix — when a driver IS
+        // installed (the normal RuntimeBuilder / enable_time path) there is no
+        // per-Sleep churn (br-asupersync-runtime-cpu-overhaul-5vt09v.3.6).
+        let driver = TimerDriverHandle::with_wall_clock();
+        let deadline = Time::from_nanos(
+            driver.now().as_nanos() + duration_to_nanos(Duration::from_millis(100)),
+        );
+        let before = crate::runtime::metrics::snapshot();
+        let mut s = Sleep::with_timer_driver(deadline, driver.clone());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // First poll registers on the wheel and returns Pending (no thread spawn).
+        let first = Pin::new(&mut s).poll(&mut cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "driver-backed sleep pending on first poll",
+            true,
+            first.is_pending()
+        );
+        let mid = crate::runtime::metrics::snapshot();
+        let spawned = mid.timer_threads_spawned - before.timer_threads_spawned;
+        crate::assert_with_log!(
+            spawned == 0,
+            "driver-backed sleep spawns no OS thread",
+            0u64,
+            spawned
+        );
+        let registered = mid.timers_registered - before.timers_registered;
+        crate::assert_with_log!(
+            registered >= 1,
+            "driver-backed sleep registered on the wheel",
+            true,
+            registered >= 1
+        );
+        // Drive it to completion through the (passive) wall-clock driver so the
+        // registration is cleaned up and we prove it still fires.
+        let give_up = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = driver.process_timers();
+            if Pin::new(&mut s).poll(&mut cx).is_ready() {
+                break;
+            }
+            assert!(Instant::now() < give_up, "driver-backed sleep stalled");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        crate::test_complete!("sleep_with_driver_registers_without_spawning_thread");
+    }
+
+    #[test]
+    fn missing_timer_driver_warns_exactly_once() {
+        init_test("missing_timer_driver_warns_exactly_once");
+        // The fallback warn must fire on the FIRST take and never again
+        // (br-asupersync-runtime-cpu-overhaul-5vt09v.3.5). Test the once-claim
+        // primitive against a LOCAL flag so the assertion is deterministic and
+        // independent of process-global state / parallel test ordering (the real
+        // call site uses the module-global FALLBACK_TIMER_WARNED, which other
+        // off-Cx tests may have already flipped).
+        let flag = AtomicBool::new(false);
+        let first = claim_first_call(&flag);
+        crate::assert_with_log!(first, "first call claims the warn", true, first);
+        // Every subsequent call must observe the flag already set.
+        for _ in 0..5 {
+            let again = claim_first_call(&flag);
+            crate::assert_with_log!(!again, "subsequent calls do not re-warn", false, again);
+        }
+        // Calling the real warn helper must not panic regardless of whether the
+        // process-global flag was already consumed by another test.
+        warn_missing_timer_driver_once();
+        warn_missing_timer_driver_once();
+        crate::test_complete!("missing_timer_driver_warns_exactly_once");
     }
 }

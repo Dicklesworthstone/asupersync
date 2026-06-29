@@ -47,9 +47,20 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
   threads. It now registers with a single process-lifetime pump thread that
   shares the standard wall-clock timer wheel; a per-`Sleep` thread is kept only
   for custom logical clocks. Behavior-preserving — the default `Cx`-driver path
-  is unchanged.
+  is unchanged. As defense-in-depth, taking the fallback now emits a **one-time
+  WARN** (via `tracing_compat`) naming the missing timer driver, so a
+  mis-configured consumer surfaces in logs instead of churning silently — the
+  fallback stays a valid path (no panic), matching the `br-asupersync-9nn568`
+  no-driver-warn idiom.
   ([`b67dec457`](https://github.com/Dicklesworthstone/asupersync/commit/b67dec457),
-  `br-asupersync-runtime-cpu-overhaul-5vt09v.3`)
+  `br-asupersync-runtime-cpu-overhaul-5vt09v.3`, `.3.5`)
+- **`RuntimeBuilder::enable_time()`** convenience: a discoverable, tokio-shaped
+  opt-in that installs a wall-clock timer driver unless one was already provided
+  via `with_timer_driver` (idempotent, order-independent). `build()` already
+  installs a wall-clock driver by default, so this is a clarity/migration aid
+  that gives consumers a named method to reach for — and that the off-driver
+  fallback warn above points at — rather than a behavior change.
+  (`br-asupersync-runtime-cpu-overhaul-5vt09v.3.1`)
 - **Empirical findings recorded (no code shipped):** the benchmark proved the
   default multi-threaded runtime is healthy — `timer_threads_spawned == 0`, 0%
   idle CPU, and zero idle `sched_yield` — so the profiled pathologies are
