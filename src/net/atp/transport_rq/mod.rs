@@ -261,10 +261,13 @@ const RQ_CONTROL_STREAM_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 /// 16 MiB/s overshoots the pipe before feedback can correct the spray, causing
 /// repair rounds to chase self-inflicted drops. Keep this deliberately narrow:
 /// clean/high-BDP uses the clean ramp, good/0.1% stays source-first, and
-/// broken/10% keeps the existing lossy fallback behavior.
+/// broken/10% gets its own narrower 10 mbit-class cap.
 const RQ_BAD_LINK_ROUND0_LOSS_MIN: f64 = 0.015;
 const RQ_BAD_LINK_ROUND0_LOSS_MAX: f64 = RQ_MILD_LOSS_PACING_MAX_LOSS;
 const RQ_BAD_LINK_ROUND0_PACING_BPS: u64 = 6 * 1024 * 1024;
+const RQ_BROKEN_LINK_ROUND0_LOSS_MIN: f64 = RQ_BAD_LINK_ROUND0_LOSS_MAX;
+const RQ_BROKEN_LINK_ROUND0_LOSS_MAX: f64 = RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD;
+const RQ_BROKEN_LINK_ROUND0_PACING_BPS: u64 = 1152 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
@@ -305,6 +308,11 @@ const RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
 /// delivery rate as the backoff anchor instead of repeatedly halving below the
 /// pipe.
 const RQ_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM: f64 = 1.10;
+/// Loss-targeted cells must also react when receiver arrival loss is
+/// underreported but confirmed decode/rank progress is far below the offered
+/// send rate. Ratios below this are treated as congestion for AIMD/LossDetector.
+const RQ_LOSS_TARGET_PROGRESS_STALL_RATIO: f64 = 0.50;
+const RQ_LOSS_TARGET_PROGRESS_LOSS_MARGIN: f64 = 0.01;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
@@ -884,20 +892,22 @@ fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
 
 impl RqSprayPacer {
     fn new_round0(pacing: RqSprayPacing, config: &RqConfig, force_clean_ramp: bool) -> Self {
-        let round0_ramp = (force_clean_ramp || round0_clean_ramp_enabled(config, pacing))
+        let clean_ramp_enabled = round0_clean_ramp_enabled(config, pacing);
+        let round0_ramp = clean_ramp_enabled
             .then(|| RqRound0CleanPacingRamp::new(round0_clean_ramp_max_rate(config)));
         if round0_ramp.is_some() {
             rqtrace!(
-                "sender: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} udp_fanout={} datagram_bytes={} burst_symbols={}",
+                "sender: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} udp_fanout={} datagram_bytes={} burst_symbols={} forced={}",
                 pacing.rate_bytes_per_sec(),
                 RQ_ROUND0_CLEAN_RAMP_STEP_BYTES,
                 round0_clean_ramp_max_rate(config),
                 config.udp_fanout.max(1),
                 pacing.datagram_bytes,
                 pacing.max_burst_size,
+                force_clean_ramp,
             );
         }
-        Self::new_with_round0_ramp(pacing, round0_ramp, force_clean_ramp)
+        Self::new_with_round0_ramp(pacing, round0_ramp, force_clean_ramp && clean_ramp_enabled)
     }
 
     fn new_with_round0_ramp(
@@ -1324,6 +1334,7 @@ struct RqAdaptiveSendState {
     loss_pacing_cap_bps: Option<u64>,
     loss_fec_floor: f64,
     regime_shift: bool,
+    last_pending_rank: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1332,9 +1343,28 @@ enum RqDeliverySampleKind {
     SourceRetransmit,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RqNeedMoreProgress {
+    pending_rank: Option<u64>,
+    pending_rank_columns: Option<u64>,
+    pending_rank_deficit: Option<u64>,
+    pending_decode_jobs: Option<u64>,
+}
+
 impl RqDeliverySampleKind {
     fn feeds_pacing_estimator(self) -> bool {
         matches!(self, Self::InitialOrRepair)
+    }
+}
+
+fn delivery_sample_kind_for_need_more_response(
+    requested_sources: usize,
+    fec_fallback_active: bool,
+) -> RqDeliverySampleKind {
+    if requested_sources == 0 || fec_fallback_active {
+        RqDeliverySampleKind::InitialOrRepair
+    } else {
+        RqDeliverySampleKind::SourceRetransmit
     }
 }
 
@@ -1379,6 +1409,7 @@ impl RqAdaptiveSendState {
             loss_pacing_cap_bps: None,
             loss_fec_floor: 0.0,
             regime_shift: false,
+            last_pending_rank: None,
         }
     }
 
@@ -1486,7 +1517,7 @@ impl RqAdaptiveSendState {
     fn source_fec_fallback_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
         let mut tuning = self.round_tuning(config);
         let k = fixed_block_k(config);
-        let loss_bar = self.source_fec_fallback_loss_bar();
+        let loss_bar = self.source_fec_fallback_loss_bar(config);
         let overhead = adaptive::overhead_for_target(
             k,
             loss_bar,
@@ -1509,19 +1540,58 @@ impl RqAdaptiveSendState {
         tuning
     }
 
-    fn source_fec_fallback_loss_bar(&self) -> f64 {
+    fn source_fec_fallback_loss_bar(&self, config: &RqConfig) -> f64 {
+        let configured_loss_bar = if round0_loss_target_repair_enabled(config) {
+            round0_loss_target_loss_bar(config)
+        } else {
+            0.0
+        };
         let measured_loss = self.pacing_loss_ema.max(self.est.loss_p_hat);
         self.loss_bar
             .max(self.loss_ema)
             .max(measured_loss)
+            .max(configured_loss_bar)
             .max(RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR)
     }
 
+    #[cfg(test)]
     fn observe_need_more(
         &mut self,
         config: &RqConfig,
         digests: &[EntryDigest],
         pending: &BTreeSet<u32>,
+        sent_this_round: u64,
+        received_this_round: u64,
+        round_loss_fraction: Option<f64>,
+        delivery_sample_kind: RqDeliverySampleKind,
+        send_wall: Duration,
+        control_wait: Duration,
+        total_bytes: u64,
+    ) {
+        let pending_bytes = pending_bytes(digests, pending);
+        self.observe_need_more_with_progress(
+            config,
+            digests,
+            pending,
+            pending_bytes,
+            RqNeedMoreProgress::default(),
+            sent_this_round,
+            received_this_round,
+            round_loss_fraction,
+            delivery_sample_kind,
+            send_wall,
+            control_wait,
+            total_bytes,
+        );
+    }
+
+    fn observe_need_more_with_progress(
+        &mut self,
+        config: &RqConfig,
+        digests: &[EntryDigest],
+        pending: &BTreeSet<u32>,
+        prior_pending_bytes: u64,
+        progress: RqNeedMoreProgress,
         sent_this_round: u64,
         received_this_round: u64,
         round_loss_fraction: Option<f64>,
@@ -1556,9 +1626,27 @@ impl RqAdaptiveSendState {
         let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
         let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
-        let observed_delivery_bps = (useful_bytes as f64 / send_wall_s).max(1.0);
+        let receiver_delivery_bps = (useful_bytes as f64 / send_wall_s).max(1.0);
+        let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
+        let progress_delivery_bps = self.progress_delivery_bps(
+            config,
+            prior_pending_bytes,
+            pending_bytes,
+            progress,
+            symbol_payload_bytes,
+            send_wall_s,
+        );
+        let progress_congestion_loss = progress_delivery_bps
+            .and_then(|delivery_bps| {
+                loss_target_progress_congestion_loss(config, delivery_bps, offered_bps)
+            })
+            .unwrap_or(0.0);
+        let pacing_loss_sample = estimator_wire_loss.max(progress_congestion_loss);
+        let observed_delivery_bps = progress_delivery_bps
+            .unwrap_or(receiver_delivery_bps)
+            .max(1.0);
         if sent_this_round != 0 && feeds_pacing_estimator {
-            self.apply_aimd_feedback(config, estimator_wire_loss, Some(observed_delivery_bps));
+            self.apply_aimd_feedback(config, pacing_loss_sample, Some(observed_delivery_bps));
         }
         let byte_pressure = if total_bytes == 0 {
             0.0
@@ -1566,19 +1654,18 @@ impl RqAdaptiveSendState {
             (pending_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0)
         };
         let pressure_loss = byte_pressure * RQ_PENDING_PRESSURE_LOSS_FLOOR;
-        let repair_loss_hat = estimator_wire_loss
+        let repair_loss_hat = pacing_loss_sample
             .max(decode_pending_loss)
             .max(pressure_loss)
             .clamp(0.0, 0.90);
 
         if feeds_pacing_estimator {
             self.regime_shift = self.pacing_loss_ema > 0.0
-                && estimator_wire_loss > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
+                && pacing_loss_sample > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
         }
         self.loss_ema = ema(self.loss_ema, repair_loss_hat, RQ_LOSS_EMA_ALPHA);
         if feeds_pacing_estimator {
-            self.pacing_loss_ema =
-                ema(self.pacing_loss_ema, estimator_wire_loss, RQ_LOSS_EMA_ALPHA);
+            self.pacing_loss_ema = ema(self.pacing_loss_ema, pacing_loss_sample, RQ_LOSS_EMA_ALPHA);
         }
         let raw_loss_bar = repair_loss_hat.max(self.loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
         self.loss_bar = if self.loss_bar <= 0.0 {
@@ -1589,18 +1676,17 @@ impl RqAdaptiveSendState {
         .clamp(0.0, 0.90);
         if feeds_pacing_estimator {
             let raw_pacing_loss_bar =
-                estimator_wire_loss.max(self.pacing_loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
+                pacing_loss_sample.max(self.pacing_loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
             self.pacing_loss_bar = if self.pacing_loss_bar <= 0.0 {
                 raw_pacing_loss_bar
             } else {
                 ema(self.pacing_loss_bar, raw_pacing_loss_bar, RQ_LOSS_EMA_ALPHA)
-                    .max(estimator_wire_loss)
+                    .max(pacing_loss_sample)
             }
             .clamp(0.0, 0.90);
         }
 
-        let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
-        let useful_factor = (1.0 - estimator_wire_loss * 0.5).clamp(0.25, 1.0);
+        let useful_factor = (1.0 - pacing_loss_sample * 0.5).clamp(0.25, 1.0);
         let bw_sample = offered_bps * useful_factor;
         let sent_payload_fraction = if pending_bytes == 0 {
             1.0
@@ -1609,7 +1695,7 @@ impl RqAdaptiveSendState {
         };
         let stalled_repair_sample = byte_pressure >= RQ_STALLED_REPAIR_PRESSURE_MIN
             && sent_payload_fraction < RQ_STALLED_REPAIR_PAYLOAD_FRACTION_MAX
-            && estimator_wire_loss <= RQ_MILD_LOSS_PACING_MAX_LOSS;
+            && pacing_loss_sample <= RQ_MILD_LOSS_PACING_MAX_LOSS;
         if feeds_pacing_estimator && (self.bw_ema_bps <= 0.0 || !stalled_repair_sample) {
             self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
                 bw_sample
@@ -1638,7 +1724,9 @@ impl RqAdaptiveSendState {
             .ceil() as u64;
         self.loss_pacing_cap_bps = None;
         self.loss_fec_floor = 0.0;
-        let lost_symbols = sent_symbols.saturating_sub(received_symbols);
+        let lost_symbols = ((sent_symbols as f64) * pacing_loss_sample)
+            .ceil()
+            .clamp(0.0, sent_symbols as f64) as u64;
         if feeds_pacing_estimator {
             let loss_result = self.loss_detector.observe_datagram_loss_sample(
                 sent_symbols,
@@ -1647,7 +1735,7 @@ impl RqAdaptiveSendState {
                 sent_payload_bytes,
                 cwnd_bytes,
             );
-            let mild_wire_loss = estimator_wire_loss <= RQ_MILD_LOSS_PACING_MAX_LOSS
+            let mild_wire_loss = pacing_loss_sample <= RQ_MILD_LOSS_PACING_MAX_LOSS
                 && self.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS;
             self.apply_loss_recommendations(&loss_result.recommendations, mild_wire_loss);
             self.controller.observe_path_signals(
@@ -1659,9 +1747,43 @@ impl RqAdaptiveSendState {
                 PathSignalSample {
                     smoothed_rtt_s: rtt_s,
                     congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
-                    loss_rate: estimator_wire_loss,
+                    loss_rate: pacing_loss_sample,
                 },
             );
+        }
+    }
+
+    fn progress_delivery_bps(
+        &mut self,
+        config: &RqConfig,
+        prior_pending_bytes: u64,
+        pending_bytes: u64,
+        progress: RqNeedMoreProgress,
+        symbol_payload_bytes: u64,
+        send_wall_s: f64,
+    ) -> Option<f64> {
+        if !round0_loss_target_repair_enabled(config) {
+            self.last_pending_rank = progress.pending_rank;
+            return None;
+        }
+
+        let completed_entry_bytes = prior_pending_bytes.saturating_sub(pending_bytes);
+        let progress_accounted = progress.pending_rank.is_some()
+            || progress.pending_rank_columns.is_some()
+            || progress.pending_rank_deficit.is_some()
+            || progress.pending_decode_jobs.is_some();
+        let rank_delta_bytes = progress.pending_rank.map(|rank| {
+            let delta = self
+                .last_pending_rank
+                .map_or(rank, |previous| rank.saturating_sub(previous));
+            self.last_pending_rank = Some(rank);
+            delta.saturating_mul(symbol_payload_bytes)
+        });
+        let progress_bytes = completed_entry_bytes.max(rank_delta_bytes.unwrap_or(0));
+        if progress_bytes == 0 {
+            progress_accounted.then_some(0.0)
+        } else {
+            Some(progress_bytes as f64 / send_wall_s)
         }
     }
 
@@ -1683,11 +1805,14 @@ impl RqAdaptiveSendState {
                     delivery_backoff.min(multiplicative)
                 });
             self.aimd_rate_bps = reduced.clamp(aimd_decrease_floor_bps(config), RQ_MAX_PACING_BPS);
-        } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD {
+        } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD
+            && let Some(ceiling) = aimd_clean_increase_ceiling_bps(config)
+            && self.aimd_rate_bps < ceiling
+        {
             self.aimd_rate_bps = self
                 .aimd_rate_bps
                 .saturating_add(RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
-                .clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
+                .clamp(RQ_MIN_PACING_BPS, ceiling);
         }
     }
 
@@ -1913,6 +2038,11 @@ fn round0_bad_link_pacing_bps(config: &RqConfig) -> Option<u64> {
         && (RQ_BAD_LINK_ROUND0_LOSS_MIN..=RQ_BAD_LINK_ROUND0_LOSS_MAX).contains(&loss)
     {
         Some(RQ_BAD_LINK_ROUND0_PACING_BPS)
+    } else if loss.is_finite()
+        && loss > RQ_BROKEN_LINK_ROUND0_LOSS_MIN
+        && loss <= RQ_BROKEN_LINK_ROUND0_LOSS_MAX
+    {
+        Some(RQ_BROKEN_LINK_ROUND0_PACING_BPS)
     } else {
         None
     }
@@ -2017,6 +2147,35 @@ fn aimd_decrease_floor_bps(config: &RqConfig) -> u64 {
     }
 }
 
+fn aimd_clean_increase_ceiling_bps(config: &RqConfig) -> Option<u64> {
+    if round0_loss_target_repair_enabled(config) {
+        round0_bad_link_pacing_bps(config)
+    } else {
+        Some(RQ_MAX_PACING_BPS)
+    }
+}
+
+fn loss_target_progress_congestion_loss(
+    config: &RqConfig,
+    progress_delivery_bps: f64,
+    offered_bps: f64,
+) -> Option<f64> {
+    if !round0_loss_target_repair_enabled(config) || !offered_bps.is_finite() || offered_bps <= 0.0
+    {
+        return None;
+    }
+    let delivery_ratio = (progress_delivery_bps / offered_bps).clamp(0.0, 1.0);
+    if delivery_ratio >= RQ_LOSS_TARGET_PROGRESS_STALL_RATIO {
+        return None;
+    }
+    let decrease_threshold = aimd_loss_decrease_threshold(config);
+    Some(
+        (1.0 - delivery_ratio)
+            .max(decrease_threshold + RQ_LOSS_TARGET_PROGRESS_LOSS_MARGIN)
+            .clamp(0.0, 0.90),
+    )
+}
+
 fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
     pending.iter().fold(0u64, |acc, index| {
         let Some(entry) = usize::try_from(*index)
@@ -2027,6 +2186,10 @@ fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
         };
         acc.saturating_add(entry.size)
     })
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn finite_duration_s(duration: Duration) -> f64 {
@@ -2371,6 +2534,19 @@ struct NeedMore {
     /// dependent repair rows and must not be treated as packet loss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     round_symbols_accepted: Option<u64>,
+    /// Aggregate decoder rank across the still-pending entries after this round.
+    ///
+    /// Unlike `round_symbols_observed`, this is confirmed useful progress. The
+    /// sender uses rank deltas as a delivery-clocked congestion signal for lossy
+    /// cells where kernel overflow can make arrival loss appear artificially low.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_rank: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_rank_columns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_rank_deficit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_decode_jobs: Option<u64>,
 }
 
 /// Request for retransmission of one systematic source symbol.
@@ -5150,6 +5326,13 @@ pub async fn send_path(
                     });
                 }
                 let source_symbols = need.source_symbols;
+                let prior_pending_bytes = pending_bytes(&digests, &pending);
+                let progress = RqNeedMoreProgress {
+                    pending_rank: need.pending_rank,
+                    pending_rank_columns: need.pending_rank_columns,
+                    pending_rank_deficit: need.pending_rank_deficit,
+                    pending_decode_jobs: need.pending_decode_jobs,
+                };
                 pending = need.pending.into_iter().collect();
                 let fallback_received = sent_this_round.saturating_sub(
                     u64::try_from(pending.len())
@@ -5169,10 +5352,12 @@ pub async fn send_path(
                     // loop again to fetch the Proof.
                     continue;
                 }
-                adaptive.observe_need_more(
+                adaptive.observe_need_more_with_progress(
                     &config,
                     &digests,
                     &pending,
+                    prior_pending_bytes,
+                    progress,
                     sent_this_round,
                     received_this_round,
                     need.round_loss_fraction,
@@ -5294,7 +5479,10 @@ pub async fn send_path(
                         .await?;
                     }
                     round_send_wall = round_started.elapsed();
-                    round_delivery_sample_kind = RqDeliverySampleKind::SourceRetransmit;
+                    round_delivery_sample_kind = delivery_sample_kind_for_need_more_response(
+                        source_symbols.len(),
+                        source_fec_fallback_active,
+                    );
                 }
                 let emitted_this_response = symbols_sent.saturating_sub(round_symbols_start);
                 rqtrace!(
@@ -7009,8 +7197,8 @@ pub async fn receive_connection(
                 }
                 let source_symbols = source_retransmit_request_limit(&config, feedback_rounds)
                     .map_or_else(Vec::new, |limit| collect_source_requests(&decoders, limit));
+                let progress = source_progress_for_pending(&decoders, &pending);
                 if trace_receiver_intake {
-                    let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
                         "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_source_observed={} round_source_accepted={} round_repair_observed={} round_repair_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} round_wall_micros={} round_wall_symbols_per_s={} round_wall_bytes_per_s={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_repair_attempts={} decode_source_complete_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_join_wait_micros={} decode_apply_micros={} decode_persist_micros={} decode_queued_jobs={} decode_inline_jobs={} decode_spawn_denials={} decode_entry_cap_saturations={} decode_transfer_cap_saturations={} decode_pending_peak={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
@@ -7087,6 +7275,10 @@ pub async fn receive_connection(
                             round_symbols_observed: Some(round_stats.observed),
                             round_symbols_accepted: Some(round_stats.accepted),
                             round_loss_fraction,
+                            pending_rank: Some(usize_to_u64(progress.rank)),
+                            pending_rank_columns: Some(usize_to_u64(progress.rank_columns)),
+                            pending_rank_deficit: Some(usize_to_u64(progress.rank_deficit)),
+                            pending_decode_jobs: Some(usize_to_u64(progress.pending_decode_jobs)),
                         },
                     )?)
                     .await?;
@@ -11115,6 +11307,14 @@ mod tests {
                 ..clean.clone()
             },
             RqConfig {
+                round0_loss_target: 0.02,
+                ..clean.clone()
+            },
+            RqConfig {
+                round0_loss_target: 0.10,
+                ..clean.clone()
+            },
+            RqConfig {
                 repair_overhead: 1.01,
                 ..clean.clone()
             },
@@ -11530,10 +11730,193 @@ mod tests {
             total_bytes,
         );
 
-        assert_eq!(state.last_round_loss_fraction, 0.10);
+        assert!((state.last_round_loss_fraction - 0.10).abs() < f64::EPSILON * 8.0);
         assert_eq!(
-            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
+            state.aimd_rate_bps, RQ_BROKEN_LINK_ROUND0_PACING_BPS,
             "expected link loss should neither decrease nor increase the AIMD rate"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_holds_broken_link_cap_on_zero_loss_feedback() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "broken.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"broken-zero-loss"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            10_000,
+            Some(0.0),
+            RqDeliverySampleKind::InitialOrRepair,
+            Duration::from_millis(800),
+            Duration::from_millis(200),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.0);
+        assert_eq!(
+            state.aimd_rate_bps, RQ_BROKEN_LINK_ROUND0_PACING_BPS,
+            "explicitly lossy/broken cells must not treat zero-loss feedback as a clean-link additive increase"
+        );
+        assert_eq!(
+            state.round_tuning(&config).pacing.rate_bytes_per_sec(),
+            RQ_BROKEN_LINK_ROUND0_PACING_BPS,
+            "repair rounds must keep the 10 mbit-class broken-link cap until real delivery evidence changes it"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_backs_off_when_broken_rank_progress_stalls_despite_zero_loss() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.aimd_rate_bps = RQ_COLD_START_PACING_BPS;
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "broken.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"broken-progress-stall"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more_with_progress(
+            &config,
+            &digests,
+            &pending,
+            total_bytes,
+            RqNeedMoreProgress {
+                pending_rank: Some(100),
+                pending_rank_columns: Some(43_700),
+                pending_rank_deficit: Some(43_600),
+                pending_decode_jobs: Some(0),
+            },
+            10_000,
+            10_000,
+            Some(0.0),
+            RqDeliverySampleKind::InitialOrRepair,
+            Duration::from_millis(800),
+            Duration::from_millis(200),
+            total_bytes,
+        );
+
+        assert!(
+            state.last_round_loss_fraction > aimd_loss_decrease_threshold(&config),
+            "rank-progress stall must override underreported receiver arrival loss"
+        );
+        assert_eq!(
+            state.aimd_rate_bps, RQ_MIN_PACING_BPS,
+            "stalled rank progress should back off to the sender-side delivery floor"
+        );
+        assert!(
+            state.pacing_loss_ema > RQ_MILD_LOSS_PACING_MAX_LOSS,
+            "progress-derived congestion must feed the pacing/loss detector path"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_holds_broken_cap_when_rank_progress_matches_offer() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "broken.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"broken-progress-healthy"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more_with_progress(
+            &config,
+            &digests,
+            &pending,
+            total_bytes,
+            RqNeedMoreProgress {
+                pending_rank: Some(8_500),
+                pending_rank_columns: Some(43_700),
+                pending_rank_deficit: Some(35_200),
+                pending_decode_jobs: Some(0),
+            },
+            10_000,
+            10_000,
+            Some(0.0),
+            RqDeliverySampleKind::InitialOrRepair,
+            Duration::from_millis(1_000),
+            Duration::from_millis(200),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.0);
+        assert_eq!(
+            state.aimd_rate_bps, RQ_BROKEN_LINK_ROUND0_PACING_BPS,
+            "healthy rank progress should not back off below the configured broken-link cap"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_recovers_broken_link_cap_after_clean_feedback() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.aimd_rate_bps = RQ_MIN_PACING_BPS;
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "broken.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"broken-recovery"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            10_000,
+            Some(0.0),
+            RqDeliverySampleKind::InitialOrRepair,
+            Duration::from_millis(800),
+            Duration::from_millis(200),
+            total_bytes,
+        );
+
+        assert_eq!(
+            state.aimd_rate_bps, RQ_BROKEN_LINK_ROUND0_PACING_BPS,
+            "a conservative broken-link decrease must recover up to the 10 mbit-class cap on clean feedback"
         );
     }
 
@@ -11569,7 +11952,7 @@ mod tests {
             total_bytes,
         );
 
-        assert_eq!(state.last_round_loss_fraction, 0.02);
+        assert!((state.last_round_loss_fraction - 0.02).abs() < f64::EPSILON * 8.0);
         assert_eq!(
             state.aimd_rate_bps, RQ_BAD_LINK_ROUND0_PACING_BPS,
             "bad-cell target loss should hold the 50 mbit pacing cap, not pace up into self-loss"
@@ -11610,8 +11993,8 @@ mod tests {
         );
 
         assert_eq!(state.last_round_loss_fraction, 0.50);
-        assert_eq!(
-            state.aimd_rate_bps, 6_600_000,
+        assert!(
+            state.aimd_rate_bps.abs_diff(6_600_000) <= 1,
             "loss-targeted overrun should back off to receiver delivery plus headroom, not blind half-rate"
         );
         assert!(
@@ -11933,6 +12316,25 @@ mod tests {
             state.round_tuning(&config).pacing.rate_bytes_per_sec(),
             RQ_COLD_START_PACING_BPS,
             "source retransmit under-credit must not collapse the next path rate"
+        );
+    }
+
+    #[test]
+    fn rq_mixed_source_and_fec_feedback_feeds_pacing_estimator() {
+        assert_eq!(
+            delivery_sample_kind_for_need_more_response(16, false),
+            RqDeliverySampleKind::SourceRetransmit,
+            "pure source retransmit under-credit should stay out of pacing loss"
+        );
+        assert_eq!(
+            delivery_sample_kind_for_need_more_response(16, true),
+            RqDeliverySampleKind::InitialOrRepair,
+            "source retransmit plus FEC repair must feed receiver-observed wire loss into AIMD"
+        );
+        assert_eq!(
+            delivery_sample_kind_for_need_more_response(0, false),
+            RqDeliverySampleKind::InitialOrRepair,
+            "repair-only feedback rounds are pacing samples"
         );
     }
 
@@ -14326,6 +14728,34 @@ mod tests {
     }
 
     #[test]
+    fn forced_round0_clean_ramp_cannot_override_lossy_config() {
+        for (name, round0_loss_target) in [("good", 0.001), ("bad", 0.02), ("broken", 0.10)] {
+            let config = RqConfig {
+                symbol_size: 1200,
+                max_block_size: 512 * 1024,
+                repair_overhead: 1.0,
+                round0_loss_target,
+                ..RqConfig::default()
+            };
+            let pacing = RqSprayPacing::cold_start(config.symbol_size);
+
+            assert!(
+                !round0_clean_ramp_enabled(&config, pacing),
+                "{name} must not satisfy the clean-ramp predicate"
+            );
+            let pacer = RqSprayPacer::new_round0(pacing, &config, true);
+            assert!(
+                pacer.round0_ramp.is_none(),
+                "{name} must not force-enable the clean ramp on a lossy cell"
+            );
+            assert!(
+                pacer.small_clean_burst.is_none(),
+                "{name} must not force-enable the clean burst pacer on a lossy cell"
+            );
+        }
+    }
+
+    #[test]
     fn control_source_stream_negotiates_for_clean_and_good_links_including_auth() {
         let clean = RqConfig {
             symbol_size: 1200,
@@ -14697,7 +15127,7 @@ mod tests {
             (0.0, None),
             (0.001, None),
             (0.02, Some(RQ_BAD_LINK_ROUND0_PACING_BPS)),
-            (0.10, None),
+            (0.10, Some(RQ_BROKEN_LINK_ROUND0_PACING_BPS)),
         ] {
             let config = RqConfig {
                 round0_loss_target: target,
@@ -14823,11 +15253,18 @@ mod tests {
         };
 
         let overhead = round0_loss_target_repair_overhead(&config);
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let tuning = state.round0_tuning(&config);
 
         assert!(overhead > 1.20, "broken link should receive proactive FEC");
         assert!(
             overhead <= 1.0 + RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
             "round-0 target loss must stay within bounded FEC envelope"
+        );
+        assert_eq!(
+            tuning.pacing.rate_bytes_per_sec(),
+            RQ_BROKEN_LINK_ROUND0_PACING_BPS,
+            "10% broken-link round 0 must pace near the shaped 10 mbit pipe instead of cold-start overrun"
         );
     }
 
@@ -14919,6 +15356,46 @@ mod tests {
     }
 
     #[test]
+    fn source_fec_fallback_preserves_configured_broken_loss_floor() {
+        let config = RqConfig {
+            symbol_size: 1024,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(104, &config, 4);
+        state.last_round_loss_fraction = 0.0;
+        state.loss_ema = 0.0;
+        state.loss_bar = 0.0;
+        state.pacing_loss_ema = 0.0;
+        state.est.loss_p_hat = 0.0;
+
+        let loss_bar = state.source_fec_fallback_loss_bar(&config);
+        let expected_loss_bar = round0_loss_target_loss_bar(&config);
+        let tuning = state.source_fec_fallback_tuning(&config);
+        let expected = adaptive::overhead_for_target(
+            fixed_block_k(&config),
+            expected_loss_bar,
+            RQ_SOURCE_FEC_FALLBACK_ALPHA,
+            RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+        );
+
+        assert_eq!(
+            loss_bar, expected_loss_bar,
+            "broken-regime repair must keep the configured loss floor even when receiver loss is underreported"
+        );
+        assert!(
+            tuning.repair_overhead >= 1.0 + expected,
+            "zero reported feedback loss must not shrink broken-link repair below the configured loss target"
+        );
+        assert!(
+            repair_target_for_feedback_round(512, 0, tuning.repair_overhead) >= 100,
+            "10% broken-link repair should not devolve into low single-digit repair rounds"
+        );
+    }
+
+    #[test]
     fn measured_loss_repair_target_fills_deficit_without_whole_block_respray() {
         let block_source_n = 512;
         let measured = measured_feedback_repair_overhead(0.10);
@@ -14967,7 +15444,7 @@ mod tests {
         let tuning = state.source_fec_fallback_tuning(&config);
 
         assert_eq!(
-            state.source_fec_fallback_loss_bar(),
+            state.source_fec_fallback_loss_bar(&config),
             RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR
         );
         assert!(
@@ -15000,7 +15477,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.source_fec_fallback_loss_bar(),
+            state.source_fec_fallback_loss_bar(&config),
             RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR
         );
         assert!(tuning.repair_overhead >= 1.0 + expected);
