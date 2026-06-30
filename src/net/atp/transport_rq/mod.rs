@@ -4686,6 +4686,15 @@ struct EntryDecoder {
     pending_decodes: Vec<PendingDecode>,
     source_write_buffer: Vec<u8>,
     source_write_buffer_offset: Option<u64>,
+    /// Incremental SHA-256 + content-id over the control-source-stream bytes,
+    /// folded in receive order (the source-stream path enforces strictly
+    /// in-order contiguous writes, so this equals the post-stream digest).
+    /// `Some` only on the reliable control-source-stream path; the lossy
+    /// RaptorQ-datagram path leaves this `None` and verifies post-stream.
+    inc: Option<crate::net::atp::transport_common::StagedEntryReceive>,
+    /// Finalized `(size, content_id, content_sha256)` once the entry completes,
+    /// letting commit skip the post-stream staging-file re-read+hash.
+    inc_digest: Option<(u64, crate::atp::object::ObjectId, [u8; 32])>,
 }
 
 struct PendingDecode {
@@ -7085,6 +7094,12 @@ pub async fn receive_connection(
                 source_streaming: entry_source_streaming,
                 source_blocks,
                 pending_decodes: Vec::new(),
+                inc: control_source_stream.then(|| {
+                    crate::net::atp::transport_common::StagedEntryReceive::new(
+                        staging_dir.join(e.index.to_string()),
+                    )
+                }),
+                inc_digest: None,
                 source_write_buffer: if control_source_stream {
                     Vec::new()
                 } else {
@@ -7500,11 +7515,21 @@ async fn apply_control_source_data_frame(
     }
 
     write_entry_staging_range(dec, data.offset, data.data).await?;
+    // Fold the chunk into the incremental digest in receive order. The offset
+    // == bytes_written guard above guarantees strictly in-order contiguous
+    // bytes, so this equals a post-stream hash of the staged file.
+    if let Some(inc) = dec.inc.as_mut() {
+        inc.update_with_chunk(data.data);
+    }
     dec.bytes_written = end;
     if dec.bytes_written == dec.size {
         dec.complete = true;
         dec.pipeline = None;
         close_cached_entry_staging_file(dec).await?;
+        if let Some(inc) = dec.inc.take() {
+            let (digest, _path, _created) = inc.finalize(String::new());
+            dec.inc_digest = Some((digest.size, digest.content_id, digest.content_sha256));
+        }
     }
     Ok(data.data.len())
 }
@@ -9128,12 +9153,23 @@ async fn verify_and_commit(
         }
         // Object-level integrity: the staging file's size + SHA-256 must match the
         // manifest entry. This applies to packed objects too (the concatenation).
-        let hash_started = trace_commit.then(Instant::now);
+        // Fast path: the reliable control-source-stream already folded every
+        // in-order chunk into an incremental digest during receive, so reuse it
+        // instead of re-reading + re-hashing the whole staging file (the
+        // post-stream pass is otherwise the dominant clean-link tail). The lossy
+        // RaptorQ-datagram path leaves `inc_digest` None and re-hashes here.
         let (size, content_id, content_sha256) =
-            hash_file_streaming(&decoder.staging_path, &mut hash_buf)
-                .await
-                .map_err(|e| RqError::Source(e.into_message()))?;
-        verify_hash_micros = verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
+            if let Some((sz, cid, sha)) = decoder.inc_digest.as_ref() {
+                (*sz, cid.clone(), *sha)
+            } else {
+                let hash_started = trace_commit.then(Instant::now);
+                let r = hash_file_streaming(&decoder.staging_path, &mut hash_buf)
+                    .await
+                    .map_err(|e| RqError::Source(e.into_message()))?;
+                verify_hash_micros =
+                    verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
+                r
+            };
         received = received.saturating_add(size);
         if size != e.size || hex_encode(&content_sha256) != e.sha256_hex {
             sha_ok = false;
@@ -11363,6 +11399,8 @@ mod tests {
             source_blocks: source_block_progress_for(size, max_block_size, symbol_size)
                 .expect("fixture must fit source-block table"),
             pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
             source_write_buffer: Vec::new(),
             source_write_buffer_offset: None,
         }
@@ -13277,6 +13315,8 @@ mod tests {
             source_streaming: false,
             source_blocks: Vec::new(),
             pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
             source_write_buffer: Vec::new(),
             source_write_buffer_offset: None,
         }];
@@ -13370,6 +13410,8 @@ mod tests {
             )
             .expect("test source blocks"),
             pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
             source_write_buffer: Vec::new(),
             source_write_buffer_offset: None,
         }
@@ -14267,6 +14309,8 @@ mod tests {
             source_streaming: true,
             source_blocks: source_block_progress_for(8, 4, symbol_size).expect("two source blocks"),
             pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
             source_write_buffer: Vec::new(),
             source_write_buffer_offset: None,
         };
@@ -16601,6 +16645,8 @@ mod tests {
                 source_streaming: false,
                 source_blocks: Vec::new(),
                 pending_decodes: Vec::new(),
+                inc: None,
+                inc_digest: None,
                 source_write_buffer: Vec::new(),
                 source_write_buffer_offset: None,
             },
@@ -16621,6 +16667,8 @@ mod tests {
                 source_streaming: false,
                 source_blocks: Vec::new(),
                 pending_decodes: Vec::new(),
+                inc: None,
+                inc_digest: None,
                 source_write_buffer: Vec::new(),
                 source_write_buffer_offset: None,
             },
@@ -16923,6 +16971,8 @@ mod tests {
             source_streaming: false,
             source_blocks: Vec::new(),
             pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
             source_write_buffer: Vec::new(),
             source_write_buffer_offset: None,
         }];
@@ -17179,6 +17229,8 @@ mod tests {
             source_streaming: false,
             source_blocks: Vec::new(),
             pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
             source_write_buffer: Vec::new(),
             source_write_buffer_offset: None,
         }];
