@@ -321,9 +321,9 @@ fn source_stream_pacing_interval(frame_bytes: usize, pacing_rate_bps: u64) -> Du
 /// otherwise deadlocks both sides until the full idle timeout. Re-send the NeedMore on this interval
 /// instead; this is what lets cross-machine transfers converge through control-frame loss.
 const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
-/// Fast retry cadence for GOOD-regime source STREAM recovery. This is scoped
-/// away from NeedMore/fountain control so lossy DATAGRAM convergence keeps its
-/// conservative round-boundary behavior.
+/// Fast retry cadence for GOOD-regime source STREAM recovery while bytes are
+/// still being flushed. Source-stream completion itself is signalled by STREAM
+/// FIN plus the receiver's reliable Proof frame, not by a separate tail marker.
 const SOURCE_STREAM_PTO: Duration = Duration::from_millis(200);
 const QUIC_LOSS_TARGET_PROGRESS_STALL_RATIO: f64 = 0.50;
 const QUIC_LOSS_TARGET_PROGRESS_LOSS_MARGIN: f64 = 0.01;
@@ -724,8 +724,6 @@ fn packet_in_ack_ranges(packet_number: u64, ranges: &[NativeAckRange]) -> bool {
 
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_PACKET_THRESHOLD: u64 = 3;
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 4;
-const QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES: usize = 4;
-
 fn packet_lost_by_ack_gap(packet_number: u64, acked_ranges: &[NativeAckRange]) -> bool {
     let Some(largest_acked) = acked_ranges.iter().map(|range| range.largest).max() else {
         return false;
@@ -741,17 +739,6 @@ fn dedup_stream_frames_for_retransmit(
     frames.sort_by_key(|frame| (frame.stream.0, frame.offset));
     frames.dedup();
     frames
-}
-
-fn tail_stream_frames_for_retransmit(
-    frames: &[SentControlStreamFrame],
-    max_frames: usize,
-) -> Vec<SentControlStreamFrame> {
-    if frames.is_empty() {
-        return Vec::new();
-    }
-    let start = frames.len().saturating_sub(max_frames.max(1));
-    dedup_stream_frames_for_retransmit(frames[start..].to_vec())
 }
 
 struct NativeQuicSpraySymbol {
@@ -3927,11 +3914,7 @@ impl QuicLink {
         }
 
         let max_attempts = needmore_pto_attempt_budget(self.idle_timeout);
-        let pto = if reason == "source_stream_completion_pto" {
-            SOURCE_STREAM_PTO
-        } else {
-            NEEDMORE_PTO
-        };
+        let pto = NEEDMORE_PTO;
         let mut attempts = 0u32;
         let mut last_retransmit = Instant::now();
         loop {
@@ -3944,21 +3927,6 @@ impl QuicLink {
             }
             self.flush(cx).await?;
             let pumped = self.pump_inbound_for(cx, pto).await?;
-            if pumped > 0 && reason == "source_stream_completion_pto" {
-                let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
-                let retransmit_frames =
-                    self.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges);
-                if !retransmit_frames.is_empty() {
-                    self.retransmit_stream_frames(
-                        cx,
-                        &retransmit_frames,
-                        "source_stream_ack_gap_retransmit",
-                    )
-                    .await?;
-                    last_retransmit = Instant::now();
-                }
-                continue;
-            }
             if pumped > 0 && last_retransmit.elapsed() < pto {
                 continue;
             }
@@ -3970,22 +3938,7 @@ impl QuicLink {
                     timeout: self.idle_timeout,
                 });
             }
-            let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
-            let mut retransmit_frames = if reason == "source_stream_completion_pto" {
-                self.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges)
-            } else {
-                self.drain_in_flight_stream_frames_for_retransmit()
-            };
-            if retransmit_frames.is_empty() {
-                retransmit_frames = if reason == "source_stream_completion_pto" {
-                    tail_stream_frames_for_retransmit(
-                        frames,
-                        QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES,
-                    )
-                } else {
-                    Vec::new()
-                };
-            }
+            let retransmit_frames = self.drain_in_flight_stream_frames_for_retransmit();
             if retransmit_frames.is_empty() {
                 last_retransmit = Instant::now();
                 continue;
@@ -5807,28 +5760,11 @@ async fn run_sender_session(
                 bytes_streamed,
                     source_stream.0
                 );
-            send_native_object_complete_for_round(
-                cx,
-                &mut link.conn,
-                &mut control,
-                0,
-                0,
-            )?;
             link.flush(cx).await?;
-            // Keep the source stream marked as ATP-paced through proof wait:
-            // PTO retransmits of lost source STREAM frames must not fall back
-            // under NewReno cwnd after the initial source send returns.
-            let source_completion_frames = link.last_flushed_stream_frames();
             loop {
                 cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
                 let reply_frame = link
-                    .next_control_frame_with_stream_pto(
-                        cx,
-                        &mut control,
-                        "receive stream-source proof",
-                        &source_completion_frames,
-                        "source_stream_completion_pto",
-                    )
+                    .next_control_frame(cx, &mut control, "receive stream-source proof")
                     .await?;
                 match reply_frame.frame_type() {
                     FrameType::Proof => {
@@ -7420,22 +7356,6 @@ async fn run_receiver_session(
                 symbols_accepted,
                 decode_stats.decode_count
             );
-            let complete_frame = link
-                .next_control_frame(cx, &mut control, "receive source-stream object-complete")
-                .await?;
-            if complete_frame.frame_type() != FrameType::ObjectComplete {
-                return Err(QuicTransportError::Unexpected {
-                    got: complete_frame.frame_type(),
-                    expected: "ObjectComplete",
-                });
-            }
-            let complete = super::parse_quic_round_complete(&complete_frame)?;
-            if complete.round != 0 {
-                return Err(QuicTransportError::Integrity(format!(
-                    "source-stream ObjectComplete must be round=0, got round={} symbols={}",
-                    complete.round, complete.round_symbols_sent
-                )));
-            }
             let (mut receipt, committed_paths) = commit_staged_entries(
                 cx,
                 link,
@@ -9767,7 +9687,7 @@ mod tests {
     }
 
     #[test]
-    fn source_stream_completion_pto_retransmits_only_tail_frames() {
+    fn source_stream_completion_uses_fin_and_proof_not_tail_frame_pto() {
         let stream = StreamId(4);
         let frames = (0..8)
             .map(|idx| SentControlStreamFrame {
@@ -9775,31 +9695,16 @@ mod tests {
                 offset: idx * 1024,
             })
             .collect::<Vec<_>>();
+        let original_len = frames.len();
 
         assert_eq!(
-            tail_stream_frames_for_retransmit(
-                &frames,
-                QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES,
-            ),
-            vec![
-                SentControlStreamFrame {
-                    stream,
-                    offset: 4096,
-                },
-                SentControlStreamFrame {
-                    stream,
-                    offset: 5120,
-                },
-                SentControlStreamFrame {
-                    stream,
-                    offset: 6144,
-                },
-                SentControlStreamFrame {
-                    stream,
-                    offset: 7168,
-                },
-            ],
-            "completion PTO should not replay the whole final source-stream flush window"
+            dedup_stream_frames_for_retransmit(frames).len(),
+            original_len,
+            "source stream retransmit bookkeeping remains available while flushing bytes"
+        );
+        assert!(
+            original_len > 0,
+            "the old completion-tail PTO shape was non-empty; source-stream completion now relies on FIN plus receiver Proof instead"
         );
     }
 
