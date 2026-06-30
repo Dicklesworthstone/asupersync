@@ -5675,6 +5675,7 @@ async fn send_native_source_stream_entries_pumped(
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+#[allow(dead_code)]
 fn source_stream_repair_tail_requests(
     manifest: &TransferManifest,
     config: &QuicConfig,
@@ -5792,9 +5793,6 @@ async fn run_sender_session(
             source_stream_max_frame_bytes(),
         );
         let source_result: Result<SendReport, QuicTransportError> = async {
-            let mut encoders = super::encoders_from_prepared_source(cx, prepared, config).await?;
-            let repair_tail_requests = source_stream_repair_tail_requests(manifest, config)?;
-            let mut tail_aimd = NativeQuicAimdPacer::default();
             let bytes_streamed =
                 send_native_source_stream_entries_pumped(cx, link, source_stream, prepared, config)
                     .await?;
@@ -5807,44 +5805,20 @@ async fn run_sender_session(
             quic_rqtrace!(
                 "sender: native_source_stream sent bytes={} stream={}",
                 bytes_streamed,
-                source_stream.0
-            );
-            let repair_tail_symbols = if repair_tail_requests.is_empty() {
-                0
-            } else {
-                spray_block_repair_requests(
-                    cx,
-                    link,
-                    &mut control,
-                    manifest,
-                    &mut encoders,
-                    &repair_tail_requests,
-                    0,
-                    config,
-                    symbol_auth.as_ref(),
-                    &mut tail_aimd,
-                )
-                .await?
-            };
-            quic_rqtrace!(
-                "sender: native_source_stream_repair_tail symbols={} blocks={}",
-                repair_tail_symbols,
-                repair_tail_requests.len()
-            );
-            let mut symbols_sent = repair_tail_symbols;
-            let mut feedback_rounds = 0u32;
+                    source_stream.0
+                );
             send_native_object_complete_for_round(
                 cx,
                 &mut link.conn,
                 &mut control,
                 0,
-                repair_tail_symbols,
+                0,
             )?;
             link.flush(cx).await?;
             // Keep the source stream marked as ATP-paced through proof wait:
             // PTO retransmits of lost source STREAM frames must not fall back
             // under NewReno cwnd after the initial source send returns.
-            let mut source_completion_frames = link.last_flushed_stream_frames();
+            let source_completion_frames = link.last_flushed_stream_frames();
             loop {
                 cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
                 let reply_frame = link
@@ -5873,8 +5847,8 @@ async fn run_sender_session(
                             transfer_id: manifest.transfer_id.clone(),
                             bytes_sent: manifest.total_bytes,
                             files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
-                            symbols_sent,
-                            feedback_rounds,
+                            symbols_sent: 0,
+                            feedback_rounds: 0,
                             merkle_root_hex: manifest.merkle_root_hex.clone(),
                             receipt,
                             peer: link.peer,
@@ -5883,200 +5857,20 @@ async fn run_sender_session(
                     FrameType::KeepAlive => continue,
                     FrameType::ObjectRequest => {
                         let need = super::parse_json::<QuicNeedMore>(&reply_frame)?;
-                        let (next_feedback_round, response_feedback_round) =
-                            feedback_round_for_need_or_no_convergence(
-                                feedback_rounds,
-                                config.max_feedback_rounds,
-                                need.feedback_round,
-                                need.pending.len(),
-                            )?;
-                        tail_aimd.observe_need_more(cx, config, &need);
-                        feedback_rounds = next_feedback_round;
-                        let requested_repair_symbols = need_more_repair_symbol_count(&need);
-                        let base_deficit_symbols =
-                            need_more_base_deficit_symbols(&need, requested_repair_symbols);
-                        let sender_delivery_loss_for_repair =
-                            tail_aimd.sender_delivery_loss_for_repair(need.round_loss_fraction);
-                        let loss_compensated_target_symbols =
-                            loss_compensated_repair_target(
-                                base_deficit_symbols,
-                                need.round_loss_fraction,
-                            );
-                        let loss_compensated_target_symbols =
-                            need_more_loss_compensated_target_symbols(&need, base_deficit_symbols)
-                                .max(loss_compensated_target_symbols);
-                        let repair_blocks_to_send = if need.repair_blocks.is_empty() {
-                            Vec::new()
-                        } else {
-                            need.repair_blocks.clone()
-                        };
-                        let repair_symbols_to_emit =
-                            repair_block_symbol_count(&repair_blocks_to_send);
-                        let loss_compensated_target_symbols =
-                            loss_compensated_target_symbols.max(repair_symbols_to_emit);
-                        let request_gap_to_target = need
-                            .repair_request_gap_to_target_symbols
-                            .unwrap_or_else(|| {
-                                loss_compensated_target_symbols
-                                    .saturating_sub(requested_repair_symbols)
-                            });
-                        let repair_detail = repair_block_trace_summary(&need.repair_blocks);
-                        let sender_delivery_loss_for_repair_trace =
-                            sender_delivery_loss_for_repair.unwrap_or(0.0);
                         quic_rqtrace!(
-                            "sender: native_source_stream NeedMore round={feedback_rounds} pending={} repair_blocks={} base_deficit_symbols={} requested_repair_symbols={} repair_symbols_to_emit={} loss_compensated_target_symbols={} request_gap_to_target={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} sender_delivery_loss_for_repair={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
+                            "sender: native_source_stream unexpected NeedMore round={} pending={} repair_blocks={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4}",
+                            need.feedback_round,
                             need.pending.len(),
                             need.repair_blocks.len(),
-                            base_deficit_symbols,
-                            requested_repair_symbols,
-                            repair_symbols_to_emit,
-                            loss_compensated_target_symbols,
-                            request_gap_to_target,
                             need.source_symbols.len(),
                             need.round_symbols_observed.unwrap_or(0),
                             need.round_symbols_accepted.unwrap_or(0),
                             need.round_loss_fraction.unwrap_or(0.0),
-                            sender_delivery_loss_for_repair_trace,
-                            config.max_feedback_rounds,
-                            feedback_rounds > config.max_feedback_rounds,
-                            need.repair_symbol_round_cap
-                                .unwrap_or(super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64),
-                            symbols_sent,
-                            tail_aimd.last_round_symbols_sent,
-                            tail_aimd.last_round_pacing_rate_bps,
-                            repair_detail,
                         );
-                        trace_repair_block_deficits(
-                            "native_source_stream_sender",
-                            feedback_rounds,
-                            &need.repair_blocks,
-                        );
-                        super::trace_quic_sender_need_more(
-                            cx,
-                            feedback_rounds,
-                            symbols_sent,
-                            tail_aimd.last_round_symbols_sent,
-                            &need,
-                            config,
-                            None,
-                            tail_aimd.cap_bps(),
-                        );
-                        if need.pending.is_empty()
-                            && need.repair_blocks.is_empty()
-                            && need.source_symbols.is_empty()
-                        {
-                            super::trace_quic_sender_repair_round(
-                                cx,
-                                feedback_rounds,
-                                super::quic_need_more_response_mode(&need),
-                                symbols_sent,
-                                0,
-                                &need,
-                            );
-                            send_native_object_complete_for_round(
-                                cx,
-                                &mut link.conn,
-                                &mut control,
-                                response_feedback_round,
-                                0,
-                            )?;
-                            link.flush(cx).await?;
-                            source_completion_frames = link.last_flushed_stream_frames();
-                            continue;
-                        }
-                        super::validate_need_more_feedback(manifest, config, &need)?;
-                        let symbols_before = symbols_sent;
-                        let response_mode = super::quic_need_more_response_mode(&need);
-                        let sent = if !need.repair_blocks.is_empty() {
-                            spray_block_repair_requests(
-                                cx,
-                                link,
-                                &mut control,
-                                manifest,
-                                &mut encoders,
-                                &repair_blocks_to_send,
-                                feedback_rounds,
-                                config,
-                                symbol_auth.as_ref(),
-                                &mut tail_aimd,
-                            )
-                            .await?
-                        } else if need.source_symbols.is_empty() {
-                            let fallback_pending = need.pending.iter().copied().collect();
-                            spray_round(
-                                cx,
-                                link,
-                                &mut control,
-                                manifest,
-                                &mut encoders,
-                                &fallback_pending,
-                                feedback_rounds,
-                                config,
-                                symbol_auth.as_ref(),
-                                false,
-                                &mut tail_aimd,
-                            )
-                            .await?
-                        } else {
-                            spray_source_requests(
-                                cx,
-                                link,
-                                &mut control,
-                                manifest,
-                                &encoders,
-                                &need.source_symbols,
-                                feedback_rounds,
-                                config,
-                                symbol_auth.as_ref(),
-                                &mut tail_aimd,
-                            )
-                            .await?
-                        };
-                        if !need.repair_blocks.is_empty() && sent != repair_symbols_to_emit {
-                            return Err(QuicTransportError::Integrity(format!(
-                                "sender emitted {sent} repair symbols for loss-compensated repair target {repair_symbols_to_emit}"
-                            )));
-                        }
-                        symbols_sent = symbols_sent.saturating_add(sent);
-                        trace_native_repair_accounting(
-                            cx,
-                            "native_source_stream_sender",
-                            feedback_rounds,
-                            base_deficit_symbols,
-                            requested_repair_symbols,
-                            loss_compensated_target_symbols,
-                            Some(sent),
-                            &need,
-                        );
-                        super::trace_quic_sender_repair_round(
-                            cx,
-                            feedback_rounds,
-                            response_mode,
-                            symbols_before,
-                            sent,
-                            &need,
-                        );
-                        link.flush(cx).await?;
-                        let handoff_phase = if need.repair_blocks.is_empty() {
-                            "source_stream_source_requests"
-                        } else {
-                            "source_stream_repair_blocks"
-                        };
-                        link.trace_sender_handoff_summary(cx, handoff_phase, sent);
-                        send_native_object_complete_for_round(
-                            cx,
-                            &mut link.conn,
-                            &mut control,
-                            response_feedback_round,
-                            sent,
-                        )?;
-                        link.flush(cx).await?;
-                        source_completion_frames = link.last_flushed_stream_frames();
-                        if !need.repair_blocks.is_empty() {
-                            let _ = link
-                                .drop_duplicate_need_more_resends(cx, &mut control, &need)
-                                .await?;
-                        }
+                        return Err(QuicTransportError::NoConvergence {
+                            rounds: need.feedback_round,
+                            pending: need.pending.len(),
+                        });
                     }
                     got => {
                         return Err(QuicTransportError::Unexpected {
@@ -6487,6 +6281,29 @@ impl QuicStagedEntryReceive {
             )));
         }
 
+        self.write_range(entry, offset, data).await
+    }
+
+    async fn write_range(
+        &mut self,
+        entry: &super::ManifestEntry,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), QuicTransportError> {
+        if offset > entry.size || (offset == entry.size && !data.is_empty()) {
+            return Err(QuicTransportError::Integrity(format!(
+                "staged write starts outside entry {}: offset {offset}, size {}",
+                entry.index, entry.size
+            )));
+        }
+        let end = offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        if end > entry.size {
+            return Err(QuicTransportError::Integrity(format!(
+                "staged write overruns entry {}: end {end}, size {}",
+                entry.index, entry.size
+            )));
+        }
+
         if self.cache_staging_file {
             if self.staging_file.is_none() {
                 let file = self.open_staging_file(entry).await?;
@@ -6891,6 +6708,7 @@ async fn read_native_source_stream_chunk(
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SourceSymbolKey {
     entry: u32,
@@ -6898,6 +6716,7 @@ struct SourceSymbolKey {
     esi: u32,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct SourceStreamEntryPlan {
     entry: u32,
@@ -6905,18 +6724,21 @@ struct SourceStreamEntryPlan {
     size: u64,
 }
 
+#[allow(dead_code)]
 impl SourceStreamEntryPlan {
     fn stream_end(self) -> u64 {
         self.stream_start.saturating_add(self.size)
     }
 }
 
+#[allow(dead_code)]
 struct PartialSourceSymbol {
     data: Vec<u8>,
     received: Vec<bool>,
     received_count: usize,
 }
 
+#[allow(dead_code)]
 impl PartialSourceSymbol {
     fn new(symbol_size: usize, expected_len: usize) -> Self {
         Self {
@@ -6948,6 +6770,7 @@ impl PartialSourceSymbol {
     }
 }
 
+#[allow(dead_code)]
 struct NativeSourceStreamSymbolIntake {
     plans: Vec<SourceStreamEntryPlan>,
     partials: BTreeMap<SourceSymbolKey, PartialSourceSymbol>,
@@ -6956,6 +6779,7 @@ struct NativeSourceStreamSymbolIntake {
     fin_seen: bool,
 }
 
+#[allow(dead_code)]
 impl NativeSourceStreamSymbolIntake {
     fn new(manifest: &TransferManifest) -> Result<Self, QuicTransportError> {
         let mut stream_start = 0u64;
@@ -7215,6 +7039,7 @@ impl NativeSourceStreamSymbolIntake {
     }
 }
 
+#[allow(dead_code)]
 async fn drain_native_source_stream_tap_frames(
     cx: &Cx,
     link: &mut QuicLink,
@@ -7257,96 +7082,74 @@ async fn drain_native_source_stream_tap_frames(
 async fn receive_native_source_stream_entries_pumped(
     cx: &Cx,
     link: &mut QuicLink,
-    control: &mut NativeQuicFrameTransport,
     stream: StreamId,
     manifest: &TransferManifest,
     staged: &mut [QuicStagedEntryReceive],
-    decoders: &mut [super::QuicEntryDecoder],
     config: &QuicConfig,
 ) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
-    let _ = stream;
-    let mut intake = NativeSourceStreamSymbolIntake::new(manifest)?;
-    let mut symbols_accepted = 0u64;
-    let mut decode_stats = super::QuicDecodeStats::default();
-    let mut intake_stats = NativeReceiverIntakeStats::default();
-    let mut completed_backlog = Vec::new();
-    let mut last_progress = Instant::now();
-    loop {
+    let mut received = 0u64;
+    for (entry_index, entry) in manifest.entries.iter().enumerate() {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-
-        let (stream_frames, stream_symbols) = drain_native_source_stream_tap_frames(
-            cx,
-            link,
-            &mut intake,
-            decoders,
-            config,
-            &mut decode_stats,
-            &mut completed_backlog,
-        )
-        .await?;
-        if stream_frames > 0 || stream_symbols > 0 {
-            symbols_accepted = symbols_accepted.saturating_add(stream_symbols);
-            last_progress = Instant::now();
-        }
-
-        let (observed, accepted) = drain_native_receiver_symbol_queue(
-            cx,
-            link,
-            manifest,
-            decoders,
-            config,
-            &mut decode_stats,
-            &mut intake_stats,
-            &mut completed_backlog,
-            0,
-            None,
-            super::NativeSymbolDrainMode::ReadyOnly,
-            RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
-        )
-        .await?;
-        if observed > 0 || accepted > 0 {
-            symbols_accepted = symbols_accepted.saturating_add(accepted);
-            last_progress = Instant::now();
-            send_native_keep_alive(cx, &mut link.conn, control)?;
-        }
-
-        write_completed_native_blocks(
-            cx,
-            link,
-            control,
-            manifest,
-            staged,
-            config,
-            &mut intake_stats,
-            &mut completed_backlog,
-        )
-        .await?;
-        if super::pending_entries(decoders).is_empty() && intake.fin_seen() {
-            flush_cached_quic_staging_files(staged).await?;
-            return Ok((manifest.total_bytes, symbols_accepted, decode_stats));
-        }
-
-        link.flush(cx).await?;
-        let pump_started = Instant::now();
-        let pumped_packets = link
-            .pump_inbound_for_with_drain_budget(
-                cx,
-                SOURCE_STREAM_PTO,
-                RECEIVER_SYMBOL_DRAIN_BATCHES_PER_SOCKET_POLL,
+        let staged_entry = staged.get_mut(entry_index).ok_or_else(|| {
+            QuicTransportError::Integrity(format!(
+                "source stream has no staging slot for entry {}",
+                entry.index
+            ))
+        })?;
+        let mut entry_offset = 0u64;
+        while entry_offset < entry.size {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let remaining = entry.size.saturating_sub(entry_offset);
+            let chunk_len = usize::try_from(
+                remaining
+                    .min(u64::try_from(config.chunk_size.max(1)).unwrap_or(u64::MAX))
+                    .min(u64::try_from(super::QUIC_SOURCE_STREAM_READ_CHUNK).unwrap_or(u64::MAX)),
             )
-            .await?;
-        intake_stats.record_pump(pump_started.elapsed(), pumped_packets);
-        if pumped_packets > 0 {
-            last_progress = Instant::now();
-            continue;
-        }
-        if last_progress.elapsed() >= config.idle_timeout {
-            return Err(QuicTransportError::Timeout {
-                operation: "receive QUIC source stream",
-                timeout: config.idle_timeout,
-            });
+            .unwrap_or(super::QUIC_SOURCE_STREAM_READ_CHUNK)
+            .max(1);
+            let chunk =
+                read_native_source_stream_chunk(cx, link, stream, chunk_len, config.idle_timeout)
+                    .await?;
+            if chunk.is_empty() {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source stream ended before entry {} completed ({} of {} bytes)",
+                    entry.index, entry_offset, entry.size
+                )));
+            }
+            staged_entry
+                .write_range(entry, entry_offset, chunk.as_ref())
+                .await?;
+            let n = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+            entry_offset = entry_offset.checked_add(n).ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "source stream entry {} byte count overflow",
+                    entry.index
+                ))
+            })?;
+            received = received.saturating_add(n);
+            link.flush(cx).await?;
         }
     }
+
+    let extra = read_native_source_stream_chunk(cx, link, stream, 1, config.idle_timeout).await?;
+    if !extra.is_empty() {
+        return Err(QuicTransportError::Integrity(
+            "source stream carried bytes beyond the manifest total".to_string(),
+        ));
+    }
+    if !link.conn.is_stream_read_eof(stream)? {
+        return Err(QuicTransportError::Integrity(
+            "source stream did not finish after manifest bytes".to_string(),
+        ));
+    }
+    if received != manifest.total_bytes {
+        return Err(QuicTransportError::Integrity(format!(
+            "source stream delivered {received} bytes, expected {}",
+            manifest.total_bytes
+        )));
+    }
+    flush_cached_quic_staging_files(staged).await?;
+    Ok((received, 0, super::QuicDecodeStats::default()))
 }
 
 async fn drain_native_receiver_symbol_queue(
@@ -7596,7 +7399,7 @@ async fn run_receiver_session(
             }
             if !super::quic_native_source_stream_enabled(manifest.total_bytes, config, &link.conn) {
                 return Err(QuicTransportError::Integrity(format!(
-                    "sender advertised QUIC source stream {} for a non-clean or oversized transfer",
+                    "sender advertised QUIC source stream {} for an ineligible or oversized transfer",
                     source_stream.0
                 )));
             }
@@ -7604,11 +7407,9 @@ async fn run_receiver_session(
                 receive_native_source_stream_entries_pumped(
                     cx,
                     link,
-                    &mut control,
                     source_stream,
                     &manifest,
                     &mut staged,
-                    &mut decoders,
                     config,
                 )
                 .await?;
@@ -9054,7 +8855,7 @@ mod tests {
     #[test]
     fn native_source_stream_pacing_uses_stream_ceiling_for_good_path() {
         let good_config = QuicConfig {
-            round0_loss_target: super::super::QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            round0_loss_target: super::super::QUIC_NEAR_CLEAN_SOURCE_STREAM_MAX_LOSS_TARGET,
             max_spray_symbols_per_flush: 54,
             ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
         };
@@ -9069,7 +8870,7 @@ mod tests {
             responsiveness_backoff: 1.0,
             path_rtt_s: 0.025,
             path_cwnd_bytes: 12_000,
-            path_loss_rate: super::super::QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            path_loss_rate: super::super::QUIC_NEAR_CLEAN_SOURCE_STREAM_MAX_LOSS_TARGET,
             fec_loss_budget: 0.0,
             congestion_loss_rate: 0.0,
             limiter: super::super::QuicSprayPacingLimiter::PacingRate,
@@ -9097,10 +8898,10 @@ mod tests {
     }
 
     #[test]
-    fn native_source_stream_repair_tail_has_good_loss_floor() {
+    fn legacy_source_stream_repair_tail_helper_has_near_clean_loss_floor() {
         let config = QuicConfig {
             repair_overhead: 1.0,
-            round0_loss_target: super::super::QUIC_RELIABLE_SOURCE_STREAM_MAX_LOSS_TARGET,
+            round0_loss_target: super::super::QUIC_NEAR_CLEAN_SOURCE_STREAM_MAX_LOSS_TARGET,
             symbol_size: 1141,
             max_block_size: 512 * 1024,
             ..QuicConfig::default().allow_unauthenticated_for_trusted_transport()
@@ -9128,7 +8929,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(
             requests.iter().all(|request| request.symbols == 2),
-            "GOOD source-stream tail should not collapse to zero when CLI repair_overhead is 1.0"
+            "legacy near-clean repair-tail sizing should not collapse to zero when CLI repair_overhead is 1.0"
         );
     }
 
