@@ -331,6 +331,12 @@ const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 #[allow(dead_code)]
 pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS: u64 = QUIC_AIMD_MAX_RATE_BPS;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
+// Same `tls`/`not(tls)` interaction as `QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS`
+// above: the only non-test use site (`quic_near_clean_source_stream_enabled` →
+// `promote_source_stream_pacing`) is compiled out in builds that omit the QUIC
+// pacing path (e.g. the franken_node dependency build, no `tls`), so `deny(dead_code)`
+// re-exposes it. Allow unconditionally; harmless no-op when the use site is present.
+#[allow(dead_code)]
 const QUIC_NEAR_CLEAN_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = 0.001;
 /// Loss ceiling for the reliable-source-stream bulk path.
 ///
@@ -1753,6 +1759,10 @@ fn quic_round0_datagram_ramp_enabled(
         && pacing.path_loss_rate <= f64::EPSILON
 }
 
+// Only non-test caller (`promote_source_stream_pacing` in `native_link`) is
+// compiled out in builds that omit the QUIC pacing path, so `deny(dead_code)`
+// re-exposes this gate the same way it did the loss-target const above.
+#[allow(dead_code)]
 pub(crate) fn quic_near_clean_source_stream_enabled(
     config: &QuicConfig,
     pacing: &QuicSprayPacingDecision,
