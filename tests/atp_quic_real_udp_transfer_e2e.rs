@@ -319,6 +319,15 @@ impl LossyUdpProxy {
         seed: u64,
         data_rate_limit: Option<ProxyRateLimit>,
     ) -> Self {
+        Self::spawn_with_rate_timeout(server_addr, seed, data_rate_limit, LOSSY_PROXY_TIMEOUT)
+    }
+
+    fn spawn_with_rate_timeout(
+        server_addr: SocketAddr,
+        seed: u64,
+        data_rate_limit: Option<ProxyRateLimit>,
+        proxy_timeout: Duration,
+    ) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind lossy proxy");
         socket
             .set_nonblocking(true)
@@ -327,7 +336,14 @@ impl LossyUdpProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
-            run_lossy_proxy(socket, server_addr, thread_stop, seed, data_rate_limit);
+            run_lossy_proxy(
+                socket,
+                server_addr,
+                thread_stop,
+                seed,
+                data_rate_limit,
+                proxy_timeout,
+            );
         });
         Self {
             addr,
@@ -420,6 +436,7 @@ fn run_lossy_proxy(
     stop: Arc<AtomicBool>,
     seed: u64,
     data_rate_limit: Option<ProxyRateLimit>,
+    proxy_timeout: Duration,
 ) {
     let mut rng = DeterministicLoss::new(seed);
     let mut client_addr = None;
@@ -429,7 +446,7 @@ fn run_lossy_proxy(
     let started = Instant::now();
     let mut buf = vec![0u8; 65_535];
 
-    while !stop.load(Ordering::Relaxed) && started.elapsed() < LOSSY_PROXY_TIMEOUT {
+    while !stop.load(Ordering::Relaxed) && started.elapsed() < proxy_timeout {
         loop {
             match socket.recv_from(&mut buf) {
                 Ok((len, src)) => {
@@ -464,6 +481,7 @@ fn run_lossy_proxy(
     }
 }
 
+#[allow(dead_code)]
 fn run_transfer_via_rate_limited_lossy_proxy(
     send_cfg: QuicConfig,
     recv_cfg: QuicConfig,
@@ -471,6 +489,30 @@ fn run_transfer_via_rate_limited_lossy_proxy(
     dest_dir: &Path,
     seed: u64,
     data_rate_limit: ProxyRateLimit,
+) -> (
+    Result<SendReport, QuicTransportError>,
+    Result<ReceiveReport, QuicTransportError>,
+    LogCollector,
+) {
+    run_transfer_via_rate_limited_lossy_proxy_with_timeout(
+        send_cfg,
+        recv_cfg,
+        source,
+        dest_dir,
+        seed,
+        data_rate_limit,
+        LOSSY_PROXY_TIMEOUT,
+    )
+}
+
+fn run_transfer_via_rate_limited_lossy_proxy_with_timeout(
+    send_cfg: QuicConfig,
+    recv_cfg: QuicConfig,
+    source: &Path,
+    dest_dir: &Path,
+    seed: u64,
+    data_rate_limit: ProxyRateLimit,
+    proxy_timeout: Duration,
 ) -> (
     Result<SendReport, QuicTransportError>,
     Result<ReceiveReport, QuicTransportError>,
@@ -485,7 +527,12 @@ fn run_transfer_via_rate_limited_lossy_proxy(
             .await
             .expect("bind server endpoint");
         let server_addr = server_endpoint.local_addr();
-        let proxy = LossyUdpProxy::spawn_with_rate(server_addr, seed, Some(data_rate_limit));
+        let proxy = LossyUdpProxy::spawn_with_rate_timeout(
+            server_addr,
+            seed,
+            Some(data_rate_limit),
+            proxy_timeout,
+        );
 
         let (send, recv) = zip(
             send_path(&cx, proxy.addr, source, send_cfg, "atp-quic-client"),
@@ -911,37 +958,40 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
 #[test]
 // pending SapphireHill netns A/B verification
 #[ignore]
-fn real_udp_quic_multiblock_rate_limited_lossy_proxy_recovers_with_low_round_loss() {
+fn real_udp_quic_pivot_a_rate_limited_lossy_proxy_converges_non_dividing_multiblock() {
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");
-    let source = src.path().join("rate-limited-lossy-proxy-multiblock.bin");
-    let payload: Vec<u8> = (0..(2 * 1024 * 1024) as u32)
+    let source = src.path().join("pivot-a-rate-limited-lossy-proxy.bin");
+    let payload: Vec<u8> = (0..((16 * 1024 * 1024) + 113) as u32)
         .map(|i| (i.wrapping_mul(41).wrapping_add(i / 251).wrapping_add(23) % 251) as u8)
         .collect();
     std::fs::write(&source, &payload).expect("write source");
 
     let mut cfg = authenticated_configs(0x0001_0CC2);
+    cfg.send.symbol_size = 1141;
+    cfg.recv.symbol_size = 1141;
     cfg.send.repair_overhead = 1.0;
     cfg.recv.repair_overhead = 1.0;
     cfg.send.round0_loss_target = 0.10;
     cfg.recv.round0_loss_target = 0.10;
     cfg.send.max_block_size = 512 * 1024;
     cfg.recv.max_block_size = 512 * 1024;
-    cfg.send.idle_timeout = Duration::from_secs(60);
-    cfg.recv.idle_timeout = Duration::from_secs(60);
+    cfg.send.idle_timeout = Duration::from_secs(180);
+    cfg.recv.idle_timeout = Duration::from_secs(180);
 
     let data_rate_limit = ProxyRateLimit {
         bytes_per_sec: 1_250_000,
         burst_bytes: 16 * 1024,
         max_queue_delay: Duration::from_millis(300),
     };
-    let (send_res, recv_res, collector) = run_transfer_via_rate_limited_lossy_proxy(
+    let (send_res, recv_res, collector) = run_transfer_via_rate_limited_lossy_proxy_with_timeout(
         cfg.send,
         cfg.recv,
         &source,
         dst.path(),
         0x0A5A_5170,
         data_rate_limit,
+        Duration::from_secs(300),
     );
     let round_losses = need_more_round_losses(&collector);
     let max_round_loss = round_losses.iter().copied().fold(0.0, f64::max);
@@ -957,7 +1007,7 @@ fn real_udp_quic_multiblock_rate_limited_lossy_proxy_recovers_with_low_round_los
     assert_receive_report_counters(&send_res, &recv_res, payload.len() as u64, 1);
     assert!(
         recv_res.feedback_rounds > 0,
-        "10% deterministic packet loss under a 1.25 MB/s cap should exercise the repair-feedback loop"
+        "10% deterministic 1-RTT packet loss under a 1.25 MB/s cap should exercise the repair-feedback loop"
     );
     assert!(
         !round_losses.is_empty(),
@@ -969,10 +1019,10 @@ fn real_udp_quic_multiblock_rate_limited_lossy_proxy_recovers_with_low_round_los
     );
     assert_eq!(send_res.bytes_sent, payload.len() as u64);
     assert_eq!(
-        std::fs::read(dst.path().join("rate-limited-lossy-proxy-multiblock.bin"))
+        std::fs::read(dst.path().join("pivot-a-rate-limited-lossy-proxy.bin"))
             .expect("read committed"),
         payload,
-        "rate-limited lossy QUIC/TLS DATAGRAM transfer must commit exact bytes after paced repair"
+        "rate-limited lossy QUIC/TLS DATAGRAM transfer with 1141-byte symbols must commit exact bytes after reliable control-stream feedback"
     );
     assert_no_staging_residue(dst.path());
 }

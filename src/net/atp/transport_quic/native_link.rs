@@ -22,9 +22,11 @@
 //!
 //! The reliable ATP control protocol (Hello / manifest / NeedMore / Proof /
 //! Close) and the fountain feedback loop are the existing `super::` native
-//! helpers; this module only adds the async UDP pump that drives them, because
-//! the in-memory loopback driver ([`super`]'s tests) moves frames synchronously
-//! between two in-process connections, which cannot do real async socket I/O.
+//! helpers; this module adds the async UDP pump plus the ATP-scoped stream PTO
+//! that requeues lost control-stream offsets while the peer is waiting at a
+//! protocol boundary. The in-memory loopback driver ([`super`]'s tests) moves
+//! frames synchronously between two in-process connections, which cannot do real
+//! async socket I/O.
 //!
 //! # 1-RTT wire framing (no-claim boundary)
 //!
@@ -44,9 +46,10 @@
 //!
 //! RaptorQ + the fountain feedback loop tolerate symbol-DATAGRAM loss
 //! end-to-end. The reliable control STREAM has bounded, ATP-specific
-//! retransmission for NeedMore and terminal Proof frames; full generic QUIC loss
-//! recovery remains out of scope for this pump. Deterministic symbol loss for
-//! tests is injected before a symbol is sprayed ([`QuicConfig::debug_drop_one_in`]).
+//! retransmission for setup, round-complete, NeedMore, and terminal Proof
+//! frames; full generic QUIC loss recovery remains out of scope for this pump.
+//! Deterministic symbol loss for tests is injected before a symbol is sprayed
+//! ([`QuicConfig::debug_drop_one_in`]).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -3187,9 +3190,10 @@ impl QuicLink {
         packet_number: u64,
         plaintext: &[u8],
     ) -> Result<bool, QuicTransportError> {
-        let required_datagram_slots = self.max_datagram_frames_per_packet.max(1);
+        let decoded_frames = NativeQuicConnection::decode_frames(plaintext)?;
+        let required_datagram_slots = datagram_frame_count(&decoded_frames);
         let available_datagram_slots = self.conn.inbound_datagram_remaining_capacity();
-        if available_datagram_slots < required_datagram_slots {
+        if required_datagram_slots > 0 && available_datagram_slots < required_datagram_slots {
             let packet_number_text = packet_number.to_string();
             let required_text = required_datagram_slots.to_string();
             let available_text = available_datagram_slots.to_string();
@@ -3212,7 +3216,6 @@ impl QuicLink {
             self.mark_peer_activity();
             return Ok(false);
         }
-        let decoded_frames = NativeQuicConnection::decode_frames(plaintext)?;
         let acked_stream_ranges = acked_packet_ranges_from_frames(&decoded_frames)?;
         self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
         match self.conn.process_packet_payload(
@@ -3980,8 +3983,12 @@ impl QuicLink {
                         QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES,
                     )
                 } else {
-                    frames.to_vec()
+                    Vec::new()
                 };
+            }
+            if retransmit_frames.is_empty() {
+                last_retransmit = Instant::now();
+                continue;
             }
             super::quic_progress(format_args!(
                 "control: stream_pto_retransmit reason={reason} attempt={attempts} frames={} operation={operation}",
@@ -7495,6 +7502,7 @@ async fn run_receiver_session(
     let ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
     control.send(cx, &mut link.conn, &ack_frame)?;
     link.flush(cx).await?;
+    let mut ack_frames = link.last_flushed_stream_frames();
     if let Some(reason) = reason {
         return Err(QuicTransportError::HandshakeRejected(reason));
     }
@@ -7505,9 +7513,40 @@ async fn run_receiver_session(
     };
 
     // Manifest.
-    let manifest_frame = link
-        .next_control_frame(cx, &mut control, "receive transfer manifest")
-        .await?;
+    let manifest_frame = loop {
+        let frame = link
+            .next_control_frame_with_stream_pto(
+                cx,
+                &mut control,
+                "receive transfer manifest",
+                &ack_frames,
+                "handshake_ack_pto",
+            )
+            .await?;
+        match frame.frame_type() {
+            FrameType::ObjectManifest => break frame,
+            FrameType::Handshake => {
+                let duplicate: QuicHello = super::parse_json(&frame)?;
+                if duplicate != hello {
+                    return Err(QuicTransportError::Unexpected {
+                        got: FrameType::Handshake,
+                        expected: "ObjectManifest or duplicate Handshake",
+                    });
+                }
+                control.send(cx, &mut link.conn, &ack_frame)?;
+                link.flush(cx).await?;
+                ack_frames = link.last_flushed_stream_frames();
+                continue;
+            }
+            FrameType::KeepAlive => continue,
+            got => {
+                return Err(QuicTransportError::Unexpected {
+                    got,
+                    expected: "ObjectManifest",
+                });
+            }
+        }
+    };
     let manifest: TransferManifest =
         super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
     super::validate_quic_manifest(&manifest, config)?;
