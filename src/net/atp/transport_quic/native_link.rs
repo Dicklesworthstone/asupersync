@@ -321,9 +321,8 @@ fn source_stream_pacing_interval(frame_bytes: usize, pacing_rate_bps: u64) -> Du
 /// otherwise deadlocks both sides until the full idle timeout. Re-send the NeedMore on this interval
 /// instead; this is what lets cross-machine transfers converge through control-frame loss.
 const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
-/// Fast retry cadence for GOOD-regime source STREAM recovery. This is scoped
-/// away from NeedMore/fountain control so lossy DATAGRAM convergence keeps its
-/// conservative round-boundary behavior.
+/// Fast retry cadence for source STREAM recovery while bytes are still being
+/// flushed or while the sender awaits the receiver's reliable Proof.
 const SOURCE_STREAM_PTO: Duration = Duration::from_millis(200);
 const QUIC_LOSS_TARGET_PROGRESS_STALL_RATIO: f64 = 0.50;
 const QUIC_LOSS_TARGET_PROGRESS_LOSS_MARGIN: f64 = 0.01;
@@ -724,7 +723,7 @@ fn packet_in_ack_ranges(packet_number: u64, ranges: &[NativeAckRange]) -> bool {
 
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_PACKET_THRESHOLD: u64 = 3;
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 4;
-const QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES: usize = 4;
+const QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS: usize = 64;
 
 fn packet_lost_by_ack_gap(packet_number: u64, acked_ranges: &[NativeAckRange]) -> bool {
     let Some(largest_acked) = acked_ranges.iter().map(|range| range.largest).max() else {
@@ -741,17 +740,6 @@ fn dedup_stream_frames_for_retransmit(
     frames.sort_by_key(|frame| (frame.stream.0, frame.offset));
     frames.dedup();
     frames
-}
-
-fn tail_stream_frames_for_retransmit(
-    frames: &[SentControlStreamFrame],
-    max_frames: usize,
-) -> Vec<SentControlStreamFrame> {
-    if frames.is_empty() {
-        return Vec::new();
-    }
-    let start = frames.len().saturating_sub(max_frames.max(1));
-    dedup_stream_frames_for_retransmit(frames[start..].to_vec())
 }
 
 struct NativeQuicSpraySymbol {
@@ -3143,6 +3131,29 @@ impl QuicLink {
         dedup_stream_frames_for_retransmit(frames)
     }
 
+    fn drain_limited_in_flight_stream_frames_for_retransmit(
+        &mut self,
+        max_packets: usize,
+    ) -> Vec<SentControlStreamFrame> {
+        if self.in_flight_stream_frames.is_empty() || max_packets == 0 {
+            return Vec::new();
+        }
+
+        let mut retained = BTreeMap::new();
+        let mut frames = Vec::new();
+        let mut drained_packets = 0usize;
+        for (packet_number, packet_frames) in std::mem::take(&mut self.in_flight_stream_frames) {
+            if drained_packets < max_packets {
+                drained_packets = drained_packets.saturating_add(1);
+                frames.extend(packet_frames);
+            } else {
+                retained.insert(packet_number, packet_frames);
+            }
+        }
+        self.in_flight_stream_frames = retained;
+        dedup_stream_frames_for_retransmit(frames)
+    }
+
     fn pending_fountain_feedback_count(&self) -> usize {
         queued_fountain_feedback_count(&self.pending_control_frames)
     }
@@ -3927,11 +3938,7 @@ impl QuicLink {
         }
 
         let max_attempts = needmore_pto_attempt_budget(self.idle_timeout);
-        let pto = if reason == "source_stream_completion_pto" {
-            SOURCE_STREAM_PTO
-        } else {
-            NEEDMORE_PTO
-        };
+        let pto = NEEDMORE_PTO;
         let mut attempts = 0u32;
         let mut last_retransmit = Instant::now();
         loop {
@@ -3944,7 +3951,58 @@ impl QuicLink {
             }
             self.flush(cx).await?;
             let pumped = self.pump_inbound_for(cx, pto).await?;
-            if pumped > 0 && reason == "source_stream_completion_pto" {
+            if pumped > 0 && last_retransmit.elapsed() < pto {
+                continue;
+            }
+
+            attempts = attempts.saturating_add(1);
+            if attempts > max_attempts {
+                return Err(QuicTransportError::Timeout {
+                    operation,
+                    timeout: self.idle_timeout,
+                });
+            }
+            let retransmit_frames = self.drain_in_flight_stream_frames_for_retransmit();
+            if retransmit_frames.is_empty() {
+                last_retransmit = Instant::now();
+                continue;
+            }
+            super::quic_progress(format_args!(
+                "control: stream_pto_retransmit reason={reason} attempt={attempts} frames={} operation={operation}",
+                retransmit_frames.len()
+            ));
+            self.retransmit_stream_frames(cx, &retransmit_frames, reason)
+                .await?;
+            last_retransmit = Instant::now();
+        }
+    }
+
+    async fn next_control_frame_with_source_stream_recovery(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+        operation: &'static str,
+    ) -> Result<Frame, QuicTransportError> {
+        let started = Instant::now();
+        let mut last_retransmit = Instant::now();
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if started.elapsed() >= self.idle_timeout {
+                return Err(QuicTransportError::Timeout {
+                    operation,
+                    timeout: self.idle_timeout,
+                });
+            }
+            if let Some(frame) = self.pending_control_frames.pop_front() {
+                return Ok(frame);
+            }
+            if let Some(frame) = control.try_recv(cx, &mut self.conn)? {
+                return Ok(frame);
+            }
+
+            let flushed = self.flush(cx).await?;
+            let pumped = self.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
+            if pumped > 0 {
                 let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
                 let retransmit_frames =
                     self.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges);
@@ -3959,44 +4017,35 @@ impl QuicLink {
                 }
                 continue;
             }
-            if pumped > 0 && last_retransmit.elapsed() < pto {
+
+            if flushed > 0 {
                 continue;
             }
 
-            attempts = attempts.saturating_add(1);
-            if attempts > max_attempts {
-                return Err(QuicTransportError::Timeout {
-                    operation,
-                    timeout: self.idle_timeout,
-                });
-            }
-            let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
-            let mut retransmit_frames = if reason == "source_stream_completion_pto" {
-                self.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges)
-            } else {
-                self.drain_in_flight_stream_frames_for_retransmit()
-            };
-            if retransmit_frames.is_empty() {
-                retransmit_frames = if reason == "source_stream_completion_pto" {
-                    tail_stream_frames_for_retransmit(
-                        frames,
-                        QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES,
+            if last_retransmit.elapsed() >= SOURCE_STREAM_PTO {
+                if self.conn.has_pending_stream_frames() {
+                    continue;
+                }
+                let _ = self.expire_app_data_loss_timeout(cx, operation)?;
+                let retransmit_frames = self.drain_limited_in_flight_stream_frames_for_retransmit(
+                    QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
+                );
+                if !retransmit_frames.is_empty() {
+                    super::quic_progress(format_args!(
+                        "control: source_stream_proof_wait_retransmit frames={} operation={operation}",
+                        retransmit_frames.len()
+                    ));
+                    self.retransmit_stream_frames(
+                        cx,
+                        &retransmit_frames,
+                        "source_stream_proof_wait_pto",
                     )
-                } else {
-                    Vec::new()
-                };
-            }
-            if retransmit_frames.is_empty() {
+                    .await?;
+                    last_retransmit = Instant::now();
+                    continue;
+                }
                 last_retransmit = Instant::now();
-                continue;
             }
-            super::quic_progress(format_args!(
-                "control: stream_pto_retransmit reason={reason} attempt={attempts} frames={} operation={operation}",
-                retransmit_frames.len()
-            ));
-            self.retransmit_stream_frames(cx, &retransmit_frames, reason)
-                .await?;
-            last_retransmit = Instant::now();
         }
     }
 }
@@ -5566,8 +5615,13 @@ async fn drive_native_source_stream_flush(
             return Ok(());
         }
         if flushed == 0 && pumped == 0 && last_progress.elapsed() >= SOURCE_STREAM_PTO {
+            if link.conn.has_pending_stream_frames() {
+                continue;
+            }
             let _ = link.expire_app_data_loss_timeout(cx, "flush QUIC source stream")?;
-            let mut retransmit_frames = link.drain_in_flight_stream_frames_for_retransmit();
+            let mut retransmit_frames = link.drain_limited_in_flight_stream_frames_for_retransmit(
+                QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
+            );
             if retransmit_frames.is_empty() {
                 retransmit_frames = recent_stream_frames.clone();
             }
@@ -5807,27 +5861,16 @@ async fn run_sender_session(
                 bytes_streamed,
                     source_stream.0
                 );
-            send_native_object_complete_for_round(
-                cx,
-                &mut link.conn,
-                &mut control,
-                0,
-                0,
-            )?;
-            link.flush(cx).await?;
             // Keep the source stream marked as ATP-paced through proof wait:
             // PTO retransmits of lost source STREAM frames must not fall back
             // under NewReno cwnd after the initial source send returns.
-            let source_completion_frames = link.last_flushed_stream_frames();
             loop {
                 cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
                 let reply_frame = link
-                    .next_control_frame_with_stream_pto(
+                    .next_control_frame_with_source_stream_recovery(
                         cx,
                         &mut control,
                         "receive stream-source proof",
-                        &source_completion_frames,
-                        "source_stream_completion_pto",
                     )
                     .await?;
                 match reply_frame.frame_type() {
@@ -7079,6 +7122,33 @@ async fn drain_native_source_stream_tap_frames(
     Ok((frames.len(), accepted))
 }
 
+fn validate_native_source_stream_observed_completion(
+    link: &mut QuicLink,
+    expected_total: u64,
+) -> Result<bool, QuicTransportError> {
+    let mut fin_seen = false;
+    for frame in link.drain_received_source_stream_frames() {
+        let frame_len = u64::try_from(frame.data.len()).unwrap_or(u64::MAX);
+        let frame_end = frame.offset.checked_add(frame_len).ok_or_else(|| {
+            QuicTransportError::Integrity("source stream frame offset overflow".to_string())
+        })?;
+        if frame_end > expected_total {
+            return Err(QuicTransportError::Integrity(format!(
+                "source stream carried bytes beyond the manifest total: end={frame_end}, total={expected_total}"
+            )));
+        }
+        if frame.fin {
+            if frame_end != expected_total {
+                return Err(QuicTransportError::Integrity(format!(
+                    "source stream FIN at offset {frame_end}, expected {expected_total}"
+                )));
+            }
+            fin_seen = true;
+        }
+    }
+    Ok(fin_seen)
+}
+
 async fn receive_native_source_stream_entries_pumped(
     cx: &Cx,
     link: &mut QuicLink,
@@ -7131,22 +7201,25 @@ async fn receive_native_source_stream_entries_pumped(
         }
     }
 
-    let extra = read_native_source_stream_chunk(cx, link, stream, 1, config.idle_timeout).await?;
+    let extra = link.conn.read_stream_bytes(cx, stream, 1)?;
     if !extra.is_empty() {
         return Err(QuicTransportError::Integrity(
             "source stream carried bytes beyond the manifest total".to_string(),
         ));
     }
-    if !link.conn.is_stream_read_eof(stream)? {
-        return Err(QuicTransportError::Integrity(
-            "source stream did not finish after manifest bytes".to_string(),
-        ));
-    }
+    let fin_seen = validate_native_source_stream_observed_completion(link, manifest.total_bytes)?;
     if received != manifest.total_bytes {
         return Err(QuicTransportError::Integrity(format!(
             "source stream delivered {received} bytes, expected {}",
             manifest.total_bytes
         )));
+    }
+    if !fin_seen && !link.conn.is_stream_read_eof(stream)? {
+        quic_rqtrace!(
+            "receiver: native_source_stream byte-complete before FIN bytes={} stream={}",
+            received,
+            stream.0
+        );
     }
     flush_cached_quic_staging_files(staged).await?;
     Ok((received, 0, super::QuicDecodeStats::default()))
@@ -7420,22 +7493,6 @@ async fn run_receiver_session(
                 symbols_accepted,
                 decode_stats.decode_count
             );
-            let complete_frame = link
-                .next_control_frame(cx, &mut control, "receive source-stream object-complete")
-                .await?;
-            if complete_frame.frame_type() != FrameType::ObjectComplete {
-                return Err(QuicTransportError::Unexpected {
-                    got: complete_frame.frame_type(),
-                    expected: "ObjectComplete",
-                });
-            }
-            let complete = super::parse_quic_round_complete(&complete_frame)?;
-            if complete.round != 0 {
-                return Err(QuicTransportError::Integrity(format!(
-                    "source-stream ObjectComplete must be round=0, got round={} symbols={}",
-                    complete.round, complete.round_symbols_sent
-                )));
-            }
             let (mut receipt, committed_paths) = commit_staged_entries(
                 cx,
                 link,
@@ -9767,7 +9824,7 @@ mod tests {
     }
 
     #[test]
-    fn source_stream_completion_pto_retransmits_only_tail_frames() {
+    fn source_stream_proof_wait_deduplicates_replay_offsets() {
         let stream = StreamId(4);
         let frames = (0..8)
             .map(|idx| SentControlStreamFrame {
@@ -9777,29 +9834,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            tail_stream_frames_for_retransmit(
-                &frames,
-                QUIC_SOURCE_STREAM_COMPLETION_PTO_MAX_FRAMES,
-            ),
-            vec![
-                SentControlStreamFrame {
-                    stream,
-                    offset: 4096,
-                },
-                SentControlStreamFrame {
-                    stream,
-                    offset: 5120,
-                },
-                SentControlStreamFrame {
-                    stream,
-                    offset: 6144,
-                },
-                SentControlStreamFrame {
-                    stream,
-                    offset: 7168,
-                },
-            ],
-            "completion PTO should not replay the whole final source-stream flush window"
+            dedup_stream_frames_for_retransmit(frames.clone()),
+            frames,
+            "proof wait replay uses stream offsets rather than the old marker-tail subset"
         );
     }
 

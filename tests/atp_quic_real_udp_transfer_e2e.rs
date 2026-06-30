@@ -314,6 +314,7 @@ struct LossyUdpProxy {
 }
 
 impl LossyUdpProxy {
+    #[allow(dead_code)]
     fn spawn_with_rate(
         server_addr: SocketAddr,
         seed: u64,
@@ -543,6 +544,34 @@ fn run_transfer_via_rate_limited_lossy_proxy_with_timeout(
     })
 }
 
+fn run_transfer_via_lossy_proxy(
+    send_cfg: QuicConfig,
+    recv_cfg: QuicConfig,
+    source: &Path,
+    dest_dir: &Path,
+    seed: u64,
+    proxy_timeout: Duration,
+) -> (
+    Result<SendReport, QuicTransportError>,
+    Result<ReceiveReport, QuicTransportError>,
+) {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server_endpoint = bind_server_endpoint(&cx, listen)
+            .await
+            .expect("bind server endpoint");
+        let server_addr = server_endpoint.local_addr();
+        let proxy = LossyUdpProxy::spawn_with_rate_timeout(server_addr, seed, None, proxy_timeout);
+
+        zip(
+            send_path(&cx, proxy.addr, source, send_cfg, "atp-quic-client"),
+            receive_on_endpoint(&cx, server_endpoint, dest_dir, &recv_cfg, "atp-quic-server"),
+        )
+        .await
+    })
+}
+
 fn need_more_round_losses(collector: &LogCollector) -> Vec<f64> {
     collector
         .peek()
@@ -688,6 +717,63 @@ fn real_udp_quic_good_transport_auth_uses_reliable_source_stream() {
         std::fs::read(dst.path().join("good-stream.bin")).expect("read committed"),
         payload,
         "committed bytes must match the source"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
+#[test]
+fn real_udp_quic_broken_loss_transport_auth_source_stream_commits_without_marker_deadlock() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("broken-loss-stream.bin");
+    let payload: Vec<u8> = (0..(2 * 1024 * 1024))
+        .map(|i| u8::try_from((i * 43 + i / 257 + 29) % 251).expect("byte pattern fits u8"))
+        .collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.round0_loss_target = 0.10;
+    cfg.recv.round0_loss_target = 0.10;
+    cfg.send.idle_timeout = Duration::from_secs(45);
+    cfg.recv.idle_timeout = Duration::from_secs(45);
+    cfg.send.handshake_timeout = Duration::from_secs(20);
+    cfg.recv.handshake_timeout = Duration::from_secs(20);
+    cfg.send.accept_timeout = Duration::from_secs(20);
+    cfg.recv.accept_timeout = Duration::from_secs(20);
+
+    let (send, recv) = run_transfer_via_lossy_proxy(
+        cfg.send,
+        cfg.recv,
+        &source,
+        dst.path(),
+        0x23_83_50_0A,
+        Duration::from_secs(60),
+    );
+    let send = send.unwrap_or_else(|err| {
+        panic!(
+            "10% lossy source-stream sender must receive reliable proof: {err:?}; receiver={recv:?}"
+        )
+    });
+    let recv = recv.expect("10% lossy source-stream receiver commits");
+
+    assert!(
+        recv.committed,
+        "receiver must commit under induced 10% loss"
+    );
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.files, 1);
+    assert_eq!(recv.files, 1);
+    assert_eq!(send.bytes_sent, payload.len() as u64);
+    assert_eq!(recv.bytes_received, payload.len() as u64);
+    assert_eq!(
+        recv.feedback_rounds, 0,
+        "reliable source-stream path should not fall back to RaptorQ repair feedback"
+    );
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(
+        std::fs::read(dst.path().join("broken-loss-stream.bin")).expect("read committed"),
+        payload,
+        "committed bytes must match the source through 10% loopback packet loss"
     );
     assert_no_staging_residue(dst.path());
 }
