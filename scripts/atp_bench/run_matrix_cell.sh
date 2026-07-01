@@ -328,7 +328,11 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
         extra_send=(--streams "$STREAMS")
     fi
     if [ "$transport" = "rq" ] || [ "$transport" = "quic" ]; then
-        rq_loss_args=(--rq-round0-loss-pct "$(netem_loss_pct)")
+        # ATP_RQ_FORCE_LOSS_PCT overrides the regime-derived --rq-round0-loss-pct. Diagnostic only:
+        # used to force the FEC datagram spray (vs the reliable source-stream) on a lossy cell by
+        # advertising a loss target above RQ_CONTROL_SOURCE_STREAM_MAX_LOSS_TARGET, to prove the
+        # source-stream-vs-spray path selection (MATRIX-198). Not a headline number.
+        rq_loss_args=(--rq-round0-loss-pct "${ATP_RQ_FORCE_LOSS_PCT:-$(netem_loss_pct)}")
     fi
     # Optional sender bandwidth cap (bytes/sec). Set ATP_SEND_BWLIMIT to pace the
     # sender at/below the link rate — diagnostic for round-0 overrun on rate-capped
