@@ -7313,6 +7313,7 @@ pub async fn receive_connection(
                         dest_dir,
                         symbols_accepted,
                         feedback_rounds,
+                        &std::collections::BTreeMap::new(),
                     )
                     .await?;
                     control
@@ -7477,11 +7478,15 @@ pub async fn receive_connection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_control_source_data_frame(
     frame: &Frame,
     transfer_id: &str,
     symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
+    manifest: &TransferManifest,
+    logical: &mut BTreeMap<String, crate::net::atp::transport_common::StagedEntryReceive>,
+    logical_done: &mut BTreeMap<String, (u64, crate::atp::object::ObjectId, [u8; 32])>,
 ) -> Result<usize, RqError> {
     let data = parse_control_source_data_frame(frame, transfer_id, symbol_auth)?;
     let pos = decoder_position_for_entry(decoders, data.entry).ok_or_else(|| {
@@ -7521,6 +7526,33 @@ async fn apply_control_source_data_frame(
     if let Some(inc) = dec.inc.as_mut() {
         inc.update_with_chunk(data.data);
     }
+    // L2: for a fragmented logical file, also fold the chunk into a per-logical-
+    // file running hash. Fragments stream in shard order and each is in-order,
+    // so the concatenation of arrival-order chunks equals the logical file; this
+    // lets commit skip the post-stream re-read of every fragment (the remaining
+    // clean-link tail after the per-fragment inc-hash).
+    if let Some(frag) = manifest
+        .entries
+        .iter()
+        .find(|e| e.index == data.entry)
+        .and_then(|e| e.fragment.as_ref())
+    {
+        let lh = logical.entry(frag.rel_path.clone()).or_insert_with(|| {
+            crate::net::atp::transport_common::StagedEntryReceive::new(std::path::PathBuf::from(
+                &frag.rel_path,
+            ))
+        });
+        lh.update_with_chunk(data.data);
+        if lh.bytes_written == frag.logical_size {
+            if let Some(done) = logical.remove(&frag.rel_path) {
+                let (d, _p, _c) = done.finalize(String::new());
+                logical_done.insert(
+                    frag.rel_path.clone(),
+                    (d.size, d.content_id, d.content_sha256),
+                );
+            }
+        }
+    }
     dec.bytes_written = end;
     if dec.bytes_written == dec.size {
         dec.complete = true;
@@ -7548,6 +7580,12 @@ where
 {
     let mut bytes_streamed = 0u64;
     let mut chunks = 0u64;
+    // L2: per-logical-file running hashes for fragmented objects, finalized in
+    // arrival order so commit can skip the post-stream fragment re-read.
+    let mut logical: BTreeMap<String, crate::net::atp::transport_common::StagedEntryReceive> =
+        BTreeMap::new();
+    let mut logical_done: BTreeMap<String, (u64, crate::atp::object::ObjectId, [u8; 32])> =
+        BTreeMap::new();
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let frame = control.recv().await?;
@@ -7558,6 +7596,9 @@ where
                     &manifest.transfer_id,
                     symbol_auth,
                     decoders,
+                    manifest,
+                    &mut logical,
+                    &mut logical_done,
                 )
                 .await?;
                 bytes_streamed =
@@ -7593,7 +7634,8 @@ where
                     });
                 }
 
-                let receipt = verify_and_commit(manifest, decoders, dest_dir, 0, 0).await?;
+                let receipt =
+                    verify_and_commit(manifest, decoders, dest_dir, 0, 0, &logical_done).await?;
                 control
                     .send(&json_frame(FrameType::Proof, &receipt)?)
                     .await?;
@@ -9088,6 +9130,7 @@ async fn verify_and_commit(
     dest_dir: &Path,
     symbols_accepted: u64,
     feedback_rounds: u32,
+    logical_precomputed: &BTreeMap<String, (u64, crate::atp::object::ObjectId, [u8; 32])>,
 ) -> Result<ReceiveReceipt, RqError> {
     let trace_commit = std::env::var_os("ATP_RQ_TRACE").is_some();
     let total_started = trace_commit.then(Instant::now);
@@ -9221,10 +9264,20 @@ async fn verify_and_commit(
 
     for (rel_path, mut shards) in fragment_groups {
         shards.sort_by_key(|shard| shard.fragment.shard_index);
-        let hash_started = trace_commit.then(Instant::now);
+        // L2 fast path: if the reliable source-stream already folded every
+        // fragment (in arrival order) into a logical running hash, reuse it and
+        // skip re-reading + re-hashing all fragment staging files. The lossy
+        // datagram path leaves `logical_precomputed` empty and re-hashes here.
         let (size, content_id, content_sha256) =
-            hash_large_object_fragments(&shards, &mut hash_buf).await?;
-        verify_hash_micros = verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
+            if let Some((sz, cid, sha)) = logical_precomputed.get(&rel_path) {
+                (*sz, cid.clone(), *sha)
+            } else {
+                let hash_started = trace_commit.then(Instant::now);
+                let r = hash_large_object_fragments(&shards, &mut hash_buf).await?;
+                verify_hash_micros =
+                    verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
+                r
+            };
         let Some(first) = shards.first() else {
             sha_ok = false;
             continue;
@@ -13327,6 +13380,7 @@ mod tests {
             dest.path(),
             0,
             0,
+            &std::collections::BTreeMap::new(),
         ))
         .expect_err("commit must reject pre-existing symlink ancestors");
         assert!(
@@ -15261,12 +15315,18 @@ mod tests {
             4,
         );
         let mut decoders = vec![decoder];
+        let manifest = manifest_with(Vec::new(), 0);
+        let mut logical = std::collections::BTreeMap::new();
+        let mut logical_done = std::collections::BTreeMap::new();
 
         let err = futures_lite::future::block_on(apply_control_source_data_frame(
             &tampered,
             transfer_id,
             Some(&ctx),
             &mut decoders,
+            &manifest,
+            &mut logical,
+            &mut logical_done,
         ))
         .expect_err("tampered control-source byte must reject");
 
@@ -16680,6 +16740,7 @@ mod tests {
             dest.path(),
             0,
             0,
+            &std::collections::BTreeMap::new(),
         ))
         .expect("verify fragmented file");
 
@@ -16983,6 +17044,7 @@ mod tests {
             dest.path(),
             0,
             0,
+            &std::collections::BTreeMap::new(),
         ))
         .expect("verify_and_commit");
 
@@ -17241,6 +17303,7 @@ mod tests {
             dest.path(),
             0,
             0,
+            &std::collections::BTreeMap::new(),
         ))
         .expect("verify_and_commit returns a receipt");
 
