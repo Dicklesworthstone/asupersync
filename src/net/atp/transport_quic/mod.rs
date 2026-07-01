@@ -247,6 +247,14 @@ const MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND: usize = 16_384;
 /// fits the pipe instead of self-dropping in the kernel queue.
 const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 1 << 20;
 const QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT: usize = 256;
+/// Upper bound on a peer-advertised (Hello) `max_block_size` that the receiver will ADOPT.
+/// The sender scales its block size UP for large entries (see
+/// `effective_quic_max_block_size_for_largest_entry`) to keep the per-object source-block count
+/// under `QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT`; the receiver adopts that value so its decode geometry
+/// matches, but caps it here so a hostile/oversized Hello cannot force unbounded per-block decode
+/// buffers. 32 MiB admits the sender's `max_entry_len / QUIC_MAX_SOURCE_BLOCKS_PER_OBJECT` scaling
+/// for entries up to ~8 GiB while keeping per-block decode memory bounded. (br-asupersync-j73ili)
+const MAX_QUIC_ADOPTED_BLOCK_SIZE: usize = 32 * 1024 * 1024;
 const QUIC_REPAIR_REQUEST_PACING_WINDOW_MILLIS: u64 = 2_000;
 const QUIC_REPAIR_REQUEST_MIN_SYMBOLS_PER_ROUND: usize = 64;
 
@@ -5840,19 +5848,47 @@ fn reject_hello_reason(
             hello.symbol_size, config.symbol_size
         ));
     }
-    let receiver_max_block_size =
-        match quic_symbol_aligned_block_size(config, config.max_block_size) {
-            Ok(max_block_size) => u64::try_from(max_block_size).unwrap_or(u64::MAX),
-            Err(_) => {
-                return Some(
-                    "receiver max_block_size cannot be aligned to symbol_size without overflow"
-                        .to_string(),
-                );
-            }
-        };
-    if hello.max_block_size != receiver_max_block_size {
+    // The sender is authoritative on block geometry: it scales `max_block_size` UP for large
+    // entries (see `effective_quic_max_block_size_for_largest_entry`) to keep the per-object source
+    // block count bounded. The receiver ADOPTS the sender's value (in
+    // `receive_established_native_connection`) provided it is symbol-aligned, at least the
+    // receiver's own aligned floor, and within `MAX_QUIC_ADOPTED_BLOCK_SIZE` (which bounds per-block
+    // decode memory). A strict equality here rejected every large transfer whose sender scaled the
+    // block size — the ASUP-E802 handshake failure. (br-asupersync-j73ili)
+    let receiver_floor = match quic_symbol_aligned_block_size(config, config.max_block_size) {
+        Ok(v) => u64::try_from(v).unwrap_or(u64::MAX),
+        Err(_) => {
+            return Some(
+                "receiver max_block_size cannot be aligned to symbol_size without overflow"
+                    .to_string(),
+            );
+        }
+    };
+    let hello_block = usize::try_from(hello.max_block_size).unwrap_or(usize::MAX);
+    let hello_aligned = match quic_symbol_aligned_block_size(config, hello_block) {
+        Ok(v) => u64::try_from(v).unwrap_or(u64::MAX),
+        Err(_) => {
+            return Some(format!(
+                "sender max_block_size ({}) cannot be aligned to symbol_size without overflow",
+                hello.max_block_size
+            ));
+        }
+    };
+    if hello_aligned != hello.max_block_size {
         return Some(format!(
-            "sender max_block_size ({}) must match receiver max_block_size ({receiver_max_block_size})",
+            "sender max_block_size ({}) is not a multiple of symbol_size ({})",
+            hello.max_block_size, config.symbol_size
+        ));
+    }
+    if hello.max_block_size < receiver_floor {
+        return Some(format!(
+            "sender max_block_size ({}) is below the receiver floor ({receiver_floor})",
+            hello.max_block_size
+        ));
+    }
+    if hello.max_block_size > MAX_QUIC_ADOPTED_BLOCK_SIZE as u64 {
+        return Some(format!(
+            "sender max_block_size ({}) exceeds the maximum adopted block size ({MAX_QUIC_ADOPTED_BLOCK_SIZE})",
             hello.max_block_size
         ));
     }
@@ -8039,7 +8075,7 @@ async fn receive_established_native_connection(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
-    let config = effective_quic_receiver_config(&config)?;
+    let mut config = effective_quic_receiver_config(&config)?;
     let mut control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
@@ -8052,6 +8088,13 @@ async fn receive_established_native_connection(
         peer_id,
         symbol_auth_enabled,
     )?;
+    // Adopt the sender's (bounded-accepted in `reject_hello_reason`) block geometry so the
+    // receiver's decoders + block-count math match the sender's encode geometry for large entries.
+    // Without this the handshake would accept a scaled block size but decode with the receiver's
+    // default, corrupting reassembly (ASUP-E802 / br-asupersync-j73ili).
+    if let Ok(hello_block) = usize::try_from(hello.max_block_size) {
+        config.max_block_size = hello_block;
+    }
     let source_stream = if hello.source_stream
         && quic_native_source_stream_enabled(hello.total_bytes, &config, &connection)
     {
@@ -13862,15 +13905,62 @@ mod tests {
         bad_hello.symbol_size = config.symbol_size;
         bad_hello.max_block_size = u64::try_from(config.max_block_size / 2).unwrap_or(1).max(1);
         let reason = reject_hello_reason(&bad_hello, &config, false)
-            .expect("block layout mismatch must reject at handshake");
+            .expect("non-aligned / below-floor sender block size must reject at handshake");
+        // Post-E802 (br-asupersync-j73ili) the receiver bounded-accepts the sender's block size
+        // instead of demanding equality; config.max_block_size/2 is both non-symbol-aligned and
+        // below the receiver floor, so it is rejected with the new semantics.
         assert!(
             reason.contains("max_block_size")
-                && reason.contains("sender max_block_size")
-                && reason.contains("receiver max_block_size")
-                && reason.contains("must match")
-                && reason.contains(&config.max_block_size.to_string()),
+                && (reason.contains("not a multiple of symbol_size")
+                    || reason.contains("below the receiver floor")),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn quic_control_handshake_adopts_sender_scaled_block_size() {
+        let config = trusted_quic_config();
+        // A sender transferring a large entry scales its block size UP to keep the per-object
+        // source-block count bounded; the receiver must adopt that (symbol-aligned, within cap)
+        // rather than reject it (ASUP-E802 / br-asupersync-j73ili).
+        let scaled = effective_quic_max_block_size_for_largest_entry(&config, 512 * 1024 * 1024)
+            .expect("large-entry scaled block size");
+        assert!(
+            scaled > config.max_block_size,
+            "a large entry must scale the block size above the configured default"
+        );
+        let mut hello = QuicHello {
+            protocol: ATP_QUIC_PROTOCOL,
+            role: "sender".to_string(),
+            peer_id: "sender-peer".to_string(),
+            symbol_size: config.symbol_size,
+            max_block_size: u64::try_from(scaled).unwrap_or(u64::MAX),
+            symbol_auth: false,
+            source_stream: false,
+            source_stream_id: None,
+            total_bytes: 512 * 1024 * 1024,
+        };
+        assert!(
+            reject_hello_reason(&hello, &config, false).is_none(),
+            "receiver must adopt a symbol-aligned sender-scaled block size within cap"
+        );
+
+        // Over the memory-bounding cap → rejected (bounded, no unbounded decode buffers).
+        let over = quic_symbol_aligned_block_size(&config, MAX_QUIC_ADOPTED_BLOCK_SIZE + 1)
+            .expect("aligned over-cap value");
+        hello.max_block_size = u64::try_from(over).unwrap_or(u64::MAX);
+        let reason = reject_hello_reason(&hello, &config, false)
+            .expect("over-cap sender block size must reject");
+        assert!(
+            reason.contains("exceeds the maximum adopted block size"),
+            "{reason}"
+        );
+
+        // Non-symbol-aligned → rejected.
+        hello.max_block_size = u64::try_from(config.max_block_size).unwrap_or(u64::MAX) + 1;
+        let reason = reject_hello_reason(&hello, &config, false)
+            .expect("non-aligned sender block size must reject");
+        assert!(reason.contains("not a multiple of symbol_size"), "{reason}");
     }
 
     #[test]
