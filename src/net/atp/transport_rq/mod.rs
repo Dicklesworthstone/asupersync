@@ -9517,6 +9517,46 @@ async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Resu
     Ok(())
 }
 
+/// Like [`reject_destination_symlink_prefix`] but skips path prefixes already proven non-symlink
+/// in `verified`. During a single commit the receiver is the sole writer, so a prefix verified
+/// non-symlink stays non-symlink; caching the per-component `lstat` across many files that share
+/// parent directories turns O(files × depth) syscalls into O(unique prefixes). This is the
+/// dominant receiver cost for many-small-file trees (tree_small `symlink_guard_micros`).
+/// The per-component `Normal`-component safety check still runs for every path (it is a pure,
+/// syscall-free check); only the redundant `lstat` of an already-verified prefix is elided, so
+/// the fail-closed guarantee (any crossed symlink → error) is unchanged.
+async fn reject_destination_symlink_prefix_cached(
+    base: &Path,
+    out_path: &Path,
+    verified: &mut BTreeSet<PathBuf>,
+) -> Result<(), RqError> {
+    let rel = out_path.strip_prefix(base).map_err(|_| {
+        RqError::Source(format!(
+            "destination path {} is outside safe base {}",
+            out_path.display(),
+            base.display()
+        ))
+    })?;
+
+    let mut current = base.to_path_buf();
+    if verified.insert(current.clone()) {
+        reject_existing_symlink(&current).await?;
+    }
+    for component in rel.components() {
+        let Component::Normal(component) = component else {
+            return Err(RqError::Source(format!(
+                "unsafe destination component in {}",
+                out_path.display()
+            )));
+        };
+        current.push(component);
+        if verified.insert(current.clone()) {
+            reject_existing_symlink(&current).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn reject_existing_symlink(path: &Path) -> Result<(), RqError> {
     match crate::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.is_symlink() => Err(RqError::Source(format!(
@@ -10176,14 +10216,29 @@ async fn verify_and_commit(
         commit_plan_micros = commit_plan_micros.saturating_add(elapsed_micros_since(plan_started));
 
         let symlink_started = trace_commit.then(Instant::now);
+        // Dedup the per-component symlink `lstat` across all destination paths: many files in a
+        // tree share parent directories, so verifying each unique prefix once (instead of per file)
+        // eliminates the redundant syscalls that dominate `symlink_guard_micros` for small-file
+        // trees. Fail-closed is preserved (every unique prefix + every final path is still checked).
+        let mut verified_prefixes: BTreeSet<PathBuf> = BTreeSet::new();
         for write in &writes {
             match write {
                 CommitWrite::Rename { out_path, .. } | CommitWrite::Fragments { out_path, .. } => {
-                    reject_destination_symlink_prefix(&base, out_path).await?;
+                    reject_destination_symlink_prefix_cached(
+                        &base,
+                        out_path,
+                        &mut verified_prefixes,
+                    )
+                    .await?;
                 }
                 CommitWrite::Members { members, .. } => {
                     for member in members {
-                        reject_destination_symlink_prefix(&base, &member.out_path).await?;
+                        reject_destination_symlink_prefix_cached(
+                            &base,
+                            &member.out_path,
+                            &mut verified_prefixes,
+                        )
+                        .await?;
                     }
                 }
             }
