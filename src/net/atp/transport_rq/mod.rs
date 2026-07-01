@@ -326,6 +326,16 @@ const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
 /// This matches the MATRIX "good" 0.1% loss fixture while keeping bad/lossy
 /// regimes on the FEC datagram fountain.
 const RQ_CONTROL_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = RQ_ROUND0_TARGET_LOSS_ENABLE_MIN / 5.0;
+/// Minimum object size (bytes) for the large-transfer moderate-loss reliable-stream fallback.
+/// Below this the FEC datagram spray converges fine on lossy links (e.g. 50M/broken WINS via
+/// forward-repair); at/above it the spray rate-collapses on lossy objects, so the reliable
+/// control-source stream (TCP retransmit) is used instead. (MATRIX-199 / br-...317hxr.2.5)
+const RQ_LARGE_LOSSY_SOURCE_STREAM_MIN_BYTES: u64 = 256 * 1024 * 1024;
+/// Moderate loss ceiling for the large-transfer reliable-stream fallback. Covers the MATRIX "bad"
+/// 2% fixture but excludes "broken" (10%), where even reliable TCP degrades and the FEC spray is
+/// the right tool. Proven: 500M/bad@2% reliable-stream 95.3s beats rsync 97.9s; the FEC spray
+/// times out (pacing collapse, 317hxr.2.5). This bound can shrink once the spray collapse is fixed.
+const RQ_LARGE_LOSSY_SOURCE_STREAM_MAX_LOSS_TARGET: f64 = 0.03;
 /// Convert an explicit path-loss target into a conservative upper bound before
 /// feeding the RaptorQ overhead solver. At 2% loss this produces a ~3% sizing
 /// input, enough margin for one-round convergence without turning clean links
@@ -2231,9 +2241,25 @@ fn control_source_stream_base_round0(config: &RqConfig) -> bool {
 }
 
 fn control_source_stream_eligible(total_bytes: u64, config: &RqConfig) -> bool {
-    total_bytes > 0
-        && total_bytes <= config.max_transfer_bytes
-        && near_clean_control_source_stream_round0(config)
+    if total_bytes == 0 || total_bytes > config.max_transfer_bytes {
+        return false;
+    }
+    if near_clean_control_source_stream_round0(config) {
+        return true;
+    }
+    // ADDITIVE composing path selection (MATRIX-199 / 317hxr.2.5): a LARGE object over a
+    // MODERATELY-lossy link takes the reliable control-source stream instead of the FEC datagram
+    // spray, because the spray rate-collapses on large lossy objects (a non-converging block
+    // inflates the loss estimate → the pacing rate halves each round → timeout) while reliable TCP
+    // retransmit completes and beats rsync (500M/bad@2%: reliable-stream 95.3s vs rsync 97.9s;
+    // spray times out). Small objects and high-loss links still take the spray, where forward-repair
+    // wins (e.g. 50M/broken). This does NOT touch the FEC pacing path; once the spray collapse is
+    // fixed (317hxr.2.5) this fallback can be narrowed.
+    total_bytes >= RQ_LARGE_LOSSY_SOURCE_STREAM_MIN_BYTES
+        && control_source_stream_base_round0(config)
+        && config.round0_loss_target.is_finite()
+        && config.round0_loss_target >= 0.0
+        && config.round0_loss_target <= RQ_LARGE_LOSSY_SOURCE_STREAM_MAX_LOSS_TARGET
 }
 
 fn apply_small_clean_round0_source_only(
