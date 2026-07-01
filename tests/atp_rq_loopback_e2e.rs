@@ -47,6 +47,15 @@ fn test_config() -> RqConfig {
     .allow_unauthenticated_for_trusted_transport()
 }
 
+fn source_stream_fragment_config() -> RqConfig {
+    RqConfig {
+        max_block_size: 4 * 1024,
+        max_transfer_bytes: 8 * 1024 * 1024,
+        ..RqConfig::default()
+    }
+    .allow_unauthenticated_for_trusted_transport()
+}
+
 fn auth_test_config() -> RqConfig {
     RqConfig {
         max_block_size: 64 * 1024,
@@ -272,6 +281,54 @@ fn directory_tree_roundtrip_preserves_structure_and_bytes() {
 }
 
 #[test]
+fn source_stream_trailer_roundtrip_multifile_and_fragmented() {
+    let root = unique_tmp("trailer_frag");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("payload");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let a: Vec<u8> = (0..1_048_709u32)
+        .map(|i| (i.wrapping_mul(16_777_619).rotate_left(5) >> 9) as u8)
+        .collect();
+    let b: Vec<u8> = (0..1_048_919u32)
+        .map(|i| (i.wrapping_mul(1_103_515_245).rotate_left(11) >> 7) as u8)
+        .collect();
+    std::fs::write(tree.join("a.bin"), &a).unwrap();
+    std::fs::write(tree.join("nested-b.bin"), &b).unwrap();
+
+    let config = source_stream_fragment_config();
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), config.clone());
+    let send = run_sender(addr, tree.clone(), config).expect("source-stream send succeeds");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("source-stream receive succeeds");
+
+    assert!(send.receipt.committed);
+    assert!(send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(send.files, 2);
+    assert_eq!(send.bytes_sent, (a.len() + b.len()) as u64);
+    assert_eq!(
+        send.symbols_sent, 0,
+        "clean source stream must not spray UDP"
+    );
+    assert_eq!(send.feedback_rounds, 0);
+    assert!(recv.committed);
+    assert_eq!(recv.files, 2);
+    assert_eq!(recv.bytes_received, (a.len() + b.len()) as u64);
+    assert_eq!(
+        recv.symbols_accepted, 0,
+        "source-stream transfer must not consume UDP symbols"
+    );
+
+    let base = dst_dir.join("payload");
+    assert_eq!(std::fs::read(base.join("a.bin")).unwrap(), a);
+    assert_eq!(std::fs::read(base.join("nested-b.bin")).unwrap(), b);
+}
+
+#[test]
 fn loss_injection_recovers_via_repair_symbols() {
     let root = unique_tmp("loss");
     let src_dir = root.join("src");
@@ -306,6 +363,14 @@ fn loss_injection_recovers_via_repair_symbols() {
     assert!(
         recv.committed,
         "receiver report must commit despite 1/7 symbol loss"
+    );
+    assert!(
+        send.symbols_sent > 0,
+        "loss injection must stay on the UDP/RaptorQ path"
+    );
+    assert!(
+        recv.symbols_accepted > 0,
+        "loss injection must consume datagram symbols"
     );
     let got = std::fs::read(dst_dir.join("lossy.bin")).expect("received file");
     assert_eq!(got, payload, "lossy transfer must still be byte-identical");
@@ -354,7 +419,14 @@ fn deterministic_merkle_root_across_runs() {
         s1.merkle_root_hex, s2.merkle_root_hex,
         "identical content must yield identical merkle root"
     );
-    assert_eq!(s1.transfer_id, s2.transfer_id);
+    assert_eq!(s1.transfer_id.len(), 32);
+    assert_eq!(s2.transfer_id.len(), 32);
+    assert!(s1.transfer_id.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert!(s2.transfer_id.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert_ne!(
+        s1.transfer_id, s2.transfer_id,
+        "source-stream transfer ids include a per-transfer nonce"
+    );
 }
 
 #[test]

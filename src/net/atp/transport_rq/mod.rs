@@ -96,7 +96,7 @@ use adaptive::{AdaptiveController, AdaptivePolicy, BlockPlan, PathEstimate, Path
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
 /// changes.
-pub const ATP_RQ_PROTOCOL: u32 = 2;
+pub const ATP_RQ_PROTOCOL: u32 = 3;
 
 /// Magic prefix on every UDP symbol datagram (`"ATRQ"`).
 const SYMBOL_MAGIC: u32 = 0x4154_5251;
@@ -401,6 +401,9 @@ const RQ_SOURCE_STAGE_BUFFER_BYTES: usize = 256 * 1024;
 
 /// Process-unique suffix for RQ receive staging directories.
 static RQ_STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
+/// Process-unique nonce folded into source-stream transfer ids that are no
+/// longer content-merkle-derived.
+static RQ_TRANSFER_SEQ: AtomicU64 = AtomicU64::new(1);
 const RQ_STAGING_CREATE_ATTEMPTS: u64 = 1024;
 
 /// UDP datagram header size (magic + transfer tag + entry + sbn + esi + kind +
@@ -2581,8 +2584,30 @@ pub struct TransferManifest {
     pub entries: Vec<ManifestEntry>,
 }
 
-/// Sender → receiver marker for one finished spray round.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+/// Object-level digest carried in the source-stream `ObjectComplete` trailer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ObjectCompleteEntryDigest {
+    /// Manifest entry index.
+    index: u32,
+    /// Entry byte length observed by the sender while streaming.
+    size: u64,
+    /// Lowercase hex SHA-256 of this encoded object.
+    sha256_hex: String,
+}
+
+/// Logical-file digest carried in the source-stream `ObjectComplete` trailer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ObjectCompleteLogicalDigest {
+    /// Logical path relative to the transfer root.
+    rel_path: String,
+    /// Logical file byte length observed by the sender while streaming.
+    size: u64,
+    /// Lowercase hex SHA-256 of the logical file.
+    sha256_hex: String,
+}
+
+/// Sender -> receiver marker for one finished spray/source-stream round.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RqRoundComplete {
     /// Number of datagrams the sender emitted in the completed spray round.
     ///
@@ -2591,6 +2616,18 @@ struct RqRoundComplete {
     /// frames are treated as unknown and fall back to sender-side inference.
     #[serde(default)]
     round_symbols_sent: u64,
+    /// Source-stream trailer digests for each encoded object. Empty on the UDP
+    /// RaptorQ datagram path, where manifest hashes remain authoritative.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    entry_digests: Vec<ObjectCompleteEntryDigest>,
+    /// Source-stream trailer digests for logical files whose digest is not
+    /// authoritatively carried by the manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    logical_digests: Vec<ObjectCompleteLogicalDigest>,
+    /// Source-stream logical merkle root. Empty on the UDP datagram path, where
+    /// the manifest merkle root remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merkle_root_hex: Option<String>,
 }
 
 /// Sender-side UDP batch acceleration counters for the ATP-RQ symbol plane.
@@ -3624,6 +3661,36 @@ fn collect_dir<'a>(
     })
 }
 
+async fn source_entry_size(entry: &RqSourceEntry) -> Result<u64, RqError> {
+    if let Some(len) = entry.source_len {
+        return Ok(len);
+    }
+    crate::fs::metadata(&entry.abs_path)
+        .await
+        .map(|metadata| metadata.len())
+        .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))
+}
+
+async fn source_entry_sizes(entries: &[RqSourceEntry]) -> Result<Vec<u64>, RqError> {
+    let mut sizes = Vec::with_capacity(entries.len());
+    for entry in entries {
+        sizes.push(source_entry_size(entry).await?);
+    }
+    Ok(sizes)
+}
+
+async fn source_entries_total_bytes(entries: &[RqSourceEntry]) -> Result<u64, RqError> {
+    let mut total = 0u64;
+    for entry in entries {
+        let size = source_entry_size(entry).await?;
+        total = total.checked_add(size).ok_or(RqError::TooLarge {
+            size: u64::MAX,
+            max: u64::MAX,
+        })?;
+    }
+    Ok(total)
+}
+
 /// E-15 tree coalescing (send side): greedily pack sub-threshold files into fewer,
 /// larger combined RaptorQ objects.
 ///
@@ -3653,6 +3720,21 @@ fn collect_dir<'a>(
 async fn pack_small_files(
     entries: Vec<RqSourceEntry>,
     config: &RqConfig,
+) -> Result<
+    (
+        Vec<RqSourceEntry>,
+        Vec<EntryDigest>,
+        Option<tempfile::TempDir>,
+    ),
+    RqError,
+> {
+    pack_small_files_with_deferred_singleton_digests(entries, config, false).await
+}
+
+async fn pack_small_files_with_deferred_singleton_digests(
+    entries: Vec<RqSourceEntry>,
+    config: &RqConfig,
+    defer_singleton_digests: bool,
 ) -> Result<
     (
         Vec<RqSourceEntry>,
@@ -3716,17 +3798,19 @@ async fn pack_small_files(
     let packs_anything = groups.iter().any(|g| g.len() >= 2);
     if !packs_anything {
         let mut logical_digests = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let (size, content_id, content_sha256) =
-                hash_file_streaming(&entry.abs_path, &mut hash_buf)
-                    .await
-                    .map_err(|e| RqError::Source(e.into_message()))?;
-            logical_digests.push(EntryDigest {
-                rel_path: entry.rel_path.clone(),
-                size,
-                content_id,
-                content_sha256,
-            });
+        if !defer_singleton_digests {
+            for entry in &entries {
+                let (size, content_id, content_sha256) =
+                    hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                        .await
+                        .map_err(|e| RqError::Source(e.into_message()))?;
+                logical_digests.push(EntryDigest {
+                    rel_path: entry.rel_path.clone(),
+                    size,
+                    content_id,
+                    content_sha256,
+                });
+            }
         }
         return Ok((entries, logical_digests, None));
     }
@@ -3744,16 +3828,18 @@ async fn pack_small_files(
             // Singleton (a lone small file or a >= threshold file): emit unchanged
             // and push its own logical digest. Byte-identical to today.
             let entry = &entries[group[0]];
-            let (size, content_id, content_sha256) =
-                hash_file_streaming(&entry.abs_path, &mut hash_buf)
-                    .await
-                    .map_err(|e| RqError::Source(e.into_message()))?;
-            logical_digests.push(EntryDigest {
-                rel_path: entry.rel_path.clone(),
-                size,
-                content_id,
-                content_sha256,
-            });
+            if !defer_singleton_digests {
+                let (size, content_id, content_sha256) =
+                    hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                        .await
+                        .map_err(|e| RqError::Source(e.into_message()))?;
+                logical_digests.push(EntryDigest {
+                    rel_path: entry.rel_path.clone(),
+                    size,
+                    content_id,
+                    content_sha256,
+                });
+            }
             new_entries.push(entry.clone());
             continue;
         }
@@ -3845,12 +3931,33 @@ async fn append_file_to_pack_with_digest(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestDigestMode {
+    Manifest,
+    SourceStreamTrailer,
+}
+
 /// Split large unpacked entries into ordered RaptorQ objects while preserving the
 /// logical file digest list used for the transfer merkle root.
 async fn split_large_entries(
     entries: Vec<RqSourceEntry>,
     logical_digests: &[EntryDigest],
     config: &RqConfig,
+) -> Result<Vec<RqSourceEntry>, RqError> {
+    split_large_entries_with_digest_mode(
+        entries,
+        logical_digests,
+        config,
+        ManifestDigestMode::Manifest,
+    )
+    .await
+}
+
+async fn split_large_entries_with_digest_mode(
+    entries: Vec<RqSourceEntry>,
+    logical_digests: &[EntryDigest],
+    config: &RqConfig,
+    digest_mode: ManifestDigestMode,
 ) -> Result<Vec<RqSourceEntry>, RqError> {
     let symbol_size = usize::from(config.symbol_size.max(1));
     let block_size = config.max_block_size.max(symbol_size);
@@ -3879,20 +3986,22 @@ async fn split_large_entries(
 
         let logical_digest = logical_digests
             .iter()
-            .find(|digest| digest.rel_path == entry.rel_path)
-            .ok_or_else(|| {
-                RqError::Coding(format!(
-                    "large-entry split missing logical digest for {}",
-                    entry.rel_path
-                ))
-            })?;
+            .find(|digest| digest.rel_path == entry.rel_path);
+        if digest_mode == ManifestDigestMode::Manifest && logical_digest.is_none() {
+            return Err(RqError::Coding(format!(
+                "large-entry split missing logical digest for {}",
+                entry.rel_path
+            )));
+        }
         let shard_count = u32::try_from(plan.shard_count()).map_err(|_| {
             RqError::Coding(format!(
                 "large-entry split produced too many shards for {}",
                 entry.rel_path
             ))
         })?;
-        let whole_sha256_hex = hex_encode(&logical_digest.content_sha256);
+        let whole_sha256_hex = logical_digest
+            .map(|digest| hex_encode(&digest.content_sha256))
+            .unwrap_or_else(sha256_hex_placeholder);
         for shard in plan.shards {
             let object_rel_path = format!(".atp-fragment-{}-{}", out.len(), shard.shard_index);
             out.push(RqSourceEntry {
@@ -4199,6 +4308,10 @@ fn validate_manifest_sha256_hex(label: &str, value: &str) -> Result<(), RqError>
     Ok(())
 }
 
+fn sha256_hex_placeholder() -> String {
+    "0".repeat(64)
+}
+
 fn validate_manifest_rel_path(rel: &str) -> Result<(), RqError> {
     if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
         return Err(RqError::Source(format!("unsafe manifest rel_path: {rel}")));
@@ -4214,6 +4327,107 @@ fn validate_manifest_rel_path(rel: &str) -> Result<(), RqError> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct CompletionDigestIndex {
+    entry_digests: BTreeMap<u32, (u64, String)>,
+    logical_digests: BTreeMap<String, (u64, String)>,
+    merkle_root_hex: Option<String>,
+}
+
+impl CompletionDigestIndex {
+    fn from_round_complete(
+        complete: &RqRoundComplete,
+        manifest: &TransferManifest,
+        require_source_stream_trailer: bool,
+    ) -> Result<Self, RqError> {
+        let mut index = Self::default();
+        if let Some(root) = &complete.merkle_root_hex {
+            validate_manifest_sha256_hex("ObjectComplete merkle_root_hex", root)?;
+            index.merkle_root_hex = Some(root.clone());
+        }
+
+        let manifest_indexes: BTreeSet<u32> =
+            manifest.entries.iter().map(|entry| entry.index).collect();
+        for digest in &complete.entry_digests {
+            validate_manifest_sha256_hex("ObjectComplete entry sha256_hex", &digest.sha256_hex)?;
+            if !manifest_indexes.contains(&digest.index) {
+                return Err(RqError::Frame(format!(
+                    "ObjectComplete digest for unknown entry {}",
+                    digest.index
+                )));
+            }
+            if index
+                .entry_digests
+                .insert(digest.index, (digest.size, digest.sha256_hex.clone()))
+                .is_some()
+            {
+                return Err(RqError::Frame(format!(
+                    "duplicate ObjectComplete digest for entry {}",
+                    digest.index
+                )));
+            }
+        }
+
+        for digest in &complete.logical_digests {
+            validate_manifest_rel_path(&digest.rel_path)?;
+            validate_manifest_sha256_hex("ObjectComplete logical sha256_hex", &digest.sha256_hex)?;
+            if index
+                .logical_digests
+                .insert(
+                    digest.rel_path.clone(),
+                    (digest.size, digest.sha256_hex.clone()),
+                )
+                .is_some()
+            {
+                return Err(RqError::Frame(format!(
+                    "duplicate ObjectComplete logical digest for {}",
+                    digest.rel_path
+                )));
+            }
+        }
+
+        if require_source_stream_trailer {
+            if index.merkle_root_hex.is_none() {
+                return Err(RqError::Frame(
+                    "control source stream ObjectComplete missing merkle_root_hex".to_string(),
+                ));
+            }
+            for entry in &manifest.entries {
+                if !index.entry_digests.contains_key(&entry.index) {
+                    return Err(RqError::Frame(format!(
+                        "control source stream ObjectComplete missing digest for entry {}",
+                        entry.index
+                    )));
+                }
+            }
+        }
+
+        Ok(index)
+    }
+
+    fn expected_entry<'a>(&'a self, entry: &'a ManifestEntry) -> (u64, &'a str) {
+        self.entry_digests
+            .get(&entry.index)
+            .map_or((entry.size, entry.sha256_hex.as_str()), |(size, sha)| {
+                (*size, sha.as_str())
+            })
+    }
+
+    fn expected_logical<'a>(&'a self, rel_path: &str, size: u64, sha: &'a str) -> (u64, &'a str) {
+        self.logical_digests
+            .get(rel_path)
+            .map_or((size, sha), |(trailer_size, trailer_sha)| {
+                (*trailer_size, trailer_sha.as_str())
+            })
+    }
+
+    fn expected_merkle_root<'a>(&'a self, manifest: &'a TransferManifest) -> &'a str {
+        self.merkle_root_hex
+            .as_deref()
+            .unwrap_or(&manifest.merkle_root_hex)
+    }
 }
 
 /// Join `base` with a forward-slash relative path, rejecting any component that
@@ -4240,6 +4454,47 @@ fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -
     hasher.update(merkle_root_hex.as_bytes());
     hasher.update(total_bytes.to_be_bytes());
     hasher.update((file_count as u64).to_be_bytes());
+    hex_encode(&hasher.finalize()[..16])
+}
+
+fn transfer_id_hex_from_structure(
+    root_name: &str,
+    is_directory: bool,
+    total_bytes: u64,
+    entries: &[ManifestEntry],
+) -> String {
+    let nonce = RQ_TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.atp.rq.transfer-id.v3.structure\0");
+    hasher.update(root_name.as_bytes());
+    hasher.update([u8::from(is_directory)]);
+    hasher.update(total_bytes.to_be_bytes());
+    hasher.update((entries.len() as u64).to_be_bytes());
+    hasher.update(std::process::id().to_be_bytes());
+    hasher.update(nonce.to_be_bytes());
+    for entry in entries {
+        hasher.update(entry.index.to_be_bytes());
+        hasher.update(entry.rel_path.as_bytes());
+        hasher.update([0]);
+        hasher.update(entry.size.to_be_bytes());
+        if let Some(fragment) = &entry.fragment {
+            hasher.update(b"fragment\0");
+            hasher.update(fragment.rel_path.as_bytes());
+            hasher.update([0]);
+            hasher.update(fragment.shard_index.to_be_bytes());
+            hasher.update(fragment.shard_count.to_be_bytes());
+            hasher.update(fragment.logical_offset.to_be_bytes());
+            hasher.update(fragment.len.to_be_bytes());
+            hasher.update(fragment.logical_size.to_be_bytes());
+        }
+        for member in &entry.members {
+            hasher.update(b"member\0");
+            hasher.update(member.rel_path.as_bytes());
+            hasher.update([0]);
+            hasher.update(member.offset.to_be_bytes());
+            hasher.update(member.len.to_be_bytes());
+        }
+    }
     hex_encode(&hasher.finalize()[..16])
 }
 
@@ -5075,6 +5330,167 @@ pub async fn send_path(
     let symbol_auth_enabled = symbol_auth.is_some();
 
     let (root_name, is_directory, raw_entries) = collect_entries(source).await?;
+    let preflight_total_bytes = source_entries_total_bytes(&raw_entries).await?;
+    if preflight_total_bytes > config.max_transfer_bytes {
+        return Err(RqError::TooLarge {
+            size: preflight_total_bytes,
+            max: config.max_transfer_bytes,
+        });
+    }
+    let prefer_control_source_stream =
+        control_source_stream_eligible(preflight_total_bytes, &config);
+    if prefer_control_source_stream {
+        let stream =
+            match crate::time::timeout(cx.now(), DEFAULT_CONNECT_TIMEOUT, TcpStream::connect(addr))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(err)) => return Err(RqError::Io(err)),
+                Err(_elapsed) => {
+                    return Err(RqError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("connect to {addr} timed out after {DEFAULT_CONNECT_TIMEOUT:?}"),
+                    )));
+                }
+            };
+        tune_control_stream_for_bulk_source(&stream);
+        let peer = stream.peer_addr().unwrap_or(addr);
+        let mut control = FrameTransport::new(stream);
+        control
+            .send(&json_frame(
+                FrameType::Handshake,
+                &Hello {
+                    protocol: ATP_RQ_PROTOCOL,
+                    role: "sender".to_string(),
+                    peer_id: peer_id.to_string(),
+                    symbol_size: config.symbol_size,
+                    max_block_size: config.max_block_size as u64,
+                    symbol_auth: symbol_auth_enabled,
+                    total_bytes: preflight_total_bytes,
+                    prefer_control_source_stream,
+                },
+            )?)
+            .await?;
+        let ack_frame = control.recv().await?;
+        if ack_frame.frame_type() != FrameType::HandshakeAck {
+            return Err(RqError::Unexpected {
+                got: ack_frame.frame_type(),
+                expected: "HandshakeAck",
+            });
+        }
+        let ack: HelloAck = parse_json(&ack_frame)?;
+        if !ack.accepted {
+            return Err(RqError::HandshakeRejected(
+                ack.reason.unwrap_or_else(|| "no reason given".to_string()),
+            ));
+        }
+        if !ack.control_source_stream {
+            return Err(RqError::HandshakeRejected(
+                "receiver declined required control source stream".to_string(),
+            ));
+        }
+
+        let prepared = prepare_control_source_transfer(
+            root_name,
+            is_directory,
+            raw_entries,
+            &config,
+            preflight_total_bytes,
+        )
+        .await?;
+        let transfer_id = prepared.manifest.transfer_id.clone();
+        let total_bytes = prepared.manifest.total_bytes;
+        let mut encoders: Vec<EntryEncoder> = Vec::with_capacity(prepared.entries.len());
+        for (i, (entry, size)) in prepared
+            .entries
+            .iter()
+            .zip(prepared.object_sizes.iter())
+            .enumerate()
+        {
+            let index = u32::try_from(i).unwrap_or(u32::MAX);
+            let size = usize::try_from(*size).map_err(|_| RqError::TooLarge {
+                size: *size,
+                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            })?;
+            let source_offset =
+                usize::try_from(entry.source_offset).map_err(|_| RqError::TooLarge {
+                    size: entry.source_offset,
+                    max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+                })?;
+            encoders.push(EntryEncoder {
+                index,
+                object_id: entry_object_id(&transfer_id, index),
+                abs_path: entry.abs_path.clone(),
+                source_offset,
+                size,
+                repair_cursors: Vec::new(),
+            });
+        }
+
+        control
+            .send(&json_frame(FrameType::ObjectManifest, &prepared.manifest)?)
+            .await?;
+        let digest_report = stream_control_source_entries(
+            cx,
+            &mut control,
+            &encoders,
+            &prepared.manifest,
+            &prepared.precomputed_logical_digests,
+            &transfer_id,
+            symbol_auth.as_ref(),
+        )
+        .await?;
+        if digest_report.bytes_streamed != total_bytes {
+            return Err(RqError::Source(format!(
+                "control source stream sent {} bytes, expected {total_bytes}",
+                digest_report.bytes_streamed
+            )));
+        }
+        let files = u32::try_from(digest_report.logical_digests.len()).unwrap_or(u32::MAX);
+        let merkle_root_hex = digest_report.merkle_root_hex.clone();
+        control
+            .send(&json_frame(
+                FrameType::ObjectComplete,
+                &RqRoundComplete {
+                    round_symbols_sent: 0,
+                    entry_digests: digest_report.entry_digests,
+                    logical_digests: digest_report.logical_digests,
+                    merkle_root_hex: Some(merkle_root_hex.clone()),
+                },
+            )?)
+            .await?;
+        let reply = control.recv().await?;
+        if reply.frame_type() != FrameType::Proof {
+            return Err(RqError::Unexpected {
+                got: reply.frame_type(),
+                expected: "Proof",
+            });
+        }
+        let receipt: ReceiveReceipt = parse_json(&reply)?;
+        let _ = control
+            .send(&Frame::empty(FrameType::Close).map_err(|e| RqError::Frame(e.to_string()))?)
+            .await;
+        if !receipt.committed {
+            return Err(RqError::Integrity(
+                receipt
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "receiver did not commit".to_string()),
+            ));
+        }
+        return Ok(SendReport {
+            transfer_id,
+            bytes_sent: total_bytes,
+            files,
+            symbols_sent: 0,
+            feedback_rounds: 0,
+            merkle_root_hex,
+            receipt,
+            udp_send_acceleration: UdpSendAccelerationReport::default(),
+            peer,
+        });
+    }
+
     // E-15: coalesce sub-threshold files into fewer/larger combined RaptorQ
     // objects. `entries` are the OBJECTS to spray (a packed entry's `abs_path`
     // points at a temp file holding the member concatenation); `logical_digests`
@@ -5245,24 +5661,31 @@ pub async fn send_path(
         .await?;
 
     if control_source_stream {
-        let bytes_streamed = stream_control_source_entries(
+        let digest_report = stream_control_source_entries(
             cx,
             &mut control,
             &encoders,
+            &manifest,
+            &logical_digests,
             &transfer_id,
             symbol_auth.as_ref(),
         )
         .await?;
-        if bytes_streamed != total_bytes {
+        if digest_report.bytes_streamed != total_bytes {
             return Err(RqError::Source(format!(
-                "control source stream sent {bytes_streamed} bytes, expected {total_bytes}"
+                "control source stream sent {} bytes, expected {total_bytes}",
+                digest_report.bytes_streamed
             )));
         }
+        let merkle_root_hex = digest_report.merkle_root_hex.clone();
         control
             .send(&json_frame(
                 FrameType::ObjectComplete,
                 &RqRoundComplete {
                     round_symbols_sent: 0,
+                    entry_digests: digest_report.entry_digests,
+                    logical_digests: digest_report.logical_digests,
+                    merkle_root_hex: Some(merkle_root_hex.clone()),
                 },
             )?)
             .await?;
@@ -5395,6 +5818,7 @@ pub async fn send_path(
                 FrameType::ObjectComplete,
                 &RqRoundComplete {
                     round_symbols_sent: sent_this_round,
+                    ..RqRoundComplete::default()
                 },
             )?)
             .await?;
@@ -6511,13 +6935,99 @@ async fn read_source_range(path: &Path, offset: usize, len: usize) -> Result<Vec
     Ok(bytes)
 }
 
+struct ControlSourcePreparedTransfer {
+    entries: Vec<RqSourceEntry>,
+    object_sizes: Vec<u64>,
+    manifest: TransferManifest,
+    precomputed_logical_digests: Vec<EntryDigest>,
+    _pack_tempdir: Option<tempfile::TempDir>,
+}
+
+struct ControlSourceStreamDigestReport {
+    bytes_streamed: u64,
+    entry_digests: Vec<ObjectCompleteEntryDigest>,
+    logical_digests: Vec<ObjectCompleteLogicalDigest>,
+    merkle_root_hex: String,
+}
+
+async fn prepare_control_source_transfer(
+    root_name: String,
+    is_directory: bool,
+    raw_entries: Vec<RqSourceEntry>,
+    config: &RqConfig,
+    expected_total_bytes: u64,
+) -> Result<ControlSourcePreparedTransfer, RqError> {
+    let (packed_entries, precomputed_logical_digests, pack_tempdir) =
+        pack_small_files_with_deferred_singleton_digests(raw_entries, config, true).await?;
+    let entries = split_large_entries_with_digest_mode(
+        packed_entries,
+        &precomputed_logical_digests,
+        config,
+        ManifestDigestMode::SourceStreamTrailer,
+    )
+    .await?;
+    let object_sizes = source_entry_sizes(&entries).await?;
+    let total_bytes = object_sizes
+        .iter()
+        .try_fold(0u64, |acc, size| acc.checked_add(*size))
+        .ok_or(RqError::TooLarge {
+            size: u64::MAX,
+            max: config.max_transfer_bytes,
+        })?;
+    if total_bytes != expected_total_bytes {
+        return Err(RqError::Source(format!(
+            "source entry sizes changed while preparing control stream: expected {expected_total_bytes}, got {total_bytes}"
+        )));
+    }
+    if total_bytes > config.max_transfer_bytes {
+        return Err(RqError::TooLarge {
+            size: total_bytes,
+            max: config.max_transfer_bytes,
+        });
+    }
+
+    let manifest_entries: Vec<ManifestEntry> = entries
+        .iter()
+        .zip(object_sizes.iter())
+        .enumerate()
+        .map(|(i, (entry, size))| ManifestEntry {
+            index: u32::try_from(i).unwrap_or(u32::MAX),
+            rel_path: entry.rel_path.clone(),
+            size: *size,
+            sha256_hex: sha256_hex_placeholder(),
+            members: entry.members.clone(),
+            fragment: entry.fragment.clone(),
+        })
+        .collect();
+    let transfer_id =
+        transfer_id_hex_from_structure(&root_name, is_directory, total_bytes, &manifest_entries);
+    let manifest = TransferManifest {
+        transfer_id,
+        root_name,
+        is_directory,
+        total_bytes,
+        merkle_root_hex: sha256_hex_placeholder(),
+        entries: manifest_entries,
+    };
+
+    Ok(ControlSourcePreparedTransfer {
+        entries,
+        object_sizes,
+        manifest,
+        precomputed_logical_digests,
+        _pack_tempdir: pack_tempdir,
+    })
+}
+
 async fn stream_control_source_entries<S>(
     cx: &Cx,
     control: &mut FrameTransport<S>,
     encoders: &[EntryEncoder],
+    manifest: &TransferManifest,
+    precomputed_logical_digests: &[EntryDigest],
     transfer_id: &str,
     symbol_auth: Option<&SecurityContext>,
-) -> Result<u64, RqError>
+) -> Result<ControlSourceStreamDigestReport, RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
@@ -6526,8 +7036,24 @@ where
     let mut chunks = 0u64;
     let mut pending_flush_bytes = 0usize;
     let mut flushes = 0u64;
+    let mut entry_digests = Vec::with_capacity(encoders.len());
+    let mut logical_digests: Vec<EntryDigest> = precomputed_logical_digests.to_vec();
+    let mut logical_fragment_hashes: BTreeMap<
+        String,
+        crate::net::atp::transport_common::StagedEntryReceive,
+    > = BTreeMap::new();
     for enc in encoders {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let manifest_entry = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.index == enc.index)
+            .ok_or_else(|| {
+                RqError::Coding(format!(
+                    "control source encoder {} missing manifest entry",
+                    enc.index
+                ))
+            })?;
         let mut file = crate::fs::File::open(&enc.abs_path)
             .await
             .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
@@ -6546,6 +7072,8 @@ where
             max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         })?;
         let mut offset = 0u64;
+        let mut entry_hash =
+            crate::net::atp::transport_common::StagedEntryReceive::new(enc.abs_path.clone());
         while remaining > 0 {
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
             let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
@@ -6559,6 +7087,17 @@ where
                     enc.abs_path.display(),
                     enc.index
                 )));
+            }
+            entry_hash.update_with_chunk(&buf[..n]);
+            if let Some(fragment) = manifest_entry.fragment.as_ref() {
+                let logical_hash = logical_fragment_hashes
+                    .entry(fragment.rel_path.clone())
+                    .or_insert_with(|| {
+                        crate::net::atp::transport_common::StagedEntryReceive::new(PathBuf::from(
+                            &fragment.rel_path,
+                        ))
+                    });
+                logical_hash.update_with_chunk(&buf[..n]);
             }
             let written = control
                 .send_control_source_data_unflushed(
@@ -6581,11 +7120,33 @@ where
             bytes_streamed = bytes_streamed.saturating_add(n_u64);
             chunks = chunks.saturating_add(1);
         }
+        let (entry_digest, _path, _created) = entry_hash.finalize(manifest_entry.rel_path.clone());
+        entry_digests.push(ObjectCompleteEntryDigest {
+            index: enc.index,
+            size: entry_digest.size,
+            sha256_hex: hex_encode(&entry_digest.content_sha256),
+        });
+        if manifest_entry.fragment.is_none() && manifest_entry.members.is_empty() {
+            logical_digests.push(entry_digest);
+        }
     }
     if pending_flush_bytes > 0 {
         control.flush().await?;
         flushes = flushes.saturating_add(1);
     }
+    for (rel_path, logical_hash) in logical_fragment_hashes {
+        let (digest, _path, _created) = logical_hash.finalize(rel_path);
+        logical_digests.push(digest);
+    }
+    let merkle_root_hex = flat_merkle_root_from_digests(&logical_digests);
+    let logical_digests = logical_digests
+        .into_iter()
+        .map(|digest| ObjectCompleteLogicalDigest {
+            rel_path: digest.rel_path,
+            size: digest.size,
+            sha256_hex: hex_encode(&digest.content_sha256),
+        })
+        .collect();
     rqtrace!(
         "sender: control_source_stream sent chunks={} bytes={} flushes={} flush_threshold_bytes={}",
         chunks,
@@ -6593,7 +7154,12 @@ where
         flushes,
         RQ_CONTROL_SOURCE_FLUSH_BYTES
     );
-    Ok(bytes_streamed)
+    Ok(ControlSourceStreamDigestReport {
+        bytes_streamed,
+        entry_digests,
+        logical_digests,
+        merkle_root_hex,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7173,6 +7739,8 @@ pub async fn receive_connection(
         match frame.frame_type() {
             FrameType::ObjectComplete => {
                 let round_complete = parse_round_complete(&frame)?;
+                let completion_digests =
+                    CompletionDigestIndex::from_round_complete(&round_complete, &manifest, false)?;
                 let drained = drain_round_tail(
                     cx,
                     &mut udp,
@@ -7314,6 +7882,7 @@ pub async fn receive_connection(
                         symbols_accepted,
                         feedback_rounds,
                         &std::collections::BTreeMap::new(),
+                        &completion_digests,
                     )
                     .await?;
                     control
@@ -7606,6 +8175,9 @@ where
                 chunks = chunks.saturating_add(1);
             }
             FrameType::ObjectComplete => {
+                let complete = parse_round_complete(&frame)?;
+                let completion_digests =
+                    CompletionDigestIndex::from_round_complete(&complete, manifest, true)?;
                 flush_cached_entry_staging_files(decoders).await?;
                 let pending: Vec<u32> = decoders
                     .iter()
@@ -7634,8 +8206,16 @@ where
                     });
                 }
 
-                let receipt =
-                    verify_and_commit(manifest, decoders, dest_dir, 0, 0, &logical_done).await?;
+                let receipt = verify_and_commit(
+                    manifest,
+                    decoders,
+                    dest_dir,
+                    0,
+                    0,
+                    &logical_done,
+                    &completion_digests,
+                )
+                .await?;
                 control
                     .send(&json_frame(FrameType::Proof, &receipt)?)
                     .await?;
@@ -9131,6 +9711,7 @@ async fn verify_and_commit(
     symbols_accepted: u64,
     feedback_rounds: u32,
     logical_precomputed: &BTreeMap<String, (u64, crate::atp::object::ObjectId, [u8; 32])>,
+    completion_digests: &CompletionDigestIndex,
 ) -> Result<ReceiveReceipt, RqError> {
     let trace_commit = std::env::var_os("ATP_RQ_TRACE").is_some();
     let total_started = trace_commit.then(Instant::now);
@@ -9214,7 +9795,11 @@ async fn verify_and_commit(
                 r
             };
         received = received.saturating_add(size);
-        if size != e.size || hex_encode(&content_sha256) != e.sha256_hex {
+        let (expected_entry_size, expected_entry_sha256_hex) = completion_digests.expected_entry(e);
+        if size != e.size
+            || size != expected_entry_size
+            || hex_encode(&content_sha256) != expected_entry_sha256_hex
+        {
             sha_ok = false;
         }
 
@@ -9282,8 +9867,15 @@ async fn verify_and_commit(
             sha_ok = false;
             continue;
         };
+        let (expected_logical_size, expected_logical_sha256_hex) = completion_digests
+            .expected_logical(
+                &rel_path,
+                first.fragment.logical_size,
+                &first.fragment.sha256_hex,
+            );
         if size != first.fragment.logical_size
-            || hex_encode(&content_sha256) != first.fragment.sha256_hex
+            || size != expected_logical_size
+            || hex_encode(&content_sha256) != expected_logical_sha256_hex
         {
             sha_ok = false;
         }
@@ -9298,7 +9890,8 @@ async fn verify_and_commit(
     }
 
     let merkle_started = trace_commit.then(Instant::now);
-    let merkle_ok = flat_merkle_root_from_digests(&logical_digests) == manifest.merkle_root_hex;
+    let merkle_ok = flat_merkle_root_from_digests(&logical_digests)
+        == completion_digests.expected_merkle_root(manifest);
     merkle_micros = merkle_micros.saturating_add(elapsed_micros_since(merkle_started));
 
     let committed = sha_ok && merkle_ok;
@@ -13381,6 +13974,7 @@ mod tests {
             0,
             0,
             &std::collections::BTreeMap::new(),
+            &CompletionDigestIndex::default(),
         ))
         .expect_err("commit must reject pre-existing symlink ancestors");
         assert!(
@@ -16741,6 +17335,7 @@ mod tests {
             0,
             0,
             &std::collections::BTreeMap::new(),
+            &CompletionDigestIndex::default(),
         ))
         .expect("verify fragmented file");
 
@@ -16749,6 +17344,262 @@ mod tests {
         assert!(receipt.merkle_ok);
         assert_eq!(receipt.files, 1);
         assert_eq!(std::fs::read(dest.path().join("huge.bin")).unwrap(), whole);
+    }
+
+    #[test]
+    fn verify_and_commit_uses_source_stream_trailer_digests_for_manifest_placeholders() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let staging_dir = dest.path().join(".atp-rq-trailer-staging");
+        std::fs::create_dir_all(&staging_dir).expect("staging dir");
+
+        let a = b"source-stream fragment one ".to_vec();
+        let b = b"source-stream fragment two".to_vec();
+        let mut whole = Vec::new();
+        whole.extend_from_slice(&a);
+        whole.extend_from_slice(&b);
+        let a_path = staging_dir.join("0");
+        let b_path = staging_dir.join("1");
+        std::fs::write(&a_path, &a).expect("write first staged shard");
+        std::fs::write(&b_path, &b).expect("write second staged shard");
+
+        let placeholder = sha256_hex_placeholder();
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer-trailer".to_string(),
+            root_name: "huge.bin".to_string(),
+            is_directory: false,
+            total_bytes: whole.len() as u64,
+            merkle_root_hex: placeholder.clone(),
+            entries: vec![
+                ManifestEntry {
+                    index: 0,
+                    rel_path: ".atp-fragment-0-0".to_string(),
+                    size: a.len() as u64,
+                    sha256_hex: placeholder.clone(),
+                    members: Vec::new(),
+                    fragment: Some(LargeObjectFragment {
+                        rel_path: "huge.bin".to_string(),
+                        shard_index: 0,
+                        shard_count: 2,
+                        logical_offset: 0,
+                        len: a.len() as u64,
+                        logical_size: whole.len() as u64,
+                        sha256_hex: placeholder.clone(),
+                    }),
+                },
+                ManifestEntry {
+                    index: 1,
+                    rel_path: ".atp-fragment-0-1".to_string(),
+                    size: b.len() as u64,
+                    sha256_hex: placeholder,
+                    members: Vec::new(),
+                    fragment: Some(LargeObjectFragment {
+                        rel_path: "huge.bin".to_string(),
+                        shard_index: 1,
+                        shard_count: 2,
+                        logical_offset: a.len() as u64,
+                        len: b.len() as u64,
+                        logical_size: whole.len() as u64,
+                        sha256_hex: sha256_hex_placeholder(),
+                    }),
+                },
+            ],
+        };
+
+        let a_digest = digest_for_bytes(".atp-fragment-0-0", &a);
+        let b_digest = digest_for_bytes(".atp-fragment-0-1", &b);
+        let logical_digest = digest_for_bytes("huge.bin", &whole);
+        let merkle_root_hex = flat_merkle_root_from_digests(&[logical_digest.clone()]);
+        let complete = RqRoundComplete {
+            round_symbols_sent: 0,
+            entry_digests: vec![
+                ObjectCompleteEntryDigest {
+                    index: 0,
+                    size: a_digest.size,
+                    sha256_hex: hex_encode(&a_digest.content_sha256),
+                },
+                ObjectCompleteEntryDigest {
+                    index: 1,
+                    size: b_digest.size,
+                    sha256_hex: hex_encode(&b_digest.content_sha256),
+                },
+            ],
+            logical_digests: vec![ObjectCompleteLogicalDigest {
+                rel_path: "huge.bin".to_string(),
+                size: logical_digest.size,
+                sha256_hex: hex_encode(&logical_digest.content_sha256),
+            }],
+            merkle_root_hex: Some(merkle_root_hex),
+        };
+        let completion_digests =
+            CompletionDigestIndex::from_round_complete(&complete, &manifest, true)
+                .expect("source-stream trailer digests are valid");
+
+        let mut decoders = vec![
+            EntryDecoder {
+                index: 0,
+                object_id: entry_object_id(&manifest.transfer_id, 0),
+                size: a.len() as u64,
+                pipeline: None,
+                complete: true,
+                staging_path: a_path,
+                staging_created: true,
+                staging_file: None,
+                staging_cursor: None,
+                staging_unflushed_bytes: 0,
+                cache_staging_file: false,
+                bytes_written: a.len() as u64,
+                max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+                source_streaming: true,
+                source_blocks: Vec::new(),
+                pending_decodes: Vec::new(),
+                inc: None,
+                inc_digest: Some((
+                    a_digest.size,
+                    a_digest.content_id.clone(),
+                    a_digest.content_sha256,
+                )),
+                source_write_buffer: Vec::new(),
+                source_write_buffer_offset: None,
+            },
+            EntryDecoder {
+                index: 1,
+                object_id: entry_object_id(&manifest.transfer_id, 1),
+                size: b.len() as u64,
+                pipeline: None,
+                complete: true,
+                staging_path: b_path,
+                staging_created: true,
+                staging_file: None,
+                staging_cursor: None,
+                staging_unflushed_bytes: 0,
+                cache_staging_file: false,
+                bytes_written: b.len() as u64,
+                max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+                source_streaming: true,
+                source_blocks: Vec::new(),
+                pending_decodes: Vec::new(),
+                inc: None,
+                inc_digest: Some((
+                    b_digest.size,
+                    b_digest.content_id.clone(),
+                    b_digest.content_sha256,
+                )),
+                source_write_buffer: Vec::new(),
+                source_write_buffer_offset: None,
+            },
+        ];
+        let mut logical_precomputed = BTreeMap::new();
+        logical_precomputed.insert(
+            "huge.bin".to_string(),
+            (
+                logical_digest.size,
+                logical_digest.content_id,
+                logical_digest.content_sha256,
+            ),
+        );
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+            &logical_precomputed,
+            &completion_digests,
+        ))
+        .expect("verify source-stream trailer digests");
+
+        assert!(receipt.committed, "trailer digests must authorize commit");
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+        assert_eq!(std::fs::read(dest.path().join("huge.bin")).unwrap(), whole);
+    }
+
+    #[test]
+    fn verify_and_commit_rejects_bad_source_stream_trailer_digest_without_commit() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let staging_dir = dest.path().join(".atp-rq-trailer-tamper");
+        std::fs::create_dir_all(&staging_dir).expect("staging dir");
+
+        let payload = b"source stream payload".to_vec();
+        let staging_path = staging_dir.join("0");
+        std::fs::write(&staging_path, &payload).expect("write staged payload");
+
+        let payload_digest = digest_for_bytes("payload.bin", &payload);
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer-trailer-bad".to_string(),
+            root_name: "payload.bin".to_string(),
+            is_directory: false,
+            total_bytes: payload.len() as u64,
+            merkle_root_hex: sha256_hex_placeholder(),
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: "payload.bin".to_string(),
+                size: payload.len() as u64,
+                sha256_hex: sha256_hex_placeholder(),
+                members: Vec::new(),
+                fragment: None,
+            }],
+        };
+        let complete = RqRoundComplete {
+            round_symbols_sent: 0,
+            entry_digests: vec![ObjectCompleteEntryDigest {
+                index: 0,
+                size: payload_digest.size,
+                sha256_hex: "ff".repeat(32),
+            }],
+            logical_digests: vec![ObjectCompleteLogicalDigest {
+                rel_path: "payload.bin".to_string(),
+                size: payload_digest.size,
+                sha256_hex: hex_encode(&payload_digest.content_sha256),
+            }],
+            merkle_root_hex: Some(flat_merkle_root_from_digests(&[payload_digest.clone()])),
+        };
+        let completion_digests =
+            CompletionDigestIndex::from_round_complete(&complete, &manifest, true)
+                .expect("bad digest is still well-formed hex");
+
+        let mut decoders = vec![EntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: payload.len() as u64,
+            pipeline: None,
+            complete: true,
+            staging_path,
+            staging_created: true,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
+            bytes_written: payload.len() as u64,
+            max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+            source_streaming: true,
+            source_blocks: Vec::new(),
+            pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: Some((
+                payload_digest.size,
+                payload_digest.content_id,
+                payload_digest.content_sha256,
+            )),
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
+        }];
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+            &BTreeMap::new(),
+            &completion_digests,
+        ))
+        .expect("verify returns a fail-closed receipt");
+
+        assert!(!receipt.committed, "bad trailer digest must fail closed");
+        assert!(!receipt.sha_ok);
+        assert!(!dest.path().join("payload.bin").exists());
     }
 
     // ─── E-15 tree coalescing (pack / split) ───────────────────────────────
@@ -17045,6 +17896,7 @@ mod tests {
             0,
             0,
             &std::collections::BTreeMap::new(),
+            &CompletionDigestIndex::default(),
         ))
         .expect("verify_and_commit");
 
@@ -17304,6 +18156,7 @@ mod tests {
             0,
             0,
             &std::collections::BTreeMap::new(),
+            &CompletionDigestIndex::default(),
         ))
         .expect("verify_and_commit returns a receipt");
 
