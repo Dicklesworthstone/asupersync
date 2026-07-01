@@ -751,25 +751,96 @@ pub struct DecisionAuditEntry {
     pub ts_unix_ms: u64,
 }
 
+/// Sanitize a posterior snapshot to the evidence-ledger invariants: non-empty,
+/// finite, non-negative, and summing to ~1.0. A decision whose posterior
+/// collapsed (empty / all-zero / non-finite — which `Posterior::probs()` can
+/// yield for an ill-conditioned posterior) would otherwise make the diagnostic
+/// [`DecisionAuditEntry::to_evidence_ledger`] fail `EvidenceLedger::validate`
+/// (as `PosteriorNotNormalized`) and abort the runtime; sanitizing keeps the
+/// audit a faithful-but-valid record instead of a panic.
+fn sanitize_posterior_snapshot(probs: &[f64]) -> Vec<f64> {
+    let all_finite_nonneg = !probs.is_empty() && probs.iter().all(|p| p.is_finite() && *p >= 0.0);
+    let sum: f64 = probs.iter().sum();
+    if all_finite_nonneg && (sum - 1.0).abs() <= 1e-6 {
+        probs.to_vec()
+    } else if all_finite_nonneg && sum > 0.0 {
+        probs.iter().map(|p| p / sum).collect()
+    } else {
+        // Empty / all-zero / non-finite: uniform over the same state count
+        // (min length 1 so the snapshot is never empty).
+        let n = probs.len().max(1);
+        vec![1.0 / n as f64; n]
+    }
+}
+
+/// Clamp a loss to the evidence-ledger invariant (finite, non-negative).
+fn sanitize_loss(loss: f64) -> f64 {
+    if loss.is_finite() && loss >= 0.0 {
+        loss
+    } else {
+        0.0
+    }
+}
+
 impl DecisionAuditEntry {
     /// Convert to an [`EvidenceLedger`] entry for structured tracing.
+    ///
+    /// The evidence ledger is a *diagnostic* record and must never panic. A
+    /// decision whose posterior collapsed (an all-zero snapshot sums to `0`,
+    /// which `EvidenceLedger::validate` rejects as `PosteriorNotNormalized`)
+    /// previously aborted the runtime here via `.expect()`. We now sanitize the
+    /// fields to the ledger's invariants — a normalized/finite/non-negative
+    /// posterior, a calibration score clamped to `[0, 1]`, finite non-negative
+    /// losses whose chosen entry matches `chosen_expected_loss` — so the build
+    /// always succeeds; a residual failure degrades to a minimal valid entry
+    /// rather than panicking.
     pub fn to_evidence_ledger(&self) -> EvidenceLedger {
+        let chosen_loss = sanitize_loss(self.expected_loss);
         let mut builder = EvidenceLedgerBuilder::new()
             .ts_unix_ms(self.ts_unix_ms)
             .component(&self.contract_name)
             .action(&self.action_chosen)
-            .posterior(self.posterior_snapshot.clone())
-            .chosen_expected_loss(self.expected_loss)
-            .calibration_score(self.calibration_score)
+            .posterior(sanitize_posterior_snapshot(&self.posterior_snapshot))
+            .chosen_expected_loss(chosen_loss)
+            .calibration_score(self.calibration_score.clamp(0.0, 1.0))
             .fallback_active(self.fallback_active);
 
         for (action, &loss) in &self.expected_loss_by_action {
+            // The chosen action's mapped loss must equal `chosen_expected_loss`
+            // (the ledger validates this); force agreement, sanitize the rest.
+            let loss = if *action == self.action_chosen {
+                chosen_loss
+            } else {
+                sanitize_loss(loss)
+            };
             builder = builder.expected_loss(action, loss);
         }
+        // Guarantee the chosen action is present in the loss map with the
+        // matching loss even if the caller omitted it.
+        builder = builder.expected_loss(&self.action_chosen, chosen_loss);
 
-        builder
-            .build()
-            .expect("audit entry should produce valid evidence ledger")
+        builder.build().unwrap_or_else(|_| {
+            // Provably-valid minimal fallback (never fails validation): a
+            // single-state uniform posterior, mid calibration, zero loss.
+            EvidenceLedgerBuilder::new()
+                .ts_unix_ms(self.ts_unix_ms)
+                .component(if self.contract_name.is_empty() {
+                    "unknown"
+                } else {
+                    self.contract_name.as_str()
+                })
+                .action(if self.action_chosen.is_empty() {
+                    "unknown"
+                } else {
+                    self.action_chosen.as_str()
+                })
+                .posterior(vec![1.0])
+                .chosen_expected_loss(0.0)
+                .calibration_score(0.5)
+                .fallback_active(self.fallback_active)
+                .build()
+                .expect("minimal evidence ledger is valid by construction")
+        })
     }
 }
 
@@ -1475,6 +1546,30 @@ mod tests {
         assert!(!evidence.fallback_active);
         assert_eq!(evidence.posterior, vec![0.6, 0.4]);
         assert!(evidence.is_valid());
+    }
+
+    #[test]
+    fn to_evidence_ledger_sanitizes_degenerate_audit_without_panicking() {
+        // Regression: a collapsed (all-zero) posterior snapshot plus a `-0.0`
+        // chosen loss — the shape produced on native-only backend routing —
+        // must NOT abort the runtime via `.expect()`. The conversion sanitizes
+        // to a valid, normalized ledger instead of panicking.
+        let contract = TestContract::new();
+        let posterior = Posterior::new(vec![0.6, 0.4]).unwrap();
+        let ctx = test_ctx(0.5, 100);
+        let outcome = evaluate(&contract, &posterior, &ctx).expect("valid contract");
+
+        let mut audit = outcome.audit_entry;
+        audit.posterior_snapshot = vec![0.0, 0.0]; // collapsed / all-zero
+        audit.expected_loss = -0.0;
+
+        let ledger = audit.to_evidence_ledger(); // must not panic
+        assert!(ledger.is_valid());
+        let sum: f64 = ledger.posterior.iter().sum();
+        assert!(
+            (sum - 1.0).abs() <= 1e-6,
+            "degenerate posterior should be renormalized, got sum {sum}"
+        );
     }
 
     #[test]
