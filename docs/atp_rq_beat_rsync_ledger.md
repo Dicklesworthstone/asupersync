@@ -3619,3 +3619,14 @@ L3 = commit-write rename-not-copy (bead br-asupersync-sze9ym, codex-drafted + Sa
 - NO-REGRESS: 500K WIN (0.151 vs 0.727 / 0.551 vs 1.629), 5M WIN (0.152 vs 0.826 / 0.816 vs 1.929), tree_big WIN (0.551 vs 0.927 / 1.615 vs 2.427), **500M/perfect/nocrypto 4.518 vs 5.130 — banked clean-large intact**.
 
 ★**Remaining tree_small/perfect gap (−0.09s):** now dominated by `commit_write_micros=289370` (0.29s) — `write_packed_member_batch` does a serial `File::create`+write per small file. Next lever = parallelize the per-file commit writes across the blocking pool → projected tree_small/perfect < rsync 1.027. Landed the dedup as a clean accretive win (flips good, improves perfect, no-regress); perfect flip pending the commit_write parallelization.
+
+## MATRIX-198 (2026-07-01) — FRONT C lossy diagnosis (timeout=300, atp_treeb, run 20260701T190457Z): 50M/bad ≈TIE; 500M/bad TIMEOUT because atp rides the reliable source-stream on a mildly-lossy link instead of the FEC spray.
+
+★**Results (nocrypto, reps2, timeout=300):**
+- 50M/bad atp **18.93s** vs rsyncd **20.49s median** (rsync HIGH variance 15.4–25.5) — ≈TIE / slight atp win, NOT a clear loss.
+- 500M/bad atp **TIMEOUT 299s (0/2)** vs rsyncd **97.85s (2/2 ok)** — real loss.
+- (earlier run) 50M/broken atp 65.3 WINS rsync 70.8.
+
+★**Root cause:** all lossy atp cells ran `feedback_rounds=0` = atp used the **reliable TCP control-source-stream** (the clean-large path), NOT the RaptorQ FEC datagram spray. `control_source_stream_eligible` (mod.rs:2233) = `total_bytes ≤ max_transfer_bytes && near_clean_control_source_stream_round0(config)`, and `near_clean...` (2221) only requires `round0_loss_target ≤ RQ_CONTROL_SOURCE_STREAM_MAX_LOSS_TARGET` (= `RQ_ROUND0_TARGET_LOSS_ENABLE_MIN/5`, a lenient threshold). The `bad` regime's netem loss is below that threshold, so atp picks the reliable stream — but on a lossy+latency link, reliable-TCP retransmit/RTT-throttling can't push 500M through in 300s, while rsync's tuned TCP does 98s. atp's FEC forward-repair advantage (its lossy home turf) is bypassed.
+
+★**Fix (transport_rq, mine — but INTERSECTS the swarm's loss-detection WIRE-4 / source-first work, coordinate):** make source-stream eligibility SIZE-AWARE — large transfers should require a stricter (near-zero) loss target to use the reliable stream; above a size threshold on any non-trivial loss, use the FEC spray. OR runtime: detect the source-stream stalling (no progress over N RTT) and fall back to the spray mid-transfer (composes with 7585f24ce "engage lossy AIMD on rank stalls"). PROOF-TEST pending: force `--rq-round0-loss-pct` high on 500M/bad → confirm FEC spray completes + beats rsync before coding. Honest: 50M/bad is a tie (not a loss); the real Front C loss is 500M/bad, and it's a path-selection bug (reliable-stream-on-lossy), not a fundamental FEC weakness — atp already wins 50M/broken via the spray.
