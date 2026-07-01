@@ -14,6 +14,106 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 ## [Unreleased]
 
+### ATP clean-matrix, transport security, and proof-lane consolidation
+
+> Late-June and July work moved ATP from individual architecture wins toward
+> matrix-governed benchmark evidence. The bar is now explicit: tuned rsync
+> baseline, release `atp`, crypto-symmetric cells, fail-closed SHA/tamper
+> checks, rate-capped links, and whole-matrix evidence before claiming a win.
+> Stale cells, compile-only checks, or `sha_ok` without timing/bytes evidence do
+> not count.
+
+- **ATP-over-QUIC/H3 foundation and native TLS posture.** The transport lane
+  now includes ATP QUIC integration, ATP-over-H3/WebTransport adapters, native
+  QUIC frame codecs, handshake state, packet protection, real UDP transfer
+  paths, and fail-closed X.509/server-name/replay/anti-amplification tests.
+  Direct native QUIC/TLS relies on QUIC AEAD authentication; non-direct or
+  cross-trust RaptorQ paths still need explicit symbol-auth posture.
+  Representative commits include
+  [`b45516d70`](https://github.com/Dicklesworthstone/asupersync/commit/b45516d70),
+  [`bb20b0fa9`](https://github.com/Dicklesworthstone/asupersync/commit/bb20b0fa9),
+  [`651748218`](https://github.com/Dicklesworthstone/asupersync/commit/651748218),
+  [`e1a681d80`](https://github.com/Dicklesworthstone/asupersync/commit/e1a681d80),
+  [`159113a1f`](https://github.com/Dicklesworthstone/asupersync/commit/159113a1f),
+  [`e7e1d8e8`](https://github.com/Dicklesworthstone/asupersync/commit/e7e1d8e8),
+  [`4078161f`](https://github.com/Dicklesworthstone/asupersync/commit/4078161f),
+  [`1442724ff`](https://github.com/Dicklesworthstone/asupersync/commit/1442724ff),
+  and [`ca63bd03e`](https://github.com/Dicklesworthstone/asupersync/commit/ca63bd03e).
+- **Reliable clean-source stream and auth/encrypted repair path.** The
+  benchmark lane landed authenticated control-source frames, clean encrypted
+  source-stream routing, drain/flush fixes, good-link reliable stream admission,
+  ack-clocked QUIC datagram pacing, repair-spray pacing, and E802 block-size
+  rounding fixes. These are tracked through the matrix harnesses rather than as
+  isolated unit claims.
+  ([`d7a82fd44`](https://github.com/Dicklesworthstone/asupersync/commit/d7a82fd44),
+  [`116e51adf`](https://github.com/Dicklesworthstone/asupersync/commit/116e51adf),
+  [`d880f5fb4`](https://github.com/Dicklesworthstone/asupersync/commit/d880f5fb4),
+  [`69c9c14be`](https://github.com/Dicklesworthstone/asupersync/commit/69c9c14be),
+  [`da53c8e9a`](https://github.com/Dicklesworthstone/asupersync/commit/da53c8e9a),
+  [`ace3358d5`](https://github.com/Dicklesworthstone/asupersync/commit/ace3358d5),
+  [`0dd7aa708`](https://github.com/Dicklesworthstone/asupersync/commit/0dd7aa708),
+  `br-asupersync-8sxwj0`, `br-asupersync-5r1mh8`,
+  `br-asupersync-uw1cc2`)
+- **Large-object clean wins against tuned rsync.** Incremental hash-on-receive,
+  fragment hash overlap, protocol-v3 `ObjectComplete` hash trailers, and
+  same-filesystem commit rename cut tail work on large clean transfers. Matrix
+  evidence recorded 500M and 5G clean wins in nocrypto+auth cells while keeping
+  explicit no-regress and no-claim boundaries for remaining harder lanes.
+  ([`faa93d808`](https://github.com/Dicklesworthstone/asupersync/commit/faa93d808),
+  [`463a4cfae`](https://github.com/Dicklesworthstone/asupersync/commit/463a4cfae),
+  [`81c44d28e`](https://github.com/Dicklesworthstone/asupersync/commit/81c44d28e),
+  [`bae50415d`](https://github.com/Dicklesworthstone/asupersync/commit/bae50415d),
+  `br-asupersync-2eb4k2`, `br-asupersync-sze9ym`)
+- **Delta/resync and bonding groundwork.** Byte-precise subchunk planning,
+  mixed-subchunk tests, wire apply reports, compact repeated-chunk framing, and
+  manifest-framing reductions landed for delta resync and netns sidecar work.
+  The known delta resync hang remains an active blocker rather than a completed
+  claim.
+  ([`70d8fa001`](https://github.com/Dicklesworthstone/asupersync/commit/70d8fa001),
+  [`bec7a27d1`](https://github.com/Dicklesworthstone/asupersync/commit/bec7a27d1),
+  [`989331e78`](https://github.com/Dicklesworthstone/asupersync/commit/989331e78),
+  [`cbbe37474`](https://github.com/Dicklesworthstone/asupersync/commit/cbbe37474),
+  [`8983b7364`](https://github.com/Dicklesworthstone/asupersync/commit/8983b7364),
+  `br-asupersync-v0jeoc`, `br-asupersync-cu4zww`,
+  `br-asupersync-2qas9c`)
+- **RaptorQ hardening and fail-closed decode posture.** The RaptorQ lane now has
+  deterministic proof traces, decode verification guards, wrong-width symbol
+  rejection, tamper proof witnesses, rank-profile evidence, and data-loss bug
+  fixes. Treat it as a proof-carrying subsystem with explicit authentication
+  posture, not just an encoder/decoder API.
+  ([`ac69a713c`](https://github.com/Dicklesworthstone/asupersync/commit/ac69a713c),
+  [`727e21eb7`](https://github.com/Dicklesworthstone/asupersync/commit/727e21eb7),
+  [`11a08727b`](https://github.com/Dicklesworthstone/asupersync/commit/11a08727b),
+  [`0ac5c3e7c`](https://github.com/Dicklesworthstone/asupersync/commit/0ac5c3e7c),
+  [`aa0959143`](https://github.com/Dicklesworthstone/asupersync/commit/aa0959143),
+  [`cb44e3cc4`](https://github.com/Dicklesworthstone/asupersync/commit/cb44e3cc4))
+- **Proof lanes as first-class source of truth.** Remote `rch` proof commands,
+  proof-lane manifests, proof status snapshots, validation-frontier signoff, and
+  resource-envelope contracts now govern many documentation/runtime claims.
+  Update scripts, artifacts, manifest lanes, and contract tests together.
+  ([`1cc389141`](https://github.com/Dicklesworthstone/asupersync/commit/1cc389141),
+  [`92e801726`](https://github.com/Dicklesworthstone/asupersync/commit/92e801726),
+  [`fd911e707`](https://github.com/Dicklesworthstone/asupersync/commit/fd911e707),
+  [`b63bd24cf`](https://github.com/Dicklesworthstone/asupersync/commit/b63bd24cf),
+  [`29fb46d10`](https://github.com/Dicklesworthstone/asupersync/commit/29fb46d10))
+- **Browser/service/runtime expansion.** Browser Edition added readiness,
+  package-integrity, consumer-compatibility, WASM rebuild, native-only cfg, and
+  RCH-in-CI gates. Service surfaces also advanced across production H2
+  listeners, web middleware layering, fluent HTTP client requests, database
+  transaction obligations, and gRPC call-scoped backpressure/cancel coupling.
+  Runtime work added spawn/mailbox improvements, platform reactor defaults,
+  shared fallback timers, scheduler CPU metrics, and churn gates.
+  ([`0f58ff593`](https://github.com/Dicklesworthstone/asupersync/commit/0f58ff593),
+  [`186a71303`](https://github.com/Dicklesworthstone/asupersync/commit/186a71303),
+  [`057a8d8c0`](https://github.com/Dicklesworthstone/asupersync/commit/057a8d8c0),
+  [`2ac589d68`](https://github.com/Dicklesworthstone/asupersync/commit/2ac589d68),
+  [`6a79f24b6`](https://github.com/Dicklesworthstone/asupersync/commit/6a79f24b6),
+  [`4c772a47c`](https://github.com/Dicklesworthstone/asupersync/commit/4c772a47c),
+  [`88ef4e0da`](https://github.com/Dicklesworthstone/asupersync/commit/88ef4e0da),
+  [`12c926ef8`](https://github.com/Dicklesworthstone/asupersync/commit/12c926ef8),
+  [`326082b0f`](https://github.com/Dicklesworthstone/asupersync/commit/326082b0f),
+  [`09868a489`](https://github.com/Dicklesworthstone/asupersync/commit/09868a489))
+
 ### Runtime scheduler/timer CPU efficiency (`runtime-cpu-overhaul`)
 
 > Live profiling of a heavy consumer (a terminal-multiplexer GUI) localized
