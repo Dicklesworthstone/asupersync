@@ -183,6 +183,7 @@ const PACK_TARGET: u64 = 8 * 1024 * 1024;
 /// small enough that the receiver cannot retain too many open files.
 const ENTRY_STAGING_FILE_CACHE_MIN_BYTES: u64 = 1024 * 1024;
 const ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES: usize = 128;
+const RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR: &str = ".atp-rq-fragment-staging";
 
 /// Default bound on fountain feedback rounds before failing closed.
 pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
@@ -4929,6 +4930,16 @@ struct EntryDecoder {
     pipeline: Option<DecodingPipeline>,
     complete: bool,
     staging_path: PathBuf,
+    /// Entry-relative writes are offset by this amount inside `staging_path`.
+    /// Normal entries keep zero; single-file large fragments share one logical
+    /// staging file and write at their logical offset.
+    staging_write_offset: u64,
+    /// Size to pre-create for `staging_path`. This is usually `size`; shared
+    /// fragment staging uses the whole logical file size.
+    staging_file_len: u64,
+    /// Allows multiple fragment decoders to open the same pre-created logical
+    /// staging file instead of treating `AlreadyExists` as hostile.
+    staging_shared: bool,
     staging_created: bool,
     staging_file: Option<crate::fs::File>,
     staging_cursor: Option<u64>,
@@ -5028,6 +5039,96 @@ fn entry_source_block_count(dec: &EntryDecoder) -> usize {
 
 fn source_streaming_entry_complete(dec: &EntryDecoder) -> bool {
     !dec.source_blocks.is_empty() && dec.bytes_written == dec.size
+}
+
+fn single_file_fragment_staging_path(
+    manifest: &TransferManifest,
+    staging_dir: &Path,
+) -> Option<PathBuf> {
+    if manifest.is_directory || manifest.entries.is_empty() {
+        return None;
+    }
+
+    let first_rel_path = manifest
+        .entries
+        .first()?
+        .fragment
+        .as_ref()?
+        .rel_path
+        .as_str();
+    let all_same_fragment = manifest.entries.iter().all(|entry| {
+        entry
+            .fragment
+            .as_ref()
+            .is_some_and(|fragment| fragment.rel_path == first_rel_path)
+    });
+    all_same_fragment.then(|| {
+        staging_dir
+            .join(RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR)
+            .join("0")
+    })
+}
+
+fn receive_staging_layout_for_entry(
+    entry: &ManifestEntry,
+    staging_dir: &Path,
+    single_file_fragment_staging_path: Option<&Path>,
+) -> (PathBuf, u64, u64, bool) {
+    if let (Some(fragment), Some(staging_path)) =
+        (entry.fragment.as_ref(), single_file_fragment_staging_path)
+    {
+        return (
+            staging_path.to_path_buf(),
+            fragment.logical_offset,
+            fragment.logical_size,
+            true,
+        );
+    }
+
+    (
+        staging_dir.join(entry.index.to_string()),
+        0,
+        entry.size,
+        false,
+    )
+}
+
+fn entry_staging_absolute_offset(
+    dec: &EntryDecoder,
+    offset: u64,
+    len: usize,
+) -> Result<u64, RqError> {
+    let len = u64::try_from(len).unwrap_or(u64::MAX);
+    let entry_end = offset
+        .checked_add(len)
+        .ok_or_else(|| RqError::Coding(format!("entry {} staging range overflow", dec.index)))?;
+    if entry_end > dec.size {
+        return Err(RqError::Frame(format!(
+            "entry {} staging write range {}..{} overruns declared size {}",
+            dec.index, offset, entry_end, dec.size
+        )));
+    }
+
+    let absolute = dec
+        .staging_write_offset
+        .checked_add(offset)
+        .ok_or_else(|| {
+            RqError::Coding(format!(
+                "entry {} shared staging offset overflow",
+                dec.index
+            ))
+        })?;
+    let absolute_end = absolute.checked_add(len).ok_or_else(|| {
+        RqError::Coding(format!("entry {} shared staging range overflow", dec.index))
+    })?;
+    if absolute_end > dec.staging_file_len {
+        return Err(RqError::Frame(format!(
+            "entry {} staging write range {}..{} overruns staging file size {}",
+            dec.index, absolute, absolute_end, dec.staging_file_len
+        )));
+    }
+
+    Ok(absolute)
 }
 
 fn decoder_position_for_entry(decoders: &[EntryDecoder], entry: u32) -> Option<usize> {
@@ -7589,6 +7690,7 @@ pub async fn receive_connection(
     })?;
     let staging_dir = create_receive_staging_dir(dest_dir, &manifest.transfer_id).await?;
     let _staging_guard = RqStagingDirGuard::new(staging_dir.clone());
+    let single_file_fragment_staging = single_file_fragment_staging_path(&manifest, &staging_dir);
     let source_streaming = config.repair_overhead <= 1.0 && config.source_retransmit_rounds > 0;
 
     // Per-entry decoders.
@@ -7597,6 +7699,16 @@ pub async fn receive_connection(
         .iter()
         .map(|e| {
             let object_id = entry_object_id(&manifest.transfer_id, e.index);
+            let (
+                staging_path,
+                staging_write_offset,
+                staging_file_len,
+                staging_shared,
+            ) = receive_staging_layout_for_entry(
+                e,
+                &staging_dir,
+                single_file_fragment_staging.as_deref(),
+            );
             let (pipeline, entry_source_streaming, source_blocks) = if control_source_stream {
                 (None, false, Vec::new())
             } else {
@@ -7645,7 +7757,10 @@ pub async fn receive_connection(
                 size: e.size,
                 pipeline,
                 complete: e.size == 0,
-                staging_path: staging_dir.join(e.index.to_string()),
+                staging_path: staging_path.clone(),
+                staging_write_offset,
+                staging_file_len,
+                staging_shared,
                 staging_created: false,
                 staging_file: None,
                 staging_cursor: None,
@@ -7661,9 +7776,7 @@ pub async fn receive_connection(
                 source_blocks,
                 pending_decodes: Vec::new(),
                 inc: control_source_stream.then(|| {
-                    crate::net::atp::transport_common::StagedEntryReceive::new(
-                        staging_dir.join(e.index.to_string()),
-                    )
+                    crate::net::atp::transport_common::StagedEntryReceive::new(staging_path)
                 }),
                 inc_digest: None,
                 source_write_buffer: if control_source_stream {
@@ -9190,15 +9303,32 @@ async fn open_entry_staging_file(dec: &mut EntryDecoder) -> Result<crate::fs::Fi
         .await
         .map_err(|err| {
             if err.kind() == std::io::ErrorKind::AlreadyExists {
-                RqError::Frame(format!(
-                    "staging file already exists for entry {}",
-                    dec.index
-                ))
+                if dec.staging_shared {
+                    RqError::Io(err)
+                } else {
+                    RqError::Frame(format!(
+                        "staging file already exists for entry {}",
+                        dec.index
+                    ))
+                }
             } else {
                 RqError::Io(err)
             }
-        })?;
-    file.set_len(dec.size).await?;
+        });
+    let file = match file {
+        Ok(file) => file,
+        Err(RqError::Io(err))
+            if dec.staging_shared && err.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            crate::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(&dec.staging_path)
+                .await?
+        }
+        Err(err) => return Err(err),
+    };
+    file.set_len(dec.staging_file_len).await?;
     dec.staging_created = true;
     Ok(file)
 }
@@ -9303,6 +9433,7 @@ async fn write_entry_staging_range_unbuffered(
     offset: u64,
     data: &[u8],
 ) -> Result<(), RqError> {
+    let absolute_offset = entry_staging_absolute_offset(dec, offset, data.len())?;
     if dec.cache_staging_file {
         if dec.staging_file.is_none() {
             let file = open_entry_staging_file(dec).await?;
@@ -9312,7 +9443,7 @@ async fn write_entry_staging_range_unbuffered(
         }
 
         let expected_cursor = dec.staging_cursor;
-        let next_cursor = offset
+        let next_cursor = absolute_offset
             .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
             .ok_or_else(|| {
                 RqError::Coding(format!("entry {} staging cursor overflow", dec.index))
@@ -9324,8 +9455,8 @@ async fn write_entry_staging_range_unbuffered(
                 .staging_file
                 .as_mut()
                 .expect("staging file opened above");
-            if expected_cursor != Some(offset) {
-                file.seek(std::io::SeekFrom::Start(offset)).await?;
+            if expected_cursor != Some(absolute_offset) {
+                file.seek(std::io::SeekFrom::Start(absolute_offset)).await?;
             }
             file.write_all(data).await?;
             if should_flush {
@@ -9338,7 +9469,7 @@ async fn write_entry_staging_range_unbuffered(
     }
 
     let mut file = open_entry_staging_file(dec).await?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    file.seek(std::io::SeekFrom::Start(absolute_offset)).await?;
     file.write_all(data).await?;
     Ok(())
 }
@@ -9491,6 +9622,8 @@ fn object_params_for(
 #[derive(Debug, Clone)]
 struct LargeObjectCommitShard {
     staging_path: PathBuf,
+    staging_offset: u64,
+    staging_shared: bool,
     fragment: LargeObjectFragment,
 }
 
@@ -9635,6 +9768,9 @@ async fn hash_large_object_fragments(
         let mut file = crate::fs::File::open(&shard.staging_path)
             .await
             .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
+        file.seek(std::io::SeekFrom::Start(shard.staging_offset))
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
         let mut remaining = shard.fragment.len;
         while remaining > 0 {
             let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
@@ -9673,6 +9809,9 @@ async fn write_large_object_fragments(
         let mut file = crate::fs::File::open(&shard.staging_path)
             .await
             .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
+        file.seek(std::io::SeekFrom::Start(shard.staging_offset))
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
         let mut remaining = shard.fragment.len;
         while remaining > 0 {
             let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
@@ -9693,6 +9832,42 @@ async fn write_large_object_fragments(
     }
     out.flush().await?;
     Ok(())
+}
+
+fn contiguous_fragment_staging_path(shards: &[LargeObjectCommitShard]) -> Option<PathBuf> {
+    let first = shards.first()?;
+    if !first.staging_shared {
+        return None;
+    }
+    let staging_path = &first.staging_path;
+    let all_contiguous_shared = shards.iter().all(|shard| {
+        shard.staging_shared
+            && shard.staging_path == *staging_path
+            && shard.staging_offset == shard.fragment.logical_offset
+    });
+    all_contiguous_shared.then(|| staging_path.clone())
+}
+
+fn is_cross_device_rename_error(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        const EXDEV_RAW_OS_ERROR: i32 = 18;
+        err.raw_os_error() == Some(EXDEV_RAW_OS_ERROR)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+async fn remove_failed_fragment_staging_file(path: &Path) -> Result<(), RqError> {
+    match crate::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(RqError::Io(err)),
+    }
 }
 
 /// Verify every entry (SHA-256 + rebuilt merkle root) and, on success, atomically
@@ -9785,6 +9960,19 @@ async fn verify_and_commit(
         let (size, content_id, content_sha256) =
             if let Some((sz, cid, sha)) = decoder.inc_digest.as_ref() {
                 (*sz, cid.clone(), *sha)
+            } else if e.fragment.is_some() {
+                let hash_started = trace_commit.then(Instant::now);
+                let r = hash_file_range_streaming(
+                    &decoder.staging_path,
+                    decoder.staging_write_offset,
+                    e.size,
+                    &mut hash_buf,
+                )
+                .await
+                .map_err(|e| RqError::Source(e.into_message()))?;
+                verify_hash_micros =
+                    verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
+                r
             } else {
                 let hash_started = trace_commit.then(Instant::now);
                 let r = hash_file_streaming(&decoder.staging_path, &mut hash_buf)
@@ -9809,6 +9997,8 @@ async fn verify_and_commit(
                 .or_default()
                 .push(LargeObjectCommitShard {
                     staging_path: decoder.staging_path.clone(),
+                    staging_offset: decoder.staging_write_offset,
+                    staging_shared: decoder.staging_shared,
                     fragment: fragment.clone(),
                 });
         } else if e.members.is_empty() {
@@ -9896,6 +10086,17 @@ async fn verify_and_commit(
 
     let committed = sha_ok && merkle_ok;
     let mut committed_paths: Vec<String> = Vec::new();
+    if !committed {
+        let mut cleaned_fragment_staging: BTreeSet<PathBuf> = BTreeSet::new();
+        for commit in &commits {
+            if let EntryCommit::Fragments { shards, .. } = commit
+                && let Some(staging_path) = contiguous_fragment_staging_path(shards)
+                && cleaned_fragment_staging.insert(staging_path.clone())
+            {
+                remove_failed_fragment_staging_file(&staging_path).await?;
+            }
+        }
+    }
     if committed {
         // `root_name` is attacker-controlled off the wire; collapse it to a
         // single safe component so a hostile (absolute / separator-bearing)
@@ -9916,6 +10117,7 @@ async fn verify_and_commit(
             },
             Fragments {
                 shards: Vec<LargeObjectCommitShard>,
+                rename_staging_path: Option<PathBuf>,
                 out_path: PathBuf,
             },
         }
@@ -9962,8 +10164,10 @@ async fn verify_and_commit(
                     } else {
                         base.clone()
                     };
+                    let rename_staging_path = contiguous_fragment_staging_path(shards);
                     writes.push(CommitWrite::Fragments {
                         shards: shards.clone(),
+                        rename_staging_path,
                         out_path,
                     });
                 }
@@ -10015,11 +10219,26 @@ async fn verify_and_commit(
                             .map(|member| member.out_path.display().to_string()),
                     );
                 }
-                CommitWrite::Fragments { shards, out_path } => {
+                CommitWrite::Fragments {
+                    shards,
+                    rename_staging_path,
+                    out_path,
+                } => {
                     if let Some(parent) = out_path.parent() {
                         crate::fs::create_dir_all(parent).await?;
                     }
-                    write_large_object_fragments(&shards, &out_path, &mut hash_buf).await?;
+                    if let Some(staging_path) = rename_staging_path {
+                        match crate::fs::rename(&staging_path, &out_path).await {
+                            Ok(()) => {}
+                            Err(err) if is_cross_device_rename_error(&err) => {
+                                write_large_object_fragments(&shards, &out_path, &mut hash_buf)
+                                    .await?;
+                            }
+                            Err(err) => return Err(RqError::Io(err)),
+                        }
+                    } else {
+                        write_large_object_fragments(&shards, &out_path, &mut hash_buf).await?;
+                    }
                     committed_paths.push(out_path.display().to_string());
                 }
             }
@@ -12034,6 +12253,9 @@ mod tests {
             pipeline: None,
             complete: false,
             staging_path: PathBuf::new(),
+            staging_write_offset: 0,
+            staging_file_len: size,
+            staging_shared: false,
             staging_created: false,
             staging_file: None,
             staging_cursor: None,
@@ -13951,6 +14173,9 @@ mod tests {
             pipeline: None,
             complete: true,
             staging_path,
+            staging_write_offset: 0,
+            staging_file_len: size,
+            staging_shared: false,
             staging_created: true,
             staging_file: None,
             staging_cursor: None,
@@ -14043,6 +14268,9 @@ mod tests {
             pipeline: None,
             complete: false,
             staging_path,
+            staging_write_offset: 0,
+            staging_file_len: size,
+            staging_shared: false,
             staging_created: false,
             staging_file: None,
             staging_cursor: None,
@@ -14947,6 +15175,9 @@ mod tests {
             pipeline: None,
             complete: false,
             staging_path: staging_path.clone(),
+            staging_write_offset: 0,
+            staging_file_len: 8,
+            staging_shared: false,
             staging_created: false,
             staging_file: None,
             staging_cursor: None,
@@ -17118,6 +17349,97 @@ mod tests {
         }
     }
 
+    fn two_fragment_manifest(a: &[u8], b: &[u8]) -> TransferManifest {
+        let mut whole = Vec::with_capacity(a.len().saturating_add(b.len()));
+        whole.extend_from_slice(a);
+        whole.extend_from_slice(b);
+        let whole_sha = hex_encode(&Sha256::digest(&whole));
+        TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "huge.bin".to_string(),
+            is_directory: false,
+            total_bytes: whole.len() as u64,
+            merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
+            entries: vec![
+                fragment_entry(
+                    0,
+                    ".atp-fragment-0-0",
+                    a,
+                    LargeObjectFragment {
+                        rel_path: "huge.bin".to_string(),
+                        shard_index: 0,
+                        shard_count: 2,
+                        logical_offset: 0,
+                        len: a.len() as u64,
+                        logical_size: whole.len() as u64,
+                        sha256_hex: whole_sha.clone(),
+                    },
+                ),
+                fragment_entry(
+                    1,
+                    ".atp-fragment-0-1",
+                    b,
+                    LargeObjectFragment {
+                        rel_path: "huge.bin".to_string(),
+                        shard_index: 1,
+                        shard_count: 2,
+                        logical_offset: a.len() as u64,
+                        len: b.len() as u64,
+                        logical_size: whole.len() as u64,
+                        sha256_hex: whole_sha,
+                    },
+                ),
+            ],
+        }
+    }
+
+    fn shared_fragment_decoders(
+        manifest: &TransferManifest,
+        staging_path: &Path,
+        complete: bool,
+        staging_created: bool,
+    ) -> Vec<EntryDecoder> {
+        manifest
+            .entries
+            .iter()
+            .map(|entry| {
+                let fragment = entry.fragment.as_ref().expect("fragment metadata");
+                EntryDecoder {
+                    index: entry.index,
+                    object_id: entry_object_id(&manifest.transfer_id, entry.index),
+                    size: entry.size,
+                    pipeline: None,
+                    complete,
+                    staging_path: staging_path.to_path_buf(),
+                    staging_write_offset: fragment.logical_offset,
+                    staging_file_len: fragment.logical_size,
+                    staging_shared: true,
+                    staging_created,
+                    staging_file: None,
+                    staging_cursor: None,
+                    staging_unflushed_bytes: 0,
+                    cache_staging_file: false,
+                    bytes_written: if complete { entry.size } else { 0 },
+                    max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+                    source_streaming: false,
+                    source_blocks: Vec::new(),
+                    pending_decodes: Vec::new(),
+                    inc: None,
+                    inc_digest: None,
+                    source_write_buffer: Vec::new(),
+                    source_write_buffer_offset: None,
+                }
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn inode_for(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+
+        std::fs::metadata(path).expect("metadata").ino()
+    }
+
     #[test]
     fn split_large_entries_plans_bounded_ranged_objects() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -17289,6 +17611,9 @@ mod tests {
                 pipeline: None,
                 complete: true,
                 staging_path: a_path,
+                staging_write_offset: 0,
+                staging_file_len: a.len() as u64,
+                staging_shared: false,
                 staging_created: true,
                 staging_file: None,
                 staging_cursor: None,
@@ -17311,6 +17636,9 @@ mod tests {
                 pipeline: None,
                 complete: true,
                 staging_path: b_path,
+                staging_write_offset: 0,
+                staging_file_len: b.len() as u64,
+                staging_shared: false,
                 staging_created: true,
                 staging_file: None,
                 staging_cursor: None,
@@ -17344,6 +17672,142 @@ mod tests {
         assert!(receipt.merkle_ok);
         assert_eq!(receipt.files, 1);
         assert_eq!(std::fs::read(dest.path().join("huge.bin")).unwrap(), whole);
+    }
+
+    #[test]
+    fn verify_and_commit_renames_contiguous_single_file_fragment_staging() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let receive_staging_dir = dest.path().join(".atp-rq-staging-rqtransfer1-0");
+        let fragment_dir = receive_staging_dir.join(RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR);
+        std::fs::create_dir_all(&fragment_dir).expect("fragment staging dir");
+
+        let a = vec![b'a'; 4096];
+        let b = vec![b'b'; 4096];
+        let mut whole = Vec::with_capacity(a.len() + b.len());
+        whole.extend_from_slice(&a);
+        whole.extend_from_slice(&b);
+        let staging_path = fragment_dir.join("0");
+        std::fs::write(&staging_path, &whole).expect("write contiguous fragment staging");
+
+        let manifest = two_fragment_manifest(&a, &b);
+        let planned_staging = single_file_fragment_staging_path(&manifest, &receive_staging_dir)
+            .expect("single-file fragment staging path");
+        assert_eq!(planned_staging, staging_path);
+        let mut decoders = shared_fragment_decoders(&manifest, &staging_path, true, true);
+        #[cfg(unix)]
+        let staging_inode = inode_for(&staging_path);
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+            &BTreeMap::new(),
+            &CompletionDigestIndex::default(),
+        ))
+        .expect("verify contiguous fragmented file");
+
+        assert!(receipt.committed, "fragmented transfer must commit");
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+        let out_path = dest.path().join("huge.bin");
+        assert_eq!(
+            std::fs::read(&out_path).expect("read committed file"),
+            whole
+        );
+        assert!(
+            !staging_path.exists(),
+            "rename branch must move the contiguous staging file"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            inode_for(&out_path),
+            staging_inode,
+            "committed file should be the renamed staging inode"
+        );
+    }
+
+    #[test]
+    fn verify_and_commit_rejects_tampered_contiguous_fragment_and_cleans_staging() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let receive_staging_dir = dest.path().join(".atp-rq-staging-rqtransfer1-0");
+        let fragment_dir = receive_staging_dir.join(RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR);
+        std::fs::create_dir_all(&fragment_dir).expect("fragment staging dir");
+
+        let a = b"first verified fragment".to_vec();
+        let b = b"second verified fragment".to_vec();
+        let mut tampered = Vec::with_capacity(a.len() + b.len());
+        tampered.extend_from_slice(&a);
+        tampered.extend_from_slice(&b);
+        tampered[a.len()] ^= 0x5a;
+        let staging_path = fragment_dir.join("0");
+        std::fs::write(&staging_path, &tampered).expect("write tampered staging");
+
+        let manifest = two_fragment_manifest(&a, &b);
+        let mut decoders = shared_fragment_decoders(&manifest, &staging_path, true, true);
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+            &BTreeMap::new(),
+            &CompletionDigestIndex::default(),
+        ))
+        .expect("verify returns fail-closed receipt");
+
+        assert!(!receipt.committed, "tampered fragment must not commit");
+        assert!(!receipt.sha_ok);
+        assert!(!dest.path().join("huge.bin").exists());
+        assert!(
+            !staging_path.exists(),
+            "failed contiguous fragment verification must clean staging"
+        );
+    }
+
+    #[test]
+    fn contiguous_fragment_staging_accepts_out_of_order_datagram_writes() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let receive_staging_dir = dest.path().join(".atp-rq-staging-rqtransfer1-0");
+        let fragment_dir = receive_staging_dir.join(RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR);
+        let staging_path = fragment_dir.join("0");
+
+        let a = b"first fragment arrives second".to_vec();
+        let b = b"second fragment arrives first".to_vec();
+        let mut whole = Vec::with_capacity(a.len() + b.len());
+        whole.extend_from_slice(&a);
+        whole.extend_from_slice(&b);
+        let manifest = two_fragment_manifest(&a, &b);
+        let mut decoders = shared_fragment_decoders(&manifest, &staging_path, false, false);
+
+        futures_lite::future::block_on(write_entry_staging_range(&mut decoders[1], 0, &b))
+            .expect("write second fragment first");
+        futures_lite::future::block_on(write_entry_staging_range(&mut decoders[0], 0, &a))
+            .expect("write first fragment second");
+        for decoder in &mut decoders {
+            decoder.complete = true;
+            decoder.bytes_written = decoder.size;
+        }
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+            &BTreeMap::new(),
+            &CompletionDigestIndex::default(),
+        ))
+        .expect("verify out-of-order contiguous fragments");
+
+        assert!(receipt.committed);
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+        assert_eq!(
+            std::fs::read(dest.path().join("huge.bin")).expect("read committed file"),
+            whole
+        );
     }
 
     #[test]
@@ -17442,6 +17906,9 @@ mod tests {
                 pipeline: None,
                 complete: true,
                 staging_path: a_path,
+                staging_write_offset: 0,
+                staging_file_len: a.len() as u64,
+                staging_shared: false,
                 staging_created: true,
                 staging_file: None,
                 staging_cursor: None,
@@ -17468,6 +17935,9 @@ mod tests {
                 pipeline: None,
                 complete: true,
                 staging_path: b_path,
+                staging_write_offset: 0,
+                staging_file_len: b.len() as u64,
+                staging_shared: false,
                 staging_created: true,
                 staging_file: None,
                 staging_cursor: None,
@@ -17566,6 +18036,9 @@ mod tests {
             pipeline: None,
             complete: true,
             staging_path,
+            staging_write_offset: 0,
+            staging_file_len: payload.len() as u64,
+            staging_shared: false,
             staging_created: true,
             staging_file: None,
             staging_cursor: None,
@@ -17873,6 +18346,9 @@ mod tests {
             pipeline: None,
             complete: true,
             staging_path,
+            staging_write_offset: 0,
+            staging_file_len: object.len() as u64,
+            staging_shared: false,
             staging_created: true,
             staging_file: None,
             staging_cursor: None,
@@ -18133,6 +18609,9 @@ mod tests {
             pipeline: None,
             complete: true,
             staging_path,
+            staging_write_offset: 0,
+            staging_file_len: object.len() as u64,
+            staging_shared: false,
             staging_created: true,
             staging_file: None,
             staging_cursor: None,
