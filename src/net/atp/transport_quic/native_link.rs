@@ -1249,6 +1249,14 @@ fn source_stream_packet_uses_paced_recovery(
     frames: &[QuicFrame],
     source_stream: Option<StreamId>,
 ) -> bool {
+    // The reliable source STREAM is DELIBERATELY pacer-governed with in_flight=false, NOT
+    // NewReno-cwnd-clocked. MATRIX-202 measured why: cwnd/ACK-clocking it beats the pacer on a
+    // perfectly-clean link (500M 14s→8.9s) but CATASTROPHICALLY regresses mildly-lossy links
+    // (50M/good @0.1% loss/25ms: 4s→~52s, ~12×) because NewReno halves cwnd on every drop and
+    // recovers a full RTT at a time, while fixed-rate pacing + ack-gap retransmit shrugs off
+    // mild loss. The near-clean source-stream selection still admits 0.1% loss, so the pacer is
+    // the correct admission control. (Do not re-clock this on cwnd without also solving the
+    // mild-loss cwnd-collapse — that is the QUIC congestion owner's call, br-asupersync-uw1cc2.)
     let Some(source_stream) = source_stream else {
         return false;
     };
@@ -7346,8 +7354,7 @@ async fn run_receiver_session(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
-    let config = super::effective_quic_receiver_config(config)?;
-    let config = &config;
+    let mut config = super::effective_quic_receiver_config(config)?;
     config.validate()?;
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
@@ -7364,11 +7371,11 @@ async fn run_receiver_session(
         });
     }
     let hello: QuicHello = super::parse_json(&hello_frame)?;
-    let reason = super::reject_hello_reason(&hello, config, symbol_auth_enabled);
+    let reason = super::reject_hello_reason(&hello, &config, symbol_auth_enabled);
     let accepted = reason.is_none();
     let accepted_source_stream = accepted
         && hello.source_stream
-        && super::quic_native_source_stream_enabled(hello.total_bytes, config, &link.conn);
+        && super::quic_native_source_stream_enabled(hello.total_bytes, &config, &link.conn);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
@@ -7382,6 +7389,17 @@ async fn run_receiver_session(
     if let Some(reason) = reason {
         return Err(QuicTransportError::HandshakeRejected(reason));
     }
+    // Adopt the sender's bounded-accepted (validated in `reject_hello_reason`: aligned,
+    // >= floor, <= 32 MiB cap) scaled block geometry so the receiver's decoders match the
+    // sender's encode geometry for large entries. The mod.rs `receive_established_native_connection`
+    // path already does this (ASUP-E802, 2ff8a0a5d) but the CLI `run_receiver_session` path did
+    // not — without it `decoders_from_manifest` rejects any source object > max_block_size*256
+    // (~128 MiB at the 512 KiB default), so encrypted transfers >= ~128 MiB fail closed
+    // (br-asupersync-j73ili, MATRIX-201/202).
+    if let Ok(hello_block) = usize::try_from(hello.max_block_size) {
+        config.max_block_size = hello_block;
+    }
+    let config = &config;
     let source_stream = if accepted_source_stream {
         super::source_stream_from_hello(&hello)?
     } else {

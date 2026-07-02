@@ -330,12 +330,20 @@ const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
 /// bytes are reliable and authenticated by QUIC/TLS, while lossy DATAGRAM
 /// fountains keep the lower probe cap and AIMD feedback loop.
 ///
-/// Reserved for the reliable-source-stream pacing wiring; not yet referenced.
-/// The previous `cfg_attr(not(feature = "tls"), allow(dead_code))` only
-/// suppressed the lint in the default (no-`tls`) build — enabling `tls`
-/// (e.g. via `tls-webpki-roots` for an HTTPS-only consumer that never touches
-/// QUIC) re-exposed it as `deny(dead_code)`. Allow it unconditionally until the
-/// pacing site lands; the attribute becomes a harmless no-op once it is used.
+/// The `cfg_attr(not(feature = "tls"), allow(dead_code))` history: the only non-test
+/// use site (`promote_source_stream_pacing`) is compiled out in builds omitting the
+/// QUIC pacing path, so `deny(dead_code)` re-exposed it under `tls`. Allow unconditionally.
+///
+/// MATRIX-202 (cwnd-clock REFUTED): raising this cap to lift the ~36.5 MB/s clean-stream
+/// throughput requires cwnd/ACK-clocking the source stream (otherwise a higher fixed rate
+/// storms with no cwnd ceiling). But cwnd-clocking it — even though it lifted clean 500M
+/// (14s→8.9s, ~56 MB/s) — CATASTROPHICALLY regressed mildly-lossy links (50M/good @0.1%
+/// loss: 4s→~52s, ~12×) because NewReno collapses cwnd on every drop, whereas the fixed-rate
+/// pacer + ack-gap retransmit shrugs off mild loss. And even cwnd-clocked, clean stayed below
+/// rsync (56 vs ~100 MB/s: per-packet AEAD + no TSO/GSO — a structural QUIC-vs-TCP gap). So
+/// the deliberate pacer-not-cwnd design (test `native_source_stream_bulk_admission_is_pacer_not_newreno_cwnd`)
+/// stands; left at the AIMD cap. Beating rsync on clean-fast encrypted needs GSO+jumbo, not a
+/// bigger rate — owned by br-asupersync-uw1cc2 / the GSO work (E-6.3).
 #[allow(dead_code)]
 pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS: u64 = QUIC_AIMD_MAX_RATE_BPS;
 const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
@@ -3723,6 +3731,33 @@ fn decoders_from_manifest(
                 data: Vec::new(),
                 pending_decodes: Vec::new(),
             })
+        })
+        .collect()
+}
+
+/// Build bare entry decoders for the reliable source-stream path.
+///
+/// The reliable QUIC source stream delivers whole objects as ordered bytes and
+/// never RaptorQ-decodes — `mark_quic_decoder_complete_from_stream` drops the
+/// pipeline (`pipeline = None`) and fills `data` directly. Constructing the
+/// RaptorQ pipeline here would run `set_object_params`, whose block-partition
+/// check caps an object at `max_block_size * 256` (SBN u8) and fail-closed
+/// rejects any source-stream object > ~128 MiB even though it is never decoded
+/// (ASUP-E802 / br-asupersync-j73ili, MATRIX-201: 500M `object size ... exceeds
+/// limit ...`). Skip the pipeline entirely on this path; the sha256 + Merkle
+/// verification in `verify_and_commit` still fail-closes on any corruption.
+fn source_stream_decoders_from_manifest(manifest: &TransferManifest) -> Vec<QuicEntryDecoder> {
+    manifest
+        .entries
+        .iter()
+        .map(|entry| QuicEntryDecoder {
+            index: entry.index,
+            object_id: entry_object_id(&manifest.transfer_id, entry.index),
+            size: entry.size,
+            pipeline: None,
+            complete: entry.size == 0,
+            data: Vec::new(),
+            pending_decodes: Vec::new(),
         })
         .collect()
 }
@@ -8104,7 +8139,15 @@ async fn receive_established_native_connection(
     };
     let manifest = receive_native_manifest(cx, &mut connection, &mut control)?;
     validate_quic_manifest(&manifest, &config)?;
-    let mut decoders = decoders_from_manifest(&manifest, &config)?;
+    // The reliable source stream never RaptorQ-decodes, so build bare decoders that
+    // skip the RaptorQ object-metadata block-partition validation (which caps objects
+    // at max_block_size*256 and would fail-closed reject any source-stream object
+    // >~128 MiB). The datagram/fountain path still gets full decoders. (j73ili)
+    let mut decoders = if source_stream.is_some() {
+        source_stream_decoders_from_manifest(&manifest)
+    } else {
+        decoders_from_manifest(&manifest, &config)?
+    };
     let aggregator = primary_quic_receive_aggregator(peer.to_string());
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
