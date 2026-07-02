@@ -4670,6 +4670,7 @@ async fn create_receive_staging_dir(
     )))
 }
 
+#[allow(dead_code)]
 async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Result<(), RqError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         RqError::Source(format!(
