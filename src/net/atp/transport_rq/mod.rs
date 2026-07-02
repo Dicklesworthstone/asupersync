@@ -9519,6 +9519,13 @@ async fn create_receive_staging_dir(
     )))
 }
 
+// Reference full-check variant of the receiver symlink-prefix guard. All hot call
+// sites now use `reject_destination_symlink_prefix_cached` (same fail-closed
+// guarantee, per-prefix `lstat` caching), leaving this uncached form with no live
+// caller. Kept as the canonical, cache-free reference implementation of the guard;
+// per-fn `#[allow(dead_code)]` (asupersync convention) so `#![deny(dead_code)]`
+// stays green without removing the primitive.
+#[allow(dead_code)]
 async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Result<(), RqError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         RqError::Source(format!(
