@@ -442,6 +442,7 @@ case "$METHOD" in
     atp-rq-lab)             run_atp lab rq ;;
     atp-rq-auth)            run_atp key rq ;;
     atp-quic-tls13)         run_atp key quic ;;
+    atp-quic-tls13-xauth)   run_atp lab quic ;;
     rsyncd)                 run_rsync daemon ;;
     rsync-ssh-aes128gcm)    run_rsync ssh ;;
     *) log "unknown method '$METHOD' — recording as error"; STATUS_CODE=2 ;;

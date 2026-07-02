@@ -217,6 +217,15 @@ methods_for_tier() {
     encrypted)
       printf '%s\n' "atp-quic-tls13" "rsync-ssh-aes128gcm"
       ;;
+    encrypted-xauth)
+      # Crypto-SYMMETRIC encrypted tier: atp over TLS-1.3 transport authentication
+      # (connection-level encryption+auth, the same security class as rsync's ssh) with
+      # NO extra per-symbol HMAC — so it is reliable-source-stream eligible and skips the
+      # RaptorQ decode wall. This is the apples-to-apples encrypted comparison; the stricter
+      # `encrypted` tier (TLS-1.3 + per-symbol HMAC, extra integrity for untrusted relays)
+      # stays as its own row.
+      printf '%s\n' "atp-quic-tls13-xauth" "rsync-ssh-aes128gcm"
+      ;;
     *)
       die "unknown crypto tier: ${tier}"
       ;;
