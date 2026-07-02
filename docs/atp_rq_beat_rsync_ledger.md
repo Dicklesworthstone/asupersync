@@ -3675,3 +3675,18 @@ L3 = commit-write rename-not-copy (bead br-asupersync-sze9ym, codex-drafted + Sa
 ★**NEXT throughput lever (follow-up, needs a receiver flamegraph): PARALLELIZE the receiver's per-byte passes across `--workers 4`** (pipeline recv+decrypt → SHA-256 → disk-write on separate cores) and/or inc-hash-during-receive (overlap the serial SHA pass, the same shape as the transport_rq clean-large win `faa93d808`/`463a4cfae`) and/or zero-copy stream-to-disk (avoid the 650 MB `Vec`; also fixes RSS + unlocks 5G). The single-core serial-pass structure is the real gap vs rsync's kernel-offloaded TCP receive. Owned direction routed to `uw1cc2`.
 
 ★**Honest scoreboard:** 500M/perfect encrypted-xauth now **completes correctly** (13.6s sha-ok, was a hard FAIL) but **still loses on speed** vs rsync-ssh 5.15s. Banked = the CORRECTNESS win (j73ili) only, not a speed win. atp's encrypted edge remains lossy/high-BDP links (QUIC+FEC), not clean-fast links (TCP's kernel-offloaded receive structurally wins until the receiver is parallelized). No gaming, rsync untouched, TLS-1.3 intact.
+
+## MATRIX-203 (2026-07-02) — RECEIVER PROFILED (the "flamegraph" MATRIX-202 called for): the encrypted-large throughput bottleneck is the QUIC packet-processing PUMP, not the SHA. Cheapest levers ruled out; the win is a deep quic_native hot-loop optimization (uw1cc2 scope).
+
+★**Measurement (gate8, env `ATP_QUIC_RECV_PROFILE` timers in `receive_native_source_stream_entries_pumped` native_link.rs; 500M/perfect encrypted-xauth, netns 1gbit, receiver 92% CPU, wall 13.8s):**
+- `read_pump_decrypt_micros` = **9.66 s (~70% of recv wall)** — recv + AEAD unprotect + QUIC header parse + ordered stream reassembly (`read_native_source_stream_chunk` → `pump_inbound_for`, in `quic_native/connection.rs`). **DOMINANT.**
+- `staging_write_micros` = 0.56 s (4%) — already streams to staging, not a 650 MB Vec on this path.
+- `per_chunk_flush_ack_micros` = **0.0004 s (negligible)** — the per-chunk ACK flush is NOT a cost (ruled out).
+- Remaining ~3.6 s = handshake + SHA-256 verify + commit (secondary).
+
+★**Conclusion — every cheap lever is ruled out; the win is a deep QUIC-receive-hot-loop optimization:**
+- NOT the SHA → **inc-hash/overlap won't help** (it's ~26%, and single-core CPU-bound means overlap on one core saves nothing; confirmed the physics).
+- NOT the ACK flush (negligible), NOT congestion (**cwnd-clock REFUTED**, MATRIX-202), NOT per-packet size (**jumbo ruled out** — ~8 KB packets already, GSO/recvmmsg already exist).
+- The pump runs at ~56 MB/s for ~8 KB packets = ~150 µs/packet, but AES-NI decrypt is <1 µs/packet → the cost is per-packet **overhead** (allocations, reassembly copies, packet-number/ACK bookkeeping) in the receive hot loop, NOT crypto. To beat rsync (~100 MB/s) needs ~2× the pump: optimize the hot loop (cut per-packet allocs, batch-parse a `recv_batch` of packets, faster ordered reassembly) and/or parallelize AEAD-decrypt across cores (packets decrypt-independently; reassembly stays ordered).
+
+★**Verdict + handoff:** this bottleneck lives in **`quic_native/connection.rs` — GreenMarsh's core QUIC packet-processing pump, outside SapphireHill's `transport_quic` reservation** — and beating a kernel-offloaded TCP receive with a userspace QUIC pump is a substantial, uncertain optimization. Scoped as a dedicated **`uw1cc2` receiver-throughput slice** with the precise split above (bead comment filed). The env-gated `ATP_QUIC_RECV_PROFILE` hook is committed in `native_link.rs` for re-measurement. Correctness (j73ili) is banked; this speed follow-up is handed to the QUIC-core owner rather than blind-edited. No gaming, rsync untouched, TLS-1.3 intact.

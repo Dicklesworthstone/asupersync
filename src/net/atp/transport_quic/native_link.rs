@@ -7166,6 +7166,12 @@ async fn receive_native_source_stream_entries_pumped(
     config: &QuicConfig,
 ) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
     let mut received = 0u64;
+    // Profiling-only (env ATP_QUIC_RECV_PROFILE): attribute the source-stream receiver's
+    // per-byte CPU between pump+AEAD-decrypt (read chunk), staging write, and per-chunk
+    // ACK flush — to target the cross-core parallelization for encrypted-large throughput.
+    // No behavior change when unset.
+    let recv_profile = std::env::var_os("ATP_QUIC_RECV_PROFILE").is_some();
+    let (mut read_us, mut write_us, mut flush_us) = (0u64, 0u64, 0u64);
     for (entry_index, entry) in manifest.entries.iter().enumerate() {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let staged_entry = staged.get_mut(entry_index).ok_or_else(|| {
@@ -7185,18 +7191,26 @@ async fn receive_native_source_stream_entries_pumped(
             )
             .unwrap_or(super::QUIC_SOURCE_STREAM_READ_CHUNK)
             .max(1);
+            let read_at = recv_profile.then(Instant::now);
             let chunk =
                 read_native_source_stream_chunk(cx, link, stream, chunk_len, config.idle_timeout)
                     .await?;
+            if let Some(t) = read_at {
+                read_us = read_us.saturating_add(t.elapsed().as_micros() as u64);
+            }
             if chunk.is_empty() {
                 return Err(QuicTransportError::Integrity(format!(
                     "source stream ended before entry {} completed ({} of {} bytes)",
                     entry.index, entry_offset, entry.size
                 )));
             }
+            let write_at = recv_profile.then(Instant::now);
             staged_entry
                 .write_range(entry, entry_offset, chunk.as_ref())
                 .await?;
+            if let Some(t) = write_at {
+                write_us = write_us.saturating_add(t.elapsed().as_micros() as u64);
+            }
             let n = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
             entry_offset = entry_offset.checked_add(n).ok_or_else(|| {
                 QuicTransportError::Integrity(format!(
@@ -7205,8 +7219,17 @@ async fn receive_native_source_stream_entries_pumped(
                 ))
             })?;
             received = received.saturating_add(n);
+            let flush_at = recv_profile.then(Instant::now);
             link.flush(cx).await?;
+            if let Some(t) = flush_at {
+                flush_us = flush_us.saturating_add(t.elapsed().as_micros() as u64);
+            }
         }
+    }
+    if recv_profile {
+        eprintln!(
+            "[atp-quic-recv-profile] read_pump_decrypt_micros={read_us} staging_write_micros={write_us} per_chunk_flush_ack_micros={flush_us} total_bytes={received}"
+        );
     }
 
     let extra = link.conn.read_stream_bytes(cx, stream, 1)?;
