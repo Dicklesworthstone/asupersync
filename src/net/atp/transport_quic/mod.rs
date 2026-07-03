@@ -198,10 +198,14 @@ pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// The stream path is the default encrypted bulk path: QUIC STREAM reliability
 /// supplies native ARQ/congestion control while TLS 1.3 supplies encryption, so
 /// clean through ordinary lossy matrix cells skip the RaptorQ decode wall.
-/// Keep this bounded so native stream flow-credit and receiver staging cannot
-/// become a surprise multi-GiB memory envelope; larger transfers continue using
-/// the FEC DATAGRAM fountain.
-pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES: u64 = 512 * 1024 * 1024;
+///
+/// The historical 512 MiB bound existed because the receiver materialized each
+/// entry in RAM; the receive path now streams chunks straight to staging (with
+/// an incremental hash), flow credit is a numeric limit rather than a buffer,
+/// and reassembly backlog is bounded per pump turn — so the bound only needs to
+/// admit the largest single transfer the CLI/bench surface exercises (5 GiB)
+/// with headroom. Transfers above it continue using the FEC DATAGRAM fountain.
+pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const QUIC_SOURCE_STREAM_FRAME_MAX_BYTES: usize = MAX_FRAME_SIZE as usize;
 const QUIC_SOURCE_STREAM_WIRE_HEADER_MAX_BYTES: usize = 1 + 2 + 4 + 1;
 const QUIC_SOURCE_STREAM_DATA_HEADER_BYTES: usize = 4 + 8;

@@ -72,9 +72,7 @@ use crate::net::atp::datagram::congestion::{
 };
 use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
-use crate::net::atp::quic::packet_protection::{
-    AtpPacketProtection, AtpPacketProtectionConfig, PacketUnprotectionRequest,
-};
+use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::atp::transport_common::{
     EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
 };
@@ -84,8 +82,7 @@ use crate::net::quic_native::handshake_driver::{
     is_stale_handshake_packet_error,
 };
 use crate::net::quic_native::tls::{
-    PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket, ProtectionProof,
-    RustlsQuicCryptoProvider, TranscriptHash,
+    PacketProtectionRequest, PacketProtectionSpace, RustlsQuicCryptoProvider,
 };
 use crate::net::quic_native::{
     AckRange as NativeAckRange, NativeQuicConnection, NativeQuicConnectionConfig,
@@ -298,6 +295,28 @@ const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 48;
 /// packets amplified loss tails on shaped netns links, while this envelope keeps
 /// the repair tail small and avoids IP fragmentation.
 const QUIC_SOURCE_STREAM_FLUSH_BYTES: u64 = 512 * 1024;
+/// Upper bound on un-flushed send-side stream bytes; the disk reader waits on
+/// paced flushes past this, so sender RSS stays a few bursts deep instead of
+/// scaling with the transfer size.
+const QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Upper bound on sent-but-unacknowledged source-stream bytes. This is the
+/// runaway guard, not a congestion window: it sits far above any bench-link
+/// BDP (1 gbit × 25 ms ≈ 3 MB) so it never limits clean throughput, but it
+/// stops a mis-estimated pacing rate from streaming hundreds of MB into a
+/// loss gap (which drove the receiver's reassembly backlog quadratic and
+/// timed out the 500M A/B). New data admission waits on the ACK clock past
+/// this; retransmits are unaffected.
+const QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Inbound drain budget (batches) for the source-stream read path. The read
+/// loop drains the reassembly map between pumps, so a small budget bounds
+/// receiver-side backlog RSS; the FEC DATAGRAM pump keeps the larger
+/// `INBOUND_PUMP_MAX_DRAIN_BATCHES` drain-until-empty behavior.
+///
+/// This is also the receiver's ACK cadence: the read loop flushes ACKs once
+/// per pump turn, so one turn must stay small (one batch ≈ 4 MB) — at 4
+/// batches the ~16 MB ACK batches lockstepped with the sender's un-ACKed
+/// ceiling into a hard ~64 MB/s throughput cap.
+const QUIC_SOURCE_STREAM_READ_DRAIN_BATCHES: usize = 1;
 const QUIC_SOURCE_STREAM_PACKET_BYTES: usize = 8 * 1024;
 const QUIC_SOURCE_STREAM_REPAIR_LOSS_MULTIPLIER: f64 = 4.0;
 
@@ -642,6 +661,9 @@ fn next_feedback_round_or_no_convergence(
 struct SentControlStreamFrame {
     stream: StreamId,
     offset: u64,
+    /// Stream payload bytes carried by this frame, so ACK processing can
+    /// clock the delivery-rate estimator for adaptive source-stream pacing.
+    len: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1082,6 +1104,10 @@ fn encode_one_rtt_header(packet_number: u64) -> [u8; ONE_RTT_HEADER_LEN] {
 /// header_bytes, ciphertext, tag)`. Returns `None` for any packet that is not a
 /// well-formed short-header 1-RTT packet (e.g. a late handshake long-header
 /// retransmit), which the caller silently drops, matching QUIC semantics.
+///
+/// The live receive path uses [`parse_one_rtt_header`] + in-place unprotection
+/// instead; this borrowing decomposition remains for header-shape unit tests.
+#[cfg(test)]
 fn decode_one_rtt_packet(
     packet: &[u8],
 ) -> Option<(bool, u64, &[u8], &[u8], [u8; ONE_RTT_TAG_LEN])> {
@@ -1109,15 +1135,25 @@ fn decode_one_rtt_packet(
     Some((key_phase, packet_number, header, ciphertext, tag))
 }
 
-struct PendingOneRttPacket {
+/// A received 1-RTT packet after authentication and a single frame decode.
+///
+/// `frames` hold zero-copy `Bytes` views into the (decrypted-in-place)
+/// datagram buffer, so stashing a decoded packet under receive backpressure
+/// keeps the authenticated result instead of re-running AEAD on the raw
+/// datagram — which the anti-replay window would (correctly) reject.
+struct DecodedOneRttPacket {
     packet_number: u64,
-    header: [u8; ONE_RTT_HEADER_LEN],
-    protected: ProtectedPacket,
+    frames: Vec<QuicFrame>,
 }
 
-enum DecodedInboundPacket {
-    OneRtt(PendingOneRttPacket),
-    NonOneRtt,
+/// Outcome of decoding + authenticating one received datagram.
+enum InboundPacketDecode {
+    /// Authenticated 1-RTT packet, frames decoded once.
+    Decoded(DecodedOneRttPacket),
+    /// Not a well-formed 1-RTT short-header packet (silently dropped).
+    NotOneRtt,
+    /// Authentication/replay failure (silently dropped, per QUIC).
+    Dropped,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1127,32 +1163,20 @@ struct IngestPacketsReport {
     receive_backpressure: bool,
 }
 
-fn decode_protected_one_rtt_packet(
-    provider_kind: &'static str,
-    packet: &ReceivedPacket,
-) -> Option<PendingOneRttPacket> {
-    let (key_phase, packet_number, header, ciphertext, tag) = decode_one_rtt_packet(&packet.data)?;
-    let mut header_bytes = [0u8; ONE_RTT_HEADER_LEN];
-    header_bytes.copy_from_slice(header);
-    Some(PendingOneRttPacket {
-        packet_number,
-        header: header_bytes,
-        protected: ProtectedPacket {
-            space: PacketProtectionSpace::OneRtt,
-            key_phase,
-            packet_number,
-            ciphertext: ciphertext.to_vec(),
-            tag,
-            proof: ProtectionProof {
-                provider_kind,
-                space: PacketProtectionSpace::OneRtt,
-                key_phase,
-                generation: 0,
-                transcript_hash: TranscriptHash::from_bytes([0u8; 32]),
-                failure_code: None,
-            },
-        },
-    })
+/// Parse the simplified 1-RTT short header, returning `(key_phase,
+/// packet_number)` without borrowing slices out of the packet.
+fn parse_one_rtt_header(packet: &[u8]) -> Option<(bool, u64)> {
+    if packet.len() < ONE_RTT_HEADER_LEN + ONE_RTT_TAG_LEN {
+        return None;
+    }
+    let flags = packet[0];
+    if flags & 0x80 != 0 || flags & ONE_RTT_FIXED_BIT == 0 {
+        return None;
+    }
+    let key_phase = flags & ONE_RTT_KEY_PHASE_BIT != 0;
+    let mut pn_bytes = [0u8; 8];
+    pn_bytes.copy_from_slice(&packet[1..ONE_RTT_HEADER_LEN]);
+    Some((key_phase, u64::from_be_bytes(pn_bytes)))
 }
 
 fn one_rtt_max_payload_for_udp_packet(max_udp_packet: usize) -> usize {
@@ -1484,6 +1508,94 @@ fn trace_quic_initial_spray_cut_for_feedback(
     );
 }
 
+/// Delivery-clocked pacing-rate follower for the reliable source stream.
+///
+/// BBR-shaped, deliberately tiny: a windowed **max** filter over recent
+/// per-ACK-window delivery-rate samples estimates the bottleneck bandwidth,
+/// and the pacing rate follows `1.25 × max_filter` — probing upward on clean
+/// windows and holding ~link rate under sustained *random* loss (where
+/// delivered ≈ 0.9 × sent), while genuine congestion (a sustained delivery
+/// collapse) ages the old maximum out of the filter within
+/// `STREAM_RATE_FILTER_WINDOWS` windows and pulls the rate down with it.
+///
+/// This replaces the fixed `QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS`
+/// setpoint (which capped clean encrypted throughput at ~37 MB/s) and avoids
+/// both NewReno's mild-loss cwnd collapse (MATRIX-202) and min-ratchet
+/// delivery followers, whose bottleneck estimate can only fall when no
+/// loss-free window ever arrives (10% regimes).
+struct SourceStreamRatePacer {
+    rate_bytes_per_s: u64,
+    /// Regime-derived starting rate; also the recovery floor, so a
+    /// post-overrun window can never crawl below the path's conservative
+    /// estimate (measured delivery during PTO recovery reflects only the
+    /// small retransmit batches, not the path).
+    initial_rate_bytes_per_s: u64,
+    delivery_samples: [u64; STREAM_RATE_FILTER_WINDOWS],
+    next_sample: usize,
+}
+
+/// Recent-delivery max-filter depth.
+const STREAM_RATE_FILTER_WINDOWS: usize = 8;
+/// Pacing floor; loss recovery must always trickle.
+const STREAM_RATE_MIN_BYTES_PER_S: u64 = 256 * 1024;
+/// Pacing ceiling (~4 gbit/s payload) — far above the bench links so the
+/// delivery filter, not this constant, is what binds.
+const STREAM_RATE_MAX_BYTES_PER_S: u64 = 512 * 1024 * 1024;
+/// Probe/headroom gain over the max-filtered delivery estimate (BBR form:
+/// `pacing = gain × BtlBw`). Growth toward the link is geometric with ratio
+/// `gain × pacer_efficiency`, so the flush pipeline must stay efficient
+/// (see the zero-timeout opportunistic pump in the flush loop) — an
+/// unbounded multiplicative probe instead overruns the shaper by 4× and
+/// collapses into retransmit churn (measured: 500M 11s → 53s).
+const STREAM_RATE_GAIN_X1000: u64 = 1250;
+
+impl SourceStreamRatePacer {
+    fn new(initial_rate_bytes_per_s: u64) -> Self {
+        let rate = initial_rate_bytes_per_s
+            .clamp(STREAM_RATE_MIN_BYTES_PER_S, STREAM_RATE_MAX_BYTES_PER_S);
+        Self {
+            // Seed the filter with the initial rate so early jittery windows
+            // cannot pull the estimate below the regime-derived starting
+            // point; real samples overwrite these within 8 windows.
+            rate_bytes_per_s: rate,
+            initial_rate_bytes_per_s: rate,
+            delivery_samples: [rate; STREAM_RATE_FILTER_WINDOWS],
+            next_sample: 0,
+        }
+    }
+
+    /// Fold one ACK window into the filter and return the new pacing rate:
+    /// `clamp(max(gain × max_filter(delivery), initial))`.
+    ///
+    /// `lost_bytes` is accepted for signature stability but deliberately
+    /// unused: with the relative pacer schedule the probe's effective ratio
+    /// (gain × pacer efficiency ≈ 1) is self-limiting, and loss-reactive
+    /// variants (settle gains, filter resets) were all measured to interact
+    /// badly with the current retransmit framing on shaped links.
+    fn on_ack_window(&mut self, acked_bytes: u64, lost_bytes: u64, elapsed_micros: u64) -> u64 {
+        let delivery = acked_bytes
+            .saturating_mul(1_000_000)
+            .checked_div(elapsed_micros.max(1))
+            .unwrap_or(0);
+        self.delivery_samples[self.next_sample] = delivery;
+        self.next_sample = (self.next_sample + 1) % STREAM_RATE_FILTER_WINDOWS;
+        let bottleneck = self
+            .delivery_samples
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(delivery);
+        let _ = lost_bytes;
+        self.rate_bytes_per_s = bottleneck
+            .saturating_mul(STREAM_RATE_GAIN_X1000)
+            .checked_div(1000)
+            .unwrap_or(bottleneck)
+            .max(self.initial_rate_bytes_per_s)
+            .clamp(STREAM_RATE_MIN_BYTES_PER_S, STREAM_RATE_MAX_BYTES_PER_S);
+        self.rate_bytes_per_s
+    }
+}
+
 /// Native ATP-QUIC data-plane send authority.
 ///
 /// QUIC recovery remains useful as ACK/loss/RTT telemetry, but its NewReno cwnd
@@ -1566,6 +1678,23 @@ impl NativeDataPlanePacer {
         self.byte_pacer_next_send_at = None;
     }
 
+    /// Update only the byte-pacer rate (bytes/s), preserving the burst shape.
+    ///
+    /// Used by the delivery-clocked source-stream controller, which re-rates
+    /// the pacer every ACK window. Deliberately does NOT reconfigure the
+    /// token-bucket `controller`: that bucket gates the DATAGRAM
+    /// (`before_send`) path, and resetting it every ACK window would
+    /// interfere with FEC repair sends sharing this pacer; the source-stream
+    /// path (`before_send_bytes`) reads only `pacing_rate_bps`.
+    fn set_pacing_rate_bytes_per_s(&mut self, rate_bytes_per_s: u64) {
+        let rate = rate_bytes_per_s.max(1);
+        if rate == self.pacing_rate_bps {
+            return;
+        }
+        self.pacing_rate_bps = rate;
+        self.byte_pacer_next_send_at = None;
+    }
+
     async fn before_send(
         &mut self,
         cx: &Cx,
@@ -1636,6 +1765,15 @@ impl NativeDataPlanePacer {
                 self.byte_pacer_burst_bytes.max(pacer_bytes),
                 self.pacing_rate_bps,
             );
+            // Relative schedule (`now + interval`), deliberately: the
+            // pipeline's between-burst work time deflates the effective rate
+            // ~20% below the setpoint, and that slack is what keeps the
+            // delivery-clocked controller's probe stable against shaped
+            // links. An absolute (deadline-credit) schedule was measured to
+            // push the ramp over the netem queue cliff, and the resulting
+            // retransmit churn cost far more than the slack (500M 9s → 42s,
+            // 50M/good 3.5s → 30s). Revisit only together with a cheaper
+            // loss-recovery path (coalesced retransmit framing).
             self.byte_pacer_next_send_at = Some(now.checked_add(interval).unwrap_or(now));
         }
         Ok(())
@@ -1790,6 +1928,28 @@ pub struct QuicLink {
     symbol_datagram_frame_len: usize,
     data_plane_pacer: NativeDataPlanePacer,
     pending_received_packets: VecDeque<ReceivedPacket>,
+    /// Authenticated + decoded packets parked under receive backpressure.
+    /// Drained before any raw pending packets so packet order is preserved
+    /// and AEAD/replay work is never repeated.
+    pending_decoded_packets: VecDeque<DecodedOneRttPacket>,
+    /// Delivery-clocked adaptive pacing for the reliable source stream
+    /// (sender side). `Some` only while a paced source stream is active. The
+    /// shared controller probes the pacing rate up while ACKed delivery keeps
+    /// pace and converges toward measured delivery under loss, replacing the
+    /// fixed `QUIC_RELIABLE_SOURCE_STREAM_MAX_PACING_BPS` setpoint that capped
+    /// clean encrypted throughput (~37 MB/s) and the collapsed lossy spray
+    /// rates, without NewReno's mild-loss cwnd collapse (uw1cc2).
+    stream_rate_controller: Option<SourceStreamRatePacer>,
+    stream_rate_epoch: Instant,
+    stream_rate_window_started_micros: u64,
+    stream_rate_sent_bytes: u64,
+    stream_rate_acked_bytes: u64,
+    stream_rate_lost_bytes: u64,
+    /// Source-stream payload bytes sent but not yet acknowledged (bytes in
+    /// packets currently tracked by `in_flight_stream_frames`). Gates new
+    /// data admission so a mis-estimated pacing rate can never run the
+    /// sender hundreds of MB ahead of the receiver through a loss gap.
+    stream_unacked_bytes: u64,
     sender_handoff: QuicSenderHandoffStats,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
@@ -1801,6 +1961,11 @@ pub struct QuicLink {
     datagram_bytes_in_flight: u64,
     pending_datagram_rate_samples: VecDeque<DatagramRateSample>,
     received_source_stream_frames: VecDeque<ReceivedSourceStreamFrame>,
+    /// Maximum observed `offset + len` on the paced source stream (receiver
+    /// completion validation).
+    source_stream_observed_end: u64,
+    /// Observed FIN end offset on the paced source stream, if any.
+    source_stream_observed_fin_end: Option<u64>,
     paced_source_stream: Option<StreamId>,
     udp_packets_received: u64,
     one_rtt_packets_ingested: u64,
@@ -1918,7 +2083,7 @@ impl NativeReceiveTraceCounters {
             datagrams_received: link.conn.datagrams_received(),
             datagrams_dropped_on_receive: link.conn.datagrams_dropped_on_receive(),
             pending_datagrams: link.conn.pending_datagram_count(),
-            pending_received_packets: link.pending_received_packets.len(),
+            pending_received_packets: link.pending_inbound_packets(),
             inbound_datagram_capacity: link.conn.inbound_datagram_capacity(),
             inbound_datagram_available: link.conn.inbound_datagram_remaining_capacity(),
             inbound_pump_batch_limit: INBOUND_PUMP_BATCH,
@@ -2179,9 +2344,14 @@ impl QuicLink {
         self.pending_received_packets.extend(packets);
     }
 
-    fn push_front_received_packets(&mut self, packets: &[ReceivedPacket]) {
-        for packet in packets.iter().rev() {
-            self.pending_received_packets.push_front(packet.clone());
+    /// Return not-yet-ingested raw packets to the front of the pending queue,
+    /// preserving arrival order.
+    fn requeue_received_packets_front(
+        &mut self,
+        packets: impl DoubleEndedIterator<Item = ReceivedPacket>,
+    ) {
+        for packet in packets.rev() {
+            self.pending_received_packets.push_front(packet);
         }
     }
 
@@ -2194,6 +2364,12 @@ impl QuicLink {
             }
         }
         packets
+    }
+
+    fn pending_inbound_packets(&self) -> usize {
+        self.pending_received_packets
+            .len()
+            .saturating_add(self.pending_decoded_packets.len())
     }
 
     fn reset_sender_handoff_trace(&mut self) {
@@ -2623,13 +2799,19 @@ impl QuicLink {
                 if let crate::net::atp::protocol::quic_frames::QuicFrame::Stream {
                     stream_id,
                     offset,
+                    data,
                     ..
                 } = frame
                 {
                     let stream_frame = SentControlStreamFrame {
                         stream: StreamId(stream_id.value()),
                         offset: offset.map_or(0, |offset| offset.value()),
+                        len: u64::try_from(data.len()).unwrap_or(u64::MAX),
                     };
+                    if self.paced_source_stream == Some(stream_frame.stream) {
+                        self.stream_rate_sent_bytes =
+                            self.stream_rate_sent_bytes.saturating_add(stream_frame.len);
+                    }
                     flushed_stream_frames.push(stream_frame);
                     packet_stream_frames.push(stream_frame);
                 }
@@ -2761,8 +2943,19 @@ impl QuicLink {
                     plain.time_sent_micros,
                 );
                 if !plain.stream_frames.is_empty() {
-                    self.in_flight_stream_frames
-                        .insert(plain.packet_number, plain.stream_frames.clone());
+                    for frame in &plain.stream_frames {
+                        self.stream_unacked_bytes =
+                            self.stream_unacked_bytes.saturating_add(frame.len);
+                    }
+                    if let Some(previous) = self
+                        .in_flight_stream_frames
+                        .insert(plain.packet_number, plain.stream_frames.clone())
+                    {
+                        for frame in &previous {
+                            self.stream_unacked_bytes =
+                                self.stream_unacked_bytes.saturating_sub(frame.len);
+                        }
+                    }
                 }
             }
             trace_quic_flush_coalescing(
@@ -2813,15 +3006,27 @@ impl QuicLink {
             if stream_id.value() != source_stream.0 || (data.is_empty() && !*fin) {
                 continue;
             }
-            self.received_source_stream_frames
-                .push_back(ReceivedSourceStreamFrame {
-                    offset: offset.map_or(0, |offset| offset.value()),
-                    data: data.clone(),
-                    fin: *fin,
-                });
+            // Fold into completion-validation scalars instead of retaining a
+            // payload clone per frame: accumulating `Bytes` clones here held
+            // the entire transfer in receiver memory (~530 MB on the 500M
+            // cell) until the one end-of-stream validation pass, which only
+            // ever needed the maximum observed end offset and the FIN end.
+            let frame_offset = offset.map_or(0, |offset| offset.value());
+            let frame_end =
+                frame_offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+            self.source_stream_observed_end = self.source_stream_observed_end.max(frame_end);
+            if *fin {
+                self.source_stream_observed_fin_end = Some(frame_end);
+            }
         }
     }
 
+    /// Only the parked RQ-tap path (`drain_native_source_stream_tap_frames`,
+    /// itself `dead_code`) consumes payload-carrying frames; the live receive
+    /// path folds completion evidence into scalars instead of retaining
+    /// payloads. Reviving the tap path requires re-adding payload capture in
+    /// `record_received_source_stream_frames`.
+    #[allow(dead_code)]
     fn drain_received_source_stream_frames(&mut self) -> Vec<ReceivedSourceStreamFrame> {
         self.received_source_stream_frames.drain(..).collect()
     }
@@ -2837,10 +3042,109 @@ impl QuicLink {
         }
         self.latest_stream_ack_ranges = acked_ranges.to_vec();
         let before = self.in_flight_stream_frames.len();
+        let mut acked_bytes = 0u64;
+        let mut acked_frames: Vec<SentControlStreamFrame> = Vec::new();
         self.in_flight_stream_frames
-            .retain(|packet_number, _frames| !packet_in_ack_ranges(*packet_number, acked_ranges));
+            .retain(|packet_number, frames| {
+                if packet_in_ack_ranges(*packet_number, acked_ranges) {
+                    for frame in frames.iter() {
+                        acked_bytes = acked_bytes.saturating_add(frame.len);
+                    }
+                    acked_frames.extend_from_slice(frames);
+                    false
+                } else {
+                    true
+                }
+            });
+        // Release the acknowledged frames' retained retransmission copies so
+        // sender memory tracks the un-ACKed window, not the transfer size.
+        for frame in &acked_frames {
+            let _ = self
+                .conn
+                .release_sent_stream_frame(frame.stream, frame.offset);
+        }
+        quic_rqtrace!(
+            "sender: stream_ack_ranges ranges={} in_flight_packets={} acked_bytes={}",
+            acked_ranges.len(),
+            before,
+            acked_bytes,
+        );
+        if acked_bytes > 0 {
+            self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(acked_bytes);
+            self.stream_rate_acked_bytes = self.stream_rate_acked_bytes.saturating_add(acked_bytes);
+            self.maybe_update_source_stream_rate();
+        }
         let removed = before.saturating_sub(self.in_flight_stream_frames.len());
         Ok((removed, 0))
+    }
+
+    /// Arm delivery-clocked adaptive pacing for an active paced source stream,
+    /// seeded from the current pacing decision's rate.
+    fn begin_source_stream_rate_control(&mut self, initial_pacing_bytes_per_s: u64) {
+        self.stream_rate_controller = Some(SourceStreamRatePacer::new(initial_pacing_bytes_per_s));
+        self.stream_rate_window_started_micros = self.stream_rate_now_micros();
+        self.stream_rate_sent_bytes = 0;
+        self.stream_rate_acked_bytes = 0;
+        self.stream_rate_lost_bytes = 0;
+        self.stream_unacked_bytes = 0;
+    }
+
+    fn end_source_stream_rate_control(&mut self) {
+        self.stream_rate_controller = None;
+    }
+
+    fn stream_rate_now_micros(&self) -> u64 {
+        u64::try_from(self.stream_rate_epoch.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// Record source-stream payload bytes queued for retransmission as a loss
+    /// signal for the adaptive pacer.
+    fn note_source_stream_retransmit_bytes(&mut self, bytes: u64) {
+        if self.stream_rate_controller.is_some() {
+            self.stream_rate_lost_bytes = self.stream_rate_lost_bytes.saturating_add(bytes);
+        }
+    }
+
+    /// Feed the accumulated sent/acked/lost window into the delivery-rate
+    /// follower and apply the resulting pacing rate to the data-plane pacer.
+    ///
+    /// Windows shorter than 25 ms are accumulated further so the delivery-rate
+    /// estimate is not dominated by ACK batching jitter.
+    fn maybe_update_source_stream_rate(&mut self) {
+        const STREAM_RATE_MIN_WINDOW_MICROS: u64 = 25_000;
+        let Some(pacer) = self.stream_rate_controller.as_mut() else {
+            return;
+        };
+        let now_micros =
+            u64::try_from(self.stream_rate_epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let elapsed = now_micros.saturating_sub(self.stream_rate_window_started_micros);
+        if elapsed < STREAM_RATE_MIN_WINDOW_MICROS {
+            return;
+        }
+        if self.stream_rate_acked_bytes == 0 && self.stream_rate_lost_bytes == 0 {
+            return;
+        }
+        let acked = std::mem::take(&mut self.stream_rate_acked_bytes);
+        let lost = std::mem::take(&mut self.stream_rate_lost_bytes);
+        self.stream_rate_sent_bytes = 0;
+        self.stream_rate_window_started_micros = now_micros;
+        // The full window elapsed is the delivery divisor — ACK processing is
+        // batchy (windows can span hundreds of ms), and dividing the batch by
+        // its true span yields the true average delivery rate. Loss-stall
+        // distortion is bounded elsewhere: the un-ACKed byte ceiling stops the
+        // sender from running ahead through a gap, the max filter rides out
+        // transient underestimates, and heavy-loss windows adopt the filtered
+        // delivery target rather than probing.
+        let rate = pacer.on_ack_window(acked, lost, elapsed.max(1));
+        quic_rqtrace!(
+            "sender: stream_rate_update rate_bytes_per_s={} acked={} lost={} window_micros={} unacked={}",
+            rate,
+            acked,
+            lost,
+            elapsed,
+            self.stream_unacked_bytes,
+        );
+        self.data_plane_pacer.set_pacing_rate_bytes_per_s(rate);
     }
 
     fn datagram_payload_bytes_for_frames(&self, datagram_frames: usize) -> u64 {
@@ -3119,6 +3423,9 @@ impl QuicLink {
                 && packet_lost_by_ack_gap(packet_number, acked_ranges)
             {
                 lost_packets = lost_packets.saturating_add(1);
+                for frame in &frames {
+                    self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
+                }
                 lost.extend(frames);
             } else {
                 retained.insert(packet_number, frames);
@@ -3136,6 +3443,9 @@ impl QuicLink {
             .into_values()
             .flatten()
             .collect::<Vec<_>>();
+        for frame in &frames {
+            self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
+        }
         dedup_stream_frames_for_retransmit(frames)
     }
 
@@ -3153,6 +3463,9 @@ impl QuicLink {
         for (packet_number, packet_frames) in std::mem::take(&mut self.in_flight_stream_frames) {
             if drained_packets < max_packets {
                 drained_packets = drained_packets.saturating_add(1);
+                for frame in &packet_frames {
+                    self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
+                }
                 frames.extend(packet_frames);
             } else {
                 retained.insert(packet_number, packet_frames);
@@ -3179,6 +3492,11 @@ impl QuicLink {
         if frames.is_empty() {
             return Ok(0);
         }
+        let mut lost_bytes = 0u64;
+        for frame in frames {
+            lost_bytes = lost_bytes.saturating_add(frame.len);
+        }
+        self.note_source_stream_retransmit_bytes(lost_bytes);
         for frame in frames {
             self.conn
                 .requeue_sent_stream_frame(cx, frame.stream, frame.offset)?;
@@ -3203,80 +3521,109 @@ impl QuicLink {
         Ok(retransmitted)
     }
 
-    fn process_unprotected_one_rtt_packet(
+    fn process_decoded_one_rtt_packet(
         &mut self,
         cx: &Cx,
-        packet_number: u64,
-        plaintext: &[u8],
+        packet: &DecodedOneRttPacket,
     ) -> Result<bool, QuicTransportError> {
-        let decoded_frames = NativeQuicConnection::decode_frames(plaintext)?;
-        let required_datagram_slots = datagram_frame_count(&decoded_frames);
+        let packet_number = packet.packet_number;
+        let decoded_frames = &packet.frames;
+        let required_datagram_slots = datagram_frame_count(decoded_frames);
         let available_datagram_slots = self.conn.inbound_datagram_remaining_capacity();
-        if required_datagram_slots > 0 && available_datagram_slots < required_datagram_slots {
-            let packet_number_text = packet_number.to_string();
-            let required_text = required_datagram_slots.to_string();
-            let available_text = available_datagram_slots.to_string();
-            let pending_datagrams_text = self.conn.pending_datagram_count().to_string();
-            let pending_received_packets_text = self.pending_received_packets.len().to_string();
-            cx.trace_with_fields(
-                "atp_quic.receive.datagram_queue_backpressure",
-                &[
-                    ("reason", "insufficient_slots_for_packet"),
-                    ("packet_number", packet_number_text.as_str()),
-                    ("required_datagram_slots", required_text.as_str()),
-                    ("available_datagram_slots", available_text.as_str()),
-                    ("pending_datagrams", pending_datagrams_text.as_str()),
-                    (
-                        "pending_received_packets",
-                        pending_received_packets_text.as_str(),
-                    ),
-                ],
-            );
-            self.mark_peer_activity();
-            return Ok(false);
-        }
-        let acked_stream_ranges = acked_packet_ranges_from_frames(&decoded_frames)?;
-        self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
-        match self.conn.process_packet_payload(
-            cx,
-            PacketNumberSpace::ApplicationData,
-            packet_number,
-            plaintext,
-            self.clock,
-        ) {
-            Ok(()) => {
-                self.apply_source_stream_ack_ranges(cx, &acked_stream_ranges)?;
-                self.apply_datagram_ack_ranges(cx, &acked_stream_ranges);
-                self.record_received_source_stream_frames(&decoded_frames);
-                self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
-                self.mark_peer_activity();
-                Ok(true)
-            }
-            Err(NativeQuicConnectionError::DatagramReceiveQueueFull { capacity }) => {
+        // Under symbol-queue pressure, shed only this packet's DATAGRAM frames
+        // (RFC 9221 receivers may drop datagrams under resource pressure, and
+        // ATP's fountain-coded symbols are redundant by design) while the
+        // ACK/STREAM frames keep flowing. Parking the whole packet instead
+        // would head-of-line block the reliable source stream behind a full
+        // symbol queue and stall the transfer.
+        let shed_datagram_frames =
+            required_datagram_slots > 0 && available_datagram_slots < required_datagram_slots;
+        let kept_frames: Vec<QuicFrame>;
+        let process_frames: &[QuicFrame] = if shed_datagram_frames {
+            if cx.trace_buffer().is_some() {
                 let packet_number_text = packet_number.to_string();
-                let capacity_text = capacity.to_string();
+                let required_text = required_datagram_slots.to_string();
+                let available_text = available_datagram_slots.to_string();
                 let pending_datagrams_text = self.conn.pending_datagram_count().to_string();
-                let pending_received_packets_text = self.pending_received_packets.len().to_string();
-                let datagrams_received_text = self.conn.datagrams_received().to_string();
-                let datagrams_dropped_on_receive_text =
-                    self.conn.datagrams_dropped_on_receive().to_string();
+                let pending_received_packets_text = self.pending_inbound_packets().to_string();
                 cx.trace_with_fields(
                     "atp_quic.receive.datagram_queue_backpressure",
                     &[
+                        ("reason", "shed_datagram_frames_insufficient_slots"),
                         ("packet_number", packet_number_text.as_str()),
-                        ("capacity", capacity_text.as_str()),
+                        ("required_datagram_slots", required_text.as_str()),
+                        ("available_datagram_slots", available_text.as_str()),
                         ("pending_datagrams", pending_datagrams_text.as_str()),
                         (
                             "pending_received_packets",
                             pending_received_packets_text.as_str(),
                         ),
-                        ("datagrams_received", datagrams_received_text.as_str()),
-                        (
-                            "datagrams_dropped_on_receive",
-                            datagrams_dropped_on_receive_text.as_str(),
-                        ),
                     ],
                 );
+            }
+            kept_frames = decoded_frames
+                .iter()
+                .filter(|frame| !matches!(frame, QuicFrame::Datagram { .. }))
+                .cloned()
+                .collect();
+            &kept_frames
+        } else {
+            decoded_frames
+        };
+        let acked_stream_ranges = acked_packet_ranges_from_frames(process_frames)?;
+        self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
+        match self.conn.process_packet_frames(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            packet_number,
+            process_frames,
+            self.clock,
+        ) {
+            Ok(()) => {
+                if shed_datagram_frames {
+                    // The packet itself was received and authenticated; only
+                    // its DATAGRAM payload was shed. Acknowledge it so the
+                    // sender's in-flight/cwnd accounting drains instead of
+                    // jamming on packets we deliberately shed.
+                    self.conn.acknowledge_received_packet(
+                        PacketNumberSpace::ApplicationData,
+                        packet_number,
+                    );
+                }
+                self.apply_source_stream_ack_ranges(cx, &acked_stream_ranges)?;
+                self.apply_datagram_ack_ranges(cx, &acked_stream_ranges);
+                self.record_received_source_stream_frames(process_frames);
+                self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
+                self.mark_peer_activity();
+                Ok(true)
+            }
+            Err(NativeQuicConnectionError::DatagramReceiveQueueFull { capacity }) => {
+                if cx.trace_buffer().is_some() {
+                    let packet_number_text = packet_number.to_string();
+                    let capacity_text = capacity.to_string();
+                    let pending_datagrams_text = self.conn.pending_datagram_count().to_string();
+                    let pending_received_packets_text = self.pending_inbound_packets().to_string();
+                    let datagrams_received_text = self.conn.datagrams_received().to_string();
+                    let datagrams_dropped_on_receive_text =
+                        self.conn.datagrams_dropped_on_receive().to_string();
+                    cx.trace_with_fields(
+                        "atp_quic.receive.datagram_queue_backpressure",
+                        &[
+                            ("packet_number", packet_number_text.as_str()),
+                            ("capacity", capacity_text.as_str()),
+                            ("pending_datagrams", pending_datagrams_text.as_str()),
+                            (
+                                "pending_received_packets",
+                                pending_received_packets_text.as_str(),
+                            ),
+                            ("datagrams_received", datagrams_received_text.as_str()),
+                            (
+                                "datagrams_dropped_on_receive",
+                                datagrams_dropped_on_receive_text.as_str(),
+                            ),
+                        ],
+                    );
+                }
                 self.mark_peer_activity();
                 Ok(false)
             }
@@ -3284,88 +3631,117 @@ impl QuicLink {
         }
     }
 
-    /// Feed a batch of already-received packets (e.g. 1-RTT data that arrived at
-    /// the server while it was still completing the handshake) into the connection.
-    async fn ingest_packets(
+    /// Authenticate and decode one received datagram, decrypting in place and
+    /// decoding frames exactly once as zero-copy views of the datagram buffer.
+    fn decode_and_unprotect_one_rtt(
         &mut self,
         cx: &Cx,
-        packets: &[ReceivedPacket],
+        packet: ReceivedPacket,
+    ) -> Result<InboundPacketDecode, QuicTransportError> {
+        let Some((key_phase, packet_number)) = parse_one_rtt_header(&packet.data) else {
+            return Ok(InboundPacketDecode::NotOneRtt);
+        };
+        let mut data = packet.data;
+        match self.protection.unprotect_one_rtt_in_place_now(
+            cx,
+            key_phase,
+            packet_number,
+            &mut data,
+            ONE_RTT_HEADER_LEN,
+        ) {
+            Outcome::Ok(plaintext_len) => {
+                data.truncate(ONE_RTT_HEADER_LEN + plaintext_len);
+                let plaintext = Bytes::from(data).slice(ONE_RTT_HEADER_LEN..);
+                let frames = NativeQuicConnection::decode_frames_bytes(&plaintext)?;
+                Ok(InboundPacketDecode::Decoded(DecodedOneRttPacket {
+                    packet_number,
+                    frames,
+                }))
+            }
+            // Undecryptable / replayed / stray packet: drop it (QUIC semantics).
+            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                Ok(InboundPacketDecode::Dropped)
+            }
+        }
+    }
+
+    /// Feed a batch of already-received packets (e.g. 1-RTT data that arrived at
+    /// the server while it was still completing the handshake) into the connection.
+    fn ingest_packets(
+        &mut self,
+        cx: &Cx,
+        packets: Vec<ReceivedPacket>,
     ) -> Result<IngestPacketsReport, QuicTransportError> {
-        let provider_kind = self.protection.provider_kind();
-        let decoded = packets
-            .iter()
-            .map(|packet| {
-                decode_protected_one_rtt_packet(provider_kind, packet).map_or(
-                    DecodedInboundPacket::NonOneRtt,
-                    DecodedInboundPacket::OneRtt,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let requests = decoded
-            .iter()
-            .filter_map(|packet| match packet {
-                DecodedInboundPacket::OneRtt(packet) => Some(PacketUnprotectionRequest {
-                    packet: &packet.protected,
-                    associated_data: &packet.header,
-                }),
-                DecodedInboundPacket::NonOneRtt => None,
-            })
-            .collect::<Vec<_>>();
-        let unprotected = self
-            .protection
-            .unprotect_packets_parallel(cx, &requests)
-            .await;
-
         let mut report = IngestPacketsReport::default();
-        let mut unprotected = unprotected.into_iter();
-        for (packet_index, packet) in decoded.iter().enumerate() {
-            match packet {
-                DecodedInboundPacket::OneRtt(packet) => match unprotected
-                    .next()
-                    .expect("one unprotect outcome per decoded 1-RTT packet")
-                {
-                    Outcome::Ok(unprotected) => {
-                        if self.process_unprotected_one_rtt_packet(
-                            cx,
-                            packet.packet_number,
-                            &unprotected.plaintext,
-                        )? {
-                            report.packets_consumed = packet_index.saturating_add(1);
-                            report.one_rtt_packets_processed =
-                                report.one_rtt_packets_processed.saturating_add(1);
-                        } else {
-                            report.receive_backpressure = true;
-                            break;
-                        }
+        let mut packets = packets.into_iter();
+        while let Some(packet) = packets.next() {
+            match self.decode_and_unprotect_one_rtt(cx, packet)? {
+                InboundPacketDecode::Decoded(decoded) => {
+                    if self.process_decoded_one_rtt_packet(cx, &decoded)? {
+                        report.packets_consumed = report.packets_consumed.saturating_add(1);
+                        report.one_rtt_packets_processed =
+                            report.one_rtt_packets_processed.saturating_add(1);
+                    } else {
+                        // Receive backpressure: park the authenticated packet
+                        // (never re-run AEAD — the replay window would reject
+                        // it) and return the untouched raw remainder to the
+                        // front of the pending queue in arrival order.
+                        self.pending_decoded_packets.push_back(decoded);
+                        self.requeue_received_packets_front(packets);
+                        report.receive_backpressure = true;
+                        break;
                     }
-                    // Undecryptable / replayed / stray packet: drop it (QUIC semantics).
-                    Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                        self.unprotect_packets_dropped =
-                            self.unprotect_packets_dropped.saturating_add(1);
-                        report.packets_consumed = packet_index.saturating_add(1);
-                    }
-                },
-                DecodedInboundPacket::NonOneRtt => {
+                }
+                InboundPacketDecode::Dropped => {
+                    self.unprotect_packets_dropped =
+                        self.unprotect_packets_dropped.saturating_add(1);
+                    report.packets_consumed = report.packets_consumed.saturating_add(1);
+                }
+                InboundPacketDecode::NotOneRtt => {
                     self.non_one_rtt_packets_dropped =
                         self.non_one_rtt_packets_dropped.saturating_add(1);
-                    report.packets_consumed = packet_index.saturating_add(1);
+                    report.packets_consumed = report.packets_consumed.saturating_add(1);
                 }
             }
         }
         Ok(report)
     }
 
-    async fn ingest_pending_received_packets(
+    /// Drain packets parked under receive backpressure: decoded packets first
+    /// (already authenticated), then raw pending packets.
+    fn ingest_pending_received_packets(
         &mut self,
         cx: &Cx,
         limit: usize,
     ) -> Result<IngestPacketsReport, QuicTransportError> {
-        let packets = self.take_pending_received_packets(limit);
-        let report = self.ingest_packets(cx, &packets).await?;
-        if report.receive_backpressure {
-            self.push_front_received_packets(&packets[report.packets_consumed..]);
+        let mut report = IngestPacketsReport::default();
+        while report.one_rtt_packets_processed < limit {
+            let Some(decoded) = self.pending_decoded_packets.pop_front() else {
+                break;
+            };
+            if self.process_decoded_one_rtt_packet(cx, &decoded)? {
+                report.packets_consumed = report.packets_consumed.saturating_add(1);
+                report.one_rtt_packets_processed =
+                    report.one_rtt_packets_processed.saturating_add(1);
+            } else {
+                self.pending_decoded_packets.push_front(decoded);
+                report.receive_backpressure = true;
+                return Ok(report);
+            }
         }
+        let remaining = limit.saturating_sub(report.one_rtt_packets_processed);
+        if remaining == 0 || self.pending_received_packets.is_empty() {
+            return Ok(report);
+        }
+        let packets = self.take_pending_received_packets(remaining);
+        let raw_report = self.ingest_packets(cx, packets)?;
+        report.packets_consumed = report
+            .packets_consumed
+            .saturating_add(raw_report.packets_consumed);
+        report.one_rtt_packets_processed = report
+            .one_rtt_packets_processed
+            .saturating_add(raw_report.one_rtt_packets_processed);
+        report.receive_backpressure = raw_report.receive_backpressure;
         Ok(report)
     }
 
@@ -3378,7 +3754,7 @@ impl QuicLink {
         let remaining_capacity_text = remaining_capacity.to_string();
         let packets_processed_text = packets_processed.to_string();
         let max_datagrams_per_packet_text = self.max_datagram_frames_per_packet.to_string();
-        let pending_received_packets_text = self.pending_received_packets.len().to_string();
+        let pending_received_packets_text = self.pending_inbound_packets().to_string();
         cx.trace_with_fields(
             "atp_quic.receive.datagram_queue_needs_drain",
             &[
@@ -3434,15 +3810,17 @@ impl QuicLink {
                 self.trace_datagram_queue_needs_drain(cx, total_processed);
                 return Ok(total_processed);
             }
-            if !self.pending_received_packets.is_empty() {
-                let report = self
-                    .ingest_pending_received_packets(cx, receive_limit)
-                    .await?;
+            if self.pending_inbound_packets() > 0 {
+                let report = self.ingest_pending_received_packets(cx, receive_limit)?;
                 total_processed = total_processed.saturating_add(report.one_rtt_packets_processed);
                 if report.receive_backpressure {
                     self.trace_datagram_queue_needs_drain(cx, total_processed);
                     return Ok(total_processed);
                 }
+                // Ingest is fully synchronous now; yield so co-scheduled peer
+                // tasks (in-process lab proxies, loopback tests) are not
+                // starved for a whole drain budget.
+                crate::runtime::yield_now().await;
                 continue;
             }
             let received = match crate::time::timeout(
@@ -3463,13 +3841,15 @@ impl QuicLink {
             self.udp_packets_received = self
                 .udp_packets_received
                 .saturating_add(u64::try_from(received_len).unwrap_or(u64::MAX));
-            let report = self.ingest_packets(cx, &received).await?;
+            let report = self.ingest_packets(cx, received)?;
             total_processed = total_processed.saturating_add(report.one_rtt_packets_processed);
             if report.receive_backpressure {
-                self.queue_received_packets(received.into_iter().skip(report.packets_consumed));
                 self.trace_datagram_queue_needs_drain(cx, total_processed);
                 return Ok(total_processed);
             }
+            // Ingest is fully synchronous now; yield between drained batches
+            // so co-scheduled peer tasks are not starved for a whole budget.
+            crate::runtime::yield_now().await;
 
             batches = batches.saturating_add(1);
             if received_len < receive_limit {
@@ -3515,7 +3895,7 @@ impl QuicLink {
             self.conn.datagrams_received(),
             self.conn.datagrams_dropped_on_receive(),
             self.conn.pending_datagram_count(),
-            self.pending_received_packets.len(),
+            self.pending_inbound_packets(),
             option_usize_trace(socket.recv_buffer_requested),
             option_usize_trace(socket.recv_buffer_applied),
             option_u64_trace(socket.kernel_rx_queue_bytes),
@@ -3993,14 +4373,42 @@ impl QuicLink {
     ) -> Result<Frame, QuicTransportError> {
         let started = Instant::now();
         let mut last_retransmit = Instant::now();
+        let mut loops = 0u64;
+        let mut flush_continues = 0u64;
+        let mut pump_continues = 0u64;
+        let mut gap_retransmit_frames = 0u64;
+        let mut pto_expiries = 0u64;
+        let mut pto_lost_packets = 0u64;
+        let mut pto_blocked_pending = 0u64;
+        let mut pto_retransmit_frames = 0u64;
+        let mut pto_empty_drains = 0u64;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             if started.elapsed() >= self.idle_timeout {
-                return Err(QuicTransportError::Timeout {
-                    operation,
-                    timeout: self.idle_timeout,
-                });
+                return Err(QuicTransportError::Quic(format!(
+                    "transport timeout during {operation} after {:?}; \
+                     in_flight_stream_packets={} pending_stream_frames={} \
+                     pending_stream_bytes={} pacing_rate_bytes_per_s={} \
+                     udp_packets_received={} one_rtt_packets_ingested={} \
+                     loops={loops} flush_continues={flush_continues} \
+                     pump_continues={pump_continues} \
+                     gap_retransmit_frames={gap_retransmit_frames} \
+                     pto_expiries={pto_expiries} pto_lost_packets={pto_lost_packets} \
+                     pto_blocked_pending={pto_blocked_pending} \
+                     pto_retransmit_frames={pto_retransmit_frames} \
+                     pto_empty_drains={pto_empty_drains} bytes_in_flight={} cwnd={}",
+                    self.idle_timeout,
+                    self.in_flight_stream_frames.len(),
+                    self.conn.pending_stream_frame_count(),
+                    self.conn.pending_stream_data_bytes(),
+                    self.data_plane_pacer.pacing_rate_bps,
+                    self.udp_packets_received,
+                    self.one_rtt_packets_ingested,
+                    self.conn.transport().bytes_in_flight(),
+                    self.conn.transport().congestion_window_bytes(),
+                )));
             }
+            loops = loops.saturating_add(1);
             if let Some(frame) = self.pending_control_frames.pop_front() {
                 return Ok(frame);
             }
@@ -4011,10 +4419,13 @@ impl QuicLink {
             let flushed = self.flush(cx).await?;
             let pumped = self.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
             if pumped > 0 {
+                pump_continues = pump_continues.saturating_add(1);
                 let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
                 let retransmit_frames =
                     self.drain_ack_gap_lost_stream_frames_for_retransmit(&latest_stream_ack_ranges);
                 if !retransmit_frames.is_empty() {
+                    gap_retransmit_frames =
+                        gap_retransmit_frames.saturating_add(retransmit_frames.len() as u64);
                     self.retransmit_stream_frames(
                         cx,
                         &retransmit_frames,
@@ -4027,18 +4438,30 @@ impl QuicLink {
             }
 
             if flushed > 0 {
+                flush_continues = flush_continues.saturating_add(1);
                 continue;
             }
 
             if last_retransmit.elapsed() >= SOURCE_STREAM_PTO {
+                // Declare PTO loss BEFORE the pending-frames guard: a
+                // cwnd-blocked flush leaves requeued retransmit frames
+                // pending forever, and skipping expiry while frames are
+                // pending would livelock (in-flight accounting never
+                // releases, so the cwnd gate never opens and nothing is ever
+                // sent again — both sides then idle out).
+                pto_expiries = pto_expiries.saturating_add(1);
+                pto_lost_packets = pto_lost_packets
+                    .saturating_add(self.expire_app_data_loss_timeout(cx, operation)? as u64);
                 if self.conn.has_pending_stream_frames() {
+                    pto_blocked_pending = pto_blocked_pending.saturating_add(1);
                     continue;
                 }
-                let _ = self.expire_app_data_loss_timeout(cx, operation)?;
                 let retransmit_frames = self.drain_limited_in_flight_stream_frames_for_retransmit(
                     QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
                 );
                 if !retransmit_frames.is_empty() {
+                    pto_retransmit_frames =
+                        pto_retransmit_frames.saturating_add(retransmit_frames.len() as u64);
                     super::quic_progress(format_args!(
                         "control: source_stream_proof_wait_retransmit frames={} operation={operation}",
                         retransmit_frames.len()
@@ -4052,6 +4475,7 @@ impl QuicLink {
                     last_retransmit = Instant::now();
                     continue;
                 }
+                pto_empty_drains = pto_empty_drains.saturating_add(1);
                 last_retransmit = Instant::now();
             }
         }
@@ -4175,6 +4599,14 @@ fn link_from_handshake(
                 .unwrap_or(super::QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64),
         ),
         pending_received_packets: VecDeque::new(),
+        pending_decoded_packets: VecDeque::new(),
+        stream_rate_controller: None,
+        stream_rate_epoch: Instant::now(),
+        stream_rate_window_started_micros: 0,
+        stream_rate_sent_bytes: 0,
+        stream_rate_acked_bytes: 0,
+        stream_rate_lost_bytes: 0,
+        stream_unacked_bytes: 0,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
         pending_control_frames: VecDeque::new(),
@@ -4185,6 +4617,8 @@ fn link_from_handshake(
         datagram_bytes_in_flight: 0,
         pending_datagram_rate_samples: VecDeque::new(),
         received_source_stream_frames: VecDeque::new(),
+        source_stream_observed_end: 0,
+        source_stream_observed_fin_end: None,
         paced_source_stream: None,
         udp_packets_received: 0,
         one_rtt_packets_ingested: 0,
@@ -5590,7 +6024,11 @@ async fn drive_native_source_stream_flush(
         if link.conn.pending_stream_frame_count() == 0 {
             return Ok(());
         }
-        let pump_timeout = if flushed == 0 || !drain_all {
+        // Only a BLOCKED flush waits for inbound (ACKs unblock it); a healthy
+        // mid-stream cycle drains inbound opportunistically with a zero
+        // timeout. Waiting a grace per 512 KiB quantum convoyed the sender
+        // and receiver into RTT-scale lockstep (~47 MB/s at any pacing rate).
+        let pump_timeout = if flushed == 0 {
             INBOUND_PUMP_DRAIN_GRACE
         } else {
             Duration::ZERO
@@ -5623,10 +6061,15 @@ async fn drive_native_source_stream_flush(
             return Ok(());
         }
         if flushed == 0 && pumped == 0 && last_progress.elapsed() >= SOURCE_STREAM_PTO {
+            // Declare PTO loss BEFORE the pending-frames guard (see
+            // `next_control_frame_with_source_stream_recovery`): pending
+            // frames behind a cwnd-blocked flush must not starve the loss
+            // timeout, or the in-flight accounting never releases and the
+            // flush livelocks until the idle timeout.
+            let _ = link.expire_app_data_loss_timeout(cx, "flush QUIC source stream")?;
             if link.conn.has_pending_stream_frames() {
                 continue;
             }
-            let _ = link.expire_app_data_loss_timeout(cx, "flush QUIC source stream")?;
             let mut retransmit_frames = link.drain_limited_in_flight_stream_frames_for_retransmit(
                 QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
             );
@@ -5707,6 +6150,63 @@ async fn send_native_source_stream_entries_pumped(
             if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
                 drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
                 queued_since_flush = 0;
+                // Bound sender-side buffering (RSS) and sent-but-unacked
+                // bytes (runaway guard): without the first, the disk reader
+                // queues the entire file ahead of the pacer (~540 MB RSS on
+                // a 500 MB transfer); without the second, a mis-estimated
+                // pacing rate streams the file into a loss gap faster than
+                // the receiver can reassemble. Both waits are ACK/pacer
+                // clocked, not spins.
+                let gate_started = Instant::now();
+                loop {
+                    if gate_started.elapsed() >= config.idle_timeout {
+                        return Err(QuicTransportError::Timeout {
+                            operation: "source stream unacked gate",
+                            timeout: config.idle_timeout,
+                        });
+                    }
+                    if link.conn.pending_stream_data_bytes()
+                        > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES
+                    {
+                        drive_native_source_stream_flush(cx, link, config.idle_timeout, false)
+                            .await?;
+                        continue;
+                    }
+                    if link.stream_unacked_bytes <= QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES {
+                        break;
+                    }
+                    // Everything is flushed; wait on the ACK clock, running
+                    // the same gap/PTO recovery the flush loop would so a
+                    // lossy window cannot wedge the gate.
+                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                    let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
+                    if pumped > 0 {
+                        let ranges = link.latest_stream_ack_ranges.clone();
+                        let frames = link.drain_ack_gap_lost_stream_frames_for_retransmit(&ranges);
+                        if !frames.is_empty() {
+                            link.retransmit_stream_frames(
+                                cx,
+                                &frames,
+                                "source_stream_unacked_gate_retransmit",
+                            )
+                            .await?;
+                        }
+                    } else {
+                        let _ =
+                            link.expire_app_data_loss_timeout(cx, "source stream unacked gate")?;
+                        let frames = link.drain_limited_in_flight_stream_frames_for_retransmit(
+                            QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
+                        );
+                        if !frames.is_empty() {
+                            link.retransmit_stream_frames(
+                                cx,
+                                &frames,
+                                "source_stream_unacked_gate_pto",
+                            )
+                            .await?;
+                        }
+                    }
+                }
             }
         }
         if read != entry.size {
@@ -5847,6 +6347,7 @@ async fn run_sender_session(
         source_pacing.trace_epoch(cx, 0);
         link.data_plane_pacer
             .configure_source_stream(&source_pacing);
+        link.begin_source_stream_rate_control(source_pacing.pacing_rate_bps);
         quic_rqtrace!(
             "sender: native_source_stream_pacing rate_bps={} burst_symbols={} burst_bytes={} frame_bytes={}",
             source_pacing.pacing_rate_bps,
@@ -5933,6 +6434,7 @@ async fn run_sender_session(
             }
         }
         .await;
+        link.end_source_stream_rate_control();
         link.paced_source_stream = previous_paced_source_stream;
         return source_result;
     }
@@ -6254,6 +6756,24 @@ async fn run_sender_session(
 
 // ─── Receiver session ───────────────────────────────────────────────────────
 
+/// Incremental hash state maintained while staged writes remain strictly
+/// sequential, so commit can skip the post-stream re-read + SHA-256 pass.
+struct QuicInlineEntryHash {
+    sha: Sha256,
+    cid: crate::atp::object::ContentIdHasher,
+    hashed: u64,
+}
+
+impl QuicInlineEntryHash {
+    fn new() -> Self {
+        Self {
+            sha: Sha256::new(),
+            cid: crate::atp::object::ContentId::streaming(),
+            hashed: 0,
+        }
+    }
+}
+
 struct QuicStagedEntryReceive {
     staging_path: PathBuf,
     created: bool,
@@ -6261,6 +6781,10 @@ struct QuicStagedEntryReceive {
     staging_cursor: Option<u64>,
     staging_unflushed_bytes: usize,
     cache_staging_file: bool,
+    /// `Some` while every accepted write has been sequential from offset 0;
+    /// dropped on the first out-of-order write (e.g. decoded FEC blocks
+    /// landing out of order), which falls back to the post-stream hash pass.
+    inline_hash: Option<QuicInlineEntryHash>,
 }
 
 impl QuicStagedEntryReceive {
@@ -6272,7 +6796,29 @@ impl QuicStagedEntryReceive {
             staging_cursor: None,
             staging_unflushed_bytes: 0,
             cache_staging_file: should_cache_quic_staging_file(entry_size, manifest_entries),
+            inline_hash: Some(QuicInlineEntryHash::new()),
         }
+    }
+
+    /// Consume the inline hash if it covered the entire entry, yielding the
+    /// same `(size, content_id, content_sha256)` triple as
+    /// `hash_file_streaming` over the staged file (identical byte stream:
+    /// every accepted write was folded in sequentially from offset 0).
+    fn take_inline_hash_if_complete(
+        &mut self,
+        entry_size: u64,
+    ) -> Option<(u64, crate::atp::object::ObjectId, [u8; 32])> {
+        let complete = self
+            .inline_hash
+            .as_ref()
+            .is_some_and(|state| state.hashed == entry_size);
+        if !complete {
+            return None;
+        }
+        let state = self.inline_hash.take()?;
+        let content_sha256: [u8; 32] = state.sha.finalize().into();
+        let content_id = crate::atp::object::ObjectId::content(state.cid.finalize());
+        Some((state.hashed, content_id, content_sha256))
     }
 
     async fn open_staging_file(
@@ -6353,6 +6899,19 @@ impl QuicStagedEntryReceive {
                 "staged write overruns entry {}: end {end}, size {}",
                 entry.index, entry.size
             )));
+        }
+
+        if let Some(state) = self.inline_hash.as_mut() {
+            if offset == state.hashed {
+                state.sha.update(data);
+                state.cid.update(data);
+                state.hashed = state.hashed.saturating_add(data.len() as u64);
+            } else {
+                // Out-of-order write: the inline hash no longer mirrors the
+                // file's byte order, so commit falls back to the streaming
+                // hash pass over the staged file.
+                self.inline_hash = None;
+            }
         }
 
         if self.cache_staging_file {
@@ -6633,7 +7192,10 @@ async fn commit_staged_entries(
         staged_entry.close_cached_staging_file().await?;
         staged_entry.ensure_created(entry).await?;
         let (size, content_id, content_sha256) =
-            hash_file_streaming(&staged_entry.staging_path, &mut read_buf).await?;
+            match staged_entry.take_inline_hash_if_complete(entry.size) {
+                Some(inline) => inline,
+                None => hash_file_streaming(&staged_entry.staging_path, &mut read_buf).await?,
+            };
         if size != entry.size || hex_encode(&content_sha256) != entry.sha256_hex {
             sha_ok = false;
         }
@@ -6749,11 +7311,31 @@ async fn read_native_source_stream_chunk(
             ))) if unknown == stream => {}
             Err(err) => return Err(err.into()),
         }
-        if link.pump_inbound_for(cx, idle_timeout).await? == 0 {
-            return Err(QuicTransportError::Timeout {
-                operation: "receive QUIC source stream",
-                timeout: idle_timeout,
-            });
+        // Small drain budget: the read loop consumes the reassembly map
+        // between pumps, so bounding each pump turn bounds receiver backlog
+        // RSS instead of letting the pump ingest an entire drain-until-empty
+        // budget ahead of the staging writer.
+        if link
+            .pump_inbound_for_with_drain_budget(
+                cx,
+                idle_timeout,
+                QUIC_SOURCE_STREAM_READ_DRAIN_BATCHES,
+            )
+            .await?
+            == 0
+        {
+            return Err(QuicTransportError::Quic(format!(
+                "transport timeout during receive QUIC source stream after {idle_timeout:?}; \
+                 udp_packets_received={} one_rtt_packets_ingested={} \
+                 unprotect_packets_dropped={} non_one_rtt_packets_dropped={} \
+                 pending_inbound_packets={} stream_read_eof={:?}",
+                link.udp_packets_received,
+                link.one_rtt_packets_ingested,
+                link.unprotect_packets_dropped,
+                link.non_one_rtt_packets_dropped,
+                link.pending_inbound_packets(),
+                link.conn.is_stream_read_eof(stream),
+            )));
         }
         let _ = link.flush(cx).await?;
     }
@@ -7134,27 +7716,19 @@ fn validate_native_source_stream_observed_completion(
     link: &mut QuicLink,
     expected_total: u64,
 ) -> Result<bool, QuicTransportError> {
-    let mut fin_seen = false;
-    for frame in link.drain_received_source_stream_frames() {
-        let frame_len = u64::try_from(frame.data.len()).unwrap_or(u64::MAX);
-        let frame_end = frame.offset.checked_add(frame_len).ok_or_else(|| {
-            QuicTransportError::Integrity("source stream frame offset overflow".to_string())
-        })?;
-        if frame_end > expected_total {
-            return Err(QuicTransportError::Integrity(format!(
-                "source stream carried bytes beyond the manifest total: end={frame_end}, total={expected_total}"
-            )));
-        }
-        if frame.fin {
-            if frame_end != expected_total {
-                return Err(QuicTransportError::Integrity(format!(
-                    "source stream FIN at offset {frame_end}, expected {expected_total}"
-                )));
-            }
-            fin_seen = true;
-        }
+    let observed_end = link.source_stream_observed_end;
+    if observed_end > expected_total {
+        return Err(QuicTransportError::Integrity(format!(
+            "source stream carried bytes beyond the manifest total: end={observed_end}, total={expected_total}"
+        )));
     }
-    Ok(fin_seen)
+    match link.source_stream_observed_fin_end {
+        Some(fin_end) if fin_end != expected_total => Err(QuicTransportError::Integrity(format!(
+            "source stream FIN at offset {fin_end}, expected {expected_total}"
+        ))),
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
 }
 
 async fn receive_native_source_stream_entries_pumped(
@@ -7504,6 +8078,8 @@ async fn run_receiver_session(
         .collect::<Vec<_>>();
     if let Some(source_stream) = source_stream {
         let previous_paced_source_stream = link.paced_source_stream.replace(source_stream);
+        link.source_stream_observed_end = 0;
+        link.source_stream_observed_fin_end = None;
         let source_receive_result: Result<ReceiveReport, QuicTransportError> = async {
             if hello.total_bytes != manifest.total_bytes {
                 return Err(QuicTransportError::Integrity(format!(
@@ -9781,6 +10357,7 @@ mod tests {
         let recorded = [SentControlStreamFrame {
             stream: StreamId(0),
             offset: 4096,
+            len: 1024,
         }];
         assert_eq!(
             need_more_pto_mode(&recorded),
@@ -9830,18 +10407,22 @@ mod tests {
             SentControlStreamFrame {
                 stream,
                 offset: 4096,
+                len: 1024,
             },
             SentControlStreamFrame {
                 stream,
                 offset: 1024,
+                len: 1024,
             },
             SentControlStreamFrame {
                 stream,
                 offset: 4096,
+                len: 1024,
             },
             SentControlStreamFrame {
                 stream: StreamId(8),
                 offset: 0,
+                len: 1024,
             },
         ];
 
@@ -9851,14 +10432,17 @@ mod tests {
                 SentControlStreamFrame {
                     stream,
                     offset: 1024,
+                    len: 1024,
                 },
                 SentControlStreamFrame {
                     stream,
                     offset: 4096,
+                    len: 1024,
                 },
                 SentControlStreamFrame {
                     stream: StreamId(8),
                     offset: 0,
+                    len: 1024,
                 },
             ]
         );
@@ -9871,6 +10455,7 @@ mod tests {
             .map(|idx| SentControlStreamFrame {
                 stream,
                 offset: idx * 1024,
+                len: 1024,
             })
             .collect::<Vec<_>>();
 

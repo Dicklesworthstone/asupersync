@@ -588,6 +588,60 @@ pub trait QuicPacketProtectionProvider {
         associated_data: &[u8],
     ) -> Result<UnprotectedPacket, QuicTlsError>;
 
+    /// Authenticate and decrypt a protected packet in place.
+    ///
+    /// `packet_data` is the full received datagram: `header || ciphertext ||
+    /// tag`, with the header occupying `packet_data[..header_len]` and serving
+    /// as the associated data. On success the plaintext occupies
+    /// `packet_data[header_len..header_len + returned_len]` and the returned
+    /// length is the plaintext length (`packet_data.len() - header_len -
+    /// tag_len`).
+    ///
+    /// The default implementation routes through [`Self::unprotect_packet`]
+    /// (one ciphertext copy in, one plaintext copy back), so existing
+    /// providers stay correct; providers with an in-place AEAD override this
+    /// to decrypt with zero copies.
+    fn unprotect_packet_in_place(
+        &mut self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+        packet_number: u64,
+        packet_data: &mut [u8],
+        header_len: usize,
+    ) -> Result<usize, QuicTlsError> {
+        const TAG_LEN: usize = 16;
+        if packet_data.len() < header_len + TAG_LEN {
+            return Err(QuicTlsError::CryptoProviderFailure {
+                provider: self.provider_kind(),
+                code: "packet_too_short_for_in_place_unprotect",
+            });
+        }
+        let body = &packet_data[header_len..];
+        let tag_offset = body.len() - TAG_LEN;
+        let mut tag = [0u8; TAG_LEN];
+        tag.copy_from_slice(&body[tag_offset..]);
+        let protected = ProtectedPacket {
+            space,
+            key_phase,
+            packet_number,
+            ciphertext: body[..tag_offset].to_vec(),
+            tag,
+            proof: ProtectionProof {
+                provider_kind: self.provider_kind(),
+                space,
+                key_phase,
+                generation: 0,
+                transcript_hash: TranscriptHash::from_bytes([0u8; 32]),
+                failure_code: None,
+            },
+        };
+        let associated_data = packet_data[..header_len].to_vec();
+        let unprotected = self.unprotect_packet(&protected, &associated_data)?;
+        let plaintext_len = unprotected.plaintext.len();
+        packet_data[header_len..header_len + plaintext_len].copy_from_slice(&unprotected.plaintext);
+        Ok(plaintext_len)
+    }
+
     /// Produce QUIC header-protection mask bytes.
     fn header_protection_mask(
         &self,
@@ -1042,6 +1096,33 @@ impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
             plaintext,
             proof: ProtectionProof::success(self.provider_kind(), &slot.snapshot),
         })
+    }
+
+    fn unprotect_packet_in_place(
+        &mut self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+        packet_number: u64,
+        packet_data: &mut [u8],
+        header_len: usize,
+    ) -> Result<usize, QuicTlsError> {
+        const TAG_LEN: usize = 16;
+        if packet_data.len() < header_len + TAG_LEN {
+            return Err(QuicTlsError::CryptoProviderFailure {
+                provider: self.provider_kind(),
+                code: "packet_too_short_for_in_place_unprotect",
+            });
+        }
+        let slot = self.installed_key(space, key_phase)?;
+        let (header, payload_and_tag) = packet_data.split_at_mut(header_len);
+        let plaintext_len = slot
+            .keys
+            .remote
+            .packet
+            .decrypt_in_place(packet_number, header, payload_and_tag)
+            .map_err(|_| QuicTlsError::BadPacketTag { space })?
+            .len();
+        Ok(plaintext_len)
     }
 
     fn header_protection_mask(

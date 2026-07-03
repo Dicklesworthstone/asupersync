@@ -1293,14 +1293,22 @@ fn recv_batch_payload_buffer(spare_payloads: &mut Vec<Vec<u8>>, packet_size: usi
     let mut buf = spare_payloads
         .pop()
         .unwrap_or_else(|| Vec::with_capacity(packet_size));
-    buf.resize(packet_size, 0);
+    // A recycled scratch buffer keeps its previous length so reuse avoids
+    // re-zeroing `packet_size` bytes on every receive; only fresh or
+    // shorter-than-requested buffers pay the one-time zero fill. Stale
+    // contents are never observed: receives overwrite `[..n]` and only
+    // `[..n]` is copied out.
+    if buf.len() < packet_size {
+        buf.resize(packet_size, 0);
+    } else {
+        buf.truncate(packet_size);
+    }
     buf
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn recycle_unused_recv_batch_payload(spare_payloads: &mut Vec<Vec<u8>>, mut buf: Vec<u8>) {
+fn recycle_unused_recv_batch_payload(spare_payloads: &mut Vec<Vec<u8>>, buf: Vec<u8>) {
     if buf.capacity() <= UDP_MAX_PACKET_SIZE {
-        buf.clear();
         spare_payloads.push(buf);
     }
 }
@@ -2549,15 +2557,20 @@ impl UdpSocket {
                 ));
             }
 
-            let mut first = recv_batch_payload_buffer(spare_payloads, packet_size);
-            let (bytes_read, src_addr) = match self.recv_from(&mut first).await {
+            // One reusable scratch buffer serves every receive in the batch;
+            // each datagram is copied out into an exactly-sized payload Vec.
+            // This replaces the old per-datagram `packet_size` (up to 64 KiB)
+            // allocation + zero fill with an `n`-byte allocation + copy, and
+            // keeps downstream zero-copy consumers (which hold the payload
+            // alive as shared `Bytes` backing) from pinning oversized buffers.
+            let mut scratch = recv_batch_payload_buffer(spare_payloads, packet_size);
+            let (bytes_read, src_addr) = match self.recv_from(&mut scratch).await {
                 Ok(received) => received,
                 Err(err) => {
-                    recycle_unused_recv_batch_payload(spare_payloads, first);
+                    recycle_unused_recv_batch_payload(spare_payloads, scratch);
                     return Err(err);
                 }
             };
-            first.truncate(bytes_read);
 
             let mut batch = UdpRecvBatch {
                 packets: Vec::with_capacity(max_packets),
@@ -2572,7 +2585,7 @@ impl UdpSocket {
             };
             batch.packets.push(UdpInboundDatagram {
                 src_addr,
-                payload: first,
+                payload: scratch[..bytes_read].to_vec(),
                 possibly_truncated: bytes_read == packet_size,
             });
 
@@ -2582,29 +2595,26 @@ impl UdpSocket {
                     break;
                 }
 
-                let mut buf = recv_batch_payload_buffer(spare_payloads, packet_size);
-                match self.inner.recv_from(&mut buf) {
+                match self.inner.recv_from(&mut scratch) {
                     Ok((n, addr)) => {
-                        buf.truncate(n);
                         batch.report.packets_processed += 1;
                         batch.report.bytes_processed += n;
                         batch.packets.push(UdpInboundDatagram {
                             src_addr: addr,
-                            payload: buf,
+                            payload: scratch[..n].to_vec(),
                             possibly_truncated: n == packet_size,
                         });
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        recycle_unused_recv_batch_payload(spare_payloads, buf);
                         break;
                     }
                     Err(err) => {
-                        recycle_unused_recv_batch_payload(spare_payloads, buf);
                         batch.report.error = Some(err.to_string());
                         break;
                     }
                 }
             }
+            recycle_unused_recv_batch_payload(spare_payloads, scratch);
 
             Ok(batch)
         }

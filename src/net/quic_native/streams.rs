@@ -573,18 +573,30 @@ impl QuicStream {
     }
 
     /// Requeue a previously emitted STREAM frame after packet loss.
+    ///
+    /// An offset whose retained copy was already released by
+    /// [`Self::release_sent_stream_frame`] is a no-op: release happens only
+    /// on acknowledgment, so the peer has the data and a retransmission
+    /// would be redundant (an ack-gap loss judgment can race a late ACK for
+    /// the same offset carried by another in-flight packet).
     pub fn requeue_sent_stream_frame(&mut self, offset: u64) -> Result<(), QuicStreamError> {
         let Some(frame) = self.sent_stream_frames.get(&offset).cloned() else {
-            return Err(QuicStreamError::InvalidFinalSize {
-                final_size: self.send_offset,
-                received: offset,
-            });
+            return Ok(());
         };
         self.pending_send_frames.push_front(QueuedStreamFrame {
             retransmit: true,
             ..frame
         });
         Ok(())
+    }
+
+    /// Release the retained retransmission copy of an acknowledged frame.
+    ///
+    /// Without this, `sent_stream_frames` pins every sent payload for the
+    /// stream's lifetime and sender memory scales with the transfer size.
+    /// Unknown offsets are ignored (duplicate ACKs, already-released frames).
+    pub fn release_sent_stream_frame(&mut self, offset: u64) {
+        self.sent_stream_frames.remove(&offset);
     }
 
     /// Set final size from FIN/RESET.
@@ -1144,6 +1156,16 @@ impl StreamTable {
         offset: u64,
     ) -> Result<(), StreamTableError> {
         self.stream_mut(id)?.requeue_sent_stream_frame(offset)?;
+        Ok(())
+    }
+
+    /// Release the retained retransmission copy of an acknowledged frame.
+    pub fn release_sent_stream_frame(
+        &mut self,
+        id: StreamId,
+        offset: u64,
+    ) -> Result<(), StreamTableError> {
+        self.stream_mut(id)?.release_sent_stream_frame(offset);
         Ok(())
     }
 
@@ -2352,7 +2374,11 @@ mod tests {
             .requeue_unemitted_stream_frame(frame)
             .expect("requeue unemitted");
         assert!(
-            table.requeue_sent_stream_frame(stream, offset).is_err(),
+            !table
+                .stream(stream)
+                .expect("stream exists")
+                .sent_stream_frames
+                .contains_key(&offset),
             "unemitted frames must not remain marked as sent"
         );
 

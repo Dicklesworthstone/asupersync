@@ -537,6 +537,75 @@ impl AtpPacketProtection {
         result
     }
 
+    /// Authenticate and decrypt a received 1-RTT datagram in place.
+    ///
+    /// `packet_data` is the full datagram (`header || ciphertext || tag`) with
+    /// the header in `packet_data[..header_len]` serving as associated data.
+    /// On success the plaintext occupies
+    /// `packet_data[header_len..header_len + returned_len]`.
+    ///
+    /// Anti-replay semantics are identical to [`Self::unprotect_packet_now`]:
+    /// the packet number is screened against the accepted window first and
+    /// accepted only after authentication succeeds.
+    pub fn unprotect_one_rtt_in_place_now(
+        &mut self,
+        cx: &Cx,
+        key_phase: bool,
+        packet_number: u64,
+        packet_data: &mut [u8],
+        header_len: usize,
+    ) -> AtpOutcome<usize> {
+        let space = PacketProtectionSpace::OneRtt;
+        self.trace_provider_profile_once(cx, "unprotect");
+
+        if self
+            .accepted_packets
+            .get(&space)
+            .is_some_and(|window| window.rejects(packet_number))
+        {
+            if cx.trace_buffer().is_some() {
+                cx.trace_with_fields(
+                    "atp_packet_protection_replay_rejected",
+                    &[
+                        ("space", space.as_str()),
+                        ("pn", &packet_number.to_string()),
+                        ("phase", &key_phase.to_string()),
+                    ],
+                );
+            }
+            return Outcome::err(AtpError::Auth(AuthError::ReplayedNonce));
+        }
+
+        let result: AtpOutcome<usize> = self
+            .provider
+            .unprotect_packet_in_place(space, key_phase, packet_number, packet_data, header_len)
+            .map_err(|e| self.map_tls_error(e))
+            .into();
+
+        if let Outcome::Ok(_) = &result {
+            self.accepted_packets
+                .entry(space)
+                .or_default()
+                .accept(packet_number);
+        }
+
+        if self.config.enable_proof_logging {
+            match &result {
+                Outcome::Ok(plaintext_len) => {
+                    cx.trace(&format!(
+                        "packet unprotected: space={space:?} pn={packet_number} payload_len={plaintext_len}"
+                    ));
+                }
+                Outcome::Err(err) => {
+                    cx.trace(&format!("packet unprotection failed: {err:?}"));
+                }
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {}
+            }
+        }
+
+        result
+    }
+
     /// Unprotect a batch of packets with one ATP boundary call.
     ///
     /// Requests are processed in order. Each result is independent so a stray,

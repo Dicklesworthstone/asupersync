@@ -77,6 +77,36 @@ pub trait Buf {
         }
     }
 
+    /// Copy the next `len` bytes into a freshly returned [`Bytes`], advancing
+    /// the cursor.
+    ///
+    /// The default implementation copies. Implementations backed by shared
+    /// storage (for example [`BytesCursor`](crate::bytes::BytesCursor))
+    /// override this to return a zero-copy slice of the underlying buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len > self.remaining()`.
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> crate::bytes::Bytes {
+        assert!(
+            self.remaining() >= len,
+            "buffer underflow: need {} bytes, have {}",
+            len,
+            self.remaining()
+        );
+        let mut dst = Vec::with_capacity(len);
+        let mut off = 0;
+        while off < len {
+            let chunk = self.chunk();
+            let cnt = std::cmp::min(chunk.len(), len - off);
+            dst.extend_from_slice(&chunk[..cnt]);
+            self.advance(cnt);
+            off += cnt;
+        }
+        crate::bytes::Bytes::from(dst)
+    }
+
     /// Get a u8, advancing the cursor.
     ///
     /// # Panics

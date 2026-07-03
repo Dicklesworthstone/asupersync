@@ -482,6 +482,18 @@ impl Buf for BytesCursor {
         );
         self.pos += cnt;
     }
+
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        assert!(
+            len <= self.remaining(),
+            "buffer underflow: need {len} bytes, have {}",
+            self.remaining()
+        );
+        let out = self.inner.slice(self.pos..self.pos + len);
+        self.pos += len;
+        out
+    }
 }
 
 impl Bytes {

@@ -7,7 +7,7 @@
 //!
 //! It intentionally stays runtime-agnostic and does not perform socket I/O.
 
-use crate::bytes::{Bytes, BytesMut};
+use crate::bytes::{Buf, Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
 use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
@@ -686,6 +686,18 @@ impl NativeQuicConnection {
             .map_err(map_stream_table_error)
     }
 
+    /// Release the retained retransmission copy of an acknowledged
+    /// STREAM frame so sender memory does not scale with transfer size.
+    pub fn release_sent_stream_frame(
+        &mut self,
+        id: StreamId,
+        offset: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        self.streams
+            .release_sent_stream_frame(id, offset)
+            .map_err(map_stream_table_error)
+    }
+
     /// Account bytes received on a stream at an explicit offset.
     pub fn receive_stream_segment(
         &mut self,
@@ -1248,8 +1260,26 @@ impl NativeQuicConnection {
         payload: &[u8],
         now_micros: u64,
     ) -> Result<(), NativeQuicConnectionError> {
-        checkpoint(cx)?;
         let frames = Self::decode_frames(payload)?;
+        self.process_packet_frames(cx, space, packet_number, &frames, now_micros)
+    }
+
+    /// Process the already-decoded frames of one packet and update connection
+    /// state.
+    ///
+    /// This is the single-decode hot path: callers that already decoded the
+    /// packet's frames (for example to count DATAGRAM slots before admission)
+    /// pass them here directly instead of paying a second decode + payload
+    /// copy via [`Self::process_packet_payload`].
+    pub fn process_packet_frames(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        packet_number: u64,
+        frames: &[QuicFrame],
+        now_micros: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
         let ack_eliciting = frames.iter().any(frame_is_ack_eliciting);
 
         let mut index = 0usize;
@@ -1984,6 +2014,28 @@ impl NativeQuicConnection {
         Ok(frames)
     }
 
+    /// Decode frames from a shared packet payload without copying frame data.
+    ///
+    /// STREAM/DATAGRAM frame payloads become zero-copy slices of `payload`
+    /// (via the `BytesCursor` `copy_to_bytes` override), so the hot receive
+    /// path pays no per-frame allocation or memcpy.
+    pub fn decode_frames_bytes(
+        payload: &Bytes,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        let mut frames = Vec::new();
+        let mut cursor = payload.clone().reader();
+
+        while cursor.has_remaining() {
+            if let Some(frame) = QuicFrame::decode(&mut cursor)? {
+                frames.push(frame);
+            } else {
+                break;
+            }
+        }
+
+        Ok(frames)
+    }
+
     fn queue_stream_data_blocked(&mut self, id: StreamId) {
         let limit = self.streams.stream_send_limit(id).unwrap_or(0);
         self.pending_control_frames
@@ -2003,22 +2055,26 @@ impl NativeQuicConnection {
         fin: bool,
         retransmit: bool,
     ) {
-        let id_s = id.0.to_string();
-        let offset_s = offset.to_string();
-        let len_s = len.to_string();
-        let fin_s = fin.to_string();
-        let retransmit_s = retransmit.to_string();
-        cx.trace_with_fields(
-            "ATP_QUIC_TRACE stream_frame",
-            &[
-                ("direction", direction),
-                ("stream_id", id_s.as_str()),
-                ("offset", offset_s.as_str()),
-                ("len", len_s.as_str()),
-                ("fin", fin_s.as_str()),
-                ("retransmit", retransmit_s.as_str()),
-            ],
-        );
+        // Gate the field formatting itself: this runs per received STREAM
+        // frame, so the string building must not happen when tracing is off.
+        if cx.trace_buffer().is_some() {
+            let id_s = id.0.to_string();
+            let offset_s = offset.to_string();
+            let len_s = len.to_string();
+            let fin_s = fin.to_string();
+            let retransmit_s = retransmit.to_string();
+            cx.trace_with_fields(
+                "ATP_QUIC_TRACE stream_frame",
+                &[
+                    ("direction", direction),
+                    ("stream_id", id_s.as_str()),
+                    ("offset", offset_s.as_str()),
+                    ("len", len_s.as_str()),
+                    ("fin", fin_s.as_str()),
+                    ("retransmit", retransmit_s.as_str()),
+                ],
+            );
+        }
         quictrace!(
             "event=stream_frame direction={} stream_id={} offset={} len={} fin={} retransmit={}",
             direction,
@@ -2028,6 +2084,15 @@ impl NativeQuicConnection {
             fin,
             retransmit
         );
+    }
+
+    /// Record receipt of an ack-eliciting packet whose frames were consumed
+    /// outside [`Self::process_packet_frames`] (for example when a receiver
+    /// sheds DATAGRAM frames under queue pressure). The packet was
+    /// authenticated and received, so the peer's loss detector must see it
+    /// acknowledged even though its payload was intentionally dropped.
+    pub fn acknowledge_received_packet(&mut self, space: PacketNumberSpace, packet_number: u64) {
+        self.queue_ack_frame(space, packet_number);
     }
 
     fn queue_ack_frame(&mut self, space: PacketNumberSpace, packet_number: u64) {
@@ -2049,6 +2114,18 @@ struct ReceivedPacketTracker {
 
 impl ReceivedPacketTracker {
     fn observe(&mut self, packet_number: u64) {
+        // In-order fast path: extending (or re-observing) the newest range
+        // avoids the per-packet sort + merged-Vec rebuild below, which is the
+        // common case on a healthy link.
+        if let Some(first) = self.ranges.first_mut() {
+            if packet_number == first.largest.saturating_add(1) {
+                first.largest = packet_number;
+                return;
+            }
+            if packet_number >= first.smallest && packet_number <= first.largest {
+                return;
+            }
+        }
         self.ranges.push(AckRange {
             largest: packet_number,
             smallest: packet_number,

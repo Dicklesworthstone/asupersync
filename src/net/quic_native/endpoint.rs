@@ -191,6 +191,9 @@ pub struct QuicUdpEndpoint {
     buffer_report: UdpBufferTuneReport,
     endpoint_id: u64,
     metrics: Arc<EndpointMetrics>,
+    /// Reusable receive scratch buffers, so batch receives do not pay a
+    /// `max_packet_size` allocation + zero fill per batch.
+    recv_payload_pool: Vec<Vec<u8>>,
 }
 
 /// Endpoint metrics for observability.
@@ -330,6 +333,7 @@ impl QuicUdpEndpoint {
             buffer_report,
             endpoint_id,
             metrics: Arc::new(EndpointMetrics::default()),
+            recv_payload_pool: Vec::new(),
         })
     }
 
@@ -385,7 +389,11 @@ impl QuicUdpEndpoint {
 
         let batch = match self
             .socket
-            .recv_batch_from(effective_max, self.config.max_packet_size)
+            .recv_batch_from_reusing(
+                effective_max,
+                self.config.max_packet_size,
+                &mut self.recv_payload_pool,
+            )
             .await
         {
             Ok(batch) => batch,
@@ -463,44 +471,49 @@ impl QuicUdpEndpoint {
                 .store(snapshot.drops, Ordering::Relaxed);
         }
 
-        let batch_duration = batch_start.elapsed();
-        let endpoint_id = self.endpoint_id.to_string();
-        let local_addr = self.local_addr.to_string();
-        let requested_max = max_packets.to_string();
-        let effective_max = effective_max.to_string();
-        let packet_count = packet_count.to_string();
-        let byte_count = batch.report.bytes_processed.to_string();
-        let duration_micros = batch_duration.as_micros().to_string();
-        let full_batch = received_full_batch.to_string();
-        let truncated_packets = truncated_packets.to_string();
-        let recv_requested = format!("{:?}", self.buffer_report.requested_recv_buffer_bytes);
-        let recv_applied = format!("{:?}", self.buffer_report.applied_recv_buffer_bytes);
-        let kernel_rx_queue = kernel_snapshot
-            .map(|snapshot| snapshot.rx_queue_bytes.to_string())
-            .unwrap_or_else(|| "unavailable".to_string());
-        let kernel_drops = kernel_snapshot
-            .map(|snapshot| snapshot.drops.to_string())
-            .unwrap_or_else(|| "unavailable".to_string());
-        let error = batch.report.error.as_deref().unwrap_or("none");
-        cx.trace_with_fields(
-            "quic_udp_endpoint.receive_batch",
-            &[
-                ("endpoint_id", endpoint_id.as_str()),
-                ("local_addr", local_addr.as_str()),
-                ("requested_max", requested_max.as_str()),
-                ("effective_max", effective_max.as_str()),
-                ("packets", packet_count.as_str()),
-                ("bytes", byte_count.as_str()),
-                ("duration_micros", duration_micros.as_str()),
-                ("full_batch", full_batch.as_str()),
-                ("truncated_packets", truncated_packets.as_str()),
-                ("recv_requested", recv_requested.as_str()),
-                ("recv_applied", recv_applied.as_str()),
-                ("kernel_rx_queue_bytes", kernel_rx_queue.as_str()),
-                ("kernel_drops", kernel_drops.as_str()),
-                ("error", error),
-            ],
-        );
+        // Gate the field formatting: receive_batch runs once per socket batch
+        // on the hot receive path, so the ~15 string allocations below must
+        // not happen when tracing is off.
+        if cx.trace_buffer().is_some() {
+            let batch_duration = batch_start.elapsed();
+            let endpoint_id = self.endpoint_id.to_string();
+            let local_addr = self.local_addr.to_string();
+            let requested_max = max_packets.to_string();
+            let effective_max = effective_max.to_string();
+            let packet_count = packet_count.to_string();
+            let byte_count = batch.report.bytes_processed.to_string();
+            let duration_micros = batch_duration.as_micros().to_string();
+            let full_batch = received_full_batch.to_string();
+            let truncated_packets = truncated_packets.to_string();
+            let recv_requested = format!("{:?}", self.buffer_report.requested_recv_buffer_bytes);
+            let recv_applied = format!("{:?}", self.buffer_report.applied_recv_buffer_bytes);
+            let kernel_rx_queue = kernel_snapshot
+                .map(|snapshot| snapshot.rx_queue_bytes.to_string())
+                .unwrap_or_else(|| "unavailable".to_string());
+            let kernel_drops = kernel_snapshot
+                .map(|snapshot| snapshot.drops.to_string())
+                .unwrap_or_else(|| "unavailable".to_string());
+            let error = batch.report.error.as_deref().unwrap_or("none");
+            cx.trace_with_fields(
+                "quic_udp_endpoint.receive_batch",
+                &[
+                    ("endpoint_id", endpoint_id.as_str()),
+                    ("local_addr", local_addr.as_str()),
+                    ("requested_max", requested_max.as_str()),
+                    ("effective_max", effective_max.as_str()),
+                    ("packets", packet_count.as_str()),
+                    ("bytes", byte_count.as_str()),
+                    ("duration_micros", duration_micros.as_str()),
+                    ("full_batch", full_batch.as_str()),
+                    ("truncated_packets", truncated_packets.as_str()),
+                    ("recv_requested", recv_requested.as_str()),
+                    ("recv_applied", recv_applied.as_str()),
+                    ("kernel_rx_queue_bytes", kernel_rx_queue.as_str()),
+                    ("kernel_drops", kernel_drops.as_str()),
+                    ("error", error),
+                ],
+            );
+        }
 
         Ok(packets)
     }

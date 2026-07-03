@@ -917,9 +917,9 @@ impl QuicFrame {
 }
 
 fn copy_to_bytes_from_buf<B: Buf>(buf: &mut B, len: usize) -> Bytes {
-    let mut bytes = vec![0; len];
-    buf.copy_to_slice(&mut bytes);
-    Bytes::from(bytes)
+    // Zero-copy when the underlying `Buf` is backed by shared storage
+    // (e.g. `BytesCursor`); copies otherwise.
+    buf.copy_to_bytes(len)
 }
 
 /// Extensions for VarInt to work with Buf/BufMut
