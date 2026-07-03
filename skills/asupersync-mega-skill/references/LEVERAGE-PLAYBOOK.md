@@ -107,7 +107,9 @@ Use:
 
 Important guidance:
 
-- `Cx::for_request()` is a convenience seam, not the center of a production architecture.
+- Production `Cx` values should come from runtime/request/call boundaries.
+  `Cx::for_request()` belongs in test/internal harnesses, not as the center of a
+  production architecture.
 - Do not pass full-capability `Cx` through every handler if most handlers only need trace/time/spawn.
 - Do not rebuild ambient registries, global service locators, or hidden runtime handles.
 

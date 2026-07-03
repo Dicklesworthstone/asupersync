@@ -26,8 +26,15 @@ Important limitation:
 
 Native messaging surfaces exist, but some areas remain partial.
 
+Good fits to inspect first:
+
+- in-process pub/sub,
+- request/reply,
+- bounded backpressure and lifecycle tests.
+
 Be conservative with:
 
+- durable fabric/control-plane claims unless current source and tests prove them,
 - Kafka advanced consumers,
 - Redis cluster failover,
 - NATS JetStream.

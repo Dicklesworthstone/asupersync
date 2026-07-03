@@ -115,9 +115,15 @@ RuntimeBuilder::low_latency()      // Request/response APIs, latency-sensitive
 RuntimeBuilder::high_throughput()  // Queue-heavy, fan-out, high concurrency
 ```
 
-Key knobs: `blocking_threads(min, max)`, `poll_budget(n)`, `cancel_lane_max_streak(n)`, `enable_adaptive_cancel_streak(bool)`, `enable_governor(bool)`, `governor_interval(n)`, `root_region_limits(...)`, `deadline_monitoring(...)`, `logical_clock_mode(...)`, `cancel_attribution_config(...)`, `obligation_leak_response(...)`, `observability(...)`, `metrics(...)`.
+Key knobs: `blocking_threads(min, max)`, `poll_budget(n)`, `cancel_lane_max_streak(n)`, `enable_adaptive_cancel_streak(bool)`, `enable_governor(bool)`, `governor_interval(n)`, `root_region_limits(...)`, `deadline_monitoring(...)`, `logical_clock_mode(...)`, `cancel_attribution_config(...)`, `obligation_leak_response(...)`, `enable_time()`, `observability(...)`, `metrics(...)`.
 
-Configuration layering: defaults < TOML (`from_toml()`) < env (`with_env_overrides()`) < programmatic.
+Configuration layering: defaults < TOML (`from_toml()` / `from_toml_str()` with
+the `config-file` feature) < env (`with_env_overrides()`) < programmatic.
+
+Runtime CPU work added `runtime-metrics`, `runtime::metrics::snapshot()`, a
+scheduler CPU/churn benchmark, and a validation script for idle busy-spin,
+idle-CPU, and timer-thread churn regressions. Treat measured bench results as
+the authority; the late-June spin-over-yield hypothesis was bench-refuted.
 
 ## Panic Containment
 

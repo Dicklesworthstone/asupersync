@@ -122,10 +122,13 @@ permit.send(msg);
 
 | Error | Cause |
 |-------|-------|
-| `SendError::Closed` | All receivers dropped |
-| `SendError::Full` | Bounded channel at capacity (try_send) |
-| `RecvError::Closed` | All senders dropped |
-| `RecvError::Lagged(n)` | Broadcast receiver fell behind by n messages |
+| `SendError::Disconnected(value)` | All receivers dropped |
+| `SendError::Cancelled(value)` | Send operation cancelled |
+| `SendError::Full(value)` | Bounded channel at capacity (try_send) |
+| `RecvError::Disconnected` | All senders dropped |
+| `RecvError::Cancelled` | Receive operation cancelled |
+| `RecvError::Empty` | No item available (try_recv) |
+| `broadcast::RecvError::Lagged(n)` | Broadcast receiver fell behind by n messages |
 
 ## Outcome Handling
 

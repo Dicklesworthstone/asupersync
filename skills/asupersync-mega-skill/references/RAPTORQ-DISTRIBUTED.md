@@ -4,7 +4,7 @@
 
 Source: `src/raptorq/`
 
-RFC 6330 systematic RaptorQ codes: any K-of-N encoded symbols suffice to recover original K source symbols. Underpins distributed snapshot distribution.
+RFC 6330 systematic RaptorQ codes: any K-of-N encoded symbols suffice to recover original K source symbols. In current Asupersync, treat this as a proof-carrying, fail-closed subsystem, not just an encoder/decoder API.
 
 | Module | Purpose |
 |--------|---------|
@@ -48,6 +48,22 @@ NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
 ```
 
 Outputs: `summary.json`, `scenarios.ndjson`, `validation_stages.ndjson`.
+
+### Authentication Posture
+
+RaptorQ transport must make the trust boundary explicit:
+
+- Direct native QUIC/TLS data planes can rely on verified QUIC AEAD for symbols
+  that stay inside the verified 1-RTT channel.
+- Non-direct, non-QUIC, or cross-trust symbol paths must use explicit
+  per-symbol authentication context.
+- Secure defaults should fail closed when authentication context is missing or
+  mismatched. Do not "opt out" except for a deliberately trusted transport path.
+
+Useful anchors: `src/net/atp/transport_rq/mod.rs`,
+`tests/atp_rq_symbol_auth_e2e_contract.rs`, and
+`tests/atp_rq_decoding_secure_default.rs`-style secure-default tests when
+present in the current tree.
 
 ## Distributed Primitives
 
@@ -104,6 +120,9 @@ Region state encoded via RaptorQ, symbols assigned via consistent hashing, recov
 Source: `src/security/`
 
 Per-symbol authentication tags prevent Byzantine symbol injection. Integrates with RaptorQ pipeline.
+
+Do not describe symbol authentication as optional polish. It is part of the
+commit-safety story for untrusted symbol planes.
 
 ## Testing Distributed Logic
 

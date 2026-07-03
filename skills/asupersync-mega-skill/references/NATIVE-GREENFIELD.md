@@ -15,17 +15,30 @@ This is the preferred path when you control the architecture.
 Pattern:
 
 ```rust
+use asupersync::{Cx, Error};
 use asupersync::runtime::RuntimeBuilder;
 
-fn main() -> Result<(), asupersync::Error> {
-    let rt = RuntimeBuilder::current_thread().build()?;
-    rt.block_on(async {
-        // prefer runtime-managed contexts in production,
-        // use Cx::for_request() only as a convenience seam
-    });
+async fn run(cx: &Cx) -> Result<(), Error> {
+    cx.checkpoint()?;
+    Ok(())
+}
+
+fn main() -> Result<(), Error> {
+    let runtime = RuntimeBuilder::current_thread().build()?;
+    let result = runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task Cx");
+        run(&cx).await
+    }));
+    result?;
     Ok(())
 }
 ```
+
+Production `Cx` values come from runtime/request/service boundaries. Keep
+`Cx::for_request()` / `Cx::for_testing()` in test-internals or local harnesses,
+not in production bootstrap examples. `RuntimeHandle::spawn` is the compact
+orientation path; use `try_spawn` / `try_spawn_with_cx` when admission failure
+must be handled explicitly.
 
 Useful runtime builder levers:
 
@@ -63,14 +76,17 @@ Relevant repo patterns:
 
 Prefer:
 
-- `Scope::spawn`
-- child regions with tighter budgets
+- `Cx::spawn` for current-region child work
+- `Cx::spawn_in` for targeting an existing scope's region
+- `Scope::region(...)` for explicit child-region boundaries and tighter budgets
 - explicit race/join semantics that preserve loser draining where needed
 - native channel and sync primitives
 
 Be careful with:
 
 - proc macros beyond `scope!`
+- `Scope::spawn_registered`, which is a lower-level boot/test path for callers
+  already holding `&mut RuntimeState`
 - low-level `Cx::race*` variants that may drop losers instead of proving they drained
 
 If loser drain matters, use the manual scope/task APIs that preserve the stronger semantics.

@@ -78,7 +78,12 @@ At minimum, care about:
 - cancellation protocol,
 - deterministic replay where relevant.
 
-The README already demonstrates `quiescence_oracle()` and `obligation_leak_oracle()`. The broader lab/oracle suite also tracks loser-drain and other invariants. Use those as regression guards, not just informational reports.
+Use report-based oracle checks. For lab runs, inspect `LabRunReport`:
+`report.lab_test_passed()`, `report.oracle_report.all_passed()`, and
+`report.oracle_report.entry("quiescence")` /
+`entry("obligation_leak")` when a specific invariant matters. The broader
+lab/oracle suite also tracks loser-drain and cancellation-protocol invariants.
+Use those as regression guards, not just informational reports.
 
 If the migrated slice is supposed to be strict, make the test prove it instead
 of trusting review intuition.

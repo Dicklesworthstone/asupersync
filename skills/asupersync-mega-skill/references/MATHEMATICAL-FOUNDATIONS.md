@@ -10,7 +10,7 @@ Asupersync uses mathematically rigorous machinery where it buys real correctness
 | **Concurrency** | Near-semiring: `join (x)` and `race (+)` with algebraic laws | Lawful rewrites, DAG optimization |
 | **Budgets** | Tropical semiring: `(R u {inf}, min, +)` | Critical path computation, budget propagation |
 | **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
-| **Traces** | Mazurkiewicz equivalence (partial orders) | Optimal DPOR, stable replay |
+| **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided coverage, stable replay |
 | **Cancellation** | Two-player game with budgets | Completeness: sufficient budgets guarantee termination |
 | **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption without fairness blind spots |
 | **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that drain reaches quiescence |

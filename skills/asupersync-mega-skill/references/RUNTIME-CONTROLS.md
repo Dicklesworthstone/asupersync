@@ -24,6 +24,7 @@ Do not start from `high_throughput()` just because it sounds bigger. Tail behavi
 | Improve shutdown/cancel-heavy behavior | `cancel_lane_max_streak(...)`, `enable_adaptive_cancel_streak(...)`, `enable_governor(...)`, `governor_interval(...)` | Worth using when cancellations are frequent or cleanup pressure is high. |
 | Bound root-level fan-out | `root_region_limits(...)` | Use for admission control on the app root; do not confuse this with per-handler concurrency limits. |
 | Attach logs and metrics | `observability(...)`, `metrics(...)` | Treat these as first-class runtime wiring, not an afterthought. |
+| Install a wall-clock timer driver explicitly | `enable_time()` | Discoverable migration aid; `build()` already installs the default driver, but this is useful when fixing no-driver sleep fallbacks. |
 | Detect deadline trouble early | `deadline_monitoring(...)` | Especially valuable for APIs, pipelines, and long-running workflows. |
 | Preserve causal context in traces | `logical_clock_mode(...)` | Useful when work crosses regions, nodes, or replay/debug boundaries. |
 | Keep cancel provenance bounded | `cancel_attribution_config(...)` | Important in deep call graphs or high fan-out cancellation trees. |
@@ -122,7 +123,8 @@ Recommended pattern:
 
 Relevant APIs:
 
-- `RuntimeBuilder::from_toml(...)`
+- `RuntimeBuilder::from_toml(...)` / `from_toml_str(...)` with the
+  `config-file` feature
 - `RuntimeBuilder::with_env_overrides()`
 
 ## Tuning Rules

@@ -27,29 +27,33 @@ If the system has named workers, restart policy, or explicit startup/shutdown to
 
 ## Minimal Bootstrap
 
-Documented bootstrap pattern from `docs/integration.md`:
+Current bootstrap pattern from the README:
 
 ```rust,ignore
-use asupersync::{Cx, Outcome};
-use asupersync::proc_macros::scope;
+use asupersync::{Cx, Error};
 use asupersync::runtime::RuntimeBuilder;
 
-fn main() -> Result<(), asupersync::Error> {
-    let rt = RuntimeBuilder::current_thread().build()?;
+async fn run(cx: &Cx) -> Result<(), Error> {
+    cx.trace("worker running");
+    cx.checkpoint()?;
+    Ok(())
+}
 
-    rt.block_on(async {
-        let cx = Cx::for_request();
-        scope!(cx, {
-            cx.trace("worker running");
-            Outcome::ok(())
-        });
-    });
-
+fn main() -> Result<(), Error> {
+    let runtime = RuntimeBuilder::current_thread().build()?;
+    let result = runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task Cx");
+        run(&cx).await
+    }));
+    result?;
     Ok(())
 }
 ```
 
-Use this as an orientation example, not as a license to stop at request-scoped toy code.
+Use this as the production orientation example. Keep `Cx::for_request()` and
+`Cx::for_testing()` in test/internal harnesses. `RuntimeHandle::spawn` is the
+small teaching shape; use `try_spawn` / `try_spawn_with_cx` when bootstrap
+admission failure must be handled without panicking.
 
 ## Long-Lived Service Skeleton
 
@@ -115,7 +119,7 @@ At framework or handler boundaries, narrow `Cx` instead of passing full authorit
 ```rust,ignore
 async fn handler(ctx: &RequestContext<'_>) -> Response {
     let cx = ctx.cx_narrow::<RequestCaps>();
-    cx.checkpoint()?;
+    cx.checkpoint().ok();
     // handler logic with only the capabilities it actually needs
 }
 ```
@@ -125,21 +129,22 @@ This is the practical shape behind capability security in downstream apps.
 ## Owned Concurrency Pattern
 
 ```rust,ignore
-scope!(cx, {
-    let a = spawn!(async { worker_a(cx).await });
-    let b = spawn!(async { worker_b(cx).await });
-    let (ra, rb) = join!(a, b);
-    (ra, rb)
-});
+let mut a = cx.spawn(|task_cx| async move { worker_a(&task_cx).await })?;
+let mut b = cx.spawn(|task_cx| async move { worker_b(&task_cx).await })?;
+let ra = a.join(cx).await?;
+let rb = b.join(cx).await?;
 ```
 
-If macro caveats get in the way, fall back to explicit `Scope` APIs.
+`scope!` binds the current-region scope; it does not create a fresh child-region
+boundary. `Cx::spawn_in` targets an existing scope's region. Use
+`Scope::region(...)` when a new structural child region must close to
+quiescence before you proceed.
 
 ## Cancellation-Safe Send Pattern
 
 ```rust,ignore
 let permit = tx.reserve(cx).await?;
-permit.send(message);
+permit.send(message)?;
 ```
 
 Do not reserve and then await unrelated work while holding the permit unless

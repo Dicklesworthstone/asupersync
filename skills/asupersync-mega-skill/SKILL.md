@@ -11,31 +11,40 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 This skill is primarily for agents integrating Asupersync into other projects or extracting maximum architectural leverage from it in greenfield systems. It also covers repo-internal work when that is the actual task.
 
 For codebase orientation, types, module map, and workspace layout see [SOURCE-MAP.md](references/SOURCE-MAP.md).
-For repo-internal testing choices, use the compact agent router at
-[`../../TESTING_FOR_AGENTS.md`](../../TESTING_FOR_AGENTS.md) before drilling into
-`TESTING.md`.
 
 ## Quick Orient
 
 Minimal bootstrap:
 
 ```rust
+use asupersync::{Cx, Error};
 use asupersync::runtime::RuntimeBuilder;
 
-fn main() -> Result<(), asupersync::Error> {
-    let rt = RuntimeBuilder::current_thread().build()?;
-    rt.block_on(async {
-        let cx = asupersync::Cx::for_request();
-        asupersync::proc_macros::scope!(cx, {
-            cx.trace("running");
-            asupersync::Outcome::ok(())
-        });
-    });
+async fn main_task(cx: &Cx) -> Result<(), Error> {
+    cx.trace("running");
+    cx.checkpoint()?;
+    Ok(())
+}
+
+fn main() -> Result<(), Error> {
+    let runtime = RuntimeBuilder::current_thread().build()?;
+    let result = runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task Cx");
+        main_task(&cx).await
+    }));
+    result?;
     Ok(())
 }
 ```
 
-This is the smallest runnable seam, not the recommended production architecture. Do not build serious services around `Cx::for_request()` plus `block_on(...)` alone; prefer runtime-managed contexts, request/call regions at service boundaries, and graduate to `AppSpec` + supervision when the topology becomes long-lived.
+This is the current production teaching seam: `RuntimeBuilder` creates the
+runtime, `block_on` installs an ambient runtime context, runtime-spawned tasks
+run with a runtime-owned `Cx`, and app code receives `&Cx`. Do not teach
+`Cx::for_request()` as production bootstrap; it is test/internal-harness
+material. For services, prefer request/call regions at boundaries, then
+graduate to `AppSpec` + supervision when the topology is long-lived. For
+admission-sensitive bootstrap, use `try_spawn` / `try_spawn_with_cx` and handle
+`SpawnError` explicitly.
 
 Where to focus first:
 
@@ -76,10 +85,14 @@ Default rule:
 - Do **not** treat Asupersync as an executor swap.
 - Put `&Cx` first in async APIs you control.
 - Use `Scope` and child regions for owned work. Avoid detached background tasks.
+- Use `Cx::spawn` / `Cx::spawn_in` for ordinary region-owned task creation.
+  `Scope::spawn_registered` is a lower-level boot/test path for callers already
+  holding `&mut RuntimeState`.
 - Add `cx.checkpoint()` in loops, retry bodies, long handlers, and shutdown-sensitive code.
 - Prefer cancel-aware primitives and two-phase effects.
 - Use deterministic tests as part of normal development, not as optional polish.
-- Treat `Cx::for_testing()` as test-only. `Cx::for_request()` is a convenience seam, not your whole architecture.
+- Treat `Cx::for_testing()` and `Cx::for_request()` as test/internal harness
+  paths, not production architecture.
 - Keep Tokio and Tokio-only crates behind explicit adapter modules if you must keep them at all.
 
 ## Leverage, Not Just Migration
@@ -96,28 +109,20 @@ If the target system is doing real work, do not stop after "the code compiles on
 ## Canonical Spine
 
 - Bootstrap: `runtime::RuntimeBuilder`, `Runtime`, `RuntimeHandle`
-- App code: `Cx`, `Scope`
-- Tests: `test_utils::{run_test, run_test_with_cx}`, `LabRuntime`, `LabConfig`
+- App code: `Cx`, `Cx::spawn`, `Cx::spawn_in`, `Scope` child regions
+- Tests: `test_utils::{run_test, run_test_with_cx}`, `LabRuntime`, `LabConfig`,
+  `LabRunReport`
 - Service boundaries: `web::request_region::{RequestRegion, RequestContext}`, `grpc::CallContext::with_cx(...)`
 - Higher-level apps: `app::AppSpec`, `actor`, `gen_server`, `supervision`, `spork`
 
 Start with RuntimeBuilder + Cx + Scope. Graduate to AppSpec + supervision when you need restart policy, named workers, or explicit application topology.
 
-Macro guidance: `scope!` is useful. Manual APIs are still the safest authoritative path. Do not assume proc-macro surfaces are automatically the best default path for every task.
-
-Agent-native v2 entry points:
-
-- Public API navigation: `artifacts/api_surface_map_v1.json` once br-asupersync-agent-native-dx-zxqaqs.1 lands
-- Error remediation lookup: `docs/error_codes/registry.json` once br-asupersync-agent-native-dx-zxqaqs.2 lands
-- Testing router: [`../../TESTING_FOR_AGENTS.md`](../../TESTING_FOR_AGENTS.md)
-- Full testing contract: [`../../TESTING.md`](../../TESTING.md)
-- Mandatory repo rules: [`../../AGENTS.md`](../../AGENTS.md)
+Macro guidance: `scope!` binds the current-region scope; it does not create a
+fresh child-region boundary. `spawn!` needs runtime state. Manual APIs are still
+the safest authoritative path when semantics matter.
 
 ## Standard Workflow
 
-- For brownfield work, run the read-only planner first: `python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness`.
-- Use `python3 scripts/migration_readiness_planner.py --list`, `--dry-run`, and `--execute --output-root "${TMPDIR:-/tmp}/asupersync_migration_planner_e2e"` to inspect deterministic fixture scenarios before touching a target project.
-- Read `summary.final_verdict`, `proof_pack.proof_commands`, `semantic_map.recommendations`, and `operator_report.phase_plan` before choosing the first migration edit.
 - Inventory all `tokio::*`, `tokio-util`, `hyper`, `axum`, `tonic`, `reqwest`, `sqlx`, `quinn`, `h3`, `rdkafka`, and related dependencies.
 - Classify each dependency as: native replacement, compat holdout, or deliberate workaround.
 - Replace runtime bootstrap first.
@@ -133,70 +138,36 @@ Agent-native v2 entry points:
 
 | I need to... | Read (in order) |
 |---|---|
-| Plan a brownfield migration before edits | Run `scripts/migration_readiness_planner.py` → [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) → [TOKIO-MAPPING](references/TOKIO-MAPPING.md) |
 | Migrate a Tokio HTTP/gRPC service | [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) → [TOKIO-MAPPING](references/TOKIO-MAPPING.md) → [WEB-GRPC-HTTP](references/WEB-GRPC-HTTP.md) |
 | Build a new service from scratch | [NATIVE-GREENFIELD](references/NATIVE-GREENFIELD.md) → [GREENFIELD-PATTERNS](references/GREENFIELD-PATTERNS.md) |
 | Get more than parity and maximize Asupersync leverage | [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) → [BUDGET-OUTCOME-CAPABILITIES](references/BUDGET-OUTCOME-CAPABILITIES.md) → [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [TESTING-FORENSICS](references/TESTING-FORENSICS.md) |
 | Design a supervised long-lived service | [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) |
 | Choose the right channel/sync/combinator | [PRIMITIVES-AND-ORCHESTRATION-CHOOSER](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) |
-| Add deterministic tests inside this repo | [`../../TESTING_FOR_AGENTS.md`](../../TESTING_FOR_AGENTS.md) → [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
-| Add deterministic tests in a consuming project | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
+| Add deterministic tests | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
 | Debug a runtime error | [ERROR-TAXONOMY](references/ERROR-TAXONOMY.md) → [TROUBLESHOOTING](references/TROUBLESHOOTING.md) |
 | Tune runtime performance | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) → [SCHEDULER-INTERNALS](references/SCHEDULER-INTERNALS.md) |
 | See what to lead with vs use only when required | [STACK-SURFACES](references/STACK-SURFACES.md) → [TOKIO-REPLACEMENT-MATRIX](references/TOKIO-REPLACEMENT-MATRIX.md) |
 | Work inside the Asupersync repo | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) → [SOURCE-MAP](references/SOURCE-MAP.md) |
 
-### All References
+Other focused references live under `references/` for adoption lanes, compat
+bridges, anti-patterns, budgets/outcomes/capabilities, lock ordering,
+performance, supervision, networking, browser frameworks, distributed rigor,
+observability, and troubleshooting. Use [SOURCE-MAP.md](references/SOURCE-MAP.md)
+when you need the full codebase navigation map.
 
-**Integration and Migration**
-
-- Leverage playbook: [LEVERAGE-PLAYBOOK.md](references/LEVERAGE-PLAYBOOK.md)
-- Budgets, outcomes, capabilities: [BUDGET-OUTCOME-CAPABILITIES.md](references/BUDGET-OUTCOME-CAPABILITIES.md)
-- Native greenfield: [NATIVE-GREENFIELD.md](references/NATIVE-GREENFIELD.md)
-- Greenfield patterns: [GREENFIELD-PATTERNS.md](references/GREENFIELD-PATTERNS.md)
-- Brownfield migration: [BROWNFIELD-MIGRATION.md](references/BROWNFIELD-MIGRATION.md)
-- Tokio mapping: [TOKIO-MAPPING.md](references/TOKIO-MAPPING.md)
-- Tokio replacement matrix: [TOKIO-REPLACEMENT-MATRIX.md](references/TOKIO-REPLACEMENT-MATRIX.md)
-- Compat boundary rules: [COMPAT-BOUNDARY.md](references/COMPAT-BOUNDARY.md)
-- Compat bridge recipes: [COMPAT-BRIDGE.md](references/COMPAT-BRIDGE.md)
-- Adoption lanes: [ADOPTION-LANES.md](references/ADOPTION-LANES.md)
-- Anti-patterns: [ANTI-PATTERNS.md](references/ANTI-PATTERNS.md)
-
-**Architecture and Primitives**
-
-- Primitive and orchestration chooser: [PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md)
-- Channel and sync internals: [CHANNELS-SYNC-INTERNALS.md](references/CHANNELS-SYNC-INTERNALS.md)
-- Performance and scheduling: [PERFORMANCE-AND-SCHEDULING.md](references/PERFORMANCE-AND-SCHEDULING.md)
-- Scheduler internals: [SCHEDULER-INTERNALS.md](references/SCHEDULER-INTERNALS.md)
-- Lock ordering: [LOCK-ORDERING.md](references/LOCK-ORDERING.md)
-- Advanced features: [ADVANCED-FEATURES.md](references/ADVANCED-FEATURES.md)
-- Runtime controls and diagnostics: [RUNTIME-CONTROLS.md](references/RUNTIME-CONTROLS.md)
-- Supervision and OTP: [SUPERVISION-OTP.md](references/SUPERVISION-OTP.md)
-
-**Networking and Services**
-
-- Networking and protocol stack: [NETWORKING-PROTOCOL-STACK.md](references/NETWORKING-PROTOCOL-STACK.md)
-- Web and gRPC: [WEB-GRPC-HTTP.md](references/WEB-GRPC-HTTP.md)
-- Database, messaging, fs, process: [DB-MESSAGING-FS-PROCESS.md](references/DB-MESSAGING-FS-PROCESS.md)
-- Distributed execution: [DISTRIBUTED-AND-RIGOR.md](references/DISTRIBUTED-AND-RIGOR.md)
-- RaptorQ and distributed snapshots: [RAPTORQ-DISTRIBUTED.md](references/RAPTORQ-DISTRIBUTED.md)
-
-**Testing and Diagnostics**
-
-- Testing and forensics: [TESTING-FORENSICS.md](references/TESTING-FORENSICS.md)
-- Lab runtime, DPOR, traces: [LAB-TRACE-DPOR.md](references/LAB-TRACE-DPOR.md)
-- Mathematical foundations: [MATHEMATICAL-FOUNDATIONS.md](references/MATHEMATICAL-FOUNDATIONS.md)
-- Observability and forensics: [OBSERVABILITY-FORENSICS.md](references/OBSERVABILITY-FORENSICS.md)
-- Error taxonomy: [ERROR-TAXONOMY.md](references/ERROR-TAXONOMY.md)
-- Troubleshooting: [TROUBLESHOOTING.md](references/TROUBLESHOOTING.md)
-
-**Codebase Navigation**
-
-- Source map, module map, types, workspace: [SOURCE-MAP.md](references/SOURCE-MAP.md)
-- Stack surface guidance: [STACK-SURFACES.md](references/STACK-SURFACES.md)
-- Browser / WASM: [BROWSER-WASM.md](references/BROWSER-WASM.md)
-- Browser / React / Next: [BROWSER-FRAMEWORKS.md](references/BROWSER-FRAMEWORKS.md)
-- Repo contributor guide: [REPO-CONTRIBUTOR-GUIDE.md](references/REPO-CONTRIBUTOR-GUIDE.md)
+Specialized refs: [ADOPTION-LANES](references/ADOPTION-LANES.md),
+[COMPAT-BOUNDARY](references/COMPAT-BOUNDARY.md),
+[COMPAT-BRIDGE](references/COMPAT-BRIDGE.md),
+[ANTI-PATTERNS](references/ANTI-PATTERNS.md),
+[CHANNELS-SYNC-INTERNALS](references/CHANNELS-SYNC-INTERNALS.md),
+[LOCK-ORDERING](references/LOCK-ORDERING.md),
+[NETWORKING-PROTOCOL-STACK](references/NETWORKING-PROTOCOL-STACK.md),
+[DB-MESSAGING-FS-PROCESS](references/DB-MESSAGING-FS-PROCESS.md),
+[DISTRIBUTED-AND-RIGOR](references/DISTRIBUTED-AND-RIGOR.md),
+[RAPTORQ-DISTRIBUTED](references/RAPTORQ-DISTRIBUTED.md),
+[MATHEMATICAL-FOUNDATIONS](references/MATHEMATICAL-FOUNDATIONS.md),
+[BROWSER-WASM](references/BROWSER-WASM.md), and
+[BROWSER-FRAMEWORKS](references/BROWSER-FRAMEWORKS.md).
 
 ## Validation
 
@@ -213,4 +184,14 @@ If working inside the Asupersync repo itself, see [REPO-CONTRIBUTOR-GUIDE.md](re
 
 - When forced to choose between "minimal code churn" and "native Asupersync semantics", choose the latter unless the task explicitly calls for a temporary boundary bridge.
 - **Forbidden crates** in core: `tokio`, `hyper`, `reqwest`, `axum`, `async-std`, `smol`.
-- Inside the Asupersync repo: follow AGENTS.md. Never delete files without permission. Branch is `main`, never `master`.
+- Inside the Asupersync repo: follow live `AGENTS.md`. Never delete files
+  without permission. Work only on `main`; do not introduce legacy-branch
+  references except the exact required mirror command, if still present there.
+- Inside the Asupersync repo, trust `AGENTS.md`, `README.md`,
+  `CHANGELOG.md`, `artifacts/api_surface_map_v1.json`, proof-lane manifests,
+  proof-status snapshots, and benchmark matrix artifacts over remembered API
+  shapes.
+- ATP benchmark claims require tuned-rsync, release-`atp`, crypto-symmetric,
+  rate-capped, SHA/tamper-checked evidence. A single current cell can support a
+  scoped regression claim; headline "beats rsync" claims need whole-matrix
+  evidence. Compile success or `sha_ok` alone is not a win.

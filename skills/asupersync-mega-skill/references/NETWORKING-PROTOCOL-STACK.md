@@ -115,7 +115,39 @@ Wraps `rustls` for TLS 1.2/1.3:
 
 Source: `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs`
 
-In progress. Native feature surfaces exposed via `quic`/`http3` features.
+Feature-gated native surfaces are active, but still requirement-driven. Do not
+promise generic QUIC/H3 interoperability without checking the exact protocol
+need, feature set, and tests.
+
+High-value current anchors:
+
+- native QUIC/TLS handshake and packet protection in `src/net/quic_native/`
+- fail-closed X.509, hostname, signature, replay, and anti-amplification tests
+- HTTP/3/QPACK bounds and H3 adapter work under `src/http/h3_native.rs`
+- ATP-over-QUIC/H3 paths under `src/net/atp/`
+
+Direct native QUIC/TLS paths rely on QUIC AEAD authentication once the verified
+1-RTT channel is established. Non-direct, non-QUIC, or cross-trust RaptorQ
+symbol paths still need explicit symbol-auth posture.
+
+## ATP Object Transfer
+
+Source: `src/net/atp/`, `docs/atp_architecture.md`,
+`docs/quic_atp_threat_model.md`, `scripts/atp_bench/`
+
+ATP is governed by matrix evidence, not isolated success. Claims against rsync
+must cite current matrix-cell runs with:
+
+- tuned rsync baseline,
+- release `atp`,
+- crypto-symmetric conditions,
+- SHA/tamper fail-closed checks,
+- rate-capped links,
+- timing plus byte evidence.
+
+Known active frontiers include reliable clean-source streaming, authenticated
+control-source frames, QUIC pacing/congestion, large-object clean wins,
+delta/resync planning, and no-claim boundaries for cells that remain blocked.
 
 ## Transport Layer
 
@@ -169,3 +201,5 @@ All networking layers respect:
 - Cancellation drains connections cleanly
 - Lab runtime substitutes virtual TCP for deterministic network testing
 - Two-phase semantics where applicable (send permits on channels)
+- Security posture is fail-closed: tampered bytes, wrong cert/hostname, replay,
+  and unauthenticated symbol paths must reject before commit.

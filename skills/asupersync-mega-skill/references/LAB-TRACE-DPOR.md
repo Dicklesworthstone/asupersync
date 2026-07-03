@@ -9,24 +9,16 @@ Deterministic runtime for testing. Same seed = same execution = reproducible bug
 ### Configuration
 
 ```rust
-let lab = LabRuntime::new(
-    LabConfig::new(42)               // seed for deterministic scheduling
-        .max_steps(100_000)          // prevent infinite loops
-        .panic_on_leak(true)         // obligation leaks fail fast
-        .futurelock_max_idle_steps(1000) // detect stuck tasks
-        .panic_on_futurelock(true)
-        .capture_trace(true),        // enable trace replay
-);
+use asupersync::lab::run_async_under_lab;
 
-lab.run(|cx| async {
-    cx.region(|scope| async {
-        scope.spawn(task_under_test);
-    }).await
+let (_value, report) = run_async_under_lab(42, |cx| async move {
+    task_under_test(cx).await
 });
 
-// Oracle checks
-assert!(lab.obligation_leak_oracle().is_ok());
-assert!(lab.quiescence_oracle().is_ok());
+assert!(report.quiescent);
+assert!(report.oracle_report.all_passed());
+assert!(report.oracle_report.entry("obligation_leak").is_some());
+assert!(report.oracle_report.entry("quiescence").is_some());
 ```
 
 ### Futurelock Detection
@@ -180,21 +172,18 @@ When `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set:
 ```rust
 #[test]
 fn test_cancel_safety() {
-    let lab = LabRuntime::new(
-        LabConfig::new(42)
-            .panic_on_leak(true)
-            .capture_trace(true),
-    );
-    lab.run(|cx| async { /* test logic */ });
-    assert!(lab.obligation_leak_oracle().is_ok());
-    assert!(lab.quiescence_oracle().is_ok());
+    let (_value, report) = run_async_under_lab(42, |cx| async move {
+        /* test logic */
+    });
+    assert!(report.lab_test_passed());
+    assert!(report.oracle_report.all_passed());
 }
 ```
 
 ### Using Test Helpers
 
 ```rust
-test_utils::run_test(async { /* simple async test */ });
+test_utils::run_test(|| async { /* simple async test */ });
 test_utils::run_test_with_cx(|cx| async move { /* test with Cx */ });
 ```
 

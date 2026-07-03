@@ -9,6 +9,11 @@ The repo's browser story is explicit and fail-closed:
 - direct runtime support is for the browser main thread,
 - SSR / server / edge / Node-only contexts are bridge-only or unsupported for direct browser runtime execution,
 - canonical browser profiles are selected by feature flags.
+- `asupersync-browser-core` is the canonical browser core; `asupersync-wasm`
+  may remain as excluded/non-canonical scaffold unless `Cargo.toml` says
+  otherwise.
+- `RuntimeBuilder::browser()` is a browser-lane API, not a blanket replacement
+  for native server runtime setup.
 
 Use this file as the lane chooser and posture summary.
 

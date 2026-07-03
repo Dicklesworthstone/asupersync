@@ -7,7 +7,7 @@ Use this as the first-pass replacement matrix.
 | Tokio surface | Native Asupersync surface | Guidance |
 | --- | --- | --- |
 | `#[tokio::main]` | `runtime::RuntimeBuilder` + `Runtime::block_on` | Replace bootstrap first. |
-| `tokio::spawn` | `Scope::spawn`, scoped task APIs, `RuntimeHandle` | Prefer region-owned work. |
+| `tokio::spawn` | `Cx::spawn`, `Cx::spawn_in`, `RuntimeHandle::{spawn,spawn_with_cx}` | Prefer region-owned work. Use `Scope::spawn_registered` only when you already hold `&mut RuntimeState`. |
 | `tokio::task::spawn_blocking` | Asupersync blocking pool / runtime blocking helpers | Keep blocking work explicit and bounded. |
 | `tokio::runtime::Handle` | `RuntimeHandle`, `Cx`, scoped spawn paths | Avoid ambient runtime discovery when possible. |
 
@@ -78,7 +78,9 @@ Compat gives you:
 
 ## Partial / Unsupported Areas To Remember
 
-- QUIC / HTTP3 work should be treated as requirement-driven and validated case by case.
+- QUIC / HTTP3 work is feature-gated and materially stronger than the old
+  "prototype" posture, but still requirement-driven. Validate exact protocol
+  needs and fail-closed security posture case by case.
 - SQLx compile-time `query!` macros are unsupported.
 - `rdkafka` `StreamConsumer` still needs case-specific validation.
 - Redis cluster failover still needs case-specific validation.

@@ -24,18 +24,21 @@ let (tx, mut rx) = mpsc::channel::<T>(capacity);
 
 // Send side (cancel-safe)
 let permit = tx.reserve(&cx).await?;  // wait for capacity
-permit.send(value);                    // cannot fail
+let sent = permit.send(value);         // Outcome<(), SendError<T>>
 
 // Receive side
 match rx.recv(&cx).await {
     Ok(value) => { /* got value */ }
-    Err(RecvError::Closed) => { /* all senders dropped */ }
+    Err(RecvError::Disconnected) => { /* all senders dropped */ }
+    Err(RecvError::Cancelled) => { /* receive was cancelled */ }
+    Err(RecvError::Empty) => { /* try_recv only */ }
 }
 ```
 
 - `SendWaiter` uses `Arc<AtomicBool>` for waker dedup
 - Bounded capacity with backpressure
 - `try_send()` for non-blocking attempts
+- `SendError` variants are `Disconnected(T)`, `Cancelled(T)`, and `Full(T)`
 
 ## Oneshot Channel
 
@@ -77,8 +80,9 @@ Last-value multicast. Always-current read.
 let (tx, rx) = watch::channel(initial_value);
 tx.send(new_value);
 
-rx.changed(&cx).await?;  // wait for change
-let val = rx.borrow_and_clone();
+rx.changed(&cx).await?;          // wait for change
+let snapshot = rx.borrow_and_clone(); // does not mark seen
+let current = rx.borrow_and_update_clone(); // clones and marks seen
 ```
 
 `WatchWaiter` uses `Arc<AtomicBool>` for waker dedup.

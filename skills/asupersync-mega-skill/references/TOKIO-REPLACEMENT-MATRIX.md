@@ -5,7 +5,7 @@
 | Tokio / Ecosystem Surface | Native Asupersync Surface | Recommendation | Notes |
 |---------------------------|---------------------------|---------|-------|
 | `tokio::runtime::Runtime` | `runtime::RuntimeBuilder` | Default | Use builder presets like `current_thread`, `high_throughput`, `low_latency` |
-| `tokio::spawn` | `Scope::spawn`, `scope!`, `spawn!` | Default | Region ownership is the real replacement |
+| `tokio::spawn` | `Cx::spawn`, `Cx::spawn_in`, `RuntimeHandle::{spawn,spawn_with_cx}` | Default | Region ownership is the real replacement; `Scope::spawn_registered` is for state-threaded boot/test internals |
 | `tokio::task::spawn_blocking` | `runtime::spawn_blocking`, blocking pool | Default | Keep `Cx` and budgets explicit |
 | `tokio::sync::mpsc` | `channel::mpsc` | Default | Two-phase reserve/send |
 | `tokio::sync::oneshot` | `channel::oneshot` | Default | Cancel-aware |

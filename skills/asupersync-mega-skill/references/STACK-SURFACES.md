@@ -16,11 +16,12 @@
 | Databases | `src/database/` | Good default when needed | Feature-gated, native wire protocols for Pg/MySQL |
 | Actors / GenServer / supervision / Spork | `src/actor.rs`, `src/gen_server.rs`, `src/supervision.rs` | Use when topology/state demands it | Good fit for stateful concurrency |
 | Observability | `src/observability/` | Turn on early | Much deeper than just tracing integration |
-| QUIC / HTTP3 | `src/net/quic_*`, `src/http/h3_native.rs` | Only if the requirement exists | Verify exact protocol needs; do not oversell |
-| Messaging | `src/messaging/` | Only when required; verify exact feature needs | Recommend with caution |
+| QUIC / HTTP3 | `src/net/quic_*`, `src/http/h3_native.rs` | Only if the requirement exists | Native fail-closed pieces exist; verify exact interoperability/protocol need |
+| ATP object transfer | `src/net/atp/`, `scripts/atp_bench/` | Only for object-transfer / benchmark lanes | Claims require matrix evidence against tuned rsync |
+| Messaging | `src/messaging/` | Only when required; verify exact feature needs | In-process pub/sub/request-reply surfaces are useful; durable/fabric compiler claims need source checks |
 | Remote / distributed | `src/remote.rs`, `src/distributed/` | Requirement-driven | Require extra source inspection |
-| Browser Edition | browser docs and wasm crates | Requirement-driven | Supported direct runtime only in explicit contexts |
-| RaptorQ / advanced math stack | `src/raptorq/` | Only if the requirement exists | Lead with it only when the target problem actually needs it |
+| Browser Edition | `asupersync-browser-core`, browser docs, wasm profiles | Requirement-driven | Supported direct runtime only in explicit browser contexts |
+| RaptorQ / advanced math stack | `src/raptorq/` | Only if the requirement exists | Proof-carrying and fail-closed; lead with it only when the target problem actually needs it |
 
 ## Web / Service / gRPC Detail
 
@@ -99,4 +100,4 @@ Default recommendation order:
 4. gRPC and database
 5. actors/spork
 6. browser or compat bridge
-7. QUIC/H3, messaging, remote/distributed, RaptorQ only when explicitly needed
+7. QUIC/H3, ATP, messaging, remote/distributed, Browser Edition, RaptorQ only when explicitly needed
