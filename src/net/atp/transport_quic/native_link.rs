@@ -1769,11 +1769,14 @@ impl NativeDataPlanePacer {
             // pipeline's between-burst work time deflates the effective rate
             // ~20% below the setpoint, and that slack is what keeps the
             // delivery-clocked controller's probe stable against shaped
-            // links. An absolute (deadline-credit) schedule was measured to
-            // push the ramp over the netem queue cliff, and the resulting
-            // retransmit churn cost far more than the slack (500M 9s → 42s,
-            // 50M/good 3.5s → 30s). Revisit only together with a cheaper
-            // loss-recovery path (coalesced retransmit framing).
+            // links. An absolute (deadline-credit) schedule pushes the ramp
+            // over the netem queue cliff and was measured unstable BOTH
+            // without retransmit coalescing (500M 9s → 42s, 50M/good 3.5s →
+            // 30s) and with it (500M 12.7-41.8s erratic, good 3.3/28.2) —
+            // per-PTO retransmit batches are too small for coalescing alone
+            // to make cliff recovery cheap at scale. Revisit together with
+            // larger drain-per-recovery batches or receiver-side gap
+            // shrinking.
             self.byte_pacer_next_send_at = Some(now.checked_add(interval).unwrap_or(now));
         }
         Ok(())
@@ -3497,7 +3500,13 @@ impl QuicLink {
             lost_bytes = lost_bytes.saturating_add(frame.len);
         }
         self.note_source_stream_retransmit_bytes(lost_bytes);
-        for frame in frames {
+        // Requeue in REVERSE: each requeue pushes to the queue front, so
+        // iterating the dedup-sorted (ascending) list in reverse leaves the
+        // pending queue in ascending offset order — which is what lets the
+        // stream's pop-time retransmit coalescing merge contiguous ranges
+        // into full-size wire frames (and helps receiver reassembly
+        // locality).
+        for frame in frames.iter().rev() {
             self.conn
                 .requeue_sent_stream_frame(cx, frame.stream, frame.offset)?;
         }

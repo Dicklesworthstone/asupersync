@@ -1,6 +1,6 @@
 //! Native QUIC stream table + flow-control model.
 
-use crate::bytes::Bytes;
+use crate::bytes::{Bytes, BytesMut};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -547,6 +547,59 @@ impl QuicStream {
             });
             frame.data = frame.data.slice(..max_data_len);
             frame.fin = false;
+        } else if frame.retransmit && !frame.fin {
+            // Coalesce contiguous queued RETRANSMIT frames into one wire
+            // frame. Loss requeues the ORIGINAL emission's frame boundaries,
+            // and recovery bandwidth collapses when each retransmit packet
+            // carries hundreds of tiny frames (each paying its own frame
+            // header) — one loss event then stalls the stream for seconds.
+            // The bounded copy below (at most one wire frame) is far
+            // cheaper. First-emission frames are already written at
+            // near-wire size and are left untouched.
+            let mut merged: Option<BytesMut> = None;
+            let mut merged_fin = false;
+            loop {
+                let merged_len = merged.as_ref().map_or(frame.data.len(), BytesMut::len);
+                let room = max_data_len.saturating_sub(merged_len);
+                if room == 0 || merged_fin {
+                    break;
+                }
+                let contiguous_end = frame
+                    .offset
+                    .saturating_add(u64::try_from(merged_len).unwrap_or(u64::MAX));
+                let Some(next) = self.pending_send_frames.front() else {
+                    break;
+                };
+                if !next.retransmit || next.offset != contiguous_end {
+                    break;
+                }
+                let next = self
+                    .pending_send_frames
+                    .pop_front()
+                    .expect("front checked above");
+                let buf = merged.get_or_insert_with(|| {
+                    let mut buf = BytesMut::with_capacity(max_data_len);
+                    buf.extend_from_slice(&frame.data);
+                    buf
+                });
+                if next.data.len() <= room {
+                    buf.extend_from_slice(&next.data);
+                    merged_fin = next.fin;
+                } else {
+                    buf.extend_from_slice(&next.data.slice(..room));
+                    self.pending_send_frames.push_front(QueuedStreamFrame {
+                        offset: next.offset.saturating_add(room as u64),
+                        data: next.data.slice(room..),
+                        fin: next.fin,
+                        retransmit: true,
+                    });
+                    break;
+                }
+            }
+            if let Some(buf) = merged {
+                frame.data = buf.freeze();
+                frame.fin = merged_fin;
+            }
         }
         self.sent_stream_frames.insert(frame.offset, frame.clone());
         Some(StreamFramePayload {
@@ -2355,6 +2408,57 @@ mod tests {
             let poll = AsyncRead::poll_read(Pin::new(&mut io), &mut cx, &mut read_buf);
             assert!(matches!(poll, Poll::Ready(Err(_))));
         }
+    }
+
+    #[test]
+    fn pop_pending_stream_frame_coalesces_contiguous_retransmits() {
+        let mut table = StreamTable::new_with_connection_limits(
+            StreamRole::Client,
+            1,
+            0,
+            65536,
+            65536,
+            65536,
+            65536,
+        );
+        let stream = table.open_local_bidi().expect("open");
+        table
+            .write_stream_bytes(stream, Bytes::from(vec![0xAB; 4096]), false)
+            .expect("queue stream bytes");
+
+        // First emission at tiny wire size: 8 frames of 512 bytes.
+        let mut emitted = Vec::new();
+        while let Some(frame) = table.pop_next_stream_frame(512) {
+            emitted.push((frame.offset, frame.data.len()));
+        }
+        assert_eq!(emitted.len(), 8, "eight tiny first-emission frames");
+
+        // Loss: requeue all eight in REVERSE (each requeue pushes to the
+        // queue front), mirroring the transport's retransmit path, so the
+        // pending queue ends up in ascending offset order.
+        for (offset, _) in emitted.iter().rev() {
+            table
+                .requeue_sent_stream_frame(stream, *offset)
+                .expect("requeue");
+        }
+
+        // Retransmission at full wire size coalesces the contiguous tiny
+        // frames into one frame instead of eight.
+        let frame = table
+            .pop_next_stream_frame(8192)
+            .expect("coalesced retransmit frame");
+        assert!(frame.retransmit);
+        assert_eq!(frame.offset, 0);
+        assert_eq!(
+            frame.data.len(),
+            4096,
+            "eight contiguous 512-byte retransmits must merge into one frame"
+        );
+        assert_eq!(&frame.data[..], vec![0xAB; 4096].as_slice());
+        assert!(
+            table.pop_next_stream_frame(8192).is_none(),
+            "no residual retransmit fragments"
+        );
     }
 
     #[test]
