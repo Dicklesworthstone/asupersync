@@ -1732,15 +1732,38 @@ impl RqAdaptiveSendState {
                 .ceil()
                 .clamp(0.0, sent_payload_bytes as f64) as u64
         });
-        let progress_congestion_loss = progress_delivery_bps
-            .and_then(|delivery_bps| {
-                loss_target_progress_congestion_loss(config, delivery_bps, offered_bps)
-            })
-            .unwrap_or(0.0);
+        // Rank-stall reads as congestion ONLY when arrivals corroborate it.
+        // The stall-ratio congestion proxy exists for kernel-overflow drops,
+        // but overflow also depresses the ARRIVAL count — whereas a
+        // decode-side stall (e.g. one rank-deficient block) leaves arrivals
+        // healthy. Without this gate a single stalled block inflated the
+        // pacing loss to 0.90 and halved the path rate every round while
+        // 90%+ of symbols were arriving (MATRIX-8 re-entry via the
+        // progress-stall term; MATRIX-207). Decode pressure still feeds
+        // repair/FEC sizing below, never the pacer.
+        let arrival_ratio = received_symbols as f64 / sent_symbols.max(1) as f64;
+        let arrivals_corroborate_congestion =
+            arrival_ratio < 1.0 - aimd_loss_decrease_threshold(config);
+        let progress_congestion_loss = if arrivals_corroborate_congestion {
+            progress_delivery_bps
+                .and_then(|delivery_bps| {
+                    loss_target_progress_congestion_loss(config, delivery_bps, offered_bps)
+                })
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let pacing_loss_sample = estimator_wire_loss.max(progress_congestion_loss);
-        let observed_delivery_bps = progress_delivery_bps
-            .unwrap_or(receiver_delivery_bps)
-            .max(1.0);
+        // Same evidence rule for the delivery estimate the AIMD backs off
+        // toward: with healthy arrivals, the arrival-clocked receiver rate is
+        // the path's true delivery; the rank-progress rate only substitutes
+        // when arrivals themselves say the wire is failing.
+        let observed_delivery_bps = if arrivals_corroborate_congestion {
+            progress_delivery_bps.unwrap_or(receiver_delivery_bps)
+        } else {
+            receiver_delivery_bps
+        }
+        .max(1.0);
         let delivered_payload_bytes = progress_delivery_bytes
             .unwrap_or(useful_bytes)
             .min(sent_payload_bytes);
@@ -1842,8 +1865,13 @@ impl RqAdaptiveSendState {
                 sent_payload_bytes,
                 cwnd_bytes,
             );
-            let mild_wire_loss = pacing_loss_sample <= RQ_MILD_LOSS_PACING_MAX_LOSS
-                && self.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS;
+            // "Mild" is relative to the configured regime: on a loss-target
+            // link the expected erasure rate (plus the AIMD margin) is the
+            // ambient condition, not congestion (MATRIX-207).
+            let mild_loss_ceiling =
+                aimd_loss_decrease_threshold(config).max(RQ_MILD_LOSS_PACING_MAX_LOSS);
+            let mild_wire_loss = pacing_loss_sample <= mild_loss_ceiling
+                && self.pacing_loss_ema <= mild_loss_ceiling;
             self.apply_loss_recommendations(&loss_result.recommendations, mild_wire_loss);
             self.controller.observe_path_signals(
                 sent_symbols,
@@ -1979,11 +2007,18 @@ impl RqAdaptiveSendState {
     ) {
         for recommendation in recommendations {
             match recommendation {
-                LossRecommendation::ReduceCongestionWindow { factor } => {
+                // Wire-slowing recommendations only apply when loss EXCEEDS the
+                // regime's expectation (`mild_wire_loss` is threshold-aware):
+                // on a configured-lossy link the erasure loss is the ambient
+                // condition FEC already pays for, not congestion evidence.
+                // Un-gated, sustained 9% link loss halved the pacing cap to
+                // the floor every round and turned a 66s repair round into
+                // 209s (500M/broken, MATRIX-207).
+                LossRecommendation::ReduceCongestionWindow { factor } if !mild_wire_loss => {
                     let cap = (self.bw_ema_bps * (*factor).clamp(0.1, 1.0)).ceil() as u64;
                     self.lower_pacing_cap(cap);
                 }
-                LossRecommendation::EnablePacing { rate } => {
+                LossRecommendation::EnablePacing { rate } if !mild_wire_loss => {
                     let ema_cap = if self.bw_ema_bps > 0.0 {
                         (self.bw_ema_bps * 0.75).ceil() as u64
                     } else {
@@ -1991,6 +2026,8 @@ impl RqAdaptiveSendState {
                     };
                     self.lower_pacing_cap((*rate).max(ema_cap));
                 }
+                LossRecommendation::ReduceCongestionWindow { .. }
+                | LossRecommendation::EnablePacing { .. } => {}
                 LossRecommendation::EnableFec { rate } => {
                     self.loss_fec_floor = self.loss_fec_floor.max((*rate).clamp(0.0, 0.50));
                 }
@@ -2170,6 +2207,18 @@ fn fixed_block_k(config: &RqConfig) -> u32 {
     u32::try_from(k).unwrap_or(u32::MAX)
 }
 
+/// Per-block decode-failure target for the round-0 first flight.
+///
+/// Deliberately far looser than `RQ_SOURCE_FEC_FALLBACK_ALPHA` (1e-6): a
+/// round-0 block that misses decode is simply repaired by the feedback round
+/// at the (now sustained) path rate, so paying a ~4.75σ concentration margin
+/// up front is a pure byte tax. On the 500M/broken cell the 1e-6 target
+/// inflated round-0 to +25.3% repair overhead — 657 MB on a 10 mbit link is
+/// ≥526 s of wire time before any repair, which alone loses to rsync. At
+/// α=0.02, K=437 the margin drops to ~+16-18% and the expected ~2% of blocks
+/// that miss cost one cheap repair round (MATRIX-207).
+const RQ_ROUND0_TARGET_ALPHA: f64 = 0.02;
+
 fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
     if !round0_loss_target_repair_enabled(config) {
         return config.repair_overhead.max(1.0);
@@ -2178,7 +2227,7 @@ fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
     let overhead = adaptive::decode_repair_overhead_for_target(
         fixed_block_k(config),
         loss_bar,
-        RQ_SOURCE_FEC_FALLBACK_ALPHA,
+        RQ_ROUND0_TARGET_ALPHA,
         RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
     )
     .min(RQ_MAX_ROUND_REPAIR_OVERHEAD);
@@ -6062,6 +6111,20 @@ pub async fn send_path(
                     // loop again to fetch the Proof.
                     continue;
                 }
+                // Wire loss for pacing/AIMD comes from ARRIVALS when the
+                // receiver counted them: `round_symbols_observed` includes
+                // duplicates and rank-stalled symbols — everything that
+                // proved delivery. The receiver's `round_loss_fraction`
+                // folds in usefulness (post-completion excess reads as
+                // loss): on the 500M/broken cell it reported 0.59 while
+                // arrivals proved 0.092, halving the AIMD rate every round
+                // (MATRIX-207). Passing None here lets observe_need_more
+                // derive loss from the arrival count itself.
+                let pacing_round_loss_fraction = if need.round_symbols_observed.is_some() {
+                    None
+                } else {
+                    need.round_loss_fraction
+                };
                 adaptive.observe_need_more_with_progress(
                     &config,
                     &digests,
@@ -6070,7 +6133,7 @@ pub async fn send_path(
                     progress,
                     sent_this_round,
                     received_this_round,
-                    need.round_loss_fraction,
+                    pacing_round_loss_fraction,
                     round_delivery_sample_kind,
                     round_send_wall,
                     control_wait,
@@ -6119,6 +6182,18 @@ pub async fn send_path(
                     adaptive.pacing_loss_bar,
                     source_fec_fallback_active,
                 );
+                // A request list below the cap enumerates the ENTIRE residual
+                // (collect_source_requests truncates at the limit): the
+                // requested systematic symbols are exactly what the remaining
+                // blocks are missing, so the blanket per-block fallback spray
+                // would land almost entirely on already-complete blocks
+                // (99.4% of a 78MB spray round rejected on 500M/broken,
+                // MATRIX-207). Only spray when the list was truncated and the
+                // true residual is unknown.
+                let residual_fully_requested = !source_symbols.is_empty()
+                    && (config.max_source_retransmit_requests == 0
+                        || source_symbols.len() < config.max_source_retransmit_requests);
+                let spray_fallback = source_fec_fallback_active && !residual_fully_requested;
                 if source_symbols.is_empty() {
                     round_started = Instant::now();
                     round_symbols_start = symbols_sent;
@@ -6168,7 +6243,7 @@ pub async fn send_path(
                         &mut udp_send_acceleration,
                     )
                     .await?;
-                    if source_fec_fallback_active {
+                    if spray_fallback {
                         spray_round(
                             cx,
                             &mut control,
@@ -6194,7 +6269,7 @@ pub async fn send_path(
                     round_send_wall = round_started.elapsed();
                     round_delivery_sample_kind = delivery_sample_kind_for_need_more_response(
                         source_symbols.len(),
-                        source_fec_fallback_active,
+                        spray_fallback,
                     );
                 }
                 let emitted_this_response = symbols_sent.saturating_sub(round_symbols_start);
@@ -6206,7 +6281,7 @@ pub async fn send_path(
                     symbols_sent,
                     config.max_feedback_rounds,
                     round_tuning.repair_overhead,
-                    source_fec_fallback_active,
+                    spray_fallback,
                 );
             }
             other => {
@@ -6265,8 +6340,17 @@ fn repair_target_for_feedback_round(
 }
 
 fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Option<usize> {
-    if !round0_loss_target_repair_enabled(config)
-        && config.repair_overhead <= 1.0
+    // Loss-target cells: round-0 FEC carries the bulk of the transfer, so by
+    // the first feedback round most blocks have decoded and the residual is a
+    // FEW rank-deficient blocks. Sparse systematic requests pinpoint exactly
+    // those symbols; the blanket per-block fallback spray cannot (on the
+    // 500M/broken cell 99.4% of a 78MB spray round landed on already-complete
+    // blocks and was rejected, MATRIX-207). No round cap: the residual only
+    // shrinks, so requests stay the cheapest mechanism every round.
+    if round0_loss_target_repair_enabled(config) {
+        return Some(config.max_source_retransmit_requests);
+    }
+    if config.repair_overhead <= 1.0
         && config.source_retransmit_rounds > 0
         && feedback_round <= config.source_retransmit_rounds
     {
@@ -12901,6 +12985,10 @@ mod tests {
             state.aimd_rate_bps, RQ_BROKEN_LINK_ROUND0_PACING_BPS,
             "expected link loss should neither decrease nor increase the AIMD rate"
         );
+        assert_eq!(
+            state.loss_pacing_cap_bps, None,
+            "expected-regime loss must not lower the loss-detector pacing cap (MATRIX-207)"
+        );
     }
 
     #[test]
@@ -12979,7 +13067,7 @@ mod tests {
                 pending_decode_jobs: Some(0),
             },
             10_000,
-            10_000,
+            6_000,
             Some(0.0),
             RqDeliverySampleKind::InitialOrRepair,
             Duration::from_millis(800),
@@ -12989,15 +13077,70 @@ mod tests {
 
         assert!(
             state.last_round_loss_fraction > aimd_loss_decrease_threshold(&config),
-            "rank-progress stall must override underreported receiver arrival loss"
+            "arrival-corroborated rank stall must override underreported receiver loss"
         );
         assert_eq!(
             state.aimd_rate_bps, RQ_MIN_PACING_BPS,
-            "stalled rank progress should back off to the sender-side delivery floor"
+            "stalled rank progress with depressed arrivals should back off to the sender-side delivery floor"
         );
         assert!(
             state.pacing_loss_ema > RQ_MILD_LOSS_PACING_MAX_LOSS,
             "progress-derived congestion must feed the pacing/loss detector path"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_holds_rate_when_rank_stalls_but_arrivals_complete() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.aimd_rate_bps = RQ_COLD_START_PACING_BPS;
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "broken.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"broken-stall-healthy-arrivals"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more_with_progress(
+            &config,
+            &digests,
+            &pending,
+            total_bytes,
+            RqNeedMoreProgress {
+                pending_rank: Some(100),
+                pending_rank_columns: Some(43_700),
+                pending_rank_deficit: Some(43_600),
+                pending_decode_jobs: Some(0),
+            },
+            10_000,
+            10_000,
+            None,
+            RqDeliverySampleKind::InitialOrRepair,
+            Duration::from_millis(800),
+            Duration::from_millis(200),
+            total_bytes,
+        );
+
+        assert!(
+            state.last_round_loss_fraction <= aimd_loss_decrease_threshold(&config),
+            "a decode-side stall with complete arrivals is not congestion"
+        );
+        assert_eq!(
+            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
+            "healthy arrivals must veto the rank-stall congestion proxy: slowing the \
+             sender cannot un-stall a rank-deficient block (500M/broken collapse, MATRIX-207)"
+        );
+        assert!(
+            state.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS,
+            "an uncorroborated stall must not poison the pacing loss detector"
         );
     }
 
@@ -13801,6 +13944,34 @@ mod tests {
         assert_eq!(state.loss_pacing_cap_bps, Some(5_000_000));
         assert!(state.loss_fec_floor >= 0.10);
         assert!(state.regime_shift);
+    }
+
+    #[test]
+    fn rq_loss_recommendations_keep_wire_rate_under_expected_regime_loss() {
+        let config = RqConfig::default();
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.bw_ema_bps = 10_000_000.0;
+
+        state.apply_loss_recommendations(
+            &[
+                LossRecommendation::ReduceCongestionWindow { factor: 0.5 },
+                LossRecommendation::EnablePacing { rate: 1_000_000 },
+                LossRecommendation::EnableFec { rate: 0.10 },
+            ],
+            true,
+        );
+
+        assert_eq!(
+            state.loss_pacing_cap_bps, None,
+            "loss at or below the regime's expectation is the ambient erasure \
+             condition FEC pays for, not congestion — the pacing cap must not \
+             drop (500M/broken repair-round collapse, MATRIX-207)"
+        );
+        assert!(
+            state.loss_fec_floor >= 0.10,
+            "FEC sizing must stay available under expected loss"
+        );
+        assert!(!state.regime_shift);
     }
 
     #[test]
@@ -15623,7 +15794,19 @@ mod tests {
             ..RqConfig::default()
         };
 
-        assert_eq!(source_retransmit_request_limit(&config, 1), None);
+        // Loss-target cells keep sparse source requests available in EVERY
+        // feedback round: after the round-0 FEC bulk, the residual is a few
+        // rank-deficient blocks that only targeted systematic retransmits can
+        // repair efficiently (MATRIX-207). The FEC fallback stays latched for
+        // rounds whose request list saturates.
+        assert_eq!(
+            source_retransmit_request_limit(&config, 1),
+            Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
+        );
+        assert_eq!(
+            source_retransmit_request_limit(&config, DEFAULT_SOURCE_RETRANSMIT_ROUNDS + 5),
+            Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
+        );
         assert!(source_retransmit_needs_fec_fallback(&config, 1, 0, 0.0));
     }
 
@@ -16440,8 +16623,9 @@ mod tests {
         );
         assert!(
             adaptive::decode_fail_probability(fixed_block_k(&config), extra_fraction, loss_bar)
-                <= RQ_SOURCE_FEC_FALLBACK_ALPHA * 1.000_001,
-            "round-0 pre-spray must still hit the configured decode-failure target"
+                <= RQ_ROUND0_TARGET_ALPHA * 1.000_001,
+            "round-0 pre-spray must still hit the round-0 decode-failure target \
+             (α={RQ_ROUND0_TARGET_ALPHA}; feedback rounds carry the residual, MATRIX-207)"
         );
         assert!(
             initial_repair_target_per_block(437, tuning.repair_overhead) >= 20,
@@ -16545,10 +16729,17 @@ mod tests {
         let mut state = RqAdaptiveSendState::new(7, &config, 1);
         let tuning = state.round0_tuning(&config);
 
-        assert!(overhead > 1.20, "broken link should receive proactive FEC");
+        let loss_bar = round0_loss_target_loss_bar(&config);
         assert!(
-            overhead <= 1.0 + RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
-            "round-0 target loss must stay within bounded FEC envelope"
+            overhead > 1.0 + loss_bar,
+            "broken link must receive proactive FEC above the expected-loss floor: got {overhead}, floor {}",
+            1.0 + loss_bar
+        );
+        assert!(
+            overhead < 1.25,
+            "round-0 first flight must stay byte-efficient (α={RQ_ROUND0_TARGET_ALPHA} \
+             relaxation, MATRIX-207): the old 1e-6 per-block target inflated round-0 \
+             to +25.3% and lost the 500M/broken cell on wire time alone; got {overhead}"
         );
         assert_eq!(
             tuning.pacing.rate_bytes_per_sec(),
