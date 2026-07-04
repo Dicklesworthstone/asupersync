@@ -6645,8 +6645,8 @@ where
             // encoded and sprayed in SBN order, so the wire output is byte-identical to the
             // sequential path — a pure throughput isomorphism (decode is order-independent; the
             // receiver verifies sha256 + merkle). Bounded BATCHES (degree = host parallelism) cap
-            // peak symbol RAM at ~`par_batch` blocks; each batch is joined before the next
-            // checkpoint so a cancelled region drains every encode task (no strands).
+            // peak symbol RAM at ~2x `par_batch` blocks (double-buffered below); the in-flight
+            // window is joined on the checkpoint-cancel path so no encode task strands.
             let enc_cfg = crate::config::EncodingConfig {
                 repair_overhead: round_tuning.repair_overhead,
                 max_block_size: config.max_block_size,
@@ -6657,11 +6657,31 @@ where
             let par_batch = parallel_encode_window_blocks(
                 parallel_encode_plan.expect("parallel encode plan checked above"),
             );
+            // Double-buffered encode-ahead: spawn window W+1's encodes BEFORE
+            // draining window W, so the pool encodes the next window while the
+            // pacer is emitting the current one. The serial spawn-join-spawn
+            // shape stalled the paced spray ~300-400 ms per window (encode
+            // latency un-overlapped with the ~4 s paced send), a ~7% realized
+            // round-0 rate loss on the 10 mbit broken cell (MATRIX-209).
+            // Steady state holds at most TWO windows of symbols; the pending
+            // window is drained on the checkpoint-cancel path, and hard-error
+            // unwinds drain via region close (quiescence).
+            let mut pending: Vec<(
+                usize,
+                usize,
+                usize,
+                crate::runtime::TaskHandle<Result<Vec<Symbol>, String>>,
+            )> = Vec::new();
             for window_start in (0..blocks.len()).step_by(par_batch) {
-                cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+                if cx.checkpoint().is_err() {
+                    for (_, _, _, mut handle) in pending.drain(..) {
+                        let _ = handle.join(cx).await;
+                    }
+                    return Err(RqError::Cancelled);
+                }
                 let window_end = (window_start + par_batch).min(blocks.len());
                 let window = &blocks[window_start..window_end];
-                let mut handles = Vec::with_capacity(window.len());
+                let mut spawned = Vec::with_capacity(window.len());
                 for (window_offset, block) in window.iter().enumerate() {
                     // Disk reads are cheap relative to the RaptorQ solve, so read each block's
                     // source range here and hand the owned bytes to the pool task.
@@ -6682,9 +6702,9 @@ where
                             encode_block_symbols(&cfg, object_id, sbn, &block_bytes, repair)
                         })
                         .map_err(|e| RqError::Coding(format!("encode spawn failed: {e:?}")))?;
-                    handles.push((block_index, block.k, repair, handle));
+                    spawned.push((block_index, block.k, repair, handle));
                 }
-                for (block_index, source_symbols, target_repair, mut handle) in handles {
+                for (block_index, source_symbols, target_repair, mut handle) in pending.drain(..) {
                     let syms = match handle.join(cx).await {
                         Ok(Ok(syms)) => syms,
                         Ok(Err(e)) => return Err(RqError::Coding(e)),
@@ -6716,6 +6736,37 @@ where
                     round0_repair_symbols = round0_repair_symbols.saturating_add(target_repair);
                     enc.repair_cursors[block_index] = target_repair;
                 }
+                pending = spawned;
+            }
+            for (block_index, source_symbols, target_repair, mut handle) in pending {
+                let syms = match handle.join(cx).await {
+                    Ok(Ok(syms)) => syms,
+                    Ok(Err(e)) => return Err(RqError::Coding(e)),
+                    Err(join_err) => {
+                        return Err(RqError::Coding(format!("encode task failed: {join_err:?}")));
+                    }
+                };
+                send_symbol_datagrams(
+                    cx,
+                    control,
+                    adaptive,
+                    sockets,
+                    rr,
+                    symbols_sent,
+                    dropper,
+                    tag,
+                    enc.index,
+                    &syms,
+                    config,
+                    pacer,
+                    symbol_auth,
+                    udp_send_acceleration,
+                )
+                .await?;
+                round0_blocks = round0_blocks.saturating_add(1);
+                round0_source_symbols = round0_source_symbols.saturating_add(source_symbols);
+                round0_repair_symbols = round0_repair_symbols.saturating_add(target_repair);
+                enc.repair_cursors[block_index] = target_repair;
             }
         } else {
             let mut feedback_repair_blocks = 0usize;

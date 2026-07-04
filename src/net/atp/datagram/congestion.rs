@@ -1039,11 +1039,19 @@ impl CongestionController {
     /// Refill token bucket
     fn refill_tokens(&mut self, now: Instant) {
         let elapsed = now.duration_since(self.state.last_refill);
-        let tokens_to_add = (elapsed.as_secs_f64() * self.config.max_rate_per_sec as f64)
-            .min(self.config.max_burst_size as f64);
+        // Bank one extra burst of SCHEDULE CREDIT past the nominal burst size.
+        // Every paced sleep overshoots by timer granularity, and clamping the
+        // bucket at exactly `max_burst_size` discards that overshoot each
+        // burst cycle — a structural realized-rate tax (~7% measured on the
+        // 10 mbit broken cell: 1.099 of 1.18 MB/s configured, MATRIX-208).
+        // One banked burst lets the sender catch up to its own schedule while
+        // bounding the worst-case wire micro-burst at 2x `max_burst_size`
+        // datagrams, which a shaped qdisc absorbs without tail-dropping.
+        let capacity = f64::from(self.config.max_burst_size) * 2.0;
+        let tokens_to_add =
+            (elapsed.as_secs_f64() * f64::from(self.config.max_rate_per_sec.max(1))).min(capacity);
 
-        self.state.tokens =
-            (self.state.tokens + tokens_to_add).min(self.config.max_burst_size as f64);
+        self.state.tokens = (self.state.tokens + tokens_to_add).min(capacity);
         self.state.last_refill = now;
     }
 
@@ -1759,6 +1767,30 @@ mod tests {
         assert!(controller.time_until_send_budget(now) > Duration::ZERO);
         assert_eq!(controller.total_queue_depth(), 0);
         assert_eq!(controller.get_stats().sent_count, 2);
+    }
+
+    #[test]
+    fn token_bucket_banks_bounded_schedule_credit_past_burst() {
+        let mut controller = CongestionController::new(CongestionConfig::default());
+        controller.configure_token_bucket(10, 2, Duration::ZERO);
+        let t0 = Instant::now();
+        // Drain the nominal burst.
+        assert!(controller.try_consume_send_budget(t0));
+        assert!(controller.try_consume_send_budget(t0));
+        assert!(!controller.try_consume_send_budget(t0));
+
+        // A long stall banks up to 2x burst of schedule credit — the
+        // timer-overshoot catch-up that keeps the realized spray rate at the
+        // configured rate (MATRIX-208) — and no more.
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(controller.try_consume_send_budget(t1));
+        assert!(controller.try_consume_send_budget(t1));
+        assert!(controller.try_consume_send_budget(t1));
+        assert!(controller.try_consume_send_budget(t1));
+        assert!(
+            !controller.try_consume_send_budget(t1),
+            "schedule credit must stay bounded at 2x max_burst_size"
+        );
     }
 
     #[test]
