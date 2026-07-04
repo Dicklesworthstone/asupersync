@@ -424,6 +424,16 @@ const DGRAM_HEADER: usize = 4 + 8 + 4 + 1 + 4 + 1 + 2;
 /// UDP datagram header plus the authenticated-symbol tag.
 const AUTH_DGRAM_HEADER: usize = DGRAM_HEADER + TAG_SIZE;
 
+/// Opt-in receiver staging-write cursor audit (c54to7 diagnosis). When
+/// `ATP_RQ_STAGING_CURSOR_AUDIT` is set, the cached-staging-handle write path
+/// verifies the skip-seek invariant with a `stream_position` call before every
+/// skip-eligible write, logs any desync, and self-heals by re-seeking. Off by
+/// default: it costs one extra lseek per skip-eligible write.
+fn staging_cursor_audit_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ATP_RQ_STAGING_CURSOR_AUDIT").is_some())
+}
+
 /// Opt-in stderr tracing for transport bring-up/diagnosis. Off unless the
 /// `ATP_RQ_TRACE` env var is set, so the production path stays silent.
 macro_rules! rqtrace {
@@ -9176,7 +9186,19 @@ async fn seed_source_streaming_pipeline(
     let block_start = dec.source_blocks[sbn].start;
     let block_len = dec.source_blocks[sbn].len;
     let mut source_block = vec![0u8; block_len];
-    reader.seek(std::io::SeekFrom::Start(block_start)).await?;
+    // Seed reads MUST use the same shared-staging mapping the writers use:
+    // `block_start` is ENTRY-relative, but `staging_path` is the SHARED
+    // fragment for the whole logical object (large entries are E-12 shards
+    // with `staging_write_offset` bases). Seeking the raw relative offset
+    // read shard 0's bytes for every later shard, poisoning seeded source
+    // symbols → InconsistentEquations when redundancy caught it, silent
+    // rank-K-exact wrong solves (per-entry SHA mismatch) when it did not.
+    // Entry 0 (base 0) was immune, which is why only later shards rejected
+    // (c54to7, MATRIX-207).
+    let absolute_block_start = entry_staging_absolute_offset(dec, block_start, block_len)?;
+    reader
+        .seek(std::io::SeekFrom::Start(absolute_block_start))
+        .await?;
     reader.read_exact(&mut source_block).await?;
 
     for esi in 0..k {
@@ -9567,6 +9589,24 @@ async fn write_entry_staging_range_unbuffered(
                 .expect("staging file opened above");
             if expected_cursor != Some(absolute_offset) {
                 file.seek(std::io::SeekFrom::Start(absolute_offset)).await?;
+            } else if staging_cursor_audit_enabled() {
+                // c54to7 diagnostic: validate the skip-seek invariant. The
+                // cached-handle fast path assumes the shared fd offset always
+                // equals the tracked cursor; a desync here silently lands
+                // bytes at the wrong staging offset (per-entry SHA mismatch
+                // at verify). Audit is env-gated (one extra lseek per
+                // skip-eligible write) and self-heals by re-seeking.
+                let actual = file.stream_position().await?;
+                if actual != absolute_offset {
+                    rqtrace!(
+                        "receiver: entry {} STAGING_CURSOR_DESYNC expected={} actual={} len={}",
+                        dec.index,
+                        absolute_offset,
+                        actual,
+                        data.len()
+                    );
+                    file.seek(std::io::SeekFrom::Start(absolute_offset)).await?;
+                }
             }
             file.write_all(data).await?;
             if should_flush {
@@ -15231,6 +15271,114 @@ mod tests {
         assert_eq!(
             std::fs::read(staging_path).expect("read repaired source stream"),
             data
+        );
+    }
+
+    /// c54to7 regression (MATRIX-207): the FEC seed read-back must use the
+    /// SHARED-staging absolute offset (`staging_write_offset + block.start`),
+    /// not the entry-relative offset. A sharded large object (E-12) staged
+    /// every shard in one fragment; seeding a non-first shard at the raw
+    /// relative offset read shard 0's bytes, poisoning the seeded source
+    /// symbols — InconsistentEquations when redundancy caught it, a silent
+    /// rank-K-exact wrong solve (per-entry SHA mismatch at verify) when it
+    /// did not. Entry 0 (base 0) was immune, which produced the observed
+    /// entry-skew.
+    #[test]
+    fn signed_source_streaming_seed_reads_shard_absolute_staging_offset() {
+        let ctx = SecurityContext::for_testing(31341);
+        let object_id = entry_object_id("signed-source-stream-shard-seed", 1);
+        let symbol_size = 4u16;
+        let data = vec![11, 22, 33, 44, 55, 66, 77, 88];
+        let shard_base = 8u64;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("fragment0");
+        // Shared fragment: shard 0's region holds poison bytes; this decoder
+        // is the SECOND shard, staged at absolute [8, 16).
+        std::fs::write(&staging_path, [0xAA; 16]).expect("pre-create shared fragment");
+
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 8, symbol_size);
+        decoder.staging_write_offset = shard_base;
+        decoder.staging_file_len = 16;
+        decoder.staging_shared = true;
+        let mut pipeline = DecodingPipeline::with_auth(
+            DecodingConfig {
+                symbol_size,
+                max_block_size: 8,
+                repair_overhead: 1.0,
+                min_overhead: 0,
+                max_buffered_symbols: 0,
+                block_timeout: std::time::Duration::from_secs(0),
+                verify_auth: true,
+            },
+            ctx.clone(),
+        );
+        pipeline
+            .set_object_params(object_params_for(object_id, 8, symbol_size, 8))
+            .expect("set object params");
+        decoder.pipeline = Some(pipeline);
+
+        let (first, first_payload) =
+            signed_source_payload(&ctx, object_id, 0, data[..4].to_vec(), None);
+        assert!(
+            futures_lite::future::block_on(feed_symbol(
+                &mut decoder,
+                &first,
+                &first_payload,
+                symbol_size,
+                Some(&ctx),
+            ))
+            .expect("feed first source")
+        );
+        assert!(!decoder.complete);
+        assert_eq!(decoder.source_blocks[0].received_count, 1);
+
+        let pool = SymbolPool::new(PoolConfig::default());
+        let mut encoder = EncodingPipeline::new(
+            crate::config::EncodingConfig {
+                repair_overhead: 1.0,
+                max_block_size: 8,
+                symbol_size,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            pool,
+        );
+
+        for encoded in encoder.encode_single_block_repair_range(object_id, 0, &data, 0, 4) {
+            let sym = encoded.expect("repair encode").into_symbol();
+            let auth = ctx.sign_symbol(&sym);
+            let dg = encode_symbol_datagram(0xA77E, 0, &sym, Some(auth.tag()));
+            let parsed = parse_symbol_header(&dg, 0xA77E, true).expect("parse signed repair");
+            let payload = dg[parsed.header_len..parsed.header_len + parsed.payload_len].to_vec();
+            let _ = futures_lite::future::block_on(feed_symbol(
+                &mut decoder,
+                &parsed,
+                &payload,
+                symbol_size,
+                Some(&ctx),
+            ))
+            .expect("feed repair");
+            if decoder.complete {
+                break;
+            }
+        }
+
+        assert!(
+            decoder.complete,
+            "shard seed must read the staged source symbol from its ABSOLUTE \
+             shared-fragment offset and finish the block"
+        );
+        let staged = std::fs::read(staging_path).expect("read shared fragment");
+        assert_eq!(
+            &staged[8..16],
+            &data[..],
+            "shard content must decode byte-identical from absolute-offset seeds"
+        );
+        assert_eq!(
+            &staged[..8],
+            &[0xAA; 8],
+            "shard 0's region must never be touched by shard 1's decoder"
         );
     }
 
