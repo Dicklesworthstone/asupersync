@@ -2,7 +2,7 @@
 
 ## What Is Asupersync?
 
-A spec-first, cancel-correct, capability-secure async runtime for Rust with ~500 source files across 40+ modules. Not a Tokio wrapper -- a complete replacement with stronger guarantees:
+A spec-first, cancel-correct, capability-secure async runtime for Rust with ~500 source files across 40+ modules. Not a Tokio wrapper -- a broad support-class-scoped replacement for native Asupersync designs, with stronger guarantees:
 
 - **Structured concurrency**: every task owned by a region; region close = quiescence
 - **Cancel-correctness**: cancellation is request -> drain -> finalize (not silent drop)
@@ -88,9 +88,9 @@ not treat them as canonical workspace members without checking `Cargo.toml`.
 | `signal/` | Native signal handling surface |
 | `net/` | TCP, UDP, Unix, DNS, WebSocket, native QUIC |
 | `atp/` / `net/atp/` | ATP object transfer, RaptorQ transport, QUIC/H3 adapters, benchmarked matrix lanes |
-| `http/` | HTTP/1.1, HTTP/2, body, pool, compression |
+| `http/` | HTTP/1.1, HTTP/2, `http::Client` / `HttpClient`, body, pool, compression |
 | `tls/` | rustls TLS 1.2/1.3 |
-| `bytes/` | Zero-copy Bytes, BytesMut, Buf, BufMut |
+| `bytes/` | Zero-copy `Bytes`, `BytesMut`, `BytesCursor`, `Buf`, `BufMut`, `Buf::copy_to_bytes` |
 | `codec/` | Framing, encoding/decoding |
 | `encoding.rs` / `decoding.rs` | Public encoding/decoding helpers around protocol and RaptorQ paths |
 | `web/` | Router, extractors, middleware, request regions |
@@ -157,6 +157,8 @@ not treat them as canonical workspace members without checking `Cargo.toml`.
 
 ### 4. Migration and interop docs
 
+- `/data/projects/asupersync/scripts/migration_readiness_planner.py`
+- `/data/projects/asupersync/artifacts/migration_readiness_planner_signoff_v1.json`
 - `/data/projects/asupersync/docs/tokio_migration_cookbooks.md`
 - `/data/projects/asupersync/docs/tokio_adapter_boundary_architecture.md`
 - `/data/projects/asupersync/docs/tokio_interop_support_matrix.md`
@@ -175,6 +177,12 @@ not treat them as canonical workspace members without checking `Cargo.toml`.
 
 - `/data/projects/asupersync/artifacts/proof_lane_manifest_v1.json`
 - `/data/projects/asupersync/artifacts/proof_status_snapshot_v1.json`
+- `/data/projects/asupersync/artifacts/semantic_evidence_bundles_v1.json`
+- `/data/projects/asupersync/artifacts/public_guarantee_semantic_evidence_bundles_v1.json`
+- `/data/projects/asupersync/artifacts/proof_evidence_debt_graph_contract_v1.json`
+- `/data/projects/asupersync/artifacts/proof_lane_failure_repro_receipt_contract_v1.json`
+- `/data/projects/asupersync/artifacts/reservation_aware_fallback_work_finder_contract_v1.json`
+- `/data/projects/asupersync/artifacts/swarm_proof_lane_planner_contract_v1.json`
 - `/data/projects/asupersync/artifacts/validation_frontier_signoff_v1.json`
 - `/data/projects/asupersync/docs/atp_bench_matrix_spec.md`
 - `/data/projects/asupersync/docs/atp_rq_beat_rsync_ledger.md`

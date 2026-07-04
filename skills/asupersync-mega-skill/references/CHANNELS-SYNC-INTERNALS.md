@@ -2,11 +2,13 @@
 
 ## Two-Phase Channel Pattern
 
-The core cancel-safety mechanism. All channels use reserve/commit:
+The core cancel-safety mechanism on capacity/deferred-send surfaces. Use
+reserve/commit where the channel exposes a permit path; do not invent one for
+latest-value or immediate-send channels:
 
 ```rust
 // Phase 1: Reserve (cancel-safe, nothing committed)
-let permit = tx.reserve(cx).await?;
+let permit = tx.reserve(&cx).await?;
 // Phase 2: Commit (linear, must happen or abort)
 permit.send(message);
 ```
@@ -57,14 +59,15 @@ let result = rx.recv(&cx).await?;
 
 Source: `src/channel/broadcast.rs`
 
-Fan-out to multiple subscribers with waiter cleanup on drop.
+Fan-out to multiple subscribers with waiter cleanup on drop. Its reserve path is
+synchronous because it reserves a slot in the ring without awaiting capacity.
 
 ```rust
 let (tx, _) = broadcast::channel::<T>(capacity);
 let mut rx1 = tx.subscribe();
 let mut rx2 = tx.subscribe();
 
-let permit = tx.reserve(&cx).await?;
+let permit = tx.reserve(&cx)?;
 permit.send(value);
 
 // Lagging receivers get RecvError::Lagged(n)
@@ -74,7 +77,8 @@ permit.send(value);
 
 Source: `src/channel/watch.rs`
 
-Last-value multicast. Always-current read.
+Last-value multicast. Always-current read. `watch::Sender::send(...)` is
+immediate; it does not take `Cx` and does not use reserve/commit.
 
 ```rust
 let (tx, rx) = watch::channel(initial_value);
@@ -190,7 +194,7 @@ Source: `src/sync/contended_mutex.rs`
 |-----------|------------------|--------------|
 | MPSC send | `reserve()` | `permit.send()` |
 | Oneshot send | `reserve()` | `permit.send()` |
-| Broadcast send | `reserve()` | `permit.send()` |
+| Broadcast send | synchronous `reserve()` | `permit.send()` |
 | Mutex lock | waiting for lock | guard held |
 | Semaphore acquire | waiting for permits | permit held |
 | Barrier wait | waiting for peers | post-barrier |

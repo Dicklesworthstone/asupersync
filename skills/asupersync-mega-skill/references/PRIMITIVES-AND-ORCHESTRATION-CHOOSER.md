@@ -32,8 +32,9 @@ just because that is what Tokio code often did.
 
 Critical Asupersync distinction:
 
-- `mpsc` and `oneshot` are two-phase send surfaces,
-- reserve/commit exists to keep cancellation from half-sending work,
+- `mpsc` and `oneshot` are async two-phase send surfaces,
+- `broadcast` also exposes a permit path, but reserve is synchronous,
+- reserve/commit exists to keep work from being half-sent,
 - session reply handles are linear resources and should be treated that way.
 
 Good uses:

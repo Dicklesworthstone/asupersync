@@ -43,7 +43,10 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo fm
 This is the default live-`AGENTS.md` lane for substantive changes. Use a narrower
 command only when the user, bead, or proof-lane manifest explicitly narrows the
 scope. Do not silently fall back to local builds when remote `rch` proof is
-required; preserve the failing command and blocker instead.
+required; preserve the failing command and blocker instead. Before selecting
+proof, read live `TESTING_FOR_AGENTS.md`, coordinate before starting competing
+long-running proof jobs, and record the RCH build id, target dir, artifact root,
+and dirty-tree state for any cited result.
 
 Repo-internal proof is not the same thing as a downstream migration inventory.
 The helper script `scripts/audit-target.sh` may run local `cargo tree` for an
@@ -105,11 +108,15 @@ cargo bench --bench timer_wheel
 | `test-internals` | Opt-in test helpers -- NOT for production |
 | `runtime-metrics` / `metrics` | Runtime counters and telemetry surfaces |
 | `wasm-browser-*` | Canonical browser profiles |
+| `real-service-e2e` + focused E2E flags | Environment-gated no-mock service proof lanes |
 | `tls` / `tls-native-roots` / `tls-webpki-roots` | TLS via rustls |
 | `sqlite` / `postgres` / `mysql` | Database clients |
 | `quic` / `http3` / `atp-cli` | Feature-gated QUIC/H3/ATP surfaces; `atp-cli` implies TLS |
+| `atpd-daemon` | Unpublished ATP daemon binary gate, outside default release checks |
 | `io-uring` | Linux io_uring reactor |
 | `tower` | Tower Service adapter |
+| `ci-cross-platform` | Cross-platform CI umbrella; excludes benchmark-only Tokio quarantine |
+| `benchmark-adapters` / `criterion-benches` | Benchmark-only lanes; do not cite as core production graph proof |
 | `lock-metrics` | ContendedMutex tracking |
 | `loom-tests` | Loom verification |
 | `simd-intrinsics` | AVX2/NEON GF(256) for RaptorQ |
@@ -179,7 +186,14 @@ claims.
 | `artifacts/api_surface_map_v1.json` | Machine-readable public API map |
 | `artifacts/proof_lane_manifest_v1.json` | Proof-lane source of truth |
 | `artifacts/proof_status_snapshot_v1.json` | Current proof status snapshot |
+| `artifacts/semantic_evidence_bundles_v1.json` / `artifacts/public_guarantee_semantic_evidence_bundles_v1.json` | Claim/evidence bundles for public guarantees |
+| `artifacts/proof_evidence_debt_graph_contract_v1.json` | Proof debt graph contract |
+| `artifacts/proof_lane_failure_repro_receipt_contract_v1.json` | Failure reproduction receipt contract |
+| `artifacts/reservation_aware_fallback_work_finder_contract_v1.json` | Reservation-aware fallback work finder contract |
+| `artifacts/swarm_proof_lane_planner_contract_v1.json` | Swarm proof-lane planner contract |
+| `artifacts/migration_readiness_planner_signoff_v1.json` | Migration planner signoff and proof-status claim |
 | `artifacts/phase6_methodology_gate_enforcement_contract_v1.json` | Direct-main vs PR/release-review gate contract |
+| `artifacts/runtime_pressure_control_evidence_contract_v1.json` | Runtime pressure-control evidence contract |
 | `docs/atp_bench_matrix_spec.md` | ATP benchmark acceptance contract |
 | `scripts/atp_bench/MATRIX.md` | Current ATP matrix ledger |
 
@@ -209,6 +223,21 @@ run is not a substitute for a triggered artifact gate.
 Do not infer release status from `Cargo.toml` version alone. `CHANGELOG.md`
 separates published GitHub Releases from plain tags and active Unreleased work;
 verify tags, releases, Cargo/package metadata, and changelog together.
+
+## Migration Readiness Planner
+
+For downstream Rust migrations, the quick inventory script is only a fast grep /
+`cargo tree` aid. The repo's richer read-only planner is
+`scripts/migration_readiness_planner.py`; use it when the task is to decide
+whether or how to migrate a real project. Map:
+
+- `summary.final_verdict` to the migration/adoption lane,
+- `proof_pack.proof_commands` to validation obligations,
+- `semantic_map.recommendations` to concrete rewrite targets,
+- `operator_report.phase_plan` to staged rollout and handoff.
+
+The proof-lane manifest contains the planner signoff lane. Do not replace this
+with ad hoc dependency search when the user asks for migration readiness.
 
 ## UBS (Ultimate Bug Scanner)
 
@@ -242,6 +271,16 @@ For ATP work, `scripts/atp_bench/run_matrix_cell.sh`,
 evidence spine. Do not claim a win unless the current matrix cell beats tuned
 rsync under the requested crypto/auth/link conditions with SHA/tamper checks and
 timing/byte evidence.
+
+Run sequence for serious ATP claims:
+
+1. ATP bench selftest.
+2. Release `atp` binary for the exact feature tier.
+3. `scripts/atp_bench/run_matrix_cell.sh` or the requested matrix command.
+4. `scripts/atp_bench/score_matrix.py`.
+5. Ledger update in `docs/atp_rq_beat_rsync_ledger.md` and/or matrix artifact.
+
+Stale cells are blockers unless the claim is explicitly scoped to the fresh cell.
 
 A single fresh matrix cell can support only that scoped cell/regression claim.
 Headline ATP claims such as "beats rsync" require whole-matrix evidence and must

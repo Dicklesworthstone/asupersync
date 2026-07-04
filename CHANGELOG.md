@@ -10,6 +10,16 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
+Scope window: current Unreleased work through 2026-07-04, reconstructed from git history, beads, benchmark ledgers, and live repo artifacts; latest published GitHub Release/tag baseline is `v0.3.4`.
+
+## Version Timeline
+
+- **Unreleased**: post-`v0.3.4` ATP, proof-lane, runtime, and skill-refresh work.
+- **v0.3.5 workspace version marker**: internal package/version update on 2026-06-18; no `v0.3.5` git tag or GitHub Release existed when this changelog was refreshed.
+- **v0.3.4 Release**: latest published GitHub Release/tag baseline, dated 2026-06-07.
+- **v0.3.3 Pre-release**: superseded by `v0.3.4`.
+- **v0.3.2 Release** and older entries: retained release-history sections below.
+
 ---
 
 ## [Unreleased]
@@ -54,6 +64,21 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
   [`0dd7aa708`](https://github.com/Dicklesworthstone/asupersync/commit/0dd7aa708),
   `br-asupersync-8sxwj0`, `br-asupersync-5r1mh8`,
   `br-asupersync-uw1cc2`)
+- **Encrypted QUIC receiver/sender overhaul and retransmit coalescing.** The
+  July 3 MATRIX-205/206 work replaced the encrypted QUIC receive pump with
+  zero-copy frame decode, in-place AEAD unprotect, ACK fast paths,
+  inc-hash-on-receive, bounded sender queues, release-on-ACK retention,
+  delivery-clocked source-stream pacing, and coalesced retransmit frames.
+  Current evidence records the first encrypted mild-loss win (`50M/good`),
+  `5G/perfect/encrypted` correctness unblocked, and a large receiver RSS drop,
+  while keeping the no-claim boundary explicit: `500M/perfect/encrypted` still
+  loses to tuned rsync, `50M/bad/encrypted` still needs a rate-climb/cliff
+  recovery mechanism, absolute-schedule pacing was re-refuted, and 5G encrypted
+  peak RSS remains follow-up work.
+  ([`773a655ef`](https://github.com/Dicklesworthstone/asupersync/commit/773a655ef),
+  [`1b480bcab`](https://github.com/Dicklesworthstone/asupersync/commit/1b480bcab),
+  `br-asupersync-uw1cc2`, `br-asupersync-oh6gm2`,
+  `br-asupersync-xnlyss`)
 - **Large-object clean wins against tuned rsync.** Incremental hash-on-receive,
   fragment hash overlap, protocol-v3 `ObjectComplete` hash trailers, and
   same-filesystem commit rename cut tail work on large clean transfers. Matrix
@@ -174,10 +199,14 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
   single-thread worker parks on a constant timeout).
   (`br-asupersync-runtime-cpu-overhaul-5vt09v.4`, `.5`)
 
-## [v0.3.5] -- 2026-06-18
+## v0.3.5 workspace version marker -- 2026-06-18
 
 > Dependency-refresh and release-train patch for Rust workspace crates and
 > Browser Edition packages.
+>
+> Internal package-version marker: no `v0.3.5` git tag or GitHub Release was
+> present when this changelog was refreshed on 2026-07-04. Until that tag exists,
+> compare Unreleased work from `v0.3.4`.
 
 ### Release highlights
 
@@ -1568,8 +1597,7 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.5...HEAD
-[v0.3.5]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.4...v0.3.5
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.4...HEAD
 [v0.3.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.3...v0.3.4
 [v0.3.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...v0.3.2

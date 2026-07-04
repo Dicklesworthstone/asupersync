@@ -65,6 +65,14 @@ Useful anchors: `src/net/atp/transport_rq/mod.rs`,
 `tests/atp_rq_decoding_secure_default.rs`-style secure-default tests when
 present in the current tree.
 
+ATP benchmark no-claim boundaries are part of the security story. Direct
+QUIC/TLS paths can rely on verified 1-RTT AEAD for in-channel symbols, but
+missing symbol-auth context, TLS-less native QUIC send paths, and unsupported
+transport/auth combinations must fail closed. Current positive ATP claims are
+matrix-cell scoped unless the full current matrix is fresh; insert/shift
+re-sync byte savings, clean-large wins, or one encrypted mild-loss win do not
+automatically prove lossy, encrypted-large, or cross-trust symbol safety.
+
 ## Distributed Primitives
 
 Source: `src/remote.rs`, `src/distributed/`

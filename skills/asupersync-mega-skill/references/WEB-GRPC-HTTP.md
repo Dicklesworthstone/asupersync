@@ -10,6 +10,8 @@ Prefer:
 - native extractors
 - native middleware/layering
 - request-region isolation
+- route metadata via `web::Router::routes()` and `web::RouteInfo` when an
+  operator, docs, or audit surface needs to enumerate routes.
 
 The important architectural pattern is request-as-region:
 
@@ -61,6 +63,24 @@ High-value layers:
 
 Use these to make overload and tail behavior explicit instead of implicit.
 
+Concrete web middleware anchors include `web::middleware::TimeoutLayer`,
+`CompressionLayer`, `RequestTraceLayer`, and `CatchPanicLayer`, plus
+`web::Router::layer` for native composition.
+
+## HTTP Client Pattern
+
+For outbound HTTP, prefer the native explicit-`Cx` client path:
+
+- `http::Client` for high-level pooled client usage,
+- `http::HttpClient` / fluent request builders for `get`, `post`, `put`,
+  `patch`, and `delete`,
+- explicit timeout, header, query, body, and response handling at the request
+  boundary.
+
+Do not keep `reqwest` just because the old app used it. If a Tokio-only client
+must remain temporarily, keep it behind a compat boundary and schedule its
+removal.
+
 ## gRPC Pattern
 
 Prefer:
@@ -68,6 +88,7 @@ Prefer:
 - native `grpc::*` service stack
 - `CallContext::with_cx(...)`
 - narrowed `Cx` inside handlers/interceptors
+- `ServerBuilder::enable_reflection_with_auth(...)` for production reflection
 
 Important point:
 
@@ -120,6 +141,7 @@ Recommended phases:
 - HTTP stack: `http::*`
 - Router and extractors: `web::*`
 - Middleware/service composition: `service::*`
+- HTTP client: `http::Client`, `http::HttpClient`
 - gRPC: `grpc::*`
 - per-request isolation: `web::request_region::*`
 

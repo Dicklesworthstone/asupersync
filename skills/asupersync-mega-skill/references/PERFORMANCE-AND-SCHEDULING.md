@@ -201,7 +201,7 @@ If the architecture is wrong, builder tuning will not save it.
 
 ## Read Next
 
-- `RUNTIME-CONTROLS-DIAGNOSTICS.md`
+- `RUNTIME-CONTROLS.md`
 - `OBSERVABILITY-FORENSICS.md`
 - `TESTING-FORENSICS.md`
 - `PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md`

@@ -130,6 +130,15 @@ Direct native QUIC/TLS paths rely on QUIC AEAD authentication once the verified
 1-RTT channel is established. Non-direct, non-QUIC, or cross-trust RaptorQ
 symbol paths still need explicit symbol-auth posture.
 
+Current fail-closed boundaries to preserve:
+
+- direct QUIC/TLS may use `TransportAuthenticated` symbols only inside the
+  verified 1-RTT channel,
+- missing symbol authentication is a distinct mode, not a silent downgrade,
+- TLS-less native QUIC send paths must fail closed,
+- unsupported transport/auth combinations should surface typed `NotImplemented`
+  style errors rather than pretending to send.
+
 ## ATP Object Transfer
 
 Source: `src/net/atp/`, `docs/atp_architecture.md`,
@@ -148,6 +157,22 @@ must cite current matrix-cell runs with:
 Known active frontiers include reliable clean-source streaming, authenticated
 control-source frames, QUIC pacing/congestion, large-object clean wins,
 delta/resync planning, and no-claim boundaries for cells that remain blocked.
+
+Current encrypted QUIC frontier (MATRIX-205/206, July 3, 2026):
+
+- landed zero-copy receive pump, in-place AEAD unprotect, ACK fast path,
+  inc-hash-on-receive, bounded sender queues, release-on-ACK retention, and
+  delivery-clocked source-stream pacing;
+- `Buf::copy_to_bytes` plus `BytesCursor` zero-copy override are now part of the
+  protocol hot-path story;
+- retransmit-frame coalescing and requeue ordering fixes landed, but absolute
+  pacer scheduling was re-refuted;
+- scoped positive claim: `50M/good/encrypted` beats tuned rsync-ssh in current
+  evidence, and `5G/perfect/encrypted` completes byte-identical after being
+  previously impossible;
+- no-claim boundary: `500M/perfect/encrypted` still loses on speed,
+  `50M/bad/encrypted` still needs a rate-climb/cliff-recovery mechanism, and
+  5G encrypted peak RSS remains a follow-up.
 
 ## Transport Layer
 
@@ -168,7 +193,10 @@ Shared channel close paths wake both send and receive waiters (no stranded opera
 
 Source: `src/bytes/`
 
-Zero-copy buffer types: `Bytes`, `BytesMut`, `Buf`, `BufMut`. Compatible API surface for buffer management across the stack.
+Zero-copy buffer types: `Bytes`, `BytesMut`, `Buf`, `BufMut`, and
+`BytesCursor`. `Buf::copy_to_bytes` is the public extraction hook; buffer types
+with shared backing storage should override it instead of forcing protocol
+parsers through temporary `Vec` allocations.
 
 ## Codec
 

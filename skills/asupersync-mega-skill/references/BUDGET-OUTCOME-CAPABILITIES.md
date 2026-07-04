@@ -214,6 +214,7 @@ Do not use masking to hide sloppy cancellation handling.
 ## When To Read Next
 
 - For concrete request/call boundary patterns: `WEB-GRPC-HTTP.md`
-- For runtime knobs and diagnostics: `RUNTIME-CONTROLS-DIAGNOSTICS.md`
+- For runtime knobs: `RUNTIME-CONTROLS.md`
+- For diagnostics and forensics: `OBSERVABILITY-FORENSICS.md`
 - For supervision and long-lived apps: `SUPERVISION-OTP.md`
 - For migration mistakes: `ANTI-PATTERNS.md`

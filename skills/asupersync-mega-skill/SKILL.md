@@ -6,7 +6,7 @@ description: >-
 
 # Asupersync Mega Skill
 
-Asupersync is a spec-first, cancel-correct, capability-secure async runtime for Rust. Not a Tokio wrapper -- a complete replacement with stronger guarantees around structured concurrency, obligation tracking, deterministic testing, and capability security.
+Asupersync is a spec-first, cancel-correct, capability-secure async runtime for Rust. Not a Tokio wrapper -- a broad, support-class-scoped replacement for native Asupersync designs, with stronger guarantees around structured concurrency, obligation tracking, deterministic testing, and capability security. Exact adapter, web, browser, protocol, and benchmark parity must still be checked against live docs and proof artifacts.
 
 This skill is primarily for agents integrating Asupersync into other projects or extracting maximum architectural leverage from it in greenfield systems. It also covers repo-internal work when that is the actual task.
 
@@ -71,6 +71,9 @@ Choose one lane before touching code:
    Build directly on `RuntimeBuilder`, `Cx`, `Scope`, `LabRuntime`, and optional `AppSpec`.
 2. **Brownfield native migration**
    Rewrite your app's async seams around `&Cx`, region-owned tasks, cancel-aware primitives, and deterministic tests.
+   For serious migrations, run the repo's read-only migration readiness planner
+   and use its verdict, proof commands, semantic recommendations, and operator
+   phase plan as inputs rather than treating `cargo tree` grep output as a plan.
 3. **Boundary interop**
    Use `asupersync-tokio-compat` only for crates you cannot remove yet. Keep Tokio out of core business logic.
 
@@ -121,6 +124,19 @@ Macro guidance: `scope!` binds the current-region scope; it does not create a
 fresh child-region boundary. `spawn!` needs runtime state. Manual APIs are still
 the safest authoritative path when semantics matter.
 
+Current generated API-map anchors to remember:
+
+- outbound HTTP: `http::Client` / `http::HttpClient` fluent request builders,
+- deterministic lab: `lab::ScenarioRunner` and `lab::CancellationInjector`,
+- web metadata and middleware: `web::Router::routes`, `web::RouteInfo`,
+  `web::middleware::{CatchPanicLayer, CompressionLayer, RequestTraceLayer,
+  TimeoutLayer}`, plus `web::Router::layer`,
+- ATP/daemon, RaptorQ, observability, Spork, `runtime::RuntimeBuilder`, and
+  `Cx + Scope`.
+
+Refresh these from `/data/projects/asupersync/artifacts/api_surface_map_v1.json`
+before making precise public-surface claims.
+
 ## Standard Workflow
 
 - Inventory all `tokio::*`, `tokio-util`, `hyper`, `axum`, `tonic`, `reqwest`, `sqlx`, `quinn`, `h3`, `rdkafka`, and related dependencies.
@@ -144,6 +160,7 @@ the safest authoritative path when semantics matter.
 | Design a supervised long-lived service | [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) |
 | Choose the right channel/sync/combinator | [PRIMITIVES-AND-ORCHESTRATION-CHOOSER](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) |
 | Add deterministic tests | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
+| Assess migration readiness with the repo planner | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) → live `scripts/migration_readiness_planner.py` output |
 | Debug a runtime error | [ERROR-TAXONOMY](references/ERROR-TAXONOMY.md) → [TROUBLESHOOTING](references/TROUBLESHOOTING.md) |
 | Tune runtime performance | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) → [SCHEDULER-INTERNALS](references/SCHEDULER-INTERNALS.md) |
 | See what to lead with vs use only when required | [STACK-SURFACES](references/STACK-SURFACES.md) → [TOKIO-REPLACEMENT-MATRIX](references/TOKIO-REPLACEMENT-MATRIX.md) |
@@ -178,12 +195,21 @@ When changing code:
 - verify cancellation, shutdown, and resource-release behavior,
 - verify that no core domain code still depends on Tokio if the goal is full native adoption.
 
-If working inside the Asupersync repo itself, see [REPO-CONTRIBUTOR-GUIDE.md](references/REPO-CONTRIBUTOR-GUIDE.md) for mandatory compiler checks and testing discipline.
+If working inside the Asupersync repo itself, read live `TESTING_FOR_AGENTS.md`
+before choosing proof. Use `rch exec -- env CARGO_TARGET_DIR=...` for
+remote-required lanes, preserve the RCH build id / target dir / artifact root /
+dirty-tree state in handoff, and do not turn a local fallback into green proof
+for a lane whose manifest says remote proof is required. See
+[REPO-CONTRIBUTOR-GUIDE.md](references/REPO-CONTRIBUTOR-GUIDE.md) for mandatory
+compiler checks and testing discipline.
 
 ## Operating Rules
 
 - When forced to choose between "minimal code churn" and "native Asupersync semantics", choose the latter unless the task explicitly calls for a temporary boundary bridge.
-- **Forbidden crates** in core: `tokio`, `hyper`, `reqwest`, `axum`, `async-std`, `smol`.
+- **Forbidden crates** in runtime/core `src/`: `tokio`, `hyper`, `reqwest`,
+  `axum`, `tower` except scoped adapter feature paths, `async-std`, and `smol`.
+  Satellite, test, fuzz, benchmark, and compat carve-outs must stay documented
+  and proof-checked.
 - Inside the Asupersync repo: follow live `AGENTS.md`. Never delete files
   without permission. Work only on `main`; do not introduce legacy-branch
   references except the exact required mirror command, if still present there.
@@ -191,7 +217,17 @@ If working inside the Asupersync repo itself, see [REPO-CONTRIBUTOR-GUIDE.md](re
   `CHANGELOG.md`, `artifacts/api_surface_map_v1.json`, proof-lane manifests,
   proof-status snapshots, and benchmark matrix artifacts over remembered API
   shapes.
+- Classify every repo-internal proof through
+  `artifacts/proof_lane_manifest_v1.json` and
+  `artifacts/proof_status_snapshot_v1.json` before making any "green" claim.
+  A broad `check`/`clippy` result is not enough when a Phase 6, benchmark,
+  golden, flamegraph, or proof-note artifact gate applies.
 - ATP benchmark claims require tuned-rsync, release-`atp`, crypto-symmetric,
   rate-capped, SHA/tamper-checked evidence. A single current cell can support a
   scoped regression claim; headline "beats rsync" claims need whole-matrix
   evidence. Compile success or `sha_ok` alone is not a win.
+- Current ATP frontier (July 3, 2026 MATRIX-205/206): encrypted QUIC has a
+  measured `50M/good/encrypted` win and `5G/perfect/encrypted` correctness
+  unblock, but `500M/perfect/encrypted` still loses to tuned rsync, the
+  `50M/bad/encrypted` rate-climb remains open, and 5G encrypted RSS is still a
+  follow-up. Do not describe encrypted-large or the full matrix as solved.

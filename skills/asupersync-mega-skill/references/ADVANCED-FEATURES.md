@@ -13,7 +13,8 @@ Those are where most "we switched runtimes but still think like Tokio" gaps show
 Read:
 
 - `LEVERAGE-PLAYBOOK.md`
-- `RUNTIME-CONTROLS-DIAGNOSTICS.md`
+- `RUNTIME-CONTROLS.md`
+- `OBSERVABILITY-FORENSICS.md`
 - `GREENFIELD-PATTERNS.md`
 
 ## Supervision, AppSpec, And Spork

@@ -36,13 +36,13 @@ Use this as the first-pass replacement matrix.
 
 | Tokio ecosystem surface | Native Asupersync surface | Guidance |
 | --- | --- | --- |
-| `hyper` runtime stack | `http::*` | Prefer native HTTP stack if you control the app. |
+| `hyper` runtime stack | `http::*`, `http::Client`, `http::HttpClient` | Prefer native HTTP stack and explicit-`Cx` client builders if you control the app. |
 | `axum::Router` | `web::Router` | Native routing path. |
 | `axum` extractors | `web::{Json, Path, Query, ...}` | Prefer native extractors. |
 | `tower` / `tower-http` layers | `service::*`, `web::*` middleware | Native layering path; optional tower feature exists too. |
 | `tonic` | `grpc::*` | Prefer native gRPC if the app is being fully migrated. |
 | `tonic-web` | `grpc::web` | Native browser gRPC bridge. |
-| `tonic-reflection` | built-in reflection service via `grpc::reflection` and `ServerBuilder::enable_reflection()` | Native server reflection exists; validate exact tooling/interoperability workflow if central. |
+| `tonic-reflection` | built-in reflection service via `grpc::reflection` and `ServerBuilder::enable_reflection_with_auth(...)` | Use auth-gated reflection in production. Anonymous reflection belongs only in deliberate test/dev harnesses. |
 
 ## Database / Messaging / System
 
@@ -87,6 +87,9 @@ Compat gives you:
 - NATS JetStream still needs case-specific validation.
 - Windows signal behavior should be validated if it matters to the deployment.
 - PTY support is unsupported.
-- gRPC reflection exists natively; if grpcurl/grpc_cli-style development tooling is central to the workflow, validate the exact reflection/tooling path you need instead of assuming every external workflow is identical.
+- gRPC reflection exists natively; production guidance is
+  `ServerBuilder::enable_reflection_with_auth(...)`. Use
+  `ReflectionService::allow_anonymous()` only for deliberate test/dev harnesses,
+  and validate grpcurl/grpc_cli-style tooling if that workflow is central.
 
 When these matter, either stay on a boundary bridge or redesign deliberately. Do not hand-wave them away.
