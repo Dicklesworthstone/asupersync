@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current Unreleased work through 2026-07-04, reconstructed from git history, beads, benchmark ledgers, and live repo artifacts; latest published GitHub Release/tag baseline is `v0.3.4`.
+Scope window: current Unreleased work through 2026-07-05, reconstructed from git history, beads, benchmark ledgers, and live repo artifacts; latest published GitHub Release/tag baseline is `v0.3.4`.
 
 ## Version Timeline
 
@@ -79,6 +79,34 @@ Scope window: current Unreleased work through 2026-07-04, reconstructed from git
   [`1b480bcab`](https://github.com/Dicklesworthstone/asupersync/commit/1b480bcab),
   `br-asupersync-uw1cc2`, `br-asupersync-oh6gm2`,
   `br-asupersync-xnlyss`)
+- **RQ 500M/broken convergence, decode-integrity correction, and scoped win.**
+  MATRIX-207/208/209 moved `500M/broken/nocrypto` from timeout, to
+  fail-closed convergence, to sha-ok parity, and finally to a banked scoped
+  win. The stack includes arrival-evidence pacing loss, rank-stall congestion
+  gated by arrival corroboration, lower round-0 FEC overhead, sparse residual
+  source requests, shard-absolute FEC seed read-back from shared staging, and
+  double-buffered encode-ahead for the paced RQ spray. Current ledger evidence
+  supports only this matrix-cell claim: atp median 564.77s, sha-ok 3/3 plus a
+  confirming fourth rep, versus tuned rsync median 574.46s. The residual
+  `asupersync-c54to7` decode-integrity bead remains open for rare
+  redundancy-recovered `InconsistentEquations`; do not read this as an
+  encrypted, tree, cross-trust symbol-auth, or whole-matrix win.
+  ([`6bfdf6c54`](https://github.com/Dicklesworthstone/asupersync/commit/6bfdf6c54),
+  [`a6b797fc9`](https://github.com/Dicklesworthstone/asupersync/commit/a6b797fc9),
+  [`814809e5`](https://github.com/Dicklesworthstone/asupersync/commit/814809e5),
+  [`acfccb30`](https://github.com/Dicklesworthstone/asupersync/commit/acfccb30),
+  `br-asupersync-c54to7`)
+- **ATP follow-ups after the banked RQ win remain proof-gated.** MATRIX-210
+  raised encrypted QUIC recovery drain caps conservatively (`FAST` 4->8,
+  PTO 64->256), and MATRIX-211 landed a one-shot packed-member commit batch on
+  the blocking I/O pool for a future `tree_small` A/B. These are implementation
+  landings, not standalone benchmark wins: `br-asupersync-oh6gm2` remains open
+  for encrypted rate-climb/cliff recovery, `br-asupersync-xnlyss` records the
+  5G encrypted receiver RSS profile, and the packed-member path still needs a
+  quiet-box matrix proof before any perf claim is banked.
+  ([`dc99cad8`](https://github.com/Dicklesworthstone/asupersync/commit/dc99cad8),
+  [`3dd3f141`](https://github.com/Dicklesworthstone/asupersync/commit/3dd3f141),
+  `br-asupersync-oh6gm2`, `br-asupersync-xnlyss`)
 - **Large-object clean wins against tuned rsync.** Incremental hash-on-receive,
   fragment hash overlap, protocol-v3 `ObjectComplete` hash trailers, and
   same-filesystem commit rename cut tail work on large clean transfers. Matrix

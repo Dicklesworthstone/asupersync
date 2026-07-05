@@ -2,7 +2,13 @@
 
 ## What Is Asupersync?
 
-A spec-first, cancel-correct, capability-secure async runtime for Rust with ~500 source files across 40+ modules. Not a Tokio wrapper -- a broad support-class-scoped replacement for native Asupersync designs, with stronger guarantees:
+A spec-first, cancel-correct, capability-secure async runtime for Rust with
+1,700+ tracked files under `src/`, including 1,100+ Rust files; the generated
+API map currently lists 120 modules and 298 root exports. Refresh live counts
+from `/data/projects/asupersync/artifacts/api_surface_map_v1.json` and
+`git ls-files` before quoting them. Not a Tokio wrapper -- a broad
+support-class-scoped replacement for native Asupersync designs, with stronger
+guarantees:
 
 - **Structured concurrency**: every task owned by a region; region close = quiescence
 - **Cancel-correctness**: cancellation is request -> drain -> finalize (not silent drop)
@@ -48,7 +54,7 @@ Severity lattice: `Ok < Err < Cancelled < Panicked`. Monotone aggregation.
 
 | Workspace member / package | Purpose |
 |-------|---------|
-| `asupersync` | Main runtime (~500 files, 40+ modules) |
+| `asupersync` | Main runtime (1,700+ tracked files under `src/`, 120 API-map modules) |
 | `asupersync-macros` | Proc macros: `scope!`, `spawn!`, `join!`, `join_all!`, `race!` |
 | `asupersync-browser-core` | Canonical browser-runtime core for JS/TS packages |
 | `asupersync-tokio-compat` | Quarantined interop bridge for stubborn Tokio-only dependencies |

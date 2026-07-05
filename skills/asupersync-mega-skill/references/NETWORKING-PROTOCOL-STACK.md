@@ -8,13 +8,20 @@ Asupersync ships a cancel-safe networking stack from raw sockets through applica
 
 Source: `src/runtime/reactor/`
 
-| Backend | Platform | Source |
-|---------|----------|--------|
-| epoll | Linux | `src/runtime/reactor/epoll.rs` |
-| kqueue | macOS/BSD | `src/runtime/reactor/kqueue.rs` |
-| Windows | Windows | `src/runtime/reactor/windows.rs` |
-| io_uring | Linux 5.1+ | `src/runtime/reactor/io_uring.rs` (feature: `io-uring`) |
-| Lab | Testing | `src/runtime/reactor/lab.rs` |
+The exported reactor contract is narrower than the directory listing. Verify
+the live export graph before promising platform parity.
+
+| Export | Platform / role | Current caveat |
+|--------|-----------------|----------------|
+| `EpollReactor` | Linux primary path | Full shipped readiness/mode surface used by the native runtime |
+| `IoUringReactor` | Linux with `io-uring`; intentional `Unsupported` without it | Feature-gated helper path, not a blanket replacement for epoll |
+| `KqueueReactor` | BSD-family targets | Rejects `Interest::DISPATCH` and `Interest::PRIORITY` |
+| `IocpReactor` | Windows | Currently accepts only `READABLE` / `WRITABLE` |
+| `BrowserReactor` | `wasm32` browser contexts | Browser-hosted, capability-bounded, not native socket parity |
+| `LabReactor` | Deterministic tests | Lab/runtime proof surface, not production I/O |
+
+Historical or platform-specific files under `src/runtime/reactor/` are not
+automatically part of the live public export graph.
 
 ### I/O Driver
 
@@ -158,21 +165,44 @@ Known active frontiers include reliable clean-source streaming, authenticated
 control-source frames, QUIC pacing/congestion, large-object clean wins,
 delta/resync planning, and no-claim boundaries for cells that remain blocked.
 
-Current encrypted QUIC frontier (MATRIX-205/206, July 3, 2026):
+Current encrypted QUIC frontier (refresh before citing):
 
 - landed zero-copy receive pump, in-place AEAD unprotect, ACK fast path,
   inc-hash-on-receive, bounded sender queues, release-on-ACK retention, and
   delivery-clocked source-stream pacing;
 - `Buf::copy_to_bytes` plus `BytesCursor` zero-copy override are now part of the
   protocol hot-path story;
-- retransmit-frame coalescing and requeue ordering fixes landed, but absolute
-  pacer scheduling was re-refuted;
+- retransmit-frame coalescing, requeue ordering fixes, and conservative
+  QUIC recovery drain-cap tuning landed, but absolute pacer scheduling was
+  re-refuted;
 - scoped positive claim: `50M/good/encrypted` beats tuned rsync-ssh in current
   evidence, and `5G/perfect/encrypted` completes byte-identical after being
   previously impossible;
 - no-claim boundary: `500M/perfect/encrypted` still loses on speed,
   `50M/bad/encrypted` still needs a rate-climb/cliff-recovery mechanism, and
   5G encrypted peak RSS remains a follow-up.
+
+Current RQ/nocrypto frontier (MATRIX-207..211, July 2026):
+
+- `MATRIX-207` landed the convergence-control stack for
+  `500M/broken/nocrypto`: arrival-evidence pacing loss, rank-stall congestion
+  only when arrivals corroborate wire loss, lower round-0 FEC overhead, sparse
+  residual source requests, and expected-loss-aware recommendations. It was
+  not banked because the cell reached fail-closed SHA mismatch.
+- `MATRIX-208` fixed the decode-integrity root cause by reading FEC seeds from
+  the shared staging fragment at shard-absolute offsets. That made the cell
+  sha-ok 3/3 but only statistical parity with tuned rsync.
+- `MATRIX-209` banked exactly one new ATP win:
+  `500M/broken/nocrypto` atp median 564.77s, sha-ok 3/3 plus a confirming
+  fourth rep, versus tuned rsync median 574.46s. The winning lever was
+  double-buffered encode-ahead in the RQ spray; bounded token-bucket schedule
+  credit stayed as hygiene after its speed hypothesis was refuted.
+- `MATRIX-211` one-shot packed-member commit batching is a candidate landing
+  for tree/small-file commit-write overhead. It needs quiet-box A/B matrix
+  evidence before any performance win is claimed.
+
+Do not generalize the RQ `500M/broken/nocrypto` win to encrypted-large,
+tree-small, cross-trust symbol safety, or whole-matrix success.
 
 ## Transport Layer
 

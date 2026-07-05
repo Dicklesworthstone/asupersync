@@ -70,8 +70,16 @@ QUIC/TLS paths can rely on verified 1-RTT AEAD for in-channel symbols, but
 missing symbol-auth context, TLS-less native QUIC send paths, and unsupported
 transport/auth combinations must fail closed. Current positive ATP claims are
 matrix-cell scoped unless the full current matrix is fresh; insert/shift
-re-sync byte savings, clean-large wins, or one encrypted mild-loss win do not
-automatically prove lossy, encrypted-large, or cross-trust symbol safety.
+re-sync byte savings, clean-large wins, one encrypted mild-loss win, or the
+`500M/broken/nocrypto` RQ win do not automatically prove encrypted-large,
+tree-small, lossy-encrypted, full-matrix, or cross-trust symbol safety.
+
+For the current RQ benchmark evidence, `MATRIX-207` made
+`500M/broken/nocrypto` converge but fail closed on SHA, `MATRIX-208` fixed the
+shard-absolute staging seed read and reached parity, and `MATRIX-209` banked
+the scoped win with double-buffered encode-ahead. Residual rare
+redundancy-recovered `InconsistentEquations` remain tracked under
+`asupersync-c54to7`; cite the ledger before claiming anything broader.
 
 ## Distributed Primitives
 

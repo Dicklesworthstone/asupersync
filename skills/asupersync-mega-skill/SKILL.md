@@ -1,7 +1,7 @@
 ---
 name: asupersync-mega-skill
 description: >-
-  Replace Tokio Rust stacks with Asupersync. Use when migrating tokio/axum/hyper/tonic apps, designing native Cx/region-based services, or debugging Asupersync internals.
+  Replace Tokio stacks with Asupersync. Use when migrating Tokio/axum/hyper/tonic apps, designing Cx/region services, debugging internals, or classifying proof/ATP evidence.
 ---
 
 # Asupersync Mega Skill
@@ -226,8 +226,35 @@ compiler checks and testing discipline.
   rate-capped, SHA/tamper-checked evidence. A single current cell can support a
   scoped regression claim; headline "beats rsync" claims need whole-matrix
   evidence. Compile success or `sha_ok` alone is not a win.
-- Current ATP frontier (July 3, 2026 MATRIX-205/206): encrypted QUIC has a
-  measured `50M/good/encrypted` win and `5G/perfect/encrypted` correctness
-  unblock, but `500M/perfect/encrypted` still loses to tuned rsync, the
-  `50M/bad/encrypted` rate-climb remains open, and 5G encrypted RSS is still a
-  follow-up. Do not describe encrypted-large or the full matrix as solved.
+
+## Evidence-First Operator Cards
+
+Use these compact operators for volatile repo-internal claims:
+
+- **Live-doc refresh**: before any Asupersync-internal API, proof, or ATP claim,
+  read live `AGENTS.md`, `README.md`, `TESTING_FOR_AGENTS.md`, `CHANGELOG.md`,
+  the relevant source, and the relevant artifact/ledger rows. Do not rely on
+  this skill's dated examples as authority.
+- **Claim gate**: classify the evidence as `banked`, `scoped-cell-only`,
+  `parity`, `correct-but-slower`, `candidate`, `stale`, `blocked`, or
+  `failed`. Say the no-claim boundary in the same breath as the positive claim.
+- **ATP gate**: require tuned rsync, release `atp`, crypto-symmetric setup,
+  rate caps, SHA/tamper fail-closed checks, and current matrix/ledger evidence.
+  `sha_ok`, `cargo check`, or one favorable stale cell is not a benchmark win.
+- **Proof-lane classifier**: map each repo-internal proof to
+  `artifacts/proof_lane_manifest_v1.json` and
+  `artifacts/proof_status_snapshot_v1.json`; preserve RCH build id, target dir,
+  artifact path, and dirty-tree state for cited proof.
+- **Migration planner router**: for downstream migrations, run the read-only
+  migration readiness planner when deciding whether/how to migrate; treat
+  `scripts/audit-target.sh` as quick inventory only.
+
+Current ATP evidence snapshot (refresh before citing): encrypted QUIC
+`MATRIX-205/206/210` has a measured `50M/good/encrypted` win and
+`5G/perfect/encrypted` correctness unblock, but no banked encrypted-large or
+full-matrix win; `500M/perfect/encrypted`, `50M/bad/encrypted`, and 5G
+receiver RSS remain open. RQ/nocrypto `MATRIX-207/208/209` banked exactly one
+new positive cell: `500M/broken/nocrypto` atp median 564.77s, sha-ok 3/3 plus
+a confirming fourth rep, versus tuned rsync median 574.46s. `MATRIX-210`
+QUIC drain-cap tuning and `MATRIX-211` packed-member commit batching are
+implementation landings, not banked benchmark wins without fresh matrix proof.

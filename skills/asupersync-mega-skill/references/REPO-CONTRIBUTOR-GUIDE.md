@@ -195,7 +195,8 @@ claims.
 | `artifacts/phase6_methodology_gate_enforcement_contract_v1.json` | Direct-main vs PR/release-review gate contract |
 | `artifacts/runtime_pressure_control_evidence_contract_v1.json` | Runtime pressure-control evidence contract |
 | `docs/atp_bench_matrix_spec.md` | ATP benchmark acceptance contract |
-| `scripts/atp_bench/MATRIX.md` | Current ATP matrix ledger |
+| `docs/atp_rq_beat_rsync_ledger.md` | Append-only ATP benchmark evidence ledger and refuted-hypothesis history |
+| `scripts/atp_bench/MATRIX.md` | ATP matrix operator runbook / command guide |
 
 ## RCH (Remote Compilation Helper)
 
@@ -267,10 +268,12 @@ Always `br sync --flush-only && git add .beads/` before ending sessions.
 
 For ATP work, `scripts/atp_bench/run_matrix_cell.sh`,
 `scripts/atp_bench/score_matrix.py`, `scripts/atp_bench/MATRIX.md`,
-`docs/atp_bench_matrix_spec.md`, and `docs/atp_rq_beat_rsync_ledger.md` are the
-evidence spine. Do not claim a win unless the current matrix cell beats tuned
-rsync under the requested crypto/auth/link conditions with SHA/tamper checks and
-timing/byte evidence.
+`docs/atp_bench_matrix_spec.md`, and `docs/atp_rq_beat_rsync_ledger.md` work
+together, but they do not have the same authority. `MATRIX.md` is the operator
+runbook; `docs/atp_rq_beat_rsync_ledger.md` is the append-only evidence ledger
+for results, refuted hypotheses, and no-claim boundaries. Do not claim a win
+unless the current matrix cell beats tuned rsync under the requested
+crypto/auth/link conditions with SHA/tamper checks and timing/byte evidence.
 
 Run sequence for serious ATP claims:
 
