@@ -9947,11 +9947,76 @@ async fn hash_packed_members_streaming(
     Ok(sha_ok)
 }
 
+/// One-shot packed-member commit cap: above this staged span the batch falls
+/// back to the streaming cursor loop instead of materializing the span.
+const PACKED_MEMBER_BATCH_ONESHOT_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Commit an entire packed small-file batch inside ONE blocking-pool task:
+/// read the verified staged span once, then create/write every member with
+/// raw `std::fs`. The serial async loop paid several pool round-trips per
+/// tiny file (create + write + flush + staged reads ≈ thousands of
+/// dispatches for a small tree), which is the commit_write tail rsync does
+/// not pay (MATRIX-204/211). Parallel per-member writes buy little here —
+/// same-directory creates serialize on the kernel dir lock — so the win is
+/// eliminating dispatch overhead, not adding concurrency.
+fn write_packed_member_batch_oneshot(
+    staging_path: PathBuf,
+    members: Vec<PackedMemberWrite>,
+    span_start: u64,
+    span_len: usize,
+) -> std::io::Result<()> {
+    use std::io::{Read, Seek};
+
+    let mut staged = vec![0u8; span_len];
+    let mut source = std::fs::File::open(&staging_path)?;
+    source.seek(std::io::SeekFrom::Start(span_start))?;
+    source.read_exact(&mut staged)?;
+
+    let mut created_parents: BTreeSet<PathBuf> = BTreeSet::new();
+    for member in &members {
+        if let Some(parent) = member.out_path.parent()
+            && created_parents.insert(parent.to_path_buf())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let start = usize::try_from(member.offset - span_start)
+            .map_err(|_| std::io::Error::other("packed member offset exceeds span"))?;
+        let len = usize::try_from(member.len)
+            .map_err(|_| std::io::Error::other("packed member length exceeds span"))?;
+        let end = start
+            .checked_add(len)
+            .filter(|end| *end <= staged.len())
+            .ok_or_else(|| std::io::Error::other("packed member range exceeds staged span"))?;
+        std::fs::write(&member.out_path, &staged[start..end])?;
+    }
+    Ok(())
+}
+
 async fn write_packed_member_batch(
     staging_path: &Path,
     members: &[PackedMemberWrite],
     buf: &mut [u8],
 ) -> Result<(), RqError> {
+    let span_start = members.iter().map(|member| member.offset).min();
+    let span_end = members
+        .iter()
+        .map(|member| member.offset.saturating_add(member.len))
+        .max();
+    if let (Some(span_start), Some(span_end)) = (span_start, span_end)
+        && members.len() > 1
+        && span_end.saturating_sub(span_start) <= PACKED_MEMBER_BATCH_ONESHOT_MAX_BYTES
+        && let Ok(span_len) = usize::try_from(span_end - span_start)
+    {
+        let staging = staging_path.to_path_buf();
+        let batch = members.to_vec();
+        let staging_display = staging_path.display().to_string();
+        return crate::runtime::spawn_blocking_io(move || {
+            write_packed_member_batch_oneshot(staging, batch, span_start, span_len)
+        })
+        .await
+        .map_err(|e| RqError::Source(format!("{staging_display}: {e}")));
+    }
+
     let mut created_parents: BTreeSet<PathBuf> = BTreeSet::new();
     for member in members {
         if let Some(parent) = member.out_path.parent()
@@ -18942,6 +19007,70 @@ mod tests {
         assert_eq!(
             std::fs::read(out_root.join("nested/b.txt")).expect("read b"),
             b
+        );
+    }
+
+    /// MATRIX-211 regression: the one-shot packed commit must slice members
+    /// relative to the batch SPAN (min offset), not the staging file start,
+    /// and must not care about member order; a single member takes the
+    /// streaming fallback and still commits byte-identically.
+    #[test]
+    fn packed_member_batch_oneshot_spans_and_fallback_commit_identically() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging_path = temp.path().join("pack-object");
+        let pad = vec![0xEE_u8; 7];
+        let a = b"span-member-a".to_vec();
+        let b = b"span-member-b-longer".to_vec();
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&pad);
+        packed.extend_from_slice(&a);
+        packed.extend_from_slice(&b);
+        std::fs::write(&staging_path, &packed).expect("write packed staging object");
+        let a_off = pad.len() as u64;
+        let b_off = a_off + a.len() as u64;
+
+        // Out-of-order members with span_start > 0 → one-shot path.
+        let out_root = temp.path().join("out");
+        let writes = vec![
+            PackedMemberWrite {
+                offset: b_off,
+                len: b.len() as u64,
+                out_path: out_root.join("deep/nested/b.bin"),
+            },
+            PackedMemberWrite {
+                offset: a_off,
+                len: a.len() as u64,
+                out_path: out_root.join("a.bin"),
+            },
+        ];
+        let mut write_buf = [0u8; 4];
+        futures_lite::future::block_on(write_packed_member_batch(
+            &staging_path,
+            &writes,
+            &mut write_buf,
+        ))
+        .expect("one-shot span commit");
+        assert_eq!(std::fs::read(out_root.join("a.bin")).expect("read a"), a);
+        assert_eq!(
+            std::fs::read(out_root.join("deep/nested/b.bin")).expect("read b"),
+            b
+        );
+
+        // Single member → streaming fallback path.
+        let solo = vec![PackedMemberWrite {
+            offset: a_off,
+            len: a.len() as u64,
+            out_path: out_root.join("solo/a-again.bin"),
+        }];
+        futures_lite::future::block_on(write_packed_member_batch(
+            &staging_path,
+            &solo,
+            &mut write_buf,
+        ))
+        .expect("single-member fallback commit");
+        assert_eq!(
+            std::fs::read(out_root.join("solo/a-again.bin")).expect("read solo"),
+            a
         );
     }
 
