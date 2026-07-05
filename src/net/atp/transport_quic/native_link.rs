@@ -744,8 +744,17 @@ fn packet_in_ack_ranges(packet_number: u64, ranges: &[NativeAckRange]) -> bool {
 }
 
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_PACKET_THRESHOLD: u64 = 3;
-const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 4;
-const QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS: usize = 64;
+/// Recovery drains feed `requeue_sent_stream_frame` + a paced `flush`, so these
+/// caps bound how much recovery data becomes AVAILABLE to the pacer per event —
+/// they are not a wire burst. Asymmetric by design (MATRIX-210 A/B): the
+/// ACK-gap FAST drain uses a packet-threshold detector that fires spuriously
+/// under ACK batching, and a 32-packet drain amplified each false positive
+/// into seconds of retransmit churn (50M/good 3.45→26s, 500M/perfect
+/// 9.5→21.9s reps) — so it stays small. The PTO drain is timer-based (no
+/// spurious trigger) and 64 packets/200ms capped loss recovery at ~2.5MB/s;
+/// 256 lifts the recovery ceiling where it is safe (oh6gm2 phase 2).
+const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 8;
+const QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS: usize = 256;
 
 fn packet_lost_by_ack_gap(packet_number: u64, acked_ranges: &[NativeAckRange]) -> bool {
     let Some(largest_acked) = acked_ranges.iter().map(|range| range.largest).max() else {
