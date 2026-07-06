@@ -265,6 +265,11 @@ const DEFAULT_MAX_REMOTE_STREAMS: u64 = 128;
 /// from the kernel instead of self-backpressuring after a short burst.
 const MAX_INBOUND_DATAGRAMS: usize = 65_536;
 
+/// Upper bound on SACK ranges encoded per ACK frame (newest ranges first).
+/// Keeps every ACK packet inside one conservative MTU; see
+/// `ReceivedPacketTracker::ack_frame`.
+const MAX_ACK_FRAME_RANGES: usize = 32;
+
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
 const MAX_OUTBOUND_DATAGRAMS: usize = 256;
@@ -2231,7 +2236,14 @@ impl ReceivedPacketTracker {
         let mut previous_smallest = first.smallest;
         let mut ack_ranges = Vec::new();
 
-        for range in self.ranges.iter().skip(1) {
+        // Bound the encoded SACK ranges to the newest window. Under sustained
+        // loss the tracker can hold hundreds of ranges, and an unbounded ACK
+        // frame grows past one MTU — the resulting IP-fragmented feedback
+        // packet then dies at the per-fragment loss rate exactly when feedback
+        // matters most (br-asupersync-u6m3dy). Omitted older ranges are legal
+        // per RFC 9000 §13.2.3: the peer keeps those packets in flight and
+        // recovers them through later ACKs or its own loss/PTO retransmit.
+        for range in self.ranges.iter().skip(1).take(MAX_ACK_FRAME_RANGES - 1) {
             let gap = previous_smallest
                 .saturating_sub(range.largest)
                 .saturating_sub(2);

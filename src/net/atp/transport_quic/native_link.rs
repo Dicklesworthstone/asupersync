@@ -211,6 +211,46 @@ const QUIC_DATA_PLANE_PACER_MAX_PAUSE: Duration = Duration::from_millis(250);
 /// old bound before the fountain loop could recover.
 const ATP_QUIC_UDP_MAX_PACKET: usize = 65_535;
 
+/// UDP packet ceiling for links whose config declares real path loss.
+///
+/// The jumbo `ATP_QUIC_UDP_MAX_PACKET` build (8 KiB stream packets, coalesced
+/// spray packets) IP-fragments on any MTU-1500 link. Fragmentation is free on
+/// a clean path, but under packet loss it multiplies the effective loss rate:
+/// an 8 KiB UDP datagram is ~6 fragments, so 10% per-fragment netem loss kills
+/// ~47% of packets — bulk data AND the ACK/feedback path both crawl and the
+/// broken regime cannot converge (br-asupersync-u6m3dy). Cap protected packets
+/// under one Ethernet MTU (1350 + 28 IP/UDP = 1378 < 1500) so lossy links see
+/// per-packet loss at the configured rate; clean links keep the jumbo build
+/// the perfect/good-cell wins were measured with. The cap still leaves room
+/// for one full default symbol DATAGRAM frame (~1200 bytes) plus packet
+/// overhead; `udp_packet_cap_for_config` raises it further if an operator
+/// configures oversized symbols, because a payload budget below one symbol
+/// frame fail-closes the spray path at startup.
+const QUIC_LOSSY_PATH_UDP_MAX_PACKET: usize = 1_350;
+
+/// Select the protected-packet build ceiling from the declared loss posture.
+fn udp_packet_cap_for_config(config: &QuicConfig) -> usize {
+    if config.round0_loss_target >= super::QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN {
+        // Floor: one symbol DATAGRAM frame (either auth posture) or one
+        // configured DATAGRAM must always fit a packet, else spray-path
+        // budgets invert (`spray_frame_payload_limit` clamps min > max).
+        let symbol_frame =
+            symbol_datagram_frame_len(config.symbol_size, super::AUTH_ENVELOPE_HEADER_LEN)
+                .max(symbol_datagram_frame_len(
+                    config.symbol_size,
+                    super::ENVELOPE_HEADER_LEN,
+                ))
+                .max(config.max_datagram_size);
+        QUIC_LOSSY_PATH_UDP_MAX_PACKET.max(
+            symbol_frame
+                .saturating_add(ONE_RTT_PACKET_OVERHEAD)
+                .saturating_add(ONE_RTT_COALESCED_CONTROL_HEADROOM),
+        )
+    } else {
+        ATP_QUIC_UDP_MAX_PACKET
+    }
+}
+
 /// Bytes added around each encoded 1-RTT payload before it is handed to UDP.
 const ONE_RTT_PACKET_OVERHEAD: usize = ONE_RTT_HEADER_LEN + ONE_RTT_TAG_LEN;
 /// Reserved bytes below the endpoint cap for ACK/control-frame coalescing slack.
@@ -3887,10 +3927,12 @@ impl QuicLink {
 
     /// Receive one batch of UDP packets, unprotect each, and feed the recovered
     /// 1-RTT frames into the connection. Waits at most `idle_timeout` for the
-    /// first packet, then keeps draining short-quiet full batches until the
-    /// socket appears empty or the per-turn drain budget is reached. Returns the
-    /// number of packets successfully processed (undecryptable / non-1-RTT
-    /// packets are silently dropped, per QUIC).
+    /// first *successfully processed* packet, then keeps draining short-quiet
+    /// full batches until the socket appears empty or the per-turn drain budget
+    /// is reached. Returns the number of packets successfully processed
+    /// (undecryptable / non-1-RTT packets are silently dropped, per QUIC, and
+    /// do not count as progress or consume the idle allowance — `Ok(0)` means
+    /// the full `idle_timeout` elapsed without one processable packet).
     async fn pump_inbound_for(
         &mut self,
         cx: &Cx,
@@ -3910,6 +3952,15 @@ impl QuicLink {
         let mut batches = 0usize;
         let mut next_timeout = timeout;
         let max_drain_batches = max_drain_batches.max(1);
+        // Zero-progress deadline: callers treat `Ok(0)` as "nothing arrived for
+        // `timeout`", and several turn it into a fatal idle-timeout error. A
+        // batch whose packets are all dropped (undecryptable, stale, non-1-RTT)
+        // must therefore keep waiting out the caller's remaining allowance
+        // rather than short-circuiting a zero back — otherwise one junk UDP
+        // packet arriving alone fake-expires a 360s idle timeout seconds into
+        // a healthy transfer (br-asupersync-u6m3dy: every encrypted broken-cell
+        // receiver died this way while stream data was still flowing).
+        let zero_progress_deadline = Instant::now().checked_add(timeout);
 
         loop {
             let receive_limit = self.inbound_receive_packet_limit();
@@ -3958,6 +4009,23 @@ impl QuicLink {
             // so co-scheduled peer tasks are not starved for a whole budget.
             crate::runtime::yield_now().await;
 
+            if total_processed == 0 {
+                // Every packet so far was dropped by unprotect/decode. Dropped
+                // packets are not peer progress, so they must not consume the
+                // idle allowance: re-arm the wait with whatever remains of it
+                // instead of returning the `Ok(0)` that callers escalate to a
+                // fatal "transport timeout" (br-asupersync-u6m3dy).
+                let remaining = zero_progress_deadline
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                match remaining {
+                    Some(remaining) if remaining.is_zero() => return Ok(0),
+                    Some(remaining) => next_timeout = remaining,
+                    // Unreachable in practice (deadline overflow): keep the
+                    // original window so the wait stays bounded.
+                    None => next_timeout = timeout,
+                }
+                continue;
+            }
             batches = batches.saturating_add(1);
             if received_len < receive_limit {
                 return Ok(total_processed);
@@ -4636,7 +4704,9 @@ fn link_from_handshake(
     // per-symbol loss granularity, but avoids the MATRIX-39 one-symbol-per-UDP
     // packet ceiling that throttled encrypted transfers to packet-rate speed.
     // The no-evict receive queue and inbound pump remain the burst bounds.
-    let max_app_payload = one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET);
+    // Declared-lossy links cap the build at one MTU so packets never
+    // IP-fragment into netem loss amplification (br-asupersync-u6m3dy).
+    let max_app_payload = one_rtt_max_payload_for_udp_packet(udp_packet_cap_for_config(config));
     let max_datagram_frame_size = config.max_datagram_size.min(max_app_payload);
     // Use the smallest ATP symbol envelope this link may legitimately carry so
     // the receive batch bound remains safe for both auth postures.

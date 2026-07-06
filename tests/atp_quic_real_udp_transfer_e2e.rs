@@ -778,6 +778,95 @@ fn real_udp_quic_broken_loss_transport_auth_source_stream_commits_without_marker
     assert_no_staging_residue(dst.path());
 }
 
+/// Regression for br-asupersync-u6m3dy: an undecryptable UDP packet arriving
+/// alone in an inbound pump turn must be dropped per QUIC without consuming
+/// the idle allowance. Before the fix, `pump_inbound_for` returned `Ok(0)`
+/// for a batch whose packets all failed unprotect, and the receive session
+/// escalated that zero into a fatal "transport timeout after 360s" seconds
+/// into a healthy transfer — every encrypted broken-regime matrix cell ≥5M
+/// died this way (uniform ~363s failures with data still flowing).
+///
+/// The blaster thread sprays plausible 1-RTT short-header junk (0x40 marker +
+/// fresh packet numbers + garbage ciphertext) at the receiver for the whole
+/// transfer, so many pump turns wake up to a junk-only batch. The transfer
+/// must still commit with verified bytes.
+#[test]
+fn real_udp_quic_transfer_survives_solo_undecryptable_junk_packets() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("junk-survivor.bin");
+    let payload: Vec<u8> = (0..(4 * 1024 * 1024))
+        .map(|i| u8::try_from((i * 31 + i / 509 + 17) % 251).expect("byte pattern fits u8"))
+        .collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let cfg = transport_authenticated_configs();
+
+    let (send, recv) = block_on(async {
+        let cx = Cx::for_testing();
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server_endpoint = bind_server_endpoint(&cx, listen)
+            .await
+            .expect("bind server endpoint");
+        let server_addr = server_endpoint.local_addr();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let blaster = {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let sock = UdpSocket::bind("127.0.0.1:0").expect("bind junk socket");
+                // Let the (loopback-fast) handshake finish so the junk lands
+                // on the established 1-RTT pump, matching the wedge cells.
+                thread::sleep(Duration::from_millis(200));
+                let mut junk = [0u8; 48];
+                junk[0] = 0x40;
+                for (i, byte) in junk.iter_mut().enumerate().skip(9) {
+                    *byte = u8::try_from((i * 37 + 11) % 251).expect("byte pattern fits u8");
+                }
+                let mut fake_pn: u64 = 0xFFFF_0000_0000_0000;
+                while !stop.load(Ordering::Relaxed) {
+                    junk[1..9].copy_from_slice(&fake_pn.to_be_bytes());
+                    fake_pn = fake_pn.wrapping_add(1);
+                    let _ = sock.send_to(&junk, server_addr);
+                    thread::sleep(Duration::from_micros(500));
+                }
+            })
+        };
+
+        let out = zip(
+            send_path(&cx, server_addr, &source, cfg.send, "atp-quic-client"),
+            receive_on_endpoint(
+                &cx,
+                server_endpoint,
+                dst.path(),
+                &cfg.recv,
+                "atp-quic-server",
+            ),
+        )
+        .await;
+        stop.store(true, Ordering::Relaxed);
+        blaster.join().expect("junk blaster thread exits");
+        out
+    });
+
+    let send = send.unwrap_or_else(|err| {
+        panic!("sender must survive junk-packet spray: {err:?}; receiver={recv:?}")
+    });
+    let recv = recv.expect("receiver must drop junk packets without fake idle timeout");
+
+    assert!(recv.committed, "receiver must commit through junk spray");
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.bytes_sent, payload.len() as u64);
+    assert_eq!(recv.bytes_received, payload.len() as u64);
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(
+        std::fs::read(dst.path().join("junk-survivor.bin")).expect("read committed"),
+        payload,
+        "committed bytes must match the source through continuous junk spray"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
 fn assert_non_dividing_transport_auth_transfer(
     max_block_size: usize,
     file_name: &str,
