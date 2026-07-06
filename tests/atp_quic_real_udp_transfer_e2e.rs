@@ -778,6 +778,111 @@ fn real_udp_quic_broken_loss_transport_auth_source_stream_commits_without_marker
     assert_no_staging_residue(dst.path());
 }
 
+/// Regression for br-asupersync-jmri58: the client's final handshake flight
+/// (the packets carrying its TLS Finished) is dropped exactly once. A TLS 1.3
+/// client completes on *sending* Finished, so before the fix the client moved
+/// on to the data plane (dropping the server's retransmitted long-header
+/// flight as NotOneRtt) while the server could never complete — a mutual
+/// wedge that killed ~19% of broken-regime session establishments. The
+/// recovery handshake (server re-offers its flight on early 1-RTT evidence;
+/// client re-sends its retained Finished flight when it drops a long-header
+/// packet) must converge and the transfer must commit.
+#[test]
+fn real_udp_quic_transfer_recovers_lost_client_finished_flight() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("finished-drop.bin");
+    let payload: Vec<u8> = (0..65536u32)
+        .map(|i| u8::try_from((i.wrapping_mul(23).wrapping_add(11)) % 251).expect("byte"))
+        .collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let cfg = transport_authenticated_configs();
+
+    let (send, recv) = block_on(async {
+        let cx = Cx::for_testing();
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server_endpoint = bind_server_endpoint(&cx, listen)
+            .await
+            .expect("bind server endpoint");
+        let server_addr = server_endpoint.local_addr();
+
+        let proxy_sock = UdpSocket::bind("127.0.0.1:0").expect("bind proxy socket");
+        proxy_sock.set_nonblocking(true).expect("proxy nonblocking");
+        let proxy_addr = proxy_sock.local_addr().expect("proxy addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let proxy = {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let mut client_addr: Option<SocketAddr> = None;
+                let mut dropped_finished = 0usize;
+                let mut buf = vec![0u8; 65_535];
+                let started = Instant::now();
+                while !stop.load(Ordering::Relaxed) && started.elapsed() < Duration::from_secs(30) {
+                    match proxy_sock.recv_from(&mut buf) {
+                        Ok((len, src_addr)) => {
+                            let (target, from_client) = if src_addr == server_addr {
+                                let Some(client) = client_addr else { continue };
+                                (client, false)
+                            } else {
+                                client_addr = Some(src_addr);
+                                (server_addr, true)
+                            };
+                            // Drop the client's first Handshake-space flight
+                            // (the Finished) once: long header (0x80 form bit)
+                            // with packet type bits 0x20 (Handshake).
+                            if from_client
+                                && dropped_finished < 2
+                                && len > 0
+                                && buf[0] & 0x80 != 0
+                                && buf[0] & 0x30 == 0x20
+                            {
+                                dropped_finished += 1;
+                                continue;
+                            }
+                            let _ = proxy_sock.send_to(&buf[..len], target);
+                        }
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_micros(200));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+        };
+
+        let out = zip(
+            send_path(&cx, proxy_addr, &source, cfg.send, "atp-quic-client"),
+            receive_on_endpoint(
+                &cx,
+                server_endpoint,
+                dst.path(),
+                &cfg.recv,
+                "atp-quic-server",
+            ),
+        )
+        .await;
+        stop.store(true, Ordering::Relaxed);
+        proxy.join().expect("finished-drop proxy thread exits");
+        out
+    });
+
+    let send = send.unwrap_or_else(|err| {
+        panic!("sender must recover a lost Finished flight: {err:?}; receiver={recv:?}")
+    });
+    let recv = recv.expect("receiver must complete the handshake via recovery");
+    assert!(recv.committed, "receiver must commit after recovery");
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(recv.bytes_received, payload.len() as u64);
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(
+        std::fs::read(dst.path().join("finished-drop.bin")).expect("read committed"),
+        payload,
+        "committed bytes must match through a dropped Finished flight"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
 /// Regression for br-asupersync-u6m3dy: an undecryptable UDP packet arriving
 /// alone in an inbound pump turn must be dropped per QUIC without consuming
 /// the idle allowance. Before the fix, `pump_inbound_for` returned `Ok(0)`

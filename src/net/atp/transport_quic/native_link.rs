@@ -2095,6 +2095,17 @@ pub struct QuicLink {
     one_rtt_packets_ingested: u64,
     non_one_rtt_packets_dropped: u64,
     unprotect_packets_dropped: u64,
+    /// Client only: the final handshake flight (the packets carrying the TLS
+    /// Finished), retained for post-handshake loss recovery. A TLS 1.3 client
+    /// completes on *sending* Finished; if that flight is lost the server
+    /// keeps retransmitting its own long-header flight, which this side's
+    /// data plane would otherwise just drop as `NotOneRtt` — a mutual wedge
+    /// until both idle timeouts. When the pump drops a long-header packet
+    /// while this flight is non-empty, the flight is re-sent (rate-limited)
+    /// so the server can complete (br-asupersync-jmri58).
+    final_handshake_flight: Vec<OutgoingPacket>,
+    /// Rate limiter for `final_handshake_flight` re-sends.
+    last_final_flight_resend: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3942,6 +3953,32 @@ impl QuicLink {
             .await
     }
 
+    /// Re-send the retained client Finished flight (rate-limited). Called when
+    /// the pump drops an inbound long-header packet: post-handshake, that is
+    /// the server retransmitting its flight because it never received our
+    /// Finished — without this resend both sides wedge until their idle
+    /// timeouts (br-asupersync-jmri58).
+    async fn maybe_resend_final_handshake_flight(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<(), QuicTransportError> {
+        if self.final_handshake_flight.is_empty() {
+            return Ok(());
+        }
+        let due = self
+            .last_final_flight_resend
+            .is_none_or(|at| at.elapsed() >= HANDSHAKE_RECOVERY_RESEND_PTO);
+        if !due {
+            return Ok(());
+        }
+        self.last_final_flight_resend = Some(Instant::now());
+        self.endpoint
+            .send_batch(cx, &self.final_handshake_flight)
+            .await
+            .map_err(map_udp_error)?;
+        Ok(())
+    }
+
     async fn pump_inbound_for_with_drain_budget(
         &mut self,
         cx: &Cx,
@@ -3999,7 +4036,13 @@ impl QuicLink {
             self.udp_packets_received = self
                 .udp_packets_received
                 .saturating_add(u64::try_from(received_len).unwrap_or(u64::MAX));
+            let non_one_rtt_before = self.non_one_rtt_packets_dropped;
             let report = self.ingest_packets(cx, received)?;
+            if self.non_one_rtt_packets_dropped > non_one_rtt_before {
+                // Dropped long-header packet(s): the peer is still
+                // handshaking — re-offer our Finished flight so it can finish.
+                self.maybe_resend_final_handshake_flight(cx).await?;
+            }
             total_processed = total_processed.saturating_add(report.one_rtt_packets_processed);
             if report.receive_backpressure {
                 self.trace_datagram_queue_needs_drain(cx, total_processed);
@@ -4688,7 +4731,7 @@ fn unspecified_for(peer: SocketAddr) -> SocketAddr {
 /// Establish a [`QuicLink`] from a completed handshake driver and its endpoint.
 fn link_from_handshake(
     cx: &Cx,
-    driver: QuicHandshakeDriver,
+    mut driver: QuicHandshakeDriver,
     endpoint: QuicUdpEndpoint,
     peer: SocketAddr,
     role: StreamRole,
@@ -4749,6 +4792,7 @@ fn link_from_handshake(
         ));
     }
 
+    let final_handshake_flight = driver.take_final_flight();
     let provider: RustlsQuicCryptoProvider = driver.into_provider();
     let protection =
         AtpPacketProtection::from_provider(Box::new(provider), QuicLink::protection_config());
@@ -4802,6 +4846,8 @@ fn link_from_handshake(
         one_rtt_packets_ingested: 0,
         non_one_rtt_packets_dropped: 0,
         unprotect_packets_dropped: 0,
+        final_handshake_flight,
+        last_final_flight_resend: None,
         sender_handoff: QuicSenderHandoffStats::default(),
     })
 }
@@ -4848,6 +4894,12 @@ async fn connect(
 
 /// Bound on handshake flights before giving up (mirrors the driver's own bound).
 const HANDSHAKE_MAX_FLIGHTS: usize = 64;
+
+/// Cadence for handshake loss-recovery re-sends outside the driver loops: the
+/// server re-offering its flight when early 1-RTT data proves the client
+/// finished, and the client re-offering its Finished flight when dropped
+/// long-header packets prove the server did not (br-asupersync-jmri58).
+const HANDSHAKE_RECOVERY_RESEND_PTO: Duration = Duration::from_millis(750);
 
 /// True if a received UDP packet is a QUIC long-header packet (handshake), vs a
 /// short-header 1-RTT data-plane packet. The long-header form bit is `0x80`.
@@ -4924,14 +4976,29 @@ async fn accept(
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
     let mut early_data: Vec<ReceivedPacket> = Vec::new();
     let mut last_flight: Vec<OutgoingPacket> = Vec::new();
+    // `accept_timeout` bounds the WHOLE accept, and each receive waits at most
+    // one recovery PTO so lost flights are re-offered on a real cadence
+    // instead of only when a stale long-header packet happens to arrive.
+    let accept_started = Instant::now();
+    let mut flights = 0usize;
+    let mut last_early_data_resend: Option<Instant> = None;
 
-    for _ in 0..HANDSHAKE_MAX_FLIGHTS {
+    while flights < HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
             break;
         }
+        let remaining = config
+            .accept_timeout
+            .saturating_sub(accept_started.elapsed());
+        if remaining.is_zero() {
+            return Err(QuicTransportError::Timeout {
+                operation: "quic server accept handshake",
+                timeout: config.accept_timeout,
+            });
+        }
         let received = match crate::time::timeout(
             cx.now(),
-            config.accept_timeout,
+            remaining.min(HANDSHAKE_RECOVERY_RESEND_PTO),
             endpoint.receive_batch(cx, INBOUND_PUMP_BATCH),
         )
         .await
@@ -4939,10 +5006,16 @@ async fn accept(
             Ok(Ok(packets)) => packets,
             Ok(Err(err)) => return Err(map_udp_error(err)),
             Err(_elapsed) => {
-                return Err(QuicTransportError::Timeout {
-                    operation: "quic server accept handshake",
-                    timeout: config.accept_timeout,
-                });
+                // Quiet PTO window: if we have a peer and a flight, re-offer
+                // it — the client may be waiting on a lost server flight.
+                if peer.is_some() && !last_flight.is_empty() {
+                    flights = flights.saturating_add(1);
+                    endpoint
+                        .send_batch(cx, &last_flight)
+                        .await
+                        .map_err(map_udp_error)?;
+                }
+                continue;
             }
         };
         for packet in received {
@@ -4951,6 +5024,7 @@ async fn accept(
                     Ok(client_cid) => client_cid,
                     Err(err) if is_stale_handshake_packet_error(&err) => {
                         if !last_flight.is_empty() {
+                            flights = flights.saturating_add(1);
                             endpoint
                                 .send_batch(cx, &last_flight)
                                 .await
@@ -4974,6 +5048,7 @@ async fn accept(
                         &mut server_pn,
                     )
                     .await?;
+                    flights = flights.saturating_add(1);
                     if !sent.is_empty() {
                         last_flight = sent;
                     } else if !driver.is_complete() && !last_flight.is_empty() {
@@ -4986,7 +5061,24 @@ async fn accept(
             } else {
                 // The client completed the handshake first and is already sending
                 // 1-RTT data. Stash it; it is replayed into the link below.
+                // While WE are still incomplete this is also hard evidence the
+                // client's final flight (its Finished) was lost — re-offer our
+                // flight (rate-limited) so the client's data plane sees a
+                // long-header packet and re-sends its Finished
+                // (br-asupersync-jmri58). Early-data packets deliberately do
+                // NOT consume the flight budget.
                 early_data.push(packet);
+                if !driver.is_complete()
+                    && !last_flight.is_empty()
+                    && last_early_data_resend
+                        .is_none_or(|at| at.elapsed() >= HANDSHAKE_RECOVERY_RESEND_PTO)
+                {
+                    last_early_data_resend = Some(Instant::now());
+                    endpoint
+                        .send_batch(cx, &last_flight)
+                        .await
+                        .map_err(map_udp_error)?;
+                }
             }
         }
     }

@@ -266,6 +266,13 @@ pub struct QuicHandshakeDriver {
     crypto_send_offset: [u64; 3],
     /// Largest inbound packet number already fed into rustls for Initial/Handshake.
     handshake_recv_largest_packet_number: [Option<u64>; 2],
+    /// The last handshake flight this side sent before completing, retained so
+    /// the data plane can re-send it if the peer provably never finished. A
+    /// TLS 1.3 client completes upon *sending* Finished; if that flight is
+    /// lost, the server retransmits its own flight forever while the
+    /// already-complete client drops those long-header packets — a mutual
+    /// wedge until both idle timeouts (br-asupersync-jmri58).
+    final_flight: Vec<OutgoingPacket>,
 }
 
 fn level_index(level: HandshakeLevel) -> usize {
@@ -334,7 +341,15 @@ impl QuicHandshakeDriver {
             one_rtt_keys_installed: false,
             crypto_send_offset: [0; 3],
             handshake_recv_largest_packet_number: [None, None],
+            final_flight: Vec::new(),
         }
+    }
+
+    /// Take the retained final handshake flight for data-plane loss recovery
+    /// (see the `final_flight` field docs). Empty when the handshake needed no
+    /// retained flight (server role) or when already taken.
+    pub fn take_final_flight(&mut self) -> Vec<OutgoingPacket> {
+        std::mem::take(&mut self.final_flight)
     }
 
     /// Mutable access to the packet-protection provider holding the installed
@@ -667,6 +682,11 @@ pub async fn client_handshake_over_udp(
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
+            // Retain the final flight (client Finished): if it was lost on the
+            // wire the server cannot complete, and only the data plane will
+            // observe the evidence (the server's retransmitted long-header
+            // flight). See `QuicHandshakeDriver::final_flight`.
+            driver.final_flight = last_flight;
             return Ok(());
         }
         let received =
@@ -713,6 +733,7 @@ pub async fn client_handshake_over_udp(
     }
 
     if driver.is_complete() {
+        driver.final_flight = last_flight;
         Ok(())
     } else {
         Err(handshake_failure("client_handshake_incomplete"))
