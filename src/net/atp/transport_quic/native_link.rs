@@ -74,7 +74,8 @@ use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::atp::transport_common::{
-    EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+    EntryDigest, EntryMetadata, MetadataApplyReport, apply_entry_metadata_sync,
+    flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
 };
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::handshake_driver::{
@@ -779,6 +780,11 @@ const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_PACKET_THRESHOLD: u64 = 3;
 /// spurious trigger) and 64 packets/200ms capped loss recovery at ~2.5MB/s;
 /// 256 lifts the recovery ceiling where it is safe (oh6gm2 phase 2).
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 8;
+/// Drain cap when the gap-detected set itself is large (> the base cap):
+/// spurious ACK-batching detections are 1-3 packet singles, so a big
+/// detected set is real burst loss and gets drained in few rounds instead
+/// of 8 packets per PTO-clocked firing.
+const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS: usize = 64;
 const QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS: usize = 256;
 
 fn packet_lost_by_ack_gap(packet_number: u64, acked_ranges: &[NativeAckRange]) -> bool {
@@ -1591,10 +1597,17 @@ const STREAM_RATE_MAX_BYTES_PER_S: u64 = 512 * 1024 * 1024;
 /// collapses into retransmit churn (measured: 500M 11s → 53s).
 const STREAM_RATE_GAIN_X1000: u64 = 1250;
 /// Cumulative retransmit-queued bytes after which the pacer stops flooring
-/// its rate at the regime-derived initial seed and trusts the delivery
-/// max-filter alone. Half a bounded source-stream window of loss is clear
-/// evidence the seed overshoots the true link rate.
+/// its rate at the FULL regime-derived seed: sustained loss is evidence the
+/// seed overshoots the true link rate.
 const STREAM_RATE_FLOOR_RELEASE_LOST_BYTES: u64 = 1024 * 1024;
+/// After release the floor drops to `initial / 8`, NOT to the global
+/// minimum: recovery-phase delivery samples reflect only the retransmit
+/// trickle, so a released-to-minimum floor let the max-filter collapse the
+/// rate to a crawl once the seeded samples rotated out (measured: a 256 KiB
+/// release-to-minimum turned 6 MB tree streams on good into uniform ~22 s
+/// walls and regressed 500M/good 46→53 s). An eighth of the seed still
+/// clears a 4-8× mis-seed while keeping recovery paced at path scale.
+const STREAM_RATE_FLOOR_RELEASE_DIVISOR: u64 = 8;
 
 impl SourceStreamRatePacer {
     fn new(initial_rate_bytes_per_s: u64) -> Self {
@@ -1639,7 +1652,8 @@ impl SourceStreamRatePacer {
             .unwrap_or(delivery);
         self.total_lost_bytes = self.total_lost_bytes.saturating_add(lost_bytes);
         let floor = if self.total_lost_bytes > STREAM_RATE_FLOOR_RELEASE_LOST_BYTES {
-            STREAM_RATE_MIN_BYTES_PER_S
+            (self.initial_rate_bytes_per_s / STREAM_RATE_FLOOR_RELEASE_DIVISOR)
+                .max(STREAM_RATE_MIN_BYTES_PER_S)
         } else {
             self.initial_rate_bytes_per_s
         };
@@ -1822,19 +1836,24 @@ impl NativeDataPlanePacer {
                 self.byte_pacer_burst_bytes.max(pacer_bytes),
                 self.pacing_rate_bps,
             );
-            // Relative schedule (`now + interval`), deliberately: the
-            // pipeline's between-burst work time deflates the effective rate
-            // ~20% below the setpoint, and that slack is what keeps the
-            // delivery-clocked controller's probe stable against shaped
-            // links. An absolute (deadline-credit) schedule pushes the ramp
-            // over the netem queue cliff and was measured unstable BOTH
-            // without retransmit coalescing (500M 9s → 42s, 50M/good 3.5s →
-            // 30s) and with it (500M 12.7-41.8s erratic, good 3.3/28.2) —
-            // per-PTO retransmit batches are too small for coalescing alone
-            // to make cliff recovery cheap at scale. Revisit together with
-            // larger drain-per-recovery batches or receiver-side gap
-            // shrinking.
-            self.byte_pacer_next_send_at = Some(now.checked_add(interval).unwrap_or(now));
+            // Absolute (deadline-credit) schedule with bounded catch-up: the
+            // next deadline advances from the PREVIOUS deadline, clamped to
+            // at most one interval of accumulated credit, so between-burst
+            // pipeline work no longer deflates the effective rate ~20% below
+            // the setpoint (the gain×efficiency≈1 fixed point that pinned
+            // clean-large at ~55-63 MB/s). The pure-relative fallback was a
+            // deliberate pre-flow-control safety: an absolute schedule then
+            // pushed ramps over the netem queue cliff into multi-round
+            // retransmit churn (500M 9s→42s; 12.7-41.8s erratic even with
+            // pop-time coalescing). Its stated revisit conditions — bounded
+            // receiver-side overshoot and larger drain-per-recovery batches
+            // — are now structural: the negotiated source-stream window caps
+            // un-read overshoot at ~2 MiB and the evidence-scaled burst
+            // drain retires a whole burst loss in 1-2 firings.
+            let base = self.byte_pacer_next_send_at.map_or(now, |prev| {
+                prev.max(now.checked_sub(interval).unwrap_or(now))
+            });
+            self.byte_pacer_next_send_at = Some(base.checked_add(interval).unwrap_or(now));
         }
         Ok(())
     }
@@ -3480,13 +3499,30 @@ impl QuicLink {
             return Vec::new();
         }
 
+        // Evidence-scaled drain cap: spurious packet-threshold detections
+        // under ACK batching are 1-3 packet singles, so the base cap stays
+        // small (a FLAT 32-packet cap amplified each false positive into
+        // seconds of churn, MATRIX-210). A genuinely large detected set —
+        // more gap-lost packets than the base cap — is a real burst loss
+        // (e.g. a seed-rate overrun dropping ~0.5 MB in one window), and
+        // draining it 8 packets per firing stretched recovery across
+        // dozens of PTO-clocked rounds; scale the cap to the evidence.
+        let detected = self
+            .in_flight_stream_frames
+            .keys()
+            .filter(|packet_number| packet_lost_by_ack_gap(**packet_number, acked_ranges))
+            .count();
+        let cap = if detected > QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS {
+            detected.min(QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS)
+        } else {
+            QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS
+        };
+
         let mut retained = BTreeMap::new();
         let mut lost = Vec::new();
         let mut lost_packets = 0usize;
         for (packet_number, frames) in std::mem::take(&mut self.in_flight_stream_frames) {
-            if lost_packets < QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS
-                && packet_lost_by_ack_gap(packet_number, acked_ranges)
-            {
+            if lost_packets < cap && packet_lost_by_ack_gap(packet_number, acked_ranges) {
                 lost_packets = lost_packets.saturating_add(1);
                 for frame in &frames {
                     self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
@@ -6203,6 +6239,11 @@ async fn wait_source_stream_send_admission(
         if credit_ok && link.stream_unacked_bytes <= QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES {
             return Ok(());
         }
+        // Any observable movement counts as progress. A stricter
+        // ≥64KB-per-PTO watermark was measured WORSE (gate36: tree_small/good
+        // 8.3→22.2s uniform): steady drainage kept re-basing the watermark,
+        // the PTO drain fired every 200 ms, and its multi-MB re-flushes
+        // recreated the retransmit churn this gate exists to prevent.
         let marker = (credit_remaining, link.stream_unacked_bytes);
         if marker != progress_marker {
             progress_marker = marker;
@@ -7299,6 +7340,9 @@ struct QuicPackedMemberWrite {
     offset: u64,
     len: u64,
     out_path: PathBuf,
+    /// Member metadata applied inside the one-shot batch task (sync core) so
+    /// a 2000-member tree pays zero per-file pool dispatches for metadata.
+    metadata: Option<EntryMetadata>,
 }
 
 /// One-shot packed-member commit cap (mirrors the RQ tier): above this staged
@@ -7314,7 +7358,7 @@ fn write_quic_packed_member_batch_oneshot(
     staging_path: PathBuf,
     members: Vec<QuicPackedMemberWrite>,
     span_len: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<(PathBuf, MetadataApplyReport)>> {
     use std::io::Read;
 
     let mut staged = vec![0u8; span_len];
@@ -7323,6 +7367,7 @@ fn write_quic_packed_member_batch_oneshot(
 
     let mut created_parents: std::collections::BTreeSet<PathBuf> =
         std::collections::BTreeSet::new();
+    let mut reports = Vec::new();
     for member in &members {
         if let Some(parent) = member.out_path.parent()
             && created_parents.insert(parent.to_path_buf())
@@ -7338,15 +7383,24 @@ fn write_quic_packed_member_batch_oneshot(
             .filter(|end| *end <= staged.len())
             .ok_or_else(|| std::io::Error::other("packed member range exceeds staged span"))?;
         std::fs::write(&member.out_path, &staged[start..end])?;
+        if let Some(metadata) = &member.metadata {
+            let report = apply_entry_metadata_sync(&member.out_path, metadata)
+                .map_err(|err| std::io::Error::other(err.into_message()))?;
+            reports.push((member.out_path.clone(), report));
+        }
     }
-    Ok(())
+    Ok(reports)
 }
 
+/// Split a verified staged pack into member files. Returns `Some(reports)`
+/// when the one-shot blocking-pool path also applied member metadata inline;
+/// `None` when the streaming fallback ran and the caller owns the async
+/// per-member metadata applies.
 async fn write_quic_packed_member_batch(
     staging_path: &Path,
     members: &[QuicPackedMemberWrite],
     read_buf: &mut [u8],
-) -> Result<(), QuicTransportError> {
+) -> Result<Option<Vec<(PathBuf, MetadataApplyReport)>>, QuicTransportError> {
     let span_end = members
         .iter()
         .map(|member| member.offset.saturating_add(member.len))
@@ -7363,6 +7417,7 @@ async fn write_quic_packed_member_batch(
                 offset: member.offset,
                 len: member.len,
                 out_path: member.out_path.clone(),
+                metadata: member.metadata.clone(),
             })
             .collect::<Vec<_>>();
         let staging_display = staging_path.display().to_string();
@@ -7370,6 +7425,7 @@ async fn write_quic_packed_member_batch(
             write_quic_packed_member_batch_oneshot(staging, batch, span_len)
         })
         .await
+        .map(Some)
         .map_err(|err| QuicTransportError::Source(format!("{staging_display}: {err}")));
     }
 
@@ -7415,7 +7471,7 @@ async fn write_quic_packed_member_batch(
             QuicTransportError::Source(format!("{}: {err}", member.out_path.display()))
         })?;
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Verify each packed member's SHA-256 against the staged pack and append the
@@ -7537,8 +7593,9 @@ async fn commit_staged_entries(
             staged_entry.close_cached_staging_file().await?;
             if !entry.members.is_empty() {
                 // Packed entry: split the verified staged pack into member
-                // files with one blocking-pool batch (the staged pack itself
-                // is scratch; the staging-dir guard reclaims it).
+                // files AND apply member metadata with one blocking-pool
+                // batch (the staged pack itself is scratch; the staging-dir
+                // guard reclaims it).
                 let mut writes = Vec::with_capacity(entry.members.len());
                 for member in &entry.members {
                     let member_path = super::quic_join_relative(&base, &member.rel_path)?;
@@ -7547,12 +7604,28 @@ async fn commit_staged_entries(
                         offset: member.offset,
                         len: member.len,
                         out_path: member_path,
+                        metadata: member.metadata.clone(),
                     });
                 }
-                write_quic_packed_member_batch(&staged_entry.staging_path, &writes, &mut read_buf)
-                    .await?;
-                for (member, write) in entry.members.iter().zip(&writes) {
-                    super::apply_quic_member_metadata(cx, &write.out_path, member).await?;
+                match write_quic_packed_member_batch(
+                    &staged_entry.staging_path,
+                    &writes,
+                    &mut read_buf,
+                )
+                .await?
+                {
+                    Some(reports) => {
+                        for (path, report) in &reports {
+                            super::trace_quic_metadata_skips(cx, path, report);
+                        }
+                    }
+                    None => {
+                        for (member, write) in entry.members.iter().zip(&writes) {
+                            super::apply_quic_member_metadata(cx, &write.out_path, member).await?;
+                        }
+                    }
+                }
+                for write in &writes {
                     committed_paths.push(write.out_path.clone());
                 }
                 send_and_flush_native_keep_alive(cx, link, control).await?;
@@ -9072,12 +9145,15 @@ mod tests {
         // Sustained retransmit-queued bytes release the floor...
         let _ = pacer.on_ack_window(250_000, STREAM_RATE_FLOOR_RELEASE_LOST_BYTES + 1, 100_000);
         // ...and once the seeded samples rotate out of the max-filter the
-        // rate tracks measured delivery instead of the mis-seeded floor.
+        // rate drops to the RELEASED floor (seed / 8) — not to the global
+        // minimum: recovery-phase delivery reflects only the retransmit
+        // trickle, and a to-minimum release measured as a rate collapse.
         let mut last = 0;
         for _ in 0..STREAM_RATE_FILTER_WINDOWS {
             last = pacer.on_ack_window(250_000, 0, 100_000);
         }
-        assert_eq!(last, 2_500_000 * STREAM_RATE_GAIN_X1000 / 1000);
+        assert_eq!(last, seed / STREAM_RATE_FLOOR_RELEASE_DIVISOR);
+        assert!(last > 2_500_000 * STREAM_RATE_GAIN_X1000 / 1000);
     }
 
     #[test]

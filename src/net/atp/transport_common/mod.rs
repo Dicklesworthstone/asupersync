@@ -20,8 +20,8 @@ pub use filter::{FilterAction, FilterDecision, FilterError, FilterRule, FilterSe
 pub use metadata::{
     DirtyPathSet, EntryMetadata, FileIdentity, FileKind, MetadataApplyReport, SimilaritySignature,
     ZeroScanDecision, ZeroScanEntry, ZeroScanFingerprint, ZeroScanHashReason, ZeroScanPlan,
-    ZeroScanPolicy, ZeroScanPrefilter, apply_entry_metadata, metadata_commitment,
-    read_entry_metadata,
+    ZeroScanPolicy, ZeroScanPrefilter, apply_entry_metadata, apply_entry_metadata_sync,
+    metadata_commitment, read_entry_metadata,
 };
 pub use mirror::{
     MirrorEntryKind, MirrorError, MirrorExtra, MirrorPolicy, MirrorReport, mirror_dest,

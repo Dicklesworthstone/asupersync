@@ -883,68 +883,63 @@ pub async fn apply_entry_metadata(
     out_path: &Path,
     meta: &EntryMetadata,
 ) -> Result<MetadataApplyReport, StreamingError> {
+    let path_buf = out_path.to_path_buf();
+    let meta = meta.clone();
+    crate::runtime::spawn_blocking(move || apply_entry_metadata_sync(&path_buf, &meta)).await
+}
+
+/// Synchronous core of [`apply_entry_metadata`].
+///
+/// Every step runs on the caller's thread, so batch committers can apply
+/// metadata for thousands of packed members inside ONE blocking-pool task
+/// instead of paying pool round-trips per file (the same dispatch tail
+/// MATRIX-211 eliminated for member writes).
+///
+/// # Errors
+///
+/// Returns [`StreamingError`] only for an unexpected mode/`set_permissions`
+/// failure; best-effort fields degrade into the returned report instead.
+#[cfg(unix)]
+pub fn apply_entry_metadata_sync(
+    out_path: &Path,
+    meta: &EntryMetadata,
+) -> Result<MetadataApplyReport, StreamingError> {
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, UNIX_EPOCH};
 
     let mut report = MetadataApplyReport::default();
-
-    // Times + ownership run on the blocking pool (sync std/`std::os::unix`).
-    let path_buf = out_path.to_path_buf();
-    let mtime_secs = meta.mtime_unix_secs;
-    let mtime_nanos = meta.mtime_nanos.unwrap_or(0);
-    let owner = match (meta.uid, meta.gid) {
-        (Some(u), Some(g)) => Some((u, g)),
-        _ => None,
-    };
     let special_file = meta.file_kind.is_special();
-    let xattrs = (!meta.xattrs.is_empty() && !special_file).then(|| meta.xattrs.clone());
-    let open_mtime_secs = (!special_file).then_some(mtime_secs).flatten();
 
-    type BlockingMetadataApply = (
-        Option<Result<(), String>>,
-        Option<Vec<(String, Result<(), String>)>>,
-        Option<Result<(), String>>,
-    );
-
-    let blocking: BlockingMetadataApply = crate::runtime::spawn_blocking(move || {
-        let time_res = open_mtime_secs.map(|secs| {
-            let secs_u64 =
-                u64::try_from(secs).map_err(|_| "pre-epoch mtime not representable".to_string())?;
-            // `secs`/`mtime_nanos` arrive off-wire and are untrusted. Normalise
-            // the sub-second part into [0, 1e9) (mirroring the read path's
-            // `rem_euclid`) so an out-of-range value can't carry into the
-            // seconds count, and add via `checked_add` so a crafted huge `secs`
-            // (up to i64::MAX, which passes the u64 conversion) degrades to a
-            // skipped mtime instead of panicking the blocking pool by
-            // overflowing `SystemTime` (DoS via a malicious manifest).
-            let nanos = mtime_nanos % 1_000_000_000;
-            let when = UNIX_EPOCH
-                .checked_add(Duration::new(secs_u64, nanos))
-                .ok_or_else(|| "mtime out of representable range".to_string())?;
-            let times = std::fs::FileTimes::new().set_modified(when);
-            std::fs::File::open(&path_buf)
-                .and_then(|f| f.set_times(times))
-                .map_err(|e| e.to_string())
-        });
-        let xattr_res = xattrs.map(|attrs| {
-            attrs
-                .into_iter()
-                .map(|(name, value)| {
-                    let result = xattr::set(&path_buf, &name, &value).map_err(|e| e.to_string());
-                    (name, result)
-                })
-                .collect()
-        });
-        let owner_res = owner.map(|(u, g)| {
-            std::os::unix::fs::chown(&path_buf, Some(u), Some(g)).map_err(|e| e.to_string())
-        });
-        (time_res, xattr_res, owner_res)
-    })
-    .await;
-
-    match blocking.0 {
-        Some(Ok(())) => report.mark_applied("mtime"),
-        Some(Err(e)) => report.mark_skipped("mtime", e),
-        None => {}
+    // Applies in a safe order — times, then xattrs, then ownership, then mode
+    // last — so a restrictive mode (e.g. `0o444`) does not block the earlier
+    // steps. Open-based operations are skipped for special files such as
+    // FIFOs, where opening the path can block.
+    if let Some(secs) = (!special_file).then_some(meta.mtime_unix_secs).flatten() {
+        let mtime_nanos = meta.mtime_nanos.unwrap_or(0);
+        let applied = u64::try_from(secs)
+            .map_err(|_| "pre-epoch mtime not representable".to_string())
+            .and_then(|secs_u64| {
+                // `secs`/`mtime_nanos` arrive off-wire and are untrusted.
+                // Normalise the sub-second part into [0, 1e9) (mirroring the
+                // read path's `rem_euclid`) so an out-of-range value can't
+                // carry into the seconds count, and add via `checked_add` so a
+                // crafted huge `secs` (up to i64::MAX, which passes the u64
+                // conversion) degrades to a skipped mtime instead of panicking
+                // the blocking pool by overflowing `SystemTime` (DoS via a
+                // malicious manifest).
+                let nanos = mtime_nanos % 1_000_000_000;
+                let when = UNIX_EPOCH
+                    .checked_add(Duration::new(secs_u64, nanos))
+                    .ok_or_else(|| "mtime out of representable range".to_string())?;
+                let times = std::fs::FileTimes::new().set_modified(when);
+                std::fs::File::open(out_path)
+                    .and_then(|f| f.set_times(times))
+                    .map_err(|e| e.to_string())
+            });
+        match applied {
+            Ok(()) => report.mark_applied("mtime"),
+            Err(e) => report.mark_skipped("mtime", e),
+        }
     }
     if special_file && meta.mtime_unix_secs.is_some() {
         report.mark_skipped(
@@ -952,10 +947,11 @@ pub async fn apply_entry_metadata(
             "open-based timestamp apply skipped for special file".to_string(),
         );
     }
-    if let Some(results) = blocking.1 {
+
+    if !meta.xattrs.is_empty() && !special_file {
         let mut any_applied = false;
-        for (name, result) in results {
-            match result {
+        for (name, value) in &meta.xattrs {
+            match xattr::set(out_path, name, value) {
                 Ok(()) => any_applied = true,
                 Err(e) => report.mark_skipped("xattr", format!("{name}: {e}")),
             }
@@ -967,15 +963,16 @@ pub async fn apply_entry_metadata(
     if special_file && !meta.xattrs.is_empty() {
         report.mark_skipped("xattr", "xattr apply skipped for special file".to_string());
     }
-    match blocking.2 {
-        Some(Ok(())) => report.mark_applied("owner"),
-        Some(Err(e)) => report.mark_skipped("owner", e),
-        None => {}
+
+    if let (Some(u), Some(g)) = (meta.uid, meta.gid) {
+        match std::os::unix::fs::chown(out_path, Some(u), Some(g)) {
+            Ok(()) => report.mark_applied("owner"),
+            Err(e) => report.mark_skipped("owner", e.to_string()),
+        }
     }
 
     if let Some(mode) = meta.unix_mode {
-        crate::fs::set_permissions(out_path, crate::fs::Permissions::from_mode(mode))
-            .await
+        std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(mode))
             .map_err(|e| StreamingError::new(format!("{}: {e}", out_path.display())))?;
         report.mark_applied("mode");
     }
@@ -990,6 +987,19 @@ pub async fn apply_entry_metadata(
 /// Never returns an error on non-unix targets.
 #[cfg(not(unix))]
 pub async fn apply_entry_metadata(
+    _out_path: &Path,
+    meta: &EntryMetadata,
+) -> Result<MetadataApplyReport, StreamingError> {
+    apply_entry_metadata_sync(_out_path, meta)
+}
+
+/// Non-unix sync apply: nothing to do; report every present field as skipped.
+///
+/// # Errors
+///
+/// Never returns an error on non-unix targets.
+#[cfg(not(unix))]
+pub fn apply_entry_metadata_sync(
     _out_path: &Path,
     meta: &EntryMetadata,
 ) -> Result<MetadataApplyReport, StreamingError> {

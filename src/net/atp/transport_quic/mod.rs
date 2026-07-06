@@ -92,7 +92,7 @@ use crate::decoding::{
     run_block_decode_job,
 };
 use crate::encoding::EncodingPipeline;
-use crate::io::{AsyncReadExt, AsyncWriteExt};
+use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::quic::AtpTransportMetrics;
@@ -3564,6 +3564,56 @@ fn quic_flush_pack_group(
     *group_bytes = 0;
 }
 
+/// Materialize one pack file in a single blocking-pool task: stream every
+/// member through the pack writer with raw `std::fs`, computing per-member
+/// SHA-256 + content id and the pack-level SHA-256 in the same read. The
+/// async per-member loop paid a pool round-trip per open/read — the
+/// sender-side twin of the MATRIX-211 commit dispatch tail.
+///
+/// Returns `(per-member (len, sha256, content_id), pack_sha256)`.
+#[allow(clippy::type_complexity)]
+fn build_quic_pack_oneshot(
+    pack_path: &Path,
+    inputs: &[(PathBuf, u64)],
+) -> std::io::Result<(Vec<(u64, [u8; 32], crate::atp::object::ObjectId)>, [u8; 32])> {
+    use std::io::{Read, Write};
+
+    let mut pack = std::io::BufWriter::new(std::fs::File::create(pack_path)?);
+    let mut pack_sha = Sha256::new();
+    let mut out = Vec::with_capacity(inputs.len());
+    let mut buf = vec![0u8; 256 * 1024];
+    for (path, expected) in inputs {
+        let mut src = std::fs::File::open(path)?;
+        let mut sha = Sha256::new();
+        let mut cid = ContentId::streaming();
+        let mut len = 0u64;
+        loop {
+            let n = src.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            sha.update(&buf[..n]);
+            cid.update(&buf[..n]);
+            pack_sha.update(&buf[..n]);
+            pack.write_all(&buf[..n])?;
+            len = len.saturating_add(n as u64);
+        }
+        if len != *expected {
+            return Err(std::io::Error::other(format!(
+                "{} changed while packing (read {len} bytes, planned {expected})",
+                path.display()
+            )));
+        }
+        out.push((
+            len,
+            sha.finalize().into(),
+            crate::atp::object::ObjectId::content(cid.finalize()),
+        ));
+    }
+    pack.flush()?;
+    Ok((out, pack_sha.finalize().into()))
+}
+
 async fn prepare_source_manifest(
     cx: &Cx,
     source: &Path,
@@ -3718,48 +3768,31 @@ async fn prepare_source_manifest(
                     }
                 };
                 let pack_path = tempdir.path().join(format!("pack-{pack_count}"));
-                let mut pack_file = crate::fs::File::create(&pack_path).await.map_err(|err| {
+                // Materialize the whole pack in ONE blocking-pool task; the
+                // async per-member loop paid a pool round-trip per open/read
+                // (2000 files ≈ the sender-side MATRIX-211 dispatch tail).
+                let inputs: Vec<(PathBuf, u64)> = indices
+                    .iter()
+                    .map(|member_idx| {
+                        let plan = &planned[*member_idx];
+                        (plan.abs_path.clone(), plan.size)
+                    })
+                    .collect();
+                let oneshot_pack_path = pack_path.clone();
+                let (member_digests, pack_sha256) = crate::runtime::spawn_blocking_io(move || {
+                    build_quic_pack_oneshot(&oneshot_pack_path, &inputs)
+                })
+                .await
+                .map_err(|err| {
                     QuicTransportError::Source(format!("{}: {err}", pack_path.display()))
                 })?;
+                cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
                 let mut members: Vec<PackedMember> = Vec::with_capacity(indices.len());
-                let mut pack_sha = Sha256::new();
                 let mut offset = 0u64;
-                for member_idx in indices {
-                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                for (member_idx, (len, content_sha256, content_id)) in
+                    indices.iter().zip(member_digests)
+                {
                     let plan = &planned[*member_idx];
-                    let mut src = crate::fs::File::open(&plan.abs_path).await.map_err(|err| {
-                        QuicTransportError::Source(format!("{}: {err}", plan.abs_path.display()))
-                    })?;
-                    let mut member_sha = Sha256::new();
-                    let mut member_cid = crate::atp::object::ContentId::streaming();
-                    let mut len = 0u64;
-                    loop {
-                        let n = src.read(&mut read_buf).await.map_err(|err| {
-                            QuicTransportError::Source(format!(
-                                "{}: {err}",
-                                plan.abs_path.display()
-                            ))
-                        })?;
-                        if n == 0 {
-                            break;
-                        }
-                        let chunk = &read_buf[..n];
-                        member_sha.update(chunk);
-                        member_cid.update(chunk);
-                        pack_sha.update(chunk);
-                        pack_file.write_all(chunk).await.map_err(|err| {
-                            QuicTransportError::Source(format!("{}: {err}", pack_path.display()))
-                        })?;
-                        len = len.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
-                    }
-                    if len != plan.size {
-                        return Err(QuicTransportError::Source(format!(
-                            "{} changed while packing (read {len} bytes, planned {})",
-                            plan.abs_path.display(),
-                            plan.size
-                        )));
-                    }
-                    let content_sha256: [u8; 32] = member_sha.finalize().into();
                     members.push(PackedMember {
                         rel_path: plan.rel_path.clone(),
                         offset,
@@ -3774,16 +3807,11 @@ async fn prepare_source_manifest(
                     digests.push(EntryDigest {
                         rel_path: plan.rel_path.clone(),
                         size: len,
-                        content_id: crate::atp::object::ObjectId::content(member_cid.finalize()),
+                        content_id,
                         content_sha256,
                     });
                     offset = offset.saturating_add(len);
                 }
-                pack_file.flush().await.map_err(|err| {
-                    QuicTransportError::Source(format!("{}: {err}", pack_path.display()))
-                })?;
-                drop(pack_file);
-                let pack_sha256: [u8; 32] = pack_sha.finalize().into();
                 manifest_entries.push(ManifestEntry {
                     index,
                     rel_path: format!(".atp-pack-{pack_count}"),
