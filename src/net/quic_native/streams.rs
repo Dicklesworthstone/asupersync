@@ -193,6 +193,15 @@ impl FlowCredit {
         self.limit = new_limit;
         Ok(())
     }
+
+    /// Lower the limit to `new_limit`, clamped so already-consumed credit stays
+    /// valid. Returns the limit actually applied. Used when converting a stream
+    /// opened with the unbounded default into a bounded-window stream.
+    pub fn reduce_limit_clamped(&mut self, new_limit: u64) -> u64 {
+        let applied = new_limit.max(self.used).min(self.limit);
+        self.limit = applied;
+        applied
+    }
 }
 
 /// Stream-level errors.
@@ -343,6 +352,15 @@ pub struct QuicStream {
     recv_ranges: BTreeMap<u64, u64>,
     /// Buffered receive bytes keyed by absolute stream offset.
     recv_chunks: BTreeMap<u64, Bytes>,
+    /// Bounded receive-window size for this stream. `None` keeps the historic
+    /// unbounded-credit behavior; `Some(w)` makes the local receive limit track
+    /// `read_offset + w` and drives MAX_STREAM_DATA advertisements so the peer
+    /// can never buffer more than ~`w` un-read bytes into `recv_chunks`.
+    recv_window_bytes: Option<u64>,
+    /// Highest receive limit advertised to the peer via MAX_STREAM_DATA (or the
+    /// initial window at configure time). Only meaningful when
+    /// `recv_window_bytes` is `Some`.
+    recv_limit_advertised: u64,
     /// STREAM frames queued for packet assembly.
     pending_send_frames: VecDeque<QueuedStreamFrame>,
     /// STREAM frames emitted at least once and available for retransmission.
@@ -366,6 +384,8 @@ impl QuicStream {
             recv_reset: None,
             recv_ranges: BTreeMap::new(),
             recv_chunks: BTreeMap::new(),
+            recv_window_bytes: None,
+            recv_limit_advertised: 0,
             pending_send_frames: VecDeque::new(),
             sent_stream_frames: BTreeMap::new(),
         }
@@ -1032,6 +1052,94 @@ impl StreamTable {
         self.insert_new_stream(id)
     }
 
+    /// Convert `id` into a bounded receive-window stream, accepting it as a
+    /// remote stream first when it is not open yet.
+    ///
+    /// The window is advisory-but-honored: this endpoint advertises
+    /// `read_offset + window` via MAX_STREAM_DATA (the caller owns putting the
+    /// advertisement on the wire) and a compliant sender installs the same
+    /// value as its initial send-credit limit, bounding its un-read bytes —
+    /// and therefore this endpoint's reassembly memory — to roughly one
+    /// window. The local receive-credit enforcement limit is deliberately NOT
+    /// lowered, so a peer that predates bounded windows keeps the historic
+    /// unbounded behavior instead of failing the transfer.
+    pub fn configure_stream_recv_window(
+        &mut self,
+        id: StreamId,
+        window: u64,
+    ) -> Result<u64, StreamTableError> {
+        if !self.streams.contains_key(&id) {
+            self.accept_remote_stream(id)?;
+        }
+        let stream = self.stream_mut(id)?;
+        let advertised = stream.read_offset.saturating_add(window);
+        stream.recv_window_bytes = Some(window);
+        stream.recv_limit_advertised = advertised;
+        Ok(advertised)
+    }
+
+    /// Lower a freshly-opened local stream's send-credit limit so the sender
+    /// side of a bounded-window stream enforces the same window the receiver
+    /// advertises; the limit then grows only via peer MAX_STREAM_DATA frames.
+    /// Clamped against already-consumed credit; returns the applied limit.
+    pub fn set_fresh_stream_send_limit(
+        &mut self,
+        id: StreamId,
+        limit: u64,
+    ) -> Result<u64, StreamTableError> {
+        let stream = self.stream_mut(id)?;
+        Ok(stream.send_credit.reduce_limit_clamped(limit))
+    }
+
+    /// Remaining send credit for one stream (0 for unknown streams).
+    #[must_use]
+    pub fn stream_send_credit_remaining(&self, id: StreamId) -> u64 {
+        self.streams
+            .get(&id)
+            .map_or(0, |stream| stream.send_credit.remaining())
+    }
+
+    /// Advance bounded receive windows after application reads.
+    ///
+    /// For every bounded stream whose desired limit (`read_offset + window`)
+    /// has moved at least a sixteenth-window past the advertised limit,
+    /// record the new advertisement and return the `(stream, limit)` pairs
+    /// the caller must put on the wire as MAX_STREAM_DATA frames.
+    pub fn advance_bounded_recv_windows(&mut self) -> Vec<(StreamId, u64)> {
+        let mut updates = Vec::new();
+        for (id, stream) in &mut self.streams {
+            let Some(window) = stream.recv_window_bytes else {
+                continue;
+            };
+            let desired = stream.read_offset.saturating_add(window);
+            // Advertisement granularity is also the sender's credit-grant
+            // step: a quarter-window step quantized the whole transfer into
+            // one flush-window per RTT (measured 50M/good 3.5 s → 4.9 s), so
+            // keep steps fine enough that credit growth looks continuous.
+            let hysteresis = (window / 16).max(1);
+            if desired.saturating_sub(stream.recv_limit_advertised) < hysteresis {
+                continue;
+            }
+            stream.recv_limit_advertised = desired;
+            updates.push((*id, desired));
+        }
+        updates
+    }
+
+    /// Current bounded-window advertisements as `(stream, limit)` pairs.
+    ///
+    /// Re-attached to outgoing ACKs so a lost MAX_STREAM_DATA frame cannot
+    /// wedge a credit-blocked sender: advertisements are idempotent monotonic
+    /// maxima, so repeating the current limit is always safe.
+    #[must_use]
+    pub fn bounded_recv_window_advertisements(&self) -> Vec<(StreamId, u64)> {
+        self.streams
+            .iter()
+            .filter(|(_, stream)| stream.recv_window_bytes.is_some())
+            .map(|(id, stream)| (*id, stream.recv_limit_advertised))
+            .collect()
+    }
+
     /// Get mutable stream handle.
     pub fn stream_mut(&mut self, id: StreamId) -> Result<&mut QuicStream, StreamTableError> {
         self.streams
@@ -1386,10 +1494,17 @@ impl StreamTable {
     }
 
     /// Increase connection-level send limit monotonically.
+    ///
+    /// RFC 9000 §19.9: a MAX_DATA that does not increase the limit is
+    /// ignored, not an error — reordered frames legitimately repeat older
+    /// maxima.
     pub fn increase_connection_send_limit(
         &mut self,
         new_limit: u64,
     ) -> Result<(), FlowControlError> {
+        if new_limit <= self.send_connection_credit.limit() {
+            return Ok(());
+        }
         let before = self.send_connection_credit.remaining();
         let result = self.send_connection_credit.increase_limit(new_limit);
         if result.is_ok() && self.send_connection_credit.remaining() > before {
@@ -1405,6 +1520,12 @@ impl StreamTable {
         new_limit: u64,
     ) -> Result<(), StreamTableError> {
         let before = self.stream(id)?.send_credit.remaining();
+        // RFC 9000 §19.10: a MAX_STREAM_DATA that does not increase the limit
+        // is ignored, not an error — reordered or re-attached advertisements
+        // legitimately repeat older maxima.
+        if new_limit <= self.stream(id)?.send_credit.limit() {
+            return Ok(());
+        }
         self.stream_mut(id)?
             .send_credit
             .increase_limit(new_limit)
@@ -2169,6 +2290,70 @@ mod tests {
         tbl.receive_stream_segment(id, 0, 5, false)
             .expect("fill initial gap");
         assert_eq!(tbl.stream(id).expect("stream").recv_offset, 10);
+    }
+
+    #[test]
+    fn bounded_recv_window_advertises_on_read_with_hysteresis() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        let advertised = tbl
+            .configure_stream_recv_window(id, 100)
+            .expect("configure");
+        assert_eq!(advertised, 100);
+        assert_eq!(tbl.bounded_recv_window_advertisements(), vec![(id, 100)]);
+
+        // Under a sixteenth window drained: no fresh advertisement yet.
+        tbl.receive_stream_bytes(id, 0, Bytes::from_static(&[0u8; 4]), false)
+            .expect("recv");
+        assert_eq!(tbl.read_stream_bytes(id, 4).expect("read").len(), 4);
+        assert!(tbl.advance_bounded_recv_windows().is_empty());
+
+        // Crossing the sixteenth-window hysteresis advances the advertisement.
+        tbl.receive_stream_bytes(id, 4, Bytes::from_static(&[0u8; 4]), false)
+            .expect("recv2");
+        assert_eq!(tbl.read_stream_bytes(id, 4).expect("read2").len(), 4);
+        assert_eq!(tbl.advance_bounded_recv_windows(), vec![(id, 108)]);
+        assert_eq!(tbl.bounded_recv_window_advertisements(), vec![(id, 108)]);
+        // Receive-credit enforcement stays permissive (fail-open for peers
+        // that predate bounded windows): only the advertisement moved.
+        assert!(tbl.stream(id).expect("stream").recv_credit.limit() >= 1 << 20);
+    }
+
+    #[test]
+    fn fresh_stream_send_limit_caps_writes_and_grows_via_max_stream_data() {
+        let mut tbl = StreamTable::new_with_connection_limits(
+            StreamRole::Client,
+            1,
+            0,
+            1 << 20,
+            1 << 20,
+            1 << 20,
+            1 << 20,
+        );
+        let stream = tbl.open_local_bidi().expect("open");
+        assert_eq!(
+            tbl.set_fresh_stream_send_limit(stream, 10).expect("cap"),
+            10
+        );
+        assert_eq!(tbl.stream_send_credit_remaining(stream), 10);
+        tbl.write_stream_bytes(stream, Bytes::from_static(b"0123456789"), false)
+            .expect("fill window");
+        let err = tbl
+            .write_stream_bytes(stream, Bytes::from_static(b"x"), false)
+            .expect_err("write past the bounded window must fail");
+        assert!(matches!(
+            err,
+            StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted { .. }))
+        ));
+        // A stale/duplicate (lower) advertisement is ignored, not an error
+        // (RFC 9000 §19.10) — re-attached advertisements repeat older maxima.
+        tbl.increase_stream_send_limit(stream, 5)
+            .expect("stale advertisement is a no-op");
+        assert_eq!(tbl.stream_send_credit_remaining(stream), 0);
+        tbl.increase_stream_send_limit(stream, 16).expect("grow");
+        assert_eq!(tbl.stream_send_credit_remaining(stream), 6);
+        tbl.write_stream_bytes(stream, Bytes::from_static(b"abcdef"), false)
+            .expect("write after the window grew");
     }
 
     #[test]

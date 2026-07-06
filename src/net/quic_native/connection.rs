@@ -649,9 +649,77 @@ impl NativeQuicConnection {
     ) -> Result<Bytes, NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
-        self.streams
+        let bytes = self
+            .streams
             .read_stream_bytes(id, max_len)
+            .map_err(map_stream_table_error)?;
+        if !bytes.is_empty() {
+            // Application drain advances bounded receive windows; put the new
+            // MAX_STREAM_DATA advertisements on the next outgoing flush.
+            for (stream, limit) in self.streams.advance_bounded_recv_windows() {
+                self.queue_max_stream_data_frame(stream, limit);
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// Install a bounded receive window on `id` (accepting the remote stream
+    /// early when needed) and queue the initial MAX_STREAM_DATA
+    /// advertisement. Bounds the peer's un-read bytes — and therefore this
+    /// endpoint's reassembly memory — to roughly one window.
+    pub fn configure_stream_recv_window(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        window: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        let applied = self
+            .streams
+            .configure_stream_recv_window(id, window)
+            .map_err(map_stream_table_error)?;
+        self.queue_max_stream_data_frame(id, applied);
+        Ok(applied)
+    }
+
+    /// Lower a freshly-opened local stream's send-credit limit to mirror the
+    /// bounded window the peer enforces for that stream; the limit then grows
+    /// only via peer MAX_STREAM_DATA frames.
+    pub fn set_fresh_stream_send_limit(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        limit: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.streams
+            .set_fresh_stream_send_limit(id, limit)
             .map_err(map_stream_table_error)
+    }
+
+    /// Remaining send credit for one stream (0 for unknown streams).
+    #[must_use]
+    pub fn stream_send_credit_remaining(&self, id: StreamId) -> u64 {
+        self.streams.stream_send_credit_remaining(id)
+    }
+
+    /// Queue a MAX_STREAM_DATA advertisement, replacing any pending one for
+    /// the same stream with a lower maximum (advertisements are monotonic).
+    fn queue_max_stream_data_frame(&mut self, id: StreamId, limit: u64) {
+        self.pending_control_frames.retain(|frame| {
+            !matches!(
+                frame,
+                QuicFrame::MaxStreamData {
+                    stream_id,
+                    maximum_stream_data,
+                } if stream_id.value() == id.0 && maximum_stream_data.value() <= limit
+            )
+        });
+        self.pending_control_frames
+            .push_back(QuicFrame::MaxStreamData {
+                stream_id: VarInt(id.0),
+                maximum_stream_data: VarInt(limit),
+            });
     }
 
     /// Whether an application STREAM read has consumed through FIN.
@@ -2104,6 +2172,15 @@ impl NativeQuicConnection {
         self.pending_control_frames
             .retain(|frame| !matches!(frame, QuicFrame::Ack { .. }));
         self.pending_control_frames.push_back(frame);
+        if space == PacketNumberSpace::ApplicationData {
+            // Re-attach current bounded-window advertisements to every outgoing
+            // ACK: MAX_STREAM_DATA is an idempotent monotonic maximum, so this
+            // costs a few bytes per ACK packet and guarantees a lost window
+            // update can never wedge a credit-blocked sender.
+            for (stream, limit) in self.streams.bounded_recv_window_advertisements() {
+                self.queue_max_stream_data_frame(stream, limit);
+            }
+        }
     }
 }
 
@@ -2539,6 +2616,53 @@ mod tests {
                 "packet send requires non-draining, non-closed connection state"
             )
         );
+    }
+
+    #[test]
+    fn bounded_recv_window_advertises_via_reads_and_reattaches_on_acks() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        let advertised = conn
+            .configure_stream_recv_window(&cx, stream, 100)
+            .expect("configure window");
+        assert_eq!(advertised, 100);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("initial advertisement");
+        assert!(frames.contains(&QuicFrame::MaxStreamData {
+            stream_id: VarInt(stream.0),
+            maximum_stream_data: VarInt(100),
+        }));
+
+        // Draining past a quarter window queues a fresh advertisement.
+        conn.receive_stream_bytes(&cx, stream, 0, Bytes::from_static(&[7u8; 40]), false)
+            .expect("inbound bytes");
+        assert_eq!(
+            conn.read_stream_bytes(&cx, stream, 40)
+                .expect("drain")
+                .len(),
+            40
+        );
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("advertisement after drain");
+        assert!(frames.contains(&QuicFrame::MaxStreamData {
+            stream_id: VarInt(stream.0),
+            maximum_stream_data: VarInt(140),
+        }));
+
+        // Every ApplicationData ACK re-attaches the current advertisement, so
+        // a lost MAX_STREAM_DATA can never wedge a credit-blocked sender.
+        conn.acknowledge_received_packet(PacketNumberSpace::ApplicationData, 9);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 256)
+            .expect("ack with advertisement");
+        assert!(frames.iter().any(|f| matches!(f, QuicFrame::Ack { .. })));
+        assert!(frames.contains(&QuicFrame::MaxStreamData {
+            stream_id: VarInt(stream.0),
+            maximum_stream_data: VarInt(140),
+        }));
     }
 
     #[test]

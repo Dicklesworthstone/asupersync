@@ -307,6 +307,31 @@ const QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// timed out the 500M A/B). New data admission waits on the ACK clock past
 /// this; retransmits are unaffected.
 const QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// Bounded receive window for the paced source stream, negotiated in the
+/// HelloAck: the receiver advertises `read_offset + window` via
+/// MAX_STREAM_DATA and a compliant sender installs the window as its initial
+/// send-credit limit. Sized to cover every bench regime's BDP (max ≈ 1.25 MB
+/// at 200 mbit × 50 ms RTT) plus advertisement lag, while staying small
+/// enough that a mis-seeded pacing rate can no longer stream a 17 MB backlog
+/// into a ~1.4 MB shaper queue — the self-sustaining PTO retransmit spiral
+/// behind the intermittent ~20 s 50M/good stalls (each 200 ms round declared
+/// the oldest 256 packets lost and re-blasted them at 3.2× the link rate,
+/// re-dropping its own tail for ~87 rounds). Bounds receiver reassembly RSS
+/// to roughly one window as a side effect. Sizing note: 2 MiB measured
+/// stall-free on every regime (gate31/33), while 3 MiB re-admitted enough
+/// overshoot past the ~1.4 MB default netem queue to bring back multi-second
+/// recovery reps on 200 mbit/50 ms (gate32: 1-in-5 rep at 16 s) — the extra
+/// window buys nothing once grants are fine-grained, so prefer the tight
+/// bound. Env override: `ATP_QUIC_STREAM_RECV_WINDOW` (bytes, min 64 KiB).
+const QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
+
+fn quic_source_stream_recv_window_bytes() -> u64 {
+    std::env::var("ATP_QUIC_STREAM_RECV_WINDOW")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|window| *window >= 64 * 1024)
+        .unwrap_or(QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES)
+}
 /// Inbound drain budget (batches) for the source-stream read path. The read
 /// loop drains the reassembly map between pumps, so a small budget bounds
 /// receiver-side backlog RSS; the FEC DATAGRAM pump keeps the larger
@@ -1534,11 +1559,19 @@ fn trace_quic_initial_spray_cut_for_feedback(
 /// loss-free window ever arrives (10% regimes).
 struct SourceStreamRatePacer {
     rate_bytes_per_s: u64,
-    /// Regime-derived starting rate; also the recovery floor, so a
-    /// post-overrun window can never crawl below the path's conservative
-    /// estimate (measured delivery during PTO recovery reflects only the
-    /// small retransmit batches, not the path).
+    /// Regime-derived starting rate; also the recovery floor while the link
+    /// shows no sustained loss, so a post-overrun window can never crawl
+    /// below the path's conservative estimate (measured delivery during PTO
+    /// recovery reflects only the small retransmit batches, not the path).
     initial_rate_bytes_per_s: u64,
+    /// Cumulative bytes queued for retransmission. Once this passes
+    /// [`STREAM_RATE_FLOOR_RELEASE_LOST_BYTES`] the initial-rate floor is
+    /// released: a seed rate above the true link rate otherwise pins every
+    /// recovery burst at the mis-seeded rate forever (measured: an 80 MiB/s
+    /// seed on a 25 MB/s shaped link re-dropped its own retransmit tails for
+    /// ~87 consecutive PTO rounds), while the max-filter alone tracks the
+    /// real delivery rate within 8 windows.
+    total_lost_bytes: u64,
     delivery_samples: [u64; STREAM_RATE_FILTER_WINDOWS],
     next_sample: usize,
 }
@@ -1557,6 +1590,11 @@ const STREAM_RATE_MAX_BYTES_PER_S: u64 = 512 * 1024 * 1024;
 /// unbounded multiplicative probe instead overruns the shaper by 4× and
 /// collapses into retransmit churn (measured: 500M 11s → 53s).
 const STREAM_RATE_GAIN_X1000: u64 = 1250;
+/// Cumulative retransmit-queued bytes after which the pacer stops flooring
+/// its rate at the regime-derived initial seed and trusts the delivery
+/// max-filter alone. Half a bounded source-stream window of loss is clear
+/// evidence the seed overshoots the true link rate.
+const STREAM_RATE_FLOOR_RELEASE_LOST_BYTES: u64 = 1024 * 1024;
 
 impl SourceStreamRatePacer {
     fn new(initial_rate_bytes_per_s: u64) -> Self {
@@ -1568,19 +1606,24 @@ impl SourceStreamRatePacer {
             // point; real samples overwrite these within 8 windows.
             rate_bytes_per_s: rate,
             initial_rate_bytes_per_s: rate,
+            total_lost_bytes: 0,
             delivery_samples: [rate; STREAM_RATE_FILTER_WINDOWS],
             next_sample: 0,
         }
     }
 
     /// Fold one ACK window into the filter and return the new pacing rate:
-    /// `clamp(max(gain × max_filter(delivery), initial))`.
+    /// `clamp(max(gain × max_filter(delivery), floor))`.
     ///
-    /// `lost_bytes` is accepted for signature stability but deliberately
-    /// unused: with the relative pacer schedule the probe's effective ratio
-    /// (gain × pacer efficiency ≈ 1) is self-limiting, and loss-reactive
-    /// variants (settle gains, filter resets) were all measured to interact
-    /// badly with the current retransmit framing on shaped links.
+    /// The floor is the regime-derived initial rate until cumulative
+    /// retransmit-queued bytes pass
+    /// [`STREAM_RATE_FLOOR_RELEASE_LOST_BYTES`]; sustained loss proves the
+    /// seed overshoots the true link rate, and keeping the floor there pins
+    /// every recovery burst above the link forever. Beyond that evidence the
+    /// max-filtered delivery estimate alone drives the rate (per-window
+    /// loss-reactive variants — settle gains, filter resets — were all
+    /// measured to interact badly with retransmit framing on shaped links,
+    /// so loss only ever releases the floor, never modulates the gain).
     fn on_ack_window(&mut self, acked_bytes: u64, lost_bytes: u64, elapsed_micros: u64) -> u64 {
         let delivery = acked_bytes
             .saturating_mul(1_000_000)
@@ -1594,12 +1637,17 @@ impl SourceStreamRatePacer {
             .copied()
             .max()
             .unwrap_or(delivery);
-        let _ = lost_bytes;
+        self.total_lost_bytes = self.total_lost_bytes.saturating_add(lost_bytes);
+        let floor = if self.total_lost_bytes > STREAM_RATE_FLOOR_RELEASE_LOST_BYTES {
+            STREAM_RATE_MIN_BYTES_PER_S
+        } else {
+            self.initial_rate_bytes_per_s
+        };
         self.rate_bytes_per_s = bottleneck
             .saturating_mul(STREAM_RATE_GAIN_X1000)
             .checked_div(1000)
             .unwrap_or(bottleneck)
-            .max(self.initial_rate_bytes_per_s)
+            .max(floor)
             .clamp(STREAM_RATE_MIN_BYTES_PER_S, STREAM_RATE_MAX_BYTES_PER_S);
         self.rate_bytes_per_s
     }
@@ -1979,6 +2027,11 @@ pub struct QuicLink {
     /// Observed FIN end offset on the paced source stream, if any.
     source_stream_observed_fin_end: Option<u64>,
     paced_source_stream: Option<StreamId>,
+    /// Bounded send window negotiated for the paced source stream via the
+    /// HelloAck (`None` when the receiver predates bounded windows). Send
+    /// credit can never exceed one window, so admission demands are clamped
+    /// against it.
+    source_stream_send_window: Option<u64>,
     udp_packets_received: u64,
     one_rtt_packets_ingested: u64,
     non_one_rtt_packets_dropped: u64,
@@ -4638,6 +4691,7 @@ fn link_from_handshake(
         source_stream_observed_end: 0,
         source_stream_observed_fin_end: None,
         paced_source_stream: None,
+        source_stream_send_window: None,
         udp_packets_received: 0,
         one_rtt_packets_ingested: 0,
         non_one_rtt_packets_dropped: 0,
@@ -6115,6 +6169,63 @@ async fn drive_native_source_stream_flush(
     }
 }
 
+/// Wait until the paced source stream may admit new payload bytes: the
+/// send queue is flushed below its cap, sent-but-unacked bytes are back under
+/// the runaway guard, and (when the receiver negotiated a bounded window) at
+/// least `min_credit` bytes of send credit are available. All waits are
+/// ACK/pacer clocked and run the same gap/PTO recovery as the flush loop so a
+/// lossy window cannot wedge the gate; a credit-blocked sender with nothing
+/// left in flight keep-alive-pings so the receiver's ACKs (which re-attach
+/// MAX_STREAM_DATA advertisements) keep flowing.
+async fn wait_source_stream_send_admission(
+    cx: &Cx,
+    link: &mut QuicLink,
+    stream: StreamId,
+    min_credit: u64,
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    let gate_started = Instant::now();
+    loop {
+        if gate_started.elapsed() >= config.idle_timeout {
+            return Err(QuicTransportError::Timeout {
+                operation: "source stream send admission",
+                timeout: config.idle_timeout,
+            });
+        }
+        if link.conn.pending_stream_data_bytes() > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES {
+            drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+            continue;
+        }
+        let credit_ok =
+            min_credit == 0 || link.conn.stream_send_credit_remaining(stream) >= min_credit;
+        if credit_ok && link.stream_unacked_bytes <= QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES {
+            return Ok(());
+        }
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
+        if pumped > 0 {
+            let ranges = link.latest_stream_ack_ranges.clone();
+            let frames = link.drain_ack_gap_lost_stream_frames_for_retransmit(&ranges);
+            if !frames.is_empty() {
+                link.retransmit_stream_frames(cx, &frames, "source_stream_unacked_gate_retransmit")
+                    .await?;
+            }
+        } else {
+            let _ = link.expire_app_data_loss_timeout(cx, "source stream unacked gate")?;
+            let frames = link.drain_limited_in_flight_stream_frames_for_retransmit(
+                QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
+            );
+            if !frames.is_empty() {
+                link.retransmit_stream_frames(cx, &frames, "source_stream_unacked_gate_pto")
+                    .await?;
+            } else if !credit_ok {
+                link.conn.queue_ping(cx)?;
+                link.flush(cx).await?;
+            }
+        }
+    }
+}
+
 async fn send_native_source_stream_entries_pumped(
     cx: &Cx,
     link: &mut QuicLink,
@@ -6160,71 +6271,36 @@ async fn send_native_source_stream_entries_pumped(
                 )));
             }
             hasher.update(&buf[..n]);
+            let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
+            // Never write past the receiver's bounded window: `write_stream_bytes`
+            // consumes send credit at queue time and fails on exhaustion, so a
+            // credit shortfall waits on the ACK/advertisement clock instead.
+            if link.conn.stream_send_credit_remaining(stream) < n_u64 {
+                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+                queued_since_flush = 0;
+                wait_source_stream_send_admission(cx, link, stream, n_u64, config).await?;
+            }
             link.conn
                 .write_stream_bytes(cx, stream, Bytes::copy_from_slice(&buf[..n]), false)?;
-            let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
             streamed = streamed.saturating_add(n_u64);
             queued_since_flush = queued_since_flush.saturating_add(n_u64);
             if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
                 drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
                 queued_since_flush = 0;
-                // Bound sender-side buffering (RSS) and sent-but-unacked
-                // bytes (runaway guard): without the first, the disk reader
-                // queues the entire file ahead of the pacer (~540 MB RSS on
-                // a 500 MB transfer); without the second, a mis-estimated
-                // pacing rate streams the file into a loss gap faster than
-                // the receiver can reassemble. Both waits are ACK/pacer
+                // Bound sender-side buffering (RSS), sent-but-unacked bytes
+                // (runaway guard), and the next flush window's send credit:
+                // without the first, the disk reader queues the entire file
+                // ahead of the pacer (~540 MB RSS on a 500 MB transfer);
+                // without the second, a mis-estimated pacing rate streams the
+                // file into a loss gap faster than the receiver can
+                // reassemble; the third keeps writes inside the receiver's
+                // advertised reassembly window. All waits are ACK/pacer
                 // clocked, not spins.
-                let gate_started = Instant::now();
-                loop {
-                    if gate_started.elapsed() >= config.idle_timeout {
-                        return Err(QuicTransportError::Timeout {
-                            operation: "source stream unacked gate",
-                            timeout: config.idle_timeout,
-                        });
-                    }
-                    if link.conn.pending_stream_data_bytes()
-                        > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES
-                    {
-                        drive_native_source_stream_flush(cx, link, config.idle_timeout, false)
-                            .await?;
-                        continue;
-                    }
-                    if link.stream_unacked_bytes <= QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES {
-                        break;
-                    }
-                    // Everything is flushed; wait on the ACK clock, running
-                    // the same gap/PTO recovery the flush loop would so a
-                    // lossy window cannot wedge the gate.
-                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-                    let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
-                    if pumped > 0 {
-                        let ranges = link.latest_stream_ack_ranges.clone();
-                        let frames = link.drain_ack_gap_lost_stream_frames_for_retransmit(&ranges);
-                        if !frames.is_empty() {
-                            link.retransmit_stream_frames(
-                                cx,
-                                &frames,
-                                "source_stream_unacked_gate_retransmit",
-                            )
-                            .await?;
-                        }
-                    } else {
-                        let _ =
-                            link.expire_app_data_loss_timeout(cx, "source stream unacked gate")?;
-                        let frames = link.drain_limited_in_flight_stream_frames_for_retransmit(
-                            QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
-                        );
-                        if !frames.is_empty() {
-                            link.retransmit_stream_frames(
-                                cx,
-                                &frames,
-                                "source_stream_unacked_gate_pto",
-                            )
-                            .await?;
-                        }
-                    }
-                }
+                // Credit is gated per-write above (demanding a full flush
+                // window of credit here quantized the transfer into one
+                // window per RTT); this wait only enforces the queue and
+                // unacked ceilings.
+                wait_source_stream_send_admission(cx, link, stream, 0, config).await?;
             }
         }
         if read != entry.size {
@@ -6356,6 +6432,16 @@ async fn run_sender_session(
         }
         _ => None,
     };
+    if let (Some(stream), Some(window)) = (source_stream, ack.source_stream_recv_window) {
+        // Honor the receiver's bounded reassembly window: cap initial send
+        // credit at one window; MAX_STREAM_DATA advertisements (re-attached to
+        // every receiver ACK) grow it as the receiver drains. This bounds
+        // sent-but-un-read bytes to ~one window, so a mis-seeded pacing rate
+        // can no longer pile a multi-MB backlog into the path (the 20 s PTO
+        // retransmit spirals) and receiver reassembly RSS stays flat.
+        link.conn.set_fresh_stream_send_limit(cx, stream, window)?;
+        link.source_stream_send_window = Some(window);
+    }
 
     super::send_native_manifest(cx, &mut link.conn, &mut control, manifest)?;
     link.flush(cx).await?;
@@ -7991,10 +8077,13 @@ async fn run_receiver_session(
     let accepted_source_stream = accepted
         && hello.source_stream
         && super::quic_native_source_stream_enabled(hello.total_bytes, &config, &link.conn);
+    let source_stream_recv_window =
+        accepted_source_stream.then(quic_source_stream_recv_window_bytes);
     let ack = QuicHelloAck {
         accepted,
         peer_id: peer_id.to_string(),
         source_stream: accepted_source_stream,
+        source_stream_recv_window,
         reason: reason.clone(),
     };
     let ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
@@ -8020,6 +8109,14 @@ async fn run_receiver_session(
     } else {
         None
     };
+    if let (Some(source_stream), Some(window)) = (source_stream, source_stream_recv_window) {
+        // Install the bounded receive window advertised in the HelloAck before
+        // any source bytes arrive; the read pump's per-chunk ACK flushes carry
+        // the MAX_STREAM_DATA advertisements from here on.
+        link.conn
+            .configure_stream_recv_window(cx, source_stream, window)?;
+        link.flush(cx).await?;
+    }
 
     // Manifest.
     let manifest_frame = loop {
@@ -8728,6 +8825,25 @@ mod tests {
         conn.on_handshake_confirmed(&cx)
             .expect("handshake confirmed");
         conn
+    }
+
+    #[test]
+    fn stream_rate_floor_releases_after_sustained_loss() {
+        let seed = 80 * 1024 * 1024;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        // Low delivery with no loss: the seeded filter + initial floor keep
+        // the rate at/above the regime-derived seed.
+        let rate = pacer.on_ack_window(250_000, 0, 100_000);
+        assert!(rate >= seed);
+        // Sustained retransmit-queued bytes release the floor...
+        let _ = pacer.on_ack_window(250_000, STREAM_RATE_FLOOR_RELEASE_LOST_BYTES + 1, 100_000);
+        // ...and once the seeded samples rotate out of the max-filter the
+        // rate tracks measured delivery instead of the mis-seeded floor.
+        let mut last = 0;
+        for _ in 0..STREAM_RATE_FILTER_WINDOWS {
+            last = pacer.on_ack_window(250_000, 0, 100_000);
+        }
+        assert_eq!(last, 2_500_000 * STREAM_RATE_GAIN_X1000 / 1000);
     }
 
     #[test]

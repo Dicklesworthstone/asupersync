@@ -2202,6 +2202,14 @@ struct QuicHelloAck {
     peer_id: String,
     #[serde(default)]
     source_stream: bool,
+    /// Bounded receive window (bytes) the receiver advertises for the paced
+    /// source stream. A compliant sender installs this as its initial
+    /// send-credit limit for that stream and then follows the receiver's
+    /// MAX_STREAM_DATA advertisements, bounding un-read bytes in the
+    /// receiver's reassembly buffer to roughly one window. `None` (older
+    /// receivers) keeps the historic unbounded-credit behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_stream_recv_window: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -6036,6 +6044,7 @@ fn receive_sender_hello_and_ack(
         accepted,
         peer_id: peer_id.to_string(),
         source_stream: accepted_source_stream,
+        source_stream_recv_window: None,
         reason: reason.clone(),
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
@@ -6073,6 +6082,7 @@ fn receive_native_sender_hello_and_ack(
         accepted,
         peer_id: peer_id.to_string(),
         source_stream: accepted_source_stream,
+        source_stream_recv_window: None,
         reason: reason.clone(),
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
@@ -11055,6 +11065,7 @@ mod tests {
             accepted: false,
             peer_id: "peer-b".to_string(),
             source_stream: false,
+            source_stream_recv_window: None,
             reason: Some("unsupported protocol".to_string()),
         };
         let ack_frame = json_frame(FrameType::HandshakeAck, &ack).expect("ack frame");
