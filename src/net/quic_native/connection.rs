@@ -267,7 +267,9 @@ const MAX_INBOUND_DATAGRAMS: usize = 65_536;
 
 /// Upper bound on SACK ranges encoded per ACK frame (newest ranges first).
 /// Keeps every ACK packet inside one conservative MTU; see
-/// `ReceivedPacketTracker::ack_frame`.
+/// `ReceivedPacketTracker::ack_frame`. A netns A/B at 4096 ranges reproduced
+/// the tree-manifest wedge identically, so this bound is not load-bearing for
+/// that failure (br-asupersync-u6m3dy forensics, 2026-07-06).
 const MAX_ACK_FRAME_RANGES: usize = 32;
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`

@@ -1751,6 +1751,86 @@ mod tests {
     )]
     use super::*;
 
+    /// Adversarial reassembly property: deliver a stream as randomized,
+    /// reordered, duplicated segments with shifted (coalesced-retransmit)
+    /// boundaries, interleaved with partial application reads, and require
+    /// that once every byte has been delivered at least once the reader can
+    /// always drain the full stream (br-asupersync-u6m3dy tree-manifest
+    /// wedge: receiver held full frame-level coverage but `read_bytes`
+    /// stalled).
+    #[test]
+    fn adversarial_reassembly_always_drains() {
+        // Deterministic xorshift so failures replay by seed.
+        fn next(state: &mut u64) -> u64 {
+            let mut x = *state;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *state = x;
+            x
+        }
+        const TOTAL: usize = 4096;
+        let payload: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+        for seed in 1..=64u64 {
+            let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut stream = QuicStream::new(StreamId(0), 1 << 30, 1 << 30);
+            // Base segmentation with irregular boundaries.
+            let mut segments: Vec<(u64, u64)> = Vec::new();
+            let mut at = 0u64;
+            while at < TOTAL as u64 {
+                let len = 1 + (next(&mut rng) % 96);
+                let end = (at + len).min(TOTAL as u64);
+                segments.push((at, end));
+                at = end;
+            }
+            // Duplicates with SHIFTED boundaries (coalesced retransmits):
+            // spans overlapping several base segments.
+            let dup_count = segments.len() / 3;
+            for _ in 0..dup_count {
+                let start = next(&mut rng) % TOTAL as u64;
+                let len = 1 + (next(&mut rng) % 256);
+                let end = (start + len).min(TOTAL as u64);
+                if start < end {
+                    segments.push((start, end));
+                }
+            }
+            // Shuffle (reorder).
+            for i in (1..segments.len()).rev() {
+                let j = (next(&mut rng) as usize) % (i + 1);
+                segments.swap(i, j);
+            }
+            let mut read_back: Vec<u8> = Vec::new();
+            for (idx, &(s, e)) in segments.iter().enumerate() {
+                let data = Bytes::copy_from_slice(&payload[s as usize..e as usize]);
+                stream
+                    .receive_bytes(s, data, false)
+                    .expect("in-window segment must be accepted");
+                // Interleave partial reads like the control-frame reader.
+                if idx % 3 == 0 {
+                    let chunk_len = 1 + (next(&mut rng) as usize % 512);
+                    let chunk = stream.read_bytes(chunk_len);
+                    read_back.extend_from_slice(&chunk);
+                }
+            }
+            // All bytes delivered at least once: the reader must now drain
+            // to TOTAL no matter the arrival order.
+            loop {
+                let chunk = stream.read_bytes(512);
+                if chunk.is_empty() {
+                    break;
+                }
+                read_back.extend_from_slice(&chunk);
+            }
+            assert_eq!(
+                read_back.len(),
+                TOTAL,
+                "seed {seed}: reader stalled at {} of {TOTAL}",
+                read_back.len()
+            );
+            assert_eq!(read_back, payload, "seed {seed}: bytes corrupted");
+        }
+    }
+
     #[derive(Default)]
     struct CountingWake {
         count: std::sync::atomic::AtomicUsize,
