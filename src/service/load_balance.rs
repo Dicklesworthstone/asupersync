@@ -251,10 +251,10 @@ impl LoadMetric {
     }
 
     fn decrement(&self) {
-        // Use fetch_update to prevent underflow wrapping.
+        // Use try_update to prevent underflow wrapping.
         let _ = self
             .in_flight
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
     }
 }
 

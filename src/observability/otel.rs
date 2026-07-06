@@ -2713,7 +2713,7 @@ impl MetricsState {
     fn dec_tasks(&self) {
         let _ = self
             .active_tasks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }
@@ -2725,7 +2725,7 @@ impl MetricsState {
     fn dec_regions(&self) {
         let _ = self
             .active_regions
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }
@@ -2737,7 +2737,7 @@ impl MetricsState {
     fn dec_obligations(&self) {
         let _ = self
             .active_obligations
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
     }

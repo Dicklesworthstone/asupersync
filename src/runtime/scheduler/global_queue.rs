@@ -102,7 +102,7 @@ impl<T: Send> fmt::Debug for GlobalFifoQueue<T> {
 impl<T: Send> GlobalFifoQueue<T> {
     #[inline]
     fn saturating_decrement(counter: &AtomicUsize) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             count.checked_sub(1)
         });
     }
@@ -112,7 +112,7 @@ impl<T: Send> GlobalFifoQueue<T> {
         if count == 0 {
             return;
         }
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(current.saturating_sub(count))
         });
     }
@@ -120,7 +120,7 @@ impl<T: Send> GlobalFifoQueue<T> {
     #[inline]
     fn try_reserve_published(counter: &AtomicUsize) -> bool {
         counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
             })
             .is_ok()

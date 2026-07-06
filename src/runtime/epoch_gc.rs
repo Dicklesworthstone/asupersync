@@ -396,7 +396,7 @@ impl DeferredCleanupQueue {
     fn increment_size_estimate(&self) -> usize {
         let previous = self
             .size
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_add(1))
             })
             .expect("epoch GC size increment closure always succeeds");
@@ -406,7 +406,7 @@ impl DeferredCleanupQueue {
     fn decrement_size_estimate(&self) -> usize {
         match self
             .size
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_sub(1)
             }) {
             Ok(previous) => previous - 1,

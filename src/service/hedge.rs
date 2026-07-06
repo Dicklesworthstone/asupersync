@@ -216,7 +216,7 @@ impl HedgeStats {
     fn release_pending_slot(&self) {
         let released = self
             .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_sub(1)
             })
             .is_ok();

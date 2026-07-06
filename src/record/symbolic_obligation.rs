@@ -126,7 +126,7 @@ impl FulfillmentProgress {
     pub fn add(&self, count: u32) {
         let _ = self
             .fulfilled
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 Some(current.saturating_add(count))
             });
     }

@@ -162,7 +162,7 @@ impl ReadBiasedDrainingRegionSnapshot {
             (true, false) => {
                 let _ =
                     self.cached_count
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                             Some(count.saturating_sub(1))
                         });
                 self.writes_since_last_read.fetch_add(1, Ordering::Release);

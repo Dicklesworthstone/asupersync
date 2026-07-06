@@ -1,3 +1,8 @@
 [toolchain]
-channel = "nightly"
+# Pinned date so every rch worker and local build resolves the SAME nightly:
+# a floating "nightly" made -D warnings gates nondeterministic by worker as
+# std deprecations (fetch_update -> try_update, 2026-07-05) rolled through
+# the fleet at different times (br-asupersync-58y8hy). Bump deliberately,
+# together with any std-API migration the new nightly requires.
+channel = "nightly-2026-07-05"
 components = ["rustfmt", "clippy"]

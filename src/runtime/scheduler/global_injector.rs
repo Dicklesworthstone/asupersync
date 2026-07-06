@@ -214,14 +214,14 @@ impl Default for GlobalInjector {
 impl GlobalInjector {
     /// Decrements an advisory counter, saturating at zero.
     ///
-    /// Uses `fetch_update` with `checked_sub` so the counter never wraps to
+    /// Uses `try_update` with `checked_sub` so the counter never wraps to
     /// `usize::MAX`, even transiently.  A `fetch_sub` + store-on-underflow
     /// approach would be slightly cheaper in the common case but would expose
     /// a brief window where readers see `usize::MAX`, which confuses `len()`,
     /// `is_empty()`, and `has_timed_work()` callers.
     #[inline]
     fn saturating_decrement(counter: &AtomicUsize) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             count.checked_sub(1)
         });
     }

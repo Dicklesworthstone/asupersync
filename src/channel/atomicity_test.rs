@@ -253,7 +253,7 @@ impl CancellationInjector {
         // in [0, 1) regardless of u64 wrap-around state.
         let previous = self
             .rng_state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 Some(state.wrapping_mul(1_103_515_245).wrapping_add(12345))
             })
             .expect("infallible LCG update");
