@@ -767,9 +767,12 @@ fn sanitize_posterior_snapshot(probs: &[f64]) -> Vec<f64> {
         probs.iter().map(|p| p / sum).collect()
     } else {
         // Empty / all-zero / non-finite: uniform over the same state count
-        // (min length 1 so the snapshot is never empty).
+        // (min length 1 so the snapshot is never empty). State counts are far
+        // below 2^52, so the count-to-f64 conversion is exact.
         let n = probs.len().max(1);
-        vec![1.0 / n as f64; n]
+        #[allow(clippy::cast_precision_loss)]
+        let uniform = 1.0 / n as f64;
+        vec![uniform; n]
     }
 }
 
