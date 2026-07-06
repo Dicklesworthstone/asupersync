@@ -3813,3 +3813,22 @@ L3 = commit-write rename-not-copy (bead br-asupersync-sze9ym, codex-drafted + Sa
 ★**500M/good honest note:** first-ever rsync-ssh measurement for the cell: 24.56-25.17s (near the 20s wire-min — TCP CUBIC handles 0.1%/25ms far better than the Mathis estimate). atp: committed base 46.05, this landing ~55-63 bimodal. The cell was lost before and remains lost; the bimodal slow mode arrived with the absolute schedule + burst drain and is the price of the 50M/good flip + perfect gains. Mechanism (for oh6gm2 ph3): sustained near-link pacing on a 0.1%-loss link triggers periodic recovery episodes whose floor-released rate (seed/8=10MiB/s) under-fills the 25MB/s link between episodes. Not silently accepted — the cell needs episode-aware floor decay (e.g. decay only while an episode is active), tracked in oh6gm2.
 
 ★**Scoreboard delta (encrypted tier vs rsync-ssh):** 50M/good 4.15 vs 4.25 WIN (was fragile-then-losing); 50M/perfect 1.21-1.45 vs 0.86 (best rep 0.71-0.95 touches the bar); 500M/perfect 7.12 vs 5.15; 500M/good ~55-63 vs 24.7; trees perfect 2.42/1.95 vs 0.95/0.55; trees good 7.56/3.45 vs 2.25/2.35 (rsync tree bars re-measured contemporaneously on gate34).
+
+## MATRIX-216 (2026-07-06) — MISSION CONSOLIDATION: the encrypted board is fully measured for the first time (25/25 cells, both sides contemporaneous, gate39 = HEAD 7a49487fa). Encrypted wins: 500K sweeps ALL FOUR regimes, 5M wins good+bad (perfect = exact tie), 50M/good WON. Non-convergence at ≥5M/broken and ≥500M/bad is THE remaining hole (bead u6m3dy). xnlyss CLOSED: 5G receiver RSS 882MB→12.1MB, wall 146-151→57.1s.
+
+★**Final encrypted board (medians, SHA-256 fail-closed, netns, tuned rsync-ssh aes128-gcm, 2-5 reps/cell):**
+| cell | atp | rsync-ssh | verdict |
+|---|---|---|---|
+| 500K perfect/good/bad/broken | 0.15 / 0.35 / 2.13 / 6.06(3-of-5) | 0.45 / 1.55 / 5.25 / 16.97 | **WIN ×4** (broken: 2/5 reps timeout — flaky convergence, fail-closed) |
+| 5M perfect/good/bad/broken | 0.45 / 0.85 / 4.75 / FAIL 0-of-5 | 0.45 / 1.86 / 6.65 / 25.37 | tie / **WIN** / **WIN** / ATP-FAIL |
+| 50M perfect/good/bad/broken | 1.45 / **4.15** / 66.9 / FAIL 0-of-3 | 0.86 / 4.25 / 18.96 / 105.1 | lose / **WIN** / lose / ATP-FAIL |
+| 500M perfect/good/bad/broken | 7.12 / ~55-63 / FAIL 0-of-3 @900s / FAIL 0-of-2 | 5.15 / 24.67 / 130.7 / 940.2 | lose / lose / ATP-FAIL / ATP-FAIL |
+| 5G perfect | 57.1 (recv RSS 12.1MB) | 46.7 | lose (was 3.1×, now 1.22×) |
+| tree_small perfect/good/bad/broken | 2.42 / 7.56 / 27.2 / FAIL 0-of-5 | 0.95 / 2.25 / 7.35 / 29.1 | lose ×3 / ATP-FAIL |
+| tree_big perfect/good/bad/broken | 1.95 / 3.45 / 22.8 / FAIL 0-of-3 | 0.55 / 2.35 / 9.05 / 61.4 | lose ×3 / ATP-FAIL |
+
+★**Nocrypto no-regress (same session, under sweep load):** tree_small/perfect 1.01 med (rsyncd bar 1.028 — MATRIX-211 win holds), 500M/perfect 4.62 (baseline 4.52). The nocrypto+auth board remains atp-wins-everywhere.
+
+★**Session arc (MATRIX-213→216, all landed+pushed):** the 20s stall killed (bounded window + floor mechanics), receiver RSS bounded at every size, 500M/perfect 10.16→7.12, 5G 146→57.1, 50M/good flipped to a WIN, trees packed 2000-into-1 with 25-36% gains on the perfect cells, and the whole lossy/broken frontier measured honestly for the first time with hard timeout bounds (900-1200s).
+
+★**Remaining rsync-favored territory, all root-caused and beaded:** (1) **u6m3dy** — encrypted broken-regime (and bad-regime ≥500M) non-convergence: the QUIC datagram/FEC repair loop fails where the rq tier's MATRIX-207 stack converges on identical netem; the port map is in the bead. This is the single highest-leverage remaining fix (6 ATP-FAIL cells). (2) **oh6gm2 ph3** — clean/mild-loss throughput: 50M/perfect 1.45 vs 0.86 (best reps 0.71-0.95 already touch the bar — climb-phase variance), 500M/perfect 7.12 vs 5.15 (equilibrium ~71 vs 119MB/s), 500M/good bimodal 48/63 vs 24.7 (episode-aware floor decay), 5G 57.1 vs 46.7, 50M/bad 66.9 vs 19.0 (continuous-loss recovery economics). (3) **i7pdxb** — tree bars: pass-1 metadata batching (~4000 dispatches) then the residual handshake/verify floor; good/bad tree cells additionally gated on (2). Integrity held throughout: tuned rsync only, crypto-symmetric, SHA fail-closed, rate-capped links, whole matrix reported, refuted levers ledgered.
