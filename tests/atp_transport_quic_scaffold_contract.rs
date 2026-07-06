@@ -548,6 +548,7 @@ fn manifest_json_roundtrips() {
                 size: 1000,
                 sha256_hex: "11".repeat(32),
                 metadata: None,
+                members: Vec::new(),
             },
             ManifestEntry {
                 index: 1,
@@ -555,6 +556,7 @@ fn manifest_json_roundtrips() {
                 size: 234,
                 sha256_hex: "22".repeat(32),
                 metadata: None,
+                members: Vec::new(),
             },
         ],
     };

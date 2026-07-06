@@ -6185,6 +6185,8 @@ async fn wait_source_stream_send_admission(
     config: &QuicConfig,
 ) -> Result<(), QuicTransportError> {
     let gate_started = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut progress_marker = (u64::MAX, u64::MAX);
     loop {
         if gate_started.elapsed() >= config.idle_timeout {
             return Err(QuicTransportError::Timeout {
@@ -6196,14 +6198,26 @@ async fn wait_source_stream_send_admission(
             drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
             continue;
         }
-        let credit_ok =
-            min_credit == 0 || link.conn.stream_send_credit_remaining(stream) >= min_credit;
+        let credit_remaining = link.conn.stream_send_credit_remaining(stream);
+        let credit_ok = min_credit == 0 || credit_remaining >= min_credit;
         if credit_ok && link.stream_unacked_bytes <= QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES {
             return Ok(());
         }
+        let marker = (credit_remaining, link.stream_unacked_bytes);
+        if marker != progress_marker {
+            progress_marker = marker;
+            last_progress = Instant::now();
+        }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
-        if pumped > 0 {
+        // The PTO drain must key on lack of PROGRESS, not on a silent pump:
+        // the gate's own keep-alive pings (and the receiver's ACKs of them)
+        // keep `pumped > 0` forever, and a tail loss at the credit-window
+        // edge has no later packets to trip the 3-packet gap detector — that
+        // combination degenerated recovery to ~1 packet per PTO (measured:
+        // tree_small/good trickling at 8 KB per 252 ms for seconds).
+        let stalled = last_progress.elapsed() >= SOURCE_STREAM_PTO;
+        if pumped > 0 && !stalled {
             let ranges = link.latest_stream_ack_ranges.clone();
             let frames = link.drain_ack_gap_lost_stream_frames_for_retransmit(&ranges);
             if !frames.is_empty() {
@@ -6218,9 +6232,11 @@ async fn wait_source_stream_send_admission(
             if !frames.is_empty() {
                 link.retransmit_stream_frames(cx, &frames, "source_stream_unacked_gate_pto")
                     .await?;
+                last_progress = Instant::now();
             } else if !credit_ok {
                 link.conn.queue_ping(cx)?;
                 link.flush(cx).await?;
+                last_progress = Instant::now();
             }
         }
     }
@@ -6502,7 +6518,7 @@ async fn run_sender_session(
                         return Ok(SendReport {
                             transfer_id: manifest.transfer_id.clone(),
                             bytes_sent: manifest.total_bytes,
-                            files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                            files: super::manifest_logical_files(manifest),
                             symbols_sent: 0,
                             feedback_rounds: 0,
                             merkle_root_hex: manifest.merkle_root_hex.clone(),
@@ -6625,7 +6641,7 @@ async fn run_sender_session(
                 return Ok(SendReport {
                     transfer_id: manifest.transfer_id.clone(),
                     bytes_sent: manifest.total_bytes,
-                    files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                    files: super::manifest_logical_files(manifest),
                     symbols_sent,
                     feedback_rounds,
                     merkle_root_hex: manifest.merkle_root_hex.clone(),
@@ -7278,6 +7294,184 @@ impl NativeReceiverIntakeStats {
     }
 }
 
+/// One planned member write for a packed entry commit.
+struct QuicPackedMemberWrite {
+    offset: u64,
+    len: u64,
+    out_path: PathBuf,
+}
+
+/// One-shot packed-member commit cap (mirrors the RQ tier): above this staged
+/// span the batch falls back to the streaming cursor loop.
+const QUIC_PACKED_MEMBER_BATCH_ONESHOT_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Commit an entire packed small-file batch inside ONE blocking-pool task:
+/// read the verified staged span once, then create/write every member with
+/// raw `std::fs`. The serial async loop pays several pool round-trips per
+/// tiny file — the dispatch-overhead commit tail that MATRIX-211 eliminated
+/// on the RQ tier.
+fn write_quic_packed_member_batch_oneshot(
+    staging_path: PathBuf,
+    members: Vec<QuicPackedMemberWrite>,
+    span_len: usize,
+) -> std::io::Result<()> {
+    use std::io::Read;
+
+    let mut staged = vec![0u8; span_len];
+    let mut source = std::fs::File::open(&staging_path)?;
+    source.read_exact(&mut staged)?;
+
+    let mut created_parents: std::collections::BTreeSet<PathBuf> =
+        std::collections::BTreeSet::new();
+    for member in &members {
+        if let Some(parent) = member.out_path.parent()
+            && created_parents.insert(parent.to_path_buf())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let start = usize::try_from(member.offset)
+            .map_err(|_| std::io::Error::other("packed member offset exceeds span"))?;
+        let len = usize::try_from(member.len)
+            .map_err(|_| std::io::Error::other("packed member length exceeds span"))?;
+        let end = start
+            .checked_add(len)
+            .filter(|end| *end <= staged.len())
+            .ok_or_else(|| std::io::Error::other("packed member range exceeds staged span"))?;
+        std::fs::write(&member.out_path, &staged[start..end])?;
+    }
+    Ok(())
+}
+
+async fn write_quic_packed_member_batch(
+    staging_path: &Path,
+    members: &[QuicPackedMemberWrite],
+    read_buf: &mut [u8],
+) -> Result<(), QuicTransportError> {
+    let span_end = members
+        .iter()
+        .map(|member| member.offset.saturating_add(member.len))
+        .max()
+        .unwrap_or(0);
+    if members.len() > 1
+        && span_end <= QUIC_PACKED_MEMBER_BATCH_ONESHOT_MAX_BYTES
+        && let Ok(span_len) = usize::try_from(span_end)
+    {
+        let staging = staging_path.to_path_buf();
+        let batch = members
+            .iter()
+            .map(|member| QuicPackedMemberWrite {
+                offset: member.offset,
+                len: member.len,
+                out_path: member.out_path.clone(),
+            })
+            .collect::<Vec<_>>();
+        let staging_display = staging_path.display().to_string();
+        return crate::runtime::spawn_blocking_io(move || {
+            write_quic_packed_member_batch_oneshot(staging, batch, span_len)
+        })
+        .await
+        .map_err(|err| QuicTransportError::Source(format!("{staging_display}: {err}")));
+    }
+
+    // Streaming fallback: sequential per-member copy out of the staged pack.
+    let mut source = crate::fs::File::open(staging_path)
+        .await
+        .map_err(|err| QuicTransportError::Source(format!("{}: {err}", staging_path.display())))?;
+    let mut cursor = 0u64;
+    for member in members {
+        if let Some(parent) = member.out_path.parent() {
+            crate::fs::create_dir_all(parent).await?;
+        }
+        if cursor != member.offset {
+            source.seek(std::io::SeekFrom::Start(member.offset)).await?;
+            cursor = member.offset;
+        }
+        let mut out = crate::fs::File::create(&member.out_path)
+            .await
+            .map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", member.out_path.display()))
+            })?;
+        let mut remaining = member.len;
+        while remaining > 0 {
+            let want =
+                usize::try_from(remaining.min(read_buf.len() as u64)).unwrap_or(read_buf.len());
+            let n = source.read(&mut read_buf[..want]).await.map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", staging_path.display()))
+            })?;
+            if n == 0 {
+                return Err(QuicTransportError::Source(format!(
+                    "{}: short read while splitting packed member {}",
+                    staging_path.display(),
+                    member.out_path.display()
+                )));
+            }
+            out.write_all(&read_buf[..n]).await.map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", member.out_path.display()))
+            })?;
+            remaining -= n as u64;
+            cursor = cursor.saturating_add(n as u64);
+        }
+        out.flush().await.map_err(|err| {
+            QuicTransportError::Source(format!("{}: {err}", member.out_path.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// Verify each packed member's SHA-256 against the staged pack and append the
+/// logical (per-member) digests the merkle check needs. Returns whether every
+/// member hash matched.
+async fn hash_quic_packed_members_streaming(
+    staging_path: &Path,
+    members: &[crate::net::atp::transport_tcp::PackedMember],
+    digests: &mut Vec<EntryDigest>,
+    read_buf: &mut [u8],
+) -> Result<bool, QuicTransportError> {
+    let mut file = crate::fs::File::open(staging_path)
+        .await
+        .map_err(|err| QuicTransportError::Source(format!("{}: {err}", staging_path.display())))?;
+    let mut cursor = 0u64;
+    let mut members_ok = true;
+    for member in members {
+        if cursor != member.offset {
+            file.seek(std::io::SeekFrom::Start(member.offset)).await?;
+            cursor = member.offset;
+        }
+        let mut sha = Sha256::new();
+        let mut content_id = crate::atp::object::ContentId::streaming();
+        let mut remaining = member.len;
+        while remaining > 0 {
+            let want =
+                usize::try_from(remaining.min(read_buf.len() as u64)).unwrap_or(read_buf.len());
+            let n = file.read(&mut read_buf[..want]).await.map_err(|err| {
+                QuicTransportError::Source(format!("{}: {err}", staging_path.display()))
+            })?;
+            if n == 0 {
+                return Err(QuicTransportError::Source(format!(
+                    "{}: short read while verifying packed member {}",
+                    staging_path.display(),
+                    member.rel_path
+                )));
+            }
+            sha.update(&read_buf[..n]);
+            content_id.update(&read_buf[..n]);
+            remaining -= n as u64;
+            cursor = cursor.saturating_add(n as u64);
+        }
+        let member_sha: [u8; 32] = sha.finalize().into();
+        if hex_encode(&member_sha) != member.sha256_hex {
+            members_ok = false;
+        }
+        digests.push(EntryDigest {
+            rel_path: member.rel_path.clone(),
+            size: member.len,
+            content_id: crate::atp::object::ObjectId::content(content_id.finalize()),
+            content_sha256: member_sha,
+        });
+    }
+    Ok(members_ok)
+}
+
 async fn commit_staged_entries(
     cx: &Cx,
     link: &mut QuicLink,
@@ -7303,12 +7497,25 @@ async fn commit_staged_entries(
         if size != entry.size || hex_encode(&content_sha256) != entry.sha256_hex {
             sha_ok = false;
         }
-        digests.push(EntryDigest {
-            rel_path: entry.rel_path.clone(),
-            size,
-            content_id,
-            content_sha256,
-        });
+        if entry.members.is_empty() {
+            digests.push(EntryDigest {
+                rel_path: entry.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            });
+        } else if !hash_quic_packed_members_streaming(
+            &staged_entry.staging_path,
+            &entry.members,
+            &mut digests,
+            &mut read_buf,
+        )
+        .await?
+        {
+            // Logical digests replace the pack digest for the merkle check;
+            // any member hash mismatch fails the transfer closed.
+            sha_ok = false;
+        }
         send_and_flush_native_keep_alive(cx, link, control).await?;
     }
 
@@ -7328,6 +7535,29 @@ async fn commit_staged_entries(
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             send_and_flush_native_keep_alive(cx, link, control).await?;
             staged_entry.close_cached_staging_file().await?;
+            if !entry.members.is_empty() {
+                // Packed entry: split the verified staged pack into member
+                // files with one blocking-pool batch (the staged pack itself
+                // is scratch; the staging-dir guard reclaims it).
+                let mut writes = Vec::with_capacity(entry.members.len());
+                for member in &entry.members {
+                    let member_path = super::quic_join_relative(&base, &member.rel_path)?;
+                    super::reject_quic_destination_symlink_prefix(&base, &member_path).await?;
+                    writes.push(QuicPackedMemberWrite {
+                        offset: member.offset,
+                        len: member.len,
+                        out_path: member_path,
+                    });
+                }
+                write_quic_packed_member_batch(&staged_entry.staging_path, &writes, &mut read_buf)
+                    .await?;
+                for (member, write) in entry.members.iter().zip(&writes) {
+                    super::apply_quic_member_metadata(cx, &write.out_path, member).await?;
+                    committed_paths.push(write.out_path.clone());
+                }
+                send_and_flush_native_keep_alive(cx, link, control).await?;
+                continue;
+            }
             let out_path = if manifest.is_directory {
                 super::quic_join_relative(&base, &entry.rel_path)?
             } else {
@@ -7356,6 +7586,10 @@ async fn commit_staged_entries(
     let bytes_received = digests
         .iter()
         .fold(0u64, |acc, digest| acc.saturating_add(digest.size));
+    // Logical file count: packed entries contribute one per member.
+    let logical_files = manifest.entries.iter().fold(0usize, |acc, entry| {
+        acc.saturating_add(entry.members.len().max(1))
+    });
     super::quic_progress(format_args!(
         "receiver: commit_decision transfer={} committed={} sha_ok={} merkle_ok={} metadata_ok={} bytes_received={} files={}",
         manifest.transfer_id,
@@ -7364,13 +7598,13 @@ async fn commit_staged_entries(
         merkle_ok,
         metadata_ok,
         bytes_received,
-        manifest.entries.len()
+        logical_files
     ));
     Ok((
         ReceiveReceipt {
             committed,
             bytes_received,
-            files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+            files: u32::try_from(logical_files).unwrap_or(u32::MAX),
             sha_ok,
             merkle_ok,
             symbols_accepted: 0,
@@ -9728,6 +9962,7 @@ mod tests {
                 size: 1024 * 1024,
                 sha256_hex: "11".repeat(32),
                 metadata: None,
+                members: Vec::new(),
             }],
         };
 
@@ -10678,6 +10913,7 @@ mod tests {
             size,
             sha256_hex: "0".repeat(64),
             metadata: None,
+            members: Vec::new(),
         }
     }
 

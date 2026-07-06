@@ -92,7 +92,7 @@ use crate::decoding::{
     run_block_decode_job,
 };
 use crate::encoding::EncodingPipeline;
-use crate::io::AsyncReadExt;
+use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::quic::AtpTransportMetrics;
@@ -133,7 +133,7 @@ pub(crate) fn quic_progress(args: std::fmt::Arguments<'_>) {
 // one schema (see module docs). These are the "reuse manifest/report/receipt"
 // half of the B1 acceptance.
 pub use crate::net::atp::transport_tcp::{
-    ManifestEntry, ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
+    ManifestEntry, PackedMember, ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
 };
 
 // The RaptorQ symbol-envelope codec (the framing of a symbol inside a QUIC
@@ -2647,6 +2647,7 @@ fn manifest_from_entries(
             size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             sha256_hex: sha256_hex(bytes),
             metadata: None,
+            members: Vec::new(),
         })
         .collect::<Vec<_>>();
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
@@ -2945,6 +2946,9 @@ pub(crate) struct QuicPreparedSource {
     manifest: TransferManifest,
     entries: Vec<QuicSourceEntry>,
     max_block_size: usize,
+    /// Keeps materialized pack temp files alive for the duration of the send
+    /// (pack entries' `abs_path` points into this directory).
+    pack_tempdir: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
 impl QuicPreparedSource {
@@ -3521,6 +3525,45 @@ fn encoders_from_entries(
 }
 
 #[allow(dead_code)]
+/// Largest file that may be packed into a combined entry (inclusive).
+///
+/// Mirrors the RaptorQ tier's E-15 coalescing: many-small-file trees pay the
+/// QUIC tier's per-entry stream/staging/commit overhead once per pack instead
+/// of once per file (the tier measured 3.8× slower than the RQ tier on
+/// tree_small from exactly this per-entry tax, MATRIX-212).
+const QUIC_PACK_MEMBER_MAX_BYTES: u64 = 1024 * 1024;
+/// Target combined size for one pack entry.
+const QUIC_PACK_TARGET_BYTES: u64 = 8 * 1024 * 1024;
+
+/// One planned source entry: metadata resolved, packing eligibility decided,
+/// content hashing deferred so pack members are read exactly once.
+struct QuicPlannedSource {
+    rel_path: String,
+    abs_path: PathBuf,
+    metadata: EntryMetadata,
+    size: u64,
+    zero_content: bool,
+    pack_eligible: bool,
+}
+
+enum QuicBuildItem {
+    Plain(usize),
+    Pack(Vec<usize>),
+}
+
+fn quic_flush_pack_group(
+    items: &mut Vec<QuicBuildItem>,
+    group: &mut Vec<usize>,
+    group_bytes: &mut u64,
+) {
+    if group.len() >= 2 {
+        items.push(QuicBuildItem::Pack(std::mem::take(group)));
+    } else if let Some(idx) = group.pop() {
+        items.push(QuicBuildItem::Plain(idx));
+    }
+    *group_bytes = 0;
+}
+
 async fn prepare_source_manifest(
     cx: &Cx,
     source: &Path,
@@ -3530,12 +3573,13 @@ async fn prepare_source_manifest(
     let (root_name, is_directory, source_entries) = collect_entries(source).await?;
     let _ = quic_safe_base_for_root_name(Path::new("base"), &root_name)?;
     let mut read_buf = vec![0_u8; config.chunk_size];
-    let mut digests = Vec::with_capacity(source_entries.len());
-    let mut metadatas = Vec::with_capacity(source_entries.len());
     let mut total_bytes = 0u64;
     let mut hardlink_primary: std::collections::HashMap<(u64, u64), String> =
         std::collections::HashMap::new();
 
+    // Pass 1: metadata + hardlink resolution + packing eligibility. Content
+    // hashing is deferred to the build pass so pack members are read once.
+    let mut planned = Vec::with_capacity(source_entries.len());
     for source_entry in &source_entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         quic_join_relative(Path::new("base"), &source_entry.rel_path)?;
@@ -3556,19 +3600,19 @@ async fn prepare_source_manifest(
         }
         let zero_content =
             !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some();
-        let digest = if zero_content {
-            empty_quic_entry_digest(source_entry.rel_path.clone())
+        let size = if zero_content {
+            0
         } else {
-            let (size, content_id, content_sha256) =
-                hash_file_streaming(&source_entry.abs_path, &mut read_buf).await?;
-            EntryDigest {
-                rel_path: source_entry.rel_path.clone(),
-                size,
-                content_id,
-                content_sha256,
-            }
+            crate::fs::metadata(&source_entry.abs_path)
+                .await
+                .map_err(|err| {
+                    QuicTransportError::Source(format!(
+                        "{}: {err}",
+                        source_entry.abs_path.display()
+                    ))
+                })?
+                .len()
         };
-        let size = digest.size;
         total_bytes = total_bytes
             .checked_add(size)
             .ok_or(QuicTransportError::TooLarge {
@@ -3581,88 +3625,225 @@ async fn prepare_source_manifest(
                 max: config.max_transfer_bytes,
             });
         }
-        digests.push(digest);
-        metadatas.push(metadata);
+        let pack_eligible = is_directory && !zero_content && size <= QUIC_PACK_MEMBER_MAX_BYTES;
+        planned.push(QuicPlannedSource {
+            rel_path: source_entry.rel_path.clone(),
+            abs_path: source_entry.abs_path.clone(),
+            metadata,
+            size,
+            zero_content,
+            pack_eligible,
+        });
     }
 
-    let max_entry_len = digests.iter().try_fold(0usize, |max, digest| {
-        usize::try_from(digest.size)
+    // Pass 2: group consecutive small regular files into packs. Zero-content
+    // entries without a hardlink target (directories, symlinks) carry no
+    // stream bytes, so they stay in place without fragmenting a pack run.
+    // Hardlink entries flush the run so a packed primary always commits
+    // before the link that references it; large files flush it like the RQ
+    // tier does.
+    let mut items: Vec<QuicBuildItem> = Vec::with_capacity(planned.len());
+    let mut group: Vec<usize> = Vec::new();
+    let mut group_bytes = 0u64;
+    for (idx, plan) in planned.iter().enumerate() {
+        if plan.pack_eligible {
+            if !group.is_empty() && group_bytes.saturating_add(plan.size) > QUIC_PACK_TARGET_BYTES {
+                quic_flush_pack_group(&mut items, &mut group, &mut group_bytes);
+            }
+            group.push(idx);
+            group_bytes = group_bytes.saturating_add(plan.size);
+        } else if plan.zero_content && plan.metadata.hardlink_target.is_none() {
+            items.push(QuicBuildItem::Plain(idx));
+        } else {
+            quic_flush_pack_group(&mut items, &mut group, &mut group_bytes);
+            items.push(QuicBuildItem::Plain(idx));
+        }
+    }
+    quic_flush_pack_group(&mut items, &mut group, &mut group_bytes);
+
+    // Pass 3: hash + materialize in manifest order. `digests` is the LOGICAL
+    // (member-flattened) digest list — the merkle root and metadata
+    // commitment are computed over logical files, so they are invariant to
+    // how files were packed and the receiver recomputes them from members.
+    let mut digests: Vec<EntryDigest> = Vec::with_capacity(planned.len());
+    let mut manifest_entries: Vec<ManifestEntry> = Vec::with_capacity(items.len());
+    let mut entry_sources: Vec<PathBuf> = Vec::with_capacity(items.len());
+    let mut pack_tempdir: Option<tempfile::TempDir> = None;
+    let mut pack_count = 0usize;
+    for item in &items {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let index = u32::try_from(manifest_entries.len()).unwrap_or(u32::MAX);
+        match item {
+            QuicBuildItem::Plain(idx) => {
+                let plan = &planned[*idx];
+                let digest = if plan.zero_content {
+                    empty_quic_entry_digest(plan.rel_path.clone())
+                } else {
+                    let (size, content_id, content_sha256) =
+                        hash_file_streaming(&plan.abs_path, &mut read_buf).await?;
+                    EntryDigest {
+                        rel_path: plan.rel_path.clone(),
+                        size,
+                        content_id,
+                        content_sha256,
+                    }
+                };
+                manifest_entries.push(ManifestEntry {
+                    index,
+                    rel_path: plan.rel_path.clone(),
+                    size: digest.size,
+                    sha256_hex: hex_encode(&digest.content_sha256),
+                    metadata: if plan.metadata.is_bare() {
+                        None
+                    } else {
+                        Some(plan.metadata.clone())
+                    },
+                    members: Vec::new(),
+                });
+                entry_sources.push(plan.abs_path.clone());
+                digests.push(digest);
+            }
+            QuicBuildItem::Pack(indices) => {
+                let tempdir = match pack_tempdir.as_ref() {
+                    Some(dir) => dir,
+                    None => {
+                        let dir = tempfile::Builder::new()
+                            .prefix(".atp-quic-pack-")
+                            .tempdir()
+                            .map_err(|err| {
+                                QuicTransportError::Source(format!("create pack tempdir: {err}"))
+                            })?;
+                        pack_tempdir = Some(dir);
+                        pack_tempdir.as_ref().expect("pack tempdir just installed")
+                    }
+                };
+                let pack_path = tempdir.path().join(format!("pack-{pack_count}"));
+                let mut pack_file = crate::fs::File::create(&pack_path).await.map_err(|err| {
+                    QuicTransportError::Source(format!("{}: {err}", pack_path.display()))
+                })?;
+                let mut members: Vec<PackedMember> = Vec::with_capacity(indices.len());
+                let mut pack_sha = Sha256::new();
+                let mut offset = 0u64;
+                for member_idx in indices {
+                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                    let plan = &planned[*member_idx];
+                    let mut src = crate::fs::File::open(&plan.abs_path).await.map_err(|err| {
+                        QuicTransportError::Source(format!("{}: {err}", plan.abs_path.display()))
+                    })?;
+                    let mut member_sha = Sha256::new();
+                    let mut member_cid = crate::atp::object::ContentId::streaming();
+                    let mut len = 0u64;
+                    loop {
+                        let n = src.read(&mut read_buf).await.map_err(|err| {
+                            QuicTransportError::Source(format!(
+                                "{}: {err}",
+                                plan.abs_path.display()
+                            ))
+                        })?;
+                        if n == 0 {
+                            break;
+                        }
+                        let chunk = &read_buf[..n];
+                        member_sha.update(chunk);
+                        member_cid.update(chunk);
+                        pack_sha.update(chunk);
+                        pack_file.write_all(chunk).await.map_err(|err| {
+                            QuicTransportError::Source(format!("{}: {err}", pack_path.display()))
+                        })?;
+                        len = len.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                    }
+                    if len != plan.size {
+                        return Err(QuicTransportError::Source(format!(
+                            "{} changed while packing (read {len} bytes, planned {})",
+                            plan.abs_path.display(),
+                            plan.size
+                        )));
+                    }
+                    let content_sha256: [u8; 32] = member_sha.finalize().into();
+                    members.push(PackedMember {
+                        rel_path: plan.rel_path.clone(),
+                        offset,
+                        len,
+                        sha256_hex: hex_encode(&content_sha256),
+                        metadata: if plan.metadata.is_bare() {
+                            None
+                        } else {
+                            Some(plan.metadata.clone())
+                        },
+                    });
+                    digests.push(EntryDigest {
+                        rel_path: plan.rel_path.clone(),
+                        size: len,
+                        content_id: crate::atp::object::ObjectId::content(member_cid.finalize()),
+                        content_sha256,
+                    });
+                    offset = offset.saturating_add(len);
+                }
+                pack_file.flush().await.map_err(|err| {
+                    QuicTransportError::Source(format!("{}: {err}", pack_path.display()))
+                })?;
+                drop(pack_file);
+                let pack_sha256: [u8; 32] = pack_sha.finalize().into();
+                manifest_entries.push(ManifestEntry {
+                    index,
+                    rel_path: format!(".atp-pack-{pack_count}"),
+                    size: offset,
+                    sha256_hex: hex_encode(&pack_sha256),
+                    metadata: None,
+                    members,
+                });
+                entry_sources.push(pack_path);
+                pack_count += 1;
+            }
+        }
+    }
+
+    let max_entry_len = manifest_entries.iter().try_fold(0usize, |max, entry| {
+        usize::try_from(entry.size)
             .map(|size| max.max(size))
             .map_err(|_| QuicTransportError::TooLarge {
-                size: digest.size,
+                size: entry.size,
                 max: usize::MAX as u64,
             })
     })?;
     let effective_config = effective_quic_config_for_largest_entry(config, max_entry_len)?;
     let merkle_root_hex = flat_merkle_root_from_digests(&digests);
-    let metadata_pairs: Vec<(&str, &EntryMetadata)> = digests
-        .iter()
-        .zip(&metadatas)
-        .map(|(digest, metadata)| (digest.rel_path.as_str(), metadata))
-        .collect();
-    let metadata_root_hex = metadata_commitment(&metadata_pairs);
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, digests.len());
-    let manifest_entries = digests
-        .iter()
-        .zip(&metadatas)
-        .enumerate()
-        .map(|(i, (digest, metadata))| ManifestEntry {
-            index: u32::try_from(i).unwrap_or(u32::MAX),
-            rel_path: digest.rel_path.clone(),
-            size: digest.size,
-            sha256_hex: hex_encode(&digest.content_sha256),
-            metadata: if metadata.is_bare() {
-                None
-            } else {
-                Some(metadata.clone())
-            },
-        })
-        .collect::<Vec<_>>();
-    let manifest = TransferManifest {
+    let mut manifest = TransferManifest {
         transfer_id,
         root_name,
         is_directory,
         total_bytes,
         merkle_root_hex,
-        metadata_root_hex,
+        metadata_root_hex: None,
         entries: manifest_entries,
         delta_manifest: None,
     };
+    // Computed from the built entries (members flattened) so the sender and
+    // receiver commitments are symmetric by construction.
+    manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
     validate_quic_manifest(&manifest, &effective_config)?;
 
-    let entries = source_entries
-        .into_iter()
-        .zip(digests)
-        .map(|(source_entry, digest)| {
-            let entry = &manifest.entries[digest_index(&manifest, &digest.rel_path)?];
-            Ok(QuicSourceEntry {
-                index: entry.index,
-                rel_path: entry.rel_path.clone(),
-                abs_path: source_entry.abs_path,
-                size: entry.size,
-                object_id: entry_object_id(&manifest.transfer_id, entry.index),
-                sha256_hex: entry.sha256_hex.clone(),
-            })
+    let entries = manifest
+        .entries
+        .iter()
+        .zip(entry_sources)
+        .map(|(entry, abs_path)| QuicSourceEntry {
+            index: entry.index,
+            rel_path: entry.rel_path.clone(),
+            abs_path,
+            size: entry.size,
+            object_id: entry_object_id(&manifest.transfer_id, entry.index),
+            sha256_hex: entry.sha256_hex.clone(),
         })
-        .collect::<Result<Vec<_>, QuicTransportError>>()?;
+        .collect::<Vec<_>>();
 
     Ok(QuicPreparedSource {
         manifest,
         entries,
         max_block_size: effective_config.max_block_size,
+        pack_tempdir: pack_tempdir.map(std::sync::Arc::new),
     })
-}
-
-fn digest_index(manifest: &TransferManifest, rel_path: &str) -> Result<usize, QuicTransportError> {
-    manifest
-        .entries
-        .iter()
-        .position(|entry| entry.rel_path == rel_path)
-        .ok_or_else(|| {
-            QuicTransportError::Source(format!(
-                "prepared source entry {rel_path} missing from manifest"
-            ))
-        })
 }
 
 #[allow(dead_code)]
@@ -4351,7 +4532,7 @@ fn finish_sender_transfer(
     Ok(SendReport {
         transfer_id: manifest.transfer_id.clone(),
         bytes_sent: manifest.total_bytes,
-        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        files: manifest_logical_files(manifest),
         symbols_sent,
         feedback_rounds,
         merkle_root_hex: manifest.merkle_root_hex.clone(),
@@ -5568,18 +5749,30 @@ fn verify_in_memory_receipt(
         {
             sha_ok = false;
         }
+        for member in &entry.members {
+            match packed_member_slice(bytes, member) {
+                Some(slice) if sha256_hex(slice) == member.sha256_hex => {}
+                _ => sha_ok = false,
+            }
+        }
     }
 
-    let rebuilt = manifest
-        .entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.rel_path.clone(),
-                decoded.get(&entry.index).cloned().unwrap_or_default(),
-            )
-        })
-        .collect::<Vec<_>>();
+    // Logical (member-flattened) reconstruction: the merkle root is computed
+    // over logical files on both sides, invariant to packing.
+    let mut rebuilt: Vec<(String, Vec<u8>)> = Vec::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let bytes = decoded.get(&entry.index).cloned().unwrap_or_default();
+        if entry.members.is_empty() {
+            rebuilt.push((entry.rel_path.clone(), bytes));
+        } else {
+            for member in &entry.members {
+                let slice = packed_member_slice(&bytes, member)
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default();
+                rebuilt.push((member.rel_path.clone(), slice));
+            }
+        }
+    }
     let merkle_ok = flat_merkle_root_from_slices(
         rebuilt
             .iter()
@@ -5599,7 +5792,7 @@ fn verify_in_memory_receipt(
     ReceiveReceipt {
         committed,
         bytes_received: received,
-        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        files: manifest_logical_files(manifest),
         sha_ok,
         merkle_ok,
         symbols_accepted: 0,
@@ -5619,6 +5812,22 @@ fn verify_in_memory_receipt(
         },
         committed_paths,
     }
+}
+
+/// Slice one packed member's byte range out of a decoded pack entry.
+fn packed_member_slice<'a>(bytes: &'a [u8], member: &PackedMember) -> Option<&'a [u8]> {
+    let start = usize::try_from(member.offset).ok()?;
+    let len = usize::try_from(member.len).ok()?;
+    let end = start.checked_add(len)?;
+    bytes.get(start..end)
+}
+
+/// Logical file count: packed entries contribute one per member.
+fn manifest_logical_files(manifest: &TransferManifest) -> u32 {
+    let count = manifest.entries.iter().fold(0usize, |acc, entry| {
+        acc.saturating_add(entry.members.len().max(1))
+    });
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// Maximum control-stream chunk read per decode attempt.
@@ -6998,7 +7207,7 @@ fn finish_native_sender_transfer(
     Ok(SendReport {
         transfer_id: manifest.transfer_id.clone(),
         bytes_sent: manifest.total_bytes,
-        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        files: manifest_logical_files(manifest),
         symbols_sent,
         feedback_rounds,
         merkle_root_hex: manifest.merkle_root_hex.clone(),
@@ -7614,6 +7823,71 @@ fn validate_quic_manifest(
                 entry.index
             )));
         }
+        if !entry.members.is_empty() {
+            if !manifest.is_directory {
+                return Err(QuicTransportError::Source(format!(
+                    "packed entry {} in a single-file transfer",
+                    entry.rel_path
+                )));
+            }
+            if entry.metadata.is_some() {
+                return Err(QuicTransportError::Source(format!(
+                    "packed entry {} must not carry entry-level metadata",
+                    entry.rel_path
+                )));
+            }
+            let mut expected_offset = 0u64;
+            for member in &entry.members {
+                if member.rel_path.is_empty() {
+                    return Err(QuicTransportError::Source(
+                        "packed member rel_path is empty".to_string(),
+                    ));
+                }
+                quic_join_relative(Path::new("base"), &member.rel_path)?;
+                if !seen_paths.insert(member.rel_path.clone()) {
+                    return Err(QuicTransportError::Source(format!(
+                        "duplicate manifest entry path {}",
+                        member.rel_path
+                    )));
+                }
+                if member.offset != expected_offset {
+                    return Err(QuicTransportError::Source(format!(
+                        "packed member {} offset {} is not contiguous (expected {expected_offset})",
+                        member.rel_path, member.offset
+                    )));
+                }
+                expected_offset = expected_offset.checked_add(member.len).ok_or_else(|| {
+                    QuicTransportError::Source(format!(
+                        "packed member {} byte range overflows",
+                        member.rel_path
+                    ))
+                })?;
+                if member.sha256_hex.len() != 64
+                    || !member.sha256_hex.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err(QuicTransportError::Source(format!(
+                        "packed member {} has invalid sha256_hex",
+                        member.rel_path
+                    )));
+                }
+                let member_metadata = member.metadata.clone().unwrap_or_default();
+                if !matches!(member_metadata.file_kind, FileKind::Regular)
+                    || member_metadata.hardlink_target.is_some()
+                    || member_metadata.symlink_target.is_some()
+                {
+                    return Err(QuicTransportError::Source(format!(
+                        "packed member {} must be a plain regular file",
+                        member.rel_path
+                    )));
+                }
+            }
+            if expected_offset != entry.size {
+                return Err(QuicTransportError::Source(format!(
+                    "packed entry {} member spans ({expected_offset}) do not cover its size ({})",
+                    entry.rel_path, entry.size
+                )));
+            }
+        }
         total = total.saturating_add(entry.size);
         if total > config.max_transfer_bytes {
             return Err(QuicTransportError::TooLarge {
@@ -7740,14 +8014,30 @@ async fn reject_quic_existing_symlink(path: &Path) -> Result<(), QuicTransportEr
 }
 
 fn manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
+    // The commitment covers LOGICAL files: a packed entry contributes one
+    // pair per member (the pack entry itself is an internal container and
+    // carries no metadata), so it is invariant to how files were packed.
     let metadata_pairs: Vec<(String, EntryMetadata)> = manifest
         .entries
         .iter()
-        .map(|entry| {
-            (
-                entry.rel_path.clone(),
-                entry.metadata.clone().unwrap_or_default(),
-            )
+        .flat_map(|entry| {
+            if entry.members.is_empty() {
+                vec![(
+                    entry.rel_path.clone(),
+                    entry.metadata.clone().unwrap_or_default(),
+                )]
+            } else {
+                entry
+                    .members
+                    .iter()
+                    .map(|member| {
+                        (
+                            member.rel_path.clone(),
+                            member.metadata.clone().unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            }
         })
         .collect();
     let metadata_refs: Vec<(&str, &EntryMetadata)> = metadata_pairs
@@ -7775,8 +8065,11 @@ fn reject_quic_symlink_traversal(manifest: &TransferManifest) -> Result<(), Quic
     if symlink_paths.is_empty() {
         return Ok(());
     }
-    for entry in &manifest.entries {
-        let path = entry.rel_path.as_str();
+    let entry_and_member_paths = manifest.entries.iter().flat_map(|entry| {
+        std::iter::once(entry.rel_path.as_str())
+            .chain(entry.members.iter().map(|member| member.rel_path.as_str()))
+    });
+    for path in entry_and_member_paths {
         for symlink in &symlink_paths {
             if path.len() > symlink.len()
                 && path.as_bytes()[symlink.len()] == b'/'
@@ -7815,6 +8108,18 @@ async fn apply_quic_entry_metadata(
     entry: &ManifestEntry,
 ) -> Result<(), QuicTransportError> {
     if let Some(metadata) = &entry.metadata {
+        let report = apply_entry_metadata(out_path, metadata).await?;
+        trace_quic_metadata_skips(cx, out_path, &report);
+    }
+    Ok(())
+}
+
+async fn apply_quic_member_metadata(
+    cx: &Cx,
+    out_path: &Path,
+    member: &PackedMember,
+) -> Result<(), QuicTransportError> {
+    if let Some(metadata) = &member.metadata {
         let report = apply_entry_metadata(out_path, metadata).await?;
         trace_quic_metadata_skips(cx, out_path, &report);
     }
@@ -7933,6 +8238,26 @@ async fn commit_decoded_entries(
                     entry.index
                 ))
             })?;
+        if !entry.members.is_empty() {
+            // Packed entry: split the verified pack into its member files.
+            for member in &entry.members {
+                let member_path = quic_join_relative(&base, &member.rel_path)?;
+                reject_quic_destination_symlink_prefix(&base, &member_path).await?;
+                if let Some(parent) = member_path.parent() {
+                    crate::fs::create_dir_all(parent).await?;
+                }
+                let slice = packed_member_slice(&decoder.data, member).ok_or_else(|| {
+                    QuicTransportError::Integrity(format!(
+                        "packed member {} range escapes its verified entry",
+                        member.rel_path
+                    ))
+                })?;
+                crate::fs::write_atomic(&member_path, slice).await?;
+                apply_quic_member_metadata(cx, &member_path, member).await?;
+                committed_paths.push(member_path);
+            }
+            continue;
+        }
         let out_path = if manifest.is_directory {
             quic_join_relative(&base, &entry.rel_path)?
         } else {
@@ -8798,6 +9123,7 @@ mod tests {
                 size: 9,
                 sha256_hex: "ff".repeat(32),
                 metadata: None,
+                members: Vec::new(),
             }],
         }
     }
@@ -8876,6 +9202,7 @@ mod tests {
                 symlink_target: Some(target.to_string()),
                 ..Default::default()
             }),
+            members: Vec::new(),
         }
     }
 
@@ -8886,7 +9213,80 @@ mod tests {
             size: 0,
             sha256_hex: sha256_hex(b""),
             metadata: None,
+            members: Vec::new(),
         }
+    }
+
+    fn quic_packed_entry(index: u32, pack: u32, members: &[(&str, &[u8])]) -> ManifestEntry {
+        let mut packed = Vec::new();
+        let mut offset = 0u64;
+        let mut all = Vec::new();
+        for (rel, bytes) in members {
+            packed.push(PackedMember {
+                rel_path: (*rel).to_string(),
+                offset,
+                len: bytes.len() as u64,
+                sha256_hex: sha256_hex(bytes),
+                metadata: None,
+            });
+            offset += bytes.len() as u64;
+            all.extend_from_slice(bytes);
+        }
+        ManifestEntry {
+            index,
+            rel_path: format!(".atp-pack-{pack}"),
+            size: offset,
+            sha256_hex: sha256_hex(&all),
+            metadata: None,
+            members: packed,
+        }
+    }
+
+    #[test]
+    fn validate_quic_manifest_accepts_contiguous_pack_and_rejects_gaps_and_dups() {
+        let config = trusted_quic_config();
+        let good = quic_manifest_with_metadata(vec![quic_packed_entry(
+            0,
+            0,
+            &[("dir/a.txt", b"aaaa"), ("dir/b.txt", b"bb")],
+        )]);
+        validate_quic_manifest(&good, &config).expect("contiguous pack validates");
+
+        // Non-contiguous member offsets fail closed.
+        let mut gap = good.clone();
+        gap.entries[0].members[1].offset += 1;
+        assert!(matches!(
+            validate_quic_manifest(&gap, &config),
+            Err(QuicTransportError::Source(ref message)) if message.contains("not contiguous")
+        ));
+
+        // Members must cover the entry span exactly.
+        let mut short = good.clone();
+        short.entries[0].size += 1;
+        assert!(matches!(
+            validate_quic_manifest(&short, &config),
+            Err(QuicTransportError::Source(ref message)) if message.contains("do not cover")
+        ));
+
+        // A member path duplicating an entry path fails closed.
+        let dup = quic_manifest_with_metadata(vec![
+            quic_empty_regular_entry(0, "dir/a.txt"),
+            quic_packed_entry(1, 0, &[("dir/a.txt", b"aaaa"), ("dir/b.txt", b"bb")]),
+        ]);
+        assert!(matches!(
+            validate_quic_manifest(&dup, &config),
+            Err(QuicTransportError::Source(ref message)) if message.contains("duplicate")
+        ));
+
+        // Member paths nested under a symlink entry fail closed.
+        let through_link = quic_manifest_with_metadata(vec![
+            quic_symlink_entry(0, "link", "/tmp/outside"),
+            quic_packed_entry(1, 0, &[("link/evil.txt", b"aaaa"), ("dir/b.txt", b"bb")]),
+        ]);
+        assert!(matches!(
+            validate_quic_manifest(&through_link, &config),
+            Err(QuicTransportError::Source(ref message)) if message.contains("nested under symlink")
+        ));
     }
 
     #[test]
@@ -11277,9 +11677,18 @@ mod tests {
         assert_eq!(prepared.manifest.root_name, "payload");
         assert!(prepared.manifest.is_directory);
         assert_eq!(prepared.manifest.total_bytes, 770);
-        assert_eq!(prepared.manifest.entries.len(), 2);
-        assert_eq!(prepared.manifest.entries[0].rel_path, "alpha.bin");
-        assert_eq!(prepared.manifest.entries[1].rel_path, "nested/beta.bin");
+        // Two small files coalesce into one packed entry; the merkle root and
+        // per-member digests stay LOGICAL (per-file), invariant to packing.
+        assert_eq!(prepared.manifest.entries.len(), 1);
+        let pack = &prepared.manifest.entries[0];
+        assert_eq!(pack.rel_path, ".atp-pack-0");
+        assert_eq!(pack.size, 770);
+        assert_eq!(pack.members.len(), 2);
+        assert_eq!(pack.members[0].rel_path, "alpha.bin");
+        assert_eq!(pack.members[1].rel_path, "nested/beta.bin");
+        assert_eq!(pack.members[0].sha256_hex, sha256_hex(&alpha));
+        assert_eq!(pack.members[1].sha256_hex, sha256_hex(&beta));
+        assert_eq!(pack.members[1].offset, 257);
         assert_eq!(
             prepared.manifest.merkle_root_hex,
             flat_merkle_root_from_slices([
@@ -11287,29 +11696,19 @@ mod tests {
                 ("nested/beta.bin", beta.as_slice()),
             ])
         );
-        assert_eq!(prepared.manifest.entries[0].sha256_hex, sha256_hex(&alpha));
-        assert_eq!(prepared.manifest.entries[1].sha256_hex, sha256_hex(&beta));
+        let mut concat = alpha.clone();
+        concat.extend_from_slice(&beta);
+        assert_eq!(pack.sha256_hex, sha256_hex(&concat));
 
-        assert_eq!(prepared.entries.len(), 2);
+        assert_eq!(prepared.entries.len(), 1);
         assert_eq!(prepared.entries[0].index, 0);
-        assert_eq!(prepared.entries[0].rel_path, "alpha.bin");
-        assert_eq!(prepared.entries[0].abs_path, root.join("alpha.bin"));
-        assert_eq!(
-            prepared.entries[0].size,
-            u64::try_from(alpha.len()).expect("alpha length fits u64")
-        );
+        assert_eq!(prepared.entries[0].rel_path, ".atp-pack-0");
+        assert_eq!(prepared.entries[0].size, 770);
         assert_eq!(
             prepared.entries[0].object_id,
             entry_object_id(&prepared.manifest.transfer_id, 0)
         );
-        assert_eq!(
-            prepared.entries[1].object_id,
-            entry_object_id(&prepared.manifest.transfer_id, 1)
-        );
-        assert_eq!(
-            prepared.entries[1].sha256_hex,
-            prepared.manifest.entries[1].sha256_hex
-        );
+        assert_eq!(prepared.entries[0].sha256_hex, pack.sha256_hex);
     }
 
     #[test]
@@ -11659,8 +12058,18 @@ mod tests {
         assert_eq!(report.receipt.bytes_received, 1_024);
         assert!(symbols_sent > 0);
         assert!(symbols_accepted > 0);
-        assert_eq!(prepared.entries[0].rel_path, "alpha.bin");
-        assert_eq!(prepared.entries[1].rel_path, "nested/beta.bin");
+        // The two small files ride one packed entry; the report still counts
+        // logical files above.
+        assert_eq!(prepared.entries.len(), 1);
+        assert_eq!(prepared.entries[0].rel_path, ".atp-pack-0");
+        assert_eq!(
+            prepared.manifest.entries[0].members[0].rel_path,
+            "alpha.bin"
+        );
+        assert_eq!(
+            prepared.manifest.entries[0].members[1].rel_path,
+            "nested/beta.bin"
+        );
     }
 
     #[test]
@@ -12327,6 +12736,7 @@ mod tests {
                 size: 50 * 1024 * 1024,
                 sha256_hex: "00".repeat(32),
                 metadata: None,
+                members: Vec::new(),
             }],
             delta_manifest: None,
         };
@@ -14321,6 +14731,7 @@ mod tests {
                 size: 9,
                 sha256_hex: "ff".repeat(32),
                 metadata: None,
+                members: Vec::new(),
             }],
         };
         let json = serde_json::to_vec(&manifest).unwrap();

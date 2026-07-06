@@ -268,6 +268,30 @@ struct HelloAck {
     reason: Option<String>,
 }
 
+/// One logical file packed into a combined transfer entry.
+///
+/// When [`ManifestEntry::members`] is non-empty the entry's content is the
+/// byte concatenation of its members in `offset` order; the receiver splits
+/// the verified entry back into the member files on commit. This amortizes
+/// the per-entry stream/staging/commit overhead that makes many-small-file
+/// trees slow on the QUIC tier (mirrors the RaptorQ tier's E-15 coalescing,
+/// plus per-member metadata because this wire family preserves metadata).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackedMember {
+    /// Path of this file relative to the transfer root.
+    pub rel_path: String,
+    /// Byte offset of this file within the combined entry content.
+    pub offset: u64,
+    /// Byte length of this file.
+    pub len: u64,
+    /// Lowercase hex SHA-256 of this file's content.
+    pub sha256_hex: String,
+    /// Captured filesystem metadata for this member (always a regular file;
+    /// symlinks/directories/hardlinks are never packed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EntryMetadata>,
+}
+
 /// One file within a transfer manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestEntry {
@@ -285,6 +309,13 @@ pub struct ManifestEntry {
     /// transfer, in which case it deserializes to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<EntryMetadata>,
+    /// Files packed into this entry. Empty = a normal single-file entry whose
+    /// content IS the file (prior wire format, byte-identical thanks to
+    /// `skip_serializing_if`). Non-empty = this entry is a combined object and
+    /// these members are extracted by offset on receive; the entry itself then
+    /// carries no metadata and its `rel_path` is an internal pack name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<PackedMember>,
 }
 
 /// Transfer manifest carried in the `ObjectManifest` frame.
@@ -2523,6 +2554,7 @@ pub async fn send_path_filtered(
             size: d.size,
             sha256_hex: hex_encode(&d.content_sha256),
             metadata: if m.is_bare() { None } else { Some(m.clone()) },
+            members: Vec::new(),
         })
         .collect();
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
@@ -3750,6 +3782,7 @@ mod tests {
                 size: 9,
                 sha256_hex: "ff".repeat(32),
                 metadata: None,
+                members: Vec::new(),
             }],
             delta_manifest: None,
         };
@@ -3897,6 +3930,7 @@ mod tests {
             size,
             sha256_hex: "0".repeat(64),
             metadata: None,
+            members: Vec::new(),
         }
     }
 
@@ -3928,6 +3962,7 @@ mod tests {
                 symlink_target: Some(target.to_string()),
                 ..Default::default()
             }),
+            members: Vec::new(),
         }
     }
 
@@ -3938,6 +3973,7 @@ mod tests {
             size: 0,
             sha256_hex: "0".repeat(64),
             metadata: None,
+            members: Vec::new(),
         }
     }
 
