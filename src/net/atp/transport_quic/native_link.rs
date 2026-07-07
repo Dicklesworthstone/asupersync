@@ -1643,6 +1643,14 @@ const STREAM_RATE_MAX_BYTES_PER_S: u64 = 512 * 1024 * 1024;
 /// is pipeline efficiency, not probe headroom; raise burst amortization,
 /// not this constant.
 const STREAM_RATE_GAIN_X1000: u64 = 1250;
+// NOTE (oh6gm2 ph3c refutation, 2026-07-07): a BBR-STARTUP-style schedule —
+// gain 1.5 while the bottleneck estimate grows past the seed, permanent
+// settle to 1.25 after 3 flat windows — hit its 50M/perfect target exactly
+// (med 1.65→1.45, −12%) but REGRESSED 500M/perfect +17% (6.66→7.82 med;
+// the hot climb overshoots the shaper at ~119 MB/s absolute rates and the
+// recovery episodes cost more than the faster ramp saves). Reverted per the
+// pre-registered guard rule. A future retry needs overshoot-aware exit
+// (e.g. leave startup on FIRST loss evidence, not only on flat growth).
 /// Cumulative retransmit-queued bytes after which the pacer stops flooring
 /// its rate at the FULL regime-derived seed: sustained loss is evidence the
 /// seed overshoots the true link rate.
@@ -6834,6 +6842,11 @@ async fn run_sender_session(
                 bytes_streamed,
                     source_stream.0
                 );
+            // Phase-cost breakdown for the pure-stream path (generate /
+            // protect / udp-send micros accumulate in record_flush on every
+            // flush; the spray paths already emit this — br-asupersync-oh6gm2
+            // flush-efficiency work needs it for stream bulk too).
+            link.trace_sender_handoff_summary(cx, "source_stream", bytes_streamed);
             // Keep the source stream marked as ATP-paced through proof wait:
             // PTO retransmits of lost source STREAM frames must not fall back
             // under NewReno cwnd after the initial source send returns.

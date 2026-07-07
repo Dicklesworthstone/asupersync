@@ -265,12 +265,31 @@ const DEFAULT_MAX_REMOTE_STREAMS: u64 = 128;
 /// from the kernel instead of self-backpressuring after a short burst.
 const MAX_INBOUND_DATAGRAMS: usize = 65_536;
 
+// NOTE (oh6gm2 flush-efficiency, 2026-07-07): replacing the per-frame
+// probe-encode (encode into a throwaway buffer to learn the frame length for
+// packet budgeting) with exact arithmetic lengths was A/B-REFUTED as a
+// clean-large lever: source_stream phase telemetry showed generate_micros
+// UNCHANGED (the probe memcpy totals only ~50 ms over a 500M transfer), the
+// large clean cells measured worse (no mechanism found — likely ambient
+// load), and small/medium cells slightly better. The dominant "generate"
+// cost lives in the stream pop/queue mechanics (`pop_stream_frame_for` and
+// the pending-queue bookkeeping), not the probe encode — profile there next.
+
 /// Upper bound on SACK ranges encoded per ACK frame (newest ranges first).
 /// Keeps every ACK packet inside one conservative MTU; see
 /// `ReceivedPacketTracker::ack_frame`. A netns A/B at 4096 ranges reproduced
 /// the tree-manifest wedge identically, so this bound is not load-bearing for
 /// that failure (br-asupersync-u6m3dy forensics, 2026-07-06).
-const MAX_ACK_FRAME_RANGES: usize = 32;
+///
+/// Sizing: 96 ranges × ~8 bytes worst-case varints ≈ 780 bytes, inside the
+/// ~1163-byte lossy-path packet payload with coalescing headroom. The
+/// original 32 was conservative and measurably costly at 500M scale: even
+/// 0.1% loss over ~66K packets accretes ~66 permanent pn-space ranges, so a
+/// 32-range window left delivered packets unreportable and the sender's
+/// packet-threshold recovery re-sent 60-175 MB of already-delivered data per
+/// transfer (the 500M/good fast-vs-slow bimodality tracked exactly this
+/// spurious volume — br-asupersync-oh6gm2 forensics, 2026-07-07).
+const MAX_ACK_FRAME_RANGES: usize = 96;
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
