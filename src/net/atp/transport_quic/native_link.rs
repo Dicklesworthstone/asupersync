@@ -2141,6 +2141,7 @@ struct QuicSenderHandoffStats {
     generated_packets: u64,
     datagram_frames: u64,
     generate_micros: u128,
+    pacer_wait_micros: u128,
     protect_micros: u128,
     udp_send_micros: u128,
     max_pending_before_flush: usize,
@@ -2182,6 +2183,7 @@ impl QuicSenderHandoffStats {
         pending_before: usize,
         max_datagrams_per_plain_packet: usize,
         generate_elapsed: Duration,
+        pacer_wait_elapsed: Duration,
         protect_elapsed: Duration,
         udp_send_elapsed: Duration,
     ) {
@@ -2195,6 +2197,9 @@ impl QuicSenderHandoffStats {
         self.generate_micros = self
             .generate_micros
             .saturating_add(generate_elapsed.as_micros());
+        self.pacer_wait_micros = self
+            .pacer_wait_micros
+            .saturating_add(pacer_wait_elapsed.as_micros());
         self.protect_micros = self
             .protect_micros
             .saturating_add(protect_elapsed.as_micros());
@@ -2549,6 +2554,7 @@ impl QuicLink {
         let generated_packets_s = stats.generated_packets.to_string();
         let datagram_frames_s = stats.datagram_frames.to_string();
         let generate_micros_s = stats.generate_micros.to_string();
+        let pacer_wait_micros_s = stats.pacer_wait_micros.to_string();
         let protect_micros_s = stats.protect_micros.to_string();
         let udp_send_micros_s = stats.udp_send_micros.to_string();
         let max_pending_before_flush_s = stats.max_pending_before_flush.to_string();
@@ -2576,6 +2582,7 @@ impl QuicLink {
                 ("generated_packets", generated_packets_s.as_str()),
                 ("datagram_frames", datagram_frames_s.as_str()),
                 ("generate_micros", generate_micros_s.as_str()),
+                ("pacer_wait_micros", pacer_wait_micros_s.as_str()),
                 ("protect_micros", protect_micros_s.as_str()),
                 ("udp_send_micros", udp_send_micros_s.as_str()),
                 (
@@ -2589,7 +2596,7 @@ impl QuicLink {
             ],
         );
         quic_rqtrace!(
-            "sender: symbol_handoff_summary phase={} symbols={} symbols_queued={} enqueue_micros={} queue_full_flushes={} liveness_micros={} flushes={} generated_packets={} datagram_frames={} generate_micros={} protect_micros={} udp_send_micros={} max_pending_before_enqueue={} max_pending_after_enqueue={} max_pending_before_flush={} max_datagrams_per_plain_packet={}",
+            "sender: symbol_handoff_summary phase={} symbols={} symbols_queued={} enqueue_micros={} queue_full_flushes={} liveness_micros={} flushes={} generated_packets={} datagram_frames={} generate_micros={} pacer_wait_micros={} protect_micros={} udp_send_micros={} max_pending_before_enqueue={} max_pending_after_enqueue={} max_pending_before_flush={} max_datagrams_per_plain_packet={}",
             phase,
             symbols,
             stats.symbols_queued,
@@ -2600,6 +2607,7 @@ impl QuicLink {
             stats.generated_packets,
             stats.datagram_frames,
             stats.generate_micros,
+            stats.pacer_wait_micros,
             stats.protect_micros,
             stats.udp_send_micros,
             stats.max_pending_before_enqueue,
@@ -2859,6 +2867,11 @@ impl QuicLink {
 
         let pending_before_flush = self.conn.pending_outbound_datagram_count();
         let generate_started = Instant::now();
+        // Pacer sleeps happen INSIDE the generate loop; account them apart so
+        // `generate_micros` means CPU/build cost, not throttle time. The
+        // conflation mis-attributed the clean-large equilibrium to frame
+        // generation for a whole investigation round (br-asupersync-oh6gm2).
+        let mut pacer_wait_elapsed = Duration::ZERO;
         let mut control_packets_this_flush = 0usize;
         let mut plain_packets = Vec::new();
         let mut flushed_stream_frames = Vec::new();
@@ -2954,6 +2967,7 @@ impl QuicLink {
                         .max(1);
                 let bytes_in_flight = self.conn.transport().bytes_in_flight();
                 let congestion_window = self.conn.transport().congestion_window_bytes();
+                let pacer_wait_started = Instant::now();
                 self.data_plane_pacer
                     .before_send_bytes(
                         cx,
@@ -2963,6 +2977,7 @@ impl QuicLink {
                         congestion_window,
                     )
                     .await?;
+                pacer_wait_elapsed += pacer_wait_started.elapsed();
             }
             let frames = if control_stream_pending {
                 // Control-only packet: keeps the paced stream's frames out so
@@ -3086,7 +3101,7 @@ impl QuicLink {
                 time_sent_micros: self.clock,
             });
         }
-        let generate_elapsed = generate_started.elapsed();
+        let generate_elapsed = generate_started.elapsed().saturating_sub(pacer_wait_elapsed);
         let count = plain_packets.len();
         if !plain_packets.is_empty() {
             let protect_started = Instant::now();
@@ -3185,6 +3200,7 @@ impl QuicLink {
                 pending_before_flush,
                 max_datagram_frames_per_plain_packet,
                 generate_elapsed,
+                pacer_wait_elapsed,
                 protect_elapsed,
                 udp_send_elapsed,
             );
