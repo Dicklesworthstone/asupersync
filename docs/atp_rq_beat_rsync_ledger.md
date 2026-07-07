@@ -3861,3 +3861,24 @@ L3 = commit-write rename-not-copy (bead br-asupersync-sze9ym, codex-drafted + Sa
 ★**Fix (both sides of a recovery handshake):** (1) the client driver retains its final flight (`QuicHandshakeDriver::final_flight` → `QuicLink::final_handshake_flight`); when the data-plane pump drops a long-header packet — proof the server never finished — it re-sends the retained Finished flight (rate-limited, 750ms). (2) The server accept loop treats early 1-RTT data while incomplete as evidence the client's Finished was lost and re-offers its own flight (rate-limited); early-data iterations no longer consume the flight budget; `accept_timeout` now bounds the WHOLE accept with per-receive waits of one recovery PTO, so quiet-gap flight retransmit finally exists in the native accept path too. Recovery converges in ~1 round trip.
 
 ★**Proof:** deterministic e2e `real_udp_quic_transfer_recovers_lost_client_finished_flight` (proxy drops the client's first Handshake-space flight once → transfer must commit; converges <2s). netns validation (atp contemporaneous vs gate39 bars): 5M/broken 5/5 ok 10.4-11.7 med 11.4 (was 3/5 med 11.1); 500K/broken 5/5 med 6.6; 500M/perfect 6.4/6.7 no-regress. Trees still blocked by daqxbz (manifest starvation, unrelated mechanism).
+
+## MATRIX-219 (2026-07-06) — daqxbz CONTROL-STREAM STARVATION FIXED: ★BOTH tree/broken cells flip FAIL→WIN (tree_small 5/5 med 15.0 vs 29.1; tree_big 3/3 med 26.2 vs 61.4) and the clean tree cells accelerate as a side effect (tree_small/perfect 2.42→1.5; ★tree_small/good 7.56→2.2 vs bar 2.25 = new WIN). The tree-manifest wedge was FOUR stacked defects in how control-stream traffic coexists with paced bulk.
+
+★**Mechanisms (all landed together; each was verified insufficient alone via the in-process regression):**
+(1) **Stall-PTO exponential backoff** — `expire_app_data_loss_timeout` warps the link's synthetic clock to the transport PTO deadline and declares loss immediately; stall loops re-armed it every fixed 200ms on a ~400-500ms-RTT path, declaring every in-flight packet lost before its ACK could return (telemetry: acked_bytes=0 across 2499 consecutive ACK applications). The stall threshold now doubles per loss-declaring expiry (cap 2s) and resets on real ACK progress.
+(2) **Packet-threshold requeue for capped ACK ranges** — ACK frames carry only the newest 32 SACK ranges, so a >100-packet burst at 10% loss (~180 ranges) leaves most delivered packets' pns permanently unreportable; their in-flight entries pinned `stream_unacked_bytes`/cwnd shut. Entries whose pn falls a reorder-threshold below largest-acked and outside the reported ranges now requeue immediately under fresh pns the next ACK CAN report.
+(3) **Control-priority flush** — the paced-bulk flush branch generates source-stream frames ONLY, structurally starving never-yet-sent control bytes (the manifest tail stayed buffered for entire 360s transfers: netns receiver coverage [0,122180) contiguous, tail sent 0 times, hot frames re-sent 57×). Control-stream frames now drain FIRST: cwnd-exempt (paced bulk keeps bytes_in_flight pinned at cwnd — a cwnd-gated drain only ran in rare dips and a hard `on_packet_sent` cwnd check fail-closed the session), burst-capped (8 packets/flush), transport-untracked (their retransmission is ATP-scoped: in-flight table + threshold requeue + stall PTO; they stay ack-eliciting).
+(4) **Admission-gate pending flush** — `wait_source_stream_send_admission`'s non-stall path never called flush, so pending control frames couldn't use freed cwnd during the (potentially minutes-long) credit wait.
+
+★**Why only trees:** file manifests fit 1-2 control packets (fully covered by last-flush PTO requeue); tree manifests span >100. The receiver cannot open/drain the source stream until the manifest parses, so the sender's 2MiB window never refills — an app-level circular dependency that the four defects kept closed. In-process regression: `real_udp_quic_tree_manifest_survives_lossy_control_stream` (2000-member manifest through 10%-loss/reorder/dup ~200ms-RTT proxy; wedge→4.9s commit).
+
+★**A/B (netns, SHA fail-closed, atp contemporaneous vs gate39 rsync-ssh bars):**
+| cell | before | after | rsync-ssh | verdict |
+|---|---|---|---|---|
+| tree_small/broken | FAIL 0/5 @363s | **15.0 med (5/5)** | 29.1 | **FAIL→WIN** |
+| tree_big/broken | FAIL 0/3 | **26.2 med (3/3)** | 61.4 | **FAIL→WIN** |
+| tree_small/perfect | 2.25-2.42 | **1.5 med** | 0.95 | lose, gap 2.4×→1.6× |
+| tree_small/good | 7.56 | **2.2 med** | 2.25 | **flips to WIN** |
+| 5M/broken (guard) | 11.4 | 11.4-12.0 | 25.4 | WIN holds |
+
+★**Honest notes:** the receiver's ACK-range cap remains 32 (a 4096-range A/B earlier proved the cap alone wasn't load-bearing for the wedge; with mechanism (2) the cap is now fully safe). The e2e suite stays green modulo the pre-existing ejgdqe trio. tree_big/perfect+good and the bad-regime trees not re-measured tonight — expected to inherit the improvement, not claimed.

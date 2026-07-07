@@ -2106,6 +2106,11 @@ pub struct QuicLink {
     final_handshake_flight: Vec<OutgoingPacket>,
     /// Rate limiter for `final_handshake_flight` re-sends.
     last_final_flight_resend: Option<Instant>,
+    /// Wall-clock stall threshold for the app-data loss-expiry loops. Doubles
+    /// on each expiry that declared loss (cap [`APP_LOSS_STALL_PTO_MAX`]),
+    /// resets to [`SOURCE_STREAM_PTO`] on real ACK progress — see the cap's
+    /// docs for the spurious-loss wedge this prevents (br-asupersync-daqxbz).
+    app_loss_stall_pto: Duration,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2802,14 +2807,24 @@ impl QuicLink {
             self.clock,
         )?;
         if event.lost_packets > 0 {
+            // This expiry is clock-warped (never waits out real time), so a
+            // stall loop re-arming it faster than the path RTT declares every
+            // packet lost before its ACK can return. Back the wall-clock
+            // stall threshold off exponentially until real ACK progress
+            // resets it (br-asupersync-daqxbz).
+            self.app_loss_stall_pto = self
+                .app_loss_stall_pto
+                .saturating_mul(2)
+                .min(APP_LOSS_STALL_PTO_MAX);
             quic_rqtrace!(
-                "sender: app_data_loss_timeout operation={} lost_packets={} lost_bytes={} bytes_in_flight={} congestion_window={} pto_count={}",
+                "sender: app_data_loss_timeout operation={} lost_packets={} lost_bytes={} bytes_in_flight={} congestion_window={} pto_count={} stall_pto_ms={}",
                 operation,
                 event.lost_packets,
                 event.lost_bytes,
                 self.conn.transport().bytes_in_flight(),
                 self.conn.transport().congestion_window_bytes(),
                 self.conn.transport().pto_count(),
+                self.app_loss_stall_pto.as_millis(),
             );
         }
         Ok(event.lost_packets)
@@ -2829,6 +2844,7 @@ impl QuicLink {
 
         let pending_before_flush = self.conn.pending_outbound_datagram_count();
         let generate_started = Instant::now();
+        let mut control_packets_this_flush = 0usize;
         let mut plain_packets = Vec::new();
         let mut flushed_stream_frames = Vec::new();
         let mut datagram_frames = 0usize;
@@ -2857,11 +2873,35 @@ impl QuicLink {
                     self.max_app_payload,
                 )
             };
-            let paced_source_stream_pending = pending_datagrams == 0
+            // Control-stream priority: the paced bulk branch generates frames
+            // for the source stream ONLY, so while bulk frames are pending it
+            // structurally starves never-yet-sent control-stream bytes — a
+            // tree manifest's tail (>100 control packets) stayed buffered for
+            // an entire 360s transfer under loss (br-asupersync-daqxbz).
+            // Control traffic is tiny and latency-critical: drain it first
+            // (cwnd-exempt, burst-capped per flush), then resume paced bulk.
+            let control_stream = super::first_client_bidi_stream();
+            let control_stream_pending = pending_datagrams == 0
+                && control_packets_this_flush < QUIC_CONTROL_STREAM_PACKETS_PER_FLUSH
+                && self.paced_source_stream != Some(control_stream)
+                && self.conn.has_pending_stream_frames_for(control_stream);
+            let paced_source_stream_pending = !control_stream_pending
+                && pending_datagrams == 0
                 && self
                     .paced_source_stream
                     .is_some_and(|stream| self.conn.has_pending_stream_frames_for(stream));
-            let max_frame_bytes = if paced_source_stream_pending {
+            let max_frame_bytes = if control_stream_pending {
+                // Control packets bypass the cwnd gate: paced bulk keeps
+                // bytes_in_flight pinned at the congestion window, so a
+                // cwnd-gated control drain only ever runs in rare dips and a
+                // multi-packet manifest never finishes (br-asupersync-daqxbz).
+                // Control traffic is bounded (a manifest tops out around a
+                // couple hundred KB) and further rate-limited by the per-flush
+                // packet cap below.
+                admission
+                    .max_frame_bytes
+                    .min(source_stream_max_frame_bytes())
+            } else if paced_source_stream_pending {
                 admission
                     .max_frame_bytes
                     .min(source_stream_max_frame_bytes())
@@ -2909,7 +2949,16 @@ impl QuicLink {
                     )
                     .await?;
             }
-            let frames = if paced_source_stream_pending {
+            let frames = if control_stream_pending {
+                // Control-only packet: keeps the paced stream's frames out so
+                // bulk stays pacer-governed while the control stream drains.
+                self.conn.generate_stream_frames_for(
+                    cx,
+                    PacketNumberSpace::ApplicationData,
+                    control_stream,
+                    max_frame_bytes,
+                )?
+            } else if paced_source_stream_pending {
                 let source_stream = self
                     .paced_source_stream
                     .expect("paced source stream checked above");
@@ -2928,6 +2977,9 @@ impl QuicLink {
             };
             if frames.is_empty() {
                 break;
+            }
+            if control_stream_pending {
+                control_packets_this_flush = control_packets_this_flush.saturating_add(1);
             }
             let mut packet_stream_frames = Vec::new();
             for frame in &frames {
@@ -2965,8 +3017,15 @@ impl QuicLink {
                 let ack_eliciting = frames.iter().any(frame_is_ack_eliciting_for_recovery);
                 let uses_paced_recovery =
                     packet_uses_paced_recovery(&frames, self.paced_source_stream);
-                let tracks_quic_recovery =
-                    packet_tracks_recovery_in_flight(&frames, self.paced_source_stream);
+                // Control-priority packets are transport-untracked: their
+                // retransmission is ATP-scoped (in_flight_stream_frames +
+                // threshold requeue + stall PTO), and counting them against a
+                // cwnd that paced bulk keeps saturated re-starves the control
+                // stream the priority branch exists to serve — the transport's
+                // hard cwnd check then fail-closes the whole session
+                // (br-asupersync-daqxbz). They stay ack-eliciting.
+                let tracks_quic_recovery = !control_stream_pending
+                    && packet_tracks_recovery_in_flight(&frames, self.paced_source_stream);
                 let accounting_bytes = if uses_paced_recovery {
                     data_plane_packet_accounting_bytes(packet_len)
                 } else {
@@ -3171,7 +3230,6 @@ impl QuicLink {
         cx: &Cx,
         acked_ranges: &[NativeAckRange],
     ) -> Result<(usize, usize), QuicTransportError> {
-        let _ = cx;
         if acked_ranges.is_empty() || self.in_flight_stream_frames.is_empty() {
             return Ok((0, 0));
         }
@@ -3198,19 +3256,65 @@ impl QuicLink {
                 .conn
                 .release_sent_stream_frame(frame.stream, frame.offset);
         }
+        // Packet-threshold recovery for capped ACK ranges (RFC 9000 §6.1
+        // spirit): receiver ACK frames carry only the newest
+        // `MAX_ACK_FRAME_RANGES` SACK ranges, so once a tracked packet number
+        // falls a reorder-threshold below the largest acknowledged AND outside
+        // every reported range, it can never be acknowledged again — whether
+        // its packet was lost or merely rotated out of the reported window.
+        // Left tracked, such entries pin `stream_unacked_bytes`/cwnd shut for
+        // the rest of the transfer (the >100-packet tree-manifest burst at
+        // 10% loss accumulated ~180 ranges and wedged both sides,
+        // br-asupersync-daqxbz). Requeue their frames now: the copies ride
+        // fresh packet numbers the next ACK CAN report. Spurious re-sends of
+        // already-delivered bytes are deduplicated by receiver reassembly and
+        // are deliberately NOT counted as pacer loss.
+        let mut threshold_requeued_frames = 0usize;
+        if let Some(largest_acked) = acked_ranges.iter().map(|range| range.largest).max() {
+            let cutoff =
+                largest_acked.saturating_sub(QUIC_SOURCE_STREAM_FAST_RETRANSMIT_PACKET_THRESHOLD);
+            let stale_packets: Vec<u64> = self
+                .in_flight_stream_frames
+                .range(..cutoff)
+                .map(|(packet_number, _)| *packet_number)
+                .collect();
+            if !stale_packets.is_empty() {
+                let mut stale_frames = Vec::new();
+                for packet_number in stale_packets {
+                    if let Some(frames) = self.in_flight_stream_frames.remove(&packet_number) {
+                        for frame in &frames {
+                            self.stream_unacked_bytes =
+                                self.stream_unacked_bytes.saturating_sub(frame.len);
+                        }
+                        stale_frames.extend(frames);
+                    }
+                }
+                let stale_frames = dedup_stream_frames_for_retransmit(stale_frames);
+                threshold_requeued_frames = stale_frames.len();
+                // Requeue in reverse so the push-front pending queue ends in
+                // ascending offset order (mirrors `retransmit_stream_frames`).
+                for frame in stale_frames.iter().rev() {
+                    self.conn
+                        .requeue_sent_stream_frame(cx, frame.stream, frame.offset)?;
+                }
+            }
+        }
         quic_rqtrace!(
-            "sender: stream_ack_ranges ranges={} in_flight_packets={} acked_bytes={}",
+            "sender: stream_ack_ranges ranges={} in_flight_packets={} acked_bytes={} threshold_requeued_frames={}",
             acked_ranges.len(),
             before,
             acked_bytes,
+            threshold_requeued_frames,
         );
         if acked_bytes > 0 {
             self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(acked_bytes);
             self.stream_rate_acked_bytes = self.stream_rate_acked_bytes.saturating_add(acked_bytes);
             self.maybe_update_source_stream_rate();
+            // Real ACK progress: the loss-expiry cadence is honest again.
+            self.app_loss_stall_pto = SOURCE_STREAM_PTO;
         }
         let removed = before.saturating_sub(self.in_flight_stream_frames.len());
-        Ok((removed, 0))
+        Ok((removed, threshold_requeued_frames))
     }
 
     /// Arm delivery-clocked adaptive pacing for an active paced source stream,
@@ -4660,7 +4764,7 @@ impl QuicLink {
                 continue;
             }
 
-            if last_retransmit.elapsed() >= SOURCE_STREAM_PTO {
+            if last_retransmit.elapsed() >= self.app_loss_stall_pto {
                 // Declare PTO loss BEFORE the pending-frames guard: a
                 // cwnd-blocked flush leaves requeued retransmit frames
                 // pending forever, and skipping expiry while frames are
@@ -4848,6 +4952,7 @@ fn link_from_handshake(
         unprotect_packets_dropped: 0,
         final_handshake_flight,
         last_final_flight_resend: None,
+        app_loss_stall_pto: SOURCE_STREAM_PTO,
         sender_handoff: QuicSenderHandoffStats::default(),
     })
 }
@@ -4900,6 +5005,27 @@ const HANDSHAKE_MAX_FLIGHTS: usize = 64;
 /// finished, and the client re-offering its Finished flight when dropped
 /// long-header packets prove the server did not (br-asupersync-jmri58).
 const HANDSHAKE_RECOVERY_RESEND_PTO: Duration = Duration::from_millis(750);
+
+/// Per-flush cap on cwnd-exempt control-stream packets. Control drains ahead
+/// of paced bulk (see the flush's control-priority branch) but must not blast
+/// an entire buffered manifest into one burst on a lossy link.
+const QUIC_CONTROL_STREAM_PACKETS_PER_FLUSH: usize = 8;
+
+/// Cap for the exponential backoff of the app-data loss stall threshold.
+///
+/// `expire_app_data_loss_timeout` advances the link's synthetic clock to the
+/// transport PTO deadline and declares loss immediately — it never consults
+/// wall time. When a stall loop re-armed that expiry every fixed
+/// `SOURCE_STREAM_PTO` (200ms) on a path whose real RTT is longer (the broken
+/// netem is ~400-500ms), every in-flight packet was declared lost and
+/// front-requeued BEFORE its ACK could physically return: acked bytes pinned
+/// at zero, retransmit copies starved never-yet-sent tail frames forever, and
+/// tree manifests wedged both sides to their idle timeouts
+/// (br-asupersync-daqxbz). The stall threshold now doubles on every expiry
+/// that actually declared loss and resets on real ACK progress, so it
+/// converges above any real RTT within two rounds while fast links keep the
+/// 200ms base.
+const APP_LOSS_STALL_PTO_MAX: Duration = Duration::from_secs(2);
 
 /// True if a received UDP packet is a QUIC long-header packet (handshake), vs a
 /// short-header 1-RTT data-plane packet. The long-header form bit is `0x80`.
@@ -6330,7 +6456,7 @@ async fn drive_native_source_stream_flush(
         if !drain_all && made_progress {
             return Ok(());
         }
-        if flushed == 0 && pumped == 0 && last_progress.elapsed() >= SOURCE_STREAM_PTO {
+        if flushed == 0 && pumped == 0 && last_progress.elapsed() >= link.app_loss_stall_pto {
             // Declare PTO loss BEFORE the pending-frames guard (see
             // `next_control_frame_with_source_stream_recovery`): pending
             // frames behind a cwnd-blocked flush must not starve the loss
@@ -6413,13 +6539,21 @@ async fn wait_source_stream_send_admission(
         }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
+        // Give never-yet-sent pending frames (e.g. a tree manifest's tail on
+        // the control stream) a shot at whatever cwnd the latest ACKs freed:
+        // the gate's non-stall path otherwise never flushes, so pending
+        // control frames starved behind the retransmit-priority queue for the
+        // whole wait (br-asupersync-daqxbz).
+        if link.conn.has_pending_stream_frames() {
+            let _ = link.flush(cx).await?;
+        }
         // The PTO drain must key on lack of PROGRESS, not on a silent pump:
         // the gate's own keep-alive pings (and the receiver's ACKs of them)
         // keep `pumped > 0` forever, and a tail loss at the credit-window
         // edge has no later packets to trip the 3-packet gap detector — that
         // combination degenerated recovery to ~1 packet per PTO (measured:
         // tree_small/good trickling at 8 KB per 252 ms for seconds).
-        let stalled = last_progress.elapsed() >= SOURCE_STREAM_PTO;
+        let stalled = last_progress.elapsed() >= link.app_loss_stall_pto;
         if pumped > 0 && !stalled {
             let ranges = link.latest_stream_ack_ranges.clone();
             let frames = link.drain_ack_gap_lost_stream_frames_for_retransmit(&ranges);

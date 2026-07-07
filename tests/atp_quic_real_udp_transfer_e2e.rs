@@ -883,6 +883,89 @@ fn real_udp_quic_transfer_recovers_lost_client_finished_flight() {
     assert_no_staging_residue(dst.path());
 }
 
+/// Regression for br-asupersync-daqxbz: a packed 2000-member tree — whose
+/// manifest spans >100 control-stream packets — must commit through a lossy
+/// path whose RTT exceeds the base stall PTO. Before the fix, the clock-warped
+/// app-data loss expiry fired every 200ms (faster than the ~200ms+ RTT), so
+/// every in-flight packet was declared lost and front-requeued before its ACK
+/// could return: ACK progress pinned at zero, the retransmit copies starved
+/// the never-yet-sent manifest tail forever, the receiver could not finish
+/// the manifest (and so never drained the source stream), and both sides
+/// wedged to their idle timeouts. The exponential stall-PTO backoff must let
+/// ACKs land, clear in-flight, and deliver the manifest tail.
+#[test]
+fn real_udp_quic_tree_manifest_survives_lossy_control_stream() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let root = src.path().join("tree");
+    std::fs::create_dir_all(&root).expect("mkdir tree root");
+    // 2000 members keep the manifest at >100 control-stream packets (the
+    // wedge trigger) while ~200-byte bodies keep the bulk phase fast enough
+    // for a bounded test runtime; bulk must still be pending during the
+    // manifest exchange for the flush-priority contention to exist.
+    let mut expected = Vec::with_capacity(2000);
+    for index in 0..2000usize {
+        let rel = format!("dir_{:02}/member_{index:04}.bin", index % 40);
+        let path = root.join(&rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        let len = 160 + (index % 11) * 13;
+        let payload = (0..len)
+            .map(|byte| ((byte.wrapping_mul(29) + index.wrapping_mul(13)) % 251) as u8)
+            .collect::<Vec<_>>();
+        std::fs::write(&path, &payload).expect("write tree member");
+        expected.push((rel, payload));
+    }
+
+    let mut cfg = transport_authenticated_configs();
+    // Mirror the broken-regime cell: declared-lossy discipline (MTU packet cap)
+    // and timeouts wide enough for lossy recovery yet far below the wedge's
+    // 360s signature.
+    cfg.send.round0_loss_target = 0.10;
+    cfg.recv.round0_loss_target = 0.10;
+    cfg.send.idle_timeout = Duration::from_secs(45);
+    cfg.recv.idle_timeout = Duration::from_secs(45);
+    cfg.send.handshake_timeout = Duration::from_secs(20);
+    cfg.recv.handshake_timeout = Duration::from_secs(20);
+    cfg.send.accept_timeout = Duration::from_secs(20);
+    cfg.recv.accept_timeout = Duration::from_secs(20);
+
+    let (send, recv) = run_transfer_via_lossy_proxy(
+        cfg.send,
+        cfg.recv,
+        &root,
+        dst.path(),
+        0xDA_0B_2D_15,
+        Duration::from_secs(75),
+    );
+
+    let send = send.unwrap_or_else(|err| {
+        panic!("lossy tree-manifest sender must complete: {err:?}; receiver={recv:?}")
+    });
+    let recv = recv.expect("lossy tree-manifest receiver commits");
+    assert!(recv.committed, "receiver must commit the packed tree");
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.files as usize, expected.len());
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    let committed_paths: Vec<&String> = send.receipt.committed_paths.iter().collect();
+    for (rel, payload) in &expected {
+        let member_path = committed_paths
+            .iter()
+            .find(|path| path.ends_with(rel))
+            .unwrap_or_else(|| {
+                panic!(
+                    "member {rel} missing from {} committed paths",
+                    committed_paths.len()
+                )
+            });
+        let committed = std::fs::read(member_path)
+            .unwrap_or_else(|err| panic!("read committed member {member_path}: {err}"));
+        assert_eq!(&committed, payload, "member {rel} bytes must match");
+    }
+    assert_no_staging_residue(dst.path());
+}
+
 /// Regression for br-asupersync-u6m3dy: an undecryptable UDP packet arriving
 /// alone in an inbound pump turn must be dropped per QUIC without consuming
 /// the idle allowance. Before the fix, `pump_inbound_for` returned `Ok(0)`
