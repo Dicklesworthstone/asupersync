@@ -1634,7 +1634,14 @@ const STREAM_RATE_MAX_BYTES_PER_S: u64 = 512 * 1024 * 1024;
 /// `gain × pacer_efficiency`, so the flush pipeline must stay efficient
 /// (see the zero-timeout opportunistic pump in the flush loop) — an
 /// unbounded multiplicative probe instead overruns the shaper by 4× and
-/// collapses into retransmit churn (measured: 500M 11s → 53s).
+/// collapses into retransmit churn (measured: 500M 11s → 53s; that
+/// refutation predates the bounded receive window). REFUTED (oh6gm2 ph3,
+/// 2026-07-06): raising the gain to 1.5 measured FLAT on 500M/perfect
+/// (6.75 vs 6.66 med, 3 reps each, contemporaneous) — flush efficiency
+/// drops in proportion, so the clean-large equilibrium sits at
+/// `gain × efficiency ≈ 1` regardless of the gain. The binding constraint
+/// is pipeline efficiency, not probe headroom; raise burst amortization,
+/// not this constant.
 const STREAM_RATE_GAIN_X1000: u64 = 1250;
 /// Cumulative retransmit-queued bytes after which the pacer stops flooring
 /// its rate at the FULL regime-derived seed: sustained loss is evidence the
