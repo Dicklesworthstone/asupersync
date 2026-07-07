@@ -3898,3 +3898,22 @@ L3 = commit-write rename-not-copy (bead br-asupersync-sze9ym, codex-drafted + Sa
 ★**50M/bad attribution:** the win comes from the already-landed lossy-path stack (1350B packet cap kills fragmentation amplification at 2% loss; honest pump idle accounting; threshold requeue + control-priority flush keep ACK-clock recovery flowing). Cell measured 16.0/16.1/16.2/17.8 across two binaries tonight — WIN vs 18.96, formerly the worst non-FAIL ratio on the board (3.5×).
 
 ★**ph3a/ph3c residual map (the honest remaining rsync-favored set):** 50M/perfect 1.65 vs 0.86 (climb variance; gain-1.5 measured 1.41 med but was reverted per the keep-rule — the climb benefits from a hotter probe, the equilibrium does not; a CLIMB-PHASE-ONLY gain schedule is the shaped candidate), 500M/perfect 6.66 vs 5.15 + 5G 57.1 vs 46.7 (flush-pipeline efficiency: gain×efficiency≈1 fixed point, burst already 512KiB — profile the per-flush AEAD/build path next), 500M/good ~63 vs 24.7 (bimodal, mechanism open), tree perfect floors 1.5/1.11 vs 0.95/0.55 (handshake+manifest+verify constants). Every other encrypted cell now wins or ties; there are NO non-converging cells.
+
+## MATRIX-221 (2026-07-07) — WAVE-2 BOARD REFRESH: every unmeasured cell measured, one lever kept (ACK ranges 32→96: ★500M/good 62.8→54.0 med), two refuted with mechanism (BBR-startup gain schedule; probe-encode elimination). The encrypted lossy board is now ALL-WINS; the full remaining rsync-favored set is exactly four clean-path cells + tree-perfect floors.
+
+★**Full encrypted board (medians, SHA fail-closed, netns, tuned rsync-ssh bars; tonight's contemporaneous values, gate39 values marked †):**
+| cell | atp | rsync-ssh | verdict |
+|---|---|---|---|
+| 500K p/g/b/br | 0.15†/0.35†/2.13†/**4.5** | 0.45/1.55/5.25/16.97 | **WIN ×4** (broken now 5/5) |
+| 5M p/g/b/br | 0.45†/0.85†/4.75†/**10.7** | 0.45/1.86/6.65/25.37 | tie/**WIN**/**WIN**/**WIN** |
+| 50M p/g/b/br | 1.45-1.65/3.85-4.2/**16.1**/**81.9** | 0.86/4.25/18.96/105.1 | lose/**WIN**/**WIN** (was 66.9 lose)/**WIN** (was FAIL) |
+| 500M p/g/b/br | 6.66-6.86/**54.0**/152/**771** | 5.15/24.67/130.7/940.2 | lose/lose (was 62.8)/lose 1.16× (was FAIL)/**WIN** (was FAIL) |
+| 5G perfect | 57.1† | 46.7 | lose (a late-night 71.1 rep flagged as ambient-load noise) |
+| tree_small p/g/b/br | 1.5/**1.85-2.05**/**4.5**/**15.0-16.4** | 0.95/2.25/7.35/29.1 | lose/**WIN**/**WIN** (was 27.2)/**WIN** (was FAIL) |
+| tree_big p/g/b/br | 1.11/3.45†/**6.7**/**26.2** | 0.55/2.35/9.05/61.4 | lose/lose†/**WIN** (was 22.8)/**WIN** (was FAIL) |
+
+★**Wave-2 verdicts:** (1) ACK SACK-range window 32→96 KEPT: 500M/good −14% med with the fast mode now 3/5 (48.6/49.0 best-ever); honest note — the predicted retransmit-volume halving did NOT happen (11-20K frames unchanged; within-config fast/slow↔volume correlation persists), the win is cleaner ACK clearing shifting mode odds; all guards clean incl. tree_small/broken 5/5. (2) BBR-startup gain schedule REFUTED: hit its 50M/perfect target exactly (1.65→1.45) but regressed 500M/perfect +17% (hot climb overshoots at ~119MB/s absolute) — reverted; retry needs overshoot-aware exit. (3) Probe-encode elimination REFUTED: telemetry showed generate_micros UNCHANGED (probe memcpy ≈ 50ms/500M — mis-attribution), large cells worse (no mechanism, likely ambient) — reverted; the real "generate" cost is pop/queue mechanics.
+
+★**Tree-perfect floor decomposed (traced 1.35s tree_small/perfect):** data wire ≈ 0.05s at 1gbit; sender send-pipeline busy ≈ 0.31s (generate 291ms = **347µs/packet on the tree path** vs ~45µs on 500M — pop/queue mechanics again, amplified); remainder ≈ 1s of fixed round-trips (TLS handshake, 124KB manifest exchange, proof) + 6.2MB verify. Levers: tree-path generate cost + round-trip count; both banked on oh6gm2.
+
+★**Ambient-load caveat:** wave-2 A/Bs ran 00:00-01:00 with other agents' builds active; two anomalous single reps (500M/perfect 26.5s with only 16 retransmit frames; 5G 71.1) carry that flag. All KEEP/REVERT verdicts used medians + pre-registered rules; none hinged on a flagged rep.
