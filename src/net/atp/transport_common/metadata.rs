@@ -707,18 +707,35 @@ pub async fn read_entry_metadata(
     abs_path: &Path,
     policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, StreamingError> {
+    let path_buf = abs_path.to_path_buf();
+    let policy = policy.clone();
+    crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
+}
+
+/// Synchronous core of [`read_entry_metadata`]: one blocking-pool dispatch can
+/// capture a whole tree's metadata instead of paying 2-3 pool round-trips per
+/// member (~4000 dispatches on a 2000-file tree — the pass-1 tail measured in
+/// MATRIX-215; batched for br-asupersync-i7pdxb). Callers already on the
+/// blocking pool (or batching many entries) call this directly.
+///
+/// # Errors
+///
+/// Same contract as [`read_entry_metadata`].
+#[cfg(unix)]
+pub fn read_entry_metadata_sync(
+    abs_path: &Path,
+    policy: &MetadataPolicy,
+) -> Result<EntryMetadata, StreamingError> {
     use std::os::unix::fs::MetadataExt;
 
-    let lmeta = crate::fs::symlink_metadata(abs_path)
-        .await
+    let lmeta = std::fs::symlink_metadata(abs_path)
         .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
 
     let mut meta = EntryMetadata::default();
 
     if lmeta.is_symlink() && policy.preserve_symlinks {
         meta.file_kind = FileKind::Symlink;
-        let target = crate::fs::read_link(abs_path)
-            .await
+        let target = std::fs::read_link(abs_path)
             .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
         meta.symlink_target = Some(target.to_string_lossy().into_owned());
         // Mode/owner/time on a symlink itself are rarely meaningful and need
@@ -731,8 +748,7 @@ pub async fn read_entry_metadata(
     // path's own metadata.
     let read_xattrs_through_symlink = lmeta.is_symlink();
     let effective = if read_xattrs_through_symlink {
-        crate::fs::metadata(abs_path)
-            .await
+        std::fs::metadata(abs_path)
             .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?
     } else {
         lmeta
@@ -742,7 +758,7 @@ pub async fn read_entry_metadata(
         meta.file_kind = FileKind::Directory;
     } else if !effective.is_file() {
         use std::os::unix::fs::FileTypeExt;
-        let ft = effective.inner.file_type();
+        let ft = effective.file_type();
         meta.file_kind = if ft.is_fifo() {
             FileKind::Fifo
         } else if ft.is_socket() {
@@ -756,57 +772,49 @@ pub async fn read_entry_metadata(
         };
     }
 
-    let inner = &effective.inner;
     if policy.preserve_unix_permissions {
-        meta.unix_mode = Some(inner.mode() & 0o7777);
+        meta.unix_mode = Some(effective.mode() & 0o7777);
     }
     if policy.preserve_timestamps {
-        meta.mtime_unix_secs = Some(inner.mtime());
-        meta.mtime_nanos = u32::try_from(inner.mtime_nsec().rem_euclid(1_000_000_000)).ok();
+        meta.mtime_unix_secs = Some(effective.mtime());
+        meta.mtime_nanos = u32::try_from(effective.mtime_nsec().rem_euclid(1_000_000_000)).ok();
     }
     if policy.record_platform_metadata {
-        meta.uid = Some(inner.uid());
-        meta.gid = Some(inner.gid());
+        meta.uid = Some(effective.uid());
+        meta.gid = Some(effective.gid());
     }
     if policy.preserve_extended_attributes {
-        meta.xattrs = read_xattrs_best_effort(abs_path, read_xattrs_through_symlink).await;
+        meta.xattrs = read_xattrs_best_effort_sync(abs_path, read_xattrs_through_symlink);
     }
     Ok(meta)
 }
 
 #[cfg(unix)]
-async fn read_xattrs_best_effort(
-    abs_path: &Path,
-    deref_symlink: bool,
-) -> BTreeMap<String, Vec<u8>> {
-    let path_buf = abs_path.to_path_buf();
-    crate::runtime::spawn_blocking(move || {
-        let listed = if deref_symlink {
-            xattr::list_deref(&path_buf)
-        } else {
-            xattr::list(&path_buf)
-        };
-        let Ok(names) = listed else {
-            return BTreeMap::new();
-        };
+fn read_xattrs_best_effort_sync(abs_path: &Path, deref_symlink: bool) -> BTreeMap<String, Vec<u8>> {
+    let listed = if deref_symlink {
+        xattr::list_deref(abs_path)
+    } else {
+        xattr::list(abs_path)
+    };
+    let Ok(names) = listed else {
+        return BTreeMap::new();
+    };
 
-        let mut attrs = BTreeMap::new();
-        for name in names {
-            let Some(name_str) = name.to_str().map(str::to_owned) else {
-                continue;
-            };
-            let value = if deref_symlink {
-                xattr::get_deref(&path_buf, &name)
-            } else {
-                xattr::get(&path_buf, &name)
-            };
-            if let Ok(Some(value)) = value {
-                attrs.insert(name_str, value);
-            }
+    let mut attrs = BTreeMap::new();
+    for name in names {
+        let Some(name_str) = name.to_str().map(str::to_owned) else {
+            continue;
+        };
+        let value = if deref_symlink {
+            xattr::get_deref(abs_path, &name)
+        } else {
+            xattr::get(abs_path, &name)
+        };
+        if let Ok(Some(value)) = value {
+            attrs.insert(name_str, value);
         }
-        attrs
-    })
-    .await
+    }
+    attrs
 }
 
 /// Non-unix capture: file kind only (regular vs directory), no platform
@@ -820,11 +828,25 @@ async fn read_xattrs_best_effort(
 #[cfg(not(unix))]
 pub async fn read_entry_metadata(
     abs_path: &Path,
+    policy: &MetadataPolicy,
+) -> Result<EntryMetadata, StreamingError> {
+    let path_buf = abs_path.to_path_buf();
+    let policy = policy.clone();
+    crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
+}
+
+/// Synchronous core of [`read_entry_metadata`] (non-unix): file kind only.
+///
+/// # Errors
+///
+/// Same contract as [`read_entry_metadata`].
+#[cfg(not(unix))]
+pub fn read_entry_metadata_sync(
+    abs_path: &Path,
     _policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, StreamingError> {
     // `metadata` follows symlinks, so the recorded kind is the target's.
-    let effective = crate::fs::metadata(abs_path)
-        .await
+    let effective = std::fs::metadata(abs_path)
         .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
     let mut meta = EntryMetadata::default();
     if effective.is_dir() {
@@ -844,12 +866,23 @@ pub async fn read_entry_metadata(
 /// Returns [`StreamingError`] if the path cannot be stat'd.
 #[cfg(unix)]
 pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+    let path_buf = abs_path.to_path_buf();
+    crate::runtime::spawn_blocking(move || inode_key_if_regular_sync(&path_buf)).await
+}
+
+/// Synchronous core of [`inode_key_if_regular`] for batched pass-1 capture
+/// (br-asupersync-i7pdxb).
+///
+/// # Errors
+///
+/// Same contract as [`inode_key_if_regular`].
+#[cfg(unix)]
+pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
     use std::os::unix::fs::MetadataExt;
-    let lmeta = crate::fs::symlink_metadata(abs_path)
-        .await
+    let lmeta = std::fs::symlink_metadata(abs_path)
         .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
     if lmeta.is_file() {
-        Ok(Some((lmeta.inner.dev(), lmeta.inner.ino())))
+        Ok(Some((lmeta.dev(), lmeta.ino())))
     } else {
         Ok(None)
     }
@@ -862,6 +895,16 @@ pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>,
 /// Never returns an error on non-unix targets.
 #[cfg(not(unix))]
 pub async fn inode_key_if_regular(_abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+    Ok(None)
+}
+
+/// Non-unix: hardlink detection is unsupported (sync core mirror).
+///
+/// # Errors
+///
+/// Never returns an error on non-unix targets.
+#[cfg(not(unix))]
+pub fn inode_key_if_regular_sync(_abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
     Ok(None)
 }
 

@@ -100,7 +100,6 @@ use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, MetadataApplyReport, StreamingError,
     apply_entry_metadata, collect_entries, flat_merkle_root_from_digests,
     flat_merkle_root_from_slices, hash_file_streaming, hex_encode, metadata_commitment,
-    read_entry_metadata,
 };
 use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
@@ -3623,68 +3622,85 @@ async fn prepare_source_manifest(
     let (root_name, is_directory, source_entries) = collect_entries(source).await?;
     let _ = quic_safe_base_for_root_name(Path::new("base"), &root_name)?;
     let mut read_buf = vec![0_u8; config.chunk_size];
-    let mut total_bytes = 0u64;
-    let mut hardlink_primary: std::collections::HashMap<(u64, u64), String> =
-        std::collections::HashMap::new();
 
     // Pass 1: metadata + hardlink resolution + packing eligibility. Content
     // hashing is deferred to the build pass so pack members are read once.
-    let mut planned = Vec::with_capacity(source_entries.len());
+    // Path safety stays on the async side (cheap, pure, cancellable); the
+    // stat/xattr storm runs as ONE blocking task via the sync metadata cores
+    // instead of 2-3 pool round-trips per member — ~4000 dispatches on a
+    // 2000-file tree, the pass-1 tail MATRIX-215 left behind
+    // (br-asupersync-i7pdxb).
     for source_entry in &source_entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         quic_join_relative(Path::new("base"), &source_entry.rel_path)?;
-        let mut metadata =
-            read_entry_metadata(&source_entry.abs_path, &config.metadata_policy).await?;
-        if config.preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
-            if let Some(key) = crate::net::atp::transport_common::metadata::inode_key_if_regular(
-                &source_entry.abs_path,
-            )
-            .await?
-            {
-                if let Some(primary) = hardlink_primary.get(&key) {
-                    metadata.hardlink_target = Some(primary.clone());
-                } else {
-                    hardlink_primary.insert(key, source_entry.rel_path.clone());
-                }
-            }
-        }
-        let zero_content =
-            !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some();
-        let size = if zero_content {
-            0
-        } else {
-            crate::fs::metadata(&source_entry.abs_path)
-                .await
-                .map_err(|err| {
-                    QuicTransportError::Source(format!(
-                        "{}: {err}",
-                        source_entry.abs_path.display()
-                    ))
-                })?
-                .len()
-        };
-        total_bytes = total_bytes
-            .checked_add(size)
-            .ok_or(QuicTransportError::TooLarge {
-                size: u64::MAX,
-                max: config.max_transfer_bytes,
-            })?;
-        if total_bytes > config.max_transfer_bytes {
-            return Err(QuicTransportError::TooLarge {
-                size: total_bytes,
-                max: config.max_transfer_bytes,
-            });
-        }
-        let pack_eligible = is_directory && !zero_content && size <= QUIC_PACK_MEMBER_MAX_BYTES;
-        planned.push(QuicPlannedSource {
-            rel_path: source_entry.rel_path.clone(),
-            abs_path: source_entry.abs_path.clone(),
-            metadata,
-            size,
-            zero_content,
-            pack_eligible,
-        });
     }
+    let planned = {
+        let policy = config.metadata_policy.clone();
+        let preserve_hardlinks = config.preserve_hardlinks;
+        let max_transfer_bytes = config.max_transfer_bytes;
+        let batch_entries: Vec<(String, PathBuf)> = source_entries
+            .iter()
+            .map(|entry| (entry.rel_path.clone(), entry.abs_path.clone()))
+            .collect();
+        crate::runtime::spawn_blocking(move || {
+            use crate::net::atp::transport_common::metadata::{
+                inode_key_if_regular_sync, read_entry_metadata_sync,
+            };
+            let mut hardlink_primary: std::collections::HashMap<(u64, u64), String> =
+                std::collections::HashMap::new();
+            let mut batch_total = 0u64;
+            let mut planned = Vec::with_capacity(batch_entries.len());
+            for (rel_path, abs_path) in batch_entries {
+                let mut metadata = read_entry_metadata_sync(&abs_path, &policy)?;
+                if preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
+                    if let Some(key) = inode_key_if_regular_sync(&abs_path)? {
+                        if let Some(primary) = hardlink_primary.get(&key) {
+                            metadata.hardlink_target = Some(primary.clone());
+                        } else {
+                            hardlink_primary.insert(key, rel_path.clone());
+                        }
+                    }
+                }
+                let zero_content = !matches!(metadata.file_kind, FileKind::Regular)
+                    || metadata.hardlink_target.is_some();
+                let size = if zero_content {
+                    0
+                } else {
+                    std::fs::metadata(&abs_path)
+                        .map_err(|err| {
+                            QuicTransportError::Source(format!("{}: {err}", abs_path.display()))
+                        })?
+                        .len()
+                };
+                batch_total =
+                    batch_total
+                        .checked_add(size)
+                        .ok_or(QuicTransportError::TooLarge {
+                            size: u64::MAX,
+                            max: max_transfer_bytes,
+                        })?;
+                if batch_total > max_transfer_bytes {
+                    return Err(QuicTransportError::TooLarge {
+                        size: batch_total,
+                        max: max_transfer_bytes,
+                    });
+                }
+                let pack_eligible =
+                    is_directory && !zero_content && size <= QUIC_PACK_MEMBER_MAX_BYTES;
+                planned.push(QuicPlannedSource {
+                    rel_path,
+                    abs_path,
+                    metadata,
+                    size,
+                    zero_content,
+                    pack_eligible,
+                });
+            }
+            Ok::<(Vec<QuicPlannedSource>, u64), QuicTransportError>((planned, batch_total))
+        })
+        .await
+    };
+    let (planned, total_bytes) = planned?;
 
     // Pass 2: group consecutive small regular files into packs. Zero-content
     // entries without a hardlink target (directories, symlinks) carry no

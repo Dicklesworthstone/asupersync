@@ -3882,3 +3882,9 @@ L3 = commit-write rename-not-copy (bead br-asupersync-sze9ym, codex-drafted + Sa
 | 5M/broken (guard) | 11.4 | 11.4-12.0 | 25.4 | WIN holds |
 
 ★**Honest notes:** the receiver's ACK-range cap remains 32 (a 4096-range A/B earlier proved the cap alone wasn't load-bearing for the wedge; with mechanism (2) the cap is now fully safe). The e2e suite stays green modulo the pre-existing ejgdqe trio. tree_big/perfect+good and the bad-regime trees not re-measured tonight — expected to inherit the improvement, not claimed.
+
+## MATRIX-220 (2026-07-06) — i7pdxb pass-1 metadata batch LANDED (hygiene lever, honest read): the ~4000-dispatch pass-1 stat/xattr storm on 2000-file trees now runs as ONE blocking task. tree_small/perfect is FLAT (1.51 vs 1.5 own-baseline — the floor has moved to handshake+manifest wire+verify), tree_small/good solidifies its new WIN (2.05 vs bar 2.25), tree_big/perfect measures 1.11 vs gate39's 1.95 but attribution is MIXED with MATRIX-219 (tree_big/perfect was not re-measured between the two landings — do not credit this lever alone). Guard: tree_small/broken 15.56 (5/5) vs 15.0.
+
+★**Mechanics:** `read_entry_metadata_sync` + `inode_key_if_regular_sync` extracted as sync cores (transport_common/metadata.rs, mirroring MATRIX-215's `apply_entry_metadata_sync`); the QUIC tier's pass-1 loop (metadata + hardlink resolution + size + pack eligibility) moved wholesale into one `spawn_blocking`. Bonus: the async wrappers now cost ONE pool dispatch instead of 2-4 (`symlink_metadata` + `read_link`/`metadata` + xattr spawn) — the TCP tier inherits that for free. Path-safety validation stays on the async side (cancellable).
+
+★**Remaining tree_small/perfect gap (1.5 vs 0.95):** per-transfer constants — TLS handshake + ~124KB manifest wire time + SHA/merkle verify. Further tree wins ride oh6gm2's clean-throughput levers, not metadata batching.
