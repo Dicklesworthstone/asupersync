@@ -2202,7 +2202,10 @@ impl NativeQuicConnection {
             // Re-attach current bounded-window advertisements to every outgoing
             // ACK: MAX_STREAM_DATA is an idempotent monotonic maximum, so this
             // costs a few bytes per ACK packet and guarantees a lost window
-            // update can never wedge a credit-blocked sender.
+            // update can never wedge a credit-blocked sender. (Advertisements
+            // advance only on application reads — consumption-clocked on
+            // purpose; see the MATRIX-224 congestion-collapse refutation on
+            // advance_bounded_recv_windows before "fixing" hole stalls here.)
             for (stream, limit) in self.streams.bounded_recv_window_advertisements() {
                 self.queue_max_stream_data_frame(stream, limit);
             }
@@ -2696,6 +2699,40 @@ mod tests {
             stream_id: VarInt(stream.0),
             maximum_stream_data: VarInt(140),
         }));
+    }
+
+    #[test]
+    fn ack_path_repeats_consumption_clocked_window_past_head_of_line_hole() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.configure_stream_recv_window(&cx, stream, 100)
+            .expect("configure window");
+        // A segment lands beyond a head-of-line hole (0..10 missing): the
+        // application cannot read, and the ACK-attached advertisement must
+        // REPEAT the consumption-clocked limit (100), not chase the received
+        // offset — the credit stall is this path's congestion control (see
+        // the MATRIX-224 refutation on advance_bounded_recv_windows).
+        conn.receive_stream_bytes(&cx, stream, 10, Bytes::from_static(&[7u8; 40]), false)
+            .expect("inbound bytes past hole");
+        assert!(
+            conn.read_stream_bytes(&cx, stream, 100)
+                .expect("read")
+                .is_empty()
+        );
+        conn.acknowledge_received_packet(PacketNumberSpace::ApplicationData, 3);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 256)
+            .expect("ack with advertisement");
+        assert!(frames.contains(&QuicFrame::MaxStreamData {
+            stream_id: VarInt(stream.0),
+            maximum_stream_data: VarInt(100),
+        }));
+        assert!(!frames.iter().any(|frame| matches!(
+            frame,
+            QuicFrame::MaxStreamData { stream_id, maximum_stream_data }
+                if stream_id.value() == stream.0 && maximum_stream_data.value() > 100
+        )));
     }
 
     #[test]

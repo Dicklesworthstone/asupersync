@@ -1101,10 +1101,26 @@ impl StreamTable {
 
     /// Advance bounded receive windows after application reads.
     ///
-    /// For every bounded stream whose desired limit (`read_offset + window`)
-    /// has moved at least a sixteenth-window past the advertised limit,
-    /// record the new advertisement and return the `(stream, limit)` pairs
-    /// the caller must put on the wire as MAX_STREAM_DATA frames.
+    /// The desired limit is CONSUMPTION-clocked (`read_offset + window`) on
+    /// purpose — this is load-bearing congestion control, not just flow
+    /// control. REFUTED (br-asupersync-oh6gm2 MATRIX-224, 2026-07-08):
+    /// receipt-clocking the credit (`highest_received + window`, RSS-capped
+    /// at `read_offset + 8×window`) to stop head-of-line holes from stalling
+    /// the sender (~37 s of a 47.8 s 500M/good wall) caused CONGESTION
+    /// COLLAPSE on 200 mbit/50 ms/0.1 %: walls 47.8→129/147 s,
+    /// retransmit-queued bytes 71-111 MB → 898-1005 MB (~2× the payload
+    /// re-sent), pacer max-filter poisoned up to 84-88 MB/s by queue-drain
+    /// ACK bursts. The source-stream pacer is a delivery follower with a
+    /// +25 % probe bias and NO loss-response; the consumption-clocked window
+    /// stall is the only mechanism bounding in-flight against the LINK, and
+    /// its burst-stall duty cycle is what keeps the shaper queue drained.
+    /// Do not decouple credit from consumption without first giving this
+    /// path a real ACK-clocked congestion controller (uw1cc2).
+    ///
+    /// For every bounded stream whose desired limit has moved at least a
+    /// sixteenth-window past the advertised limit, record the new
+    /// advertisement and return the `(stream, limit)` pairs the caller must
+    /// put on the wire as MAX_STREAM_DATA frames.
     pub fn advance_bounded_recv_windows(&mut self) -> Vec<(StreamId, u64)> {
         let mut updates = Vec::new();
         for (id, stream) in &mut self.streams {
@@ -2397,6 +2413,25 @@ mod tests {
         // Receive-credit enforcement stays permissive (fail-open for peers
         // that predate bounded windows): only the advertisement moved.
         assert!(tbl.stream(id).expect("stream").recv_credit.limit() >= 1 << 20);
+    }
+
+    #[test]
+    fn bounded_recv_window_credit_stays_consumption_clocked_past_a_hole() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        assert_eq!(
+            tbl.configure_stream_recv_window(id, 100)
+                .expect("configure"),
+            100
+        );
+        // A segment arrives beyond a head-of-line hole (0..10 missing): the
+        // application cannot read, and the advertised credit must NOT chase
+        // the received offset — the stall is the congestion signal (see the
+        // MATRIX-224 refutation note on advance_bounded_recv_windows).
+        tbl.receive_stream_bytes(id, 10, Bytes::from(vec![7u8; 40]), false)
+            .expect("recv past hole");
+        assert!(tbl.read_stream_bytes(id, 100).expect("read").is_empty());
+        assert!(tbl.advance_bounded_recv_windows().is_empty());
     }
 
     #[test]
