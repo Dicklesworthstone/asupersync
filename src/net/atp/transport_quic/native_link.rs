@@ -367,8 +367,12 @@ const QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// shrinks measured delivery and pulls the cap down with it.
 const QUIC_SOURCE_STREAM_BDP_CWND_GAIN_X1000: u64 = 2000;
 /// Floor for the BDP in-flight cap: one bounded receive window, so the cap
-/// never binds tighter than the flow-control window already does.
-const QUIC_SOURCE_STREAM_BDP_CWND_MIN_BYTES: u64 = 2 * 1024 * 1024;
+/// never binds tighter than the flow-control window already does. Tracks
+/// [`QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES`] — the cap formula uses
+/// RTprop_min (pure flight time) while `stream_unacked_bytes` accounting
+/// includes ACK-processing lag, so the computed cap under-sizes by ~1.6×
+/// on ACK-batchy paths and the floor is what actually holds the invariant.
+const QUIC_SOURCE_STREAM_BDP_CWND_MIN_BYTES: u64 = QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES;
 
 /// Delivery-clocked in-flight cap for the reliable source stream:
 /// `clamp(gain × BtlBw × RTprop, window-floor, runaway-ceiling)`.
@@ -397,19 +401,25 @@ fn source_stream_bdp_admission_cap(
 /// Bounded receive window for the paced source stream, negotiated in the
 /// HelloAck: the receiver advertises `read_offset + window` via
 /// MAX_STREAM_DATA and a compliant sender installs the window as its initial
-/// send-credit limit. Sized to cover every bench regime's BDP (max ≈ 1.25 MB
-/// at 200 mbit × 50 ms RTT) plus advertisement lag, while staying small
-/// enough that a mis-seeded pacing rate can no longer stream a 17 MB backlog
-/// into a ~1.4 MB shaper queue — the self-sustaining PTO retransmit spiral
-/// behind the intermittent ~20 s 50M/good stalls (each 200 ms round declared
-/// the oldest 256 packets lost and re-blasted them at 3.2× the link rate,
-/// re-dropping its own tail for ~87 rounds). Bounds receiver reassembly RSS
-/// to roughly one window as a side effect. Sizing note: 2 MiB measured
-/// stall-free on every regime (gate31/33), while 3 MiB re-admitted enough
-/// overshoot past the ~1.4 MB default netem queue to bring back multi-second
-/// recovery reps on 200 mbit/50 ms (gate32: 1-in-5 rep at 16 s) — the extra
-/// window buys nothing once grants are fine-grained, so prefer the tight
-/// bound. Env override: `ATP_QUIC_STREAM_RECV_WINDOW` (bytes, min 64 KiB).
+/// send-credit limit. Bounds receiver reassembly RSS to roughly one window
+/// as a side effect.
+///
+/// SIZING IS A PATH LAW, NOT A TUNABLE (MATRIX-228, measured both ways):
+/// the good-regime shaper queue (~1.4 MB) is SMALLER than the lag-inflated
+/// effective BDP (25 MB/s × ~82 ms = 50 ms RTT + ~30 ms receiver ACK
+/// cadence ≈ 2.05 MB). Any in-flight bound at or below BDP_eff drains the
+/// pipe on every head-of-line repair (2 MiB measured: unacked pinned at
+/// the edge, 64 % duty cycle, 500M/good 47.0 s); any bound above it
+/// overfills the queue (4 MiB measured: delivery improved — samples
+/// 16.3→20.5 MB/s — but repair volume exploded 39→289 MB and walls went
+/// 47.0→66 s uniform). 2 MiB sits at the optimum of that trade-off for
+/// every bench regime. The REAL lever is reducing the receiver's ACK
+/// cadence so BDP_eff (~1.3 MB at per-pump-turn ACKs ≤5 ms) fits INSIDE
+/// the queue — see QUIC_SOURCE_STREAM_READ_DRAIN_BATCHES (the read loop's
+/// pump-turn ACK flush IS the cadence) — routed to uw1cc2. Earlier
+/// history: gate31-33 found the same 2 MiB optimum empirically under the
+/// constant-gain pacer. Env override: `ATP_QUIC_STREAM_RECV_WINDOW`
+/// (bytes, min 64 KiB).
 const QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 
 fn quic_source_stream_recv_window_bytes() -> u64 {
@@ -10237,7 +10247,7 @@ mod tests {
         assert!(
             (8_000_000..=12_500_000).contains(&outcome.bottleneck_bps),
             "estimate must honestly read the feedback-limited ceiling \
-             (cwnd 2 MiB / 200 ms ≈ 10.5 MB/s): {}",
+             (cwnd floor 2 MiB / 200 ms ≈ 10.5 MB/s): {}",
             outcome.bottleneck_bps
         );
     }
