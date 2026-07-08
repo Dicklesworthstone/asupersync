@@ -413,13 +413,17 @@ fn source_stream_bdp_admission_cap(
 /// overfills the queue (4 MiB measured: delivery improved — samples
 /// 16.3→20.5 MB/s — but repair volume exploded 39→289 MB and walls went
 /// 47.0→66 s uniform). 2 MiB sits at the optimum of that trade-off for
-/// every bench regime. The REAL lever is reducing the receiver's ACK
-/// cadence so BDP_eff (~1.3 MB at per-pump-turn ACKs ≤5 ms) fits INSIDE
-/// the queue — see QUIC_SOURCE_STREAM_READ_DRAIN_BATCHES (the read loop's
-/// pump-turn ACK flush IS the cadence) — routed to uw1cc2. Earlier
-/// history: gate31-33 found the same 2 MiB optimum empirically under the
-/// constant-gain pacer. Env override: `ATP_QUIC_STREAM_RECV_WINDOW`
-/// (bytes, min 64 KiB).
+/// every bench regime. CORRECTION (MATRIX-229, measured): the ~30 ms lag
+/// term is NOT ACK cadence — the receiver flushes ACK/credit packets
+/// every ~1.3 ms (34.7 K over a 44 s rep) — it is REPAIR-EPISODE SMEARING:
+/// each of ~650 hole repairs delays its bytes' acknowledgement by
+/// detect+resend+RTT (~55-105 ms), inflating the average flight to ~82 ms
+/// against a 49 ms RTprop. With repair already threshold-fast (zero PTO
+/// events) and hole count fixed by per-packet loss, the ~47 s wall is the
+/// architectural ceiling of an un-FEC'd in-order stream on a
+/// queue-smaller-than-BDP path. Earlier history: gate31-33 found the same
+/// 2 MiB optimum empirically under the constant-gain pacer. Env override:
+/// `ATP_QUIC_STREAM_RECV_WINDOW` (bytes, min 64 KiB).
 const QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 
 fn quic_source_stream_recv_window_bytes() -> u64 {
