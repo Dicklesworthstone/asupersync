@@ -756,6 +756,27 @@ impl MySqlRowStream<'_> {
     }
 }
 
+impl Drop for MySqlRowStream<'_> {
+    fn drop(&mut self) {
+        // Fail closed on an unfinished stream. `query_stream` marks the borrowed
+        // connection usable (`closed = false`) once the result-set header is
+        // read, but a stream abandoned before its terminator — an early `break`
+        // after reading a few rows, a cancelled/errored `next()`, or a hard drop
+        // of the driving future mid-`read_packet` — leaves undrained row packets
+        // in the socket. Without this guard the connection would return to the
+        // pool with `closed = false` and get recycled dirty: the next checkout's
+        // sequence-id check usually errors loudly, but for a result set larger
+        // than 256 packets the 8-bit sequence id can wrap and re-align, so a
+        // leftover row packet is accepted as the new query's response header —
+        // silent wrong-result corruption. The collect paths already fail closed
+        // this way (see `read_result_set`/`read_binary_result_set`); a finished
+        // stream drained its terminator and stays usable.
+        if !self.finished {
+            self.connection.inner.closed = true;
+        }
+    }
+}
+
 impl MySqlConnection {
     /// Execute a streaming query with bounded memory usage.
     ///
@@ -6835,6 +6856,51 @@ mod tests {
 
         assert_user_cancelled(outcome);
         assert!(conn.inner.needs_rollback);
+    }
+
+    #[test]
+    fn dropped_unfinished_row_stream_marks_connection_closed() {
+        // Regression: a MySqlRowStream abandoned before its terminator (early
+        // break, cancelled/errored next(), or a hard future drop) leaves
+        // undrained row packets in the socket, so its Drop must fail the
+        // connection closed — otherwise the pool recycles it dirty and a later
+        // checkout can misread a leftover row packet as a fresh response header.
+        // A fully-drained (finished) stream stays usable.
+        let mut conn = make_test_connection();
+
+        // Unfinished stream: drop must mark the borrowed connection closed.
+        conn.inner.closed = false;
+        {
+            let _stream = MySqlRowStream {
+                connection: &mut conn,
+                columns: None,
+                column_indices: None,
+                finished: false,
+                pending_row_count: 3,
+                deprecate_eof: false,
+            };
+        }
+        assert!(
+            conn.inner.closed,
+            "dropping an unfinished row stream must fail closed"
+        );
+
+        // Finished stream: connection remains usable for the next checkout.
+        conn.inner.closed = false;
+        {
+            let _stream = MySqlRowStream {
+                connection: &mut conn,
+                columns: None,
+                column_indices: None,
+                finished: true,
+                pending_row_count: 7,
+                deprecate_eof: false,
+            };
+        }
+        assert!(
+            !conn.inner.closed,
+            "a finished row stream must leave the connection usable"
+        );
     }
 
     #[test]
