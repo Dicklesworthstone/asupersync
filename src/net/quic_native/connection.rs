@@ -2204,9 +2204,8 @@ impl NativeQuicConnection {
             // costs a few bytes per ACK packet and guarantees a lost window
             // update can never wedge a credit-blocked sender. (Advertisements
             // advance only on application reads — consumption-clocked on
-            // purpose; see the MATRIX-224/225 congestion-collapse refutations
-            // on advance_bounded_recv_windows before "fixing" hole stalls
-            // here.)
+            // purpose, three refutations deep; see MATRIX-224/225/226 on
+            // advance_bounded_recv_windows before "fixing" hole stalls here.)
             for (stream, limit) in self.streams.bounded_recv_window_advertisements() {
                 self.queue_max_stream_data_frame(stream, limit);
             }
@@ -2710,10 +2709,9 @@ mod tests {
         conn.configure_stream_recv_window(&cx, stream, 100)
             .expect("configure window");
         // A segment lands beyond a head-of-line hole (0..10 missing): the
-        // application cannot read, and the ACK-attached advertisement must
-        // REPEAT the consumption-clocked limit (100), not chase the received
-        // offset — the credit stall is this path's congestion control (see
-        // the MATRIX-224/225 refutations on advance_bounded_recv_windows).
+        // ACK-attached advertisement must REPEAT the consumption-clocked
+        // limit (100), not chase the received offset — the credit stall is
+        // the drain phase of this path's control loop (MATRIX-224/225/226).
         conn.receive_stream_bytes(&cx, stream, 10, Bytes::from_static(&[7u8; 40]), false)
             .expect("inbound bytes past hole");
         assert!(
