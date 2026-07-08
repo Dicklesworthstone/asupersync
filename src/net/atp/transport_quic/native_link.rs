@@ -1620,6 +1620,15 @@ struct SourceStreamRatePacer {
     total_lost_bytes: u64,
     delivery_samples: [u64; STREAM_RATE_FILTER_WINDOWS],
     next_sample: usize,
+    /// Startup climb phase: pace at [`STREAM_RATE_STARTUP_GAIN_X1000`] until
+    /// the link stops absorbing the offered rate, then settle permanently to
+    /// the equilibrium gain. The exit is overshoot-aware — it fires on the
+    /// FIRST window showing loss evidence or delivery no longer tracking the
+    /// offered rate — bounding wall overrun to a single ACK window. (The
+    /// prior flat-growth exit needed 3 consecutive flat windows and regressed
+    /// 500M/perfect +17% at ~119 MB/s absolute rates; see the refutation NOTE
+    /// below STREAM_RATE_GAIN_X1000.)
+    startup: bool,
 }
 
 /// Recent-delivery max-filter depth.
@@ -1651,6 +1660,20 @@ const STREAM_RATE_GAIN_X1000: u64 = 1250;
 // recovery episodes cost more than the faster ramp saves). Reverted per the
 // pre-registered guard rule. A future retry needs overshoot-aware exit
 // (e.g. leave startup on FIRST loss evidence, not only on flat growth).
+/// Startup-climb gain: hotter probe while the link is still absorbing the
+/// offered rate. 1.5 is the value that measured −12% on 50M/perfect in the
+/// refuted flat-growth-exit attempt (NOTE above); the retry keeps the gain
+/// and replaces the exit.
+const STREAM_RATE_STARTUP_GAIN_X1000: u64 = 1500;
+/// Startup exits (permanently) the first time an armed delivery window stops
+/// tracking the offered rate: `delivered < 0.9 × offered` means the pipe —
+/// not the pacer — became the limiter. On a clean climb delivery ≈ offered
+/// (pacing is the limiter), so first wall contact reads `delivery ≈ link <
+/// 0.9 × (1.5 × link)`, exiting after ONE window of overrun. The check arms
+/// only once the bottleneck estimate exceeds the seed (proof the climb is
+/// real); pre-climb jitter windows cannot fire it. Loss evidence exits
+/// regardless of arming.
+const STREAM_RATE_STARTUP_EXIT_DELIVERY_X1000: u64 = 900;
 /// Cumulative retransmit-queued bytes after which the pacer stops flooring
 /// its rate at the FULL regime-derived seed: sustained loss is evidence the
 /// seed overshoots the true link rate.
@@ -1677,6 +1700,7 @@ impl SourceStreamRatePacer {
             total_lost_bytes: 0,
             delivery_samples: [rate; STREAM_RATE_FILTER_WINDOWS],
             next_sample: 0,
+            startup: true,
         }
     }
 
@@ -1693,6 +1717,10 @@ impl SourceStreamRatePacer {
     /// measured to interact badly with retransmit framing on shaped links,
     /// so loss only ever releases the floor, never modulates the gain).
     fn on_ack_window(&mut self, acked_bytes: u64, lost_bytes: u64, elapsed_micros: u64) -> u64 {
+        // The rate paced throughout the window that just closed: rates only
+        // change at window folds, so this is exactly what the link was
+        // offered while `acked_bytes` accumulated.
+        let offered = self.rate_bytes_per_s;
         let delivery = acked_bytes
             .saturating_mul(1_000_000)
             .checked_div(elapsed_micros.max(1))
@@ -1706,6 +1734,22 @@ impl SourceStreamRatePacer {
             .max()
             .unwrap_or(delivery);
         self.total_lost_bytes = self.total_lost_bytes.saturating_add(lost_bytes);
+        if self.startup {
+            let climb_underway = bottleneck > self.initial_rate_bytes_per_s;
+            let tracking = delivery
+                >= offered
+                    .saturating_mul(STREAM_RATE_STARTUP_EXIT_DELIVERY_X1000)
+                    .checked_div(1000)
+                    .unwrap_or(offered);
+            if lost_bytes > 0 || (climb_underway && !tracking) {
+                self.startup = false;
+            }
+        }
+        let gain_x1000 = if self.startup {
+            STREAM_RATE_STARTUP_GAIN_X1000
+        } else {
+            STREAM_RATE_GAIN_X1000
+        };
         let floor = if self.total_lost_bytes > STREAM_RATE_FLOOR_RELEASE_LOST_BYTES {
             (self.initial_rate_bytes_per_s / STREAM_RATE_FLOOR_RELEASE_DIVISOR)
                 .max(STREAM_RATE_MIN_BYTES_PER_S)
@@ -1713,7 +1757,7 @@ impl SourceStreamRatePacer {
             self.initial_rate_bytes_per_s
         };
         self.rate_bytes_per_s = bottleneck
-            .saturating_mul(STREAM_RATE_GAIN_X1000)
+            .saturating_mul(gain_x1000)
             .checked_div(1000)
             .unwrap_or(bottleneck)
             .max(floor)
@@ -9486,6 +9530,47 @@ mod tests {
         }
         assert_eq!(last, seed / STREAM_RATE_FLOOR_RELEASE_DIVISOR);
         assert!(last > 2_500_000 * STREAM_RATE_GAIN_X1000 / 1000);
+    }
+
+    #[test]
+    fn stream_rate_startup_climbs_hot_and_settles_on_wall_contact() {
+        let seed = 8_000_000;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        // Climb: delivery tracks the offered rate each window, so the rate
+        // grows at the startup gain (1.5×) per window.
+        assert_eq!(pacer.on_ack_window(800_000, 0, 100_000), 12_000_000);
+        assert_eq!(pacer.on_ack_window(1_200_000, 0, 100_000), 18_000_000);
+        assert_eq!(pacer.on_ack_window(1_800_000, 0, 100_000), 27_000_000);
+        // Wall contact: a 20 MB/s link stops absorbing the 27 MB/s offer
+        // (20 < 0.9 × 27). Startup exits after this single window and the
+        // rate settles to equilibrium gain over the measured bottleneck.
+        assert_eq!(pacer.on_ack_window(2_000_000, 0, 100_000), 25_000_000);
+        // The exit is permanent: a window that tracks again does not re-arm
+        // the hot gain (25 MB would become 30 MB/s under startup gain).
+        assert_eq!(pacer.on_ack_window(2_000_000, 0, 100_000), 25_000_000);
+    }
+
+    #[test]
+    fn stream_rate_startup_exits_on_first_loss_evidence() {
+        let seed = 8_000_000;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        // A single lost byte during the seeded phase exits startup: rate is
+        // equilibrium gain over the seeded bottleneck, not 1.5 × seed.
+        assert_eq!(pacer.on_ack_window(800_000, 1, 100_000), 10_000_000);
+        // Still settled on the next clean window.
+        assert_eq!(pacer.on_ack_window(1_000_000, 0, 100_000), 12_500_000);
+    }
+
+    #[test]
+    fn stream_rate_startup_survives_preclimb_jitter_windows() {
+        let seed = 8_000_000;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        // A tiny early window (delivery far below the offered seed) must NOT
+        // exit startup: the tracking check is unarmed until the bottleneck
+        // estimate exceeds the seed, so the hot gain still applies.
+        assert_eq!(pacer.on_ack_window(100_000, 0, 100_000), 12_000_000);
+        // And the climb proceeds hot once real delivery arrives.
+        assert_eq!(pacer.on_ack_window(1_200_000, 0, 100_000), 18_000_000);
     }
 
     #[test]
