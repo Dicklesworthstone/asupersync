@@ -1572,6 +1572,14 @@ impl StreamTable {
         &mut self,
         new_limit: u64,
     ) -> Result<(), FlowControlError> {
+        // RFC 9000 §19.9: a MAX_DATA that does not increase the connection
+        // limit is ignored, not an error — mirrors `increase_connection_send_limit`
+        // and `increase_stream_send_limit` (§19.10). Re-attached/reordered
+        // advertisements legitimately repeat older maxima, so a non-increasing
+        // value is a no-op rather than a `LimitRegression`.
+        if new_limit <= self.recv_connection_credit.limit() {
+            return Ok(());
+        }
         self.recv_connection_credit.increase_limit(new_limit)
     }
 
@@ -2890,36 +2898,24 @@ mod tests {
         tbl.increase_connection_send_limit(20)
             .expect("increase send");
         assert_eq!(tbl.connection_send_remaining(), 20);
-        // Regression must fail
-        let err = tbl
-            .increase_connection_send_limit(15)
-            .expect_err("regression");
-        assert_eq!(
-            err,
-            FlowControlError::LimitRegression {
-                current: 20,
-                requested: 15,
-            }
-        );
-        // Same value is fine
+        // RFC 9000 §19.9: a MAX_DATA that does not increase the limit is
+        // ignored, not an error (re-attached advertisements repeat maxima).
+        tbl.increase_connection_send_limit(15)
+            .expect("non-increasing limit ignored");
+        assert_eq!(tbl.connection_send_remaining(), 20);
+        // Same value is also a no-op.
         tbl.increase_connection_send_limit(20)
             .expect("same value ok");
+        assert_eq!(tbl.connection_send_remaining(), 20);
 
         // Increase recv limit
         tbl.increase_connection_recv_limit(30)
             .expect("increase recv");
         assert_eq!(tbl.connection_recv_remaining(), 30);
-        // Regression must fail
-        let err = tbl
-            .increase_connection_recv_limit(5)
-            .expect_err("regression");
-        assert_eq!(
-            err,
-            FlowControlError::LimitRegression {
-                current: 30,
-                requested: 5,
-            }
-        );
+        // RFC 9000 §19.9: a non-increasing connection recv limit is ignored.
+        tbl.increase_connection_recv_limit(5)
+            .expect("non-increasing limit ignored");
+        assert_eq!(tbl.connection_recv_remaining(), 30);
     }
 
     #[test]
