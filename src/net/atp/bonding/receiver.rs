@@ -1274,6 +1274,70 @@ mod tests {
     }
 
     #[test]
+    fn eight_donor_spray_holds_the_retention_bound_at_every_step() {
+        // C4 (z01bbr.3.4): N donors spraying simultaneously must never grow
+        // receiver retention past the policy. The bound is asserted after
+        // EVERY ingest — a transient balloon (the bad-regime 261 MB class)
+        // cannot hide inside an end-state-only check. Donor ESI windows
+        // overlap heavily and ingests interleave round-robin, so the set
+        // absorbs 8× inbound pressure through dedup + retention rejection
+        // rather than memory growth.
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(21);
+        const BLOCKS: u8 = 4;
+        const PER_BLOCK_CAP: u32 = 16;
+        // Below BLOCKS × PER_BLOCK_CAP so BOTH cap kinds engage.
+        const TRANSFER_CAP: usize = 48;
+        let retention = BondedReceiverRetentionPolicy::bounded(PER_BLOCK_CAP, TRANSFER_CAP);
+
+        let mut received = 0u64;
+        for esi_step in 0..40u32 {
+            for donor in 0..8u32 {
+                for block in 0..BLOCKS {
+                    // Each donor's window starts 4 ESIs later: ~90 %
+                    // cross-donor collision once windows overlap.
+                    let esi = donor * 4 + esi_step;
+                    let kind = if esi % 3 == 0 {
+                        SymbolKind::Source
+                    } else {
+                        SymbolKind::Repair
+                    };
+                    let _ = set.record_key_with_retention(
+                        donor,
+                        BondedSymbolKey::new(object_id, block, esi),
+                        kind,
+                        retention,
+                    );
+                    received += 1;
+                    assert!(
+                        set.len() <= TRANSFER_CAP,
+                        "retention bound violated: len={} after {received} ingests",
+                        set.len()
+                    );
+                }
+            }
+        }
+
+        let aggregate = set.aggregate_stats();
+        assert_eq!(aggregate.donor_count, 8);
+        assert_eq!(aggregate.symbols_received, received);
+        // Accounting closes: every ingest is exactly one of
+        // accepted / duplicate / retention-rejected.
+        assert_eq!(
+            aggregate.symbols_accepted
+                + aggregate.duplicate_symbols
+                + aggregate.symbols_rejected_by_retention,
+            received
+        );
+        assert_eq!(aggregate.symbols_accepted as usize, set.len());
+        // The pressure saturated the transfer-wide cap exactly.
+        assert_eq!(set.len(), TRANSFER_CAP);
+        // The 8× amplification was absorbed by dedup AND retention.
+        assert!(aggregate.duplicate_symbols > 0);
+        assert!(aggregate.symbols_rejected_by_retention > 0);
+    }
+
+    #[test]
     fn block_coverage_counts_deduplicated_symbols_across_donors() {
         let mut set = BondedReceiverSymbolSet::new();
         let object_id = ObjectId::new_for_test(13);
