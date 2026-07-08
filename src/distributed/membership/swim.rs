@@ -759,6 +759,19 @@ impl Swim {
 
     /// Applies a piggybacked rumor to the local view.
     fn apply_rumor(&mut self, now: Millis, rumor: &Rumor) {
+        // `u64::MAX` is a reserved incarnation sentinel. A legitimate incarnation
+        // only reaches it after 2^64 refutations (physically unreachable), so any
+        // rumor carrying it is forged. Reject it at ingress: SWIM gossip is
+        // unauthenticated, and adopting `Suspect{self, u64::MAX}` would pin the
+        // node un-refutably — `maybe_refute` can only `saturating_add(1)` to
+        // `u64::MAX`, which does *not* out-incarnate a same-incarnation `Suspect`
+        // (Alive loses the precedence tie), so the node would be confirmed Dead
+        // while alive. Reserving the ceiling keeps refutation open: the highest
+        // suspicion a peer can now plant is `u64::MAX - 1`, which the refutation
+        // bump to `u64::MAX` strictly supersedes (qe0zdf).
+        if rumor.incarnation() == u64::MAX {
+            return;
+        }
         if rumor.node() == &self.local {
             self.maybe_refute(rumor);
             return;
@@ -802,12 +815,14 @@ impl Swim {
             Rumor::Suspect { incarnation, .. } | Rumor::Confirm { incarnation, .. } => {
                 if *incarnation >= self.incarnation {
                     // `incarnation` is attacker-controlled (read straight off the
-                    // wire in `decode_rumor`). A crafted `u64::MAX` would make
-                    // `*incarnation + 1` overflow: a panic in debug/overflow-checked
-                    // builds (single-datagram DoS of the membership task) or a wrap
-                    // to 0 in release, which permanently defeats self-refutation —
-                    // the node could no longer out-incarnate the planted suspicion
-                    // and would be confirmed Dead while alive. Saturate instead.
+                    // wire in `decode_rumor`), but `apply_rumor` reserves the
+                    // `u64::MAX` sentinel at ingress, so the largest value that
+                    // reaches here is `u64::MAX - 1`. `saturating_add(1)` therefore
+                    // yields at most `u64::MAX`, which strictly out-incarnates the
+                    // planted suspicion (keeping self-refutation open), and is a
+                    // belt-and-suspenders guard against overflow — a panic in
+                    // overflow-checked builds or a wrap to 0 in release — should
+                    // that ingress reservation ever be bypassed.
                     self.incarnation = incarnation.saturating_add(1);
                 }
                 self.gossip
@@ -868,6 +883,16 @@ impl Swim {
             // We are obviously alive; ack straight back to the requester.
             let pkt = self.packet_to(from.clone(), Payload::Ack { seq });
             out.push(pkt);
+            return;
+        }
+        // Fail closed: SWIM gossip is unauthenticated, so a spoofed flood of
+        // `PingReq` packets would otherwise grow `forwards` (and its relayed
+        // `Ping` re-emission) without bound within a single probe-timeout
+        // window. Bound the in-flight relay table exactly like the members
+        // table (qe0zdf); stale entries are reaped on ack or expiry. Dropping a
+        // relay only forfeits one indirect probe, which the requester already
+        // treats as a nack.
+        if self.forwards.len() >= self.config.max_members {
             return;
         }
         let helper_seq = self.next_seq();
@@ -1430,12 +1455,12 @@ mod tests {
     }
 
     #[test]
-    fn self_suspicion_with_max_incarnation_saturates_without_overflow() {
-        // A crafted rumor carrying incarnation == u64::MAX about the local node
-        // must not overflow the self-incarnation bump: in debug/overflow-checked
-        // builds `*incarnation + 1` would panic (single-datagram DoS), and in
-        // release it would wrap to 0, permanently defeating self-refutation.
-        // The bump saturates at u64::MAX instead.
+    fn self_suspicion_with_max_incarnation_is_rejected_at_ingress() {
+        // `u64::MAX` is a reserved incarnation sentinel: a crafted rumor carrying
+        // it about the local node is dropped at ingress, not refuted. Adopting it
+        // would pin the node — the refutation bump can only `saturating_add(1)` to
+        // `u64::MAX`, which loses the same-incarnation precedence tie to the
+        // planted `Suspect`, so the node would be confirmed Dead while alive.
         let mut s = Swim::new(node("self"), cfg(), 9);
         let out = s.handle(
             0,
@@ -1445,14 +1470,102 @@ mod tests {
                 gossip: vec![Rumor::suspect(node("self"), u64::MAX, node("acc"))],
             },
         );
-        // Saturated: did not wrap back to 0, did not panic.
+        // The forged suspicion is ignored: incarnation is untouched (no wrap, no
+        // panic, no pinning at the ceiling).
+        assert_eq!(s.incarnation(), 0);
+        // Nothing to refute — no Alive at the reserved ceiling is emitted.
+        let ack = &out[0];
+        assert!(!ack.packet.gossip.iter().any(|r| matches!(
+            r,
+            Rumor::Alive { node: nn, incarnation } if nn == &node("self") && *incarnation == u64::MAX
+        )));
+    }
+
+    #[test]
+    fn self_refutation_ceiling_stays_open_below_the_reserved_sentinel() {
+        // The dead-zone is closed: the highest suspicion a peer can actually plant
+        // is `u64::MAX - 1` (the sentinel itself is rejected at ingress), and the
+        // node can always out-incarnate it by bumping to `u64::MAX`, which strictly
+        // supersedes a same-node `Suspect{u64::MAX - 1}`.
+        let mut s = Swim::new(node("self"), cfg(), 9);
+        let out = s.handle(
+            0,
+            node("acc"),
+            Packet {
+                payload: Payload::Ping { seq: 7 },
+                gossip: vec![Rumor::suspect(node("self"), u64::MAX - 1, node("acc"))],
+            },
+        );
+        // Bumped strictly above the planted suspicion, saturating exactly at the
+        // ceiling.
         assert_eq!(s.incarnation(), u64::MAX);
-        // The refuting Alive piggybacked on the ack carries the saturated value.
+        let refutation = Rumor::alive(node("self"), u64::MAX);
+        let planted = Rumor::suspect(node("self"), u64::MAX - 1, node("acc"));
+        assert!(
+            refutation.supersedes(&planted),
+            "Alive at the ceiling must out-incarnate the highest plantable suspicion"
+        );
+        // The refuting Alive rides out on the ack.
         let ack = &out[0];
         assert!(ack.packet.gossip.iter().any(|r| matches!(
             r,
             Rumor::Alive { node: nn, incarnation } if nn == &node("self") && *incarnation == u64::MAX
         )));
+    }
+
+    #[test]
+    fn ping_req_relay_table_capped_fail_closed() {
+        // SWIM gossip is unauthenticated, so a flood of spoofed `PingReq` packets
+        // must not grow the in-flight relay table (`forwards`) — or its relayed
+        // `Ping` re-emission — without bound within a probe-timeout window. Relays
+        // past `max_members` are dropped fail-closed (qe0zdf).
+        let mut config = cfg();
+        config.max_members = 2;
+        let mut s = Swim::new(node("local"), config, 1);
+
+        // Each distinct target we are asked to relay to allocates one forward and
+        // emits one relayed Ping — up to the cap.
+        let out1 = s.handle(
+            0,
+            node("req"),
+            Packet::new(Payload::PingReq {
+                seq: 1,
+                target: node("t1"),
+            }),
+        );
+        let out2 = s.handle(
+            0,
+            node("req"),
+            Packet::new(Payload::PingReq {
+                seq: 2,
+                target: node("t2"),
+            }),
+        );
+        assert!(
+            out1.iter()
+                .any(|o| matches!(o.packet.payload, Payload::Ping { .. }))
+                && out2
+                    .iter()
+                    .any(|o| matches!(o.packet.payload, Payload::Ping { .. })),
+            "relays within the cap emit a Ping to the target"
+        );
+
+        // The next relay past the cap is dropped: no forward is recorded and no
+        // Ping is emitted to amplify.
+        let out3 = s.handle(
+            0,
+            node("req"),
+            Packet::new(Payload::PingReq {
+                seq: 3,
+                target: node("t3"),
+            }),
+        );
+        assert!(
+            !out3
+                .iter()
+                .any(|o| matches!(o.packet.payload, Payload::Ping { .. })),
+            "a PingReq past the relay cap must not emit a relayed Ping"
+        );
     }
 
     // ---- gossip dissemination -------------------------------------------

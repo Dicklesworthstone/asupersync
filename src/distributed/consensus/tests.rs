@@ -291,6 +291,91 @@ fn preprepare_for(
     }
 }
 
+/// Drive backup replica `node` to a full prepare + commit certificate for one
+/// sequence: a pre-prepare from primary "0", then corroborating prepares and
+/// commits from replicas "2" and "3" (quorum = 2f + 1 = 3, including the node's
+/// own implicit vote). Whether the sequence then *executes* depends only on the
+/// execution watermark, which is what the reordering regression exercises.
+fn certify_sequence(
+    node: &PbftNode<MockTransport>,
+    cx: &Cx,
+    view: ViewNumber,
+    sequence: SequenceNumber,
+    batch: ConsensusBatch,
+    digest: &MessageDigest,
+) {
+    let deliver = |message: PbftMessage| poll_ready(node.process_message(cx, message));
+
+    deliver(PbftMessage::PrePrepare {
+        view,
+        sequence,
+        digest: digest.clone(),
+        batch,
+        replica_id: ReplicaId::new("0".to_string()),
+    })
+    .expect("pre-prepare accepted");
+
+    for replica in ["2", "3"] {
+        deliver(PbftMessage::Prepare {
+            view,
+            sequence,
+            digest: digest.clone(),
+            replica_id: ReplicaId::new(replica.to_string()),
+        })
+        .expect("prepare accepted");
+    }
+
+    for replica in ["2", "3"] {
+        deliver(PbftMessage::Commit {
+            view,
+            sequence,
+            digest: digest.clone(),
+            replica_id: ReplicaId::new(replica.to_string()),
+        })
+        .expect("commit accepted");
+    }
+}
+
+#[test]
+fn out_of_order_commit_quorum_drains_without_wedging_execution() {
+    // Regression: a higher sequence whose commit certificate completes BEFORE
+    // the lower sequence executes must still execute once the gap fills. Before
+    // the drain loop, execution only fired on the arrival of a NEW commit for
+    // exactly `last_executed.next()`, so seq 2's already-complete certificate
+    // stalled permanently behind seq 1 — a liveness break under ordinary network
+    // reordering, not just adversarial input.
+    let node = PbftNode::new(
+        ReplicaId::new("1".to_string()),
+        PbftConfig::new(4, 1).unwrap(),
+        MockTransport::new(),
+    )
+    .unwrap();
+    let cx = Cx::for_testing();
+    let view = ViewNumber::new(0);
+
+    let batch1 = test_batch(b"op-1");
+    let batch2 = test_batch(b"op-2");
+    let digest1 = MessageDigest::of(&batch1).expect("digest 1");
+    let digest2 = MessageDigest::of(&batch2).expect("digest 2");
+
+    // Seq 2's commit quorum completes first, out of order.
+    certify_sequence(&node, &cx, view, SequenceNumber::new(2), batch2, &digest2);
+    assert_eq!(
+        node.last_executed(),
+        SequenceNumber::new(0),
+        "seq 2 must wait for seq 1 (gap-free execution), not execute early",
+    );
+
+    // Seq 1 completes: it executes, then the drain loop picks up the already
+    // committed seq 2.
+    certify_sequence(&node, &cx, view, SequenceNumber::new(1), batch1, &digest1);
+    assert_eq!(
+        node.last_executed(),
+        SequenceNumber::new(2),
+        "executing seq 1 must drain the already-committed seq 2 (no permanent stall)",
+    );
+}
+
 #[test]
 fn preprepare_from_non_primary_fails_closed() {
     let transport = MockTransport::new();

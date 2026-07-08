@@ -274,6 +274,12 @@ impl<T: PbftTransport> PbftNode<T> {
         self.replica_index == primary_idx
     }
 
+    /// The highest sequence number this replica has executed. Execution is
+    /// gap-free, so every sequence in `1..=last_executed` has been applied.
+    pub fn last_executed(&self) -> SequenceNumber {
+        self.state.lock().unwrap().last_executed
+    }
+
     /// Submit a client request for consensus.
     pub async fn submit_request(&self, cx: &Cx, request: ConsensusRequest) -> Result<()> {
         {
@@ -617,12 +623,35 @@ impl<T: PbftTransport> PbftNode<T> {
             prepared && committed && sequence == next_to_execute && entry.result.is_none()
         };
 
-        // Execute the batch if we have quorum and it's the next in sequence
+        // Execute the batch if we have quorum and it's the next in sequence,
+        // then drain any successors whose commit-quorum completed out of order.
+        // Execution is otherwise only re-triggered by the arrival of a NEW
+        // commit for the exact `last_executed.next()`, so a higher sequence that
+        // already holds a full commit certificate would stall permanently behind
+        // a lower one — ordinary under network reordering, not just adversarial.
         if should_execute {
             self.execute_batch(sequence).await?;
+            while let Some(next) = self.next_executable_sequence() {
+                self.execute_batch(next).await?;
+            }
         }
 
         Ok(())
+    }
+
+    /// The next sequence that is prepared, committed, and not yet executed, if
+    /// any. Used to drain successors whose commit-quorum was reached before the
+    /// lower sequence executed (`handle_commit` only fires execution on the
+    /// exact `last_executed.next()`, so out-of-order quorum completion would
+    /// otherwise wedge the pipeline).
+    fn next_executable_sequence(&self) -> Option<SequenceNumber> {
+        let state = self.state.lock().unwrap();
+        let next = state.last_executed.next();
+        let entry = state.log.get(&next)?;
+        let prepared =
+            entry.preprepared && entry.prepare_msgs.len() + 1 >= self.config.quorum_size();
+        let committed = entry.commit_msgs.len() + 1 >= self.config.quorum_size();
+        (prepared && committed && entry.result.is_none()).then_some(next)
     }
 
     /// Execute a batch of requests.
