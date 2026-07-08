@@ -1001,11 +1001,36 @@ impl StreamStore {
     /// gate counts only OCCUPIED slots, not Vec capacity, so it does
     /// not bound the gap.
     ///
-    /// `1 << 20` (1,048,576) slots = ~16 MiB worst-case for
-    /// `Option<Stream>` on 64-bit. Far above any realistic
-    /// `max_concurrent_streams` (typically ≤1024) but still rejects
-    /// the pathological 2.1B-id-gap attack.
-    const MAX_STREAM_GAP_FROM_BASE: u32 = 1 << 20;
+    /// Chosen so the worst-case *eager* allocation stays ~16 MiB
+    /// regardless of `Stream`'s in-memory width. A single peer HEADERS
+    /// frame on a high stream id makes [`ensure_slot`] call
+    /// `resize_with(gap + 1, …)`, so the ceiling has to be measured in
+    /// bytes, not slots. `Stream` is ~100+ bytes (it embeds a
+    /// `VecDeque`, a `Vec`, four window `i32`s, a `PrioritySpec`, …), so
+    /// the old hand-estimate of "16 B/slot" made a literal `1 << 20`
+    /// really a ~100 MB single-frame amplifier. Deriving the cap from
+    /// `size_of::<Option<Stream>>()` keeps the 16 MiB bound honest if the
+    /// struct grows, while staying far above any realistic
+    /// `max_concurrent_streams` (typically ≤1024) and still rejecting the
+    /// pathological ~2.1B-id-gap attack (RFC 9113 ids reach
+    /// `0x7FFF_FFFF`).
+    //
+    // Truncation in the `as u32` casts is impossible: `TARGET_ALLOC_BYTES`
+    // is 16 Mi, and `size_of::<Option<Stream>>() >= 1`, so `gap <= 16 Mi`
+    // — three orders of magnitude below `u32::MAX`.
+    #[allow(clippy::cast_possible_truncation)]
+    const MAX_STREAM_GAP_FROM_BASE: u32 = {
+        const TARGET_ALLOC_BYTES: usize = 16 * 1024 * 1024;
+        // Never drop the ceiling below a working set that comfortably
+        // exceeds any realistic `max_concurrent_streams`.
+        const FLOOR_SLOTS: usize = 1 << 16;
+        let gap = TARGET_ALLOC_BYTES / core::mem::size_of::<Option<Stream>>();
+        if gap < FLOOR_SLOTS {
+            FLOOR_SLOTS as u32
+        } else {
+            gap as u32
+        }
+    };
 
     /// Ensure the Vec has a slot for `id`, growing if needed.
     /// `id` MUST be `>= base_id`; callers ensure this because

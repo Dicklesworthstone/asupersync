@@ -597,6 +597,20 @@ impl QuicStream {
                     .pending_send_frames
                     .pop_front()
                     .expect("front checked above");
+                // Drop the absorbed frame's stale retained copy: its bytes are
+                // now carried by the merged frame at `frame.offset`, so a later
+                // loss of the merged frame re-sends this range via
+                // `requeue_sent_stream_frame(frame.offset)`. Without this,
+                // `release_sent_stream_frame` (keyed by the emitted offset) can
+                // only ever release `frame.offset`, so every merged-in sub-frame
+                // leaks its `sent_stream_frames` entry — and the source `Bytes`
+                // it pins — for the connection's lifetime, defeating the bound
+                // this map was added to enforce (sender RSS then scales with the
+                // number of coalescing events on lossy transfers). In the
+                // partial-merge branch below, the un-absorbed remainder is
+                // requeued at a fresh offset and gets its own entry when emitted,
+                // so this removal is correct for both full and partial merges.
+                self.sent_stream_frames.remove(&next.offset);
                 let buf = merged.get_or_insert_with(|| {
                     let mut buf = BytesMut::with_capacity(max_data_len);
                     buf.extend_from_slice(&frame.data);
@@ -1103,19 +1117,21 @@ impl StreamTable {
     ///
     /// The desired limit is CONSUMPTION-clocked (`read_offset + window`) on
     /// purpose — this is load-bearing congestion control, not just flow
-    /// control. REFUTED (br-asupersync-oh6gm2 MATRIX-224, 2026-07-08):
-    /// receipt-clocking the credit (`highest_received + window`, RSS-capped
-    /// at `read_offset + 8×window`) to stop head-of-line holes from stalling
-    /// the sender (~37 s of a 47.8 s 500M/good wall) caused CONGESTION
-    /// COLLAPSE on 200 mbit/50 ms/0.1 %: walls 47.8→129/147 s,
-    /// retransmit-queued bytes 71-111 MB → 898-1005 MB (~2× the payload
-    /// re-sent), pacer max-filter poisoned up to 84-88 MB/s by queue-drain
-    /// ACK bursts. The source-stream pacer is a delivery follower with a
-    /// +25 % probe bias and NO loss-response; the consumption-clocked window
-    /// stall is the only mechanism bounding in-flight against the LINK, and
-    /// its burst-stall duty cycle is what keeps the shaper queue drained.
-    /// Do not decouple credit from consumption without first giving this
-    /// path a real ACK-clocked congestion controller (uw1cc2).
+    /// control. REFUTED ×3 (br-asupersync-oh6gm2/uw1cc2, MATRIX-224/225,
+    /// 2026-07-08): receipt-clocking the credit (`highest_received + window`,
+    /// RSS-capped) to stop head-of-line holes from stalling the sender was
+    /// tried (a) bare — congestion collapse, 47.8→129/147 s, ~2× payload
+    /// re-sent; (b) atop a BDP in-flight cap fed by the transport RTT — the
+    /// estimator is synthetic-clock-fed on this path and read ~1 ms, flooring
+    /// the cap into an ACK-clock stall (95 s + a failed rep); (c) atop the
+    /// cap fed by a wall-clock handshake RTT plus an offered-rate clamp on
+    /// delivery samples — the clamp MANUFACTURES evidence (every saturated
+    /// window reads delivery=offered, validating and compounding the rate
+    /// 1.25×/window) and the cap loosened into 155 s / 1101 MB re-sent. The
+    /// consumption stall is the only honest in-flight bound this path has
+    /// until delivery sampling is rebuilt on per-packet wall-clock delivered
+    /// counters (BBR delivery_rate; see uw1cc2 — deterministic lab gate
+    /// FIRST, per the bead's GATE).
     ///
     /// For every bounded stream whose desired limit has moved at least a
     /// sixteenth-window past the advertised limit, record the new
@@ -2427,7 +2443,7 @@ mod tests {
         // A segment arrives beyond a head-of-line hole (0..10 missing): the
         // application cannot read, and the advertised credit must NOT chase
         // the received offset — the stall is the congestion signal (see the
-        // MATRIX-224 refutation note on advance_bounded_recv_windows).
+        // MATRIX-224/225 refutation note on advance_bounded_recv_windows).
         tbl.receive_stream_bytes(id, 10, Bytes::from(vec![7u8; 40]), false)
             .expect("recv past hole");
         assert!(tbl.read_stream_bytes(id, 100).expect("read").is_empty());

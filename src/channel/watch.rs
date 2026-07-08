@@ -489,12 +489,19 @@ impl<T> Sender<T> {
         // Call user closure without holding any locks to prevent deadlocks
         f(&mut value);
 
-        // Update the value atomically
-        {
+        // Write back under the value lock, but drop the PREVIOUS value only
+        // after releasing the guard — a `T::Drop` that reentrantly reads this
+        // channel (`borrow`/`current_version`/…) would otherwise self-deadlock
+        // on the non-reentrant `RwLock`, and a slow drop would stall every
+        // reader. This mirrors `send()`'s `mem::replace` discipline (see above);
+        // the wholesale `guard.0 = value` it replaced dropped the old value
+        // while the write lock was held.
+        let _old_value = {
             let mut guard = self.inner.value.write();
-            guard.0 = value;
+            let old = std::mem::replace(&mut guard.0, value);
             guard.1 = guard.1.wrapping_add(1);
-        }
+            old
+        };
 
         if self.inner.has_receivers_snapshot() {
             self.inner.wake_all_waiters();

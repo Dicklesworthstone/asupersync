@@ -712,11 +712,13 @@ pub async fn read_entry_metadata(
     crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
 }
 
-/// Synchronous core of [`read_entry_metadata`]: one blocking-pool dispatch can
-/// capture a whole tree's metadata instead of paying 2-3 pool round-trips per
-/// member (~4000 dispatches on a 2000-file tree — the pass-1 tail measured in
-/// MATRIX-215; batched for br-asupersync-i7pdxb). Callers already on the
-/// blocking pool (or batching many entries) call this directly.
+/// Synchronous core of [`read_entry_metadata`].
+///
+/// One blocking-pool dispatch can capture a whole tree's metadata instead of
+/// paying 2-3 pool round-trips per member (~4000 dispatches on a 2000-file tree
+/// — the pass-1 tail measured in MATRIX-215; batched for br-asupersync-i7pdxb).
+/// Callers already on the blocking pool (or batching many entries) call this
+/// directly.
 ///
 /// # Errors
 ///
