@@ -1945,6 +1945,32 @@ impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
     }
 }
 
+/// RAII guard for a caller's FIFO-turn waiter in the async acquire loop.
+///
+/// The waiter `Arc` is registered in `inner.waiters` while the caller parks for
+/// its turn. Every *cooperative* exit — a granted turn, or the checkpoint /
+/// closed / timeout arms — clears `slot` before returning, so this guard is a
+/// no-op on those paths. Its job is the one path that runs no in-loop cleanup: a
+/// hard **drop** of the `get()`/`get_for_client()` future while still parked
+/// (wrapped in `time::timeout`, a losing `select!`/`race!` branch, or any
+/// caller that drops the future instead of polling it to a checkpoint). Without
+/// it the orphaned waiter stays in `inner.waiters` uncancelled,
+/// `wake_next_async_pool_waiter_locked` pins it `ready` at the FIFO front
+/// forever, and `prune_cancelled_async_pool_waiters_locked` never reaps it
+/// (`cancelled == false`) — wedging async acquisition pool-wide.
+struct AsyncWaiterGuard<'a, M: AsyncConnectionManager> {
+    pool: &'a AsyncDbPool<M>,
+    slot: Option<Arc<AsyncPoolWaiter>>,
+}
+
+impl<M: AsyncConnectionManager> Drop for AsyncWaiterGuard<'_, M> {
+    fn drop(&mut self) {
+        if let Some(waiter) = self.slot.take() {
+            self.pool.cancel_async_pool_waiter(&waiter);
+        }
+    }
+}
+
 impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     /// Create a new async connection pool.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
@@ -2252,7 +2278,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
         trace_async_pool_event(cx, "acquire", "start", "anonymous");
-        let mut waiter = None;
+        let mut waiter_guard = AsyncWaiterGuard {
+            pool: self,
+            slot: None,
+        };
 
         loop {
             if cx.checkpoint().is_err() {
@@ -2267,17 +2296,17 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     return Err(DbPoolError::Closed);
                 }
 
-                if !self.async_pool_caller_has_turn_locked(&mut inner, waiter.as_ref()) {
+                if !self.async_pool_caller_has_turn_locked(&mut inner, waiter_guard.slot.as_ref()) {
                     AsyncAcquireStep::Wait
                 } else if let Some(idle) = inner.idle.pop_front() {
-                    let granted_waiter = waiter.take();
+                    let granted_waiter = waiter_guard.slot.take();
                     self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                     AsyncAcquireStep::Idle(idle)
                 } else if inner.total >= self.effective_max_size() {
                     AsyncAcquireStep::Wait
                 } else {
                     inner.total += 1;
-                    let granted_waiter = waiter.take();
+                    let granted_waiter = waiter_guard.slot.take();
                     self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                     AsyncAcquireStep::Create
                 }
@@ -2285,7 +2314,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
             let idle = match step {
                 AsyncAcquireStep::Wait => {
-                    self.wait_for_async_pool_turn(cx, &mut waiter, "anonymous")
+                    self.wait_for_async_pool_turn(cx, &mut waiter_guard.slot, "anonymous")
                         .await?;
                     continue;
                 }
@@ -2429,7 +2458,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
 
         let client_id_owned = client_id.to_string();
-        let mut waiter = None;
+        let mut waiter_guard = AsyncWaiterGuard {
+            pool: self,
+            slot: None,
+        };
 
         loop {
             if cx.checkpoint().is_err() {
@@ -2457,7 +2489,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
                 }
 
-                if !self.async_pool_caller_has_turn_locked(&mut inner, waiter.as_ref()) {
+                if !self.async_pool_caller_has_turn_locked(&mut inner, waiter_guard.slot.as_ref()) {
                     AsyncAcquireStep::Wait
                 } else {
                     // Try to get an idle connection with authentication state validation.
@@ -2493,7 +2525,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     if let Some(conn) = discard {
                         AsyncAcquireStep::Discard(conn)
                     } else if let Some(idle) = candidate {
-                        let granted_waiter = waiter.take();
+                        let granted_waiter = waiter_guard.slot.take();
                         self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                         *inner
                             .client_connections
@@ -2504,7 +2536,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         AsyncAcquireStep::Wait
                     } else {
                         inner.total += 1;
-                        let granted_waiter = waiter.take();
+                        let granted_waiter = waiter_guard.slot.take();
                         self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                         *inner
                             .client_connections
@@ -2517,7 +2549,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
             let idle = match step {
                 AsyncAcquireStep::Wait => {
-                    self.wait_for_async_pool_turn(cx, &mut waiter, "client")
+                    self.wait_for_async_pool_turn(cx, &mut waiter_guard.slot, "client")
                         .await?;
                     continue;
                 }
@@ -4406,6 +4438,58 @@ mod tests {
 
         holder.return_to_pool();
         crate::test_complete!("async_get_waiter_budget_exhaustion_returns_acquire_timeout");
+    }
+
+    #[test]
+    fn async_pool_dropped_parked_waiter_does_not_wedge_queue() {
+        use std::future::Future;
+
+        init_test("async_pool_dropped_parked_waiter_does_not_wedge_queue");
+        let pool = AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_millis(200)),
+        );
+        let holder_cx = Cx::for_testing();
+        let holder = block_on(pool.get(&holder_cx)).expect("holder acquires the only slot");
+
+        // Park a waiter, then hard-drop its future — no cooperative cleanup arm
+        // (checkpoint / closed / timeout) ever runs, so only the RAII guard's
+        // Drop can reap the queue entry.
+        let waker = std::task::Waker::noop();
+        let mut ctx = std::task::Context::from_waker(waker);
+        let parked_cx = Cx::for_testing();
+        {
+            let mut parked = std::pin::pin!(pool.get(&parked_cx));
+            assert!(
+                parked.as_mut().poll(&mut ctx).is_pending(),
+                "waiter parks while the only slot is held"
+            );
+            assert_eq!(
+                pool.inner.lock().waiters.len(),
+                1,
+                "the parked waiter is registered in the FIFO queue"
+            );
+            // `parked` is dropped here without being polled again.
+        }
+
+        // Regression: before the guard, the dropped future left an uncancelled
+        // waiter pinned at the FIFO front, wedging every later async acquire
+        // pool-wide. The guard must remove it.
+        assert_eq!(
+            pool.inner.lock().waiters.len(),
+            0,
+            "dropping a parked waiter future must not orphan its queue entry",
+        );
+
+        // The pool is still usable: release the holder and a fresh acquire wins.
+        holder.return_to_pool();
+        let next_cx = Cx::for_testing();
+        let next = block_on(pool.get(&next_cx))
+            .expect("async acquisition must not be wedged by the dropped waiter");
+        next.return_to_pool();
+        crate::test_complete!("async_pool_dropped_parked_waiter_does_not_wedge_queue");
     }
 
     #[test]
