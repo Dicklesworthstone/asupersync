@@ -348,21 +348,52 @@ const QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// timed out the 500M A/B). New data admission waits on the ACK clock past
 /// this; retransmits are unaffected.
 const QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES: u64 = 16 * 1024 * 1024;
-// NOTE (uw1cc2 / MATRIX-225, 2026-07-08): a delivery-clocked BDP in-flight
-// cap here (`cwnd = 2 × BtlBw × RTprop`, floor 2 MiB, ceiling 16 MiB) was
-// built and REFUTED twice on 500M/good — (a) fed by the transport RTT
-// estimator it floored (that estimator runs on this path's synthetic
-// app-data clock and read ~1 ms on a 50 ms link) and ACK-clock-stalled the
-// transfer (95 s + one failed rep); (b) fed by a wall-clock handshake RTT
-// (measured 2× loose: ~101 ms) plus an offered-rate clamp on delivery
-// samples, the clamp MANUFACTURED capacity evidence (a saturated window
-// reads delivery=offered, validating the rate → 1.25×/window ratchet) and
-// the loosened cap collapsed the cell (155 s, 1101 MB re-sent). A real cap
-// needs BBR-style per-packet delivered-counter sampling on wall clocks
-// (in_flight_stream_frames is already pn-keyed — add (sent_at, delivered
-// snapshot) per entry), validated in a deterministic lab gate BEFORE any
-// matrix run. Until then this constant plus the consumption-clocked flow
-// window (streams.rs) are the path's only in-flight bounds — by design.
+// HISTORY (uw1cc2 / MATRIX-225→226): a BDP in-flight cap fed by ACK-window
+// aggregates was refuted twice — (a) the transport RTT estimator runs on
+// this path's synthetic app-data clock and read ~1 ms on a 50 ms link,
+// flooring the cap into an ACK-clock stall; (b) an offered-rate clamp on
+// window aggregates MANUFACTURED capacity evidence and collapsed the cell
+// (155 s, 1101 MB re-sent). The cap below is the MATRIX-226 rebuild on
+// honest inputs: per-packet delivered-counter samples
+// (SourceStreamDeliverySampler) for BtlBw and wall-clock send→ack minima
+// for RTprop, validated in the deterministic lab gate
+// (matrix226_delivery_lab tests) before any bench run.
+/// BDP multiple for the source stream's delivery-clocked in-flight cap
+/// (`cwnd = gain × BtlBw × RTprop`, uw1cc2 SPEC item 3): headroom for one
+/// probe cycle above the pipe, per BBR. Deliberately NOT loss-reactive —
+/// NewReno-style loss-halving on this path measured a 12× mild-loss
+/// regression (MATRIX-202) and stays refuted; random loss leaves the
+/// delivery estimate (and so this cap) untouched, while genuine congestion
+/// shrinks measured delivery and pulls the cap down with it.
+const QUIC_SOURCE_STREAM_BDP_CWND_GAIN_X1000: u64 = 2000;
+/// Floor for the BDP in-flight cap: one bounded receive window, so the cap
+/// never binds tighter than the flow-control window already does.
+const QUIC_SOURCE_STREAM_BDP_CWND_MIN_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Delivery-clocked in-flight cap for the reliable source stream:
+/// `clamp(gain × BtlBw × RTprop, window-floor, runaway-ceiling)`.
+///
+/// Until an RTprop sample exists (or while the delivery filter is empty)
+/// the cap falls back to the 16 MiB runaway ceiling — admission then
+/// behaves exactly as before the cap existed.
+fn source_stream_bdp_admission_cap(
+    bottleneck_bytes_per_s: u64,
+    rtprop_micros: Option<u64>,
+) -> u64 {
+    let Some(rtt_micros) = rtprop_micros.filter(|micros| *micros > 0) else {
+        return QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES;
+    };
+    if bottleneck_bytes_per_s == 0 {
+        return QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES;
+    }
+    let bdp = u128::from(bottleneck_bytes_per_s).saturating_mul(u128::from(rtt_micros))
+        / 1_000_000u128;
+    let cwnd = bdp.saturating_mul(u128::from(QUIC_SOURCE_STREAM_BDP_CWND_GAIN_X1000)) / 1000u128;
+    u64::try_from(cwnd).unwrap_or(u64::MAX).clamp(
+        QUIC_SOURCE_STREAM_BDP_CWND_MIN_BYTES,
+        QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES,
+    )
+}
 /// Bounded receive window for the paced source stream, negotiated in the
 /// HelloAck: the receiver advertises `read_offset + window` via
 /// MAX_STREAM_DATA and a compliant sender installs the window as its initial
@@ -1708,7 +1739,8 @@ impl SourceStreamRatePacer {
         }
     }
 
-    /// Fold one ACK window into the filter and return the new pacing rate:
+    /// Fold one delivery window (per-packet sampler output, MATRIX-226) into
+    /// the filter and return the new pacing rate:
     /// `clamp(max(gain × max_filter(delivery), floor))`.
     ///
     /// The floor is the regime-derived initial rate until cumulative
@@ -1720,26 +1752,33 @@ impl SourceStreamRatePacer {
     /// loss-reactive variants — settle gains, filter resets — were all
     /// measured to interact badly with retransmit framing on shaped links,
     /// so loss only ever releases the floor, never modulates the gain).
-    fn on_ack_window(&mut self, acked_bytes: u64, lost_bytes: u64, elapsed_micros: u64) -> u64 {
-        // NOTE (MATRIX-225): delivery samples here are ACK-window aggregates
-        // and CAN read far above the link under queue-drain ACK clumps
-        // (measured 84-88 MB/s on a 25 MB/s path). Clamping the sample at the
-        // offered rate was tried and REFUTED — a saturated window then reads
-        // delivery=offered, which validates and compounds any over-rate at
-        // 1.25×/window. An honest delivery rate needs per-packet wall-clock
-        // delivered-counter sampling (uw1cc2); do not re-clamp here.
-        let delivery = acked_bytes
-            .saturating_mul(1_000_000)
-            .checked_div(elapsed_micros.max(1))
-            .unwrap_or(0);
-        self.delivery_samples[self.next_sample] = delivery;
-        self.next_sample = (self.next_sample + 1) % STREAM_RATE_FILTER_WINDOWS;
-        let bottleneck = self
-            .delivery_samples
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(delivery);
+    fn on_delivery_window(&mut self, window: DeliveryWindow, lost_bytes: u64) -> u64 {
+        // Samples come from the per-packet delivered-counter sampler
+        // (MATRIX-226) — honest by construction. The refuted alternatives
+        // are documented on SourceStreamDeliverySampler: ACK-window
+        // aggregates spike 3-4× on queue-drain clumps (MATRIX-224), and
+        // clamping those at the offered rate manufactures capacity evidence
+        // (MATRIX-225). App-limited samples may only RAISE the estimate
+        // (BBR rule): a chronically limited sender must not define its
+        // capacity downward. Windows with no completed clean flight leave
+        // the filter untouched — a stall no longer poisons the ring with
+        // near-zero aggregates (the pre-M226 source of recovery rate
+        // collapse the floor machinery papers over).
+        let current_bottleneck = self.delivery_samples.iter().copied().max().unwrap_or(0);
+        let raising_app_limited = window
+            .max_app_limited_bps
+            .filter(|sample| *sample > current_bottleneck);
+        let sample = match (window.max_bps, raising_app_limited) {
+            (Some(clean), Some(raise)) => Some(clean.max(raise)),
+            (Some(clean), None) => Some(clean),
+            (None, Some(raise)) => Some(raise),
+            (None, None) => None,
+        };
+        if let Some(sample) = sample {
+            self.delivery_samples[self.next_sample] = sample;
+            self.next_sample = (self.next_sample + 1) % STREAM_RATE_FILTER_WINDOWS;
+        }
+        let bottleneck = self.delivery_samples.iter().copied().max().unwrap_or(0);
         self.total_lost_bytes = self.total_lost_bytes.saturating_add(lost_bytes);
         let floor = if self.total_lost_bytes > STREAM_RATE_FLOOR_RELEASE_LOST_BYTES {
             (self.initial_rate_bytes_per_s / STREAM_RATE_FLOOR_RELEASE_DIVISOR)
@@ -1754,6 +1793,164 @@ impl SourceStreamRatePacer {
             .max(floor)
             .clamp(STREAM_RATE_MIN_BYTES_PER_S, STREAM_RATE_MAX_BYTES_PER_S);
         self.rate_bytes_per_s
+    }
+
+    /// Current bottleneck-bandwidth estimate (the raw max-filtered delivery
+    /// rate, before the probe gain): the BtlBw term of the BDP in-flight cap.
+    fn bottleneck_bytes_per_s(&self) -> u64 {
+        self.delivery_samples.iter().copied().max().unwrap_or(0)
+    }
+}
+
+/// Per-packet delivery-rate sampling for the reliable source stream —
+/// BBR-style `delivery_rate` (uw1cc2, MATRIX-226).
+///
+/// Every ACK-window heuristic tried on this path was refuted with mechanism
+/// (MATRIX-224/225): stall windows under-read, queue-drain ACK clumps
+/// over-read (84 MB/s "delivery" on a 25 MB/s link), and clamping converts
+/// artifacts into evidence. This sampler measures what actually happened to
+/// each packet instead: at send time it snapshots the cumulative delivered
+/// counter; at ACK time the rate sample is `Δdelivered / Δwall-time` over
+/// the packet's whole flight. A sample can only exceed the true path rate by
+/// the counter's retransmit over-count (bounded, and zero on clean links) —
+/// ACK batching lengthens the interval and *lowers* the sample rather than
+/// spiking it. Packet flights that end in loss/requeue produce NO sample.
+///
+/// Pure state machine over caller-supplied microsecond timestamps
+/// (deterministically lab-tested; the QuicLink adapter feeds it wall micros
+/// from `stream_rate_epoch` — NEVER the transport's synthetic app-data
+/// clock, which reads ~1 ms RTT on a 50 ms path, MATRIX-225).
+struct SourceStreamDeliverySampler {
+    /// Cumulative acked source-stream bytes (the deduped `acked_bytes` the
+    /// ACK path already computes; includes spuriously re-sent copies acked
+    /// under fresh packet numbers — a bounded over-count, zero when clean).
+    delivered_bytes: u64,
+    /// When `delivered_bytes` last advanced (or the epoch of the current
+    /// send burst). The BBR ack-interval bound: a sample's divisor is
+    /// `max(flight time, now − snapshot of this)`, so a packet sent just
+    /// before an ACK clump cannot claim the whole clump's bytes over its
+    /// short flight (that over-read is the last surviving relative of the
+    /// MATRIX-224 window-aggregate spike).
+    delivered_time_micros: u64,
+    /// Send-time metadata per in-flight packet number.
+    in_flight: BTreeMap<u64, PacketDeliveryMeta>,
+    /// Wall RTprop: minimum send→ACK-processed interval ever observed.
+    rtprop_min_micros: Option<u64>,
+    /// Max sample (bytes/s) from NOT-app-limited flights since `take_window`.
+    window_max_bps: u64,
+    /// Max sample (bytes/s) from app-limited flights since `take_window`.
+    window_max_app_limited_bps: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PacketDeliveryMeta {
+    sent_at_micros: u64,
+    delivered_snapshot: u64,
+    delivered_time_snapshot_micros: u64,
+    /// The sender had no further stream data queued when this packet was
+    /// built: its flight measures the application, not the path. Per BBR,
+    /// such samples may only RAISE the bottleneck estimate, never define it
+    /// downward (a chronically limited sender must not decay its own
+    /// capacity estimate into the MATRIX-204-era rate-collapse spiral).
+    app_limited: bool,
+}
+
+/// One folded delivery window from the sampler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeliveryWindow {
+    /// Best not-app-limited sample, if any flight completed clean.
+    max_bps: Option<u64>,
+    /// Best app-limited sample (only usable to raise the estimate).
+    max_app_limited_bps: Option<u64>,
+}
+
+impl SourceStreamDeliverySampler {
+    fn new() -> Self {
+        Self {
+            delivered_bytes: 0,
+            delivered_time_micros: 0,
+            in_flight: BTreeMap::new(),
+            rtprop_min_micros: None,
+            window_max_bps: 0,
+            window_max_app_limited_bps: 0,
+        }
+    }
+
+    fn on_packet_sent(&mut self, packet_number: u64, now_micros: u64, app_limited: bool) {
+        // A send burst starting from an empty in-flight set re-bases the
+        // delivery clock: idle gaps (handshake, admission stalls) must not
+        // stretch the first samples' ack-interval bound.
+        if self.in_flight.is_empty() {
+            self.delivered_time_micros = now_micros;
+        }
+        self.in_flight.insert(
+            packet_number,
+            PacketDeliveryMeta {
+                sent_at_micros: now_micros,
+                delivered_snapshot: self.delivered_bytes,
+                delivered_time_snapshot_micros: self.delivered_time_micros,
+                app_limited,
+            },
+        );
+    }
+
+    /// Fold newly acknowledged packets: `acked_bytes` is the deduped payload
+    /// total the caller computed for exactly `packet_numbers`.
+    fn on_packets_acked(&mut self, packet_numbers: &[u64], acked_bytes: u64, now_micros: u64) {
+        self.delivered_bytes = self.delivered_bytes.saturating_add(acked_bytes);
+        for packet_number in packet_numbers {
+            let Some(meta) = self.in_flight.remove(packet_number) else {
+                continue;
+            };
+            let flight_micros = now_micros.saturating_sub(meta.sent_at_micros).max(1);
+            // BBR rate-sample divisor: the LONGER of the flight time and the
+            // delivered-clock interval, so clump bytes can never be claimed
+            // over a shorter span than they actually took to deliver.
+            let ack_interval = now_micros
+                .saturating_sub(meta.delivered_time_snapshot_micros)
+                .max(1);
+            let interval = flight_micros.max(ack_interval);
+            let delta = self.delivered_bytes.saturating_sub(meta.delivered_snapshot);
+            let sample_bps = delta
+                .saturating_mul(1_000_000)
+                .checked_div(interval)
+                .unwrap_or(0);
+            // RTprop is the flight time alone (send → ACK-processed).
+            self.rtprop_min_micros = Some(
+                self.rtprop_min_micros
+                    .map_or(flight_micros, |min| min.min(flight_micros)),
+            );
+            if meta.app_limited {
+                self.window_max_app_limited_bps = self.window_max_app_limited_bps.max(sample_bps);
+            } else {
+                self.window_max_bps = self.window_max_bps.max(sample_bps);
+            }
+        }
+        if !packet_numbers.is_empty() && acked_bytes > 0 {
+            self.delivered_time_micros = now_micros;
+        }
+    }
+
+    /// Forget a packet whose flight ended without an ACK (declared lost,
+    /// threshold-requeued, or drained for retransmit): no sample.
+    fn on_packet_dropped(&mut self, packet_number: u64) {
+        self.in_flight.remove(&packet_number);
+    }
+
+    /// Drain the best samples accumulated since the last call.
+    fn take_window(&mut self) -> DeliveryWindow {
+        let window = DeliveryWindow {
+            max_bps: (self.window_max_bps > 0).then_some(self.window_max_bps),
+            max_app_limited_bps: (self.window_max_app_limited_bps > 0)
+                .then_some(self.window_max_app_limited_bps),
+        };
+        self.window_max_bps = 0;
+        self.window_max_app_limited_bps = 0;
+        window
+    }
+
+    fn rtprop_min_micros(&self) -> Option<u64> {
+        self.rtprop_min_micros
     }
 }
 
@@ -2119,11 +2316,19 @@ pub struct QuicLink {
     /// data admission so a mis-estimated pacing rate can never run the
     /// sender hundreds of MB ahead of the receiver through a loss gap.
     stream_unacked_bytes: u64,
+    /// Per-packet delivered-counter sampler (MATRIX-226): the honest BtlBw/
+    /// RTprop source for the pacing filter and the BDP admission cap.
+    stream_delivery_sampler: SourceStreamDeliverySampler,
+    /// The sender loop has exhausted its source data: subsequent flights are
+    /// app-limited (tail drain, proof exchange) and may only RAISE the
+    /// delivery estimate.
+    stream_source_exhausted: bool,
     /// Wall-clock path RTT measured during the QUIC handshake (client side;
     /// `None` on the accept side or if no sample landed). The transport RTT
     /// estimator is fed by this path's synthetic app-data clock and reads
-    /// ~1 ms on a 50 ms path (MATRIX-225), so the BDP admission cap uses
-    /// this handshake sample as its RTprop instead.
+    /// ~1 ms on a 50 ms path (MATRIX-225), so RTprop consumers fall back to
+    /// this (upper-bound) handshake sample until the sampler has real
+    /// per-packet minima.
     path_rtt_estimate_micros: Option<u64>,
     sender_handoff: QuicSenderHandoffStats,
     idle_timeout: Duration,
@@ -2696,10 +2901,17 @@ impl QuicLink {
             .symbol_datagram_frame_len
             .saturating_mul(self.spray_max_datagram_frames_per_packet.max(1))
             .saturating_add(ONE_RTT_COALESCED_CONTROL_HEADROOM);
-        frame_budget.clamp(
-            self.symbol_datagram_frame_len.max(1),
-            self.max_app_payload.max(1),
-        )
+        // `usize::clamp` panics when `min > max`, and this runs on every flush.
+        // One authenticated symbol DATAGRAM frame can exceed one 1-RTT packet on
+        // a clean path with a near-`u16::MAX` `symbol_size` (`QuicConfig::validate`
+        // bounds `max_datagram_size` against `symbol_size`, but never `symbol_size`
+        // against the packet envelope), which made the old fixed argument order
+        // `min = symbol_datagram_frame_len > max = max_app_payload` and panicked
+        // the sender on the first (Hello) flush. Cap the lower bound at the upper
+        // bound so an over-sized symbol degrades to the packet limit instead.
+        let max = self.max_app_payload.max(1);
+        let min = self.symbol_datagram_frame_len.max(1).min(max);
+        frame_budget.clamp(min, max)
     }
 
     async fn service_spray_liveness(
@@ -3201,6 +3413,17 @@ impl QuicLink {
                     report.packets_processed, count
                 )));
             }
+            // App-limited marking for the delivery sampler. The classifier
+            // is END-OF-DATA, set by the sender loop when the source is
+            // exhausted — NOT "pending queue empty at flush end": the paced
+            // drive loop drains its queue on essentially every flush, and
+            // that proxy marked 100 % of flights app-limited on the wire
+            // (sample_bps=0 for all 1060 windows of a 500M/good rep; the
+            // filter never learned and the whole build was a behavioral
+            // no-op — caught by trace sanity, invisible to the lab, which
+            // models app limitation at the scenario level).
+            let flush_app_limited = self.stream_source_exhausted;
+            let sampler_now_micros = self.stream_rate_now_micros();
             for plain in &plain_packets {
                 self.record_sent_datagram_packet(
                     plain.packet_number,
@@ -3212,6 +3435,11 @@ impl QuicLink {
                         self.stream_unacked_bytes =
                             self.stream_unacked_bytes.saturating_add(frame.len);
                     }
+                    self.stream_delivery_sampler.on_packet_sent(
+                        plain.packet_number,
+                        sampler_now_micros,
+                        flush_app_limited,
+                    );
                     if let Some(previous) = self
                         .in_flight_stream_frames
                         .insert(plain.packet_number, plain.stream_frames.clone())
@@ -3309,6 +3537,7 @@ impl QuicLink {
         let before = self.in_flight_stream_frames.len();
         let mut acked_bytes = 0u64;
         let mut acked_frames: Vec<SentControlStreamFrame> = Vec::new();
+        let mut acked_packet_numbers: Vec<u64> = Vec::new();
         self.in_flight_stream_frames
             .retain(|packet_number, frames| {
                 if packet_in_ack_ranges(*packet_number, acked_ranges) {
@@ -3316,11 +3545,19 @@ impl QuicLink {
                         acked_bytes = acked_bytes.saturating_add(frame.len);
                     }
                     acked_frames.extend_from_slice(frames);
+                    acked_packet_numbers.push(*packet_number);
                     false
                 } else {
                     true
                 }
             });
+        // Per-packet delivery samples (MATRIX-226): fold the deduped acked
+        // byte total, then emit one honest rate/RTT sample per acked flight.
+        self.stream_delivery_sampler.on_packets_acked(
+            &acked_packet_numbers,
+            acked_bytes,
+            self.stream_rate_now_micros(),
+        );
         // Release the acknowledged frames' retained retransmission copies so
         // sender memory tracks the un-ACKed window, not the transfer size.
         for frame in &acked_frames {
@@ -3358,6 +3595,8 @@ impl QuicLink {
                             self.stream_unacked_bytes =
                                 self.stream_unacked_bytes.saturating_sub(frame.len);
                         }
+                        // Flight ended in a requeue, not an ACK: no sample.
+                        self.stream_delivery_sampler.on_packet_dropped(packet_number);
                         stale_frames.extend(frames);
                     }
                 }
@@ -3398,6 +3637,24 @@ impl QuicLink {
         self.stream_rate_acked_bytes = 0;
         self.stream_rate_lost_bytes = 0;
         self.stream_unacked_bytes = 0;
+        self.stream_delivery_sampler = SourceStreamDeliverySampler::new();
+        self.stream_source_exhausted = false;
+    }
+
+    /// Current delivery-clocked in-flight admission cap for the source
+    /// stream (see [`source_stream_bdp_admission_cap`]): honest per-packet
+    /// BtlBw × wall RTprop, falling back to the handshake RTT sample and
+    /// then to the 16 MiB runaway ceiling.
+    fn source_stream_unacked_admission_max(&self) -> u64 {
+        let Some(pacer) = self.stream_rate_controller.as_ref() else {
+            return QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES;
+        };
+        source_stream_bdp_admission_cap(
+            pacer.bottleneck_bytes_per_s(),
+            self.stream_delivery_sampler
+                .rtprop_min_micros()
+                .or(self.path_rtt_estimate_micros),
+        )
     }
 
     fn end_source_stream_rate_control(&mut self) {
@@ -3416,16 +3673,18 @@ impl QuicLink {
         }
     }
 
-    /// Feed the accumulated sent/acked/lost window into the delivery-rate
-    /// follower and apply the resulting pacing rate to the data-plane pacer.
+    /// Feed the delivery sampler's window into the rate follower and apply
+    /// the resulting pacing rate to the data-plane pacer.
     ///
-    /// Windows shorter than 25 ms are accumulated further so the delivery-rate
-    /// estimate is not dominated by ACK batching jitter.
+    /// Windows shorter than 25 ms are accumulated further so filter slots
+    /// aren't burned on sub-RTT slivers; the samples themselves are
+    /// per-packet delivered-counter measurements (MATRIX-226) and carry
+    /// their own honest intervals.
     fn maybe_update_source_stream_rate(&mut self) {
         const STREAM_RATE_MIN_WINDOW_MICROS: u64 = 25_000;
-        let Some(pacer) = self.stream_rate_controller.as_mut() else {
+        if self.stream_rate_controller.is_none() {
             return;
-        };
+        }
         let now_micros =
             u64::try_from(self.stream_rate_epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
         let elapsed = now_micros.saturating_sub(self.stream_rate_window_started_micros);
@@ -3439,21 +3698,30 @@ impl QuicLink {
         let lost = std::mem::take(&mut self.stream_rate_lost_bytes);
         self.stream_rate_sent_bytes = 0;
         self.stream_rate_window_started_micros = now_micros;
-        // The full window elapsed is the delivery divisor — ACK processing is
-        // batchy (windows can span hundreds of ms), and dividing the batch by
-        // its true span yields the true average delivery rate. Loss-stall
-        // distortion is bounded elsewhere: the un-ACKed byte ceiling stops the
-        // sender from running ahead through a gap, the max filter rides out
-        // transient underestimates, and heavy-loss windows adopt the filtered
-        // delivery target rather than probing.
-        let rate = pacer.on_ack_window(acked, lost, elapsed.max(1));
+        let window = self.stream_delivery_sampler.take_window();
+        let Some(pacer) = self.stream_rate_controller.as_mut() else {
+            return;
+        };
+        let rate = pacer.on_delivery_window(window, lost);
+        let cwnd_cap = source_stream_bdp_admission_cap(
+            pacer.bottleneck_bytes_per_s(),
+            self.stream_delivery_sampler
+                .rtprop_min_micros()
+                .or(self.path_rtt_estimate_micros),
+        );
         quic_rqtrace!(
-            "sender: stream_rate_update rate_bytes_per_s={} acked={} lost={} window_micros={} unacked={} path_rtt_micros={}",
+            "sender: stream_rate_update rate_bytes_per_s={} acked={} lost={} window_micros={} unacked={} sample_bps={} sample_app_limited_bps={} rtprop_micros={} cwnd_cap={} path_rtt_micros={}",
             rate,
             acked,
             lost,
             elapsed,
             self.stream_unacked_bytes,
+            window.max_bps.unwrap_or_default(),
+            window.max_app_limited_bps.unwrap_or_default(),
+            self.stream_delivery_sampler
+                .rtprop_min_micros()
+                .unwrap_or_default(),
+            cwnd_cap,
             self.path_rtt_estimate_micros.unwrap_or_default(),
         );
         self.data_plane_pacer.set_pacing_rate_bytes_per_s(rate);
@@ -3755,6 +4023,7 @@ impl QuicLink {
                 for frame in &frames {
                     self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
                 }
+                self.stream_delivery_sampler.on_packet_dropped(packet_number);
                 lost.extend(frames);
             } else {
                 retained.insert(packet_number, frames);
@@ -3768,10 +4037,11 @@ impl QuicLink {
         if self.in_flight_stream_frames.is_empty() {
             return Vec::new();
         }
-        let frames = std::mem::take(&mut self.in_flight_stream_frames)
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
+        let drained = std::mem::take(&mut self.in_flight_stream_frames);
+        for packet_number in drained.keys() {
+            self.stream_delivery_sampler.on_packet_dropped(*packet_number);
+        }
+        let frames = drained.into_values().flatten().collect::<Vec<_>>();
         for frame in &frames {
             self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
         }
@@ -3795,6 +4065,7 @@ impl QuicLink {
                 for frame in &packet_frames {
                     self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
                 }
+                self.stream_delivery_sampler.on_packet_dropped(packet_number);
                 frames.extend(packet_frames);
             } else {
                 retained.insert(packet_number, packet_frames);
@@ -5006,6 +5277,8 @@ fn link_from_handshake(
         stream_rate_acked_bytes: 0,
         stream_rate_lost_bytes: 0,
         stream_unacked_bytes: 0,
+        stream_delivery_sampler: SourceStreamDeliverySampler::new(),
+        stream_source_exhausted: false,
         path_rtt_estimate_micros: driver_path_rtt_micros,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
@@ -6599,7 +6872,7 @@ async fn wait_source_stream_send_admission(
         }
         let credit_remaining = link.conn.stream_send_credit_remaining(stream);
         let credit_ok = min_credit == 0 || credit_remaining >= min_credit;
-        if credit_ok && link.stream_unacked_bytes <= QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES {
+        if credit_ok && link.stream_unacked_bytes <= link.source_stream_unacked_admission_max() {
             return Ok(());
         }
         // Any observable movement counts as progress. A stricter
@@ -6748,6 +7021,9 @@ async fn send_native_source_stream_entries_pumped(
         }
     }
 
+    // Source exhausted: everything from here (tail drain, FIN, proof
+    // exchange) is app-limited for the delivery sampler.
+    link.stream_source_exhausted = true;
     link.conn
         .write_stream_bytes(cx, stream, Bytes::new(), true)?;
     drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
@@ -9510,26 +9786,466 @@ mod tests {
         conn
     }
 
+    fn clean_window(bps: u64) -> DeliveryWindow {
+        DeliveryWindow {
+            max_bps: Some(bps),
+            max_app_limited_bps: None,
+        }
+    }
+
     #[test]
     fn stream_rate_floor_releases_after_sustained_loss() {
         let seed = 80 * 1024 * 1024;
         let mut pacer = SourceStreamRatePacer::new(seed);
         // Low delivery with no loss: the seeded filter + initial floor keep
         // the rate at/above the regime-derived seed.
-        let rate = pacer.on_ack_window(250_000, 0, 100_000);
+        let rate = pacer.on_delivery_window(clean_window(2_500_000), 0);
         assert!(rate >= seed);
         // Sustained retransmit-queued bytes release the floor...
-        let _ = pacer.on_ack_window(250_000, STREAM_RATE_FLOOR_RELEASE_LOST_BYTES + 1, 100_000);
+        let _ = pacer.on_delivery_window(
+            clean_window(2_500_000),
+            STREAM_RATE_FLOOR_RELEASE_LOST_BYTES + 1,
+        );
         // ...and once the seeded samples rotate out of the max-filter the
         // rate drops to the RELEASED floor (seed / 8) — not to the global
         // minimum: recovery-phase delivery reflects only the retransmit
         // trickle, and a to-minimum release measured as a rate collapse.
         let mut last = 0;
         for _ in 0..STREAM_RATE_FILTER_WINDOWS {
-            last = pacer.on_ack_window(250_000, 0, 100_000);
+            last = pacer.on_delivery_window(clean_window(2_500_000), 0);
         }
         assert_eq!(last, seed / STREAM_RATE_FLOOR_RELEASE_DIVISOR);
         assert!(last > 2_500_000 * STREAM_RATE_GAIN_X1000 / 1000);
+    }
+
+    #[test]
+    fn delivery_sampler_ack_clump_reads_true_rate_not_burst() {
+        // The MATRIX-224/225 killer scenario: 1 MB flights sent 40 ms apart
+        // (25 MB/s true rate), ACKs arrive as ONE clump. A window aggregate
+        // reads 3 MB over the last short window (3-4× the link); per-packet
+        // delivered-counter samples read Δdelivered over each flight's full
+        // interval — the true rate.
+        let mut sampler = SourceStreamDeliverySampler::new();
+        sampler.on_packet_sent(1, 0, false);
+        sampler.on_packet_sent(2, 40_000, false);
+        sampler.on_packet_sent(3, 80_000, false);
+        // Clump at t=160 ms: all three flights acked at once, 3 MB delivered.
+        sampler.on_packets_acked(&[1, 2, 3], 3_000_000, 160_000);
+        let window = sampler.take_window();
+        // Best sample: pkt 3 delivered 3 MB over 80 ms = 37.5 MB/s upper
+        // bound; pkt 1 reads 3 MB / 160 ms = 18.75 MB/s. All far below the
+        // 120 MB/s a 25 ms window aggregate would have claimed.
+        let max = window.max_bps.expect("clean samples");
+        assert!(max <= 37_500_000, "clump sample must not spike: {max}");
+        assert!(max >= 18_000_000, "sample must reflect real delivery: {max}");
+        // A second identical round with steady clumped ACKs converges to the
+        // true rate: flights now span a full clump cycle.
+        sampler.on_packet_sent(4, 160_000, false);
+        sampler.on_packet_sent(5, 200_000, false);
+        sampler.on_packet_sent(6, 240_000, false);
+        sampler.on_packets_acked(&[4, 5, 6], 3_000_000, 280_000);
+        let window = sampler.take_window();
+        let max = window.max_bps.expect("clean samples");
+        assert!(max <= 30_000_000, "steady-state clump sample ≈ link: {max}");
+    }
+
+    #[test]
+    fn delivery_sampler_dropped_flights_emit_no_samples() {
+        let mut sampler = SourceStreamDeliverySampler::new();
+        sampler.on_packet_sent(1, 0, false);
+        sampler.on_packet_sent(2, 1_000, false);
+        sampler.on_packet_dropped(1);
+        sampler.on_packets_acked(&[2], 8_192, 55_000);
+        let window = sampler.take_window();
+        assert!(window.max_bps.is_some());
+        // RTprop comes from the acked flight only (54 ms), and the dropped
+        // packet contributed nothing.
+        assert_eq!(sampler.rtprop_min_micros(), Some(54_000));
+    }
+
+    #[test]
+    fn delivery_sampler_rtprop_tracks_minimum_interval() {
+        let mut sampler = SourceStreamDeliverySampler::new();
+        sampler.on_packet_sent(1, 0, false);
+        sampler.on_packets_acked(&[1], 8_192, 60_000);
+        sampler.on_packet_sent(2, 100_000, false);
+        sampler.on_packets_acked(&[2], 8_192, 152_000);
+        sampler.on_packet_sent(3, 200_000, false);
+        sampler.on_packets_acked(&[3], 8_192, 270_000);
+        assert_eq!(sampler.rtprop_min_micros(), Some(52_000));
+    }
+
+    #[test]
+    fn pacer_app_limited_samples_only_raise_the_estimate() {
+        let seed = 4_000_000;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        // Establish a real 24 MB/s plateau.
+        for _ in 0..STREAM_RATE_FILTER_WINDOWS {
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0);
+        }
+        assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
+        // App-limited windows BELOW the estimate must not decay it, even
+        // after enough folds to rotate the whole ring (the MATRIX-204-era
+        // rate-collapse class).
+        for _ in 0..STREAM_RATE_FILTER_WINDOWS + 1 {
+            let _ = pacer.on_delivery_window(
+                DeliveryWindow {
+                    max_bps: None,
+                    max_app_limited_bps: Some(6_000_000),
+                },
+                0,
+            );
+        }
+        assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
+        // An app-limited window ABOVE the estimate raises it (BBR rule).
+        let _ = pacer.on_delivery_window(
+            DeliveryWindow {
+                max_bps: None,
+                max_app_limited_bps: Some(30_000_000),
+            },
+            0,
+        );
+        assert_eq!(pacer.bottleneck_bytes_per_s(), 30_000_000);
+    }
+
+    /// Deterministic delivery-control lab (the uw1cc2 GATE): a simulated
+    /// shaped link driving the real sampler + pacer + BDP cap, asserting the
+    /// exact failure modes that cost three bench cycles (MATRIX-224/225)
+    /// before any matrix run gets to see a new controller change.
+    struct DeliveryLab {
+        link_bps: u64,
+        one_way_micros: u64,
+        queue_cap_bytes: u64,
+        ack_batch_micros: u64,
+        seed_bps: u64,
+        /// Drop every Nth packet en route (deterministic "random" loss).
+        drop_every: Option<u64>,
+        /// Application produces data at only this rate (sender app-limited).
+        app_rate_bps: Option<u64>,
+        /// (at_micros, new_link_bps): genuine capacity change mid-run.
+        rate_change: Option<(u64, u64)>,
+        sim_micros: u64,
+    }
+
+    struct DeliveryLabOutcome {
+        bottleneck_bps: u64,
+        rtprop_micros: Option<u64>,
+        cwnd_cap: u64,
+        /// (t, folded clean sample, folded app-limited sample, rate, cwnd,
+        /// unacked) per fold — the debugging trajectory.
+        folds: Vec<(u64, u64, u64, u64, u64, u64)>,
+    }
+
+    fn run_delivery_lab(lab: &DeliveryLab) -> DeliveryLabOutcome {
+        const PKT: u64 = 8_192;
+        const LOSS_DETECT_MICROS: u64 = 250_000;
+        let mut pacer = SourceStreamRatePacer::new(lab.seed_bps);
+        let mut sampler = SourceStreamDeliverySampler::new();
+        // Event calendar: time → acked (pns, bytes) and dropped pns.
+        let mut acks: BTreeMap<u64, Vec<(u64, u64)>> = BTreeMap::new();
+        let mut drops: BTreeMap<u64, Vec<(u64, u64)>> = BTreeMap::new();
+        let mut now;
+        let mut next_send = 0u64;
+        let mut app_ready_at = 0u64;
+        let mut unacked = 0u64;
+        let mut lost_window = 0u64;
+        let mut acked_window = 0u64;
+        let mut window_start = 0u64;
+        let mut queue_free_at = 0u64;
+        let mut pn = 0u64;
+        let mut link_bps = lab.link_bps;
+        let mut folds: Vec<(u64, u64, u64, u64, u64, u64)> = Vec::new();
+        // The handshake RTT upper bound seeds RTprop until real samples land.
+        let handshake_rtt = lab.one_way_micros * 2 + 2_000;
+        loop {
+            let next_ack = acks.keys().next().copied().unwrap_or(u64::MAX);
+            let next_drop = drops.keys().next().copied().unwrap_or(u64::MAX);
+            let next_event = next_ack.min(next_drop);
+            let cwnd = source_stream_bdp_admission_cap(
+                pacer.bottleneck_bytes_per_s(),
+                sampler.rtprop_min_micros().or(Some(handshake_rtt)),
+            );
+            let send_due = next_send.max(app_ready_at);
+            let can_send = unacked + PKT <= cwnd;
+            let t_next = if can_send {
+                send_due.min(next_event)
+            } else {
+                next_event
+            };
+            if t_next == u64::MAX || t_next >= lab.sim_micros {
+                break;
+            }
+            now = t_next;
+            if let Some((at, new_bps)) = lab.rate_change {
+                if now >= at {
+                    link_bps = new_bps;
+                }
+            }
+            // Process one due ACK batch (all acks sharing this timestamp
+            // fold as one clump — the batching model).
+            if next_ack == now {
+                let batch = acks.remove(&now).unwrap_or_default();
+                let pns: Vec<u64> = batch.iter().map(|(p, _)| *p).collect();
+                let bytes: u64 = batch.iter().map(|(_, b)| *b).sum();
+                sampler.on_packets_acked(&pns, bytes, now);
+                unacked = unacked.saturating_sub(bytes);
+                acked_window = acked_window.saturating_add(bytes);
+            }
+            if next_drop == now {
+                for (dropped_pn, bytes) in drops.remove(&now).unwrap_or_default() {
+                    sampler.on_packet_dropped(dropped_pn);
+                    unacked = unacked.saturating_sub(bytes);
+                    lost_window = lost_window.saturating_add(bytes);
+                }
+            }
+            if now.saturating_sub(window_start) >= 25_000 && (acked_window > 0 || lost_window > 0)
+            {
+                let window = sampler.take_window();
+                let rate = pacer.on_delivery_window(window, lost_window);
+                folds.push((
+                    now,
+                    window.max_bps.unwrap_or_default(),
+                    window.max_app_limited_bps.unwrap_or_default(),
+                    rate,
+                    source_stream_bdp_admission_cap(
+                        pacer.bottleneck_bytes_per_s(),
+                        sampler.rtprop_min_micros().or(Some(handshake_rtt)),
+                    ),
+                    unacked,
+                ));
+                acked_window = 0;
+                lost_window = 0;
+                window_start = now;
+            }
+            // Send one paced packet if due and admitted.
+            if can_send && now >= send_due && send_due <= next_event {
+                pn += 1;
+                let app_limited = lab.app_rate_bps.is_some() && app_ready_at > next_send;
+                let backlog_bytes = queue_free_at
+                    .saturating_sub(now)
+                    .saturating_mul(link_bps)
+                    / 1_000_000;
+                let random_drop = lab.drop_every.is_some_and(|n| pn.is_multiple_of(n));
+                if random_drop || backlog_bytes + PKT > lab.queue_cap_bytes {
+                    drops
+                        .entry(now + LOSS_DETECT_MICROS)
+                        .or_default()
+                        .push((pn, PKT));
+                } else {
+                    let service_start = queue_free_at.max(now);
+                    let service_end = service_start + PKT.saturating_mul(1_000_000) / link_bps;
+                    queue_free_at = service_end;
+                    let ack_arrival = service_end + lab.one_way_micros * 2;
+                    let process_at =
+                        ack_arrival.next_multiple_of(lab.ack_batch_micros.max(1));
+                    acks.entry(process_at).or_default().push((pn, PKT));
+                }
+                sampler.on_packet_sent(pn, now, app_limited);
+                unacked += PKT;
+                next_send = now + PKT.saturating_mul(1_000_000) / pacer.rate_bytes_per_s.max(1);
+                if let Some(app_rate) = lab.app_rate_bps {
+                    app_ready_at =
+                        app_ready_at.max(now) + PKT.saturating_mul(1_000_000) / app_rate.max(1);
+                }
+            }
+        }
+        DeliveryLabOutcome {
+            bottleneck_bps: pacer.bottleneck_bytes_per_s(),
+            rtprop_micros: sampler.rtprop_min_micros(),
+            cwnd_cap: source_stream_bdp_admission_cap(
+                pacer.bottleneck_bytes_per_s(),
+                sampler.rtprop_min_micros().or(Some(handshake_rtt)),
+            ),
+            folds,
+        }
+    }
+
+    fn good_regime_lab() -> DeliveryLab {
+        // The 500M/good cell: 200 mbit (25 MB/s), 25 ms each way, ~1.4 MB
+        // shaper queue, 25 ms ACK batching.
+        DeliveryLab {
+            link_bps: 25_000_000,
+            one_way_micros: 25_000,
+            queue_cap_bytes: 1_400_000,
+            ack_batch_micros: 25_000,
+            seed_bps: 12_000_000,
+            drop_every: None,
+            app_rate_bps: None,
+            rate_change: None,
+            sim_micros: 5_000_000,
+        }
+    }
+
+    /// What the constant-gain pacer + honest sampler ACTUALLY does on a
+    /// shaped link (measured in this lab, understood before any bench): the
+    /// 1.25× probe overshoots, the queue overflows, dropped flights sit as
+    /// phantom un-ACKed until loss detection (~250 ms), the cwnd pins, and
+    /// achieved throughput — honestly sampled — decays until the queue
+    /// drains and the climb repeats. The estimate therefore OSCILLATES with
+    /// peaks at the link rate; steady convergence needs a gain-cycling
+    /// (drain-phase) pacer, which is out of scope for the sampler gate. The
+    /// gate asserts the sampler's actual obligations: the climb REACHES the
+    /// link, no sample ever spikes above it (the MATRIX-224/225 collapse
+    /// class), and the estimate never collapses toward zero.
+    fn assert_honest_estimate(outcome: &DeliveryLabOutcome, link_bps: u64) {
+        let peak = outcome
+            .folds
+            .iter()
+            .map(|(_, sample, _, _, _, _)| *sample)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            peak >= link_bps * 8 / 10,
+            "climb must reach the link rate: peak {peak} vs link {link_bps}"
+        );
+        let spike = outcome
+            .folds
+            .iter()
+            .map(|(_, sample, app, _, _, _)| (*sample).max(*app))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            spike <= link_bps * 11 / 10,
+            "no sample may exceed the link (the M224/225 spike class): {spike}"
+        );
+        assert!(
+            outcome.bottleneck_bps >= link_bps * 4 / 10,
+            "estimate must not collapse: {} — folds tail: {:?}",
+            outcome.bottleneck_bps,
+            &outcome.folds[outcome.folds.len().saturating_sub(8)..]
+        );
+    }
+
+    #[test]
+    fn matrix226_delivery_lab_climbs_to_link_without_spiking() {
+        let outcome = run_delivery_lab(&good_regime_lab());
+        assert_honest_estimate(&outcome, 25_000_000);
+        let rtprop = outcome.rtprop_micros.expect("samples must land");
+        assert!(
+            (50_000..=70_000).contains(&rtprop),
+            "RTprop must track the 50 ms path: {rtprop}"
+        );
+        assert!(
+            (2_097_152..=3_600_000).contains(&outcome.cwnd_cap),
+            "cwnd ≈ 2×BDP band: {}",
+            outcome.cwnd_cap
+        );
+    }
+
+    #[test]
+    fn matrix226_delivery_lab_severe_ack_clumping_cannot_spike_the_filter() {
+        // The MATRIX-224 killer: 200 ms ACK clumps on this link read
+        // 84-88 MB/s under window aggregates. With a 2 MiB in-flight floor
+        // and 200 ms feedback, the TRUE throughput ceiling is
+        // cwnd/batch ≈ 10.5 MB/s — the honest estimator must report that
+        // ceiling, and above all must not spike past the link.
+        let lab = DeliveryLab {
+            ack_batch_micros: 200_000,
+            ..good_regime_lab()
+        };
+        let outcome = run_delivery_lab(&lab);
+        let spike = outcome
+            .folds
+            .iter()
+            .map(|(_, sample, app, _, _, _)| (*sample).max(*app))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            spike <= 27_500_000,
+            "clumped ACKs must never spike the estimate (M224 class): {spike}"
+        );
+        assert!(
+            (8_000_000..=12_500_000).contains(&outcome.bottleneck_bps),
+            "estimate must honestly read the feedback-limited ceiling \
+             (cwnd 2 MiB / 200 ms ≈ 10.5 MB/s): {}",
+            outcome.bottleneck_bps
+        );
+    }
+
+    #[test]
+    fn matrix226_delivery_lab_overseeded_rate_reads_honest_link() {
+        // The good-regime mis-seed (96 MiB/s seed on a 25 MB/s link): the
+        // ESTIMATE must read the true link even while the seeded floor keeps
+        // the offered rate high (floor release is the pacer's separate job).
+        let lab = DeliveryLab {
+            seed_bps: 100_663_296,
+            ..good_regime_lab()
+        };
+        let outcome = run_delivery_lab(&lab);
+        assert!(
+            outcome.bottleneck_bps <= 27_500_000,
+            "estimate must not follow the mis-seed: {}",
+            outcome.bottleneck_bps
+        );
+    }
+
+    #[test]
+    fn matrix226_delivery_lab_app_limited_sender_keeps_its_estimate() {
+        // Converge at full rate first, then the app throttles to ~8 MB/s:
+        // app-limited samples may not decay the capacity estimate (the
+        // MATRIX-204-era self-starvation spiral).
+        let lab = DeliveryLab {
+            seed_bps: 24_000_000,
+            app_rate_bps: Some(8_000_000),
+            ..good_regime_lab()
+        };
+        let outcome = run_delivery_lab(&lab);
+        assert!(
+            outcome.bottleneck_bps >= 20_000_000,
+            "app-limited flights must not define capacity downward: {}",
+            outcome.bottleneck_bps
+        );
+    }
+
+    #[test]
+    fn matrix226_delivery_lab_random_loss_does_not_collapse_estimate() {
+        // 0.2% deterministic loss: the anti-NewReno property (MATRIX-202) —
+        // loss must not shrink BtlBw/RTprop while delivery holds.
+        let lab = DeliveryLab {
+            drop_every: Some(500),
+            ..good_regime_lab()
+        };
+        let outcome = run_delivery_lab(&lab);
+        assert_honest_estimate(&outcome, 25_000_000);
+        let rtprop = outcome.rtprop_micros.expect("samples");
+        assert!((50_000..=70_000).contains(&rtprop), "rtprop stable: {rtprop}");
+    }
+
+    #[test]
+    fn matrix226_delivery_lab_genuine_capacity_drop_decays_estimate() {
+        // The link genuinely halves mid-run: the filter must follow DOWN
+        // within its window (loss-blind but delivery-honest).
+        let lab = DeliveryLab {
+            rate_change: Some((2_500_000, 12_500_000)),
+            sim_micros: 8_000_000,
+            ..good_regime_lab()
+        };
+        let outcome = run_delivery_lab(&lab);
+        assert!(
+            outcome.bottleneck_bps <= 15_500_000,
+            "estimate must decay to the new 12.5 MB/s capacity: {}",
+            outcome.bottleneck_bps
+        );
+    }
+
+    #[test]
+    fn pacer_empty_windows_leave_filter_untouched() {
+        let seed = 4_000_000;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        for _ in 0..STREAM_RATE_FILTER_WINDOWS {
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0);
+        }
+        // A stall (loss folded, no completed flights) must not write
+        // near-zero slots into the ring.
+        let rate = pacer.on_delivery_window(
+            DeliveryWindow {
+                max_bps: None,
+                max_app_limited_bps: None,
+            },
+            256 * 1024,
+        );
+        assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
+        assert_eq!(rate, 30_000_000);
     }
 
 
