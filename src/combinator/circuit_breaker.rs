@@ -819,15 +819,26 @@ impl CircuitBreaker {
         }
     }
 
-    /// Record a failed call.
-    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
+    /// Record a failed call, classifying `error` through the configured failure
+    /// predicate to decide whether it trips the breaker.
     pub fn record_failure(&self, permit: Permit, error: &str, now: Time) {
-        let now_millis = now.as_millis();
-
         // Check if this error counts as a failure.
         // For AllErrors predicates, skip the string inspection entirely.
         let counts_as_failure = self.policy.failure_predicate.is_all_errors()
             || self.policy.failure_predicate.is_failure(error);
+        self.record_failure_classified(permit, counts_as_failure, now);
+    }
+
+    /// Record a failure whose classification has already been decided.
+    ///
+    /// A panic unwinding out of a guarded operation is an *unconditional* hard
+    /// failure (`counts_as_failure = true`): the failure predicate classifies
+    /// domain error *values*, not panics, so routing a `"Panic"` sentinel string
+    /// through it would let a selective `ByType`/`Custom` predicate silently
+    /// swallow a panicking dependency and never open the breaker.
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
+    fn record_failure_classified(&self, permit: Permit, counts_as_failure: bool, now: Time) {
+        let now_millis = now.as_millis();
 
         if !counts_as_failure {
             self.total_ignored_errors.fetch_add(1, Ordering::Relaxed);
@@ -999,8 +1010,12 @@ impl CircuitBreaker {
         impl Drop for CallGuard<'_> {
             fn drop(&mut self) {
                 if let Some(permit) = self.permit.take() {
-                    // Panic occurred or early return without explicit success/failure
-                    self.cb.record_failure(permit, "Panic", self.now);
+                    // A panic unwound out of the operation (or the call returned
+                    // without recording an explicit outcome). A panic is an
+                    // unconditional hard failure — it must trip the breaker
+                    // regardless of the failure predicate, which only classifies
+                    // domain error values, not panics.
+                    self.cb.record_failure_classified(permit, true, self.now);
                 }
             }
         }
@@ -2089,6 +2104,39 @@ mod tests {
             ),
             "Expected reopened circuit to permit probe or briefly report Open"
         );
+    }
+
+    #[test]
+    fn panic_trips_breaker_regardless_of_failure_predicate() {
+        // Regression: a panic unwinding out of `call` is an unconditional hard
+        // failure. The failure predicate classifies domain error *values*, not
+        // panics — so panics must trip the breaker even when a selective
+        // predicate would not match the internal "Panic" sentinel. Previously a
+        // panicking dependency was classified as an ignored error and never
+        // opened the breaker, leaving it admitting every call.
+        let cb = std::sync::Arc::new(CircuitBreaker::new(CircuitBreakerPolicy {
+            failure_threshold: 3,
+            failure_predicate: FailurePredicate::ByType(|e| e.contains("503")),
+            ..Default::default()
+        }));
+        let now = Time::from_millis(0);
+
+        for _ in 0..3 {
+            let cb_clone = cb.clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _: Result<(), CircuitBreakerError<String>> =
+                    cb_clone.call::<(), String, _>(now, || panic!("bug"));
+            }));
+        }
+
+        assert!(
+            matches!(cb.state(), State::Open { .. }),
+            "panics must trip the breaker even under a selective failure predicate, got {:?}",
+            cb.state()
+        );
+        // The panics were counted as real failures, never routed to the
+        // ignored-error branch.
+        assert_eq!(cb.metrics().total_ignored_errors, 0);
     }
 
     #[test]
