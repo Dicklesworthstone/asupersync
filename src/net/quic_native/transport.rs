@@ -132,6 +132,12 @@ impl RttEstimator {
         }
     }
 
+    /// Minimum RTT observed over the connection's lifetime (RTprop).
+    #[must_use]
+    pub fn min_rtt_micros(&self) -> Option<u64> {
+        self.min_rtt_micros
+    }
+
     /// Current smoothed RTT.
     #[must_use]
     pub fn smoothed_rtt_micros(&self) -> Option<u64> {

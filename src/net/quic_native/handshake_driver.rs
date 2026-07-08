@@ -53,7 +53,7 @@ use crate::net::atp::protocol::varint::VarInt;
 use crate::net::quic_core::{ConnectionId, LongHeader, LongPacketType, PacketHeader};
 use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint};
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Handshake PTO while driving the QUIC/TLS handshake over UDP. A timeout
 /// retransmits the last handshake flight instead of aborting immediately.
@@ -273,6 +273,14 @@ pub struct QuicHandshakeDriver {
     /// already-complete client drops those long-header packets — a mutual
     /// wedge until both idle timeouts (br-asupersync-jmri58).
     final_flight: Vec<OutgoingPacket>,
+    /// Wall-clock path round-trip measured during the handshake (client side:
+    /// flight sent → first response batch received; re-stamped on handshake
+    /// retransmits, so loss inflates rather than deflates the sample). The
+    /// data plane's transport RTT estimator is fed by the app-data path's
+    /// synthetic clock and reads nonsense (~1 ms on a 50 ms path, MATRIX-225),
+    /// so consumers needing a real RTprop — the source-stream BDP admission
+    /// cap — take this instead.
+    pub path_rtt_estimate_micros: Option<u64>,
 }
 
 fn level_index(level: HandshakeLevel) -> usize {
@@ -342,6 +350,7 @@ impl QuicHandshakeDriver {
             crypto_send_offset: [0; 3],
             handshake_recv_largest_packet_number: [None, None],
             final_flight: Vec::new(),
+            path_rtt_estimate_micros: None,
         }
     }
 
@@ -679,6 +688,11 @@ pub async fn client_handshake_over_udp(
             &mut packet_number,
         )
         .await?;
+    // Wall-clock path RTT: first flight out → first response batch in.
+    // Re-stamped on every retransmit so a lost flight inflates (never
+    // deflates) the sample; consumers min-fold or treat it as an upper
+    // bound, which is the safe direction for an in-flight cap.
+    let mut flight_sent_at = Instant::now();
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
@@ -697,11 +711,16 @@ pub async fn client_handshake_over_udp(
                 Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
                 Err(_) => {
                     if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
+                        flight_sent_at = Instant::now();
                         continue;
                     }
                     return Err(handshake_failure("client_handshake_recv_timeout"));
                 }
             };
+        if driver.path_rtt_estimate_micros.is_none() && !received.is_empty() {
+            driver.path_rtt_estimate_micros =
+                Some(u64::try_from(flight_sent_at.elapsed().as_micros()).unwrap_or(u64::MAX));
+        }
         // Pump after EACH packet: e.g. after the server's Initial (ServerHello)
         // the client must pump to install Handshake keys BEFORE it can unprotect
         // the server's Handshake-level flight that may arrive in the same batch.

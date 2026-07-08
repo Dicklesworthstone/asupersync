@@ -348,6 +348,21 @@ const QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// timed out the 500M A/B). New data admission waits on the ACK clock past
 /// this; retransmits are unaffected.
 const QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES: u64 = 16 * 1024 * 1024;
+// NOTE (uw1cc2 / MATRIX-225, 2026-07-08): a delivery-clocked BDP in-flight
+// cap here (`cwnd = 2 × BtlBw × RTprop`, floor 2 MiB, ceiling 16 MiB) was
+// built and REFUTED twice on 500M/good — (a) fed by the transport RTT
+// estimator it floored (that estimator runs on this path's synthetic
+// app-data clock and read ~1 ms on a 50 ms link) and ACK-clock-stalled the
+// transfer (95 s + one failed rep); (b) fed by a wall-clock handshake RTT
+// (measured 2× loose: ~101 ms) plus an offered-rate clamp on delivery
+// samples, the clamp MANUFACTURED capacity evidence (a saturated window
+// reads delivery=offered, validating the rate → 1.25×/window ratchet) and
+// the loosened cap collapsed the cell (155 s, 1101 MB re-sent). A real cap
+// needs BBR-style per-packet delivered-counter sampling on wall clocks
+// (in_flight_stream_frames is already pn-keyed — add (sent_at, delivered
+// snapshot) per entry), validated in a deterministic lab gate BEFORE any
+// matrix run. Until then this constant plus the consumption-clocked flow
+// window (streams.rs) are the path's only in-flight bounds — by design.
 /// Bounded receive window for the paced source stream, negotiated in the
 /// HelloAck: the receiver advertises `read_offset + window` via
 /// MAX_STREAM_DATA and a compliant sender installs the window as its initial
@@ -1706,6 +1721,13 @@ impl SourceStreamRatePacer {
     /// measured to interact badly with retransmit framing on shaped links,
     /// so loss only ever releases the floor, never modulates the gain).
     fn on_ack_window(&mut self, acked_bytes: u64, lost_bytes: u64, elapsed_micros: u64) -> u64 {
+        // NOTE (MATRIX-225): delivery samples here are ACK-window aggregates
+        // and CAN read far above the link under queue-drain ACK clumps
+        // (measured 84-88 MB/s on a 25 MB/s path). Clamping the sample at the
+        // offered rate was tried and REFUTED — a saturated window then reads
+        // delivery=offered, which validates and compounds any over-rate at
+        // 1.25×/window. An honest delivery rate needs per-packet wall-clock
+        // delivered-counter sampling (uw1cc2); do not re-clamp here.
         let delivery = acked_bytes
             .saturating_mul(1_000_000)
             .checked_div(elapsed_micros.max(1))
@@ -2097,6 +2119,12 @@ pub struct QuicLink {
     /// data admission so a mis-estimated pacing rate can never run the
     /// sender hundreds of MB ahead of the receiver through a loss gap.
     stream_unacked_bytes: u64,
+    /// Wall-clock path RTT measured during the QUIC handshake (client side;
+    /// `None` on the accept side or if no sample landed). The transport RTT
+    /// estimator is fed by this path's synthetic app-data clock and reads
+    /// ~1 ms on a 50 ms path (MATRIX-225), so the BDP admission cap uses
+    /// this handshake sample as its RTprop instead.
+    path_rtt_estimate_micros: Option<u64>,
     sender_handoff: QuicSenderHandoffStats,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
@@ -3420,12 +3448,13 @@ impl QuicLink {
         // delivery target rather than probing.
         let rate = pacer.on_ack_window(acked, lost, elapsed.max(1));
         quic_rqtrace!(
-            "sender: stream_rate_update rate_bytes_per_s={} acked={} lost={} window_micros={} unacked={}",
+            "sender: stream_rate_update rate_bytes_per_s={} acked={} lost={} window_micros={} unacked={} path_rtt_micros={}",
             rate,
             acked,
             lost,
             elapsed,
             self.stream_unacked_bytes,
+            self.path_rtt_estimate_micros.unwrap_or_default(),
         );
         self.data_plane_pacer.set_pacing_rate_bytes_per_s(rate);
     }
@@ -4941,6 +4970,7 @@ fn link_from_handshake(
     }
 
     let final_handshake_flight = driver.take_final_flight();
+    let driver_path_rtt_micros = driver.path_rtt_estimate_micros;
     let provider: RustlsQuicCryptoProvider = driver.into_provider();
     let protection =
         AtpPacketProtection::from_provider(Box::new(provider), QuicLink::protection_config());
@@ -4976,6 +5006,7 @@ fn link_from_handshake(
         stream_rate_acked_bytes: 0,
         stream_rate_lost_bytes: 0,
         stream_unacked_bytes: 0,
+        path_rtt_estimate_micros: driver_path_rtt_micros,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
         pending_control_frames: VecDeque::new(),
@@ -9500,6 +9531,7 @@ mod tests {
         assert_eq!(last, seed / STREAM_RATE_FLOOR_RELEASE_DIVISOR);
         assert!(last > 2_500_000 * STREAM_RATE_GAIN_X1000 / 1000);
     }
+
 
     #[test]
     fn native_feedback_round_budget_allows_first_pending_round() {
