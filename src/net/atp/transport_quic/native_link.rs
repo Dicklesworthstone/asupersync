@@ -1666,6 +1666,16 @@ struct SourceStreamRatePacer {
     total_lost_bytes: u64,
     delivery_samples: [u64; STREAM_RATE_FILTER_WINDOWS],
     next_sample: usize,
+    /// Index into [`STREAM_RATE_PROBE_CYCLE_GAINS_X1000`] — the PROBE_BW
+    /// gain cycle (MATRIX-227). The 0.75× drain phase is the EXPLICIT
+    /// replacement for what the consumption-clocked flow-window stall was
+    /// doing implicitly (the M224/225/226 drain-phase law): a constant
+    /// 1.25× probe over-offers continuously and, with nothing draining the
+    /// shaper queue, re-sends most of the payload.
+    cycle_phase: usize,
+    /// Wall micros when the current gain phase started (caller-supplied
+    /// clock, same domain as the delivery sampler).
+    phase_started_micros: u64,
 }
 
 /// Recent-delivery max-filter depth.
@@ -1689,6 +1699,24 @@ const STREAM_RATE_MAX_BYTES_PER_S: u64 = 512 * 1024 * 1024;
 /// is pipeline efficiency, not probe headroom; raise burst amortization,
 /// not this constant.
 const STREAM_RATE_GAIN_X1000: u64 = 1250;
+/// PROBE_BW pacing-gain cycle (MATRIX-227, BBR §4.3.4.3): one probe phase
+/// discovers headroom, one drain phase empties the queue the probe built,
+/// six cruise phases sit at the estimate. Each phase lasts ~one RTprop.
+/// Average gain 1.0 keeps the shaper queue empty at steady state — the
+/// drain phase is the load-bearing element (see the drain-phase law notes
+/// on `advance_bounded_recv_windows` and `SourceStreamRatePacer`).
+const STREAM_RATE_PROBE_CYCLE_GAINS_X1000: [u64; 8] = [
+    STREAM_RATE_GAIN_X1000,
+    750,
+    1000,
+    1000,
+    1000,
+    1000,
+    1000,
+    1000,
+];
+/// Minimum gain-phase length when RTprop is unknown or implausibly small.
+const STREAM_RATE_PHASE_MIN_MICROS: u64 = 25_000;
 // NOTE (oh6gm2 ph3c refutation, 2026-07-07): a BBR-STARTUP-style schedule —
 // gain 1.5 while the bottleneck estimate grows past the seed, permanent
 // settle to 1.25 after 3 flat windows — hit its 50M/perfect target exactly
@@ -1736,6 +1764,8 @@ impl SourceStreamRatePacer {
             total_lost_bytes: 0,
             delivery_samples: [rate; STREAM_RATE_FILTER_WINDOWS],
             next_sample: 0,
+            cycle_phase: 0,
+            phase_started_micros: 0,
         }
     }
 
@@ -1752,7 +1782,13 @@ impl SourceStreamRatePacer {
     /// loss-reactive variants — settle gains, filter resets — were all
     /// measured to interact badly with retransmit framing on shaped links,
     /// so loss only ever releases the floor, never modulates the gain).
-    fn on_delivery_window(&mut self, window: DeliveryWindow, lost_bytes: u64) -> u64 {
+    fn on_delivery_window(
+        &mut self,
+        window: DeliveryWindow,
+        lost_bytes: u64,
+        now_micros: u64,
+        rtprop_micros: Option<u64>,
+    ) -> u64 {
         // Samples come from the per-packet delivered-counter sampler
         // (MATRIX-226) — honest by construction. The refuted alternatives
         // are documented on SourceStreamDeliverySampler: ACK-window
@@ -1780,6 +1816,17 @@ impl SourceStreamRatePacer {
         }
         let bottleneck = self.delivery_samples.iter().copied().max().unwrap_or(0);
         self.total_lost_bytes = self.total_lost_bytes.saturating_add(lost_bytes);
+        // PROBE_BW gain cycle (MATRIX-227): advance one phase per RTprop.
+        // Phases only tick at folds — a stalled link freezes the cycle,
+        // which is correct (no traffic to shape).
+        let phase_len = rtprop_micros
+            .unwrap_or(STREAM_RATE_PHASE_MIN_MICROS)
+            .max(STREAM_RATE_PHASE_MIN_MICROS);
+        if now_micros.saturating_sub(self.phase_started_micros) >= phase_len {
+            self.cycle_phase = (self.cycle_phase + 1) % STREAM_RATE_PROBE_CYCLE_GAINS_X1000.len();
+            self.phase_started_micros = now_micros;
+        }
+        let gain_x1000 = STREAM_RATE_PROBE_CYCLE_GAINS_X1000[self.cycle_phase];
         let floor = if self.total_lost_bytes > STREAM_RATE_FLOOR_RELEASE_LOST_BYTES {
             (self.initial_rate_bytes_per_s / STREAM_RATE_FLOOR_RELEASE_DIVISOR)
                 .max(STREAM_RATE_MIN_BYTES_PER_S)
@@ -1787,12 +1834,18 @@ impl SourceStreamRatePacer {
             self.initial_rate_bytes_per_s
         };
         self.rate_bytes_per_s = bottleneck
-            .saturating_mul(STREAM_RATE_GAIN_X1000)
+            .saturating_mul(gain_x1000)
             .checked_div(1000)
             .unwrap_or(bottleneck)
             .max(floor)
             .clamp(STREAM_RATE_MIN_BYTES_PER_S, STREAM_RATE_MAX_BYTES_PER_S);
         self.rate_bytes_per_s
+    }
+
+    /// Current pacing-gain phase (index into the PROBE_BW cycle) — trace
+    /// observability for the wire engagement check.
+    fn cycle_phase(&self) -> usize {
+        self.cycle_phase
     }
 
     /// Current bottleneck-bandwidth estimate (the raw max-filtered delivery
@@ -3699,18 +3752,17 @@ impl QuicLink {
         self.stream_rate_sent_bytes = 0;
         self.stream_rate_window_started_micros = now_micros;
         let window = self.stream_delivery_sampler.take_window();
+        let rtprop = self
+            .stream_delivery_sampler
+            .rtprop_min_micros()
+            .or(self.path_rtt_estimate_micros);
         let Some(pacer) = self.stream_rate_controller.as_mut() else {
             return;
         };
-        let rate = pacer.on_delivery_window(window, lost);
-        let cwnd_cap = source_stream_bdp_admission_cap(
-            pacer.bottleneck_bytes_per_s(),
-            self.stream_delivery_sampler
-                .rtprop_min_micros()
-                .or(self.path_rtt_estimate_micros),
-        );
+        let rate = pacer.on_delivery_window(window, lost, now_micros, rtprop);
+        let cwnd_cap = source_stream_bdp_admission_cap(pacer.bottleneck_bytes_per_s(), rtprop);
         quic_rqtrace!(
-            "sender: stream_rate_update rate_bytes_per_s={} acked={} lost={} window_micros={} unacked={} sample_bps={} sample_app_limited_bps={} rtprop_micros={} cwnd_cap={} path_rtt_micros={}",
+            "sender: stream_rate_update rate_bytes_per_s={} acked={} lost={} window_micros={} unacked={} sample_bps={} sample_app_limited_bps={} rtprop_micros={} cwnd_cap={} cycle_phase={} path_rtt_micros={}",
             rate,
             acked,
             lost,
@@ -3718,10 +3770,9 @@ impl QuicLink {
             self.stream_unacked_bytes,
             window.max_bps.unwrap_or_default(),
             window.max_app_limited_bps.unwrap_or_default(),
-            self.stream_delivery_sampler
-                .rtprop_min_micros()
-                .unwrap_or_default(),
+            rtprop.unwrap_or_default(),
             cwnd_cap,
+            pacer.cycle_phase(),
             self.path_rtt_estimate_micros.unwrap_or_default(),
         );
         self.data_plane_pacer.set_pacing_rate_bytes_per_s(rate);
@@ -9799,12 +9850,14 @@ mod tests {
         let mut pacer = SourceStreamRatePacer::new(seed);
         // Low delivery with no loss: the seeded filter + initial floor keep
         // the rate at/above the regime-derived seed.
-        let rate = pacer.on_delivery_window(clean_window(2_500_000), 0);
+        let rate = pacer.on_delivery_window(clean_window(2_500_000), 0, 0, None);
         assert!(rate >= seed);
         // Sustained retransmit-queued bytes release the floor...
         let _ = pacer.on_delivery_window(
             clean_window(2_500_000),
             STREAM_RATE_FLOOR_RELEASE_LOST_BYTES + 1,
+            0,
+            None,
         );
         // ...and once the seeded samples rotate out of the max-filter the
         // rate drops to the RELEASED floor (seed / 8) — not to the global
@@ -9812,7 +9865,7 @@ mod tests {
         // trickle, and a to-minimum release measured as a rate collapse.
         let mut last = 0;
         for _ in 0..STREAM_RATE_FILTER_WINDOWS {
-            last = pacer.on_delivery_window(clean_window(2_500_000), 0);
+            last = pacer.on_delivery_window(clean_window(2_500_000), 0, 0, None);
         }
         assert_eq!(last, seed / STREAM_RATE_FLOOR_RELEASE_DIVISOR);
         assert!(last > 2_500_000 * STREAM_RATE_GAIN_X1000 / 1000);
@@ -9881,7 +9934,7 @@ mod tests {
         let mut pacer = SourceStreamRatePacer::new(seed);
         // Establish a real 24 MB/s plateau.
         for _ in 0..STREAM_RATE_FILTER_WINDOWS {
-            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0);
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0, 0, None);
         }
         assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
         // App-limited windows BELOW the estimate must not decay it, even
@@ -9894,6 +9947,8 @@ mod tests {
                     max_app_limited_bps: Some(6_000_000),
                 },
                 0,
+            0,
+            None,
             );
         }
         assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
@@ -9904,6 +9959,8 @@ mod tests {
                 max_app_limited_bps: Some(30_000_000),
             },
             0,
+            0,
+            None,
         );
         assert_eq!(pacer.bottleneck_bytes_per_s(), 30_000_000);
     }
@@ -9934,6 +9991,13 @@ mod tests {
         /// (t, folded clean sample, folded app-limited sample, rate, cwnd,
         /// unacked) per fold — the debugging trajectory.
         folds: Vec<(u64, u64, u64, u64, u64, u64)>,
+        /// Bytes delivered during the final 2 sim-seconds: the sustained-
+        /// utilization measure the gain-cycling gate asserts on.
+        late_delivered_bytes: u64,
+        /// Packets dropped (queue overflow or injected loss) during the
+        /// final 2 sim-seconds: steady-state drops must be ~zero for a
+        /// converged non-oscillating controller on a clean link.
+        late_drops: u64,
     }
 
     fn run_delivery_lab(lab: &DeliveryLab) -> DeliveryLabOutcome {
@@ -9955,6 +10019,9 @@ mod tests {
         let mut pn = 0u64;
         let mut link_bps = lab.link_bps;
         let mut folds: Vec<(u64, u64, u64, u64, u64, u64)> = Vec::new();
+        let late_cutoff = lab.sim_micros.saturating_sub(2_000_000);
+        let mut late_delivered = 0u64;
+        let mut late_drops = 0u64;
         // The handshake RTT upper bound seeds RTprop until real samples land.
         let handshake_rtt = lab.one_way_micros * 2 + 2_000;
         loop {
@@ -9990,18 +10057,29 @@ mod tests {
                 sampler.on_packets_acked(&pns, bytes, now);
                 unacked = unacked.saturating_sub(bytes);
                 acked_window = acked_window.saturating_add(bytes);
+                if now >= late_cutoff {
+                    late_delivered = late_delivered.saturating_add(bytes);
+                }
             }
             if next_drop == now {
                 for (dropped_pn, bytes) in drops.remove(&now).unwrap_or_default() {
                     sampler.on_packet_dropped(dropped_pn);
                     unacked = unacked.saturating_sub(bytes);
                     lost_window = lost_window.saturating_add(bytes);
+                    if now >= late_cutoff {
+                        late_drops = late_drops.saturating_add(1);
+                    }
                 }
             }
             if now.saturating_sub(window_start) >= 25_000 && (acked_window > 0 || lost_window > 0)
             {
                 let window = sampler.take_window();
-                let rate = pacer.on_delivery_window(window, lost_window);
+                let rate = pacer.on_delivery_window(
+                    window,
+                    lost_window,
+                    now,
+                    sampler.rtprop_min_micros().or(Some(handshake_rtt)),
+                );
                 folds.push((
                     now,
                     window.max_bps.unwrap_or_default(),
@@ -10057,6 +10135,8 @@ mod tests {
                 sampler.rtprop_min_micros().or(Some(handshake_rtt)),
             ),
             folds,
+            late_delivered_bytes: late_delivered,
+            late_drops,
         }
     }
 
@@ -10229,11 +10309,118 @@ mod tests {
     }
 
     #[test]
+    fn matrix227_delivery_lab_gain_cycling_sustains_utilization_without_drops() {
+        // THE gate for the drain-phase fix (M224/225/226 law): with the
+        // PROBE_BW cycle, the good-regime lab (which models the Phase-B
+        // world — cwnd-bounded, no flow-window stall) must sustain ~link
+        // utilization with an empty steady-state queue, where constant
+        // gain 1.25 oscillated and dropped continuously.
+        let outcome = run_delivery_lab(&good_regime_lab());
+        // Last 2 s must deliver ≥ 0.8 × link (40 MB of 50 MB ideal).
+        assert!(
+            outcome.late_delivered_bytes >= 40_000_000,
+            "sustained utilization: {} bytes in the last 2 s — folds tail: {:?}",
+            outcome.late_delivered_bytes,
+            &outcome.folds[outcome.folds.len().saturating_sub(8)..]
+        );
+        // Steady-state drops ≈ 0 on a clean link (the drain phase keeps the
+        // probe's queue from ever reaching the 1.4 MB cap).
+        assert!(
+            outcome.late_drops <= 2,
+            "steady-state drops must be ~zero: {}",
+            outcome.late_drops
+        );
+        // Estimate pinned at the link — the oscillation is dead.
+        assert!(
+            (20_000_000..=27_500_000).contains(&outcome.bottleneck_bps),
+            "estimate stable at link: {}",
+            outcome.bottleneck_bps
+        );
+    }
+
+    #[test]
+    fn matrix227_delivery_lab_gain_cycling_holds_under_random_loss() {
+        let lab = DeliveryLab {
+            drop_every: Some(500),
+            ..good_regime_lab()
+        };
+        let outcome = run_delivery_lab(&lab);
+        // 0.2 % loss + detection lag: still ≥ 0.7 × link sustained.
+        assert!(
+            outcome.late_delivered_bytes >= 35_000_000,
+            "utilization under random loss: {}",
+            outcome.late_delivered_bytes
+        );
+        assert!(
+            (18_000_000..=27_500_000).contains(&outcome.bottleneck_bps),
+            "estimate must not collapse under random loss: {}",
+            outcome.bottleneck_bps
+        );
+    }
+
+    #[test]
+    fn pacer_gain_cycle_advances_per_rtprop_and_applies_drain() {
+        let seed = 4_000_000;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        let rtprop = Some(50_000u64);
+        // Converge the filter at 24 MB/s while pinned in phase 0 (folds at
+        // now=0 never advance the phase).
+        for _ in 0..STREAM_RATE_FILTER_WINDOWS {
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0, 0, rtprop);
+        }
+        assert_eq!(pacer.cycle_phase(), 0);
+        // Probe phase (0): gain 1.25 → 30 MB/s (10 ms in: phase holds).
+        assert_eq!(
+            pacer.on_delivery_window(clean_window(24_000_000), 0, 10_000, rtprop),
+            30_000_000
+        );
+        assert_eq!(pacer.cycle_phase(), 0);
+        // One RTprop elapses → drain phase (1): gain 0.75 → 18 MB/s.
+        assert_eq!(
+            pacer.on_delivery_window(clean_window(24_000_000), 0, 60_000, rtprop),
+            18_000_000
+        );
+        assert_eq!(pacer.cycle_phase(), 1);
+        // Next RTprop → cruise (2): gain 1.0 → 24 MB/s.
+        assert_eq!(
+            pacer.on_delivery_window(clean_window(24_000_000), 0, 120_000, rtprop),
+            24_000_000
+        );
+        assert_eq!(pacer.cycle_phase(), 2);
+        // Six more RTprops walk the cruise phases and wrap to probe.
+        let mut now = 120_000;
+        for _ in 0..6 {
+            now += 60_000;
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0, now, rtprop);
+        }
+        assert_eq!(pacer.cycle_phase(), 0);
+        assert_eq!(
+            pacer.on_delivery_window(clean_window(24_000_000), 0, now, rtprop),
+            30_000_000
+        );
+    }
+
+    #[test]
+    fn pacer_gain_phase_holds_until_rtprop_elapses() {
+        let seed = 4_000_000;
+        let mut pacer = SourceStreamRatePacer::new(seed);
+        let rtprop = Some(50_000u64);
+        for _ in 0..STREAM_RATE_FILTER_WINDOWS {
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0, 0, rtprop);
+        }
+        // Folds 10/20/30 ms into the phase: no advance (< one RTprop).
+        for now in [10_000u64, 20_000, 30_000] {
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0, now, rtprop);
+            assert_eq!(pacer.cycle_phase(), 0, "phase must hold at t={now}");
+        }
+    }
+
+    #[test]
     fn pacer_empty_windows_leave_filter_untouched() {
         let seed = 4_000_000;
         let mut pacer = SourceStreamRatePacer::new(seed);
         for _ in 0..STREAM_RATE_FILTER_WINDOWS {
-            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0);
+            let _ = pacer.on_delivery_window(clean_window(24_000_000), 0, 0, None);
         }
         // A stall (loss folded, no completed flights) must not write
         // near-zero slots into the ring.
@@ -10243,6 +10430,8 @@ mod tests {
                 max_app_limited_bps: None,
             },
             256 * 1024,
+            0,
+            None,
         );
         assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
         assert_eq!(rate, 30_000_000);
