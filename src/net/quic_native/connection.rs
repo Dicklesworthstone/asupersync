@@ -2203,9 +2203,9 @@ impl NativeQuicConnection {
             // ACK: MAX_STREAM_DATA is an idempotent monotonic maximum, so this
             // costs a few bytes per ACK packet and guarantees a lost window
             // update can never wedge a credit-blocked sender. (Advertisements
-            // advance only on application reads — consumption-clocked on
-            // purpose, three refutations deep; see MATRIX-224/225/226 on
-            // advance_bounded_recv_windows before "fixing" hole stalls here.)
+            // advance only on application reads — consumption-clocked, SETTLED
+            // after four attempts; see the MATRIX-227 history on
+            // advance_bounded_recv_windows before re-trying receipt-clocking.)
             for (stream, limit) in self.streams.bounded_recv_window_advertisements() {
                 self.queue_max_stream_data_frame(stream, limit);
             }
@@ -2710,8 +2710,8 @@ mod tests {
             .expect("configure window");
         // A segment lands beyond a head-of-line hole (0..10 missing): the
         // ACK-attached advertisement must REPEAT the consumption-clocked
-        // limit (100), not chase the received offset — the credit stall is
-        // the drain phase of this path's control loop (MATRIX-224/225/226).
+        // limit (100), not chase the received offset — settled after four
+        // attempts (MATRIX-227 on advance_bounded_recv_windows).
         conn.receive_stream_bytes(&cx, stream, 10, Bytes::from_static(&[7u8; 40]), false)
             .expect("inbound bytes past hole");
         assert!(

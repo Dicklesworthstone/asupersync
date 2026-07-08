@@ -1115,22 +1115,20 @@ impl StreamTable {
 
     /// Advance bounded receive windows after application reads.
     ///
-    /// The desired limit is CONSUMPTION-clocked (`read_offset + window`) on
-    /// purpose — the resulting credit stall is the DRAIN PHASE of this
-    /// path's implicit control loop, not an accident. REFUTED ×3
-    /// (MATRIX-224/225/226, br-asupersync-oh6gm2/uw1cc2): receipt-clocking
-    /// the credit (`highest_received + window`, RSS-capped) to kill
-    /// head-of-line stalls failed (a) bare — congestion collapse, 129/147 s,
-    /// ~2× payload re-sent; (b) atop a BDP cap fed by dishonest ACK-window
-    /// aggregates — collapse twice more; (c) atop the HONEST per-packet
-    /// delivered-counter cap (MATRIX-226) — still +60 %: with in-flight
-    /// honestly bounded (82 s not 155 s) the constant-gain-1.25 pacer
-    /// over-offers CONTINUOUSLY into the shaper (offered avg 35 MB/s on a
-    /// 25 MB/s link), the queue sits permanently full, and 379 MB of a
-    /// 500 MB payload re-sends. The stall is what drains the queue each
-    /// cycle. Receipt-clocking becomes viable only with a gain-CYCLING
-    /// pacer (a BBR PROBE_BW-style 0.75× drain phase) — lab-gate that
-    /// first (matrix226_delivery_lab harness).
+    /// The desired limit is CONSUMPTION-clocked (`read_offset + window`) —
+    /// SETTLED after four attempts (MATRIX-224/225/226/227, do not re-try
+    /// without new evidence): receipt-clocking the credit failed three ways
+    /// — (a) bare: congestion collapse, ~2× payload re-sent (M224); (b)
+    /// atop a BDP cap fed by dishonest ACK-window aggregates: collapse
+    /// twice (M225); (c) atop the honest delivered-counter cap with a
+    /// constant 1.25× gain: +60 %, nothing drained the queue (M226) — and
+    /// finally, (d) atop the FULL honest stack (delivered-counter cap +
+    /// PROBE_BW gain cycling, M227), it engaged cleanly and measured a
+    /// WASH-to-worse (med ≥46.8 vs 47.0 cycling-alone, +73 MB extra
+    /// re-sends): once the gain cycle's 0.75× drain phase cut the
+    /// over-offer that was punching the holes, the window stall it was
+    /// meant to remove had already stopped being the binding constraint.
+    /// The stall is now a cheap backstop, not a tax.
     ///
     /// For every bounded stream whose desired limit has moved at least a
     /// sixteenth-window past the advertised limit, record the new
@@ -2449,9 +2447,8 @@ mod tests {
         );
         // A segment arrives beyond a head-of-line hole (0..10 missing): the
         // application cannot read, and the advertised credit must NOT chase
-        // the received offset — the stall is the drain phase of this path's
-        // control loop (MATRIX-224/225/226 refutations on
-        // advance_bounded_recv_windows).
+        // the received offset — settled after four attempts (MATRIX-227
+        // history on advance_bounded_recv_windows).
         tbl.receive_stream_bytes(id, 10, Bytes::from(vec![7u8; 40]), false)
             .expect("recv past hole");
         assert!(tbl.read_stream_bytes(id, 100).expect("read").is_empty());
