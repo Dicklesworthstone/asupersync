@@ -66,7 +66,8 @@ use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::decoding::{
     BlockDecodeJob, BlockDecodeKind, BlockDecodeOutcome, DecodingConfig, DecodingPipeline,
-    DeferredSymbolAcceptResult, MissingSourceSymbol, SymbolAcceptResult, run_block_decode_job,
+    DeferredSymbolAcceptResult, MissingSourceSymbol, RejectReason, SymbolAcceptResult,
+    run_block_decode_job,
 };
 use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
@@ -9526,6 +9527,78 @@ async fn close_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), R
     Ok(())
 }
 
+/// Env-gated (`ATP_RQ_INCONSISTENT_AUDIT`) staged-bytes cross-dump for a
+/// block whose decode rejected with InconsistentEquations (c54to7): one line
+/// per source ESI with the received/seeded bitmap flags and the staged
+/// payload fingerprint (same FNV-1a as the decoder-side symbol dump). A
+/// seeded symbol whose decoder-side hash differs from the staged hash for
+/// the same ESI pins seed-path poisoning; matching hashes with an
+/// inconsistent solve point at the repair side instead. Best-effort: any IO
+/// error just truncates the dump.
+async fn audit_staging_block_dump(dec: &mut EntryDecoder, sbn: u8) {
+    if std::env::var_os("ATP_RQ_INCONSISTENT_AUDIT").is_none() {
+        return;
+    }
+    let sbn_index = usize::from(sbn);
+    let Some(block) = dec.source_blocks.get(sbn_index) else {
+        return;
+    };
+    let (k, block_start, block_len) = (block.k, block.start, block.len);
+    let received: Vec<bool> = block.received.clone();
+    let seeded: Vec<bool> = block.pipeline_seeded.clone();
+    let Some(symbol_size) = dec
+        .pipeline
+        .as_ref()
+        .map(|pipeline| usize::from(pipeline.config_symbol_size()))
+        .filter(|size| *size > 0)
+    else {
+        return;
+    };
+    if flush_cached_entry_staging_file(dec).await.is_err() {
+        return;
+    }
+    let Ok(mut reader) = crate::fs::File::open(&dec.staging_path).await else {
+        return;
+    };
+    let Ok(absolute_block_start) = entry_staging_absolute_offset(dec, block_start, block_len)
+    else {
+        return;
+    };
+    let mut source_block = vec![0u8; block_len];
+    if reader
+        .seek(std::io::SeekFrom::Start(absolute_block_start))
+        .await
+        .is_err()
+        || reader.read_exact(&mut source_block).await.is_err()
+    {
+        return;
+    }
+    eprintln!(
+        "[RQ_AUDIT] staging_dump entry={} sbn={sbn} k={k} block_len={block_len} abs_start={absolute_block_start}",
+        dec.index
+    );
+    // Hash the zero-PADDED symbol form (exactly how the seed path builds
+    // pipeline symbols) so staged hashes compare 1:1 with the decoder-side
+    // symbol dump, including the short final symbol.
+    let mut padded = vec![0u8; symbol_size];
+    for esi in 0..k {
+        let within = esi.saturating_mul(symbol_size);
+        if within >= block_len {
+            break;
+        }
+        let take = symbol_size.min(block_len - within);
+        padded.fill(0);
+        padded[..take].copy_from_slice(&source_block[within..within + take]);
+        eprintln!(
+            "[RQ_AUDIT] staged entry={} sbn={sbn} esi={esi} received={} seeded={} take={take} h8={:016x}",
+            dec.index,
+            received.get(esi).copied().unwrap_or(false),
+            seeded.get(esi).copied().unwrap_or(false),
+            crate::decoding::audit_fnv1a64(&padded),
+        );
+    }
+}
+
 async fn flush_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
     if is_round_scoped_entry_staging_cache(dec) {
         return close_cached_entry_staging_file(dec).await;
@@ -11721,6 +11794,7 @@ async fn finalize_decode_outcome(
 ) -> Result<RqDecodeRoundStats, RqError> {
     let mut stats = RqDecodeRoundStats::default();
     let decode_elapsed = outcome.elapsed();
+    let outcome_sbn = outcome.sbn();
     stats.record_attempt(outcome.kind(), decode_elapsed);
     let Some(pipeline) = dec.pipeline.as_mut() else {
         return Ok(stats);
@@ -11728,7 +11802,14 @@ async fn finalize_decode_outcome(
     let apply_start = Instant::now();
     match pipeline.finish_decode_job_deferred(outcome) {
         DeferredSymbolAcceptResult::Immediate(result) => {
+            let audit_inconsistent = matches!(
+                &result,
+                SymbolAcceptResult::Rejected(RejectReason::InconsistentEquations)
+            );
             let applied = apply_decode_result(dec, result, decode_elapsed).await?;
+            if audit_inconsistent {
+                audit_staging_block_dump(dec, outcome_sbn).await;
+            }
             stats.apply_micros = stats
                 .apply_micros
                 .saturating_add(duration_micros_saturating(apply_start.elapsed()));

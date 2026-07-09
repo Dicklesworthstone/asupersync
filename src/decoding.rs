@@ -211,6 +211,44 @@ pub(crate) struct BlockDecodeOutcome {
     resolution: BlockDecodeResolution,
 }
 
+/// FNV-1a 64 over a byte slice — the cheap payload fingerprint used by the
+/// `ATP_RQ_INCONSISTENT_AUDIT` probe (c54to7): stable, dependency-free, and
+/// enough to tell "same bytes" from "poisoned bytes" across audit dumps.
+#[must_use]
+pub(crate) fn audit_fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Env-gated (`ATP_RQ_INCONSISTENT_AUDIT`) equation-set dump when a block
+/// solve rejects: one line per input symbol with its payload fingerprint.
+/// Offline cross-check against the transport layer's staged-bytes dump for
+/// the same block identifies WHICH symbol carried poisoned bytes (seeded
+/// source vs wire repair) — the c54to7 residual-inconsistency probe.
+fn audit_inconsistent_reject(sbn: u8, k: usize, symbols: &[Symbol], label: &str) {
+    if std::env::var_os("ATP_RQ_INCONSISTENT_AUDIT").is_none() {
+        return;
+    }
+    eprintln!(
+        "[RQ_AUDIT] decode_reject sbn={sbn} k={k} n_symbols={} label={label}",
+        symbols.len()
+    );
+    for symbol in symbols {
+        eprintln!(
+            "[RQ_AUDIT] sym sbn={} esi={} kind={:?} len={} h8={:016x}",
+            symbol.sbn(),
+            symbol.esi(),
+            symbol.kind(),
+            symbol.data().len(),
+            audit_fnv1a64(symbol.data()),
+        );
+    }
+}
+
 /// Runs an owned block-decode job. Intended for `Cx::spawn_blocking`.
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
@@ -239,10 +277,13 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
                     reason: RejectReason::InsufficientRank,
                     symbols,
                 },
-                Err(DecodingError::MatrixInversionFailed { .. }) => BlockDecodeResolution::Retry {
-                    reason: RejectReason::InconsistentEquations,
-                    symbols,
-                },
+                Err(DecodingError::MatrixInversionFailed { .. }) => {
+                    audit_inconsistent_reject(sbn, plan.k, &symbols, "matrix_inversion_failed");
+                    BlockDecodeResolution::Retry {
+                        reason: RejectReason::InconsistentEquations,
+                        symbols,
+                    }
+                }
                 Err(DecodingError::InconsistentMetadata { .. }) => BlockDecodeResolution::Failed {
                     reason: RejectReason::InvalidMetadata,
                     symbols,
@@ -251,10 +292,13 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
                     reason: RejectReason::SymbolSizeMismatch,
                     symbols,
                 },
-                Err(_) => BlockDecodeResolution::Failed {
-                    reason: RejectReason::InconsistentEquations,
-                    symbols,
-                },
+                Err(_) => {
+                    audit_inconsistent_reject(sbn, plan.k, &symbols, "decode_failed_other");
+                    BlockDecodeResolution::Failed {
+                        reason: RejectReason::InconsistentEquations,
+                        symbols,
+                    }
+                }
             };
             (BlockDecodeKind::RaptorQRepair, resolution)
         }
@@ -273,6 +317,13 @@ impl BlockDecodeOutcome {
     #[must_use]
     pub(crate) fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+
+    /// Block this outcome belongs to (the `ATP_RQ_INCONSISTENT_AUDIT`
+    /// staging cross-dump needs it at the reject site, c54to7).
+    #[must_use]
+    pub(crate) fn sbn(&self) -> u8 {
+        self.sbn
     }
 
     #[must_use]
@@ -458,6 +509,13 @@ pub struct DecodingPipeline {
 }
 
 impl DecodingPipeline {
+    /// Configured symbol size — the `ATP_RQ_INCONSISTENT_AUDIT` staging
+    /// cross-dump (c54to7) needs it to mirror seed-symbol zero-padding.
+    #[must_use]
+    pub(crate) fn config_symbol_size(&self) -> u16 {
+        self.config.symbol_size
+    }
+
     /// Creates a new decoding pipeline.
     #[must_use]
     pub fn new(config: DecodingConfig) -> Self {
@@ -4025,5 +4083,211 @@ mod tests {
         assert_ne!(s, BlockStateKind::Failed);
         let dbg = format!("{s:?}");
         assert!(dbg.contains("Collecting"));
+    }
+
+    /// c54to7 residual hunt: honest symbols fed through arbitrary orders,
+    /// duplicate re-feeds, and repeated STALE-REQUEUE cycles must NEVER
+    /// produce InconsistentEquations — across block shapes including short
+    /// final symbols (the last-shard boundary class the residual skews to).
+    /// If this holds, the decoder core + snapshot/restore machinery is
+    /// exonerated deterministically and the residual source is
+    /// transport-side state.
+    #[test]
+    fn honest_symbols_never_inconsistent_across_stale_requeue_cycles() {
+        init_test("honest_symbols_never_inconsistent_across_stale_requeue_cycles");
+        // Deterministic LCG (no external RNG; Date/random are banned).
+        let mut rng_state: u64 = 0xC54_707;
+        let mut next_rand = move |bound: usize| -> usize {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            usize::try_from((rng_state >> 33) % (bound.max(1) as u64)).unwrap_or(0)
+        };
+
+        // Block shapes: (symbol_size, data_len) — full blocks, short final
+        // symbol, single-symbol blocks, and K around the observed class.
+        let shapes: [(u16, usize); 6] = [
+            (8, 64),  // k=8 exact
+            (8, 61),  // k=8, short final symbol (the shard-boundary class)
+            (8, 9),   // k=2, tiny short final
+            (16, 33), // k=3, one-past boundary
+            (4, 4),   // k=1 single symbol
+            (8, 57),  // k=8, 1-byte final symbol
+        ];
+
+        for (shape_index, (symbol_size, data_len)) in shapes.iter().enumerate() {
+            let config = crate::config::EncodingConfig {
+                symbol_size: *symbol_size,
+                max_block_size: 1 << 20,
+                repair_overhead: 1.0,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            };
+            let object_id = ObjectId::new_for_test(4200 + shape_index as u64);
+            let data: Vec<u8> = (0..*data_len).map(|i| (i * 31 + 7) as u8).collect();
+            let encoder_pool = SymbolPool::new(PoolConfig {
+                symbol_size: config.symbol_size,
+                initial_size: 64,
+                max_size: 64,
+                allow_growth: false,
+                growth_increment: 0,
+            });
+            let mut encoder = EncodingPipeline::new(config.clone(), encoder_pool);
+            let mut sources = Vec::new();
+            let mut repairs = Vec::new();
+            for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 8) {
+                let symbol = encoded.expect("encode").into_symbol();
+                match symbol.kind() {
+                    SymbolKind::Source => sources.push(symbol),
+                    SymbolKind::Repair => repairs.push(symbol),
+                }
+            }
+            let k = sources.len();
+
+            // Several randomized trials per shape: shuffle a mixed subset,
+            // inject staleness mid-stream, re-feed duplicates.
+            for trial in 0..24usize {
+                let mut decoder = DecodingPipeline::new(DecodingConfig {
+                    symbol_size: config.symbol_size,
+                    max_block_size: config.max_block_size,
+                    repair_overhead: 1.0,
+                    min_overhead: 0,
+                    max_buffered_symbols: 8192,
+                    block_timeout: Duration::from_secs(30),
+                    verify_auth: false,
+                });
+                decoder
+                    .set_object_params(ObjectParams::new(
+                        object_id,
+                        data.len() as u64,
+                        config.symbol_size,
+                        1,
+                        u16::try_from(k).unwrap_or(u16::MAX),
+                    ))
+                    .expect("set params");
+
+                // Feed order: drop `dropped` sources, replace with repairs.
+                let dropped = trial % (k + 1);
+                let mut feed: Vec<Symbol> = sources
+                    .iter()
+                    .skip(dropped)
+                    .chain(repairs.iter().take(dropped + 2))
+                    .cloned()
+                    .collect();
+                // Deterministic shuffle.
+                for i in (1..feed.len()).rev() {
+                    feed.swap(i, next_rand(i + 1));
+                }
+
+                let mut pending_job: Option<BlockDecodeJob> = None;
+                let mut complete = false;
+                for (feed_index, symbol) in feed.iter().enumerate() {
+                    if complete {
+                        break;
+                    }
+                    let result = decoder
+                        .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                            symbol.clone(),
+                        ))
+                        .expect("feed");
+                    match result {
+                        DeferredSymbolAcceptResult::Decode(job) => {
+                            // Sometimes run it now; sometimes hold it so more
+                            // symbols land first, then report it back STALE.
+                            if feed_index % 2 == 0 {
+                                let outcome = run_block_decode_job(job);
+                                match decoder.finish_decode_job(outcome) {
+                                    SymbolAcceptResult::Rejected(reason) => {
+                                        assert_ne!(
+                                            reason,
+                                            RejectReason::InconsistentEquations,
+                                            "honest symbols must never be inconsistent \
+                                             (shape {shape_index}, trial {trial})"
+                                        );
+                                    }
+                                    SymbolAcceptResult::BlockComplete { data: got, .. } => {
+                                        assert_eq!(got, data, "decoded bytes must match");
+                                        complete = true;
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                pending_job = Some(job);
+                            }
+                        }
+                        DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+                            reason,
+                        )) => {
+                            assert_ne!(
+                                reason,
+                                RejectReason::InconsistentEquations,
+                                "honest feed must never be inconsistent \
+                                 (shape {shape_index}, trial {trial})"
+                            );
+                        }
+                        DeferredSymbolAcceptResult::Immediate(
+                            SymbolAcceptResult::BlockComplete { data: got, .. },
+                        ) => {
+                            assert_eq!(got, data, "decoded bytes must match");
+                            complete = true;
+                        }
+                        DeferredSymbolAcceptResult::Immediate(_) => {}
+                    }
+                    // Stale cycle: resolve the held job AFTER newer symbols
+                    // arrived — the deferred finish must produce a fresh job
+                    // (or an honest outcome), never an inconsistency.
+                    if let Some(job) = pending_job.take() {
+                        let outcome = run_block_decode_job(job);
+                        match decoder.finish_decode_job_deferred(outcome) {
+                            DeferredSymbolAcceptResult::Decode(fresh) => {
+                                let outcome = run_block_decode_job(fresh);
+                                match decoder.finish_decode_job(outcome) {
+                                    SymbolAcceptResult::Rejected(reason) => {
+                                        assert_ne!(
+                                            reason,
+                                            RejectReason::InconsistentEquations,
+                                            "stale-requeue cycle must stay consistent \
+                                             (shape {shape_index}, trial {trial})"
+                                        );
+                                    }
+                                    SymbolAcceptResult::BlockComplete { data: got, .. } => {
+                                        assert_eq!(got, data);
+                                        complete = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            DeferredSymbolAcceptResult::Immediate(
+                                SymbolAcceptResult::Rejected(reason),
+                            ) => {
+                                assert_ne!(
+                                    reason,
+                                    RejectReason::InconsistentEquations,
+                                    "stale finish must stay consistent \
+                                     (shape {shape_index}, trial {trial})"
+                                );
+                            }
+                            DeferredSymbolAcceptResult::Immediate(
+                                SymbolAcceptResult::BlockComplete { data: got, .. },
+                            ) => {
+                                assert_eq!(got, data);
+                                complete = true;
+                            }
+                            DeferredSymbolAcceptResult::Immediate(_) => {}
+                        }
+                    }
+                }
+                // With ≥ K honest symbols delivered the block must complete.
+                if feed.len() >= k + 1 {
+                    assert!(
+                        complete || feed.len() < k,
+                        "block should complete with {} symbols for k={k} \
+                         (shape {shape_index}, trial {trial})",
+                        feed.len()
+                    );
+                }
+            }
+        }
+        crate::test_complete!("honest_symbols_never_inconsistent_across_stale_requeue_cycles");
     }
 }
