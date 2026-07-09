@@ -1735,21 +1735,51 @@ impl CleanupCoordinator {
                     let retry_set = set.clone();
 
                     result.handlers_run.push(handler_name.clone());
-                    match handler.cleanup(object_id, set.symbols) {
-                        Ok(_) => {
+                    // A CleanupHandler is contracted to report failure via `Err`.
+                    // If it panics instead, `set.symbols` is moved into the call and
+                    // lost to the unwind while neither match arm runs — stranding
+                    // the pre-created `cleanup_buffer` entry with the object neither
+                    // completed nor restorable, and (for a Probe permit elsewhere)
+                    // leaving the caller unable to recover it. Wrap the call so a
+                    // panic is handled exactly like `Err`: fail closed and restore
+                    // the retry state from the pre-move clone, so the object stays
+                    // retryable. Mirrors `notify_owned_listener_with_panic_logging`
+                    // (br-asupersync-l6i6i8).
+                    let symbols = set.symbols;
+                    let cleanup_outcome =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            handler.cleanup(object_id, symbols)
+                        }));
+                    match cleanup_outcome {
+                        Ok(Ok(_)) => {
                             // Handler succeeded - mark as completed and clean up buffer
                             self.completed.write().insert(object_id);
                             self.cleanup_buffer.write().remove(&object_id);
                             result.symbols_cleaned = symbol_count;
                             result.bytes_freed = total_bytes;
                         }
-                        Err(err) => {
+                        Ok(Err(err)) => {
                             // The cleanup attempt failed; retain the pending set and
                             // handler so the caller can retry deterministically.
                             // The cleanup buffer is preserved by restore_retry_state.
                             self.restore_retry_state(object_id, handler, retry_set);
                             result.completed = false;
                             result.handler_errors.push(format!("{handler_name}: {err}"));
+                        }
+                        Err(panic_payload) => {
+                            // Handler violated its Result contract by panicking.
+                            // Recover identically to the Err path so the object is
+                            // retryable, not stranded.
+                            let panic_msg = panic_payload
+                                .downcast_ref::<&str>()
+                                .map(|s| (*s).to_string())
+                                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown panic".to_string());
+                            self.restore_retry_state(object_id, handler, retry_set);
+                            result.completed = false;
+                            result
+                                .handler_errors
+                                .push(format!("{handler_name}: cleanup panicked: {panic_msg}"));
                         }
                     }
                 }
@@ -3395,6 +3425,68 @@ mod tests {
         assert_eq!(
             stats.pending_objects, 1,
             "failed cleanup must remain retryable"
+        );
+        assert_eq!(stats.pending_symbols, 1);
+        assert_eq!(stats.pending_bytes, 3);
+    }
+
+    #[test]
+    fn panicking_cleanup_handler_stays_retryable_like_error() {
+        // A CleanupHandler that violates its Result contract by panicking must be
+        // recovered exactly like an Err return: the object stays retryable (pending
+        // symbols are restored from the pre-move clone, not lost to the unwind) and
+        // the panic is surfaced as a handler error rather than stranding the object
+        // with its cleanup_buffer entry. Mirrors the Err template above
+        // (br-asupersync-l6i6i8). The caught panic prints one line to stderr; that
+        // is expected — swapping the global panic hook would race parallel tests.
+        struct PanickingHandler;
+
+        impl CleanupHandler for PanickingHandler {
+            fn cleanup(
+                &self,
+                _object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                panic!("cleanup handler blew up");
+            }
+
+            fn name(&self) -> &'static str {
+                "panicking"
+            }
+        }
+
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(7);
+        let now = Time::from_millis(100);
+
+        coordinator.register_handler(object_id, PanickingHandler);
+        coordinator.register_pending(object_id, Symbol::new_for_test(7, 0, 0, &[1, 2, 3]), now);
+
+        let result = coordinator.cleanup(object_id, None);
+        assert!(
+            !result.completed,
+            "panicking handler must not report completion"
+        );
+        assert_eq!(
+            result.symbols_cleaned, 0,
+            "panicking cleanup must not report cleaned symbols"
+        );
+        assert_eq!(
+            result.bytes_freed, 0,
+            "panicking cleanup must not report freed bytes"
+        );
+        assert_eq!(result.handlers_run, vec!["panicking"]);
+        assert_eq!(result.handler_errors.len(), 1);
+        assert!(
+            result.handler_errors[0].contains("panicked"),
+            "{}",
+            result.handler_errors[0]
+        );
+
+        let stats = coordinator.stats();
+        assert_eq!(
+            stats.pending_objects, 1,
+            "panicking cleanup must remain retryable, not strand the object"
         );
         assert_eq!(stats.pending_symbols, 1);
         assert_eq!(stats.pending_bytes, 3);
