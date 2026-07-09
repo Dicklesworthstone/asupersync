@@ -2873,6 +2873,11 @@ impl QuicLink {
         let max_pending_before_flush_s = stats.max_pending_before_flush.to_string();
         let max_datagrams_per_plain_packet_s = stats.max_datagrams_per_plain_packet.to_string();
 
+        // Correlation-safe field budget (br-asupersync-an0t8o): LogEntry caps
+        // at MAX_FIELDS=16, so the old single 18-field entry NEVER recorded
+        // its tail and lost leading fields to prioritized correlation ids.
+        // Split: enqueue/liveness accounting here, flush/timing attribution
+        // on the companion `.flush` entry below — both <=12 explicit fields.
         cx.trace_with_fields(
             "atp_quic.sender.symbol_handoff_summary",
             &[
@@ -2891,6 +2896,12 @@ impl QuicLink {
                 ("queue_full_flushes", queue_full_flushes_s.as_str()),
                 ("liveness_polls", liveness_polls_s.as_str()),
                 ("liveness_micros", liveness_micros_s.as_str()),
+            ],
+        );
+        cx.trace_with_fields(
+            "atp_quic.sender.symbol_handoff_flush",
+            &[
+                ("phase", phase),
                 ("flushes", flushes_s.as_str()),
                 ("generated_packets", generated_packets_s.as_str()),
                 ("datagram_frames", datagram_frames_s.as_str()),
@@ -5944,7 +5955,6 @@ impl NativeQuicAimdPacer {
         let sender_loss_fraction_ppm = decision.sender_loss_fraction_ppm.to_string();
         let cwnd_bytes = decision.cwnd_bytes.to_string();
         let inflight_limit_bytes = decision.inflight_limit_bytes.to_string();
-        let send_budget_bytes = decision.send_budget_bytes.to_string();
         let loss_limited = if decision.loss_limited {
             "true"
         } else {
@@ -5970,8 +5980,10 @@ impl NativeQuicAimdPacer {
                 ),
                 ("loss_limited", loss_limited),
                 ("cwnd_bytes", cwnd_bytes.as_str()),
+                // Correlation-safe field budget: <=12 explicit fields
+                // (br-asupersync-an0t8o). send_budget_bytes is derivable from
+                // inflight_limit_bytes and bytes_in_flight above.
                 ("inflight_limit_bytes", inflight_limit_bytes.as_str()),
-                ("send_budget_bytes", send_budget_bytes.as_str()),
             ],
         );
         decision
@@ -6095,15 +6107,7 @@ impl NativeQuicAimdPacer {
         let pending_rank_deficit = need.pending_rank_deficit.unwrap_or(0).to_string();
         let pending_decode_jobs = need.pending_decode_jobs.unwrap_or(0).to_string();
         let shared_pacing_bytes_per_s = decision.pacing_bytes_per_s.to_string();
-        let shared_delivery_rate_bytes_per_s = decision.delivery_rate_bytes_per_s.to_string();
-        let shared_sender_loss_fraction_ppm = decision.sender_loss_fraction_ppm.to_string();
         let shared_cwnd_bytes = decision.cwnd_bytes.to_string();
-        let shared_inflight_limit_bytes = decision.inflight_limit_bytes.to_string();
-        let shared_loss_limited = if decision.loss_limited {
-            "true"
-        } else {
-            "false"
-        };
         cx.trace_with_fields(
             "atp_quic.spray.aimd_feedback",
             &[
@@ -6116,24 +6120,17 @@ impl NativeQuicAimdPacer {
                 ("pending_rank_columns", pending_rank_columns.as_str()),
                 ("pending_rank_deficit", pending_rank_deficit.as_str()),
                 ("pending_decode_jobs", pending_decode_jobs.as_str()),
+                // Correlation-safe field budget: <=12 explicit fields
+                // (br-asupersync-an0t8o). The shared controller's full
+                // decision (delivery rate, loss ppm, inflight limit,
+                // loss_limited) is already traced per sample on
+                // atp_quic.spray.ack_clock_feedback; keep only the two
+                // round-level anchors here.
                 (
                     "shared_pacing_bytes_per_s",
                     shared_pacing_bytes_per_s.as_str(),
                 ),
-                (
-                    "shared_delivery_rate_bytes_per_s",
-                    shared_delivery_rate_bytes_per_s.as_str(),
-                ),
-                (
-                    "shared_sender_loss_fraction_ppm",
-                    shared_sender_loss_fraction_ppm.as_str(),
-                ),
-                ("shared_loss_limited", shared_loss_limited),
                 ("shared_cwnd_bytes", shared_cwnd_bytes.as_str()),
-                (
-                    "shared_inflight_limit_bytes",
-                    shared_inflight_limit_bytes.as_str(),
-                ),
                 ("aimd_cap_bps", cap.as_str()),
             ],
         );

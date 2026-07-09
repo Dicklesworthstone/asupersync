@@ -660,9 +660,6 @@ fn send_path_start_trace_carries_stable_structured_fields() {
         "max_datagram_size",
         "repair_overhead",
         "max_transfer_bytes",
-        "idle_timeout",
-        "handshake_timeout",
-        "accept_timeout",
         "max_active_connections",
         "max_feedback_rounds",
         "datagram_fanout",
@@ -672,6 +669,23 @@ fn send_path_start_trace_carries_stable_structured_fields() {
                 .get_field(required)
                 .is_some_and(|value| !value.is_empty()),
             "transport start trace must include non-empty {required}"
+        );
+    }
+
+    // The timeouts live on the companion `.config` entry: both entries stay
+    // within the correlation-safe field budget (<=12 explicit fields, so
+    // prioritized task/region/span ids never evict the leading fields —
+    // br-asupersync-an0t8o).
+    let config_entry = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.config")
+        .expect("transport config trace entry");
+    for required in ["idle_timeout", "handshake_timeout", "accept_timeout"] {
+        assert!(
+            config_entry
+                .get_field(required)
+                .is_some_and(|value| !value.is_empty()),
+            "transport config trace must include non-empty {required}"
         );
     }
 }
@@ -755,9 +769,6 @@ fn assert_transport_start_trace(collector: &LogCollector, operation: &str, peer_
         "max_datagram_size",
         "repair_overhead",
         "max_transfer_bytes",
-        "idle_timeout",
-        "handshake_timeout",
-        "accept_timeout",
         "max_active_connections",
         "max_feedback_rounds",
         "datagram_fanout",
@@ -767,6 +778,23 @@ fn assert_transport_start_trace(collector: &LogCollector, operation: &str, peer_
                 .get_field(required)
                 .is_some_and(|value| !value.is_empty()),
             "transport start trace must include non-empty {required}"
+        );
+    }
+
+    // The timeouts live on the companion `.config` entry: both entries stay
+    // within the correlation-safe field budget (<=12 explicit fields, so
+    // prioritized task/region/span ids never evict the leading fields —
+    // br-asupersync-an0t8o).
+    let config_entry = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.config")
+        .expect("transport config trace entry");
+    for required in ["idle_timeout", "handshake_timeout", "accept_timeout"] {
+        assert!(
+            config_entry
+                .get_field(required)
+                .is_some_and(|value| !value.is_empty()),
+            "transport config trace must include non-empty {required}"
         );
     }
 }

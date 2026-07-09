@@ -990,33 +990,33 @@ impl QuicSprayPacingDecision {
         let pause_after_burst_micros = self.pause_after_burst.as_micros().to_string();
         let pacing_rate_bps = self.pacing_rate_bps.to_string();
         let cwnd_symbols = self.cwnd_symbols.to_string();
-        let cwnd_share_symbols = self.cwnd_share_symbols.to_string();
-        let burst_cap_share_symbols = self.burst_cap_share_symbols.to_string();
         let loss_backoff = format!("{:.6}", self.loss_backoff);
         let responsiveness_backoff = format!("{:.6}", self.responsiveness_backoff);
         let path_rtt_s = format!("{:.6}", self.path_rtt_s);
         let path_cwnd_bytes = self.path_cwnd_bytes.to_string();
         let path_loss_rate = format!("{:.6}", self.path_loss_rate);
-        let fec_loss_budget = format!("{:.6}", self.fec_loss_budget);
         let congestion_loss_rate = format!("{:.6}", self.congestion_loss_rate);
 
+        // Correlation-safe field budget: <=12 explicit fields
+        // (br-asupersync-an0t8o) so prioritized task/region/span ids never
+        // evict the leading fields. Dropped: "transport" (in the message
+        // name), the per-fanout shares (cwnd_share_symbols,
+        // burst_cap_share_symbols — derivable from cwnd_symbols and the
+        // config burst cap), and fec_loss_budget (config-derived; its effect
+        // is already visible in congestion_loss_rate vs path_loss_rate).
         cx.trace_with_fields(
             "atp_quic.spray.pacing_epoch",
             &[
-                ("transport", "quic"),
                 ("epoch", &epoch),
                 ("max_burst_symbols", &max_burst_symbols),
                 ("pause_after_burst_micros", &pause_after_burst_micros),
                 ("pacing_rate_bps", &pacing_rate_bps),
                 ("cwnd_symbols", &cwnd_symbols),
-                ("cwnd_share_symbols", &cwnd_share_symbols),
-                ("burst_cap_share_symbols", &burst_cap_share_symbols),
                 ("loss_backoff", &loss_backoff),
                 ("responsiveness_backoff", &responsiveness_backoff),
                 ("path_rtt_s", &path_rtt_s),
                 ("path_cwnd_bytes", &path_cwnd_bytes),
                 ("path_loss_rate", &path_loss_rate),
-                ("fec_loss_budget", &fec_loss_budget),
                 ("congestion_loss_rate", &congestion_loss_rate),
                 ("limiter", self.limiter.as_str()),
             ],
@@ -3355,14 +3355,10 @@ fn trace_quic_sender_need_more(
     let round = round.to_string();
     let symbols_sent_total = symbols_sent_total.to_string();
     let sent_this_round = sent_this_round.to_string();
-    let max_feedback_rounds = config.max_feedback_rounds.to_string();
     let pending = need.pending.len().to_string();
     let repair_blocks = need.repair_blocks.len().to_string();
     let repair_symbols_requested = quic_repair_symbol_total(&need.repair_blocks).to_string();
     let source_symbols = need.source_symbols.len().to_string();
-    let round_symbols_observed = need.round_symbols_observed.unwrap_or(0).to_string();
-    let round_symbols_accepted = need.round_symbols_accepted.unwrap_or(0).to_string();
-    let round_loss_fraction = format!("{:.6}", need.round_loss_fraction.unwrap_or(0.0));
     let repair_base_deficit = need.repair_base_deficit_symbols.unwrap_or(0).to_string();
     let repair_loss_compensated_target = need
         .repair_loss_compensated_target_symbols
@@ -3372,24 +3368,23 @@ fn trace_quic_sender_need_more(
         .repair_request_gap_to_target_symbols
         .unwrap_or(0)
         .to_string();
-    let repair_symbol_round_cap = need
-        .repair_symbol_round_cap
-        .unwrap_or(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64)
-        .to_string();
-    let repair_block_request_cap = MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
-    let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
     let aimd_rate_bps = aimd_rate_bps.map_or_else(|| "none".to_string(), |rate| rate.to_string());
     let native_aimd_cap_bps =
         native_aimd_cap_bps.map_or_else(|| "none".to_string(), |rate| rate.to_string());
 
+    // Correlation-safe field budget: <=12 explicit fields (br-asupersync-an0t8o).
+    // LogEntry caps at MAX_FIELDS=16 and prioritized task/region/span ids evict
+    // the OLDEST fields of a full entry; fields past 16 are never recorded.
+    // Dropped here: "transport" (the message name carries it), config statics
+    // (max_feedback_rounds, the two repair caps), the receiver-reported round
+    // trio (round_symbols_observed/accepted, round_loss_fraction — already on
+    // atp_quic.receive.need_more), and the per-block summary string.
     cx.trace_with_fields(
         "atp_quic.sender.need_more",
         &[
-            ("transport", "quic"),
             ("round", round.as_str()),
             ("symbols_sent_total", symbols_sent_total.as_str()),
             ("sent_this_round", sent_this_round.as_str()),
-            ("max_feedback_rounds", max_feedback_rounds.as_str()),
             ("pending", pending.as_str()),
             ("repair_blocks", repair_blocks.as_str()),
             (
@@ -3397,9 +3392,6 @@ fn trace_quic_sender_need_more(
                 repair_symbols_requested.as_str(),
             ),
             ("source_symbols", source_symbols.as_str()),
-            ("round_symbols_observed", round_symbols_observed.as_str()),
-            ("round_symbols_accepted", round_symbols_accepted.as_str()),
-            ("round_loss_fraction", round_loss_fraction.as_str()),
             ("repair_base_deficit", repair_base_deficit.as_str()),
             (
                 "repair_loss_compensated_target",
@@ -3409,12 +3401,6 @@ fn trace_quic_sender_need_more(
                 "repair_request_gap_to_target",
                 repair_request_gap_to_target.as_str(),
             ),
-            ("repair_symbol_round_cap", repair_symbol_round_cap.as_str()),
-            (
-                "repair_block_request_cap",
-                repair_block_request_cap.as_str(),
-            ),
-            ("repair_block_requests", repair_block_requests.as_str()),
             ("aimd_rate_bps", aimd_rate_bps.as_str()),
             ("native_aimd_cap_bps", native_aimd_cap_bps.as_str()),
         ],
@@ -3469,12 +3455,13 @@ fn trace_quic_sender_repair_round(
         .repair_request_gap_to_target_symbols
         .unwrap_or(0)
         .to_string();
-    let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
 
+    // Correlation-safe field budget: <=12 explicit fields
+    // (br-asupersync-an0t8o). Dropped: "transport" (in the message name) and
+    // the per-block summary string (on the ATP_RQ_TRACE line).
     cx.trace_with_fields(
         "atp_quic.sender.repair_round",
         &[
-            ("transport", "quic"),
             ("round", round.as_str()),
             ("mode", mode),
             ("symbols_before", symbols_before.as_str()),
@@ -3496,7 +3483,6 @@ fn trace_quic_sender_repair_round(
                 "repair_request_gap_to_target",
                 repair_request_gap_to_target.as_str(),
             ),
-            ("repair_block_requests", repair_block_requests.as_str()),
         ],
     );
 }
@@ -8663,19 +8649,22 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
             ("max_datagram_size", &max_datagram_size),
             ("repair_overhead", &repair_overhead),
             ("max_transfer_bytes", &max_transfer_bytes),
-            ("idle_timeout", &idle_timeout),
-            ("handshake_timeout", &handshake_timeout),
-            ("accept_timeout", &accept_timeout),
             ("max_active_connections", &max_active_connections),
             ("max_feedback_rounds", &max_feedback_rounds),
             ("datagram_fanout", &datagram_fanout),
         ],
     );
+    // The three timeouts live on the companion `.config` entry: both entries
+    // must stay at <=12 explicit fields so prioritized task/region/span
+    // correlation ids never evict the leading fields (br-asupersync-an0t8o).
     cx.trace_with_fields(
         "atp_quic.transport.config",
         &[
             ("operation", operation),
             ("peer_id", peer_id),
+            ("idle_timeout", &idle_timeout),
+            ("handshake_timeout", &handshake_timeout),
+            ("accept_timeout", &accept_timeout),
             ("bwlimit_bps", &bwlimit_bps),
             ("max_spray_symbols_per_flush", &max_spray_symbols_per_flush),
             ("responsiveness_pressure", &responsiveness_pressure),

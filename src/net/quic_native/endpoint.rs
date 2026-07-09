@@ -477,8 +477,6 @@ impl QuicUdpEndpoint {
         if cx.trace_buffer().is_some() {
             let batch_duration = batch_start.elapsed();
             let endpoint_id = self.endpoint_id.to_string();
-            let local_addr = self.local_addr.to_string();
-            let requested_max = max_packets.to_string();
             let effective_max = effective_max.to_string();
             let packet_count = packet_count.to_string();
             let byte_count = batch.report.bytes_processed.to_string();
@@ -494,12 +492,14 @@ impl QuicUdpEndpoint {
                 .map(|snapshot| snapshot.drops.to_string())
                 .unwrap_or_else(|| "unavailable".to_string());
             let error = batch.report.error.as_deref().unwrap_or("none");
+            // Correlation-safe field budget: <=12 explicit fields
+            // (br-asupersync-an0t8o). local_addr is static per endpoint (on
+            // the quic_udp_endpoint.bind entry) and requested_max is the
+            // config input already reflected in effective_max.
             cx.trace_with_fields(
                 "quic_udp_endpoint.receive_batch",
                 &[
                     ("endpoint_id", endpoint_id.as_str()),
-                    ("local_addr", local_addr.as_str()),
-                    ("requested_max", requested_max.as_str()),
                     ("effective_max", effective_max.as_str()),
                     ("packets", packet_count.as_str()),
                     ("bytes", byte_count.as_str()),

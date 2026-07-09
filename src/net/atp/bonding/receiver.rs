@@ -18,6 +18,14 @@ pub const ATP_BOND_TRACE_ENV: &str = "ATP_BOND_TRACE";
 /// Structured trace event emitted for bonded receiver live progress.
 pub const BONDING_RECEIVER_PROGRESS_TRACE_EVENT: &str = "atp_bond.receiver.progress";
 
+/// Companion trace event carrying per-block outcomes and action counts.
+///
+/// Split from the progress event so each stays within the correlation-safe
+/// field budget: `LogEntry` caps at 16 fields and prioritized
+/// task/region/span ids evict the oldest fields of a full entry
+/// (br-asupersync-an0t8o).
+pub const BONDING_RECEIVER_OUTCOMES_TRACE_EVENT: &str = "atp_bond.receiver.outcomes";
+
 /// Decoder identity for one bonded RaptorQ symbol.
 ///
 /// This intentionally omits donor id: the same `(object_id, sbn, esi)` from any
@@ -450,6 +458,12 @@ impl BondedReceiverLiveProgressMetrics {
                 ("source_symbols_accepted", source_symbols_accepted.as_str()),
                 ("repair_symbols_accepted", repair_symbols_accepted.as_str()),
                 ("retention_rejects", retention_rejects.as_str()),
+            ],
+        );
+        cx.trace_with_fields(
+            BONDING_RECEIVER_OUTCOMES_TRACE_EVENT,
+            &[
+                ("phase", phase),
                 ("source_memcpy_blocks", source_memcpy_blocks.as_str()),
                 ("repair_decode_blocks", repair_decode_blocks.as_str()),
                 ("incomplete_blocks", incomplete_blocks.as_str()),

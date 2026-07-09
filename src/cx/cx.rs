@@ -2771,6 +2771,18 @@ impl<Caps> Cx<Caps> {
     /// ]);
     /// ```
     pub fn trace_with_fields(&self, message: &str, fields: &[(&str, &str)]) {
+        // Correlation-safe field budget (br-asupersync-an0t8o): LogEntry caps
+        // at MAX_FIELDS (16) and the collector inserts up to four prioritized
+        // correlation ids (task/region/span/parent) that rotate-evict the
+        // OLDEST fields of a full entry, while fields past the cap are
+        // silently ignored. Emissions must stay at <=12 explicit fields —
+        // split into companion entries instead of growing past the budget.
+        debug_assert!(
+            fields.len() <= 12,
+            "trace_with_fields(\"{message}\") passed {} fields; the correlation-safe budget is 12 \
+             (LogEntry MAX_FIELDS=16 minus four prioritized correlation ids) — split the emission",
+            fields.len()
+        );
         self.log_if_collector(|| {
             let mut entry = LogEntry::trace(message);
             for &(k, v) in fields {

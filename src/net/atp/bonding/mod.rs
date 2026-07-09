@@ -46,7 +46,8 @@ pub use handshake::{
     BondingReceiverControlPlane,
 };
 pub use receiver::{
-    ATP_BOND_TRACE_ENV, BONDING_RECEIVER_PROGRESS_TRACE_EVENT, BondedBlockCompletionPath,
+    ATP_BOND_TRACE_ENV, BONDING_RECEIVER_OUTCOMES_TRACE_EVENT,
+    BONDING_RECEIVER_PROGRESS_TRACE_EVENT, BondedBlockCompletionPath,
     BondedBlockCoverage, BondedBlockProgressMetrics, BondedBlockSourceHoles,
     BondedDonorIngressStats, BondedDonorProgressMetrics, BondedReceiverFeedbackAction,
     BondedReceiverFeedbackPlan, BondedReceiverIngressStats, BondedReceiverLiveProgressMetrics,
