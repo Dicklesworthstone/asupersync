@@ -277,10 +277,25 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
                     reason: RejectReason::InsufficientRank,
                     symbols,
                 },
+                // A singular matrix is RANK DEFICIENCY, not inconsistency —
+                // and at N == K it is EXPECTED RaptorQ behavior, not a bug:
+                // RFC 6330's decode failure probability at exactly K symbols
+                // is ~1e-2 (~1e-4 at K+1, ~1e-6 at K+2). With
+                // repair_overhead = 1.0 every block's first solve fires at
+                // exactly K, so a 500M sharded transfer (~900-1000 K-exact
+                // solves) sees a handful of these per run; the Retry path
+                // collects one more symbol and succeeds. Labeling this
+                // InconsistentEquations sent a P1 correctness hunt after
+                // spec-expected noise (br-asupersync-c54to7: traced audit
+                // showed all residual rejects rank-K-exact with ZERO payload
+                // mismatches across 1,192 seeded-vs-staged comparisons).
+                // InconsistentEquations is reserved for the unexpected-error
+                // fallback below, where the ATP_RQ_INCONSISTENT_AUDIT dump
+                // fires loudly.
                 Err(DecodingError::MatrixInversionFailed { .. }) => {
-                    audit_inconsistent_reject(sbn, plan.k, &symbols, "matrix_inversion_failed");
+                    audit_inconsistent_reject(sbn, plan.k, &symbols, "rank_deficient_singular");
                     BlockDecodeResolution::Retry {
-                        reason: RejectReason::InconsistentEquations,
+                        reason: RejectReason::InsufficientRank,
                         symbols,
                     }
                 }
