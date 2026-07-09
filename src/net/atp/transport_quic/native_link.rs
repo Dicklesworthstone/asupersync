@@ -7966,24 +7966,12 @@ impl NativeReceiverIntakeStats {
         let pending_rank_columns = need.pending_rank_columns.unwrap_or(0).to_string();
         let pending_rank_deficit = need.pending_rank_deficit.unwrap_or(0).to_string();
         let pending_decode_jobs = need.pending_decode_jobs.unwrap_or(0).to_string();
-        let repair_block_requests = super::quic_repair_block_request_summary(&need.repair_blocks);
-        let repair_symbol_round_cap = need
-            .repair_symbol_round_cap
-            .unwrap_or(super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND as u64)
-            .to_string();
-        let repair_block_request_cap =
-            super::MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
-        let drain_calls = self.drain_calls.to_string();
-        let symbols_observed = self.symbols_observed.to_string();
-        let symbols_accepted = self.symbols_accepted.to_string();
-        let blocks_completed = self.blocks_completed.to_string();
-        let drain_micros = self.drain_micros.to_string();
-        let pump_calls = self.pump_calls.to_string();
-        let pump_packets = self.pump_packets.to_string();
-        let pump_micros = self.pump_micros.to_string();
-        let staging_write_count = self.staging_write_count.to_string();
-        let staging_write_bytes = self.staging_write_bytes.to_string();
-        let staging_write_micros = self.staging_write_micros.to_string();
+        // LogEntry caps fields at MAX_FIELDS (16): everything past the 16th
+        // field was silently ignored here, and prioritized correlation ids
+        // (task/region/span) evict the leading fields of a full entry. Keep
+        // this emission at <=12 explicit fields; the cumulative intake stats
+        // (drain/pump/staging) already ship on the dedicated
+        // "atp_quic.receive.intake" entry from trace_summary.
         cx.trace_with_fields(
             "atp_quic.receive.need_more",
             &[
@@ -7999,23 +7987,6 @@ impl NativeReceiverIntakeStats {
                 ("pending_rank_columns", pending_rank_columns.as_str()),
                 ("pending_rank_deficit", pending_rank_deficit.as_str()),
                 ("pending_decode_jobs", pending_decode_jobs.as_str()),
-                ("repair_block_requests", repair_block_requests.as_str()),
-                ("repair_symbol_round_cap", repair_symbol_round_cap.as_str()),
-                (
-                    "repair_block_request_cap",
-                    repair_block_request_cap.as_str(),
-                ),
-                ("drain_calls", drain_calls.as_str()),
-                ("symbols_observed", symbols_observed.as_str()),
-                ("symbols_accepted", symbols_accepted.as_str()),
-                ("blocks_completed", blocks_completed.as_str()),
-                ("drain_micros", drain_micros.as_str()),
-                ("pump_calls", pump_calls.as_str()),
-                ("pump_packets", pump_packets.as_str()),
-                ("pump_micros", pump_micros.as_str()),
-                ("staging_write_count", staging_write_count.as_str()),
-                ("staging_write_bytes", staging_write_bytes.as_str()),
-                ("staging_write_micros", staging_write_micros.as_str()),
             ],
         );
     }

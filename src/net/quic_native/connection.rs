@@ -2496,7 +2496,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            NativeQuicConnectionError::Tls(QuicTlsError::CryptoProviderFailure { .. })
+            NativeQuicConnectionError::Tls(QuicTlsError::ServerCertificateRejected {
+                code: "server_certificate_invalid"
+            })
         ));
         assert_eq!(conn.state(), QuicConnectionState::Handshaking);
         assert!(!conn.can_send_1rtt());

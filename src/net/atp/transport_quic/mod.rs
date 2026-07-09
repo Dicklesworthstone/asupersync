@@ -8430,6 +8430,12 @@ async fn receive_native_symbol_round(
         .to_string();
     let repair_request_gap_to_target = repair_accounting.request_gap_to_target_symbols.to_string();
     let round_text = round.to_string();
+    // LogEntry caps fields at MAX_FIELDS (16) and task/region/span correlation
+    // ids are inserted with priority at collect time, evicting the OLDEST
+    // fields when full. Keep this emission at <=12 explicit fields so all four
+    // correlation ids fit without evicting `round`/`pending`. The dropped
+    // per-round detail (round_symbols_sent, repair_block_requests, the two
+    // caps) still prints on the env-gated ATP_RQ_TRACE line below.
     cx.trace_with_fields(
         "atp_quic.receive.need_more",
         &[
@@ -8438,7 +8444,6 @@ async fn receive_native_symbol_round(
             ("block_requests", block_request_count.as_str()),
             ("repair_symbols", repair_symbol_count.as_str()),
             ("source_requests", source_request_count.as_str()),
-            ("round_symbols_sent", round_symbols_sent.as_str()),
             ("round_symbols_observed", round_symbols_observed.as_str()),
             ("round_symbols_accepted", round_symbols_accepted.as_str()),
             ("round_loss_fraction", round_loss_fraction.as_str()),
@@ -8451,12 +8456,6 @@ async fn receive_native_symbol_round(
             (
                 "repair_request_gap_to_target",
                 repair_request_gap_to_target.as_str(),
-            ),
-            ("repair_block_requests", repair_block_requests.as_str()),
-            ("repair_symbol_round_cap", repair_symbol_round_cap.as_str()),
-            (
-                "repair_block_request_cap",
-                repair_block_request_cap.as_str(),
             ),
         ],
     );
@@ -9743,14 +9742,21 @@ mod tests {
             quic_should_parallel_decode_entry(&dec_50m, &config_50m),
             "50M encrypted bulk geometry should be eligible for receiver decode fanout"
         );
+        let capped_width_50m = blocks_50m
+            .min(QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY)
+            .min(QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER);
+        assert!(
+            blocks_50m > capped_width_50m,
+            "fixture must exceed the fanout caps so the clamp is exercised"
+        );
         assert_eq!(
             quic_entry_decode_width_budget(
                 &dec_50m,
                 &config_50m,
                 QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
             ),
-            blocks_50m,
-            "50M encrypted bulk geometry should open one decode slot per source block"
+            capped_width_50m,
+            "50M encrypted bulk geometry should open decode slots up to the fanout caps"
         );
         assert_eq!(
             quic_entry_decode_width_budget_for_geometry(
@@ -9758,7 +9764,7 @@ mod tests {
                 config_50m.max_block_size,
                 QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
             ),
-            blocks_50m,
+            capped_width_50m,
             "50M encrypted bulk geometry should open the same fanout as the decoder helper"
         );
         assert_eq!(
@@ -10708,12 +10714,16 @@ mod tests {
         cx.set_diagnostic_context(crate::observability::DiagnosticContext::new());
         cx.set_log_collector(collector.clone());
 
-        let signal = pacing_signal(0.025, 512 * 1024, 0.125);
+        // Keep the observed loss (and the round0 seed) below
+        // QUIC_RATE_MATCHED_BAD_LINK_LOSS_MIN and machine pressure at zero so
+        // no loss-matched pacing cap or responsiveness throttle engages and
+        // the user bwlimit is the genuine binding constraint.
+        let signal = pacing_signal(0.025, 512 * 1024, 0.0);
         let decision = quic_spray_pacing_decision_from_config(
             &QuicConfig {
                 bwlimit_bps: Some(2 * 1024 * 1024),
                 max_spray_symbols_per_flush: 16,
-                responsiveness_pressure: 0.25,
+                responsiveness_pressure: 0.0,
                 ..trusted_quic_config()
             },
             signal,
@@ -10734,6 +10744,29 @@ mod tests {
         assert_eq!(entry.get_field("limiter"), Some("bandwidth_limit"));
         assert!(entry.get_field("pause_after_burst_micros").is_some());
         assert!(entry.get_field("pacing_rate_bps").is_some());
+
+        // With observed loss above the FEC loss budget the congestion-loss
+        // backoff outranks every other limiter in the classification ladder,
+        // so the trace label must flip to "loss".
+        let lossy = quic_spray_pacing_decision_from_config(
+            &QuicConfig {
+                bwlimit_bps: Some(2 * 1024 * 1024),
+                max_spray_symbols_per_flush: 16,
+                responsiveness_pressure: 0.0,
+                ..trusted_quic_config()
+            },
+            pacing_signal(0.025, 512 * 1024, 0.125),
+        );
+        lossy.trace_epoch(&cx, 8);
+        let entries = collector.peek();
+        let lossy_entry = entries
+            .iter()
+            .find(|entry| {
+                entry.message() == "atp_quic.spray.pacing_epoch"
+                    && entry.get_field("epoch") == Some("8")
+            })
+            .expect("lossy spray pacing trace entry");
+        assert_eq!(lossy_entry.get_field("limiter"), Some("loss"));
     }
 
     #[test]
@@ -12313,11 +12346,19 @@ mod tests {
         let beta = varied_bytes(640, 71);
         std::fs::write(root.join("alpha.bin"), &alpha).expect("write alpha");
         std::fs::write(root.join("nested/beta.bin"), &beta).expect("write beta");
+        // A bandwidth limit keeps this transfer on the datagram-spray tier:
+        // without it, transport-authenticated transfers are eligible for the
+        // reliable source-stream tier, the sender offers the stream in its
+        // hello, and receive_native_sender_hello_and_ack auto-accepts it —
+        // this harness receiver only speaks the spray protocol. The stream
+        // tier has its own coverage (native_link unit tests + the transport
+        // auth e2e suite).
         let config = QuicConfig {
             chunk_size: 29,
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.25,
+            bwlimit_bps: Some(64 * 1024 * 1024),
             ..trusted_quic_config()
         };
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))

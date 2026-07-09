@@ -696,17 +696,22 @@ fn real_udp_quic_good_transport_auth_uses_reliable_source_stream() {
     assert_eq!(recv.files, 1);
     assert_eq!(send.bytes_sent, payload.len() as u64);
     assert_eq!(recv.bytes_received, payload.len() as u64);
-    assert!(
-        send.symbols_sent > 0,
-        "GOOD transport-auth transfers should send source bytes on the reliable stream plus a small FEC repair tail"
+    // Source-stream design: ALL source bytes ride the reliable QUIC stream and
+    // commit straight from sha-verified staged bytes, so the RaptorQ path must
+    // stay untouched. Loss on this tier is repaired by QUIC stream
+    // retransmission, not fountain repair (see the broken_loss variant below,
+    // which asserts feedback_rounds == 0 under 10% induced loss).
+    assert_eq!(
+        send.symbols_sent, 0,
+        "lossless source-stream transfer must not spray FEC symbols"
     );
-    assert!(
-        recv.symbols_accepted > 0,
-        "receiver should feed source-stream symbols through the RaptorQ decoder"
+    assert_eq!(
+        recv.symbols_accepted, 0,
+        "lossless source-stream receiver must not engage the RaptorQ decoder"
     );
-    assert!(
-        recv.decode_count > 0,
-        "source-stream bytes should complete through the block decoder before commit"
+    assert_eq!(
+        recv.decode_count, 0,
+        "lossless source-stream commit must come from staged stream bytes, not block decode"
     );
     assert_eq!(
         recv.feedback_rounds, 0,
@@ -1088,7 +1093,32 @@ fn assert_non_dividing_transport_auth_transfer(
     });
     let recv = recv.expect("non-dividing QUIC/TLS receiver commits");
 
-    assert_receive_report_counters(&send, &recv, payload.len() as u64, 1);
+    // Transport-auth transfers ride the reliable source stream: staged bytes
+    // commit via sha verify and the RaptorQ decoder stays disengaged on a
+    // lossless loopback link, so the FEC counters must read zero (the spray
+    // tier's assert_receive_report_counters expects the opposite).
+    assert!(recv.committed, "receiver must commit");
+    assert_eq!(recv.bytes_received, payload.len() as u64);
+    assert_eq!(recv.files, 1);
+    assert_eq!(send.receipt.symbols_accepted, recv.symbols_accepted);
+    assert_eq!(send.receipt.feedback_rounds, recv.feedback_rounds);
+    assert_eq!(send.receipt.decode_count, recv.decode_count);
+    assert_eq!(
+        recv.symbols_accepted, 0,
+        "lossless source-stream receiver must not engage the RaptorQ decoder"
+    );
+    assert_eq!(
+        recv.decode_count, 0,
+        "lossless source-stream commit must come from staged stream bytes, not block decode"
+    );
+    assert_eq!(
+        recv.feedback_rounds, 0,
+        "source-stream transfer must not need fountain repair feedback"
+    );
+    assert!(
+        !recv.committed_paths.is_empty(),
+        "receiver report must expose committed-path evidence"
+    );
     assert_eq!(send.transfer_id, recv.transfer_id);
     assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
     assert_eq!(
