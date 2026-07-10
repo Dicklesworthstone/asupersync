@@ -722,6 +722,9 @@ async fn remove_replaceable_leaf(
     path: &Path,
     kind: ReplaceableLeafKind,
 ) -> Result<(), StreamingError> {
+    // `result` is reassigned only on the Windows read-only-retry path below, so
+    // on other targets the binding is never mutated after this point.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut result = match kind {
         ReplaceableLeafKind::RegularFile => crate::fs::remove_file(path).await,
         ReplaceableLeafKind::Symlink(kind) => remove_typed_symlink(path, kind).await,
