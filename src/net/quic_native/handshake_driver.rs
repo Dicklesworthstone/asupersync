@@ -663,8 +663,9 @@ async fn retransmit_handshake_flight(
     Ok(true)
 }
 
-/// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`, talking to
-/// `server_addr`. This is the connect-side handshake: it derives Initial keys from
+/// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`.
+///
+/// This talks to `server_addr`. The connect-side handshake derives Initial keys from
 /// the client's original `dcid`, sends the ClientHello, and exchanges flights until
 /// the handshake completes. On success the driver holds 1-RTT keys ready to be
 /// handed to the data plane.
@@ -759,8 +760,9 @@ pub async fn client_handshake_over_udp(
     }
 }
 
-/// Drive a server QUIC/TLS-1.3 handshake to completion over `endpoint`. This is the
-/// accept-side handshake: it derives Initial keys from the client's original `dcid`
+/// Drive a server QUIC/TLS-1.3 handshake to completion over `endpoint`.
+///
+/// The accept-side handshake derives Initial keys from the client's original `dcid`
 /// (read from the first Initial packet by the caller), learns the client's address
 /// and source CID from the first received packet, and exchanges flights until the
 /// handshake completes. Returns the validated client peer address.

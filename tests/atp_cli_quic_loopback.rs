@@ -521,7 +521,7 @@ struct WindowsMetadataFixture {
 
 #[cfg(windows)]
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(windows)]

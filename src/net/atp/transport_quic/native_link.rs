@@ -6268,7 +6268,7 @@ fn quic_need_more_receiver_credit_bytes(config: &QuicConfig, need: &QuicNeedMore
     let credit_symbols = deficit
         .saturating_mul(2)
         .max(requested)
-        .max((!need.pending.is_empty()).then_some(32).unwrap_or(0));
+        .max(if !need.pending.is_empty() { 32 } else { 0 });
     (credit_symbols > 0).then_some(credit_symbols.saturating_mul(symbol_bytes))
 }
 
@@ -7334,7 +7334,7 @@ async fn run_sender_session(
                             peer: link.peer,
                         });
                     }
-                    FrameType::KeepAlive => continue,
+                    FrameType::KeepAlive => {}
                     FrameType::ObjectRequest => {
                         let need = super::parse_json::<QuicNeedMore>(&reply_frame)?;
                         quic_rqtrace!(
@@ -9307,9 +9307,8 @@ async fn run_receiver_session(
                 control.send(cx, &mut link.conn, &ack_frame)?;
                 link.flush(cx).await?;
                 ack_frames = link.last_flushed_stream_frames();
-                continue;
             }
-            FrameType::KeepAlive => continue,
+            FrameType::KeepAlive => {}
             got => {
                 return Err(QuicTransportError::Unexpected {
                     got,
@@ -9977,14 +9976,14 @@ pub async fn receive_on_endpoint(
                 .to_string(),
         )
     })?;
-    let (mut link, early_data) = accept(cx, endpoint, server_tls, &config).await?;
+    let (mut link, early_data) = accept(cx, endpoint, server_tls, config).await?;
     // Replay any 1-RTT packets that raced ahead of the handshake's completion
     // (the client finishes first and may start the data plane immediately), so
     // the receiver session sees the sender's Hello / early symbols. Keep them in
     // the same bounded replay path as freshly received UDP packets instead of
     // bulk-ingesting before manifest parsing creates decoders.
     link.queue_received_packets(early_data);
-    run_receiver_session(cx, &mut link, dest_dir, &config, peer_id).await
+    run_receiver_session(cx, &mut link, dest_dir, config, peer_id).await
 }
 
 /// Bind a server UDP endpoint on `listen` for the native QUIC receive path.

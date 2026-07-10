@@ -16,6 +16,9 @@
 //! emits; the control plane reuses the ATP frame codec with JSON payloads
 //! (the single-source receiver's convention).
 
+// This split implementation intentionally uses its parent module's private
+// protocol machinery as one cohesive unit.
+#[allow(clippy::wildcard_imports)]
 use super::*;
 
 use crate::io::AsyncRead;
@@ -1336,11 +1339,11 @@ pub async fn receive_bonded(
 }
 
 /// Fetch (creating on first use) one donor's per-block need row.
-fn bonded_need_entry<'needs>(
-    needs: &'needs mut BTreeMap<u32, BTreeMap<(u32, u8), BondedBlockNeed>>,
+fn bonded_need_entry(
+    needs: &mut BTreeMap<u32, BTreeMap<(u32, u8), BondedBlockNeed>>,
     donor_index: u32,
     geometry: BondEntryBlockGeometry,
-) -> &'needs mut BondedBlockNeed {
+) -> &mut BondedBlockNeed {
     needs
         .entry(donor_index)
         .or_default()
@@ -1412,11 +1415,12 @@ fn new_bonded_entry_decoder(
     }
 }
 
-/// Donate into a bonded transfer over the wire: enroll on the receiver's
-/// control plane, run the [`donate_path`] source-first spray with the
-/// receiver-assigned [`DonorAssignment`], then serve aggregated
-/// NeedMore/Close feedback (the B3 donor control loop) until the receiver
-/// broadcasts its fail-closed commit receipt.
+/// Donate into a bonded transfer over the wire.
+///
+/// Enroll on the receiver's control plane, run the [`donate_path`]
+/// source-first spray with the receiver-assigned [`DonorAssignment`], then
+/// serve aggregated NeedMore/Close feedback (the B3 donor control loop) until
+/// the receiver broadcasts its fail-closed commit receipt.
 pub async fn donate_bonded(
     cx: &Cx,
     descriptor: &BondTransferDescriptor,

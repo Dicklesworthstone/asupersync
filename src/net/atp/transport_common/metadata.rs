@@ -714,14 +714,14 @@ fn create_typed_symlink_sync(
     #[cfg(unix)]
     {
         let _ = kind;
-        return std::os::unix::fs::symlink(target, link);
+        std::os::unix::fs::symlink(target, link)
     }
     #[cfg(windows)]
     {
-        return match kind {
+        match kind {
             crate::fs::SymlinkKind::File => std::os::windows::fs::symlink_file(target, link),
             crate::fs::SymlinkKind::Directory => std::os::windows::fs::symlink_dir(target, link),
-        };
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -951,13 +951,11 @@ async fn install_staged_leaf_transactionally(
         Err(error) => {
             #[cfg(windows)]
             if error.kind() == io::ErrorKind::PermissionDenied && existing.is_some() {
-                let readonly_restore = match existing.expect("checked as present") {
-                    ReplaceableLeafKind::RegularFile => clear_windows_readonly(out_path),
-                    ReplaceableLeafKind::Symlink(kind) => {
-                        clear_windows_symlink_readonly(out_path, kind)
-                    }
-                };
-                let Some(readonly_restore) = readonly_restore.map_err(|clear| {
+                let Some(destination_restore) = clear_windows_leaf_readonly(
+                    out_path,
+                    existing.expect("checked as present"),
+                )
+                .map_err(|clear| {
                     StreamingError::new(format!(
                         "{}: clear read-only attribute for atomic replacement after {error}: {clear}",
                         out_path.display()
@@ -969,18 +967,60 @@ async fn install_staged_leaf_transactionally(
                         out_path.display()
                     )));
                 };
+                let staging_restore = match clear_windows_leaf_readonly(
+                    staging_path,
+                    expected_staging_kind,
+                ) {
+                    Ok(restore) => restore,
+                    Err(clear) => {
+                        let restore = destination_restore
+                            .restore()
+                            .err()
+                            .map_or_else(String::new, |restore| {
+                                format!("; restore destination attributes: {restore}")
+                            });
+                        return Err(StreamingError::new(format!(
+                            "{}: clear staged read-only attribute for atomic replacement: {clear}{restore}",
+                            staging_path.display()
+                        )));
+                    }
+                };
                 return match rename_staged_leaf_durably(staging_path, out_path).await {
-                    Ok(()) => readonly_restore.finish_after_replace().map_err(|restore| {
-                        StreamingError::new(format!(
-                            "{}: replacement committed but old hardlink attributes could not be restored: {restore}",
-                            out_path.display()
-                        ))
-                    }),
+                    Ok(()) => {
+                        let mut failures = Vec::new();
+                        if let Err(restore) = destination_restore.finish_after_replace() {
+                            failures.push(format!("old destination attributes: {restore}"));
+                        }
+                        if let Some(staging_restore) = staging_restore
+                            && let Err(restore) = staging_restore.finish_after_replace()
+                        {
+                            failures.push(format!("incoming hardlink attributes: {restore}"));
+                        }
+                        if failures.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(StreamingError::new(format!(
+                                "{}: replacement committed but attribute restoration failed: {}",
+                                out_path.display(),
+                                failures.join("; ")
+                            )))
+                        }
+                    }
                     Err(retry) => {
-                        let restore = readonly_restore.restore().err().map_or_else(
-                            String::new,
-                            |restore| format!("; restore read-only attribute: {restore}"),
-                        );
+                        let mut failures = Vec::new();
+                        if let Some(staging_restore) = staging_restore
+                            && let Err(restore) = staging_restore.restore()
+                        {
+                            failures.push(format!("restore staged attributes: {restore}"));
+                        }
+                        if let Err(restore) = destination_restore.restore() {
+                            failures.push(format!("restore destination attributes: {restore}"));
+                        }
+                        let restore = if failures.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; {}", failures.join("; "))
+                        };
                         Err(StreamingError::new(format!(
                             "{}: atomic replacement after clearing read-only attribute: {retry}{restore}",
                             out_path.display()
@@ -1107,6 +1147,17 @@ impl Drop for ReadonlyRestore {
         if let Some(permissions) = self.permissions.take() {
             let _ = self.file.set_permissions(permissions);
         }
+    }
+}
+
+#[cfg(windows)]
+fn clear_windows_leaf_readonly(
+    path: &Path,
+    kind: ReplaceableLeafKind,
+) -> io::Result<Option<ReadonlyRestore>> {
+    match kind {
+        ReplaceableLeafKind::RegularFile => clear_windows_readonly(path),
+        ReplaceableLeafKind::Symlink(kind) => clear_windows_symlink_readonly(path, kind),
     }
 }
 
@@ -2162,7 +2213,20 @@ fn system_time_to_unix_parts(time: std::time::SystemTime) -> Option<(i64, u32)> 
 fn unix_parts_to_system_time(seconds: i64, nanos: u32) -> Option<std::time::SystemTime> {
     use std::time::{Duration, UNIX_EPOCH};
 
-    let nanos = nanos % 1_000_000_000;
+    let nanos = {
+        let normalized = nanos % 1_000_000_000;
+        #[cfg(windows)]
+        {
+            // Windows FILETIME stores 100 ns ticks. Floor rather than truncate
+            // toward the Unix epoch so a sub-tick pre-epoch time remains before
+            // the epoch after conversion.
+            normalized - (normalized % 100)
+        }
+        #[cfg(not(windows))]
+        {
+            normalized
+        }
+    };
     if seconds >= 0 {
         return UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanos));
     }
@@ -3097,8 +3161,10 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary directory");
         let primary = root.path().join("primary");
         let destination = root.path().join("destination");
+        let displaced_alias = root.path().join("displaced-alias");
         std::fs::write(&primary, b"shared").expect("write primary");
         std::fs::write(&destination, b"old").expect("write destination");
+        std::fs::hard_link(&destination, &displaced_alias).expect("link displaced destination");
         set_windows_attributes(&primary, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN)
             .expect("make primary read-only");
         set_windows_attributes(&destination, FILE_ATTRIBUTE_READONLY)
@@ -3114,10 +3180,31 @@ mod tests {
             inode_key_if_regular_sync(&primary).expect("primary identity"),
             inode_key_if_regular_sync(&destination).expect("destination identity")
         );
+        use std::os::windows::fs::MetadataExt as _;
+        assert_eq!(
+            std::fs::symlink_metadata(&primary)
+                .expect("primary metadata")
+                .file_attributes()
+                & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN
+        );
+        assert_eq!(
+            std::fs::read(&displaced_alias).expect("read displaced alias"),
+            b"old"
+        );
+        assert_ne!(
+            std::fs::symlink_metadata(&displaced_alias)
+                .expect("displaced alias metadata")
+                .file_attributes()
+                & FILE_ATTRIBUTE_READONLY,
+            0
+        );
 
         // TempDir cleanup must not be defeated by the intentionally preserved
-        // read-only attribute on the shared file record.
+        // read-only attributes on either hardlink set.
         set_windows_attributes(&primary, 0).expect("clear primary attributes for cleanup");
+        set_windows_attributes(&displaced_alias, 0)
+            .expect("clear displaced attributes for cleanup");
     }
 
     #[cfg(windows)]
@@ -3126,12 +3213,17 @@ mod tests {
         for (seconds, nanos) in [
             (-2_i64, 125_000_000_u32),
             (-1, 0),
+            (-1, 1),
             (-1, 999_999_999),
             (0, 0),
             (1, 500_000_000),
         ] {
             let time = unix_parts_to_system_time(seconds, nanos).expect("representable timestamp");
-            assert_eq!(system_time_to_unix_parts(time), Some((seconds, nanos)));
+            let platform_nanos = nanos - (nanos % 100);
+            assert_eq!(
+                system_time_to_unix_parts(time),
+                Some((seconds, platform_nanos))
+            );
         }
     }
 

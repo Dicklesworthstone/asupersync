@@ -224,7 +224,9 @@ pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES: u64 = 8 * 1024 * 1024 * 
 
 /// Largest RaptorQ symbol payload that fits one default-size QUIC DATAGRAM
 /// (`max_datagram_size` 1200) together with the worst-case authenticated
-/// symbol envelope header. CLI front ends use this as the QUIC symbol-size
+/// symbol envelope header.
+///
+/// CLI front ends use this as the QUIC symbol-size
 /// default so users never size symbols by hand; explicitly configured larger
 /// values still fail closed in [`QuicConfig::validate`].
 pub const QUIC_DEFAULT_SYMBOL_SIZE: u16 = 1144;

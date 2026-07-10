@@ -31,7 +31,7 @@
 //! atp send ./my-folder user@receiver:/srv/inbox --transport rq --prefer tailscale
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -652,16 +652,11 @@ struct BondDescriptorArgs {
     rq_allow_unauthenticated_lab: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum MaxBlockSizeArg {
+    #[default]
     Auto,
     Bytes(usize),
-}
-
-impl Default for MaxBlockSizeArg {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl std::fmt::Display for MaxBlockSizeArg {
@@ -1480,13 +1475,6 @@ fn throughput_bytes_per_sec(bytes: u64, elapsed: Option<Duration>) -> Option<u64
     Some(rate.min(u128::from(u64::MAX)) as u64)
 }
 
-fn elapsed_micros(elapsed: Option<Duration>) -> Option<u64> {
-    elapsed.map(|duration| {
-        let micros = duration.as_micros();
-        micros.min(u128::from(u64::MAX)) as u64
-    })
-}
-
 fn atp_metrics_json(
     bytes: u64,
     symbols_sent: Option<u64>,
@@ -1499,7 +1487,10 @@ fn atp_metrics_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "bytes": bytes,
-        "elapsed_micros": elapsed_micros(elapsed),
+        "elapsed_micros": elapsed.map(|duration| {
+            let micros = duration.as_micros();
+            micros.min(u128::from(u64::MAX)) as u64
+        }),
         "throughput_bytes_per_sec": throughput_bytes_per_sec(bytes, elapsed),
         "symbols_sent": symbols_sent,
         "symbols_accepted": symbols_accepted,
@@ -4345,7 +4336,7 @@ fn delta_store_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<DeltaChun
             .ok_or_else(|| format!("source CAS missing planned chunk {content_id_hex}"))?;
         let payload_len = u64::try_from(payload.len())
             .map_err(|_| "delta chunk payload length exceeds u64::MAX".to_string())?;
-        if payload_len != chunk.size_bytes || ContentId::from_bytes(&payload) != chunk.content_id {
+        if payload_len != chunk.size_bytes || ContentId::from_bytes(payload) != chunk.content_id {
             return Err(format!(
                 "source CAS payload does not match planned chunk {content_id_hex}"
             ));
@@ -4502,7 +4493,7 @@ fn create_unique_delta_package_root(object_sha256_hex: &str) -> Result<PathBuf, 
                 require_delta_directory(&path, "create delta package root")?;
                 return Ok(path);
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => {
                 return Err(format!(
                     "create delta package root {}: {err}",
@@ -4527,7 +4518,7 @@ fn create_unique_delta_staging_root(
         ensure_delta_path_chain(&path, "create delta staging root")?;
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => {
                 return Err(format!(
                     "create delta staging root {}: {err}",
@@ -5030,7 +5021,6 @@ fn apply_delta_packages(dest: &Path, max_bytes: u64) -> Result<usize, String> {
         match delta_path_metadata(&receipt, "inspect delta package receipt")? {
             Some(metadata) if metadata.is_file() => {
                 remove_delta_path_if_exists(&path, "remove applied delta package")?;
-                continue;
             }
             Some(_) => {
                 return Err(format!(
@@ -5351,7 +5341,7 @@ fn delta_cli_state_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<Delta
             .ok_or_else(|| format!("delta state source missing chunk {content_id_hex}"))?;
         let payload_len = u64::try_from(payload.len())
             .map_err(|_| "delta state chunk payload length exceeds u64::MAX".to_string())?;
-        if payload_len != chunk.size_bytes || ContentId::from_bytes(&payload) != chunk.content_id {
+        if payload_len != chunk.size_bytes || ContentId::from_bytes(payload) != chunk.content_id {
             return Err(format!(
                 "delta state source chunk {content_id_hex} does not match manifest"
             ));
@@ -5611,7 +5601,7 @@ fn read_delta_state_sidecar_request(
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => bytes.extend_from_slice(&chunk[..read]),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
             Err(err)
                 if matches!(
                     err.kind(),
@@ -5791,7 +5781,7 @@ fn build_delta_subchunk_signature_response_before(
     check_delta_sidecar_deadline(deadline, "index delta state manifest")?;
 
     let mut signatures = Vec::new();
-    let mut seen = BTreeMap::<(String, u64), ()>::new();
+    let mut seen = BTreeSet::<(String, u64)>::new();
     let mut signature_blocks = 0usize;
     let mut signature_json_bytes = 0usize;
     for requested in request.chunks {
@@ -5801,7 +5791,7 @@ fn build_delta_subchunk_signature_response_before(
             "subchunk signature request content id",
         )?;
         let key = (requested.content_id_hex, requested.size_bytes);
-        if seen.insert(key.clone(), ()).is_some() {
+        if !seen.insert(key.clone()) {
             continue;
         }
         let Some(chunk) = manifest_by_key.get(&key).copied() else {
@@ -5918,10 +5908,10 @@ fn load_delta_store_from_state(
 ) -> Result<DeltaChunkStore, String> {
     let chunk_dir = dest.join(DELTA_STATE_DIR).join(DELTA_CHUNK_DIR);
     let mut store = DeltaChunkStore::new();
-    let mut loaded = BTreeMap::<String, ()>::new();
+    let mut loaded = BTreeSet::<String>::new();
     for chunk in &manifest.chunks {
         let content_id_hex = chunk.content_id.to_hex();
-        if loaded.insert(content_id_hex.clone(), ()).is_some() {
+        if !loaded.insert(content_id_hex.clone()) {
             continue;
         }
         let path = chunk_dir.join(format!("{content_id_hex}.chunk"));

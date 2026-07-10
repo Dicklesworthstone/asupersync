@@ -1055,7 +1055,7 @@ pub fn validate_portable_path_component(component: &str) -> Result<(), String> {
     let stem = component
         .split_once('.')
         .map_or(component, |(stem, _)| stem)
-        .trim_end_matches(|ch| ch == ' ' || ch == '.');
+        .trim_end_matches([' ', '.']);
     let folded = stem.to_uppercase();
     let reserved = matches!(
         folded.as_str(),
