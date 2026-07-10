@@ -610,7 +610,9 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -627,6 +629,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    #[cfg(unix)]
     fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {

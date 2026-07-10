@@ -4489,7 +4489,11 @@ where
             return Ok(());
         }
         if active.len() >= max_active_connections {
-            crate::time::sleep(cx.now(), accept_wait).await;
+            // A child can finish immediately after the drain above. Poll the
+            // capacity slot promptly instead of sleeping for the full accept
+            // timeout (normally 60s), which would stall a queued fallback or
+            // sequential client even though no transfer remains active.
+            crate::time::sleep(cx.now(), accept_wait.min(Duration::from_millis(25))).await;
             continue;
         }
         let accept = with_transport_timeout(cx, accept_wait, "accept", listener.accept()).await;
@@ -4956,9 +4960,12 @@ mod tests {
             ..EntryMetadata::default()
         });
         let mut valid = manifest_with(vec![primary, alias], 4);
+        let config = TransferConfig {
+            preserve_hardlinks: true,
+            ..TransferConfig::default()
+        };
         refresh_manifest_metadata_commitment(&mut valid);
-        validate_manifest(&valid, &TransferConfig::default())
-            .expect("hardlink alias with primary metadata validates");
+        validate_manifest(&valid, &config).expect("hardlink alias with primary metadata validates");
 
         valid.entries[1]
             .metadata
@@ -4967,7 +4974,7 @@ mod tests {
             .unix_mode = Some(0o600);
         refresh_manifest_metadata_commitment(&mut valid);
         assert!(matches!(
-            validate_manifest(&valid, &TransferConfig::default()),
+            validate_manifest(&valid, &config),
             Err(TransportError::Frame(message)) if message.contains("metadata different from primary")
         ));
     }

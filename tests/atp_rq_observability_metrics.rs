@@ -111,6 +111,7 @@ fn committed_manifest_does_not_leak_runtime_metrics() {
         is_directory: true,
         total_bytes: 1024,
         merkle_root_hex: "00".repeat(32),
+        metadata: None,
         entries: vec![ManifestEntry {
             index: 0,
             rel_path: "a/b.bin".to_string(),

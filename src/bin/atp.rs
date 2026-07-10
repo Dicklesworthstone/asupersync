@@ -53,13 +53,13 @@ use asupersync::atp::delta::{
     plan_incremental_resync_with_receiver_coverage,
 };
 use asupersync::atp::delta_subchunk::{self, SubBlockSignature, SubDeltaOp};
-use asupersync::atp::object::ContentId;
+use asupersync::atp::object::{ContentId, MetadataPolicy};
 use asupersync::atp::safety::{
     portable_path_collision_key, validate_portable_path_set, validate_portable_relative_path,
 };
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
-use asupersync::net::atp::bonding::{BondAuthKeyRef, BondTransferDescriptor, DonorAssignment};
+use asupersync::net::atp::bonding::BondTransferDescriptor;
 use asupersync::net::atp::channel_bonding;
 use asupersync::net::atp::transport_common::metadata::{
     path_is_link_or_reparse, path_is_link_or_reparse_sync,
@@ -161,6 +161,20 @@ enum Command {
     /// multi-donor transfer (RQ symbols; run one instance per donor host).
     #[command(name = "bond-donate")]
     BondDonate(BondDonateArgs),
+    /// Receive one bonded multi-donor transfer: enroll N donors over the TCP
+    /// control plane, ingest their RQ symbols into one decoder set, and
+    /// commit fail-closed.
+    #[command(name = "bond-recv")]
+    BondRecv(BondRecvArgs),
+    /// Orchestrate a bonded pull: run the bonded receiver locally and launch
+    /// `atp bond-donate` on every donor host over SSH (next-gen BitTorrent
+    /// pull from a fleet that holds byte-identical copies).
+    #[command(name = "bond-pull")]
+    BondPull(BondPullArgs),
+    /// Derive and print the bonded transfer descriptor for a local source as
+    /// JSON (used by `bond-pull` to fetch the agreed descriptor from a donor).
+    #[command(name = "__bond-descriptor", hide = true)]
+    BondDescriptor(BondDescriptorArgs),
     /// Generate a validator-accepted RQ symbol-auth key as lowercase hex.
     #[command(name = "rq-keygen")]
     RqKeygen,
@@ -226,6 +240,17 @@ enum PathPreference {
     Tailscale,
 }
 
+/// Remote command interpreter used by SSH bootstrap operations.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum RemoteShell {
+    /// Probe for Windows OpenSSH and otherwise use a POSIX shell.
+    Auto,
+    /// Quote argv and environment assignments for a POSIX shell.
+    Posix,
+    /// Invoke Windows PowerShell through a UTF-16LE encoded command.
+    Powershell,
+}
+
 #[derive(Parser)]
 struct SendArgs {
     /// Source file or directory to send.
@@ -262,6 +287,9 @@ struct SendArgs {
     /// Remote `atp` binary path or command name used by SSH bootstrap.
     #[arg(long, default_value = "atp")]
     remote_atp: String,
+    /// Remote command interpreter. Auto detects Windows OpenSSH.
+    #[arg(long, value_enum, default_value_t = RemoteShell::Auto)]
+    remote_shell: RemoteShell,
     /// Extra raw OpenSSH option; repeat for multiple argv words.
     #[arg(long = "ssh-option")]
     ssh_options: Vec<String>,
@@ -430,15 +458,12 @@ struct BondDonateArgs {
     /// byte-identical copy: the bonded descriptor is derived from these bytes,
     /// and the donor byte proof refuses to spray on any mismatch.
     source: PathBuf,
-    /// Receiver UDP endpoint (host:port) that ingests bonded symbols.
+    /// Receiver bonded CONTROL address (host:port, TCP). The donor enrolls
+    /// there, receives its donor index/count and UDP symbol endpoints from the
+    /// receiver, sprays its assigned fountain slice, then serves aggregated
+    /// feedback until the receiver broadcasts its fail-closed commit receipt.
     #[arg(long = "to", value_name = "HOST:PORT")]
     to: String,
-    /// Zero-based index of this donor within the bonded donor set.
-    #[arg(long)]
-    donor_index: u32,
-    /// Total number of donors participating in the bonded transfer.
-    #[arg(long)]
-    donor_count: u32,
     /// Maximum transfer size in bytes.
     #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
     max_bytes: u64,
@@ -446,11 +471,12 @@ struct BondDonateArgs {
     #[arg(long, default_value_t = 4)]
     workers: usize,
     /// RaptorQ symbol size in bytes (default 1400). Must be identical on every
-    /// donor: it is part of the agreed bonded descriptor.
+    /// donor and the receiver: it is part of the agreed bonded descriptor.
     #[arg(long)]
     symbol_size: Option<u16>,
     /// Maximum RaptorQ source-block size in bytes, `auto`, or `0`. Must be
-    /// identical on every donor: it fixes per-block K in the bonded descriptor.
+    /// identical on every donor and the receiver: it fixes per-block K in the
+    /// agreed bonded descriptor.
     #[arg(
         long,
         default_value_t = MaxBlockSizeArg::Auto,
@@ -462,6 +488,163 @@ struct BondDonateArgs {
     repair_overhead: f64,
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
     /// All bonded donors and the receiver must share the same key.
+    #[arg(long, value_name = "HEX")]
+    rq_auth_key_hex: Option<String>,
+    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    #[arg(long)]
+    rq_allow_unauthenticated_lab: bool,
+}
+
+#[derive(Parser)]
+struct BondRecvArgs {
+    /// Destination directory for the committed bonded transfer.
+    dest: PathBuf,
+    /// Local byte-identical copy of the transfer content, used to derive the
+    /// agreed bonded descriptor (the exact derivation every donor runs). The
+    /// landed enrollment protocol never transmits the descriptor: donors and
+    /// the receiver each derive it from their own bytes and enrollment fails
+    /// closed on any transfer-id / merkle-root / metadata mismatch.
+    source: PathBuf,
+    /// TCP control address to listen on for donor enrollment (donors dial
+    /// this with `bond-donate --to`).
+    #[arg(long, default_value = "0.0.0.0:8473")]
+    listen: SocketAddr,
+    /// Exact number of donors that must enroll before the transfer runs.
+    #[arg(long = "expect-donors", value_name = "N")]
+    expect_donors: u32,
+    /// IP the bonded UDP symbol sockets bind on. Defaults to the --listen IP.
+    #[arg(long = "udp-bind", value_name = "IP")]
+    udp_bind: Option<String>,
+    /// This peer's advertised identity label.
+    #[arg(long, default_value = "atp-bond-receiver")]
+    peer_id: String,
+    /// Maximum transfer size in bytes.
+    #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
+    max_bytes: u64,
+    /// Worker threads for the local runtime.
+    #[arg(long, default_value_t = 4)]
+    workers: usize,
+    /// Maximum seconds to wait for each donor enrollment accept and for donor
+    /// symbol/control progress before failing closed.
+    #[arg(long, default_value_t = DEFAULT_RECV_ACCEPT_TIMEOUT_SECS)]
+    accept_timeout_secs: u64,
+    /// RaptorQ symbol size in bytes (default 1400). Must match every donor.
+    #[arg(long)]
+    symbol_size: Option<u16>,
+    /// Maximum RaptorQ source-block size in bytes, `auto`, or `0`. Must match
+    /// every donor.
+    #[arg(
+        long,
+        default_value_t = MaxBlockSizeArg::Auto,
+        value_parser = parse_max_block_size_arg
+    )]
+    max_block_size: MaxBlockSizeArg,
+    /// Round-0 repair overhead factor, >= 1.0.
+    #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
+    repair_overhead: f64,
+    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    /// All bonded donors and the receiver must share the same key.
+    #[arg(long, value_name = "HEX")]
+    rq_auth_key_hex: Option<String>,
+    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    #[arg(long)]
+    rq_allow_unauthenticated_lab: bool,
+}
+
+#[derive(Parser)]
+struct BondPullArgs {
+    /// Path ON EVERY DONOR HOST of the byte-identical source to pull.
+    source: String,
+    /// Local destination directory for the committed transfer.
+    dest: PathBuf,
+    /// Comma-separated donor SSH hosts (`user@host` or `host`); one
+    /// `bond-donate` leg is launched on each.
+    #[arg(long, value_delimiter = ',', required = true, value_name = "HOSTS")]
+    donors: Vec<String>,
+    /// Control address (ip:port) the donors dial back. REQUIRED unless
+    /// --listen names a routable IP (then donors dial the --listen address
+    /// itself). There is deliberately no inference from the SSH connection:
+    /// the address this host uses to reach a donor says nothing about which
+    /// address that donor can reach this host on. Keep it explicit.
+    #[arg(long, value_name = "IP:PORT")]
+    advertise: Option<SocketAddr>,
+    /// Local TCP control address the bonded receiver listens on.
+    #[arg(long, default_value = "0.0.0.0:8473")]
+    listen: SocketAddr,
+    /// IP the bonded UDP symbol sockets bind on. Defaults to the --listen IP.
+    #[arg(long = "udp-bind", value_name = "IP")]
+    udp_bind: Option<String>,
+    /// Remote `atp` binary path or command name on the donor hosts.
+    #[arg(long, default_value = "atp")]
+    remote_atp: String,
+    /// Remote donor command interpreter. Auto probes each SSH host.
+    #[arg(long, value_enum, default_value_t = RemoteShell::Auto)]
+    remote_shell: RemoteShell,
+    /// Extra raw OpenSSH option; repeat for multiple argv words.
+    #[arg(long = "ssh-option")]
+    ssh_options: Vec<String>,
+    /// Seconds to wait for the remote descriptor derivation (a full source
+    /// hash pass on the first donor) before failing closed.
+    #[arg(long, default_value_t = 300)]
+    descriptor_timeout_secs: u64,
+    /// This peer's advertised identity label.
+    #[arg(long, default_value = "atp-bond-pull")]
+    peer_id: String,
+    /// Maximum transfer size in bytes.
+    #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
+    max_bytes: u64,
+    /// Worker threads for the local runtime.
+    #[arg(long, default_value_t = 4)]
+    workers: usize,
+    /// Maximum seconds to wait for each donor enrollment accept and for donor
+    /// symbol/control progress before failing closed.
+    #[arg(long, default_value_t = DEFAULT_RECV_ACCEPT_TIMEOUT_SECS)]
+    accept_timeout_secs: u64,
+    /// RaptorQ symbol size in bytes (default 1400 on every leg).
+    #[arg(long)]
+    symbol_size: Option<u16>,
+    /// Maximum RaptorQ source-block size in bytes, `auto`, or `0` (forwarded
+    /// to every donor so all legs agree).
+    #[arg(
+        long,
+        default_value_t = MaxBlockSizeArg::Auto,
+        value_parser = parse_max_block_size_arg
+    )]
+    max_block_size: MaxBlockSizeArg,
+    /// Round-0 repair overhead factor, >= 1.0 (forwarded to every donor).
+    #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
+    repair_overhead: f64,
+    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    /// Generated per-transfer when omitted and exported to the donors over
+    /// SSH (mirrors the `atp send` SSH bootstrap).
+    #[arg(long, value_name = "HEX")]
+    rq_auth_key_hex: Option<String>,
+    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    #[arg(long)]
+    rq_allow_unauthenticated_lab: bool,
+}
+
+#[derive(Parser)]
+struct BondDescriptorArgs {
+    /// Source file or directory to derive the bonded descriptor from.
+    source: PathBuf,
+    /// Maximum transfer size in bytes.
+    #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
+    max_bytes: u64,
+    /// Worker threads for the local runtime.
+    #[arg(long, default_value_t = 2)]
+    workers: usize,
+    /// RaptorQ symbol size in bytes (default 1400).
+    #[arg(long)]
+    symbol_size: Option<u16>,
+    /// Maximum RaptorQ source-block size in bytes, `auto`, or `0`.
+    #[arg(
+        long,
+        default_value_t = MaxBlockSizeArg::Auto,
+        value_parser = parse_max_block_size_arg
+    )]
+    max_block_size: MaxBlockSizeArg,
+    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
@@ -572,7 +755,16 @@ fn tcp_config(max_bytes: u64, enable_delta: bool) -> TransferConfig {
     TransferConfig {
         max_transfer_bytes: max_bytes,
         enable_delta,
+        metadata_policy: selected_cli_metadata_policy(),
+        preserve_hardlinks: true,
         ..TransferConfig::default()
+    }
+}
+
+fn selected_cli_metadata_policy() -> MetadataPolicy {
+    MetadataPolicy {
+        preserve_timestamps: true,
+        ..MetadataPolicy::default()
     }
 }
 
@@ -621,12 +813,29 @@ fn rq_config(
         repair_overhead: repair_overhead.max(1.0),
         round0_loss_target,
         max_transfer_bytes: max_bytes,
+        metadata_policy: selected_cli_metadata_policy(),
+        preserve_hardlinks: true,
         max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
         round_tail_drain: Duration::from_millis(tail_drain_ms),
         ..RqConfig::default()
     };
     let auth = resolve_rq_auth_choice(rq_auth_key_hex, rq_allow_unauthenticated_lab, false)?;
     config_with_rq_auth(config, &auth)
+}
+
+fn rq_send_config(args: &SendArgs) -> Result<RqConfig, String> {
+    let symbol_size = resolved_symbol_size(args.symbol_size, false);
+    rq_config(
+        args.max_bytes,
+        symbol_size,
+        args.streams,
+        args.max_block_size.effective(symbol_size)?,
+        args.repair_overhead,
+        args.rq_round0_loss_pct,
+        args.rq_tail_drain_ms,
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )
 }
 
 fn normalize_max_block_size(symbol_size: u16, max_block_size: usize) -> Result<usize, String> {
@@ -1081,6 +1290,8 @@ fn quic_config_send(
         max_transfer_bytes: args.max_bytes,
         bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
+        metadata_policy: selected_cli_metadata_policy(),
+        preserve_hardlinks: true,
         ..QuicConfig::default()
     };
     let mut cfg = quic_with_transport_auth(
@@ -1124,6 +1335,8 @@ fn quic_config_recv(
         max_transfer_bytes: args.max_bytes,
         accept_timeout: recv_listen_timeout(args)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
+        metadata_policy: selected_cli_metadata_policy(),
+        preserve_hardlinks: true,
         ..QuicConfig::default()
     };
     let mut cfg = quic_with_transport_auth(
@@ -1358,6 +1571,7 @@ fn resolve(target: &str) -> Result<SocketAddr, String> {
 
 fn run_send(args: SendArgs) -> Result<(), String> {
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
+    validate_user_transfer_namespace(&args.source)?;
     // `--dry-run` computes the transfer plan from the source and prints it
     // without resolving the target or opening any socket (rsync `--dry-run`).
     if args.dry_run {
@@ -1380,7 +1594,10 @@ fn validate_auto_security_policy(args: &SendArgs) -> Result<(), String> {
     if args.allow_plaintext_fallback && args.transport != Transport::Auto {
         return Err("--allow-plaintext-fallback is valid only with --transport auto".to_string());
     }
-    if args.transport == Transport::Auto && !args.no_delta && !args.allow_plaintext_fallback {
+    if args.transport == Transport::Auto
+        && cli_content_delta_enabled(args.no_delta)
+        && !args.allow_plaintext_fallback
+    {
         return Err(
             "--transport auto with delta planning would select plaintext TCP; choose an explicit \
              transport, pass --no-delta for QUIC-only fail-closed selection, or explicitly \
@@ -1401,12 +1618,21 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     // plan matches what the transfer commits: same chunk size, metadata policy
     // (symlink/dir/special-file handling), and hardlink dedup.
     let cfg = tcp_config(args.max_bytes, false);
-    let validate_rq = args.transport == Transport::Rq;
+    let rq_cfg = (args.transport == Transport::Rq)
+        .then(|| rq_send_config(args))
+        .transpose()?;
+    let plan_metadata_policy = rq_cfg.as_ref().map_or_else(
+        || cfg.metadata_policy.clone(),
+        |rq| rq.metadata_policy.clone(),
+    );
+    let plan_preserve_hardlinks = rq_cfg
+        .as_ref()
+        .map_or(cfg.preserve_hardlinks, |rq| rq.preserve_hardlinks);
     let plan = runtime
         .block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("dry-run cx");
-            if validate_rq {
-                transport_rq::validate_source_compatibility(&source)
+            if let Some(rq_cfg) = rq_cfg.as_ref() {
+                transport_rq::validate_source_compatibility_with_config(&source, rq_cfg)
                     .await
                     .map_err(|error| error.to_string())?;
             }
@@ -1414,29 +1640,42 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
                 &cx,
                 &source,
                 cfg.chunk_size,
-                &cfg.metadata_policy,
-                cfg.preserve_hardlinks,
+                &plan_metadata_policy,
+                plan_preserve_hardlinks,
             )
             .await
             .map_err(|error| error.to_string())
         }))
         .map_err(|e| e.to_string())?;
+    enforce_transfer_size("send source", plan.total_bytes, args.max_bytes)?;
     print_json(&plan);
     Ok(())
 }
 
-// ─── Channel bonding: donor leg (`atp bond-donate`) ──────────────────────────
+fn enforce_transfer_size(label: &str, total_bytes: u64, max_bytes: u64) -> Result<(), String> {
+    if total_bytes > max_bytes {
+        return Err(format!(
+            "{label} is {total_bytes} bytes which exceeds --max-bytes {max_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+// ─── Channel bonding: `atp bond-donate` / `bond-recv` / `bond-pull` ─────────
 
 /// Run one donor leg of a bonded multi-donor transfer (z01bbr Phase F, donor
-/// side): derive the shared descriptor from the LOCAL source bytes, build this
-/// donor's static-residue assignment, and spray only the assigned slice of the
-/// fountain at the receiver endpoint via [`transport_rq::donate_path`].
+/// side): derive the shared descriptor from the LOCAL source bytes, then run
+/// the full [`transport_rq::donate_bonded`] control loop — enroll on the
+/// receiver's TCP control plane (which assigns this donor's index/count and
+/// UDP endpoints), spray the assigned fountain slice, and serve aggregated
+/// NeedMore feedback until the receiver broadcasts its commit receipt.
 ///
-/// `donate_path` itself re-proves the donor's bytes against the descriptor
-/// (per-entry SHA-256 + merkle root) before any symbol is sent, so a donor
-/// whose copy has drifted refuses instead of poisoning the bonded fountain.
+/// The donor byte proof inside the donate path re-hashes this host's bytes
+/// against the descriptor (per-entry SHA-256 + merkle root) before any symbol
+/// is sent, so a donor whose copy has drifted refuses instead of poisoning
+/// the bonded fountain.
 fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
-    let receiver = resolve(&args.to)?;
+    let control_addr = resolve(&args.to)?;
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
     let config = rq_config(
         args.max_bytes,
@@ -1453,47 +1692,661 @@ fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
         args.rq_auth_key_hex.as_deref(),
         args.rq_allow_unauthenticated_lab,
     )?;
-    let assignment = bond_donor_assignment(
-        args.donor_index,
-        args.donor_count,
-        receiver,
-        auth_key_id.clone(),
-    )?;
-    let source_root = bond_source_root(&args.source)?;
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
     let max_bytes = args.max_bytes;
     let start = Instant::now();
     let report = runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("bond donor cx");
-        let descriptor =
-            derive_bond_transfer_descriptor(&cx, &source, &config, max_bytes, auth_key_id).await?;
-        transport_rq::donate_path(
-            &cx,
-            &descriptor,
-            &assignment,
-            receiver,
-            &source_root,
-            config,
-        )
-        .await
-        .map_err(|error| error.to_string())
+        bond_donate_transfer(&cx, &source, control_addr, config, max_bytes, auth_key_id).await
     }))?;
     let elapsed = start.elapsed();
     print_atp_metrics_line(
         "bond-donate",
         Transport::Rq,
-        report.udp_send_acceleration.payload_bytes,
+        report.spray.udp_send_acceleration.payload_bytes,
         Some(report.symbols_sent),
+        Some(report.receipt.symbols_accepted),
+        report.feedback_rounds,
         None,
-        0,
-        None,
-        report.receiver_endpoints.len(),
+        report.spray.receiver_endpoints.len(),
         Some(elapsed),
     );
-    print_rq_udp_send_acceleration_line(&report.udp_send_acceleration);
+    print_rq_udp_send_acceleration_line(&report.spray.udp_send_acceleration);
     print_json(&bond_donate_json(&report, Some(elapsed)));
+    if report.receipt.committed {
+        Ok(())
+    } else {
+        Err(format!(
+            "bonded receiver did not commit: {}",
+            report
+                .receipt
+                .reason
+                .as_deref()
+                .unwrap_or("verification failed")
+        ))
+    }
+}
+
+/// The donor-leg body `atp bond-donate` runs (and the in-process donor leg the
+/// bonded e2e drives): derive the agreed descriptor from local bytes, then run
+/// the full enrollment + spray + feedback loop against the receiver's control
+/// address.
+async fn bond_donate_transfer(
+    cx: &Cx,
+    source: &Path,
+    control_addr: SocketAddr,
+    config: RqConfig,
+    max_bytes: u64,
+    auth_key_id: Option<String>,
+) -> Result<transport_rq::BondedDonateReport, String> {
+    let descriptor =
+        derive_bond_transfer_descriptor(cx, source, &config, max_bytes, auth_key_id).await?;
+    let source_root = bond_source_root(source)?;
+    transport_rq::donate_bonded(cx, &descriptor, control_addr, &source_root, config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Run the bonded receiver leg (z01bbr Phase F, receiver side): derive the
+/// agreed descriptor from a LOCAL byte-identical copy — the landed enrollment
+/// protocol never transmits the descriptor, it only cross-checks agreement —
+/// then enroll `--expect-donors` donors and drive [`transport_rq::receive_bonded`]
+/// to a fail-closed commit.
+fn run_bond_recv(args: BondRecvArgs) -> Result<(), String> {
+    validate_bond_expected_donors(args.expect_donors)?;
+    let symbol_size = resolved_symbol_size(args.symbol_size, false);
+    let mut config = rq_config(
+        args.max_bytes,
+        symbol_size,
+        DEFAULT_UDP_FANOUT,
+        args.max_block_size.effective(symbol_size)?,
+        args.repair_overhead,
+        0.0,
+        DEFAULT_ROUND_TAIL_DRAIN_MS,
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    config.accept_timeout = recv_accept_timeout(args.accept_timeout_secs)?;
+    let auth_key_id = bond_auth_key_id(
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    let chosen_fanout = config.udp_fanout.max(1);
+    let udp_bind_ip = args
+        .udp_bind
+        .clone()
+        .unwrap_or_else(|| args.listen.ip().to_string());
+    let runtime = build_runtime(args.workers)?;
+    let source = args.source.clone();
+    let dest = args.dest.clone();
+    let listen = args.listen;
+    let expect_donors = args.expect_donors;
+    let peer_id = args.peer_id.clone();
+    let max_bytes = args.max_bytes;
+    let start = Instant::now();
+    let report = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("bond receiver cx");
+        let descriptor =
+            derive_bond_transfer_descriptor(&cx, &source, &config, max_bytes, auth_key_id).await?;
+        bond_recv_serve(
+            &cx,
+            &descriptor,
+            &dest,
+            listen,
+            &udp_bind_ip,
+            expect_donors,
+            config,
+            &peer_id,
+            None,
+        )
+        .await
+    }))?;
+    let elapsed = start.elapsed();
+    print_atp_metrics_line(
+        "bond-receive",
+        Transport::Rq,
+        report.bytes_received,
+        None,
+        Some(report.symbols_accepted),
+        report.feedback_rounds,
+        None,
+        chosen_fanout,
+        Some(elapsed),
+    );
+    print_json(&bond_recv_json(&report, chosen_fanout, Some(elapsed)));
     Ok(())
+}
+
+/// The receiver-leg body shared by `bond-recv` and `bond-pull`: create the
+/// destination, bind the TCP control listener, print the readiness line, and
+/// run the landed bonded receive loop to a fail-closed commit.
+///
+/// `on_bound` reports the actually-bound control address (for `--listen`
+/// port 0 and the in-process orchestrator, which must not launch donors
+/// before the listener exists).
+#[allow(clippy::too_many_arguments)]
+async fn bond_recv_serve(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    dest: &Path,
+    listen: SocketAddr,
+    udp_bind_ip: &str,
+    expected_donors: u32,
+    config: RqConfig,
+    peer_id: &str,
+    on_bound: Option<mpsc::Sender<SocketAddr>>,
+) -> Result<transport_rq::BondedReceiveReport, String> {
+    create_receive_destination(dest).await?;
+    let listener = TcpListener::bind(listen)
+        .await
+        .map_err(|e| format!("bind {listen}: {e}"))?;
+    let bound = listener.local_addr().map_err(|e| e.to_string())?;
+    eprintln!(
+        "atp: bonded control listening on {bound} (udp on {udp_bind_ip}), dest {}, expecting {expected_donors} donor(s)",
+        dest.display()
+    );
+    if let Some(ready) = on_bound {
+        let _ = ready.send(bound);
+    }
+    transport_rq::receive_bonded(
+        cx,
+        descriptor,
+        dest,
+        &listener,
+        udp_bind_ip,
+        expected_donors,
+        config,
+        peer_id,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Hidden helper backing `bond-pull`'s descriptor fetch: derive the bonded
+/// descriptor from local source bytes and print it as one JSON line on stdout.
+fn run_bond_descriptor(args: BondDescriptorArgs) -> Result<(), String> {
+    let symbol_size = resolved_symbol_size(args.symbol_size, false);
+    let config = rq_config(
+        args.max_bytes,
+        symbol_size,
+        DEFAULT_UDP_FANOUT,
+        args.max_block_size.effective(symbol_size)?,
+        DEFAULT_REPAIR_OVERHEAD,
+        0.0,
+        DEFAULT_ROUND_TAIL_DRAIN_MS,
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    let auth_key_id = bond_auth_key_id(
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    let runtime = build_runtime(args.workers)?;
+    let source = args.source.clone();
+    let max_bytes = args.max_bytes;
+    let descriptor = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("bond descriptor cx");
+        derive_bond_transfer_descriptor(&cx, &source, &config, max_bytes, auth_key_id).await
+    }))?;
+    print_json(&descriptor);
+    Ok(())
+}
+
+/// Number of donors accepted by one bonded receive.
+fn validate_bond_expected_donors(expected: u32) -> Result<(), String> {
+    let max = asupersync::net::atp::bonding::MAX_BONDING_DONORS;
+    if expected == 0 {
+        return Err("--expect-donors must be at least 1".to_string());
+    }
+    if expected > max {
+        return Err(format!(
+            "--expect-donors {expected} exceeds the bonding ceiling of {max} donors"
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the control address donors dial back for `bond-pull`.
+///
+/// Explicit `--advertise` wins (and must be a real routable ip:port). Without
+/// it, the `--listen` IP is reused only when it is routable (never
+/// 0.0.0.0/[::]); the port comes from the actually-bound listener so
+/// `--listen` port 0 still advertises the real port. Inference from the SSH
+/// connection is deliberately not offered — see the `--advertise` help.
+fn bond_pull_control_advertise(
+    advertise: Option<SocketAddr>,
+    listen: SocketAddr,
+    bound_port: u16,
+) -> Result<SocketAddr, String> {
+    if let Some(addr) = advertise {
+        if addr.ip().is_unspecified() {
+            return Err(
+                "--advertise must name a routable IP donors can dial, not 0.0.0.0/[::]".to_string(),
+            );
+        }
+        if addr.port() == 0 {
+            return Err("--advertise must carry the real control port, not 0".to_string());
+        }
+        return Ok(addr);
+    }
+    if listen.ip().is_unspecified() {
+        return Err(
+            "bond-pull cannot know which address the donors can dial: pass --advertise <ip:port> \
+             (e.g. this host's LAN/Tailscale IP + the control port), or bind --listen on a \
+             routable IP"
+                .to_string(),
+        );
+    }
+    Ok(SocketAddr::new(listen.ip(), bound_port))
+}
+
+/// Remote argv for one `bond-donate` leg launched over SSH by `bond-pull`.
+fn bond_pull_donor_argv(args: &BondPullArgs, control: SocketAddr) -> Vec<String> {
+    let mut argv = vec![
+        args.remote_atp.clone(),
+        "bond-donate".to_string(),
+        args.source.clone(),
+        "--to".to_string(),
+        control.to_string(),
+        "--max-bytes".to_string(),
+        args.max_bytes.to_string(),
+        "--workers".to_string(),
+        args.workers.max(1).to_string(),
+        "--max-block-size".to_string(),
+        args.max_block_size.remote_arg(),
+        "--repair-overhead".to_string(),
+        args.repair_overhead.to_string(),
+    ];
+    // Forward --symbol-size only when set explicitly: every leg resolves the
+    // same rq default (1400), mirroring the `atp send` SSH bootstrap.
+    if let Some(symbol_size) = args.symbol_size {
+        argv.push("--symbol-size".to_string());
+        argv.push(symbol_size.to_string());
+    }
+    if args.rq_allow_unauthenticated_lab {
+        argv.push("--rq-allow-unauthenticated-lab".to_string());
+    }
+    argv
+}
+
+/// Remote argv for the descriptor fetch `bond-pull` runs on the first donor.
+fn bond_pull_descriptor_argv(args: &BondPullArgs) -> Vec<String> {
+    let mut argv = vec![
+        args.remote_atp.clone(),
+        "__bond-descriptor".to_string(),
+        args.source.clone(),
+        "--max-bytes".to_string(),
+        args.max_bytes.to_string(),
+        "--max-block-size".to_string(),
+        args.max_block_size.remote_arg(),
+    ];
+    if let Some(symbol_size) = args.symbol_size {
+        argv.push("--symbol-size".to_string());
+        argv.push(symbol_size.to_string());
+    }
+    if args.rq_allow_unauthenticated_lab {
+        argv.push("--rq-allow-unauthenticated-lab".to_string());
+    }
+    argv
+}
+
+/// A child-pipe reader whose completion is joined before its output is parsed.
+struct CapturedChildPipe {
+    log: Arc<Mutex<String>>,
+    reader: Option<thread::JoinHandle<()>>,
+}
+
+impl CapturedChildPipe {
+    fn snapshot(&self) -> String {
+        locked_log_snapshot(&self.log)
+    }
+
+    fn finish(&mut self) -> String {
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        self.snapshot()
+    }
+}
+
+/// Spawn a thread that drains one child pipe into a shared log string.
+fn capture_child_pipe<R: Read + Send + 'static>(pipe: R) -> CapturedChildPipe {
+    let log = Arc::new(Mutex::new(String::new()));
+    let log_for_thread = Arc::clone(&log);
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(pipe).lines() {
+            let line = line.unwrap_or_else(|err| format!("<pipe read error: {err}>"));
+            if let Ok(mut log) = log_for_thread.lock() {
+                log.push_str(&line);
+                log.push('\n');
+            }
+        }
+    });
+    CapturedChildPipe {
+        log,
+        reader: Some(reader),
+    }
+}
+
+fn locked_log_snapshot(log: &Arc<Mutex<String>>) -> String {
+    log.lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "<log unavailable>".to_string())
+}
+
+/// Fetch the agreed bonded descriptor from a donor host over SSH by running
+/// the hidden `__bond-descriptor` derivation there (the descriptor is a pure
+/// function of the source bytes + agreed symbol params, so any donor that
+/// truly holds the bytes can produce it; every other donor and the receiver
+/// then fail closed on any disagreement during enrollment and commit).
+fn bond_pull_fetch_descriptor(
+    args: &BondPullArgs,
+    host: &str,
+    rq_auth: &RqAuthChoice,
+    remote_shell: RemoteShell,
+) -> Result<BondTransferDescriptor, String> {
+    let argv = bond_pull_descriptor_argv(args);
+    let env_vars = match rq_auth {
+        RqAuthChoice::KeyHex(key_hex) => vec![(RQ_AUTH_ENV, key_hex.as_str())],
+        RqAuthChoice::UnauthenticatedLab => Vec::new(),
+    };
+    let remote_command = remote_shell_command(remote_shell, &env_vars, &argv)?;
+    let mut command = ssh_base_command(&args.ssh_options, host);
+    command
+        .arg(remote_command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("spawn ssh descriptor fetch on {host}: {err}"))?;
+    let mut stdout_log = child
+        .stdout
+        .take()
+        .map(capture_child_pipe)
+        .ok_or_else(|| "ssh stdout pipe unavailable".to_string())?;
+    let mut stderr_log = child
+        .stderr
+        .take()
+        .map(capture_child_pipe)
+        .ok_or_else(|| "ssh stderr pipe unavailable".to_string())?;
+    let status = wait_child_timeout(
+        &mut child,
+        Duration::from_secs(args.descriptor_timeout_secs.max(1)),
+        &format!("descriptor derivation on {host}"),
+    );
+    let stdout = stdout_log.finish();
+    let stderr = stderr_log.finish();
+    let status = status?;
+    if !status.success() {
+        return Err(format!(
+            "descriptor derivation on {host} failed ({status}); stderr: {}",
+            last_log_lines(&stderr, 8)
+        ));
+    }
+    let descriptor = stdout
+        .lines()
+        .find_map(|line| serde_json::from_str::<BondTransferDescriptor>(line.trim()).ok())
+        .ok_or_else(|| {
+            format!(
+                "descriptor derivation on {host} printed no descriptor JSON; stdout: {}",
+                last_log_lines(&stdout, 4)
+            )
+        })?;
+    descriptor
+        .validate()
+        .map_err(|error| format!("descriptor from {host} is invalid: {error}"))?;
+    Ok(descriptor)
+}
+
+/// One donor leg launched by `bond-pull`.
+struct BondPullDonorLeg {
+    host: String,
+    child: Child,
+    stdout: CapturedChildPipe,
+    stderr: CapturedChildPipe,
+}
+
+/// Orchestrate a bonded pull (z01bbr Phase F, the headline UX): fetch the
+/// agreed descriptor from the first donor, start the bonded receiver
+/// IN-PROCESS, then SSH-launch one `bond-donate` leg per donor host dialing
+/// the explicit control address, and wait for the fail-closed commit.
+fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
+    let donors: Vec<String> = args
+        .donors
+        .iter()
+        .map(|host| host.trim().to_string())
+        .filter(|host| !host.is_empty())
+        .collect();
+    if donors.is_empty() {
+        return Err("--donors must name at least one SSH host".to_string());
+    }
+    let expected_donors = u32::try_from(donors.len())
+        .map_err(|_| format!("--donors names too many hosts: {}", donors.len()))?;
+    validate_bond_expected_donors(expected_donors)?;
+    let donor_shells = donors
+        .iter()
+        .map(|host| resolve_remote_shell(args.remote_shell, &args.ssh_options, host))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Fail fast on an unusable control posture before any remote work.
+    bond_pull_control_advertise(args.advertise, args.listen, args.listen.port())?;
+
+    // RQ symbol auth mirrors the `atp send` SSH bootstrap: use the configured
+    // key or generate a per-transfer one, and export it to every donor leg.
+    let rq_auth = resolve_rq_auth_choice(
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+        true,
+    )?;
+    let (auth_key_hex, allow_lab) = match &rq_auth {
+        RqAuthChoice::KeyHex(key_hex) => (Some(key_hex.clone()), false),
+        RqAuthChoice::UnauthenticatedLab => (None, true),
+    };
+    let symbol_size = resolved_symbol_size(args.symbol_size, false);
+    let mut config = rq_config(
+        args.max_bytes,
+        symbol_size,
+        DEFAULT_UDP_FANOUT,
+        args.max_block_size.effective(symbol_size)?,
+        args.repair_overhead,
+        0.0,
+        DEFAULT_ROUND_TAIL_DRAIN_MS,
+        auth_key_hex.as_deref(),
+        allow_lab,
+    )?;
+    config.accept_timeout = recv_accept_timeout(args.accept_timeout_secs)?;
+    let chosen_fanout = config.udp_fanout.max(1);
+
+    eprintln!(
+        "atp: bond-pull fetching descriptor from {} ({} donor(s) total)",
+        donors[0],
+        donors.len()
+    );
+    let descriptor = bond_pull_fetch_descriptor(&args, &donors[0], &rq_auth, donor_shells[0])?;
+    enforce_transfer_size("bond-pull source", descriptor.total_bytes, args.max_bytes)?;
+
+    // Start the bonded receiver in-process and wait for its bound control
+    // address before any donor is launched.
+    let udp_bind_ip = args
+        .udp_bind
+        .clone()
+        .unwrap_or_else(|| args.listen.ip().to_string());
+    let (ready_tx, ready_rx) = mpsc::channel::<SocketAddr>();
+    let start = Instant::now();
+    let receiver_thread = {
+        let descriptor = descriptor.clone();
+        let dest = args.dest.clone();
+        let listen = args.listen;
+        let udp_bind_ip = udp_bind_ip.clone();
+        let config = config.clone();
+        let peer_id = args.peer_id.clone();
+        let workers = args.workers;
+        thread::spawn(
+            move || -> Result<transport_rq::BondedReceiveReport, String> {
+                let runtime = build_runtime(workers)?;
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().expect("bond pull receiver cx");
+                    bond_recv_serve(
+                        &cx,
+                        &descriptor,
+                        &dest,
+                        listen,
+                        &udp_bind_ip,
+                        expected_donors,
+                        config,
+                        &peer_id,
+                        Some(ready_tx),
+                    )
+                    .await
+                }))
+            },
+        )
+    };
+    let bound = match ready_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(bound) => bound,
+        Err(_) => {
+            let error = match receiver_thread.join() {
+                Ok(Ok(_)) => "bonded receiver exited before binding".to_string(),
+                Ok(Err(error)) => error,
+                Err(_) => "bonded receiver thread panicked before binding".to_string(),
+            };
+            return Err(format!("bond-pull receiver failed to start: {error}"));
+        }
+    };
+    let control = bond_pull_control_advertise(args.advertise, args.listen, bound.port())?;
+
+    // Launch one bond-donate leg per donor host, all dialing the same
+    // explicit control address.
+    let mut legs: Vec<BondPullDonorLeg> = Vec::with_capacity(donors.len());
+    let argv_control = bond_pull_donor_argv(&args, control);
+    let mut spawn_error: Option<String> = None;
+    for (host, remote_shell) in donors.iter().zip(donor_shells) {
+        let env_vars = match &rq_auth {
+            RqAuthChoice::KeyHex(key_hex) => vec![(RQ_AUTH_ENV, key_hex.as_str())],
+            RqAuthChoice::UnauthenticatedLab => Vec::new(),
+        };
+        let remote_command = match remote_shell_command(remote_shell, &env_vars, &argv_control) {
+            Ok(command) => command,
+            Err(error) => {
+                spawn_error = Some(format!(
+                    "construct remote donor command for {host}: {error}"
+                ));
+                break;
+            }
+        };
+        let mut command = ssh_base_command(&args.ssh_options, host);
+        command
+            .arg(remote_command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match command.spawn() {
+            Ok(mut child) => {
+                let stdout = child.stdout.take().map(capture_child_pipe);
+                let stderr = child.stderr.take().map(capture_child_pipe);
+                let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    spawn_error = Some(format!("ssh pipes unavailable for donor {host}"));
+                    break;
+                };
+                eprintln!("atp: bond-pull launched donor {host} -> {control}");
+                legs.push(BondPullDonorLeg {
+                    host: host.clone(),
+                    child,
+                    stdout,
+                    stderr,
+                });
+            }
+            Err(err) => {
+                spawn_error = Some(format!("spawn ssh donor {host}: {err}"));
+                break;
+            }
+        }
+    }
+    if let Some(error) = spawn_error {
+        for leg in &mut legs {
+            let _ = leg.child.kill();
+            let _ = leg.child.wait();
+            let _ = leg.stdout.finish();
+            let _ = leg.stderr.finish();
+        }
+        // The receiver thread fails closed on its own enrollment timeout; the
+        // process exits with this error either way.
+        return Err(error);
+    }
+
+    // The receiver returns exactly when the transfer commits or fails closed.
+    let receive_result = receiver_thread
+        .join()
+        .map_err(|_| "bonded receiver thread panicked".to_string())?;
+    if receive_result.is_err() {
+        for leg in &mut legs {
+            let _ = leg.child.kill();
+        }
+    }
+
+    // Collect per-donor outcomes (donors exit right after the commit receipt).
+    let mut donor_outcomes = Vec::with_capacity(legs.len());
+    for leg in &mut legs {
+        let status = wait_child_timeout(
+            &mut leg.child,
+            Duration::from_secs(60),
+            &format!("bond-donate leg on {}", leg.host),
+        );
+        let stdout = leg.stdout.finish();
+        let stderr = leg.stderr.finish();
+        let report = stdout
+            .lines()
+            .find_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok());
+        let (exit_ok, exit_detail) = match &status {
+            Ok(status) => (status.success(), status.to_string()),
+            Err(error) => (false, error.clone()),
+        };
+        donor_outcomes.push(serde_json::json!({
+            "host": leg.host,
+            "exit_ok": exit_ok,
+            "exit_status": exit_detail,
+            "report": report,
+            "stderr_tail": last_log_lines(&stderr, 5),
+        }));
+    }
+
+    let elapsed = start.elapsed();
+    match receive_result {
+        Ok(report) => {
+            print_atp_metrics_line(
+                "bond-pull",
+                Transport::Rq,
+                report.bytes_received,
+                None,
+                Some(report.symbols_accepted),
+                report.feedback_rounds,
+                None,
+                chosen_fanout,
+                Some(elapsed),
+            );
+            print_json(&serde_json::json!({
+                "event": "atp_bond_pull", "transport": "rq",
+                "control_advertise": control.to_string(),
+                "donor_hosts": donors,
+                "receiver": bond_recv_json(&report, chosen_fanout, Some(elapsed)),
+                "donors": donor_outcomes,
+            }));
+            Ok(())
+        }
+        Err(error) => {
+            print_json(&serde_json::json!({
+                "event": "atp_bond_pull", "transport": "rq",
+                "control_advertise": control.to_string(),
+                "donor_hosts": donors,
+                "error": error,
+                "donors": donor_outcomes,
+            }));
+            Err(format!("bond-pull receive failed: {error}"))
+        }
+    }
 }
 
 /// Derive the shared bonded-transfer descriptor from the donor's local source
@@ -1504,7 +2357,8 @@ fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
 /// everywhere. This derivation is a pure function of the source bytes plus the
 /// agreed `(symbol_size, max_block_size)` params: [`plan_transfer`] makes the
 /// same deterministic sorted walk + streaming SHA-256 pass a real send commits
-/// (byte-identical trees at different absolute roots produce identical plans),
+/// (byte-identical trees at different absolute roots and on different operating
+/// systems produce identical plans),
 /// the merkle root is the flat object-graph root over those digests, and the
 /// transfer id is the rq derivation ([`channel_bonding::transfer_id_hex`]).
 /// E-15 small-file packing and large-object splitting are deliberately NOT
@@ -1519,13 +2373,22 @@ async fn derive_bond_transfer_descriptor(
     max_bytes: u64,
     auth_key_id: Option<String>,
 ) -> Result<BondTransferDescriptor, String> {
-    let plan_cfg = tcp_config(max_bytes, false);
+    // Donors can legitimately run on different operating systems. Platform
+    // modes, attributes, ownership, and timestamps are not byte identity and
+    // would make identical content derive different enrollment descriptors.
+    // Keep topology checks (including hardlink rejection) but commit only the
+    // portable content/path shape for bonded transfers.
+    let mut descriptor_config = config.clone();
+    descriptor_config.metadata_policy = MetadataPolicy::portable();
+    let metadata = transport_rq::source_metadata_manifest_with_config(source, &descriptor_config)
+        .await
+        .map_err(|error| format!("bond descriptor source validation: {error}"))?;
     let plan = plan_transfer(
         cx,
         source,
-        plan_cfg.chunk_size,
-        &plan_cfg.metadata_policy,
-        plan_cfg.preserve_hardlinks,
+        tcp_config(max_bytes, false).chunk_size,
+        &descriptor_config.metadata_policy,
+        descriptor_config.preserve_hardlinks,
     )
     .await
     .map_err(|error| format!("bond descriptor derivation: {error}"))?;
@@ -1567,6 +2430,7 @@ async fn derive_bond_transfer_descriptor(
         is_directory: plan.is_directory,
         total_bytes: plan.total_bytes,
         merkle_root_hex: plan.merkle_root_hex.clone(),
+        metadata: Some(metadata),
         entries,
     };
     let descriptor = BondTransferDescriptor::from_manifest(
@@ -1579,24 +2443,6 @@ async fn derive_bond_transfer_descriptor(
         .validate()
         .map_err(|error| format!("bond descriptor validation: {error}"))?;
     Ok(descriptor)
-}
-
-/// Build and validate this donor's static-residue assignment
-/// (`esi % donor_count == donor_index`). The single `--to` endpoint doubles as
-/// the primary spray target passed to `donate_path`.
-fn bond_donor_assignment(
-    donor_index: u32,
-    donor_count: u32,
-    receiver: SocketAddr,
-    auth_key_id: Option<String>,
-) -> Result<DonorAssignment, String> {
-    let auth_key_ref = auth_key_id.map(BondAuthKeyRef::ControlPlane);
-    let assignment =
-        DonorAssignment::new_static(donor_index, donor_count, vec![receiver], auth_key_ref);
-    assignment
-        .validate()
-        .map_err(|error| format!("invalid bonded donor assignment: {error}"))?;
-    Ok(assignment)
 }
 
 /// Derive the non-secret shared-key identifier carried in the bonded
@@ -1618,7 +2464,10 @@ fn bond_auth_key_id(
             hex::decode_to_slice(&key_hex, &mut bytes)
                 .map_err(|err| format!("decode RQ auth key hex: {err}"))?;
             let digest: [u8; 32] = Sha256::digest(bytes).into();
-            Ok(Some(format!("rq-auth-sha256:{}", hex::encode(&digest[..8]))))
+            Ok(Some(format!(
+                "rq-auth-sha256:{}",
+                hex::encode(&digest[..8])
+            )))
         }
     }
 }
@@ -1750,12 +2599,9 @@ fn run_send_to_addr(
     use_direct_delta_probe: bool,
 ) -> Result<(), String> {
     let mut direct_delta_plan = None;
+    let mut delta_package_guard = None;
     if use_direct_delta_probe && let Some(delta) = prepare_direct_delta_send(&args, addr)? {
         match delta {
-            DeltaPreparedSend::AlreadyInSync(report) => {
-                print_json(&report);
-                return Ok(());
-            }
             DeltaPreparedSend::Package {
                 package_root,
                 plan,
@@ -1770,6 +2616,7 @@ fn run_send_to_addr(
                     subdelta_chunks,
                     plan.shared_chunks
                 );
+                delta_package_guard = Some(DeltaPackageRootGuard::new(package_root.clone())?);
                 args.source = package_root;
                 direct_delta_plan = Some((plan, package_payload_bytes, subdelta_chunks));
             }
@@ -1790,6 +2637,9 @@ fn run_send_to_addr(
             *package_payload_bytes,
             *subdelta_chunks,
         );
+    }
+    if let Some(mut guard) = delta_package_guard {
+        guard.cleanup()?;
     }
     print_json(&report);
     Ok(())
@@ -1866,10 +2716,13 @@ fn run_send_auto_to_addr(
     let mut attempts = Vec::new();
     let rq_configured = args.rq_allow_unauthenticated_lab
         || configured_rq_auth_key(args.rq_auth_key_hex.as_deref()).is_some();
-    for transport in
-        Transport::auto_fallback_order(!args.no_delta, args.allow_plaintext_fallback, rq_configured)
-            .iter()
-            .copied()
+    for transport in Transport::auto_fallback_order(
+        cli_content_delta_enabled(args.no_delta),
+        args.allow_plaintext_fallback,
+        rq_configured,
+    )
+    .iter()
+    .copied()
     {
         eprintln!("[atp] transport selection: trying {}", transport.cli_arg());
         match send_to_addr_with_transport(runtime, args, transport, addr) {
@@ -1977,18 +2830,7 @@ fn send_to_addr_with_transport(
             Ok(tcp_send_json(&report, Some(elapsed)))
         }
         Transport::Rq => {
-            let symbol_size = resolved_symbol_size(args.symbol_size, false);
-            let cfg = rq_config(
-                args.max_bytes,
-                symbol_size,
-                args.streams,
-                args.max_block_size.effective(symbol_size)?,
-                args.repair_overhead,
-                args.rq_round0_loss_pct,
-                args.rq_tail_drain_ms,
-                args.rq_auth_key_hex.as_deref(),
-                args.rq_allow_unauthenticated_lab,
-            )?;
+            let cfg = rq_send_config(args)?;
             let chosen_fanout = cfg.udp_fanout.max(1);
             let start = Instant::now();
             let report = runtime
@@ -2124,8 +2966,21 @@ fn validate_posix_ssh_bootstrap(args: &SendArgs, remote: &RemoteTarget) -> Resul
     Ok(())
 }
 
+fn validate_ssh_bootstrap(
+    shell: RemoteShell,
+    args: &SendArgs,
+    remote: &RemoteTarget,
+) -> Result<(), String> {
+    if shell == RemoteShell::Posix {
+        validate_posix_ssh_bootstrap(args, remote)?;
+    }
+    Ok(())
+}
+
 fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), String> {
-    validate_posix_ssh_bootstrap(&args, remote)?;
+    let remote_shell =
+        resolve_remote_shell(args.remote_shell, &args.ssh_options, &remote.ssh_host)?;
+    validate_ssh_bootstrap(remote_shell, &args, remote)?;
     if args.no_tailscale && args.prefer == PathPreference::Tailscale {
         return Err("--no-tailscale conflicts with --prefer tailscale".to_string());
     }
@@ -2164,21 +3019,18 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
         );
     }
 
-    let data_host = choose_data_host(&args, remote);
+    let data_host = choose_data_host(&args, remote, remote_shell);
     if args.transport == Transport::Quic && args.server_name.is_none() {
         args.server_name = Some(default_quic_server_name_for_ssh(remote));
     }
-    let delta_package = if args.no_delta {
+    let delta_package = if !cli_content_delta_enabled(args.no_delta) {
         None
     } else {
-        prepare_delta_ssh_send(&args, remote)?
+        prepare_delta_ssh_send(&args, remote, remote_shell)?
     };
+    let mut delta_package_guard = None;
     if let Some(delta) = delta_package {
         match delta {
-            DeltaPreparedSend::AlreadyInSync(report) => {
-                print_json(&report);
-                return Ok(());
-            }
             DeltaPreparedSend::Package {
                 package_root,
                 plan,
@@ -2193,13 +3045,14 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
                     subdelta_chunks,
                     plan.shared_chunks
                 );
+                delta_package_guard = Some(DeltaPackageRootGuard::new(package_root.clone())?);
                 args.source = package_root;
             }
         }
     }
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addr = resolve(&data_target)?;
-    let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref())?;
+    let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref(), remote_shell)?;
     let stderr_log = wait_for_remote_ready(
         &mut child,
         Duration::from_secs(args.ssh_ready_timeout_secs.max(1)),
@@ -2212,7 +3065,11 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
         return send_result;
     }
 
-    let status = wait_child_timeout(&mut child, Duration::from_secs(60))?;
+    let status = wait_child_timeout(
+        &mut child,
+        Duration::from_secs(60),
+        "remote atp receiver (after send completion)",
+    )?;
     if !status.success() {
         let log = stderr_log
             .lock()
@@ -2224,12 +3081,15 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
         ));
     }
 
+    if let Some(mut guard) = delta_package_guard {
+        guard.cleanup()?;
+    }
+
     Ok(())
 }
 
 #[derive(Debug)]
 enum DeltaPreparedSend {
-    AlreadyInSync(serde_json::Value),
     Package {
         package_root: PathBuf,
         plan: DeltaResyncPlan,
@@ -2239,11 +3099,52 @@ enum DeltaPreparedSend {
 }
 
 #[derive(Debug)]
+struct DeltaPackageRootGuard {
+    root: Option<PathBuf>,
+}
+
+impl DeltaPackageRootGuard {
+    fn new(root: PathBuf) -> Result<Self, String> {
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("delta package root has no UTF-8 name: {}", root.display()))?;
+        if !name.starts_with(DELTA_PACKAGE_PREFIX) {
+            return Err(format!(
+                "refusing to own non-package temporary path: {}",
+                root.display()
+            ));
+        }
+        Ok(Self { root: Some(root) })
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        let Some(root) = self.root.take() else {
+            return Ok(());
+        };
+        match remove_delta_path_if_exists(&root, "remove sender delta package") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.root = Some(root);
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for DeltaPackageRootGuard {
+    fn drop(&mut self) {
+        if let Some(root) = self.root.take() {
+            let _ = remove_delta_path_if_exists(&root, "remove sender delta package");
+        }
+    }
+}
+
+#[derive(Debug)]
 struct DeltaSourceSnapshot {
     manifest: PersistentChunkManifest,
     chunks_by_content: BTreeMap<String, Vec<u8>>,
     object_sha256_hex: String,
-    file_count: usize,
     logical_file_bytes: u64,
 }
 
@@ -2374,6 +3275,51 @@ struct DeltaPackageWrite {
 struct DeltaTreeFile {
     rel_path: String,
     bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct DeltaSnapshotBudget {
+    max_bytes: u64,
+    logical_bytes: u64,
+}
+
+impl DeltaSnapshotBudget {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            max_bytes,
+            logical_bytes: 0,
+        }
+    }
+
+    fn read_file(&mut self, path: &Path) -> Result<Vec<u8>, DeltaSnapshotFailure> {
+        ensure_delta_path_chain(path, "read delta snapshot file")
+            .map_err(DeltaSnapshotFailure::fatal)?;
+        let remaining = self.max_bytes.saturating_sub(self.logical_bytes);
+        let host_limit = usize::try_from(remaining).unwrap_or(usize::MAX.saturating_sub(1));
+        let mut file = fs::File::open(path).map_err(|err| {
+            DeltaSnapshotFailure::fatal(format!("open delta snapshot {}: {err}", path.display()))
+        })?;
+        let bytes = read_file_limited_before_deadline(
+            &mut file,
+            host_limit,
+            None,
+            &format!("read delta snapshot {}", path.display()),
+        )
+        .map_err(DeltaSnapshotFailure::fatal)?;
+        let len = u64::try_from(bytes.len()).map_err(|_| {
+            DeltaSnapshotFailure::fatal("delta snapshot file length exceeds u64::MAX")
+        })?;
+        self.logical_bytes = self.logical_bytes.checked_add(len).ok_or_else(|| {
+            DeltaSnapshotFailure::fatal("delta snapshot logical size exceeds u64::MAX")
+        })?;
+        if self.logical_bytes > self.max_bytes {
+            return Err(DeltaSnapshotFailure::fatal(format!(
+                "delta snapshot logical size {} exceeds --max-bytes {}",
+                self.logical_bytes, self.max_bytes
+            )));
+        }
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug)]
@@ -2559,6 +3505,17 @@ fn rename_delta_path(from: &Path, to: &Path, operation: &str) -> Result<(), Stri
         .map_err(|err| format!("{operation} {} to {}: {err}", from.display(), to.display()))
 }
 
+fn remove_delta_path_if_exists(path: &Path, operation: &str) -> Result<(), String> {
+    let Some(metadata) = delta_path_metadata(path, operation)? else {
+        return Ok(());
+    };
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).map_err(|err| format!("{operation} {}: {err}", path.display()))
+    } else {
+        fs::remove_file(path).map_err(|err| format!("{operation} {}: {err}", path.display()))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeltaInternalName {
     State,
@@ -2576,6 +3533,58 @@ fn delta_internal_name(name: &str) -> Option<DeltaInternalName> {
     } else {
         None
     }
+}
+
+fn cli_delta_policy_is_content_only(policy: &MetadataPolicy) -> bool {
+    !policy.preserve_unix_permissions
+        && !policy.preserve_windows_attributes
+        && !policy.preserve_extended_attributes
+        && !policy.preserve_symlinks
+        && !policy.preserve_timestamps
+        && !policy.record_platform_metadata
+}
+
+fn cli_content_delta_enabled(no_delta: bool) -> bool {
+    !no_delta && cli_delta_policy_is_content_only(&selected_cli_metadata_policy())
+}
+
+fn validate_user_transfer_namespace(source: &Path) -> Result<(), String> {
+    validate_user_transfer_namespace_entry(source, true)
+}
+
+fn validate_user_transfer_namespace_entry(
+    path: &Path,
+    inspect_children: bool,
+) -> Result<(), String> {
+    if let Some(name) = path.file_name().and_then(|name| name.to_str())
+        && delta_internal_name(name).is_some()
+    {
+        return Err(format!(
+            "source contains reserved ATP delta namespace path: {}",
+            path.display()
+        ));
+    }
+
+    if !inspect_children {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|err| format!("inspect source namespace {}: {err}", path.display()))?;
+    if !metadata.is_dir()
+        || path_is_link_or_reparse_sync(path)
+            .map_err(|err| format!("inspect source namespace {}: {err}", path.display()))?
+    {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(path)
+        .map_err(|err| format!("read source namespace {}: {err}", path.display()))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|err| format!("read source namespace entry {}: {err}", path.display()))?;
+        validate_user_transfer_namespace_entry(&entry.path(), true)?;
+    }
+    Ok(())
 }
 
 fn validate_canonical_hex_hash(value: &str, label: &str) -> Result<(), String> {
@@ -2676,8 +3685,9 @@ fn validate_subdelta_op_count_before_decode(bytes: &[u8]) -> Result<(), String> 
 fn prepare_delta_ssh_send(
     args: &SendArgs,
     remote: &RemoteTarget,
+    remote_shell: RemoteShell,
 ) -> Result<Option<DeltaPreparedSend>, String> {
-    let receiver_state = match fetch_remote_delta_state(args, remote) {
+    let receiver_state = match fetch_remote_delta_state(args, remote, remote_shell) {
         Ok(Some(state)) => state,
         Ok(None) => {
             eprintln!("[atp] delta planner: no receiver state; using full-object transfer");
@@ -2697,6 +3707,9 @@ fn prepare_direct_delta_send(
     args: &SendArgs,
     addr: SocketAddr,
 ) -> Result<Option<DeltaPreparedSend>, String> {
+    if !cli_content_delta_enabled(args.no_delta) {
+        return Ok(None);
+    }
     if !args.allow_unauthenticated_delta_sidecar {
         if !args.no_delta
             && matches!(
@@ -2750,6 +3763,10 @@ fn prepare_delta_send_from_state(
     receiver_state: DeltaCliState,
     lazy_signature_addr: Option<SocketAddr>,
 ) -> Result<Option<DeltaPreparedSend>, String> {
+    if !cli_content_delta_enabled(args.no_delta) {
+        eprintln!("[atp] delta planner: metadata-preserving policy requires full-object transfer");
+        return Ok(None);
+    }
     let receiver_manifest = match receiver_state.manifest() {
         Ok(manifest) => manifest,
         Err(err) => {
@@ -2759,7 +3776,7 @@ fn prepare_delta_send_from_state(
             return Ok(None);
         }
     };
-    let snapshot = match build_delta_source_snapshot(&args.source) {
+    let snapshot = match build_delta_source_snapshot(&args.source, args.max_bytes) {
         Ok(snapshot) => snapshot,
         Err(err) => {
             eprintln!(
@@ -2775,28 +3792,14 @@ fn prepare_delta_send_from_state(
         Some(&receiver_manifest),
         &receiver_coverage,
     );
+    if cached_delta_match_requires_live_transfer(plan.mode) {
+        eprintln!(
+            "[atp] delta planner: cached receiver state matches, but no live receiver commit receipt was obtained; using full-object transfer"
+        );
+        return Ok(None);
+    }
     match plan.mode {
-        DeltaResyncMode::AlreadyInSync => {
-            let report = serde_json::json!({
-                "event": "atp_send",
-                "requested_transport": args.transport.cli_arg(),
-                "delta": {
-                    "mode": "already_in_sync",
-                    "sender_merkle_root": snapshot.manifest.merkle_root.to_string(),
-                    "receiver_merkle_root": plan.receiver_merkle_root.as_ref().map(ToString::to_string),
-                    "shared_chunks": plan.shared_chunks,
-                    "missing_chunks": 0,
-                    "missing_bytes": 0,
-                },
-                "committed": true,
-                "bytes_sent": 0,
-                "files": snapshot.file_count,
-                "logical_file_bytes": snapshot.logical_file_bytes,
-                "sha256": snapshot.object_sha256_hex,
-                "peer": args.peer_id,
-            });
-            Ok(Some(DeltaPreparedSend::AlreadyInSync(report)))
-        }
+        DeltaResyncMode::AlreadyInSync => unreachable!("handled above"),
         DeltaResyncMode::DeltaChunks => {
             let receiver_signatures = receiver_subchunk_signatures_for_plan(
                 &plan,
@@ -2845,17 +3848,23 @@ fn prepare_delta_send_from_state(
     }
 }
 
+fn cached_delta_match_requires_live_transfer(mode: DeltaResyncMode) -> bool {
+    mode == DeltaResyncMode::AlreadyInSync
+}
+
 fn fetch_remote_delta_state(
     args: &SendArgs,
     remote: &RemoteTarget,
+    remote_shell: RemoteShell,
 ) -> Result<Option<DeltaCliState>, String> {
+    let argv = [
+        args.remote_atp.clone(),
+        "__delta-state-export".to_string(),
+        remote.remote_path.clone(),
+    ];
     let mut command = ssh_command(args, &remote.ssh_host);
     command
-        .arg(shell_command(&[
-            args.remote_atp.clone(),
-            "__delta-state-export".to_string(),
-            remote.remote_path.clone(),
-        ]))
+        .arg(remote_shell_command(remote_shell, &[], &argv)?)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = command
@@ -3505,18 +4514,50 @@ fn create_unique_delta_package_root(object_sha256_hex: &str) -> Result<PathBuf, 
     Err("could not allocate a unique delta package directory".to_string())
 }
 
-fn build_delta_source_snapshot(source: &Path) -> Result<DeltaSourceSnapshot, String> {
-    let files = collect_delta_tree_files(source).map_err(|error| error.to_string())?;
-    build_delta_snapshot_from_files(files)
+fn create_unique_delta_staging_root(
+    state_dir: &Path,
+    object_sha256_hex: &str,
+) -> Result<PathBuf, String> {
+    create_delta_dir_all(state_dir, "create delta state directory")?;
+    for attempt in 0..32u32 {
+        let path = state_dir.join(format!(
+            "staging-{object_sha256_hex}-{}-{attempt}",
+            unique_micros()
+        ));
+        ensure_delta_path_chain(&path, "create delta staging root")?;
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(format!(
+                    "create delta staging root {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Err("could not allocate a unique delta staging directory".to_string())
 }
 
-fn build_delta_dest_snapshot(dest: &Path) -> Result<DeltaSourceSnapshot, DeltaSnapshotFailure> {
-    let files = collect_delta_dest_tree_files(dest)?;
-    build_delta_snapshot_from_files(files).map_err(DeltaSnapshotFailure::fatal)
+fn build_delta_source_snapshot(
+    source: &Path,
+    max_bytes: u64,
+) -> Result<DeltaSourceSnapshot, String> {
+    let files = collect_delta_tree_files(source, max_bytes).map_err(|error| error.to_string())?;
+    build_delta_snapshot_from_files(files, max_bytes)
+}
+
+fn build_delta_dest_snapshot(
+    dest: &Path,
+    max_bytes: u64,
+) -> Result<DeltaSourceSnapshot, DeltaSnapshotFailure> {
+    let files = collect_delta_dest_tree_files(dest, max_bytes)?;
+    build_delta_snapshot_from_files(files, max_bytes).map_err(DeltaSnapshotFailure::fatal)
 }
 
 fn build_delta_snapshot_from_files(
     files: Vec<DeltaTreeFile>,
+    max_bytes: u64,
 ) -> Result<DeltaSourceSnapshot, String> {
     let logical_file_bytes = files.iter().try_fold(0u64, |total, file| {
         let len = u64::try_from(file.bytes.len())
@@ -3525,7 +4566,19 @@ fn build_delta_snapshot_from_files(
             .checked_add(len)
             .ok_or_else(|| "delta source logical size exceeds u64::MAX".to_string())
     })?;
+    if logical_file_bytes > max_bytes {
+        return Err(format!(
+            "delta source logical size {logical_file_bytes} exceeds --max-bytes {max_bytes}"
+        ));
+    }
     let object_bytes = encode_delta_tree_object(&files)?;
+    let encoded_bytes = u64::try_from(object_bytes.len())
+        .map_err(|_| "encoded delta object size exceeds u64::MAX".to_string())?;
+    if encoded_bytes > max_bytes {
+        return Err(format!(
+            "encoded delta object size {encoded_bytes} exceeds --max-bytes {max_bytes}"
+        ));
+    }
     let object_sha256_hex = hex::encode(Sha256::digest(&object_bytes));
     let chunk_payloads = split_delta_tree_object_chunks(&object_bytes)?;
 
@@ -3548,7 +4601,6 @@ fn build_delta_snapshot_from_files(
         manifest,
         chunks_by_content,
         object_sha256_hex,
-        file_count: files.len(),
         logical_file_bytes,
     })
 }
@@ -3657,7 +4709,10 @@ fn delta_snapshot_metadata(
     }
 }
 
-fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, DeltaSnapshotFailure> {
+fn collect_delta_dest_tree_files(
+    dest: &Path,
+    max_bytes: u64,
+) -> Result<Vec<DeltaTreeFile>, DeltaSnapshotFailure> {
     let metadata = delta_snapshot_metadata(dest, "snapshot delta destination")?;
     if !metadata.is_dir() {
         return Err(DeltaSnapshotFailure::unsupported(format!(
@@ -3667,6 +4722,7 @@ fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, Delt
     }
 
     let mut files = Vec::new();
+    let mut budget = DeltaSnapshotBudget::new(max_bytes);
     ensure_delta_path_chain(dest, "read delta destination directory")
         .map_err(DeltaSnapshotFailure::fatal)?;
     let mut entries = fs::read_dir(dest)
@@ -3709,13 +4765,9 @@ fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, Delt
         }
         validate_delta_rel_path(&name).map_err(DeltaSnapshotFailure::fatal)?;
         if metadata.is_dir() {
-            collect_delta_dir(&path, &name, &mut files)?;
+            collect_delta_dir(&path, &name, &mut files, &mut budget)?;
         } else if metadata.is_file() {
-            ensure_delta_path_chain(&path, "read delta destination file")
-                .map_err(DeltaSnapshotFailure::fatal)?;
-            let bytes = fs::read(&path).map_err(|err| {
-                DeltaSnapshotFailure::fatal(format!("read {}: {err}", path.display()))
-            })?;
+            let bytes = budget.read_file(&path)?;
             files.push(DeltaTreeFile {
                 rel_path: name,
                 bytes,
@@ -3736,7 +4788,10 @@ fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, Delt
     Ok(files)
 }
 
-fn collect_delta_tree_files(source: &Path) -> Result<Vec<DeltaTreeFile>, DeltaSnapshotFailure> {
+fn collect_delta_tree_files(
+    source: &Path,
+    max_bytes: u64,
+) -> Result<Vec<DeltaTreeFile>, DeltaSnapshotFailure> {
     let metadata = delta_snapshot_metadata(source, "snapshot delta source")?;
     let root_name = source
         .file_name()
@@ -3750,12 +4805,9 @@ fn collect_delta_tree_files(source: &Path) -> Result<Vec<DeltaTreeFile>, DeltaSn
     validate_delta_rel_path(root_name).map_err(DeltaSnapshotFailure::fatal)?;
 
     let mut files = Vec::new();
+    let mut budget = DeltaSnapshotBudget::new(max_bytes);
     if metadata.is_file() {
-        ensure_delta_path_chain(source, "read delta source file")
-            .map_err(DeltaSnapshotFailure::fatal)?;
-        let bytes = fs::read(source).map_err(|err| {
-            DeltaSnapshotFailure::fatal(format!("read {}: {err}", source.display()))
-        })?;
+        let bytes = budget.read_file(source)?;
         files.push(DeltaTreeFile {
             rel_path: root_name.to_string(),
             bytes,
@@ -3763,7 +4815,7 @@ fn collect_delta_tree_files(source: &Path) -> Result<Vec<DeltaTreeFile>, DeltaSn
         return Ok(files);
     }
     if metadata.is_dir() {
-        collect_delta_dir(source, root_name, &mut files)?;
+        collect_delta_dir(source, root_name, &mut files, &mut budget)?;
         if files.is_empty() {
             return Err(DeltaSnapshotFailure::unsupported(
                 "empty directory trees use full-object transfer",
@@ -3782,6 +4834,7 @@ fn collect_delta_dir(
     dir: &Path,
     rel_prefix: &str,
     files: &mut Vec<DeltaTreeFile>,
+    budget: &mut DeltaSnapshotBudget,
 ) -> Result<(), DeltaSnapshotFailure> {
     delta_snapshot_metadata(dir, "read delta directory")?;
     let mut entries = fs::read_dir(dir)
@@ -3812,13 +4865,9 @@ fn collect_delta_dir(
         let path = entry.path();
         let metadata = delta_snapshot_metadata(&path, "snapshot delta tree entry")?;
         if metadata.is_dir() {
-            collect_delta_dir(&path, &rel_path, files)?;
+            collect_delta_dir(&path, &rel_path, files, budget)?;
         } else if metadata.is_file() {
-            ensure_delta_path_chain(&path, "read delta tree file")
-                .map_err(DeltaSnapshotFailure::fatal)?;
-            let bytes = fs::read(&path).map_err(|err| {
-                DeltaSnapshotFailure::fatal(format!("read {}: {err}", path.display()))
-            })?;
+            let bytes = budget.read_file(&path)?;
             files.push(DeltaTreeFile { rel_path, bytes });
         } else {
             return Err(DeltaSnapshotFailure::unsupported(format!(
@@ -3903,12 +4952,12 @@ fn unique_micros() -> u128 {
         .as_micros()
 }
 
-fn handle_post_receive_delta(dest: &Path, enabled: bool) -> Result<(), String> {
+fn handle_post_receive_delta(dest: &Path, enabled: bool, max_bytes: u64) -> Result<(), String> {
     if !enabled {
         return Ok(());
     }
-    let applied = apply_delta_packages(dest)?;
-    finish_delta_refresh(applied, refresh_delta_state(dest))
+    let applied = apply_delta_packages(dest, max_bytes)?;
+    finish_delta_refresh(applied, refresh_delta_state(dest, max_bytes))
 }
 
 fn finish_delta_refresh(
@@ -3927,7 +4976,7 @@ fn finish_delta_refresh(
     }
 }
 
-fn apply_delta_packages(dest: &Path) -> Result<usize, String> {
+fn apply_delta_packages(dest: &Path, max_bytes: u64) -> Result<usize, String> {
     let Some(metadata) = delta_path_metadata(dest, "scan delta packages")? else {
         return Ok(0);
     };
@@ -3979,7 +5028,10 @@ fn apply_delta_packages(dest: &Path) -> Result<usize, String> {
         }
         let receipt = path.join(".applied");
         match delta_path_metadata(&receipt, "inspect delta package receipt")? {
-            Some(metadata) if metadata.is_file() => continue,
+            Some(metadata) if metadata.is_file() => {
+                remove_delta_path_if_exists(&path, "remove applied delta package")?;
+                continue;
+            }
             Some(_) => {
                 return Err(format!(
                     "delta package receipt is not a regular file: {}",
@@ -3987,7 +5039,7 @@ fn apply_delta_packages(dest: &Path) -> Result<usize, String> {
                 ));
             }
             None => {
-                apply_delta_package(dest, &path)?;
+                apply_delta_package(dest, &path, max_bytes)?;
                 let mut file = create_delta_file(&receipt, "create delta package receipt")?;
                 let receipt_body = unique_micros().to_string();
                 write_delta_file(
@@ -3997,13 +5049,14 @@ fn apply_delta_packages(dest: &Path) -> Result<usize, String> {
                     "write delta package receipt",
                 )?;
                 applied += 1;
+                remove_delta_path_if_exists(&path, "remove applied delta package")?;
             }
         }
     }
     Ok(applied)
 }
 
-fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
+fn apply_delta_package(dest: &Path, package_root: &Path, max_bytes: u64) -> Result<(), String> {
     require_delta_directory(dest, "apply delta package")?;
     require_delta_directory(package_root, "apply delta package")?;
     let metadata_path = package_root.join(DELTA_PACKAGE_FILE);
@@ -4024,6 +5077,11 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
     }
 
     let target_manifest = decode_delta_package_target_manifest(&metadata)?;
+    enforce_transfer_size(
+        "delta target encoded object",
+        target_manifest.total_size_bytes,
+        max_bytes,
+    )?;
     validate_canonical_hex_hash(&metadata.object_sha256_hex, "delta package object sha256")?;
 
     let mut package_paths = Vec::new();
@@ -4079,6 +5137,11 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
         "delta package received but receiver has no prior delta state".to_string()
     })?;
     let receiver_manifest = receiver_state.manifest()?;
+    enforce_transfer_size(
+        "delta receiver base object",
+        receiver_manifest.total_size_bytes,
+        max_bytes,
+    )?;
     let mut store = load_delta_store_from_state(dest, &receiver_manifest)?;
 
     let chunk_dir = package_root.join(DELTA_CHUNK_DIR);
@@ -4212,7 +5275,7 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
     target_manifest
         .verify_store_coverage(&store)
         .map_err(|err| format!("delta package target coverage failed: {err}"))?;
-    let object_bytes = reconstruct_delta_object_bytes(&target_manifest, &store)?;
+    let object_bytes = reconstruct_delta_object_bytes(&target_manifest, &store, max_bytes)?;
     let object_sha256_hex = hex::encode(Sha256::digest(&object_bytes));
     if object_sha256_hex != metadata.object_sha256_hex {
         return Err(format!(
@@ -4220,12 +5283,12 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
             metadata.object_sha256_hex, object_sha256_hex
         ));
     }
-    let files = decode_delta_tree_object(&object_bytes)?;
-    commit_delta_tree_files(dest, &files, &object_sha256_hex)
+    let files = decode_delta_tree_object(&object_bytes, max_bytes)?;
+    commit_delta_tree_files(dest, &files, &object_sha256_hex, max_bytes)
 }
 
-fn refresh_delta_state(dest: &Path) -> Result<DeltaCliState, DeltaSnapshotFailure> {
-    let snapshot = build_delta_dest_snapshot(dest)?;
+fn refresh_delta_state(dest: &Path, max_bytes: u64) -> Result<DeltaCliState, DeltaSnapshotFailure> {
+    let snapshot = build_delta_dest_snapshot(dest, max_bytes)?;
     let state_dir = dest.join(DELTA_STATE_DIR);
     let chunk_dir = state_dir.join(DELTA_CHUNK_DIR);
     create_delta_dir_all(&chunk_dir, "create delta state directory")
@@ -4885,11 +5948,12 @@ fn load_delta_store_from_state(
 fn reconstruct_delta_object_bytes(
     manifest: &PersistentChunkManifest,
     store: &DeltaChunkStore,
+    max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
-    if manifest.total_size_bytes > DEFAULT_MAX_TRANSFER_BYTES {
+    if manifest.total_size_bytes > max_bytes {
         return Err(format!(
             "delta object size {} exceeds {} byte limit",
-            manifest.total_size_bytes, DEFAULT_MAX_TRANSFER_BYTES
+            manifest.total_size_bytes, max_bytes
         ));
     }
     let capacity = usize::try_from(manifest.total_size_bytes)
@@ -4918,7 +5982,14 @@ fn reconstruct_delta_object_bytes(
     Ok(bytes)
 }
 
-fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> {
+fn decode_delta_tree_object(bytes: &[u8], max_bytes: u64) -> Result<Vec<DeltaTreeFile>, String> {
+    let encoded_bytes = u64::try_from(bytes.len())
+        .map_err(|_| "encoded delta object size exceeds u64::MAX".to_string())?;
+    if encoded_bytes > max_bytes {
+        return Err(format!(
+            "encoded delta object size {encoded_bytes} exceeds {max_bytes} byte limit"
+        ));
+    }
     let mut reader = DeltaObjectReader::new(bytes);
     reader.expect_magic(DELTA_TREE_OBJECT_MAGIC)?;
     let file_count = reader.read_u64()?;
@@ -4954,9 +6025,9 @@ fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> 
         logical_file_bytes = logical_file_bytes
             .checked_add(len)
             .ok_or_else(|| "delta object logical file size overflow".to_string())?;
-        if logical_file_bytes > DEFAULT_MAX_TRANSFER_BYTES {
+        if logical_file_bytes > max_bytes {
             return Err(format!(
-                "delta object logical file size {logical_file_bytes} exceeds {DEFAULT_MAX_TRANSFER_BYTES} byte limit"
+                "delta object logical file size {logical_file_bytes} exceeds {max_bytes} byte limit"
             ));
         }
         let payload_sha256 = reader.read_sha256()?;
@@ -5027,23 +6098,26 @@ fn commit_delta_tree_files(
     dest: &Path,
     files: &[DeltaTreeFile],
     object_sha256_hex: &str,
+    max_bytes: u64,
 ) -> Result<(), String> {
     require_delta_directory(dest, "commit delta tree")?;
     validate_canonical_hex_hash(object_sha256_hex, "delta object sha256")?;
     let root_name = delta_tree_root_name(files)?;
-    let state_dir = dest.join(DELTA_STATE_DIR);
-    let staging_root = state_dir.join(format!("staging-{object_sha256_hex}"));
-    if delta_path_metadata(&staging_root, "inspect delta staging root")?.is_some() {
-        return Err(format!(
-            "delta staging root already exists: {}",
-            staging_root.display()
-        ));
+    let final_target = dest.join(&root_name);
+    if delta_path_metadata(&final_target, "inspect final delta target")?.is_some()
+        && build_delta_source_snapshot(&final_target, max_bytes)
+            .is_ok_and(|snapshot| snapshot.object_sha256_hex == object_sha256_hex)
+    {
+        return Ok(());
     }
-    create_delta_dir_all(&staging_root, "create delta staging root")?;
-    write_delta_files_under(&staging_root, files)?;
+    let state_dir = dest.join(DELTA_STATE_DIR);
+    let staging_root = create_unique_delta_staging_root(&state_dir, object_sha256_hex)?;
+    if let Err(error) = write_delta_files_under(&staging_root, files) {
+        let _ = remove_delta_path_if_exists(&staging_root, "clean failed delta staging root");
+        return Err(error);
+    }
 
     let staged_target = staging_root.join(&root_name);
-    let final_target = dest.join(&root_name);
     let backup = if delta_path_metadata(&final_target, "inspect final delta target")?.is_some() {
         let backup_dir = state_dir.join("backups");
         create_delta_dir_all(&backup_dir, "create delta backup directory")?;
@@ -5075,17 +6149,37 @@ fn commit_delta_tree_files(
     };
 
     match rename_delta_path(&staged_target, &final_target, "commit staged delta target") {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let mut cleanup_errors = Vec::new();
+            if let Some(backup) = backup.as_ref() {
+                if let Err(error) =
+                    remove_delta_path_if_exists(backup, "remove committed delta backup")
+                {
+                    cleanup_errors.push(error);
+                }
+            }
+            if let Err(error) =
+                remove_delta_path_if_exists(&staging_root, "remove committed delta staging root")
+            {
+                cleanup_errors.push(error);
+            }
+            if cleanup_errors.is_empty() {
+                Ok(())
+            } else {
+                Err(cleanup_errors.join("; "))
+            }
+        }
         Err(commit_error) => {
-            if let Some(backup) = backup {
+            if let Some(backup) = backup.as_ref() {
                 if let Err(rollback_error) =
-                    rename_delta_path(&backup, &final_target, "restore delta target backup")
+                    rename_delta_path(backup, &final_target, "restore delta target backup")
                 {
                     return Err(format!(
                         "{commit_error}; rollback also failed: {rollback_error}"
                     ));
                 }
             }
+            let _ = remove_delta_path_if_exists(&staging_root, "clean failed delta staging root");
             Err(commit_error)
         }
     }
@@ -5241,20 +6335,25 @@ impl<'a> DeltaObjectReader<'a> {
     }
 }
 
-fn choose_data_host(args: &SendArgs, remote: &RemoteTarget) -> String {
+fn choose_data_host(args: &SendArgs, remote: &RemoteTarget, remote_shell: RemoteShell) -> String {
     if let Some(host) = &args.data_host {
         return host.clone();
     }
     if args.no_tailscale || args.prefer != PathPreference::Tailscale {
         return ssh_host_without_user(&remote.ssh_host).to_string();
     }
-    probe_remote_tailscale_ipv4(args, &remote.ssh_host)
+    probe_remote_tailscale_ipv4(args, &remote.ssh_host, remote_shell)
         .unwrap_or_else(|| ssh_host_without_user(&remote.ssh_host).to_string())
 }
 
-fn probe_remote_tailscale_ipv4(args: &SendArgs, ssh_host: &str) -> Option<String> {
+fn probe_remote_tailscale_ipv4(
+    args: &SendArgs,
+    ssh_host: &str,
+    remote_shell: RemoteShell,
+) -> Option<String> {
+    let argv = ["tailscale".to_string(), "ip".to_string(), "-4".to_string()];
     let mut command = ssh_command(args, ssh_host);
-    command.arg("command -v tailscale >/dev/null 2>&1 && tailscale ip -4 | sed -n '1p'");
+    command.arg(remote_shell_command(remote_shell, &[], &argv).ok()?);
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;
@@ -5271,6 +6370,7 @@ fn spawn_remote_receiver(
     args: &SendArgs,
     remote: &RemoteTarget,
     rq_auth: Option<&RqAuthChoice>,
+    remote_shell: RemoteShell,
 ) -> Result<Child, String> {
     let receiver_peer_id = format!("{}-remote", args.peer_id);
     let mut argv = vec![
@@ -5323,12 +6423,11 @@ fn spawn_remote_receiver(
         }
     }
 
-    let remote_command = match rq_auth {
-        Some(RqAuthChoice::KeyHex(key_hex)) => {
-            shell_command_with_env(&[(RQ_AUTH_ENV, key_hex.as_str())], &argv)
-        }
-        _ => shell_command(&argv),
+    let env_vars = match rq_auth {
+        Some(RqAuthChoice::KeyHex(key_hex)) => vec![(RQ_AUTH_ENV, key_hex.as_str())],
+        _ => Vec::new(),
     };
+    let remote_command = remote_shell_command(remote_shell, &env_vars, &argv)?;
     let mut command = ssh_command(args, &remote.ssh_host);
     command
         .arg(remote_command)
@@ -5341,6 +6440,10 @@ fn spawn_remote_receiver(
 }
 
 fn ssh_command(args: &SendArgs, ssh_host: &str) -> ProcessCommand {
+    ssh_base_command(&args.ssh_options, ssh_host)
+}
+
+fn ssh_base_command(ssh_options: &[String], ssh_host: &str) -> ProcessCommand {
     let mut command = ProcessCommand::new("ssh");
     command
         .arg("-T")
@@ -5348,7 +6451,7 @@ fn ssh_command(args: &SendArgs, ssh_host: &str) -> ProcessCommand {
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
         .arg("ConnectTimeout=15");
-    for option in &args.ssh_options {
+    for option in ssh_options {
         command.arg(option);
     }
     command.arg(ssh_host);
@@ -5411,7 +6514,11 @@ fn wait_for_remote_ready(
     }
 }
 
-fn wait_child_timeout(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
+fn wait_child_timeout(
+    child: &mut Child,
+    timeout: Duration,
+    what: &str,
+) -> Result<ExitStatus, String> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
@@ -5420,10 +6527,7 @@ fn wait_child_timeout(child: &mut Child, timeout: Duration) -> Result<ExitStatus
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!(
-                "remote atp receiver did not exit within {}s after send completion",
-                timeout.as_secs()
-            ));
+            return Err(format!("{what} did not exit within {}s", timeout.as_secs()));
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -5443,6 +6547,116 @@ fn shell_command_with_env(env_vars: &[(&str, &str)], argv: &[String]) -> String 
         .collect::<Vec<_>>();
     parts.push(shell_command(argv));
     parts.join(" ")
+}
+
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn powershell_encoded_command(
+    env_vars: &[(&str, &str)],
+    argv: &[String],
+) -> Result<String, String> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| "remote command argv must not be empty".to_string())?;
+    let mut script = "$ErrorActionPreference='Stop';$utf8=New-Object System.Text.UTF8Encoding($false);[Console]::OutputEncoding=$utf8;$OutputEncoding=$utf8;".to_string();
+    for (name, value) in env_vars {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(format!("unsafe remote environment variable name: {name:?}"));
+        }
+        script.push_str("$env:");
+        script.push_str(name);
+        script.push('=');
+        script.push_str(&powershell_single_quote(value));
+        script.push(';');
+    }
+    script.push_str("& ");
+    script.push_str(&powershell_single_quote(program));
+    for arg in args {
+        script.push(' ');
+        script.push_str(&powershell_single_quote(arg));
+    }
+    script.push_str("; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }");
+
+    let mut utf16le = Vec::with_capacity(script.len().saturating_mul(2));
+    for unit in script.encode_utf16() {
+        utf16le.extend_from_slice(&unit.to_le_bytes());
+    }
+    let encoded = STANDARD.encode(utf16le);
+    let command =
+        format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}");
+    // cmd.exe, still a common Windows OpenSSH default shell, has an 8191-byte
+    // command-line ceiling. Fail explicitly instead of launching a truncated
+    // command that might reinterpret the tail.
+    if command.len() > 8_000 {
+        return Err(format!(
+            "encoded Windows remote command is {} bytes (maximum 8000)",
+            command.len()
+        ));
+    }
+    Ok(command)
+}
+
+fn remote_shell_command(
+    shell: RemoteShell,
+    env_vars: &[(&str, &str)],
+    argv: &[String],
+) -> Result<String, String> {
+    match shell {
+        RemoteShell::Posix => Ok(shell_command_with_env(env_vars, argv)),
+        RemoteShell::Powershell => powershell_encoded_command(env_vars, argv),
+        RemoteShell::Auto => {
+            Err("remote shell must be resolved before command construction".to_string())
+        }
+    }
+}
+
+fn resolve_remote_shell(
+    requested: RemoteShell,
+    ssh_options: &[String],
+    ssh_host: &str,
+) -> Result<RemoteShell, String> {
+    if requested != RemoteShell::Auto {
+        return Ok(requested);
+    }
+    let probe_argv = [
+        "cmd.exe".to_string(),
+        "/d".to_string(),
+        "/s".to_string(),
+        "/c".to_string(),
+        "echo ATP_WINDOWS_POWERSHELL".to_string(),
+    ];
+    let probe = powershell_encoded_command(&[], &probe_argv)?;
+    let mut command = ssh_base_command(ssh_options, ssh_host);
+    command
+        .arg(probe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = command
+        .output()
+        .map_err(|error| format!("probe remote shell on {ssh_host}: {error}"))?;
+    if output.status.code() == Some(255) {
+        return Err(format!(
+            "probe remote shell on {ssh_host} failed: ssh exited with status {}",
+            output.status
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.status.success()
+        && stdout
+            .lines()
+            .any(|line| line.trim() == "ATP_WINDOWS_POWERSHELL")
+    {
+        Ok(RemoteShell::Powershell)
+    } else {
+        Ok(RemoteShell::Posix)
+    }
 }
 
 fn shell_quote(arg: &str) -> String {
@@ -6010,7 +7224,8 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
     let peer_id = args.peer_id.clone();
     let one_shot = args.once && !persistent;
     let udp_bind_ip = listen.ip().to_string();
-    let delta_enabled = !args.no_delta;
+    let max_bytes = args.max_bytes;
+    let delta_enabled = cli_content_delta_enabled(args.no_delta);
     let direct_delta_sidecar_enabled = delta_enabled && args.allow_unauthenticated_delta_sidecar;
 
     match args.transport {
@@ -6035,7 +7250,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                             .await
                             .map_err(|e| e.to_string())?;
                     let elapsed = start.elapsed();
-                    handle_post_receive_delta(&dest, delta_enabled)?;
+                    handle_post_receive_delta(&dest, delta_enabled, max_bytes)?;
                     print_atp_metrics_line(
                         "receive",
                         Transport::Tcp,
@@ -6055,7 +7270,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         match o {
                             Ok(r) => {
                                 if let Err(err) =
-                                    handle_post_receive_delta(&delta_dest, delta_enabled)
+                                    handle_post_receive_delta(&delta_dest, delta_enabled, max_bytes)
                                 {
                                     eprintln!("atp: delta receiver failed: {err}");
                                 }
@@ -6121,7 +7336,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                     .await
                     .map_err(|e| e.to_string())?;
                     let elapsed = start.elapsed();
-                    handle_post_receive_delta(&dest, delta_enabled)?;
+                    handle_post_receive_delta(&dest, delta_enabled, max_bytes)?;
                     print_atp_metrics_line(
                         "receive",
                         Transport::Rq,
@@ -6147,7 +7362,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         |o| match o {
                             Ok(r) => {
                                 if let Err(err) =
-                                    handle_post_receive_delta(&delta_dest, delta_enabled)
+                                    handle_post_receive_delta(&delta_dest, delta_enabled, max_bytes)
                                 {
                                     eprintln!("atp: delta receiver failed: {err}");
                                 }
@@ -6202,7 +7417,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                             .await
                             .map_err(|e| e.to_string())?;
                         let elapsed = start.elapsed();
-                        handle_post_receive_delta(&dest, delta_enabled)?;
+                        handle_post_receive_delta(&dest, delta_enabled, max_bytes)?;
                         print_atp_metrics_line(
                             "receive",
                             Transport::Quic,
@@ -6233,7 +7448,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                             match receive_on_endpoint(&cx, endpoint, &dest, &cfg, &peer_id).await {
                                 Ok(r) => {
                                     if let Err(err) =
-                                        handle_post_receive_delta(&dest, delta_enabled)
+                                        handle_post_receive_delta(&dest, delta_enabled, max_bytes)
                                     {
                                         eprintln!("atp: delta receiver failed: {err}");
                                     }
@@ -6377,7 +7592,7 @@ fn rq_send_json(
 }
 
 fn bond_donate_json(
-    report: &transport_rq::BondedDonorSendReport,
+    report: &transport_rq::BondedDonateReport,
     elapsed: Option<Duration>,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -6385,36 +7600,84 @@ fn bond_donate_json(
         "transfer_id": report.transfer_id,
         "donor_index": report.donor_index,
         "donor_count": report.donor_count,
+        "feedback_rounds": report.feedback_rounds,
+        "committed": report.receipt.committed,
+        "sha_ok": report.receipt.sha_ok,
+        "merkle_ok": report.receipt.merkle_ok,
         "receiver_endpoints": report
+            .spray
             .receiver_endpoints
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
-        "entries": report.entries,
-        "blocks": report.blocks,
-        "source_symbols_sent": report.source_symbols_sent,
-        "repair_symbols_sent": report.repair_symbols_sent,
+        "entries": report.spray.entries,
+        "blocks": report.spray.blocks,
+        "source_symbols_sent": report.spray.source_symbols_sent,
+        "repair_symbols_sent": report.spray.repair_symbols_sent,
+        "round0_symbols_sent": report.spray.symbols_sent,
         "symbols_sent": report.symbols_sent,
-        "payload_bytes_sent": report.udp_send_acceleration.payload_bytes,
+        "round0_payload_bytes": report.spray.udp_send_acceleration.payload_bytes,
         "pacing": {
-            "initial_rate_bytes_per_sec": report.pacing.initial_rate_bytes_per_sec,
-            "final_rate_bytes_per_sec": report.pacing.final_rate_bytes_per_sec,
-            "burst_symbols": report.pacing.burst_symbols,
-            "burst_bytes": report.pacing.burst_bytes,
-            "datagram_bytes": report.pacing.datagram_bytes,
-            "clean_round0_ramp_enabled": report.pacing.clean_round0_ramp_enabled,
+            "initial_rate_bytes_per_sec": report.spray.pacing.initial_rate_bytes_per_sec,
+            "final_rate_bytes_per_sec": report.spray.pacing.final_rate_bytes_per_sec,
+            "burst_symbols": report.spray.pacing.burst_symbols,
+            "burst_bytes": report.spray.pacing.burst_bytes,
+            "datagram_bytes": report.spray.pacing.datagram_bytes,
+            "clean_round0_ramp_enabled": report.spray.pacing.clean_round0_ramp_enabled,
         },
-        "udp_send_acceleration": report.udp_send_acceleration,
+        "udp_send_acceleration": report.spray.udp_send_acceleration,
         "metrics": atp_metrics_json(
-            report.udp_send_acceleration.payload_bytes,
+            report.spray.udp_send_acceleration.payload_bytes,
             Some(report.symbols_sent),
+            Some(report.receipt.symbols_accepted),
+            report.feedback_rounds,
             None,
-            0,
             None,
-            None,
-            report.receiver_endpoints.len(),
+            report.spray.receiver_endpoints.len(),
             elapsed,
         ),
+    })
+}
+
+fn bond_recv_json(
+    report: &transport_rq::BondedReceiveReport,
+    chosen_fanout: usize,
+    elapsed: Option<Duration>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "atp_bond_receive", "transport": "rq",
+        "transfer_id": report.transfer_id,
+        "committed": report.committed,
+        "bytes_received": report.bytes_received,
+        "files": report.files,
+        "symbols_accepted": report.symbols_accepted,
+        "feedback_rounds": report.feedback_rounds,
+        "enrolled_donors": report.enrolled_donors,
+        "reallocated_repair_windows": report.reallocated_repair_windows,
+        "donor_ingress": report
+            .donor_ingress
+            .iter()
+            .map(|(donor_index, stats)| serde_json::json!({
+                "donor_index": donor_index,
+                "symbols_received": stats.symbols_received,
+                "symbols_accepted": stats.symbols_accepted,
+                "duplicate_symbols": stats.duplicate_symbols,
+                "source_symbols_accepted": stats.source_symbols_accepted,
+                "repair_symbols_accepted": stats.repair_symbols_accepted,
+                "symbols_rejected_by_retention": stats.symbols_rejected_by_retention,
+            }))
+            .collect::<Vec<_>>(),
+        "metrics": atp_metrics_json(
+            report.bytes_received,
+            None,
+            Some(report.symbols_accepted),
+            report.feedback_rounds,
+            None,
+            None,
+            chosen_fanout,
+            elapsed,
+        ),
+        "committed_paths": report.committed_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
     })
 }
 
@@ -6497,6 +7760,253 @@ mod tests {
     }
 
     #[test]
+    fn cli_content_delta_falls_back_when_metadata_must_be_preserved() {
+        assert!(!cli_delta_policy_is_content_only(&MetadataPolicy::default()));
+        assert!(cli_delta_policy_is_content_only(&MetadataPolicy::portable()));
+        assert!(!cli_content_delta_enabled(false));
+        assert!(!cli_content_delta_enabled(true));
+    }
+
+    #[test]
+    fn cli_defaults_preserve_timestamps_and_hardlinks() {
+        let policy = selected_cli_metadata_policy();
+        assert!(policy.preserve_timestamps);
+        let tcp = tcp_config(DEFAULT_MAX_TRANSFER_BYTES, true);
+        assert_eq!(tcp.metadata_policy, policy);
+        assert!(tcp.preserve_hardlinks);
+        let rq = rq_config(
+            DEFAULT_MAX_TRANSFER_BYTES,
+            DEFAULT_SYMBOL_SIZE,
+            1,
+            AUTO_MAX_BLOCK_SIZE,
+            DEFAULT_REPAIR_OVERHEAD,
+            0.0,
+            DEFAULT_ROUND_TAIL_DRAIN_MS,
+            Some(VALID_KEY_HEX),
+            false,
+        )
+        .expect("RQ CLI config");
+        assert_eq!(rq.metadata_policy, policy);
+        assert!(rq.preserve_hardlinks);
+    }
+
+    #[test]
+    fn rq_send_config_maps_nondefault_send_args_exactly() {
+        let args = SendArgs::try_parse_from([
+            "atp-send",
+            "payload.bin",
+            "127.0.0.1:8472",
+            "--transport",
+            "rq",
+            "--max-bytes",
+            "999999",
+            "--symbol-size",
+            "1024",
+            "--streams",
+            "3",
+            "--max-block-size",
+            "65536",
+            "--repair-overhead",
+            "1.25",
+            "--rq-round0-loss-pct",
+            "2.5",
+            "--rq-tail-drain-ms",
+            "17",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .expect("parse RQ send args");
+
+        let from_args = rq_send_config(&args).expect("effective RQ send config");
+        let direct = rq_config(
+            999_999,
+            1024,
+            3,
+            65_536,
+            1.25,
+            2.5,
+            17,
+            Some(VALID_KEY_HEX),
+            false,
+        )
+        .expect("direct RQ config");
+
+        assert_eq!(from_args.symbol_size, direct.symbol_size);
+        assert_eq!(from_args.max_block_size, direct.max_block_size);
+        assert_eq!(from_args.udp_fanout, direct.udp_fanout);
+        assert_eq!(from_args.max_transfer_bytes, direct.max_transfer_bytes);
+        assert_eq!(from_args.repair_overhead, direct.repair_overhead);
+        assert_eq!(from_args.round0_loss_target, direct.round0_loss_target);
+        assert_eq!(from_args.round_tail_drain, direct.round_tail_drain);
+        assert_eq!(from_args.metadata_policy, direct.metadata_policy);
+        assert_eq!(from_args.preserve_hardlinks, direct.preserve_hardlinks);
+        assert_eq!(from_args.symbol_auth_mode(), direct.symbol_auth_mode());
+    }
+
+    #[test]
+    fn rq_dry_run_rejects_the_same_hardlink_topology_as_send() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let source = temp.path().join("payload");
+        fs::create_dir(&source).expect("source root");
+        fs::write(source.join("primary.bin"), b"same inode").expect("primary file");
+        fs::hard_link(source.join("primary.bin"), source.join("duplicate.bin"))
+            .expect("hardlink duplicate");
+        let source_arg = source.to_str().expect("UTF-8 temp path");
+        let args = SendArgs::try_parse_from([
+            "atp-send",
+            source_arg,
+            "127.0.0.1:8472",
+            "--transport",
+            "rq",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .expect("parse RQ dry-run args");
+
+        let error =
+            run_send_dry_run(&args).expect_err("dry-run must apply real-send hardlink validation");
+        assert!(error.contains("cannot preserve hardlink identity"));
+    }
+
+    #[test]
+    fn cached_delta_match_never_commits_without_live_receiver_receipt() {
+        assert!(cached_delta_match_requires_live_transfer(
+            DeltaResyncMode::AlreadyInSync
+        ));
+        assert!(!cached_delta_match_requires_live_transfer(
+            DeltaResyncMode::DeltaChunks
+        ));
+    }
+
+    #[test]
+    fn user_sources_reject_reserved_delta_names_recursively() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let source = temp.path().join("payload");
+        fs::create_dir(&source).expect("source directory");
+        fs::write(source.join("ordinary.bin"), b"ok").expect("ordinary source file");
+        validate_user_transfer_namespace(&source).expect("ordinary source namespace");
+
+        let reserved = source.join(".AsUpErSyNc-AtP-DeLtA-PaCkAgE-user");
+        fs::create_dir(&reserved).expect("reserved fixture directory");
+        let error = validate_user_transfer_namespace(&source)
+            .expect_err("reserved package namespace must reject before transfer");
+        assert!(error.contains("reserved ATP delta namespace"));
+
+        let state_root = temp.path().join(DELTA_STATE_DIR);
+        fs::create_dir(&state_root).expect("reserved state fixture");
+        assert!(validate_user_transfer_namespace(&state_root).is_err());
+    }
+
+    #[test]
+    fn transfer_size_limit_accepts_exact_and_rejects_limit_plus_one() {
+        enforce_transfer_size("test source", 8, 8).expect("exact size limit");
+        let error = enforce_transfer_size("test source", 9, 8)
+            .expect_err("dry-run size limit plus one must reject");
+        assert!(error.contains("exceeds --max-bytes 8"));
+    }
+
+    #[test]
+    fn delta_snapshot_enforces_logical_and_encoded_max_bytes() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let source = temp.path().join("payload.bin");
+        fs::write(&source, b"123456789").expect("source fixture");
+        let error = build_delta_source_snapshot(&source, 8)
+            .expect_err("sender snapshot must enforce max bytes while reading");
+        assert!(error.contains("exceeds 8 byte limit"));
+
+        fs::write(&source, b"").expect("empty source fixture");
+        let error = build_delta_source_snapshot(&source, 0)
+            .expect_err("encoded delta object overhead must enforce max bytes");
+        assert!(error.contains("encoded delta object size"));
+
+        let repeated = vec![0x5a; 8 * 1024];
+        let files = vec![
+            DeltaTreeFile {
+                rel_path: "tree/a.bin".to_string(),
+                bytes: repeated.clone(),
+            },
+            DeltaTreeFile {
+                rel_path: "tree/b.bin".to_string(),
+                bytes: repeated,
+            },
+        ];
+        let encoded = encode_delta_tree_object(&files).expect("encode repeated payload tree");
+        let encoded_limit = u64::try_from(encoded.len()).expect("encoded fixture length");
+        assert!(encoded_limit < 16 * 1024);
+        let error = decode_delta_tree_object(&encoded, encoded_limit)
+            .expect_err("logical decoded size above max bytes must reject");
+        assert!(error.contains("logical file size"));
+
+        let error = decode_delta_tree_object(&encoded, encoded_limit - 1)
+            .expect_err("encoded object above max bytes must reject before decode");
+        assert!(error.contains("encoded delta object size"));
+
+        let payload = b"123456789".to_vec();
+        let snapshot = one_chunk_delta_snapshot("max-bytes-test", payload.clone());
+        let mut store = DeltaChunkStore::new();
+        store
+            .insert(&payload)
+            .expect("insert reconstruction fixture");
+        let error = reconstruct_delta_object_bytes(&snapshot.manifest, &store, 8)
+            .expect_err("reconstruction must enforce receiver max bytes");
+        assert!(error.contains("exceeds 8 byte limit"));
+    }
+
+    #[test]
+    fn delta_commit_retry_removes_staging_and_backup_artifacts() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dest = temp.path().join("dest");
+        let old_root = dest.join("tree");
+        fs::create_dir_all(&old_root).expect("old destination tree");
+        fs::write(old_root.join("payload.bin"), b"old").expect("old destination file");
+
+        let files = vec![DeltaTreeFile {
+            rel_path: "tree/payload.bin".to_string(),
+            bytes: b"new".to_vec(),
+        }];
+        let encoded = encode_delta_tree_object(&files).expect("encode replacement tree");
+        let object_sha256_hex = hex::encode(Sha256::digest(&encoded));
+        commit_delta_tree_files(
+            &dest,
+            &files,
+            &object_sha256_hex,
+            DEFAULT_MAX_TRANSFER_BYTES,
+        )
+        .expect("commit replacement tree");
+        assert_eq!(fs::read(old_root.join("payload.bin")).unwrap(), b"new");
+
+        let state_dir = dest.join(DELTA_STATE_DIR);
+        let names = fs::read_dir(&state_dir)
+            .expect("delta state directory")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(!names.iter().any(|name| name.starts_with("staging-")));
+        let backup_dir = state_dir.join("backups");
+        assert_eq!(
+            fs::read_dir(&backup_dir).expect("backup directory").count(),
+            0
+        );
+
+        commit_delta_tree_files(
+            &dest,
+            &files,
+            &object_sha256_hex,
+            DEFAULT_MAX_TRANSFER_BYTES,
+        )
+        .expect("idempotent retry of committed tree");
+    }
+
+    #[test]
+    fn sender_delta_package_guard_removes_successful_package() {
+        let package_root =
+            create_unique_delta_package_root(&"a".repeat(64)).expect("temporary delta package");
+        fs::write(package_root.join("payload"), b"test").expect("package fixture");
+        let mut guard = DeltaPackageRootGuard::new(package_root.clone()).expect("package guard");
+        guard.cleanup().expect("remove sender package");
+        assert!(!package_root.exists());
+    }
+
+    #[test]
     fn delta_paths_reject_windows_aliases_before_materialization() {
         validate_delta_rel_path("nested/payload.bin").expect("portable delta path");
         for path in [
@@ -6554,7 +8064,7 @@ mod tests {
     fn delta_object_counts_are_bounded_by_remaining_body_before_reserve() {
         let mut huge_file_count = DELTA_TREE_OBJECT_MAGIC.to_vec();
         put_u64(&mut huge_file_count, 1_000_001);
-        let error = decode_delta_tree_object(&huge_file_count)
+        let error = decode_delta_tree_object(&huge_file_count, DEFAULT_MAX_TRANSFER_BYTES)
             .expect_err("huge count with tiny body must reject before allocation");
         assert!(error.contains("file count") || error.contains("payload count"));
 
@@ -6564,7 +8074,7 @@ mod tests {
         put_u64(&mut huge_payload_count, 0);
         huge_payload_count.extend_from_slice(&sha256_array(&[]));
         put_u64(&mut huge_payload_count, 1_000_000);
-        let error = decode_delta_tree_object(&huge_payload_count)
+        let error = decode_delta_tree_object(&huge_payload_count, DEFAULT_MAX_TRANSFER_BYTES)
             .expect_err("huge payload count with tiny body must reject before allocation");
         assert!(error.contains("payload count"));
 
@@ -6592,7 +8102,7 @@ mod tests {
     #[test]
     fn empty_directory_delta_snapshot_selects_capability_fallback() {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let error = collect_delta_tree_files(temp.path())
+        let error = collect_delta_tree_files(temp.path(), DEFAULT_MAX_TRANSFER_BYTES)
             .expect_err("empty directory must not produce an unappliable delta object");
         assert!(matches!(
             error,
@@ -6682,10 +8192,10 @@ mod tests {
             .arg(&target)
             .status()
             .expect("run mklink /J");
-        if !status.success() {
-            eprintln!("skipping junction assertion: mklink /J was unavailable");
-            return;
-        }
+        assert!(
+            status.success(),
+            "mklink /J must succeed so the Windows junction guard is actually tested: {status}"
+        );
         let destination = junction.join("must-not-exist");
 
         assert!(ensure_delta_path_chain(&destination, "test create").is_err());
@@ -7045,6 +8555,36 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
+    fn windows_remote_command_is_utf16_encoded_and_injection_safe() {
+        let argv = vec![
+            r"C:\Program Files\ATP\atp.exe".to_string(),
+            "recv".to_string(),
+            r"C:\incoming folder\O'Brien".to_string(),
+            "unicode-λ".to_string(),
+        ];
+        let command = powershell_encoded_command(&[(RQ_AUTH_ENV, VALID_KEY_HEX)], &argv)
+            .expect("encode PowerShell command");
+        let encoded = command
+            .split_whitespace()
+            .last()
+            .expect("encoded-command payload");
+        let bytes = STANDARD.decode(encoded).expect("base64 payload");
+        assert_eq!(bytes.len() % 2, 0);
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        let script = String::from_utf16(&units).expect("UTF-16LE PowerShell script");
+
+        assert!(script.contains("[Console]::OutputEncoding=$utf8"));
+        assert!(script.contains("$env:ATP_RQ_AUTH_KEY_HEX='000102"));
+        assert!(script.contains("& 'C:\\Program Files\\ATP\\atp.exe' 'recv'"));
+        assert!(script.contains(r"'C:\incoming folder\O''Brien'"));
+        assert!(script.contains("'unicode-λ'"));
+        assert!(script.ends_with("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    }
+
+    #[test]
     fn default_server_name_extracts_host_without_port() {
         assert_eq!(
             default_server_name("receiver.example:8472"),
@@ -7232,7 +8772,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn auto_security_policy_rejects_implicit_plaintext_delta_path() {
+    fn auto_security_policy_allows_default_metadata_preserving_path() {
         let cli = Cli::parse_from([
             "atp",
             "send",
@@ -7245,9 +8785,16 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             panic!("expected send command");
         };
 
-        let error = validate_auto_security_policy(&args)
-            .expect_err("delta-enabled auto must not silently select plaintext TCP");
-        assert!(error.contains("--allow-plaintext-fallback"));
+        validate_auto_security_policy(&args)
+            .expect("default metadata-preserving policy selects authenticated QUIC");
+        assert_eq!(
+            Transport::auto_fallback_order(
+                cli_content_delta_enabled(args.no_delta),
+                args.allow_plaintext_fallback,
+                false,
+            ),
+            &[Transport::Quic]
+        );
     }
 
     #[test]
@@ -7441,15 +8988,18 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         sort_delta_tree_files(&mut after);
 
         let encoded = encode_delta_tree_object(&after).expect("encode moved tree object");
-        let decoded = decode_delta_tree_object(&encoded).expect("decode moved tree object");
+        let decoded = decode_delta_tree_object(&encoded, DEFAULT_MAX_TRANSFER_BYTES)
+            .expect("decode moved tree object");
         assert_eq!(decoded.len(), after.len());
         for (observed, expected) in decoded.iter().zip(&after) {
             assert_eq!(observed.rel_path, expected.rel_path);
             assert_eq!(observed.bytes, expected.bytes);
         }
 
-        let receiver = build_delta_snapshot_from_files(before).expect("receiver snapshot");
-        let sender = build_delta_snapshot_from_files(after).expect("sender snapshot");
+        let receiver = build_delta_snapshot_from_files(before, DEFAULT_MAX_TRANSFER_BYTES)
+            .expect("receiver snapshot");
+        let sender = build_delta_snapshot_from_files(after, DEFAULT_MAX_TRANSFER_BYTES)
+            .expect("sender snapshot");
         let coverage = ReceiverCasCoverage::from_manifest(&receiver.manifest);
         let plan = plan_incremental_resync_with_receiver_coverage(
             &sender.manifest,
@@ -7487,7 +9037,6 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             manifest,
             chunks_by_content,
             object_sha256_hex,
-            file_count: 1,
             logical_file_bytes: size_bytes,
         }
     }
@@ -7760,7 +9309,6 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             manifest,
             chunks_by_content,
             object_sha256_hex: hex::encode(Sha256::digest(&object_bytes)),
-            file_count: 1,
             logical_file_bytes: u64::try_from(object_bytes.len()).expect("object len"),
         };
         let receiver_manifest =
@@ -8019,41 +9567,125 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     // ─── Channel bonding: donor leg (`atp bond-donate`) ───────────────────────
 
+    #[test]
+    fn bond_subcommands_parse_and_obsolete_static_assignment_flags_fail() {
+        let donate = Cli::try_parse_from([
+            "atp",
+            "bond-donate",
+            "/srv/source",
+            "--to",
+            "127.0.0.1:8473",
+            "--rq-allow-unauthenticated-lab",
+        ])
+        .expect("parse bond-donate");
+        assert!(matches!(donate.command, Command::BondDonate(_)));
+
+        let recv = Cli::try_parse_from([
+            "atp",
+            "bond-recv",
+            "/srv/dest",
+            "/srv/source",
+            "--expect-donors",
+            "2",
+            "--rq-allow-unauthenticated-lab",
+        ])
+        .expect("parse bond-recv");
+        assert!(matches!(recv.command, Command::BondRecv(_)));
+
+        let pull = Cli::try_parse_from([
+            "atp",
+            "bond-pull",
+            r"C:\shared\payload.bin",
+            r"C:\incoming",
+            "--donors",
+            "wlap",
+            "--advertise",
+            "100.120.65.94:8473",
+            "--remote-atp",
+            r"C:\Users\jeffr\.local\bin\atp.exe",
+            "--remote-shell",
+            "powershell",
+            "--rq-allow-unauthenticated-lab",
+        ])
+        .expect("parse Windows bond-pull");
+        let Command::BondPull(pull) = pull.command else {
+            panic!("expected bond-pull command");
+        };
+        assert_eq!(pull.remote_shell, RemoteShell::Powershell);
+        assert_eq!(pull.donors, vec!["wlap"]);
+
+        let descriptor = Cli::try_parse_from([
+            "atp",
+            "__bond-descriptor",
+            "/srv/source",
+            "--rq-allow-unauthenticated-lab",
+        ])
+        .expect("parse hidden descriptor command");
+        assert!(matches!(descriptor.command, Command::BondDescriptor(_)));
+
+        assert!(
+            Cli::try_parse_from([
+                "atp",
+                "bond-donate",
+                "/srv/source",
+                "--to",
+                "127.0.0.1:8473",
+                "--donor-index",
+                "0",
+                "--donor-count",
+                "1",
+            ])
+            .is_err(),
+            "receiver-assigned donor identities must not regain obsolete CLI flags"
+        );
+    }
+
     fn bond_test_config() -> RqConfig {
-        // Descriptor derivation reads only the agreed object params; building the
-        // config directly keeps these tests independent of ATP_RQ_AUTH_KEY_HEX.
+        // Build the same fidelity policy used by the CLI while keeping these
+        // descriptor-only tests independent of ATP_RQ_AUTH_KEY_HEX.
         RqConfig {
             symbol_size: DEFAULT_SYMBOL_SIZE,
             max_block_size: AUTO_MAX_BLOCK_SIZE,
+            metadata_policy: selected_cli_metadata_policy(),
+            preserve_hardlinks: true,
             ..RqConfig::default()
         }
+    }
+
+    fn bond_test_try_derive(
+        runtime: &asupersync::runtime::Runtime,
+        path: &Path,
+    ) -> Result<BondTransferDescriptor, String> {
+        let source = path.to_path_buf();
+        let config = bond_test_config();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("bond test cx");
+            derive_bond_transfer_descriptor(&cx, &source, &config, DEFAULT_MAX_TRANSFER_BYTES, None)
+                .await
+        }))
     }
 
     fn bond_test_derive(
         runtime: &asupersync::runtime::Runtime,
         path: &Path,
     ) -> BondTransferDescriptor {
-        let source = path.to_path_buf();
-        let config = bond_test_config();
-        runtime
-            .block_on(runtime.handle().spawn(async move {
-                let cx = Cx::current().expect("bond test cx");
-                derive_bond_transfer_descriptor(
-                    &cx,
-                    &source,
-                    &config,
-                    DEFAULT_MAX_TRANSFER_BYTES,
-                    None,
-                )
-                .await
-            }))
-            .expect("derive bonded descriptor")
+        bond_test_try_derive(runtime, path).expect("derive bonded descriptor")
     }
 
     fn write_bond_payload(root: &Path, first: &[u8]) {
         fs::create_dir_all(root.join("sub")).expect("payload dirs");
-        fs::write(root.join("a.bin"), first).expect("write a.bin");
-        fs::write(root.join("sub/b.bin"), b"second donor file").expect("write b.bin");
+        let paths = [root.join("a.bin"), root.join("sub/b.bin")];
+        fs::write(&paths[0], first).expect("write a.bin");
+        fs::write(&paths[1], b"second donor file").expect("write b.bin");
+        let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for path in paths {
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open bond metadata fixture")
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .expect("set deterministic bond fixture mtime");
+        }
     }
 
     #[test]
@@ -8065,6 +9697,14 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         // disk) and a tampered copy (a drifted donor).
         let copy = temp.path().join("donor2").join("payload");
         write_bond_payload(&copy, b"hello bonded world");
+        fs::File::options()
+            .write(true)
+            .open(copy.join("a.bin"))
+            .expect("open donor with different metadata")
+            .set_times(
+                fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
+            )
+            .expect("set divergent donor mtime");
         let tampered = temp.path().join("donor3").join("payload");
         write_bond_payload(&tampered, b"HELLO bonded world");
 
@@ -8080,7 +9720,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         );
         assert!(
             first.agrees_with(&other_donor),
-            "byte-identical copies at different roots must agree"
+            "byte-identical copies at different roots and with different platform metadata must agree"
         );
         assert_eq!(first.entry_object_id(0), second.entry_object_id(0));
         assert_eq!(first.entry_object_id(1), other_donor.entry_object_id(1));
@@ -8096,6 +9736,12 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert_eq!(first.entries.len(), 2);
         assert_eq!(first.symbol_size, DEFAULT_SYMBOL_SIZE);
         assert_eq!(first.max_block_size, AUTO_MAX_BLOCK_SIZE as u64);
+        let metadata = first
+            .metadata
+            .as_ref()
+            .expect("v4 metadata must be carried");
+        assert!(metadata.entries.is_empty());
+        assert!(metadata.directories.is_none());
 
         assert_ne!(
             first.transfer_id, drifted.transfer_id,
@@ -8106,12 +9752,66 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn bond_donor_assignment_validates_index_count_and_auth() {
-        let receiver: SocketAddr = "127.0.0.1:9600".parse().expect("receiver addr");
+    fn bond_descriptor_rejects_unsupported_topology_before_creation() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let runtime = build_runtime(2).expect("bond test runtime");
 
-        let assignment =
-            bond_donor_assignment(2, 3, receiver, Some("rq-auth-sha256:00ff".to_string()))
-                .expect("valid assignment");
+        let hardlinks = temp.path().join("hardlinks");
+        fs::create_dir(&hardlinks).expect("hardlink root");
+        fs::write(hardlinks.join("primary.bin"), b"same inode").expect("hardlink primary");
+        fs::hard_link(
+            hardlinks.join("primary.bin"),
+            hardlinks.join("duplicate.bin"),
+        )
+        .expect("hardlink duplicate");
+        let error = bond_test_try_derive(&runtime, &hardlinks)
+            .expect_err("RQ bonding must not flatten hardlinks");
+        assert!(error.contains("cannot preserve hardlink identity"));
+
+        let empty_tree = temp.path().join("empty-tree");
+        fs::create_dir_all(empty_tree.join("nested-empty")).expect("nested empty directory");
+        let error = bond_test_try_derive(&runtime, &empty_tree)
+            .expect_err("RQ bonding must not flatten nested empty directories");
+        assert!(
+            error.contains("cannot represent nested empty directories"),
+            "unexpected empty-tree rejection: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bond_descriptor_rejects_symlinks_before_creation() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let source = temp.path().join("source");
+        fs::create_dir(&source).expect("source root");
+        fs::write(source.join("target.bin"), b"target").expect("symlink target");
+        symlink("target.bin", source.join("link.bin")).expect("source symlink");
+        let runtime = build_runtime(2).expect("bond test runtime");
+        let error = bond_test_try_derive(&runtime, &source)
+            .expect_err("RQ bonding must not flatten symlinks");
+        assert!(error.contains("symlink") || error.contains("reparse"));
+    }
+
+    /// The CLI no longer constructs donor assignments — the receiver's
+    /// enrollment welcome assigns index/count/UDP endpoints server-side — but
+    /// the assignment validation the enrollment relies on must keep failing
+    /// closed on the same shapes the old CLI flags used to catch.
+    #[test]
+    fn bond_donor_assignment_validates_index_count_and_auth() {
+        use asupersync::net::atp::bonding::{BondAuthKeyRef, DonorAssignment};
+
+        let receiver: SocketAddr = "127.0.0.1:9600".parse().expect("receiver addr");
+        let assignment = DonorAssignment::new_static(
+            2,
+            3,
+            vec![receiver],
+            Some(BondAuthKeyRef::ControlPlane(
+                "rq-auth-sha256:00ff".to_string(),
+            )),
+        );
+        assignment.validate().expect("valid assignment");
         assert_eq!(assignment.donor_index, 2);
         assert_eq!(assignment.donor_count, 3);
         assert_eq!(assignment.receiver_udp_endpoints, vec![receiver]);
@@ -8119,21 +9819,38 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert!(assignment.owns_esi(2), "donor 2 of 3 owns esi 2");
         assert!(!assignment.owns_esi(1), "donor 2 of 3 must not own esi 1");
 
-        let lab = bond_donor_assignment(0, 1, receiver, None).expect("lab assignment");
+        let lab = DonorAssignment::new_static(0, 1, vec![receiver], None);
+        lab.validate().expect("lab assignment");
         assert!(!lab.requires_symbol_auth());
 
-        // index >= count, zero donors, and counts above the bonding ceiling all
-        // fail closed before any socket or file is touched.
-        assert!(bond_donor_assignment(3, 3, receiver, None).is_err());
-        assert!(bond_donor_assignment(0, 0, receiver, None).is_err());
+        // index >= count, zero donors, and counts above the bonding ceiling
+        // all fail closed before a single symbol can be sprayed.
         assert!(
-            bond_donor_assignment(
+            DonorAssignment::new_static(3, 3, vec![receiver], None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            DonorAssignment::new_static(0, 0, vec![receiver], None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            DonorAssignment::new_static(
                 0,
                 asupersync::net::atp::bonding::MAX_BONDING_DONORS + 1,
-                receiver,
+                vec![receiver],
                 None,
             )
+            .validate()
             .is_err()
+        );
+        // The same ceiling guards the CLI's --expect-donors surface.
+        assert!(validate_bond_expected_donors(0).is_err());
+        assert!(validate_bond_expected_donors(1).is_ok());
+        assert!(
+            validate_bond_expected_donors(asupersync::net::atp::bonding::MAX_BONDING_DONORS + 1)
+                .is_err()
         );
     }
 
@@ -8157,7 +9874,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[test]
     fn bond_donate_json_reports_the_donor_leg() {
-        let report = transport_rq::BondedDonorSendReport {
+        let spray = transport_rq::BondedDonorSendReport {
             transfer_id: "tid-bond".to_string(),
             donor_index: 1,
             donor_count: 4,
@@ -8177,6 +9894,28 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             },
             udp_send_acceleration: transport_rq::UdpSendAccelerationReport::default(),
         };
+        // The donor leg now runs the full enrollment + feedback control loop,
+        // so the report wraps the round-0 spray with the receiver-assigned
+        // identity, served feedback rounds, and the fail-closed receipt.
+        let report = transport_rq::BondedDonateReport {
+            transfer_id: "tid-bond".to_string(),
+            donor_index: 1,
+            donor_count: 4,
+            feedback_rounds: 2,
+            symbols_sent: 21,
+            spray,
+            receipt: transport_rq::ReceiveReceipt {
+                committed: true,
+                bytes_received: 96_007,
+                files: 1,
+                sha_ok: true,
+                merkle_ok: true,
+                symbols_accepted: 90,
+                feedback_rounds: 2,
+                reason: None,
+                committed_paths: vec!["/tmp/dst/payload.bin".to_string()],
+            },
+        };
 
         let json = bond_donate_json(&report, Some(Duration::from_millis(10)));
 
@@ -8185,13 +9924,387 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert_eq!(json["transfer_id"], "tid-bond");
         assert_eq!(json["donor_index"], 1);
         assert_eq!(json["donor_count"], 4);
+        assert_eq!(json["feedback_rounds"], 2);
+        assert_eq!(json["committed"], true);
+        assert_eq!(json["sha_ok"], true);
+        assert_eq!(json["merkle_ok"], true);
         assert_eq!(json["receiver_endpoints"][0], "127.0.0.1:9600");
         assert_eq!(json["source_symbols_sent"], 10);
         assert_eq!(json["repair_symbols_sent"], 5);
-        assert_eq!(json["symbols_sent"], 15);
+        assert_eq!(json["round0_symbols_sent"], 15);
+        assert_eq!(json["symbols_sent"], 21);
         assert_eq!(json["pacing"]["burst_symbols"], 32);
         assert_eq!(json["pacing"]["clean_round0_ramp_enabled"], true);
         assert_eq!(json["metrics"]["chosen_fanout"], 1);
+        assert_eq!(json["metrics"]["symbols_accepted"], 90);
+    }
+
+    #[test]
+    fn bond_recv_json_reports_enrollment_ingress_and_reallocation() {
+        use asupersync::net::atp::bonding::BondedDonorIngressStats;
+
+        let report = transport_rq::BondedReceiveReport {
+            transfer_id: "tid-bond".to_string(),
+            bytes_received: 200_003,
+            files: 1,
+            committed: true,
+            symbols_accepted: 180,
+            feedback_rounds: 2,
+            committed_paths: vec![PathBuf::from("/tmp/dst/payload.bin")],
+            enrolled_donors: 2,
+            reallocated_repair_windows: 7,
+            donor_ingress: vec![
+                (
+                    0,
+                    BondedDonorIngressStats {
+                        symbols_received: 120,
+                        symbols_accepted: 100,
+                        duplicate_symbols: 20,
+                        source_symbols_accepted: 90,
+                        repair_symbols_accepted: 10,
+                        symbols_rejected_by_retention: 0,
+                    },
+                ),
+                (
+                    1,
+                    BondedDonorIngressStats {
+                        symbols_received: 90,
+                        symbols_accepted: 80,
+                        duplicate_symbols: 10,
+                        source_symbols_accepted: 60,
+                        repair_symbols_accepted: 20,
+                        symbols_rejected_by_retention: 0,
+                    },
+                ),
+            ],
+        };
+
+        let json = bond_recv_json(&report, 4, Some(Duration::from_millis(25)));
+
+        assert_eq!(json["event"], "atp_bond_receive");
+        assert_eq!(json["transport"], "rq");
+        assert_eq!(json["committed"], true);
+        assert_eq!(json["bytes_received"], 200_003);
+        assert_eq!(json["enrolled_donors"], 2);
+        assert_eq!(json["reallocated_repair_windows"], 7);
+        assert_eq!(json["donor_ingress"][0]["donor_index"], 0);
+        assert_eq!(json["donor_ingress"][0]["symbols_accepted"], 100);
+        assert_eq!(json["donor_ingress"][1]["donor_index"], 1);
+        assert_eq!(json["donor_ingress"][1]["symbols_received"], 90);
+        assert_eq!(json["metrics"]["chosen_fanout"], 4);
+        assert_eq!(json["committed_paths"][0], "/tmp/dst/payload.bin");
+    }
+
+    // ─── Channel bonding: orchestrator (`atp bond-pull`) ──────────────────────
+
+    fn bond_pull_test_args(advertise: Option<SocketAddr>, listen: SocketAddr) -> BondPullArgs {
+        BondPullArgs {
+            source: "/srv/data/payload.bin".to_string(),
+            dest: PathBuf::from("/tmp/dst"),
+            donors: vec!["donor@h1".to_string(), "donor@h2".to_string()],
+            advertise,
+            listen,
+            udp_bind: None,
+            remote_atp: "atp".to_string(),
+            remote_shell: RemoteShell::Auto,
+            ssh_options: Vec::new(),
+            descriptor_timeout_secs: 300,
+            peer_id: "atp-bond-pull".to_string(),
+            max_bytes: DEFAULT_MAX_TRANSFER_BYTES,
+            workers: 4,
+            accept_timeout_secs: DEFAULT_RECV_ACCEPT_TIMEOUT_SECS,
+            symbol_size: None,
+            max_block_size: MaxBlockSizeArg::Auto,
+            repair_overhead: DEFAULT_REPAIR_OVERHEAD,
+            rq_auth_key_hex: None,
+            rq_allow_unauthenticated_lab: true,
+        }
+    }
+
+    /// The control address donors dial is never inferred from SSH: explicit
+    /// --advertise wins, a routable --listen IP is reused with the real bound
+    /// port, and an unspecified listen IP without --advertise fails closed.
+    #[test]
+    fn bond_pull_control_advertise_is_explicit_and_fails_closed() {
+        let explicit: SocketAddr = "192.0.2.7:8473".parse().expect("advertise addr");
+        let routable_listen: SocketAddr = "192.0.2.9:0".parse().expect("listen addr");
+        let wildcard_listen: SocketAddr = "0.0.0.0:8473".parse().expect("wildcard addr");
+
+        assert_eq!(
+            bond_pull_control_advertise(Some(explicit), wildcard_listen, 8473)
+                .expect("explicit advertise"),
+            explicit
+        );
+        // Routable --listen: reuse its IP with the actually-bound port
+        // (--listen port 0 must still advertise the real port).
+        assert_eq!(
+            bond_pull_control_advertise(None, routable_listen, 45123)
+                .expect("routable listen advertise"),
+            "192.0.2.9:45123".parse::<SocketAddr>().expect("addr")
+        );
+        // Fail closed: wildcard listen with no --advertise.
+        assert!(bond_pull_control_advertise(None, wildcard_listen, 8473).is_err());
+        // Fail closed: unusable explicit advertise addresses.
+        assert!(
+            bond_pull_control_advertise(
+                Some("0.0.0.0:8473".parse().expect("addr")),
+                wildcard_listen,
+                8473,
+            )
+            .is_err()
+        );
+        assert!(
+            bond_pull_control_advertise(
+                Some("192.0.2.7:0".parse().expect("addr")),
+                wildcard_listen,
+                8473,
+            )
+            .is_err()
+        );
+    }
+
+    /// The SSH network path is exercised by the in-process loopback e2e
+    /// (`bond_cli_two_donor_loopback_commits`); this pins the exact remote
+    /// argv `bond-pull` launches per donor and for the descriptor fetch.
+    #[test]
+    fn bond_pull_remote_argv_carries_control_address_and_agreed_params() {
+        let listen: SocketAddr = "0.0.0.0:0".parse().expect("listen addr");
+        let control: SocketAddr = "192.0.2.7:8473".parse().expect("control addr");
+        let mut args = bond_pull_test_args(Some(control), listen);
+        args.symbol_size = Some(1200);
+        args.max_block_size = MaxBlockSizeArg::Bytes(128 * 1024);
+        args.remote_atp = "/usr/local/bin/atp".to_string();
+
+        let donor = bond_pull_donor_argv(&args, control);
+        assert_eq!(
+            donor,
+            vec![
+                "/usr/local/bin/atp".to_string(),
+                "bond-donate".to_string(),
+                "/srv/data/payload.bin".to_string(),
+                "--to".to_string(),
+                "192.0.2.7:8473".to_string(),
+                "--max-bytes".to_string(),
+                DEFAULT_MAX_TRANSFER_BYTES.to_string(),
+                "--workers".to_string(),
+                "4".to_string(),
+                "--max-block-size".to_string(),
+                (128 * 1024).to_string(),
+                "--repair-overhead".to_string(),
+                DEFAULT_REPAIR_OVERHEAD.to_string(),
+                "--symbol-size".to_string(),
+                "1200".to_string(),
+                "--rq-allow-unauthenticated-lab".to_string(),
+            ]
+        );
+
+        let descriptor = bond_pull_descriptor_argv(&args);
+        assert_eq!(
+            descriptor,
+            vec![
+                "/usr/local/bin/atp".to_string(),
+                "__bond-descriptor".to_string(),
+                "/srv/data/payload.bin".to_string(),
+                "--max-bytes".to_string(),
+                DEFAULT_MAX_TRANSFER_BYTES.to_string(),
+                "--max-block-size".to_string(),
+                (128 * 1024).to_string(),
+                "--symbol-size".to_string(),
+                "1200".to_string(),
+                "--rq-allow-unauthenticated-lab".to_string(),
+            ]
+        );
+
+        // Default surface: no explicit symbol size, authenticated posture —
+        // neither optional flag may appear.
+        let default_args = bond_pull_test_args(Some(control), listen);
+        let mut authed = default_args;
+        authed.rq_allow_unauthenticated_lab = false;
+        let default_donor = bond_pull_donor_argv(&authed, control);
+        assert!(!default_donor.contains(&"--symbol-size".to_string()));
+        assert!(
+            !default_donor.contains(&"--rq-allow-unauthenticated-lab".to_string()),
+            "authenticated pull must not downgrade its donors"
+        );
+        assert!(
+            !default_donor
+                .iter()
+                .any(|arg| arg.contains("--rq-auth-key-hex")),
+            "the auth key travels via {RQ_AUTH_ENV}, never argv"
+        );
+    }
+
+    /// MANDATORY trio e2e: two in-process donor legs (the exact
+    /// `bond_donate_transfer` body `atp bond-donate` runs) feed one in-process
+    /// bonded receiver (the exact `bond_recv_serve` body `atp bond-recv` and
+    /// `atp bond-pull` run), all on loopback. The commit must be
+    /// byte-identical, with BOTH donors enrolled and contributing accepted
+    /// symbols. The receiver derives its descriptor from a separate
+    /// byte-identical copy, proving the content-addressed agreement the CLI
+    /// relies on.
+    #[test]
+    fn bond_cli_two_donor_loopback_commits() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let payload: Vec<u8> = (0..200_003u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+            .collect();
+        let donor_a_dir = temp.path().join("donor-a");
+        let donor_b_dir = temp.path().join("donor-b");
+        let recv_copy_dir = temp.path().join("receiver-copy");
+        let dst_dir = temp.path().join("dst");
+        for dir in [&donor_a_dir, &donor_b_dir, &recv_copy_dir, &dst_dir] {
+            fs::create_dir_all(dir).expect("create e2e dir");
+        }
+        // Give each replica a stable timestamp even though bonded descriptors
+        // intentionally exclude platform metadata: enrollment identity is
+        // content/path based so Windows and Unix donors can agree.
+        let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for dir in [&donor_a_dir, &donor_b_dir, &recv_copy_dir] {
+            let path = dir.join("payload.bin");
+            fs::write(&path, &payload).expect("write e2e payload");
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open e2e payload")
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .expect("set deterministic e2e mtime");
+        }
+
+        // The exact CLI config plumbing (`rq_config`) with small blocks so
+        // debug-build RaptorQ decode stays fast, tightened drain/accept
+        // windows for a loopback lab run.
+        let mut config = rq_config(
+            DEFAULT_MAX_TRANSFER_BYTES,
+            DEFAULT_SYMBOL_SIZE,
+            1,
+            64 * 1024,
+            1.0,
+            0.0,
+            5,
+            None,
+            true,
+        )
+        .expect("bond e2e config");
+        config.accept_timeout = Duration::from_secs(30);
+
+        let (ready_tx, ready_rx) = mpsc::channel::<SocketAddr>();
+        let receiver = {
+            let source = recv_copy_dir.join("payload.bin");
+            let dest = dst_dir.clone();
+            let config = config.clone();
+            thread::spawn(
+                move || -> Result<transport_rq::BondedReceiveReport, String> {
+                    let runtime = build_runtime(2)?;
+                    runtime.block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().expect("bond e2e receiver cx");
+                        let descriptor = derive_bond_transfer_descriptor(
+                            &cx,
+                            &source,
+                            &config,
+                            DEFAULT_MAX_TRANSFER_BYTES,
+                            None,
+                        )
+                        .await?;
+                        bond_recv_serve(
+                            &cx,
+                            &descriptor,
+                            &dest,
+                            "127.0.0.1:0".parse().expect("listen addr"),
+                            "127.0.0.1",
+                            2,
+                            config,
+                            "bond-e2e-receiver",
+                            Some(ready_tx),
+                        )
+                        .await
+                    }))
+                },
+            )
+        };
+        let control = ready_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("bonded receiver bound its control listener");
+
+        let spawn_donor = |source: PathBuf| {
+            let config = config.clone();
+            thread::spawn(
+                move || -> Result<transport_rq::BondedDonateReport, String> {
+                    let runtime = build_runtime(2)?;
+                    runtime.block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().expect("bond e2e donor cx");
+                        bond_donate_transfer(
+                            &cx,
+                            &source,
+                            control,
+                            config,
+                            DEFAULT_MAX_TRANSFER_BYTES,
+                            None,
+                        )
+                        .await
+                    }))
+                },
+            )
+        };
+        let donor_a = spawn_donor(donor_a_dir.join("payload.bin"));
+        let donor_b = spawn_donor(donor_b_dir.join("payload.bin"));
+
+        let report_a = donor_a
+            .join()
+            .expect("donor A thread")
+            .expect("donor A succeeds");
+        let report_b = donor_b
+            .join()
+            .expect("donor B thread")
+            .expect("donor B succeeds");
+        let report = receiver
+            .join()
+            .expect("receiver thread")
+            .expect("bonded receive commits");
+
+        assert!(report.committed, "bonded receive must commit: {report:?}");
+        assert_eq!(report.bytes_received, payload.len() as u64);
+        assert_eq!(report.files, 1);
+        assert_eq!(report.enrolled_donors, 2);
+        let received = fs::read(dst_dir.join("payload.bin")).expect("read committed file");
+        assert_eq!(received, payload, "commit must be byte-identical");
+
+        // BOTH donors enrolled with distinct receiver-assigned identities and
+        // contributed accepted (novel, post-dedup) symbols.
+        assert_ne!(report_a.donor_index, report_b.donor_index);
+        assert_eq!(report_a.donor_count, 2);
+        assert_eq!(report_b.donor_count, 2);
+        assert!(report_a.symbols_sent > 0);
+        assert!(report_b.symbols_sent > 0);
+        assert_eq!(
+            report.donor_ingress.len(),
+            2,
+            "both donors must appear in ingress stats: {:?}",
+            report.donor_ingress
+        );
+        for (donor_index, stats) in &report.donor_ingress {
+            assert!(
+                stats.symbols_accepted > 0,
+                "donor {donor_index} must contribute accepted symbols: {stats:?}"
+            );
+        }
+
+        // Both donors saw the same fail-closed commit receipt the CLI reports.
+        for donor in [&report_a, &report_b] {
+            assert!(donor.receipt.committed);
+            assert!(donor.receipt.sha_ok && donor.receipt.merkle_ok);
+            let json = bond_donate_json(donor, Some(Duration::from_millis(1)));
+            assert_eq!(json["committed"], true);
+            assert_eq!(json["donor_count"], 2);
+        }
+        let recv_json = bond_recv_json(&report, 1, Some(Duration::from_millis(1)));
+        assert_eq!(recv_json["enrolled_donors"], 2);
+        assert_eq!(
+            recv_json["donor_ingress"]
+                .as_array()
+                .expect("ingress array")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -8247,6 +10360,9 @@ fn main() -> ExitCode {
         Command::Recv(args) => run_recv(args, false),
         Command::Serve(args) => run_recv(args, true),
         Command::BondDonate(args) => run_bond_donate(args),
+        Command::BondRecv(args) => run_bond_recv(args),
+        Command::BondPull(args) => run_bond_pull(args),
+        Command::BondDescriptor(args) => run_bond_descriptor(args),
         Command::RqKeygen => generate_rq_auth_key_hex().map(|key| {
             println!("{key}");
         }),

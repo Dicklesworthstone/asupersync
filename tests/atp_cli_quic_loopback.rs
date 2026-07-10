@@ -21,6 +21,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
+
 const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 // Canonical CA + leaf chain shared with the real UDP QUIC transport e2e. The
@@ -421,6 +424,555 @@ fn create_windows_junction(target: &Path, junction: &Path) {
         "mklink reported success but {} is not a reparse point",
         junction.display()
     );
+}
+
+#[cfg(windows)]
+struct WindowsTestRoot {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl WindowsTestRoot {
+    fn new(label: &str) -> Self {
+        Self {
+            path: unique_tmp(label),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::ops::Deref for WindowsTestRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsTestRoot {
+    fn drop(&mut self) {
+        if let Err(error) = remove_windows_test_tree(&self.path) {
+            if std::thread::panicking() {
+                eprintln!(
+                    "could not remove Windows test root {} while unwinding: {error}",
+                    self.path.display()
+                );
+            } else {
+                panic!(
+                    "could not remove Windows test root {}: {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn remove_windows_test_tree(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let attributes = metadata.file_attributes();
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+    }
+
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            remove_windows_test_tree(&entry?.path())?;
+        }
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+#[cfg(windows)]
+const WINDOWS_TEST_MTIME_SECS: u64 = 1_700_000_123;
+
+#[cfg(windows)]
+struct WindowsMetadataFixture {
+    metadata_payload: Vec<u8>,
+    packed_readonly_payload: Vec<u8>,
+    packed_peer_payload: Vec<u8>,
+    hardlink_payload: Vec<u8>,
+    file_target_payload: Vec<u8>,
+    directory_target_payload: Vec<u8>,
+    file_link_target: PathBuf,
+    directory_link_target: PathBuf,
+}
+
+#[cfg(windows)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(windows)]
+fn assert_file_bytes_and_hash(path: &Path, expected: &[u8], label: &str) {
+    let actual = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("read {label} {}: {error}", path.display()));
+    let actual_sha256 = sha256_hex(&actual);
+    let expected_sha256 = sha256_hex(expected);
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label} length at {}; actual SHA-256 {actual_sha256}, expected {expected_sha256}",
+        path.display()
+    );
+    let first_mismatch = actual
+        .iter()
+        .zip(expected)
+        .position(|(actual, expected)| actual != expected);
+    assert!(
+        first_mismatch.is_none(),
+        "{label} bytes differ at offset {first_mismatch:?} for {}; actual SHA-256 {actual_sha256}, expected {expected_sha256}",
+        path.display()
+    );
+    assert_eq!(
+        actual_sha256,
+        expected_sha256,
+        "{label} SHA-256 at {}",
+        path.display()
+    );
+}
+
+#[cfg(windows)]
+fn set_windows_readonly_hidden_and_mtime(path: &Path) {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+
+    let modified = std::time::UNIX_EPOCH + Duration::from_secs(WINDOWS_TEST_MTIME_SECS);
+    let mut options = std::fs::OpenOptions::new();
+    let file = options
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open metadata fixture {}: {error}", path.display()));
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap_or_else(|error| panic!("set metadata fixture mtime {}: {error}", path.display()));
+    drop(file);
+
+    let output = Command::new("attrib.exe")
+        .args(["+R", "+H"])
+        .arg(path)
+        .output()
+        .expect("run attrib.exe for Windows metadata fixture");
+    assert!(
+        output.status.success(),
+        "attrib +R +H failed for {}; stdout: {}; stderr: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_windows_readonly_hidden_and_mtime(path);
+}
+
+#[cfg(windows)]
+fn clear_windows_readonly(path: &Path) {
+    let output = Command::new("attrib.exe")
+        .arg("-R")
+        .arg(path)
+        .output()
+        .expect("run attrib.exe to clear Windows readonly attribute");
+    assert!(
+        output.status.success(),
+        "attrib -R failed for {}; stdout: {}; stderr: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+fn assert_windows_readonly_hidden_and_mtime(path: &Path) {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+
+    let metadata = std::fs::metadata(path)
+        .unwrap_or_else(|error| panic!("stat Windows metadata {}: {error}", path.display()));
+    let attributes = metadata.file_attributes();
+    assert_ne!(
+        attributes & FILE_ATTRIBUTE_READONLY,
+        0,
+        "readonly attribute missing from {} (attributes {attributes:#010x})",
+        path.display()
+    );
+    assert_ne!(
+        attributes & FILE_ATTRIBUTE_HIDDEN,
+        0,
+        "hidden attribute missing from {} (attributes {attributes:#010x})",
+        path.display()
+    );
+    let modified = metadata
+        .modified()
+        .expect("read Windows modified time")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Windows modified time after Unix epoch");
+    assert_eq!(
+        modified,
+        Duration::from_secs(WINDOWS_TEST_MTIME_SECS),
+        "mtime was not preserved for {}",
+        path.display()
+    );
+}
+
+#[cfg(windows)]
+fn create_windows_metadata_fixture(source: &Path) -> WindowsMetadataFixture {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+
+    let mut fixture = WindowsMetadataFixture {
+        metadata_payload: windows_payload(96 * 1024 + 13, 65_521),
+        packed_readonly_payload: windows_payload(1021, 257),
+        packed_peer_payload: windows_payload(2039, 509),
+        hardlink_payload: windows_payload(64 * 1024 + 29, 32_771),
+        file_target_payload: b"typed Windows file symlink target".to_vec(),
+        directory_target_payload: b"typed Windows directory symlink target".to_vec(),
+        file_link_target: PathBuf::new(),
+        directory_link_target: PathBuf::new(),
+    };
+
+    let metadata_path = source.join("metadata/readonly-hidden.bin");
+    write_file(&metadata_path, &fixture.metadata_payload);
+    set_windows_readonly_hidden_and_mtime(&metadata_path);
+
+    let packed_readonly = source.join("packed/readonly-small.bin");
+    write_file(&packed_readonly, &fixture.packed_readonly_payload);
+    set_windows_readonly_hidden_and_mtime(&packed_readonly);
+    write_file(
+        &source.join("packed/peer-small.bin"),
+        &fixture.packed_peer_payload,
+    );
+
+    let hardlink_primary = source.join("links/hard-primary.bin");
+    let hardlink_secondary = source.join("links/hard-secondary.bin");
+    write_file(&hardlink_primary, &fixture.hardlink_payload);
+    std::fs::hard_link(&hardlink_primary, &hardlink_secondary)
+        .expect("create Windows source hardlink");
+    set_windows_readonly_hidden_and_mtime(&hardlink_primary);
+
+    write_file(
+        &source.join("targets/file-target.txt"),
+        &fixture.file_target_payload,
+    );
+    write_file(
+        &source.join("targets/dir-target/inside.txt"),
+        &fixture.directory_target_payload,
+    );
+    symlink_file(
+        Path::new("targets/file-target.txt"),
+        source.join("file-link"),
+    )
+    .expect("create typed Windows file symlink");
+    symlink_dir(Path::new("targets/dir-target"), source.join("dir-link"))
+        .expect("create typed Windows directory symlink");
+    fixture.file_link_target =
+        std::fs::read_link(source.join("file-link")).expect("read source file symlink target");
+    fixture.directory_link_target =
+        std::fs::read_link(source.join("dir-link")).expect("read source directory symlink target");
+    // Apply directory metadata only after populating descendants. Receivers
+    // must likewise replay it root-last so readonly/mtime fidelity cannot
+    // interfere with child creation.
+    set_windows_readonly_hidden_and_mtime(&source.join("metadata"));
+    set_windows_readonly_hidden_and_mtime(source);
+    fixture
+}
+
+#[cfg(windows)]
+fn assert_windows_metadata_fixture(dest_root: &Path, fixture: &WindowsMetadataFixture) {
+    use std::os::windows::fs::FileTypeExt;
+
+    assert_windows_readonly_hidden_and_mtime(dest_root);
+    assert_windows_readonly_hidden_and_mtime(&dest_root.join("metadata"));
+
+    let metadata_path = dest_root.join("metadata/readonly-hidden.bin");
+    assert_file_bytes_and_hash(
+        &metadata_path,
+        &fixture.metadata_payload,
+        "Windows metadata payload",
+    );
+    assert_windows_readonly_hidden_and_mtime(&metadata_path);
+
+    let packed_readonly = dest_root.join("packed/readonly-small.bin");
+    assert_file_bytes_and_hash(
+        &packed_readonly,
+        &fixture.packed_readonly_payload,
+        "received packed readonly member",
+    );
+    assert_windows_readonly_hidden_and_mtime(&packed_readonly);
+    assert_file_bytes_and_hash(
+        &dest_root.join("packed/peer-small.bin"),
+        &fixture.packed_peer_payload,
+        "received packed peer member",
+    );
+
+    let file_link = dest_root.join("file-link");
+    let file_link_type = std::fs::symlink_metadata(&file_link)
+        .expect("stat received file symlink")
+        .file_type();
+    assert!(
+        file_link_type.is_symlink_file(),
+        "{} was not recreated as a typed file symlink",
+        file_link.display()
+    );
+    assert_eq!(
+        std::fs::read_link(&file_link).expect("read received file symlink"),
+        fixture.file_link_target.as_path()
+    );
+    assert_file_bytes_and_hash(
+        &file_link,
+        &fixture.file_target_payload,
+        "received file symlink target",
+    );
+
+    let dir_link = dest_root.join("dir-link");
+    let dir_link_type = std::fs::symlink_metadata(&dir_link)
+        .expect("stat received directory symlink")
+        .file_type();
+    assert!(
+        dir_link_type.is_symlink_dir(),
+        "{} was not recreated as a typed directory symlink",
+        dir_link.display()
+    );
+    assert_eq!(
+        std::fs::read_link(&dir_link).expect("read received directory symlink"),
+        fixture.directory_link_target.as_path()
+    );
+    assert_file_bytes_and_hash(
+        &dir_link.join("inside.txt"),
+        &fixture.directory_target_payload,
+        "received directory symlink target",
+    );
+
+    let hardlink_primary = dest_root.join("links/hard-primary.bin");
+    let hardlink_secondary = dest_root.join("links/hard-secondary.bin");
+    assert_file_bytes_and_hash(
+        &hardlink_primary,
+        &fixture.hardlink_payload,
+        "received hardlink primary",
+    );
+    assert_file_bytes_and_hash(
+        &hardlink_secondary,
+        &fixture.hardlink_payload,
+        "received hardlink secondary",
+    );
+    assert_windows_readonly_hidden_and_mtime(&hardlink_primary);
+    assert_windows_readonly_hidden_and_mtime(&hardlink_secondary);
+    let replacement = b"mutation through received Windows hardlink";
+    clear_windows_readonly(&hardlink_primary);
+    std::fs::write(&hardlink_primary, replacement).expect("mutate received hardlink primary");
+    assert_file_bytes_and_hash(
+        &hardlink_secondary,
+        replacement,
+        "received hardlink identity",
+    );
+    set_windows_readonly_hidden_and_mtime(&hardlink_primary);
+    assert_windows_readonly_hidden_and_mtime(&hardlink_secondary);
+}
+
+#[cfg(windows)]
+fn run_windows_tcp_transfer(source: &Path, dest: &Path, no_delta: bool) -> (Output, Output) {
+    std::fs::create_dir_all(dest).expect("create Windows TCP destination");
+    let mut receiver_command = Command::new(env!("CARGO_BIN_EXE_atp"));
+    receiver_command.arg("recv").arg(dest).args([
+        "--listen",
+        "127.0.0.1:0",
+        "--transport",
+        "tcp",
+        "--once",
+    ]);
+    if no_delta {
+        receiver_command.arg("--no-delta");
+    }
+    let receiver = receiver_command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows TCP receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_tcp_listen_addr(&receiver_stderr);
+
+    let mut sender_command = Command::new(env!("CARGO_BIN_EXE_atp"));
+    sender_command
+        .arg("send")
+        .arg(source)
+        .arg(listen_addr.to_string())
+        .args(["--transport", "tcp"]);
+    if no_delta {
+        sender_command.arg("--no-delta");
+    }
+    let sender = sender_command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows TCP sender");
+    let sender = wait_with_timeout(sender, "Windows TCP sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "Windows TCP sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+    let receiver = wait_with_timeout(receiver.into_inner(), "Windows TCP receiver");
+    assert!(
+        receiver.status.success(),
+        "Windows TCP receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+    (sender, receiver)
+}
+
+#[cfg(windows)]
+fn run_windows_quic_transfer(
+    source: &Path,
+    dest: &Path,
+    cert: &Path,
+    key: &Path,
+    ca: &Path,
+) -> (Output, Output) {
+    std::fs::create_dir_all(dest).expect("create Windows QUIC destination");
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "quic",
+            "--once",
+            "--no-delta",
+            "--server-cert",
+        ])
+        .arg(cert)
+        .arg("--server-key")
+        .arg(key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows QUIC receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(source)
+        .arg(listen_addr.to_string())
+        .args(["--transport", "quic", "--no-delta", "--ca"])
+        .arg(ca)
+        .args(["--server-name", "localhost"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows QUIC sender");
+    let sender = wait_with_timeout(sender, "Windows QUIC sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "Windows QUIC sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+    let receiver = wait_with_timeout(receiver.into_inner(), "Windows QUIC receiver");
+    assert!(
+        receiver.status.success(),
+        "Windows QUIC receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+    (sender, receiver)
+}
+
+#[cfg(windows)]
+fn run_windows_rq_metadata_transfer(source: &Path, dest: &Path) -> (Output, Output) {
+    std::fs::create_dir_all(dest).expect("create Windows RQ metadata destination");
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "rq",
+            "--once",
+            "--no-delta",
+            "--repair-overhead",
+            "1.05",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows RQ metadata receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_rq_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(source)
+        .arg(listen_addr.to_string())
+        .args([
+            "--transport",
+            "rq",
+            "--no-delta",
+            "--streams",
+            "1",
+            "--repair-overhead",
+            "1.05",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows RQ metadata sender");
+    let sender = wait_with_timeout(sender, "Windows RQ metadata sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "Windows RQ metadata sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+
+    let receiver = wait_with_timeout(receiver.into_inner(), "Windows RQ metadata receiver");
+    assert!(
+        receiver.status.success(),
+        "Windows RQ metadata receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+    (sender, receiver)
 }
 
 #[cfg(feature = "atpd-daemon")]
@@ -831,7 +1383,7 @@ fn atp_dry_run_rejects_non_unicode_windows_source_names() {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
 
-    let root = unique_tmp("windows-non-unicode");
+    let root = WindowsTestRoot::new("windows-non-unicode");
     let source = root.join("source");
     std::fs::create_dir_all(&source).expect("create source dir");
     let invalid_name = OsString::from_wide(&[0xd800, b'.' as u16, b'b' as u16]);
@@ -859,7 +1411,7 @@ fn atp_dry_run_rejects_non_unicode_windows_source_names() {
 #[cfg(windows)]
 #[test]
 fn windows_tcp_round_trips_nested_zero_large_and_replacement_files() {
-    let root = unique_tmp("windows-tcp-tree");
+    let root = WindowsTestRoot::new("windows-tcp-tree");
     let source = root.join("source");
     let dest = root.join("dest");
     let nested = source.join("nested/deeper");
@@ -967,8 +1519,153 @@ fn windows_tcp_round_trips_nested_zero_large_and_replacement_files() {
 
 #[cfg(windows)]
 #[test]
+fn windows_tcp_default_delta_repairs_stale_destination_without_legacy_state() {
+    let root = WindowsTestRoot::new("windows-tcp-default-delta");
+    let source = root.join("source/delta-default.bin");
+    let dest = root.join("dest");
+    let mut expected = windows_payload(3 * 1024 * 1024 + 73, 131_071);
+    write_file(&source, &expected);
+
+    let (first_sender, first_receiver) = run_windows_tcp_transfer(&source, &dest, false);
+    let first_sender_report = parse_cli_json(&first_sender, "initial Windows TCP delta sender");
+    let first_receiver_report =
+        parse_cli_json(&first_receiver, "initial Windows TCP delta receiver");
+    let logical_bytes = u64::try_from(expected.len()).expect("delta fixture length fits u64");
+    assert_eq!(first_sender_report["transport"], serde_json::json!("tcp"));
+    assert_eq!(first_sender_report["committed"], serde_json::json!(true));
+    assert_eq!(first_sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(first_sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(
+        first_sender_report["bytes_sent"],
+        serde_json::json!(logical_bytes),
+        "an empty destination must receive the complete initial object"
+    );
+    assert_eq!(first_receiver_report["committed"], serde_json::json!(true));
+
+    let received = dest.join("delta-default.bin");
+    assert_file_bytes_and_hash(&received, &expected, "initial default-delta payload");
+    let legacy_state_dir = dest.join(".asupersync-atp-delta-v1");
+    assert!(
+        !legacy_state_dir.exists(),
+        "metadata-preserving default unexpectedly created legacy plaintext delta state at {}",
+        legacy_state_dir.display()
+    );
+
+    for byte in &mut expected[1024 * 1024 + 19..1024 * 1024 + 4096 + 19] {
+        *byte ^= 0xa5;
+    }
+    std::fs::write(&source, &expected).expect("write edited default-delta source");
+    let (edited_sender, edited_receiver) = run_windows_tcp_transfer(&source, &dest, false);
+    let edited_sender_report = parse_cli_json(&edited_sender, "edited Windows TCP delta sender");
+    let edited_receiver_report =
+        parse_cli_json(&edited_receiver, "edited Windows TCP delta receiver");
+    let edited_bytes = edited_sender_report["bytes_sent"]
+        .as_u64()
+        .expect("edited delta sender bytes_sent");
+    assert!(
+        edited_bytes > 0 && edited_bytes < logical_bytes,
+        "default TCP delta did not reuse the stale destination; report: {edited_sender_report}"
+    );
+    assert_eq!(edited_sender_report["committed"], serde_json::json!(true));
+    assert_eq!(edited_sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(edited_sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(
+        edited_receiver_report["bytes_received"],
+        serde_json::json!(edited_bytes)
+    );
+    assert_file_bytes_and_hash(&received, &expected, "edited default-delta payload");
+    assert!(
+        !legacy_state_dir.exists(),
+        "live TCP delta unexpectedly materialized legacy plaintext state at {}",
+        legacy_state_dir.display()
+    );
+
+    let mut stale_destination = expected.clone();
+    for byte in &mut stale_destination[2 * 1024 * 1024 + 7..2 * 1024 * 1024 + 2048 + 7] {
+        *byte ^= 0x3c;
+    }
+    std::fs::write(&received, &stale_destination).expect("make committed destination stale");
+    assert_ne!(
+        sha256_hex(&std::fs::read(&received).expect("read stale destination")),
+        sha256_hex(&expected)
+    );
+
+    let (repair_sender, repair_receiver) = run_windows_tcp_transfer(&source, &dest, false);
+    let repair_sender_report = parse_cli_json(&repair_sender, "repair Windows TCP delta sender");
+    let repair_receiver_report =
+        parse_cli_json(&repair_receiver, "repair Windows TCP delta receiver");
+    let repair_bytes = repair_sender_report["bytes_sent"]
+        .as_u64()
+        .expect("repair delta sender bytes_sent");
+    assert!(
+        repair_bytes > 0 && repair_bytes < logical_bytes,
+        "default TCP delta did not repair the stale destination incrementally; report: {repair_sender_report}"
+    );
+    assert_eq!(repair_sender_report["committed"], serde_json::json!(true));
+    assert_eq!(repair_sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(repair_sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(
+        repair_receiver_report["bytes_received"],
+        serde_json::json!(repair_bytes)
+    );
+    assert_file_bytes_and_hash(&received, &expected, "repaired default-delta payload");
+    assert!(
+        !legacy_state_dir.exists(),
+        "stale-destination repair unexpectedly created legacy plaintext state at {}",
+        legacy_state_dir.display()
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "default delta transfers left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_tcp_preserves_attributes_mtime_typed_symlinks_and_hardlinks() {
+    let root = WindowsTestRoot::new("windows-tcp-metadata-links");
+    let source = root.join("source");
+    let dest = root.join("dest");
+    let fixture = create_windows_metadata_fixture(&source);
+
+    let (sender, receiver) = run_windows_tcp_transfer(&source, &dest, true);
+    let sender_report = parse_cli_json(&sender, "Windows TCP metadata sender");
+    let receiver_report = parse_cli_json(&receiver, "Windows TCP metadata receiver");
+    assert_eq!(sender_report["transport"], serde_json::json!("tcp"));
+    assert_eq!(sender_report["committed"], serde_json::json!(true));
+    assert_eq!(sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(receiver_report["transport"], serde_json::json!("tcp"));
+    assert_eq!(receiver_report["committed"], serde_json::json!(true));
+
+    assert_windows_metadata_fixture(&dest.join("source"), &fixture);
+
+    let (update_sender, update_receiver) = run_windows_tcp_transfer(&source, &dest, true);
+    let update_sender_report = parse_cli_json(&update_sender, "Windows TCP metadata update sender");
+    let update_receiver_report =
+        parse_cli_json(&update_receiver, "Windows TCP metadata update receiver");
+    assert_eq!(update_sender_report["transport"], serde_json::json!("tcp"));
+    assert_eq!(update_sender_report["committed"], serde_json::json!(true));
+    assert_eq!(update_sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(update_sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(
+        update_receiver_report["transport"],
+        serde_json::json!("tcp")
+    );
+    assert_eq!(update_receiver_report["committed"], serde_json::json!(true));
+    assert_windows_metadata_fixture(&dest.join("source"), &fixture);
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "TCP metadata create/update left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_quic_round_trip_requires_and_accepts_explicit_ca() {
-    let root = unique_tmp("windows-quic-explicit-ca");
+    let root = WindowsTestRoot::new("windows-quic-explicit-ca");
     let cert = root.join("tls/leaf.pem");
     let key = root.join("tls/leaf.key");
     let ca = root.join("tls/ca.pem");
@@ -1054,8 +1751,148 @@ fn windows_quic_round_trip_requires_and_accepts_explicit_ca() {
 
 #[cfg(windows)]
 #[test]
+fn windows_quic_preserves_attributes_mtime_typed_symlinks_and_hardlinks() {
+    let root = WindowsTestRoot::new("windows-quic-metadata-links");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let ca = root.join("tls/ca.pem");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    write_file(&ca, CA_CERT_PEM.as_bytes());
+
+    let source = root.join("source");
+    let dest = root.join("dest");
+    let fixture = create_windows_metadata_fixture(&source);
+    let (sender, receiver) = run_windows_quic_transfer(&source, &dest, &cert, &key, &ca);
+    let sender_report = parse_cli_json(&sender, "Windows QUIC metadata sender");
+    let receiver_report = parse_cli_json(&receiver, "Windows QUIC metadata receiver");
+    assert_eq!(sender_report["transport"], serde_json::json!("quic"));
+    assert_eq!(sender_report["committed"], serde_json::json!(true));
+    assert_eq!(sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(receiver_report["transport"], serde_json::json!("quic"));
+    assert_eq!(receiver_report["committed"], serde_json::json!(true));
+
+    assert_windows_metadata_fixture(&dest.join("source"), &fixture);
+
+    let (update_sender, update_receiver) =
+        run_windows_quic_transfer(&source, &dest, &cert, &key, &ca);
+    let update_sender_report =
+        parse_cli_json(&update_sender, "Windows QUIC metadata update sender");
+    let update_receiver_report =
+        parse_cli_json(&update_receiver, "Windows QUIC metadata update receiver");
+    assert_eq!(update_sender_report["transport"], serde_json::json!("quic"));
+    assert_eq!(update_sender_report["committed"], serde_json::json!(true));
+    assert_eq!(update_sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(update_sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(
+        update_receiver_report["transport"],
+        serde_json::json!("quic")
+    );
+    assert_eq!(update_receiver_report["committed"], serde_json::json!(true));
+    assert_windows_metadata_fixture(&dest.join("source"), &fixture);
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "QUIC metadata create/update left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_quic_rejects_private_ca_when_sender_omits_ca() {
+    let root = WindowsTestRoot::new("windows-quic-missing-ca");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+
+    let source = root.join("source/missing-ca.bin");
+    let dest = root.join("dest");
+    let payload = windows_payload(64 * 1024 + 17, 8_191);
+    write_file(&source, &payload);
+    std::fs::create_dir_all(&dest).expect("create missing-CA destination");
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "quic",
+            "--once",
+            "--no-delta",
+            "--listen-timeout-ms",
+            "4000",
+            "--quic-handshake-timeout-ms",
+            "1500",
+            "--server-cert",
+        ])
+        .arg(&cert)
+        .arg("--server-key")
+        .arg(&key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows QUIC receiver for missing-CA rejection");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg(listen_addr.to_string())
+        .args([
+            "--transport",
+            "quic",
+            "--no-delta",
+            "--quic-handshake-timeout-ms",
+            "1500",
+            "--server-name",
+            "localhost",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows QUIC sender without private CA");
+    let sender = wait_with_timeout(sender, "Windows QUIC sender without CA");
+    receiver.kill_and_wait();
+    assert!(
+        !sender.status.success(),
+        "QUIC sender trusted a private CA without --ca; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&sender.stdout),
+        String::from_utf8_lossy(&sender.stderr)
+    );
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&sender.stdout),
+        String::from_utf8_lossy(&sender.stderr)
+    )
+    .to_ascii_lowercase();
+    assert!(
+        diagnostics.contains("certificate")
+            || diagnostics.contains("issuer")
+            || diagnostics.contains("unknown ca")
+            || diagnostics.contains("trust"),
+        "missing-CA failure was not attributed to certificate trust: {diagnostics}"
+    );
+    assert!(
+        !dest.join("missing-ca.bin").exists(),
+        "missing-CA transfer wrote destination bytes"
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "missing-CA rejection left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_rq_round_trip_uses_real_udp_datagrams() {
-    let root = unique_tmp("windows-rq-real-udp");
+    let root = WindowsTestRoot::new("windows-rq-real-udp");
     let source = root.join("source/rq-real-udp.bin");
     let dest = root.join("dest");
     let payload = windows_payload(2 * 1024 * 1024 + 101, 131_071);
@@ -1163,8 +2000,85 @@ fn windows_rq_round_trip_uses_real_udp_datagrams() {
 
 #[cfg(windows)]
 #[test]
+fn windows_rq_preserves_attributes_mtime_and_updates_readonly_destination() {
+    let root = WindowsTestRoot::new("windows-rq-metadata-contract");
+    let source = root.join("source");
+    let dest = root.join("dest");
+    let readonly_payload = windows_payload(1021, 257);
+    let peer_payload = windows_payload(2039, 509);
+    let readonly_source = source.join("packed/readonly-small.bin");
+    write_file(&readonly_source, &readonly_payload);
+    set_windows_readonly_hidden_and_mtime(&readonly_source);
+    write_file(&source.join("packed/peer-small.bin"), &peer_payload);
+    // Root and non-empty-directory metadata are separate wire records; apply
+    // them only after populating descendants so the receiver must replay them
+    // deepest-first/root-last on both initial and update passes.
+    set_windows_readonly_hidden_and_mtime(&source.join("packed"));
+    set_windows_readonly_hidden_and_mtime(&source);
+
+    let dry_run = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg("127.0.0.1:9")
+        .args(["--transport", "rq", "--dry-run"])
+        .output()
+        .expect("run Windows RQ metadata dry-run");
+    assert!(
+        dry_run.status.success(),
+        "Windows RQ metadata dry-run failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&dry_run.stdout),
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    assert!(
+        !dest.exists(),
+        "RQ metadata dry-run mutated the destination"
+    );
+
+    let received_root = dest.join("source");
+    let received_readonly = received_root.join("packed/readonly-small.bin");
+    let received_peer = received_root.join("packed/peer-small.bin");
+    for pass in ["initial", "readonly destination update"] {
+        let (sender, receiver) = run_windows_rq_metadata_transfer(&source, &dest);
+        let sender_report = parse_cli_json(&sender, &format!("{pass} Windows RQ metadata sender"));
+        let receiver_report =
+            parse_cli_json(&receiver, &format!("{pass} Windows RQ metadata receiver"));
+        assert_eq!(sender_report["transport"], serde_json::json!("rq"));
+        assert_eq!(sender_report["committed"], serde_json::json!(true));
+        assert_eq!(sender_report["sha_ok"], serde_json::json!(true));
+        assert_eq!(sender_report["merkle_ok"], serde_json::json!(true));
+        assert_eq!(receiver_report["transport"], serde_json::json!("rq"));
+        assert_eq!(receiver_report["committed"], serde_json::json!(true));
+        assert!(
+            sender_report["udp_send_acceleration"]["datagrams"]
+                .as_u64()
+                .is_some_and(|datagrams| datagrams > 0),
+            "{pass} RQ metadata transfer did not exercise UDP: {sender_report}"
+        );
+        assert_file_bytes_and_hash(
+            &received_readonly,
+            &readonly_payload,
+            &format!("{pass} RQ packed readonly member"),
+        );
+        assert_windows_readonly_hidden_and_mtime(&received_readonly);
+        assert_file_bytes_and_hash(
+            &received_peer,
+            &peer_payload,
+            &format!("{pass} RQ packed peer member"),
+        );
+        assert_windows_readonly_hidden_and_mtime(&received_root);
+        assert_windows_readonly_hidden_and_mtime(&received_root.join("packed"));
+        assert!(
+            staging_dirs(&dest).is_empty(),
+            "{pass} RQ metadata transfer left staging directories: {:?}",
+            staging_dirs(&dest)
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_quic_peer_cancellation_rolls_back_and_reclaims_staging() {
-    let root = unique_tmp("windows-quic-cancel-cleanup");
+    let root = WindowsTestRoot::new("windows-quic-cancel-cleanup");
     let cert = root.join("tls/leaf.pem");
     let key = root.join("tls/leaf.key");
     let ca = root.join("tls/ca.pem");
@@ -1269,7 +2183,7 @@ fn windows_quic_peer_cancellation_rolls_back_and_reclaims_staging() {
 #[cfg(windows)]
 #[test]
 fn windows_tcp_rejects_junction_destination_ancestor_without_writes() {
-    let root = unique_tmp("windows-junction-destination");
+    let root = WindowsTestRoot::new("windows-junction-destination");
     let junction_target = root.join("junction-target");
     let junction = root.join("junction");
     std::fs::create_dir_all(&junction_target).expect("create junction target");

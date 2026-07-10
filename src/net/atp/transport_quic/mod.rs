@@ -8089,6 +8089,7 @@ fn validate_quic_manifest(
             committed_paths.extend(entry.members.iter().map(|member| member.rel_path.as_str()));
         }
     }
+    reject_quic_symlink_traversal(manifest)?;
     validate_portable_path_set(committed_paths).map_err(|error| {
         QuicTransportError::Source(format!("unsafe manifest path tree: {error}"))
     })?;
@@ -8098,7 +8099,6 @@ fn validate_quic_manifest(
             "manifest metadata commitment mismatch".to_string(),
         ));
     }
-    reject_quic_symlink_traversal(manifest)?;
     Ok(())
 }
 
@@ -9807,7 +9807,11 @@ mod tests {
             members: Vec::new(),
         };
         let valid = quic_manifest_with_metadata(vec![primary, alias]);
-        validate_quic_manifest(&valid, &trusted_quic_config())
+        let config = QuicConfig {
+            preserve_hardlinks: true,
+            ..trusted_quic_config()
+        };
+        validate_quic_manifest(&valid, &config)
             .expect("hardlink alias with primary metadata validates");
 
         let mut different = valid;
@@ -9818,7 +9822,7 @@ mod tests {
             .unix_mode = Some(0o600);
         different.metadata_root_hex = manifest_metadata_commitment(&different);
         assert!(matches!(
-            validate_quic_manifest(&different, &trusted_quic_config()),
+            validate_quic_manifest(&different, &config),
             Err(QuicTransportError::Source(message)) if message.contains("metadata different from primary")
         ));
     }

@@ -109,6 +109,7 @@ fn manifest_and_receipt_types_are_reused_from_transport_tcp() {
         total_bytes: 0,
         merkle_root_hex: "00".repeat(32),
         metadata_root_hex: None,
+        directory_metadata: None,
         delta_manifest: None,
         entries: vec![],
     };
@@ -540,6 +541,7 @@ fn manifest_json_roundtrips() {
         total_bytes: 1234,
         merkle_root_hex: "ab".repeat(32),
         metadata_root_hex: None,
+        directory_metadata: None,
         delta_manifest: None,
         entries: vec![
             ManifestEntry {

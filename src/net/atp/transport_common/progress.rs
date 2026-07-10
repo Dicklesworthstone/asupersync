@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 use crate::cx::Cx;
 
-use super::metadata::{FileKind, inode_key_if_regular, read_entry_metadata};
+use super::metadata::{FileKind, HardlinkIdentity, inode_key_if_regular, read_entry_metadata};
 use super::streaming::{
     EntryDigest, StreamingError, collect_entries_with_policy, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
@@ -112,7 +112,7 @@ pub async fn plan_transfer(
     // Hardlink detection mirrors the sender: the first entry (by sorted path) for
     // a given inode is the primary that carries content; later entries sharing the
     // inode are hardlinks sent content-free.
-    let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
+    let mut seen_inodes: HashSet<HardlinkIdentity> = HashSet::new();
     for entry in &entries {
         cx.checkpoint().map_err(|_| PlanError::Cancelled)?;
         let metadata = read_entry_metadata(&entry.abs_path, metadata_policy).await?;

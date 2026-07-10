@@ -31,8 +31,9 @@ use crate::net::atp::bonding::{
 
 /// Bonded control-plane protocol version carried in the donor hello.
 ///
-/// Version 2 binds the protocol-v4 metadata commitment during enrollment.
-pub const ATP_RQ_BONDED_PROTOCOL: u32 = 2;
+/// Version 3 binds the protocol-v4 metadata commitment and RaptorQ geometry
+/// during enrollment.
+pub const ATP_RQ_BONDED_PROTOCOL: u32 = 3;
 
 /// Donor → receiver bonded hello (`FrameType::Handshake` payload).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +43,10 @@ struct BondedDonorHello {
     merkle_root_hex: String,
     #[serde(default)]
     metadata_commitment_hex: String,
+    #[serde(default)]
+    symbol_size: u16,
+    #[serde(default)]
+    max_block_size: u64,
     symbol_auth: bool,
     offer: BondingHandshake,
 }
@@ -374,6 +379,49 @@ async fn feed_bonded_datagram_to_decoders(
     })
 }
 
+fn bonded_donor_hello_refusal(
+    hello: &BondedDonorHello,
+    descriptor: &BondTransferDescriptor,
+    symbol_auth_enabled: bool,
+) -> Option<String> {
+    if hello.protocol != ATP_RQ_BONDED_PROTOCOL {
+        Some(format!(
+            "unsupported bonded protocol {} (this peer speaks {ATP_RQ_BONDED_PROTOCOL})",
+            hello.protocol
+        ))
+    } else if hello.transfer_id != descriptor.transfer_id {
+        Some(format!(
+            "bonded hello names transfer {} but this receiver serves {}",
+            hello.transfer_id, descriptor.transfer_id
+        ))
+    } else if hello.merkle_root_hex != descriptor.merkle_root_hex {
+        Some("bonded hello merkle root does not match the agreed descriptor".to_string())
+    } else if descriptor
+        .metadata
+        .as_ref()
+        .is_none_or(|metadata| metadata.commitment_hex != hello.metadata_commitment_hex)
+    {
+        Some("bonded hello metadata commitment does not match the agreed descriptor".to_string())
+    } else if hello.symbol_size != descriptor.symbol_size {
+        Some(format!(
+            "bonded hello symbol size {} does not match the agreed descriptor's {}",
+            hello.symbol_size, descriptor.symbol_size
+        ))
+    } else if hello.max_block_size != descriptor.max_block_size {
+        Some(format!(
+            "bonded hello max block size {} does not match the agreed descriptor's {}",
+            hello.max_block_size, descriptor.max_block_size
+        ))
+    } else if hello.symbol_auth != symbol_auth_enabled {
+        Some(format!(
+            "symbol authentication mismatch: donor={}, receiver={symbol_auth_enabled}",
+            hello.symbol_auth
+        ))
+    } else {
+        None
+    }
+}
+
 /// Accept and enroll donor control connections until every expected donor is
 /// registered. Invalid hellos are rejected without consuming a donor slot.
 #[allow(clippy::too_many_arguments)]
@@ -453,34 +501,7 @@ async fn accept_bonded_donors(
                 continue;
             }
         };
-        let refusal = if hello.protocol != ATP_RQ_BONDED_PROTOCOL {
-            Some(format!(
-                "unsupported bonded protocol {} (this peer speaks {ATP_RQ_BONDED_PROTOCOL})",
-                hello.protocol
-            ))
-        } else if hello.transfer_id != descriptor.transfer_id {
-            Some(format!(
-                "bonded hello names transfer {} but this receiver serves {}",
-                hello.transfer_id, descriptor.transfer_id
-            ))
-        } else if hello.merkle_root_hex != descriptor.merkle_root_hex {
-            Some("bonded hello merkle root does not match the agreed descriptor".to_string())
-        } else if descriptor
-            .metadata
-            .as_ref()
-            .is_none_or(|metadata| metadata.commitment_hex != hello.metadata_commitment_hex)
-        {
-            Some(
-                "bonded hello metadata commitment does not match the agreed descriptor".to_string(),
-            )
-        } else if hello.symbol_auth != symbol_auth_enabled {
-            Some(format!(
-                "symbol authentication mismatch: donor={}, receiver={symbol_auth_enabled}",
-                hello.symbol_auth
-            ))
-        } else {
-            None
-        };
+        let refusal = bonded_donor_hello_refusal(&hello, descriptor, symbol_auth_enabled);
         if let Some(reason) = refusal {
             let _ = control
                 .send(&json_frame(FrameType::HandshakeAck, &reject(reason))?)
@@ -1443,6 +1464,8 @@ pub async fn donate_bonded(
                 transfer_id: descriptor.transfer_id.clone(),
                 merkle_root_hex: descriptor.merkle_root_hex.clone(),
                 metadata_commitment_hex,
+                symbol_size: descriptor.symbol_size,
+                max_block_size: descriptor.max_block_size,
                 symbol_auth: symbol_auth_enabled,
                 offer: BondingHandshake::v1_static(
                     [
@@ -1904,6 +1927,82 @@ mod tests {
         }))
     }
 
+    fn bonded_enrollment_descriptor() -> BondTransferDescriptor {
+        BondTransferDescriptor {
+            transfer_id: "enrollment-transfer".to_string(),
+            root_name: "payload.bin".to_string(),
+            is_directory: false,
+            total_bytes: 0,
+            merkle_root_hex: "enrollment-merkle".to_string(),
+            metadata: Some(RqMetadataManifest {
+                version: RQ_METADATA_MANIFEST_VERSION,
+                commitment_hex: "enrollment-metadata".to_string(),
+                entries: Vec::new(),
+                directories: None,
+            }),
+            entries: Vec::new(),
+            symbol_size: DEFAULT_SYMBOL_SIZE,
+            max_block_size: 64 * 1024,
+            auth_key_id: None,
+        }
+    }
+
+    fn bonded_enrollment_hello(descriptor: &BondTransferDescriptor) -> BondedDonorHello {
+        BondedDonorHello {
+            protocol: ATP_RQ_BONDED_PROTOCOL,
+            transfer_id: descriptor.transfer_id.clone(),
+            merkle_root_hex: descriptor.merkle_root_hex.clone(),
+            metadata_commitment_hex: descriptor
+                .metadata
+                .as_ref()
+                .expect("enrollment metadata")
+                .commitment_hex
+                .clone(),
+            symbol_size: descriptor.symbol_size,
+            max_block_size: descriptor.max_block_size,
+            symbol_auth: false,
+            offer: BondingHandshake::v1_static(
+                [BondTransport::DirectIp],
+                MAX_BONDING_DONORS,
+                false,
+            ),
+        }
+    }
+
+    #[test]
+    fn bonded_enrollment_rejects_symbol_size_mismatch() {
+        let descriptor = bonded_enrollment_descriptor();
+        let mut hello = bonded_enrollment_hello(&descriptor);
+        hello.symbol_size = descriptor.symbol_size.saturating_sub(1);
+
+        let refusal = bonded_donor_hello_refusal(&hello, &descriptor, false)
+            .expect("mismatched symbol size must be refused during enrollment");
+
+        assert!(
+            refusal.contains("symbol size"),
+            "unexpected refusal: {refusal}"
+        );
+        assert!(refusal.contains(&hello.symbol_size.to_string()));
+        assert!(refusal.contains(&descriptor.symbol_size.to_string()));
+    }
+
+    #[test]
+    fn bonded_enrollment_rejects_max_block_size_mismatch() {
+        let descriptor = bonded_enrollment_descriptor();
+        let mut hello = bonded_enrollment_hello(&descriptor);
+        hello.max_block_size = descriptor.max_block_size.saturating_add(1);
+
+        let refusal = bonded_donor_hello_refusal(&hello, &descriptor, false)
+            .expect("mismatched max block size must be refused during enrollment");
+
+        assert!(
+            refusal.contains("max block size"),
+            "unexpected refusal: {refusal}"
+        );
+        assert!(refusal.contains(&hello.max_block_size.to_string()));
+        assert!(refusal.contains(&descriptor.max_block_size.to_string()));
+    }
+
     #[test]
     fn bonded_manifest_roundtrips_descriptor() {
         let config = bonded_lab_config();
@@ -2167,6 +2266,8 @@ mod tests {
                                     .expect("bonded test metadata")
                                     .commitment_hex
                                     .clone(),
+                                symbol_size: descriptor.symbol_size,
+                                max_block_size: descriptor.max_block_size,
                                 symbol_auth: false,
                                 offer: BondingHandshake::v1_static(
                                     [BondTransport::DirectIp],
