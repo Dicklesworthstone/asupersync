@@ -1073,6 +1073,49 @@ Operational notes:
 - Artifact outputs include `summary.json`, `scenarios.ndjson`, and (when bundled) `validation_stages.ndjson`.
 - Increase `VALIDATION_TIMEOUT` or `E2E_TIMEOUT` if your environment is slower than expected.
 
+### Multi-Donor Bonded Transfers (`atp bond-pull`)
+
+RaptorQ's fountain property — any K-of-N symbols recover the K source symbols — makes it natural to pull a single object from **many donors at once**. In a *bonded* transfer, one receiver enrolls N donors; each donor is assigned a disjoint slice of the symbol stream (source + repair ESIs) and sprays it over UDP, and the receiver decodes from the *union*. The aggregate goodput is the sum of the donors' upload paths, and because symbols are order-independent, a donor that dies mid-transfer costs nothing but its remaining repair window, which is reallocated to the survivors (`src/net/atp/bonding/`, `src/net/atp/transport_rq/bonded.rs`).
+
+**Content agreement is fail-closed and the descriptor is never on the wire.** The receiver and every donor independently derive the bonded descriptor (transfer-id, merkle root, per-entry object IDs, portable metadata commitment) from *their own local bytes* via the same derivation; enrollment rejects on any transfer-id / merkle-root / metadata / symbol-size / max-block-size mismatch (`src/net/atp/bonding/derive.rs`, enrollment checks in `transport_rq/bonded.rs`). A donor whose bytes have drifted cannot enroll, so it cannot corrupt the decode. Per-symbol authentication posture (RaptorQ symbol-auth key, or the explicit unauthenticated-lab opt-out) is the same deliberate, fail-closed choice as the single-source RaptorQ transport above.
+
+The receiver-orchestrated CLI is one command:
+
+```bash
+# Receiver pulls /srv/payload from two donors, advertising its control endpoint.
+atp bond-pull /srv/payload /dest --donors alice@h1,bob@h2 \
+  --advertise 203.0.113.7:8473 --rq-auth-key-hex "$KEY"
+```
+
+`bond-pull` starts the in-process bonded receiver, SSH-launches one `bond-donate` leg per donor host, and waits for the fail-closed commit — SHA/merkle-verified before anything lands in `/dest`.
+
+**Per-donor transport selection** (`--transport auto|tailscale|ssh|ip`): each donor's tailnet membership is probed over ssh, then a dial path is chosen per donor (`src/net/atp/bonding/transport_select.rs`). `auto` prefers a shared Tailscale path (CGNAT `100.64.0.0/10`) when both ends are on the tailnet, else a direct IP; `ip`/`tailscale` force a family; `ssh` tunnels the symbol stream. (The live `ssh -L` forward is the remaining real-multi-host step, tracked under `z01bbr.8.3`; today an ssh-selected leg reports its tunnel plan and falls back to a direct dial.) The chosen path per donor is recorded in the `atp_bond_pull` JSON receipt so a run is auditable after the fact.
+
+**Programmatic use** — the `BondedTransfer` SDK builder drives a real bonded transfer over the same data path, cancel-correctly:
+
+```rust
+use asupersync::net::atp::sdk::BondedTransfer;
+
+// Blocking receive with a final report:
+let report = BondedTransfer::receive(dest, local_src)
+    .expect_donors(2)
+    .listen("0.0.0.0:8473".parse()?)
+    .auth_key_hex(key_hex)
+    .run(&cx);
+
+// Or spawn as an owned child and stream live progress:
+let handle = BondedTransfer::receive(dest, local_src)
+    .expect_donors(2)
+    .spawn(&cx)?;
+let addr = handle.control_addr();            // bound control endpoint for donors
+while let Some(p) = handle.next_progress() { // per-donor ingress, blocks remaining, feedback rounds
+    println!("{:.0}% ({}/{} blocks)", p.progress_percent(), p.blocks_total - p.blocks_remaining, p.blocks_total);
+}
+let outcome = handle.wait_for_completion();  // AtpOutcome: Ok / Err / Cancelled / Panicked
+```
+
+`spawn` runs the receiver as an owned child of the `Cx`'s region; `handle.cancel()` aborts it and the child unwinds to quiescence committing nothing (a final `cx.checkpoint()` guards even the last instant before the irreversible commit). The progress stream emits a terminal `Completed` on success or `Failed` on a verification failure; cancellation and other terminal errors are observed as the stream closes plus the join outcome.
+
 ---
 
 ## Stream Combinators

@@ -81,6 +81,23 @@ the scoped win with double-buffered encode-ahead. Residual rare
 redundancy-recovered `InconsistentEquations` remain tracked under
 `asupersync-c54to7`; cite the ledger before claiming anything broader.
 
+## Multi-Donor Bonded Transfers
+
+One receiver pulls a single object from N donors at once. Each donor is assigned a disjoint slice of the RaptorQ symbol stream (source + repair ESIs) and sprays it over UDP; the receiver decodes from the union. Fountain property ⇒ donors need no coordination beyond enrollment, and a dead donor's repair window is reallocated to survivors. Code: `src/net/atp/bonding/` (assignment, descriptor, handshake, receiver, `transport_select`, `derive`) + `src/net/atp/transport_rq/bonded.rs` (`receive_bonded` / `donate_bonded`).
+
+**Fail-closed content agreement (the core invariant).** The descriptor (transfer-id, merkle root, per-entry object IDs, portable metadata commitment) is NEVER sent on the wire. Receiver and every donor derive it independently from their own local bytes via `bonding::derive_bonded_descriptor` (`MetadataPolicy::portable()`, `preserve_hardlinks: true`, `max_block_size` clamped ≥ `symbol_size`). Enrollment rejects on any transfer-id / merkle / metadata / symbol-size / max-block-size mismatch. A donor with drifted bytes cannot enroll ⇒ cannot corrupt the decode. Symbol-auth posture is the same deliberate fail-closed choice as single-source RaptorQ (`rq_auth_key_hex` / `--rq-allow-unauthenticated-lab`).
+
+**CLI (receiver-orchestrated):**
+```bash
+atp bond-pull <src> <dest> --donors alice@h1,bob@h2 --advertise <ctrl-addr:port> \
+  [--transport auto|tailscale|ssh|ip] [--rq-auth-key-hex HEX | --rq-allow-unauthenticated-lab]
+```
+`bond-pull` starts the in-process bonded receiver, SSH-launches one `bond-donate` leg per donor, waits for the SHA/merkle-verified commit. `bond-recv` (server) + `bond-donate` (each donor) are the manual halves. Per-donor path + the operator's `transport_preference` land in the `atp_bond_pull` JSON receipt.
+
+**Transport selection** (`bonding::transport_select`): `select_donor_path(pref, &ReceiverEndpoints{direct,tailnet}, donor_on_tailnet) -> Option<DonorPathChoice{transport,dial}>`. `auto` prefers shared Tailscale (CGNAT `100.64.0.0/10`, detected via `detect_local_tailnet()` shelling `tailscale status --json`/`tailscale ip -4`) else direct IP; `ip`/`tailscale` force a family; `ssh` tunnels. In `run_bond_pull` the receiver always advertises `direct = Some(control)`, so a failed tailnet probe degrades to direct, never aborts. GOTCHA: the live `ssh -L` forward is stubbed (`z01bbr.8.3 H3`) — an ssh-selected leg reports its plan and falls back to a direct dial today. `PathKind::preference_rank` (`src/atp/path.rs`) is the injective total order (Tailscale < direct < relay < mailbox).
+
+**SDK** (`asupersync::net::atp::sdk::BondedTransfer`): fluent builder mirroring the CLI flags (`expect_donors`/`listen`/`udp_bind`/`auth_key_hex`/`allow_unauthenticated_lab`/`symbol_size`/`max_block_size`/`repair_overhead`/`accept_timeout`). `receive(dest, local_src)` / `donate(src, control_addr)`. `.run(&cx) -> AtpOutcome<BondedReport>` (blocking) or `.spawn(&cx) -> AtpOutcome<BondedReceiveHandle>` (owned child; `control_addr()`, `next_progress() -> Option<BondedTransferProgress>`, `cancel()`, `wait_for_completion()`). Progress carries per-donor ingress, blocks_remaining, feedback_rounds, reallocated_repair_windows; `phase` reaches terminal `Completed` (success) or `Failed` (verification failure), with cancel/other errors signalled by stream-close + the join outcome. Cancel-correct: a cancelled `Cx` unwinds at the next checkpoint (one guards the instant before the irreversible commit) and commits nothing.
+
 ## Distributed Primitives
 
 Source: `src/remote.rs`, `src/distributed/`

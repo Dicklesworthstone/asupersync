@@ -165,6 +165,7 @@ before making precise public-surface claims.
 | Tune runtime performance | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) → [SCHEDULER-INTERNALS](references/SCHEDULER-INTERNALS.md) |
 | See what to lead with vs use only when required | [STACK-SURFACES](references/STACK-SURFACES.md) → [TOKIO-REPLACEMENT-MATRIX](references/TOKIO-REPLACEMENT-MATRIX.md) |
 | Work inside the Asupersync repo | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) → [SOURCE-MAP](references/SOURCE-MAP.md) |
+| Move bulk files / pull one object from many donors (ATP bonded transfer, `atp bond-pull` + `BondedTransfer` SDK) | [RAPTORQ-DISTRIBUTED](references/RAPTORQ-DISTRIBUTED.md) → [NETWORKING-PROTOCOL-STACK](references/NETWORKING-PROTOCOL-STACK.md) |
 
 Other focused references live under `references/` for adoption lanes, compat
 bridges, anti-patterns, budgets/outcomes/capabilities, lock ordering,
