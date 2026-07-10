@@ -27,7 +27,7 @@ use crate::cx::Cx;
 
 use super::metadata::{FileKind, inode_key_if_regular, read_entry_metadata};
 use super::streaming::{
-    EntryDigest, StreamingError, collect_entries, flat_merkle_root_from_digests,
+    EntryDigest, StreamingError, collect_entries_with_policy, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
 };
 
@@ -103,7 +103,8 @@ pub async fn plan_transfer(
 ) -> Result<TransferPlan, PlanError> {
     cx.checkpoint().map_err(|_| PlanError::Cancelled)?;
 
-    let (root_name, is_directory, entries) = collect_entries(source).await?;
+    let (root_name, is_directory, entries) =
+        collect_entries_with_policy(source, metadata_policy).await?;
 
     let mut read_buf = vec![0u8; chunk_size.max(1)];
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());

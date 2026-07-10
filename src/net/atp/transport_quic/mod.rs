@@ -9337,6 +9337,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validate_quic_manifest_enforces_symlink_containment_and_receiver_policy() {
+        let contained =
+            quic_manifest_with_metadata(vec![quic_symlink_entry(0, "dir/link", "../target")]);
+        validate_quic_manifest(&contained, &trusted_quic_config())
+            .expect("contained portable symlink validates");
+
+        for target in ["../../escape", "/rooted", r"C:\escape", r"..\escape"] {
+            let rejected =
+                quic_manifest_with_metadata(vec![quic_symlink_entry(0, "dir/link", target)]);
+            assert!(
+                matches!(
+                    validate_quic_manifest(&rejected, &trusted_quic_config()),
+                    Err(QuicTransportError::Source(ref message))
+                        if message.contains("invalid metadata")
+                ),
+                "unsafe symlink target {target:?} must fail before staging"
+            );
+        }
+
+        let portable_receiver = QuicConfig {
+            metadata_policy: MetadataPolicy::portable(),
+            ..trusted_quic_config()
+        };
+        assert!(matches!(
+            validate_quic_manifest(&contained, &portable_receiver),
+            Err(QuicTransportError::Source(ref message))
+                if message.contains("denied by receiver metadata policy")
+        ));
+    }
+
     fn quic_empty_regular_entry(index: u32, rel: &str) -> ManifestEntry {
         ManifestEntry {
             index,
