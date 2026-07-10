@@ -64,8 +64,8 @@ pub use lines::Lines;
 pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
 pub use path_ops::{
-    canonicalize, copy, hard_link, metadata, read, read_link, read_to_string, remove_file, rename,
-    set_permissions, symlink_metadata, write, write_atomic,
+    SymlinkKind, canonicalize, copy, hard_link, metadata, read, read_link, read_to_string,
+    remove_file, rename, set_permissions, symlink_metadata, symlink_typed, write, write_atomic,
 };
 pub use platform::{
     CapabilityProbe, CapabilityStatus, FilesystemCapabilityProfile,

@@ -165,6 +165,56 @@ pub async fn hard_link(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io
     spawn_blocking_io(move || std::fs::hard_link(&original, &link)).await
 }
 
+/// Filesystem object type declared for a symbolic link target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymlinkKind {
+    /// A link created with file-target semantics.
+    File,
+    /// A link created with directory-target semantics.
+    Directory,
+}
+
+/// Create a symbolic link with an explicit target kind.
+///
+/// Unix does not encode this distinction and ignores `kind`. Windows requires
+/// it even for relative, dangling, or later-created targets, so callers must
+/// carry the sender's declared type instead of probing relative to the process
+/// working directory.
+#[cfg(unix)]
+pub async fn symlink_typed(
+    original: impl AsRef<Path>,
+    link: impl AsRef<Path>,
+    _kind: SymlinkKind,
+) -> io::Result<()> {
+    symlink(original, link).await
+}
+
+/// Windows counterpart of [`symlink_typed`] with an explicit target kind.
+#[cfg(windows)]
+pub async fn symlink_typed(
+    original: impl AsRef<Path>,
+    link: impl AsRef<Path>,
+    kind: SymlinkKind,
+) -> io::Result<()> {
+    match kind {
+        SymlinkKind::File => symlink_file(original, link).await,
+        SymlinkKind::Directory => symlink_dir(original, link).await,
+    }
+}
+
+/// Unsupported-platform fallback for the typed symlink API.
+#[cfg(not(any(unix, windows)))]
+pub async fn symlink_typed(
+    _original: impl AsRef<Path>,
+    _link: impl AsRef<Path>,
+    _kind: SymlinkKind,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symbolic links are unsupported on this platform",
+    ))
+}
+
 /// Create a symlink (Unix).
 ///
 /// On Linux with `io-uring`, uses `IORING_OP_SYMLINKAT`.
@@ -198,17 +248,25 @@ pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> 
     spawn_blocking_io(move || std::os::windows::fs::symlink_dir(&original, &link)).await
 }
 
-/// Create a symlink (Windows), choosing file vs directory based on the target.
+/// Create a symlink (Windows), choosing file vs directory from a live target.
 ///
 /// Mirrors the unix `symlink` so callers can use a single `crate::fs::symlink`
-/// across platforms; the ATP transport recreates symlinks from a live source,
-/// so the target exists and `is_dir()` selects the correct Windows variant.
+/// across platforms for non-ATP callers. Relative targets are resolved from the
+/// link's parent, matching Windows link semantics. Call [`symlink_typed`] when
+/// the target may be dangling or created later.
 #[cfg(windows)]
 pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_owned();
     let link = link.as_ref().to_owned();
     spawn_blocking_io(move || {
-        if original.is_dir() {
+        let resolved = if original.is_absolute() {
+            original.clone()
+        } else {
+            link.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&original)
+        };
+        if resolved.is_dir() {
             std::os::windows::fs::symlink_dir(&original, &link)
         } else {
             std::os::windows::fs::symlink_file(&original, &link)

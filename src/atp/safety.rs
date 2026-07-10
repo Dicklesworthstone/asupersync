@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
+use unicode_normalization::UnicodeNormalization;
 
 const PLAN_DIGEST_DOMAIN: &[u8] = b"asupersync.atp.receive-plan.v1\0";
 
@@ -859,6 +860,9 @@ fn inspect_graph(
         &mut seen_paths,
         &mut rejected,
     )?;
+    if let Err(error) = validate_portable_path_set(seen_paths.values().map(String::as_str)) {
+        rejected.push(ReceiveRejectReason::CaseCollision(error));
+    }
     Ok(rejected)
 }
 
@@ -888,7 +892,7 @@ fn inspect_object(
     for edge in &object.children {
         path.push(edge.name.clone());
         let rendered = path.join("/");
-        if let Err(reason) = validate_component(&edge.name) {
+        if let Err(reason) = validate_portable_path_component(&edge.name) {
             rejected.push(ReceiveRejectReason::UnsafeObjectPath(reason));
         }
         if let Err(reason) = normalize_relative_path(Path::new(&rendered)) {
@@ -1005,7 +1009,7 @@ fn normalize_relative_path(path: &Path) -> Result<Vec<String>, String> {
                 let Some(component) = raw.to_str() else {
                     return Err(path.to_string_lossy().into_owned());
                 };
-                validate_component(component)?;
+                validate_portable_path_component(component)?;
                 components.push(component.to_string());
             }
             Component::CurDir => {}
@@ -1023,7 +1027,14 @@ fn normalize_relative_path(path: &Path) -> Result<Vec<String>, String> {
     Ok(components)
 }
 
-fn validate_component(component: &str) -> Result<(), String> {
+/// Validate one transfer path component against ATP's portable filesystem
+/// namespace.
+///
+/// The portable namespace is intentionally stricter than any one host: it
+/// rejects Win32 device aliases, characters that Win32 cannot create, and
+/// trailing dot/space aliases so a manifest accepted on Unix cannot collapse
+/// or redirect when received on Windows.
+pub fn validate_portable_path_component(component: &str) -> Result<(), String> {
     if component.is_empty()
         || component.contains('\0')
         || component.contains('/')
@@ -1031,16 +1042,31 @@ fn validate_component(component: &str) -> Result<(), String> {
         || component.contains(':')
         || component.ends_with('.')
         || component.ends_with(' ')
+        || component
+            .chars()
+            .any(|ch| ch <= '\u{1f}' || matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
     {
         return Err(component.to_string());
     }
-    let folded = component.to_ascii_uppercase();
+
+    // Win32 reserves the device stem even when an extension is present:
+    // `NUL.txt` and `COM1.log` still address devices. Trim the characters that
+    // Win32 strips at the end of a name before checking the stem as well.
+    let stem = component
+        .split_once('.')
+        .map_or(component, |(stem, _)| stem)
+        .trim_end_matches(|ch| ch == ' ' || ch == '.');
+    let folded = stem.to_uppercase();
     let reserved = matches!(
         folded.as_str(),
         "CON"
             | "PRN"
             | "AUX"
             | "NUL"
+            | "CLOCK$"
+            | "CONIN$"
+            | "CONOUT$"
+            | "COM0"
             | "COM1"
             | "COM2"
             | "COM3"
@@ -1050,6 +1076,10 @@ fn validate_component(component: &str) -> Result<(), String> {
             | "COM7"
             | "COM8"
             | "COM9"
+            | "COM¹"
+            | "COM²"
+            | "COM³"
+            | "LPT0"
             | "LPT1"
             | "LPT2"
             | "LPT3"
@@ -1059,9 +1089,115 @@ fn validate_component(component: &str) -> Result<(), String> {
             | "LPT7"
             | "LPT8"
             | "LPT9"
+            | "LPT¹"
+            | "LPT²"
+            | "LPT³"
     );
     if reserved {
         return Err(component.to_string());
+    }
+
+    let portable_folded = portable_path_collision_key(component);
+    if portable_folded == ".ASUPERSYNC-ATP-DELTA-V1"
+        || portable_folded.starts_with(".ASUPERSYNC-ATP-DELTA-PACKAGE-")
+        || portable_folded.starts_with(".ATP-STAGING-")
+        || portable_folded.starts_with(".ATP-RQ-STAGING-")
+        || portable_folded.starts_with(".ATP-QUIC-STAGING-")
+    {
+        return Err(component.to_string());
+    }
+    Ok(())
+}
+
+/// Validate a forward-slash-separated transfer-relative path.
+///
+/// Every component must satisfy [`validate_portable_path_component`]; empty,
+/// current-directory, and parent-directory components are rejected.
+pub fn validate_portable_relative_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.starts_with('/') || path.starts_with('\\') {
+        return Err(path.to_string());
+    }
+    for component in path.split('/') {
+        if component == "." || component == ".." {
+            return Err(path.to_string());
+        }
+        validate_portable_path_component(component).map_err(|_| path.to_string())?;
+    }
+    Ok(())
+}
+
+/// Return the deterministic collision key used for paths that may land on a
+/// case-insensitive filesystem.
+///
+/// Callers validate the path first, then compare these keys before allocating
+/// staging state. Unicode uppercasing is deliberately conservative: rejecting
+/// an ambiguous pair is preferable to committing two logical entries to one
+/// destination file.
+#[must_use]
+pub fn portable_path_collision_key(path: &str) -> String {
+    path.nfc()
+        .flat_map(char::to_uppercase)
+        .collect::<String>()
+        .nfc()
+        .collect()
+}
+
+/// Validate that a collection of relative paths remains a distinct tree on a
+/// case-insensitive filesystem.
+///
+/// Exact leaf collisions are rejected, as are case-folding aliases at any
+/// directory prefix. The prefix rule is important for trees such as
+/// `Foo/a` + `foo/b`: those are distinct on a case-sensitive sender but merge
+/// into one directory on Windows. It also prevents a symlink entry named
+/// `Foo` from being followed through a later `foo/child` entry.
+pub fn validate_portable_path_set<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
+    let mut leaves = BTreeMap::<String, String>::new();
+    let mut prefixes = BTreeMap::<String, String>::new();
+
+    for path in paths {
+        validate_portable_relative_path(path)?;
+        let leaf_key = portable_path_collision_key(path);
+        if let Some(existing) = leaves.insert(leaf_key, path.to_string()) {
+            return Err(format!(
+                "duplicate or case-colliding paths: {existing} and {path}"
+            ));
+        }
+
+        let mut rendered = String::new();
+        for component in path.split('/') {
+            if !rendered.is_empty() {
+                rendered.push('/');
+            }
+            rendered.push_str(component);
+            let prefix_key = portable_path_collision_key(&rendered);
+            if let Some(existing) = prefixes.get(&prefix_key) {
+                if existing != &rendered {
+                    return Err(format!(
+                        "case-colliding path prefixes: {existing} and {rendered}"
+                    ));
+                }
+            } else {
+                prefixes.insert(prefix_key, rendered.clone());
+            }
+        }
+    }
+
+    for path in leaves.values() {
+        let components = path.split('/').collect::<Vec<_>>();
+        let mut prefix = String::new();
+        for component in components.iter().take(components.len().saturating_sub(1)) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            if let Some(existing) = leaves.get(&portable_path_collision_key(&prefix)) {
+                return Err(format!(
+                    "manifest leaf {existing} is also an ancestor of {path}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1094,7 +1230,7 @@ fn fold_path_key(path: &str, case_sensitive: bool) -> String {
     if case_sensitive {
         path.to_string()
     } else {
-        path.to_ascii_lowercase()
+        portable_path_collision_key(path)
     }
 }
 
@@ -1253,6 +1389,72 @@ mod tests {
             trace_id: Some("trace-1".to_string()),
             replay_pointer: Some("proof://bundle".to_string()),
         }
+    }
+
+    #[test]
+    fn portable_path_components_reject_windows_aliases_and_forbidden_characters() {
+        for component in [
+            "NUL",
+            "nul.txt",
+            "COM1.log",
+            "lpt9.tar.gz",
+            "CONIN$",
+            "trailing.",
+            "trailing ",
+            "alternate:stream",
+            "question?",
+            "star*",
+            "control\u{1f}",
+            ".ASUPERSYNC-ATP-DELTA-V1",
+            ".asupersync-atp-delta-package-hostile",
+            ".atp-staging-hostile",
+            ".atp-rq-staging-hostile",
+            ".atp-quic-staging-hostile",
+        ] {
+            assert!(
+                validate_portable_path_component(component).is_err(),
+                "portable path component {component:?} must fail closed"
+            );
+        }
+
+        for component in ["payload.bin", "nested-name", "café.txt"] {
+            validate_portable_path_component(component)
+                .unwrap_or_else(|error| panic!("safe component {component:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn portable_relative_paths_and_collision_keys_are_windows_safe() {
+        validate_portable_relative_path("nested/payload.bin").expect("safe relative path");
+        for path in [
+            "",
+            "/absolute",
+            "../escape",
+            "nested/./payload",
+            "nested//payload",
+            "nested/NUL.txt",
+        ] {
+            assert!(
+                validate_portable_relative_path(path).is_err(),
+                "portable relative path {path:?} must fail closed"
+            );
+        }
+
+        assert_eq!(
+            portable_path_collision_key("Docs/Readme.TXT"),
+            portable_path_collision_key("docs/README.txt")
+        );
+        assert_eq!(
+            portable_path_collision_key("caf\u{e9}"),
+            portable_path_collision_key("cafe\u{301}")
+        );
+
+        validate_portable_path_set(["Foo/a", "Foo/b", "Foo/nested/c"])
+            .expect("one consistently-cased tree");
+        assert!(validate_portable_path_set(["Foo", "foo"]).is_err());
+        assert!(validate_portable_path_set(["Foo/a", "foo/b"]).is_err());
+        assert!(validate_portable_path_set(["Foo", "foo/pwn"]).is_err());
+        assert!(validate_portable_path_set(["Foo", "Foo/pwn"]).is_err());
     }
 
     #[test]

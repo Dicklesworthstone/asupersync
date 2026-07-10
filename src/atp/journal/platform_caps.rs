@@ -8,9 +8,9 @@ use std::mem::MaybeUninit;
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 #[cfg(unix)]
-use std::io::Write;
-use std::io::{ErrorKind, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{
     OnceLock,

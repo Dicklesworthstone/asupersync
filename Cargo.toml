@@ -334,6 +334,7 @@ semver = { version = "1.0", features = ["serde"] }
 memchr = "2.8"
 getrandom = "0.4"
 hex = "0.4"
+unicode-normalization = "0.1.25"
 # Use maintained bincode-next (crate imported as `bincode`) with serde interop.
 bincode = { package = "bincode-next", version = "3.1.1", features = ["serde"] }
 # Optional tracing integration - only compiled when tracing-integration feature is enabled
@@ -453,6 +454,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem",
     "Win32_System_Threading",
 ] }
 

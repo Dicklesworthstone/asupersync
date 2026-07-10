@@ -783,6 +783,7 @@ pub struct SignalMaskGuard {
 }
 
 impl SignalMaskGuard {
+    #[cfg(unix)]
     fn new(previous: SignalMask) -> Self {
         Self {
             previous: Some(previous),
