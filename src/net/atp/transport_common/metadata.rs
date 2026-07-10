@@ -229,49 +229,34 @@ pub fn classify_path_link_sync(path: &Path) -> io::Result<PathLinkKind> {
 }
 
 #[cfg(windows)]
-#[allow(unsafe_code)] // Win32 handle/tag query; every handle is closed before return.
+#[allow(unsafe_code)] // Win32 tag query over an RAII-owned std::fs::File handle.
 fn windows_reparse_tag(path: &Path) -> io::Result<u32> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+        FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileInformationByHandleEx,
     };
 
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let handle = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
+    let mut options = std::fs::OpenOptions::new();
+    let file = options
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
 
     let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
     let queried = unsafe {
         GetFileInformationByHandleEx(
-            handle,
+            file.as_raw_handle(),
             FileAttributeTagInfo,
             std::ptr::addr_of_mut!(info).cast::<std::ffi::c_void>(),
             u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>()).unwrap_or(u32::MAX),
         )
     };
-    let query_error = (queried == 0).then(io::Error::last_os_error);
-    let _ = unsafe { CloseHandle(handle) };
-    if let Some(error) = query_error {
-        return Err(error);
+    if queried == 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(info.ReparseTag)
 }
