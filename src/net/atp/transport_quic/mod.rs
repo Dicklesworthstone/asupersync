@@ -73,7 +73,7 @@ pub mod native_link;
 pub mod symbol_datagram;
 pub mod symbol_envelope;
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -100,19 +100,22 @@ use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::quic::AtpTransportMetrics;
+use crate::net::atp::transport_common::metadata::{
+    HardlinkIdentity, commit_hardlink_transactionally, commit_symlink_transactionally,
+    path_is_link_or_reparse, validate_entry_metadata_for_receive,
+    validate_symlink_metadata_for_receive,
+};
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
 };
-use crate::net::atp::transport_common::metadata::{
-    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
-    validate_symlink_metadata_for_receive,
-};
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
+#[cfg(test)]
+use crate::net::atp::transport_common::{DirectoryMetadataEntry, DirectoryMetadataManifest};
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, MetadataApplyReport, StreamingError,
-    apply_entry_metadata, flat_merkle_root_from_digests, flat_merkle_root_from_slices,
-    hash_file_streaming, hex_encode, metadata_commitment,
+    apply_entry_metadata, capture_directory_metadata_manifest, flat_merkle_root_from_digests,
+    flat_merkle_root_from_slices, hash_file_streaming, hex_encode, metadata_commitment,
 };
 use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
@@ -2677,6 +2680,7 @@ fn manifest_from_entries(
         total_bytes,
         merkle_root_hex,
         metadata_root_hex: None,
+        directory_metadata: None,
         entries: manifest_entries,
         delta_manifest: None,
     }
@@ -3540,6 +3544,15 @@ const QUIC_PACK_MEMBER_MAX_BYTES: u64 = 1024 * 1024;
 /// Target combined size for one pack entry.
 const QUIC_PACK_TARGET_BYTES: u64 = 8 * 1024 * 1024;
 
+#[cfg(feature = "tls")]
+fn metadata_makes_windows_staging_readonly(metadata: &EntryMetadata) -> bool {
+    const WINDOWS_FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+    cfg!(windows)
+        && metadata
+            .windows_attributes
+            .is_some_and(|attributes| attributes & WINDOWS_FILE_ATTRIBUTE_READONLY != 0)
+}
+
 /// One planned source entry: metadata resolved, packing eligibility decided,
 /// content hashing deferred so pack members are read exactly once.
 struct QuicPlannedSource {
@@ -3627,6 +3640,12 @@ async fn prepare_source_manifest(
     config.validate()?;
     let (root_name, is_directory, source_entries) =
         collect_entries_with_policy(source, &config.metadata_policy).await?;
+    let directory_metadata = if is_directory {
+        let captured = capture_directory_metadata_manifest(source, &config.metadata_policy).await?;
+        (!captured.is_empty()).then_some(captured)
+    } else {
+        None
+    };
     let _ = quic_safe_base_for_root_name(Path::new("base"), &root_name)?;
     let mut read_buf = vec![0_u8; config.chunk_size];
 
@@ -3653,18 +3672,24 @@ async fn prepare_source_manifest(
             use crate::net::atp::transport_common::metadata::{
                 inode_key_if_regular_sync, read_entry_metadata_sync,
             };
-            let mut hardlink_primary: std::collections::HashMap<(u64, u64), String> =
+            let mut hardlink_primary: std::collections::HashMap<HardlinkIdentity, (String, usize)> =
                 std::collections::HashMap::new();
             let mut batch_total = 0u64;
-            let mut planned = Vec::with_capacity(batch_entries.len());
+            let mut planned: Vec<QuicPlannedSource> = Vec::with_capacity(batch_entries.len());
             for (rel_path, abs_path) in batch_entries {
                 let mut metadata = read_entry_metadata_sync(&abs_path, &policy)?;
                 if preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
                     if let Some(key) = inode_key_if_regular_sync(&abs_path)? {
-                        if let Some(primary) = hardlink_primary.get(&key) {
+                        if let Some((primary, primary_index)) = hardlink_primary.get(&key) {
                             metadata.hardlink_target = Some(primary.clone());
+                            // The receiver validates hardlink targets against
+                            // prior plain entries. Once a duplicate proves this
+                            // inode is a hardlink group, keep its primary out of
+                            // a small-file pack as well as the zero-content
+                            // secondary.
+                            planned[*primary_index].pack_eligible = false;
                         } else {
-                            hardlink_primary.insert(key, rel_path.clone());
+                            hardlink_primary.insert(key, (rel_path.clone(), planned.len()));
                         }
                     }
                 }
@@ -3873,6 +3898,7 @@ async fn prepare_source_manifest(
         total_bytes,
         merkle_root_hex,
         metadata_root_hex: None,
+        directory_metadata,
         entries: manifest_entries,
         delta_manifest: None,
     };
@@ -7775,6 +7801,7 @@ fn validate_quic_manifest(
     manifest: &TransferManifest,
     config: &QuicConfig,
 ) -> Result<(), QuicTransportError> {
+    const MAX_QUIC_LOGICAL_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
     // The off-wire `transfer_id` is interpolated directly into the receiver's
     // on-disk staging-directory path (native_link.rs:
     // `.atp-quic-staging-{transfer_id}-...`), which is created and then
@@ -7806,6 +7833,26 @@ fn validate_quic_manifest(
             max: config.max_transfer_bytes,
         });
     }
+    let logical_entries = manifest.entries.iter().try_fold(0usize, |total, entry| {
+        total.checked_add(entry.members.len().max(1))
+    });
+    let logical_entries = logical_entries
+        .and_then(|total| {
+            total.checked_add(
+                manifest
+                    .directory_metadata
+                    .as_ref()
+                    .map_or(0, |directories| directories.entries.len()),
+            )
+        })
+        .ok_or_else(|| {
+            QuicTransportError::Source("manifest logical entry count overflow".to_string())
+        })?;
+    if logical_entries > MAX_QUIC_LOGICAL_MANIFEST_ENTRIES {
+        return Err(QuicTransportError::Source(format!(
+            "manifest declares {logical_entries} logical files/directories (max {MAX_QUIC_LOGICAL_MANIFEST_ENTRIES})"
+        )));
+    }
     if !manifest.is_directory && manifest.entries.len() != 1 {
         return Err(QuicTransportError::Source(
             "single-file transfer manifest must contain exactly one entry".to_string(),
@@ -7822,7 +7869,7 @@ fn validate_quic_manifest(
     }
 
     let mut seen_paths = std::collections::BTreeMap::<String, String>::new();
-    let mut hardlink_primaries = BTreeSet::<String>::new();
+    let mut hardlink_primaries = BTreeMap::<String, EntryMetadata>::new();
     let mut total = 0u64;
     let empty_sha_hex = hex_encode(&Sha256::digest(b""));
     for (expected, entry) in manifest.entries.iter().enumerate() {
@@ -7839,6 +7886,12 @@ fn validate_quic_manifest(
             ));
         }
         quic_join_relative(Path::new("base"), &entry.rel_path)?;
+        if entry.metadata.as_ref().is_some_and(EntryMetadata::is_bare) {
+            return Err(QuicTransportError::Source(format!(
+                "manifest entry {} carries non-canonical bare metadata",
+                entry.rel_path
+            )));
+        }
         let metadata = entry.metadata.clone().unwrap_or_default();
         if metadata.hardlink_target.is_some() && !matches!(metadata.file_kind, FileKind::Regular) {
             return Err(QuicTransportError::Source(format!(
@@ -7862,14 +7915,23 @@ fn validate_quic_manifest(
         if let Some(primary_rel) = &metadata.hardlink_target {
             quic_join_relative(Path::new("base"), primary_rel)?;
             let primary_key = portable_path_collision_key(primary_rel);
+            let primary_metadata = hardlink_primaries.get(&primary_key);
             if primary_rel == &entry.rel_path
-                || !hardlink_primaries.contains(&primary_key)
+                || primary_metadata.is_none()
                 || seen_paths
                     .get(&primary_key)
                     .is_none_or(|seen| seen != primary_rel)
             {
                 return Err(QuicTransportError::Source(format!(
                     "manifest hardlink entry {} targets missing or later primary {}",
+                    entry.rel_path, primary_rel
+                )));
+            }
+            let mut alias_metadata = metadata.clone();
+            alias_metadata.hardlink_target = None;
+            if primary_metadata != Some(&alias_metadata) {
+                return Err(QuicTransportError::Source(format!(
+                    "manifest hardlink entry {} declares metadata different from primary {}",
                     entry.rel_path, primary_rel
                 )));
             }
@@ -7882,12 +7944,17 @@ fn validate_quic_manifest(
                 entry.rel_path
             )));
         }
-        if seen_paths
-            .insert(
-                portable_path_collision_key(&entry.rel_path),
-                entry.rel_path.clone(),
-            )
-            .is_some()
+        // Packed entry names are internal object identifiers and are never
+        // committed as destination paths. Keep them out of the logical-path
+        // namespace so a legitimate member named `.atp-pack-N` cannot collide
+        // with its synthetic container.
+        if entry.members.is_empty()
+            && seen_paths
+                .insert(
+                    portable_path_collision_key(&entry.rel_path),
+                    entry.rel_path.clone(),
+                )
+                .is_some()
         {
             return Err(QuicTransportError::Source(format!(
                 "duplicate manifest entry path (including case collision) {}",
@@ -7898,7 +7965,10 @@ fn validate_quic_manifest(
             && metadata.hardlink_target.is_none()
             && entry.members.is_empty()
         {
-            hardlink_primaries.insert(portable_path_collision_key(&entry.rel_path));
+            hardlink_primaries.insert(
+                portable_path_collision_key(&entry.rel_path),
+                metadata.clone(),
+            );
         }
         if entry.sha256_hex.len() != 64 || !entry.sha256_hex.bytes().all(|b| b.is_ascii_hexdigit())
         {
@@ -7961,6 +8031,12 @@ fn validate_quic_manifest(
                     )));
                 }
                 let member_metadata = member.metadata.clone().unwrap_or_default();
+                if member.metadata.as_ref().is_some_and(EntryMetadata::is_bare) {
+                    return Err(QuicTransportError::Source(format!(
+                        "packed member {} carries non-canonical bare metadata",
+                        member.rel_path
+                    )));
+                }
                 validate_entry_metadata_for_receive(
                     &member.rel_path,
                     &member_metadata,
@@ -7989,7 +8065,9 @@ fn validate_quic_manifest(
                 )));
             }
         }
-        total = total.saturating_add(entry.size);
+        total = total.checked_add(entry.size).ok_or_else(|| {
+            QuicTransportError::Source("manifest entry sizes overflow u64".to_string())
+        })?;
         if total > config.max_transfer_bytes {
             return Err(QuicTransportError::TooLarge {
                 size: total,
@@ -8014,12 +8092,138 @@ fn validate_quic_manifest(
     validate_portable_path_set(committed_paths).map_err(|error| {
         QuicTransportError::Source(format!("unsafe manifest path tree: {error}"))
     })?;
+    validate_quic_directory_metadata(manifest, config)?;
     if manifest_metadata_commitment(manifest) != manifest.metadata_root_hex {
         return Err(QuicTransportError::Source(
             "manifest metadata commitment mismatch".to_string(),
         ));
     }
     reject_quic_symlink_traversal(manifest)?;
+    Ok(())
+}
+
+fn validate_quic_directory_metadata_value(
+    rel_path: &str,
+    metadata: &EntryMetadata,
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    if !matches!(metadata.file_kind, FileKind::Directory) {
+        return Err(QuicTransportError::Source(format!(
+            "directory metadata entry {rel_path} declares non-directory kind {:?}",
+            metadata.file_kind
+        )));
+    }
+    if metadata.hardlink_target.is_some()
+        || metadata.symlink_target.is_some()
+        || metadata.symlink_target_info.is_some()
+    {
+        return Err(QuicTransportError::Source(format!(
+            "directory metadata entry {rel_path} declares link metadata"
+        )));
+    }
+    if metadata.unix_mode.is_none()
+        && metadata.mtime_unix_secs.is_none()
+        && metadata.mtime_nanos.is_none()
+        && metadata.uid.is_none()
+        && metadata.gid.is_none()
+        && metadata.windows_attributes.is_none()
+        && metadata.xattrs.is_empty()
+    {
+        return Err(QuicTransportError::Source(format!(
+            "directory metadata entry {rel_path} carries no fidelity fields"
+        )));
+    }
+    validate_entry_metadata_for_receive(rel_path, metadata, &config.metadata_policy).map_err(
+        |error| {
+            QuicTransportError::Source(format!(
+                "directory metadata entry {rel_path} has invalid metadata: {error}"
+            ))
+        },
+    )
+}
+
+fn validate_quic_directory_metadata(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    let Some(directories) = &manifest.directory_metadata else {
+        return Ok(());
+    };
+    if directories.is_empty() {
+        return Err(QuicTransportError::Source(
+            "directory metadata must be omitted when empty".to_string(),
+        ));
+    }
+    if !manifest.is_directory {
+        return Err(QuicTransportError::Source(
+            "single-file transfer declares directory metadata".to_string(),
+        ));
+    }
+    if let Some(root) = &directories.root {
+        validate_quic_directory_metadata_value(".", root, config)?;
+    }
+    if !directories
+        .entries
+        .windows(2)
+        .all(|pair| pair[0].rel_path < pair[1].rel_path)
+    {
+        return Err(QuicTransportError::Source(
+            "directory metadata entries are not in strict lexicographic order".to_string(),
+        ));
+    }
+
+    let mut expected = BTreeMap::<String, String>::new();
+    for entry in &manifest.entries {
+        let logical = if entry.members.is_empty() {
+            vec![entry.rel_path.as_str()]
+        } else {
+            entry
+                .members
+                .iter()
+                .map(|member| member.rel_path.as_str())
+                .collect::<Vec<_>>()
+        };
+        for path in logical {
+            let components = path.split('/').collect::<Vec<_>>();
+            // Directory metadata represents only otherwise-implicit ancestors.
+            // An explicit empty-directory content entry owns its own leaf metadata
+            // and must never have a second commitment value for the same path.
+            let directory_count = components.len().saturating_sub(1);
+            let mut rendered = String::new();
+            for component in components.into_iter().take(directory_count) {
+                if !rendered.is_empty() {
+                    rendered.push('/');
+                }
+                rendered.push_str(component);
+                expected.insert(portable_path_collision_key(&rendered), rendered.clone());
+            }
+        }
+    }
+
+    let mut seen = BTreeMap::<String, String>::new();
+    for directory in &directories.entries {
+        quic_join_relative(Path::new("base"), &directory.rel_path)?;
+        validate_quic_directory_metadata_value(&directory.rel_path, &directory.metadata, config)?;
+        let key = portable_path_collision_key(&directory.rel_path);
+        if let Some(previous) = seen.insert(key.clone(), directory.rel_path.clone()) {
+            return Err(QuicTransportError::Source(format!(
+                "duplicate or case-colliding directory metadata paths: {previous} and {}",
+                directory.rel_path
+            )));
+        }
+        let Some(expected_path) = expected.get(&key) else {
+            return Err(QuicTransportError::Source(format!(
+                "directory metadata path {} is not represented by the transfer tree",
+                directory.rel_path
+            )));
+        };
+        if expected_path != &directory.rel_path {
+            return Err(QuicTransportError::Source(format!(
+                "directory metadata path {} aliases transfer directory {expected_path}",
+                directory.rel_path
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -8070,6 +8274,18 @@ async fn reject_quic_destination_symlink_path(
             base.display()
         ))
     })?;
+
+    // `base` is below the caller-selected destination directory. Revalidate
+    // every outer ancestor on each mutation too: otherwise replacing dest_dir
+    // with a junction after the one-time prepare pass makes `base` appear to be
+    // a normal directory reached through an escaped namespace.
+    for ancestor in base
+        .ancestors()
+        .skip(1)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        reject_quic_existing_symlink(ancestor).await?;
+    }
 
     let components = rel.components().collect::<Vec<_>>();
     let mut current = base.to_path_buf();
@@ -8161,10 +8377,13 @@ fn manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
             }
         })
         .collect();
-    let metadata_refs: Vec<(&str, &EntryMetadata)> = metadata_pairs
+    let mut metadata_refs: Vec<(&str, &EntryMetadata)> = metadata_pairs
         .iter()
         .map(|(path, metadata)| (path.as_str(), metadata))
         .collect();
+    if let Some(directory_metadata) = &manifest.directory_metadata {
+        metadata_refs.extend(directory_metadata.commitment_pairs());
+    }
     metadata_commitment(&metadata_refs)
 }
 
@@ -8225,6 +8444,7 @@ fn trace_quic_metadata_skips(cx: &Cx, out_path: &Path, report: &MetadataApplyRep
     }
 }
 
+#[cfg(feature = "tls")]
 async fn apply_quic_entry_metadata(
     cx: &Cx,
     out_path: &Path,
@@ -8237,6 +8457,61 @@ async fn apply_quic_entry_metadata(
     Ok(())
 }
 
+async fn apply_quic_directory_metadata(
+    cx: &Cx,
+    base: &Path,
+    manifest: &TransferManifest,
+) -> Result<(), QuicTransportError> {
+    let mut directory_values = BTreeMap::<&str, &EntryMetadata>::new();
+    if let Some(directories) = &manifest.directory_metadata {
+        for directory in &directories.entries {
+            directory_values.insert(directory.rel_path.as_str(), &directory.metadata);
+        }
+    }
+    for entry in &manifest.entries {
+        if entry.members.is_empty() {
+            if let Some(metadata) = entry
+                .metadata
+                .as_ref()
+                .filter(|metadata| matches!(metadata.file_kind, FileKind::Directory))
+            {
+                directory_values.insert(entry.rel_path.as_str(), metadata);
+            }
+        }
+    }
+
+    let mut entries = directory_values.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .0
+            .split('/')
+            .count()
+            .cmp(&left.0.split('/').count())
+            .then_with(|| right.0.cmp(left.0))
+    });
+    for (rel_path, metadata) in entries {
+        let path = quic_join_relative(base, rel_path)?;
+        reject_quic_destination_symlink_prefix(base, &path).await?;
+        crate::fs::create_dir_all(&path).await?;
+        reject_quic_destination_symlink_prefix(base, &path).await?;
+        let report = apply_entry_metadata(&path, metadata).await?;
+        trace_quic_metadata_skips(cx, &path, &report);
+    }
+    if let Some(root) = manifest
+        .directory_metadata
+        .as_ref()
+        .and_then(|directories| directories.root.as_ref())
+    {
+        reject_quic_destination_symlink_prefix(base, base).await?;
+        crate::fs::create_dir_all(base).await?;
+        reject_quic_destination_symlink_prefix(base, base).await?;
+        let report = apply_entry_metadata(base, root).await?;
+        trace_quic_metadata_skips(cx, base, &report);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tls")]
 async fn apply_quic_member_metadata(
     cx: &Cx,
     out_path: &Path,
@@ -8286,13 +8561,17 @@ async fn commit_quic_metadata_entry(
 
     if metadata.file_kind.is_special() {
         if matches!(metadata.file_kind, FileKind::Fifo) && config.allow_special_files {
-            if let Some(parent) = out_path.parent() {
-                crate::fs::create_dir_all(parent).await?;
+            #[cfg(unix)]
+            {
+                if let Some(parent) = out_path.parent() {
+                    crate::fs::create_dir_all(parent).await?;
+                }
+                reject_quic_destination_symlink_prefix(base, out_path).await?;
+                let mode = metadata.unix_mode.unwrap_or(0o644);
+                let _ = crate::fs::remove_file(out_path).await;
+                crate::net::atp::transport_common::metadata::recreate_fifo(out_path, mode).await?;
+                return Ok(QuicMetadataCommit::Committed);
             }
-            let mode = metadata.unix_mode.unwrap_or(0o644);
-            let _ = crate::fs::remove_file(out_path).await;
-            crate::net::atp::transport_common::metadata::recreate_fifo(out_path, mode).await?;
-            return Ok(QuicMetadataCommit::Committed);
         }
         trace_quic_special_file_skipped(cx, out_path, metadata.file_kind);
         return Ok(QuicMetadataCommit::Skipped);
@@ -8302,9 +8581,18 @@ async fn commit_quic_metadata_entry(
         crate::fs::create_dir_all(parent).await?;
     }
 
+    // Parent creation may have materialized prefixes that were absent during
+    // the first check. Revalidate immediately before the filesystem mutation
+    // so an external junction/reparse swap cannot rely on that stale result.
+    if matches!(metadata.file_kind, FileKind::Symlink) {
+        reject_quic_destination_symlink_ancestors(base, out_path).await?;
+    } else {
+        reject_quic_destination_symlink_prefix(base, out_path).await?;
+    }
+
     if matches!(metadata.file_kind, FileKind::Directory) {
         crate::fs::create_dir_all(out_path).await?;
-        apply_quic_entry_metadata(cx, out_path, entry).await?;
+        reject_quic_destination_symlink_prefix(base, out_path).await?;
         return Ok(QuicMetadataCommit::Committed);
     }
 
@@ -8316,8 +8604,7 @@ async fn commit_quic_metadata_entry(
     if let Some(primary_rel) = &metadata.hardlink_target {
         let primary_path = quic_join_relative(base, primary_rel)?;
         reject_quic_destination_symlink_prefix(base, &primary_path).await?;
-        let _ = crate::fs::remove_file(out_path).await;
-        crate::fs::hard_link(&primary_path, out_path).await?;
+        commit_hardlink_transactionally(&primary_path, out_path).await?;
         return Ok(QuicMetadataCommit::Committed);
     }
 
@@ -8350,6 +8637,7 @@ async fn commit_decoded_entries(
     if manifest.is_directory && manifest.entries.is_empty() {
         reject_quic_destination_symlink_prefix(&base, &base).await?;
         crate::fs::create_dir_all(&base).await?;
+        reject_quic_destination_symlink_prefix(&base, &base).await?;
         committed_paths.push(base.clone());
     }
     for entry in &manifest.entries {
@@ -8371,14 +8659,20 @@ async fn commit_decoded_entries(
                 if let Some(parent) = member_path.parent() {
                     crate::fs::create_dir_all(parent).await?;
                 }
+                reject_quic_destination_symlink_prefix(&base, &member_path).await?;
                 let slice = packed_member_slice(&decoder.data, member).ok_or_else(|| {
                     QuicTransportError::Integrity(format!(
                         "packed member {} range escapes its verified entry",
                         member.rel_path
                     ))
                 })?;
-                crate::fs::write_atomic(&member_path, slice).await?;
-                apply_quic_member_metadata(cx, &member_path, member).await?;
+                let report = crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
+                    &member_path,
+                    slice,
+                    member.metadata.as_ref(),
+                )
+                .await?;
+                trace_quic_metadata_skips(cx, &member_path, &report);
                 committed_paths.push(member_path);
             }
             continue;
@@ -8400,10 +8694,18 @@ async fn commit_decoded_entries(
         if let Some(parent) = out_path.parent() {
             crate::fs::create_dir_all(parent).await?;
         }
-        crate::fs::write_atomic(&out_path, &decoder.data).await?;
-        apply_quic_entry_metadata(cx, &out_path, entry).await?;
+        reject_quic_destination_symlink_prefix(&base, &out_path).await?;
+        let report = crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
+            &out_path,
+            &decoder.data,
+            entry.metadata.as_ref(),
+        )
+        .await?;
+        trace_quic_metadata_skips(cx, &out_path, &report);
         committed_paths.push(out_path);
     }
+
+    apply_quic_directory_metadata(cx, &base, manifest).await?;
 
     receipt.committed_paths = committed_paths
         .iter()
@@ -9243,6 +9545,7 @@ mod tests {
             total_bytes: 9,
             merkle_root_hex: "00".repeat(32),
             metadata_root_hex: None,
+            directory_metadata: None,
             delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
@@ -9301,6 +9604,50 @@ mod tests {
         assert!(validate_quic_manifest(&boundary, &config).is_ok());
     }
 
+    #[test]
+    fn validate_quic_manifest_rejects_entry_size_sum_overflow() {
+        let mut manifest = sample_manifest();
+        manifest.total_bytes = u64::MAX;
+        manifest.entries[0].size = u64::MAX;
+        manifest.entries.push(ManifestEntry {
+            index: 1,
+            rel_path: "overflow.bin".to_string(),
+            size: 1,
+            sha256_hex: "0".repeat(64),
+            metadata: None,
+            members: Vec::new(),
+        });
+        let config = QuicConfig {
+            max_transfer_bytes: u64::MAX,
+            ..trusted_quic_config()
+        };
+        assert!(matches!(
+            validate_quic_manifest(&manifest, &config),
+            Err(QuicTransportError::Source(message)) if message.contains("overflow")
+        ));
+    }
+
+    #[test]
+    fn validate_quic_manifest_rejects_noncanonical_bare_metadata_blocks() {
+        let mut bare_entry = sample_manifest();
+        bare_entry.entries[0].metadata = Some(EntryMetadata::default());
+        assert!(matches!(
+            validate_quic_manifest(&bare_entry, &trusted_quic_config()),
+            Err(QuicTransportError::Source(message)) if message.contains("non-canonical bare metadata")
+        ));
+
+        let mut bare_member = quic_manifest_with_metadata(vec![quic_packed_entry(
+            0,
+            0,
+            &[("a.bin", b"a"), ("b.bin", b"b")],
+        )]);
+        bare_member.entries[0].members[0].metadata = Some(EntryMetadata::default());
+        assert!(matches!(
+            validate_quic_manifest(&bare_member, &trusted_quic_config()),
+            Err(QuicTransportError::Source(message)) if message.contains("non-canonical bare metadata")
+        ));
+    }
+
     fn quic_manifest_with_metadata(entries: Vec<ManifestEntry>) -> TransferManifest {
         let mut manifest = TransferManifest {
             transfer_id: "transfer42".to_string(),
@@ -9311,11 +9658,169 @@ mod tests {
                 .fold(0u64, |acc, entry| acc.saturating_add(entry.size)),
             merkle_root_hex: "00".repeat(32),
             metadata_root_hex: None,
+            directory_metadata: None,
             delta_manifest: None,
             entries,
         };
         manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
         manifest
+    }
+
+    fn quic_directory_metadata_entry(rel_path: &str) -> DirectoryMetadataEntry {
+        DirectoryMetadataEntry {
+            rel_path: rel_path.to_string(),
+            metadata: EntryMetadata {
+                file_kind: FileKind::Directory,
+                unix_mode: Some(0o755),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn with_quic_directory_metadata(
+        mut manifest: TransferManifest,
+        directory_metadata: DirectoryMetadataManifest,
+    ) -> TransferManifest {
+        manifest.directory_metadata = Some(directory_metadata);
+        manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
+        manifest
+    }
+
+    #[test]
+    fn validate_quic_directory_metadata_requires_canonical_strict_ancestors() {
+        let config = trusted_quic_config();
+        let valid = with_quic_directory_metadata(
+            sample_manifest(),
+            DirectoryMetadataManifest {
+                root: None,
+                entries: vec![quic_directory_metadata_entry("a")],
+            },
+        );
+        validate_quic_manifest(&valid, &config).expect("strict ancestor metadata validates");
+
+        let mut nested = sample_manifest();
+        nested.entries[0].rel_path = "a/b/c.txt".to_string();
+        let reversed = with_quic_directory_metadata(
+            nested,
+            DirectoryMetadataManifest {
+                root: None,
+                entries: vec![
+                    quic_directory_metadata_entry("a/b"),
+                    quic_directory_metadata_entry("a"),
+                ],
+            },
+        );
+        let error = validate_quic_manifest(&reversed, &config)
+            .expect_err("reversed directory metadata must fail closed");
+        assert!(
+            matches!(error, QuicTransportError::Source(message) if message.contains("strict lexicographic"))
+        );
+
+        let explicit_directory = quic_manifest_with_metadata(vec![ManifestEntry {
+            index: 0,
+            rel_path: "empty".to_string(),
+            size: 0,
+            sha256_hex: sha256_hex(b""),
+            metadata: Some(EntryMetadata {
+                file_kind: FileKind::Directory,
+                unix_mode: Some(0o755),
+                ..Default::default()
+            }),
+            members: Vec::new(),
+        }]);
+        let duplicate = with_quic_directory_metadata(
+            explicit_directory,
+            DirectoryMetadataManifest {
+                root: None,
+                entries: vec![quic_directory_metadata_entry("empty")],
+            },
+        );
+        let error = validate_quic_manifest(&duplicate, &config)
+            .expect_err("explicit directory leaf cannot be committed twice");
+        assert!(
+            matches!(error, QuicTransportError::Source(message) if message.contains("not represented"))
+        );
+    }
+
+    #[test]
+    fn validate_quic_directory_metadata_rejects_empty_fidelity_records() {
+        let config = trusted_quic_config();
+        let empty_root = with_quic_directory_metadata(
+            sample_manifest(),
+            DirectoryMetadataManifest {
+                root: Some(EntryMetadata {
+                    file_kind: FileKind::Directory,
+                    ..Default::default()
+                }),
+                entries: Vec::new(),
+            },
+        );
+        let error = validate_quic_manifest(&empty_root, &config)
+            .expect_err("empty-fidelity root must fail closed");
+        assert!(
+            matches!(error, QuicTransportError::Source(message) if message.contains("no fidelity fields"))
+        );
+
+        let empty_entry = with_quic_directory_metadata(
+            sample_manifest(),
+            DirectoryMetadataManifest {
+                root: None,
+                entries: vec![DirectoryMetadataEntry {
+                    rel_path: "a".to_string(),
+                    metadata: EntryMetadata {
+                        file_kind: FileKind::Directory,
+                        ..Default::default()
+                    },
+                }],
+            },
+        );
+        let error = validate_quic_manifest(&empty_entry, &config)
+            .expect_err("empty-fidelity nested record must fail closed");
+        assert!(
+            matches!(error, QuicTransportError::Source(message) if message.contains("no fidelity fields"))
+        );
+    }
+
+    #[test]
+    fn validate_quic_manifest_rejects_hardlink_metadata_that_differs_from_primary() {
+        let primary = ManifestEntry {
+            index: 0,
+            rel_path: "primary.bin".to_string(),
+            size: 4,
+            sha256_hex: "0".repeat(64),
+            metadata: Some(EntryMetadata {
+                unix_mode: Some(0o644),
+                ..Default::default()
+            }),
+            members: Vec::new(),
+        };
+        let alias = ManifestEntry {
+            index: 1,
+            rel_path: "alias.bin".to_string(),
+            size: 0,
+            sha256_hex: sha256_hex(b""),
+            metadata: Some(EntryMetadata {
+                unix_mode: Some(0o644),
+                hardlink_target: Some("primary.bin".to_string()),
+                ..Default::default()
+            }),
+            members: Vec::new(),
+        };
+        let valid = quic_manifest_with_metadata(vec![primary, alias]);
+        validate_quic_manifest(&valid, &trusted_quic_config())
+            .expect("hardlink alias with primary metadata validates");
+
+        let mut different = valid;
+        different.entries[1]
+            .metadata
+            .as_mut()
+            .expect("alias metadata")
+            .unix_mode = Some(0o600);
+        different.metadata_root_hex = manifest_metadata_commitment(&different);
+        assert!(matches!(
+            validate_quic_manifest(&different, &trusted_quic_config()),
+            Err(QuicTransportError::Source(message)) if message.contains("metadata different from primary")
+        ));
     }
 
     fn quic_symlink_entry(index: u32, rel: &str, target: &str) -> ManifestEntry {
@@ -11931,6 +12436,221 @@ mod tests {
     }
 
     #[test]
+    fn quic_pack_container_name_does_not_collide_with_logical_member() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(&root).expect("create payload root");
+        std::fs::write(root.join(".atp-pack-0"), b"legitimate-user-file")
+            .expect("write pack-shaped user file");
+        std::fs::write(root.join("neighbor.bin"), b"packable-neighbor")
+            .expect("write packable neighbor");
+        let config = trusted_quic_config();
+
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("prepare source with pack-shaped file name");
+        assert_eq!(prepared.manifest.entries.len(), 1);
+        assert_eq!(prepared.manifest.entries[0].rel_path, ".atp-pack-0");
+        assert!(
+            prepared.manifest.entries[0]
+                .members
+                .iter()
+                .any(|member| member.rel_path == ".atp-pack-0")
+        );
+        validate_quic_manifest(&prepared.manifest, &config)
+            .expect("internal pack name must not occupy logical path namespace");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn quic_prepare_source_manifest_keeps_hardlink_primary_out_of_pack() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(&root).expect("create payload root");
+        let primary = root.join("a-primary.bin");
+        std::fs::write(&primary, b"shared-hardlink-content").expect("write primary");
+        std::fs::write(root.join("b-regular.bin"), b"packable-neighbor")
+            .expect("write regular neighbor");
+        std::fs::hard_link(&primary, root.join("c-secondary.bin"))
+            .expect("create hardlink secondary");
+        let config = QuicConfig {
+            preserve_hardlinks: true,
+            ..trusted_quic_config()
+        };
+
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("hardlink source manifest prepares");
+        validate_quic_manifest(&prepared.manifest, &config)
+            .expect("sender hardlink manifest must pass receiver preflight");
+
+        let primary_entry = prepared
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == "a-primary.bin")
+            .expect("plain primary entry");
+        assert!(primary_entry.members.is_empty());
+        assert_eq!(
+            primary_entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.hardlink_target.as_ref()),
+            None
+        );
+        let secondary_entry = prepared
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == "c-secondary.bin")
+            .expect("hardlink secondary entry");
+        assert_eq!(
+            secondary_entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.hardlink_target.as_deref()),
+            Some("a-primary.bin")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quic_decoded_regular_commit_replaces_stale_readonly_destination() {
+        let cx = Cx::for_testing();
+        let dest = tempfile::tempdir().expect("destination temp dir");
+        let out_path = dest.path().join("payload/alpha.bin");
+        std::fs::create_dir_all(out_path.parent().expect("output parent"))
+            .expect("create destination parent");
+        std::fs::write(&out_path, b"stale").expect("write stale destination");
+        let mut permissions = std::fs::metadata(&out_path)
+            .expect("stale destination metadata")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&out_path, permissions).expect("make stale destination read-only");
+
+        let bytes = b"replacement-content".to_vec();
+        let entries = vec![("alpha.bin".to_string(), bytes.clone())];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let decoders = vec![QuicEntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: u64::try_from(bytes.len()).expect("payload size fits u64"),
+            pipeline: None,
+            complete: true,
+            data: bytes.clone(),
+            pending_decodes: Vec::new(),
+        }];
+
+        let (receipt, _) = block_on(commit_decoded_entries(
+            &cx,
+            dest.path(),
+            &manifest,
+            &decoders,
+            0,
+            0,
+            QuicDecodeStats::default(),
+            &trusted_quic_config(),
+        ))
+        .expect("commit over read-only destination");
+        assert!(receipt.committed);
+        assert_eq!(std::fs::read(&out_path).expect("read replacement"), bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quic_decoded_pack_replaces_stale_readonly_members() {
+        let cx = Cx::for_testing();
+        let source = tempfile::tempdir().expect("source temp dir");
+        let root = source.path().join("payload");
+        std::fs::create_dir_all(&root).expect("create payload root");
+        let alpha = varied_bytes(1_021, 89);
+        let beta = varied_bytes(2_039, 97);
+        let alpha_source = root.join("alpha.bin");
+        std::fs::write(&alpha_source, &alpha).expect("write alpha source");
+        let mut source_permissions = std::fs::metadata(&alpha_source)
+            .expect("alpha source metadata")
+            .permissions();
+        source_permissions.set_readonly(true);
+        std::fs::set_permissions(&alpha_source, source_permissions)
+            .expect("make packed source member read-only");
+        std::fs::write(root.join("beta.bin"), &beta).expect("write beta source");
+        let config = trusted_quic_config();
+        let prepared =
+            block_on(prepare_source_manifest(&cx, &root, &config)).expect("prepare packed source");
+        assert_eq!(prepared.manifest.entries.len(), 1);
+        let pack = &prepared.manifest.entries[0];
+        assert_eq!(pack.members.len(), 2);
+        assert!(pack.members.iter().any(|member| {
+            member.rel_path == "alpha.bin"
+                && member
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.windows_attributes)
+                    .is_some_and(|attributes| attributes & 1 != 0)
+        }));
+
+        let dest = tempfile::tempdir().expect("destination temp dir");
+        let dest_root = dest.path().join("payload");
+        std::fs::create_dir_all(&dest_root).expect("create destination root");
+        for name in ["alpha.bin", "beta.bin"] {
+            let path = dest_root.join(name);
+            std::fs::write(&path, b"stale").expect("write stale member");
+            let mut permissions = std::fs::metadata(&path)
+                .expect("stale member metadata")
+                .permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&path, permissions).expect("make member read-only");
+        }
+        let mut packed = alpha.clone();
+        packed.extend_from_slice(&beta);
+        let decoders = vec![QuicEntryDecoder {
+            index: pack.index,
+            object_id: entry_object_id(&prepared.manifest.transfer_id, pack.index),
+            size: pack.size,
+            pipeline: None,
+            complete: true,
+            data: packed,
+            pending_decodes: Vec::new(),
+        }];
+
+        let (receipt, _) = block_on(commit_decoded_entries(
+            &cx,
+            dest.path(),
+            &prepared.manifest,
+            &decoders,
+            0,
+            0,
+            QuicDecodeStats::default(),
+            &config,
+        ))
+        .expect("commit packed members over read-only destinations");
+        assert!(receipt.committed);
+        assert_eq!(
+            std::fs::read(dest_root.join("alpha.bin")).expect("read alpha"),
+            alpha
+        );
+        assert_eq!(
+            std::fs::read(dest_root.join("beta.bin")).expect("read beta"),
+            beta
+        );
+        assert!(
+            std::fs::metadata(dest_root.join("alpha.bin"))
+                .expect("received alpha metadata")
+                .permissions()
+                .readonly(),
+            "packed member must receive its deferred read-only attribute"
+        );
+
+        for path in [alpha_source, dest_root.join("alpha.bin")] {
+            let mut permissions = std::fs::metadata(&path)
+                .expect("read-only cleanup metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(path, permissions).expect("clear read-only for cleanup");
+        }
+    }
+
+    #[test]
     fn quic_prepare_source_manifest_preserves_explicit_empty_directory_entry() {
         let cx = Cx::for_testing();
         let temp = tempfile::tempdir().expect("temp dir");
@@ -11986,7 +12706,8 @@ mod tests {
         assert!(prepared.manifest.is_directory);
         assert_eq!(prepared.manifest.total_bytes, 0);
         assert!(prepared.manifest.entries.is_empty());
-        assert!(prepared.manifest.metadata_root_hex.is_none());
+        assert!(prepared.manifest.directory_metadata.is_some());
+        assert!(prepared.manifest.metadata_root_hex.is_some());
 
         let decoders =
             decoders_from_manifest(&prepared.manifest, &config).expect("decoders from manifest");
@@ -12957,6 +13678,7 @@ mod tests {
             total_bytes: 50 * 1024 * 1024,
             merkle_root_hex: "00".repeat(32),
             metadata_root_hex: None,
+            directory_metadata: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "large.bin".to_string(),
@@ -14912,6 +15634,56 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn quic_unsupported_fifo_never_deletes_existing_windows_file() {
+        let cx = Cx::for_testing();
+        let dest = tempfile::tempdir().expect("destination temp dir");
+        let out_path = dest.path().join("payload/named-pipe");
+        std::fs::create_dir_all(out_path.parent().expect("output parent"))
+            .expect("create destination parent");
+        std::fs::write(&out_path, b"must-survive").expect("write existing destination");
+
+        let entries = vec![("named-pipe".to_string(), Vec::new())];
+        let mut manifest = manifest_from_entries("payload", true, &entries);
+        manifest.entries[0].metadata = Some(EntryMetadata {
+            file_kind: FileKind::Fifo,
+            ..EntryMetadata::default()
+        });
+        manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
+        let decoders = vec![QuicEntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: 0,
+            pipeline: None,
+            complete: true,
+            data: Vec::new(),
+            pending_decodes: Vec::new(),
+        }];
+        let config = QuicConfig {
+            allow_special_files: true,
+            ..trusted_quic_config()
+        };
+
+        let (receipt, committed_paths) = block_on(commit_decoded_entries(
+            &cx,
+            dest.path(),
+            &manifest,
+            &decoders,
+            0,
+            0,
+            QuicDecodeStats::default(),
+            &config,
+        ))
+        .expect("unsupported FIFO is skipped without mutation");
+        assert!(receipt.committed);
+        assert!(committed_paths.is_empty());
+        assert_eq!(
+            std::fs::read(&out_path).expect("read preserved destination"),
+            b"must-survive"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn quic_commit_rejects_existing_destination_symlink_prefix() {
@@ -14957,6 +15729,29 @@ mod tests {
         );
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn quic_per_write_guard_rejects_replaced_destination_directory_ancestor() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let outside = temp.path().join("outside");
+        let pivot = temp.path().join("pivot");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &pivot).expect("create directory symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &pivot).expect("create directory symlink");
+
+        let base = pivot.join("payload");
+        let out_path = base.join("file.bin");
+        let error = block_on(reject_quic_destination_symlink_prefix(&base, &out_path))
+            .expect_err("outer destination junction must fail closed");
+        assert!(matches!(
+            error,
+            QuicTransportError::Source(message) if message.contains("symlink or reparse point")
+        ));
+        assert!(!outside.join("payload/file.bin").exists());
+    }
+
     #[test]
     fn reused_manifest_json_roundtrips() {
         let manifest = TransferManifest {
@@ -14969,6 +15764,7 @@ mod tests {
             // metadata commitment + per-entry metadata; portable transfers leave
             // them None. Additive cross-edit to keep HEAD compiling.
             metadata_root_hex: None,
+            directory_metadata: None,
             delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,

@@ -20,7 +20,9 @@
 //! # Integrity (fail-closed, identical guarantee to `transport_tcp`)
 //!
 //! After decode, the receiver (1) checks every entry's SHA-256 against the
-//! manifest and (2) rebuilds the deterministic flat
+//! manifest, (2) verifies the versioned logical-file and directory metadata
+//! commitment, and
+//! (3) rebuilds the deterministic flat
 //! [`crate::atp::object::ObjectGraph`] and compares the flat Merkle root to the
 //! manifest root. Only if both hold does it atomically write the destination and
 //! report `committed = true`. Any mismatch, oversize entry, unreachable peer, or
@@ -61,6 +63,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
+use crate::atp::object::MetadataPolicy;
 use crate::atp::safety::{
     portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
     validate_portable_relative_path,
@@ -87,7 +90,12 @@ use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::protocol::varint::VarInt;
-use crate::net::atp::transport_common::metadata::path_is_link_or_reparse;
+use crate::net::atp::transport_common::metadata::{
+    DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, HardlinkIdentity,
+    MetadataApplyReport, apply_entry_metadata, capture_directory_metadata_manifest,
+    commit_staged_regular_file_transactionally, inode_key_if_regular_sync, metadata_commitment,
+    path_is_link_or_reparse, read_entry_metadata_sync, validate_entry_metadata_for_receive,
+};
 use crate::net::atp::transport_common::{
     EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode, plan_multi_object_split,
@@ -103,7 +111,10 @@ use adaptive::{AdaptiveController, AdaptivePolicy, BlockPlan, PathEstimate, Path
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
 /// changes.
-pub const ATP_RQ_PROTOCOL: u32 = 3;
+pub const ATP_RQ_PROTOCOL: u32 = 4;
+
+/// Schema carried inside [`RqMetadataManifest`].
+const RQ_METADATA_MANIFEST_VERSION: u8 = 1;
 
 /// Magic prefix on every UDP symbol datagram (`"ATRQ"`).
 const SYMBOL_MAGIC: u32 = 0x4154_5251;
@@ -461,6 +472,13 @@ macro_rules! bondtrace {
     };
 }
 
+// Bonded (N-donor) receive loop and donor control loop (z01bbr.6). Declared
+// after the trace macros so the child module can use them.
+mod bonded;
+pub use bonded::{
+    ATP_RQ_BONDED_PROTOCOL, BondedDonateReport, BondedReceiveReport, donate_bonded, receive_bonded,
+};
+
 /// Transport tuning knobs.
 #[derive(Debug, Clone)]
 pub struct RqConfig {
@@ -482,6 +500,16 @@ pub struct RqConfig {
     pub udp_fanout: usize,
     /// Maximum total bytes a single transfer may carry.
     pub max_transfer_bytes: u64,
+    /// Filesystem metadata captured by the sender and accepted by the receiver.
+    ///
+    /// RQ preserves regular-file and non-empty-directory metadata.
+    /// Symlinks/reparse points and nested empty directories remain fail-closed
+    /// at source preflight.
+    pub metadata_policy: MetadataPolicy,
+    /// Detect source hardlinks and fail before transfer rather than silently
+    /// flattening inode identity. RQ does not yet encode hardlink topology; use
+    /// TCP or QUIC when this requested fidelity is present.
+    pub preserve_hardlinks: bool,
     /// Maximum time a one-shot receiver waits for the TCP control accept.
     pub accept_timeout: Duration,
     /// Maximum fountain feedback rounds before failing closed.
@@ -545,6 +573,8 @@ impl Default for RqConfig {
             round0_loss_target: 0.0,
             udp_fanout: DEFAULT_UDP_FANOUT,
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
+            metadata_policy: MetadataPolicy::default(),
+            preserve_hardlinks: false,
             accept_timeout: DEFAULT_ACCEPT_TIMEOUT,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
             round_tail_drain: DEFAULT_ROUND_TAIL_DRAIN,
@@ -2660,6 +2690,34 @@ pub struct ManifestEntry {
     pub fragment: Option<LargeObjectFragment>,
 }
 
+/// One logical file's non-bare metadata in an RQ transfer.
+///
+/// Metadata is keyed by the final logical path rather than encoded-object path,
+/// so packing and large-file fragmentation cannot change its meaning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RqMetadataEntry {
+    /// Path relative to the transfer root.
+    pub rel_path: String,
+    /// Metadata captured under the sender's [`MetadataPolicy`].
+    pub metadata: EntryMetadata,
+}
+
+/// Versioned metadata block committed independently from content integrity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RqMetadataManifest {
+    /// RQ metadata schema version.
+    pub version: u8,
+    /// Canonical commitment over every logical file plus explicit directory
+    /// metadata record.
+    pub commitment_hex: String,
+    /// Non-bare per-file metadata. Missing logical paths reconstruct as bare
+    /// regular files before commitment verification.
+    pub entries: Vec<RqMetadataEntry>,
+    /// Transfer-root and implicit non-empty-directory metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directories: Option<DirectoryMetadataManifest>,
+}
+
 /// Transfer manifest carried in the `ObjectManifest` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransferManifest {
@@ -2673,6 +2731,11 @@ pub struct TransferManifest {
     pub total_bytes: u64,
     /// Lowercase hex of `MerkleRoot::from_graph` over the flat object graph.
     pub merkle_root_hex: String,
+    /// Versioned filesystem metadata commitment. The optional wire shape keeps
+    /// deserialization diagnostic-friendly for older manifests, but protocol v4
+    /// validation rejects `None` so the whole block cannot be stripped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<RqMetadataManifest>,
     /// File entries in manifest order.
     pub entries: Vec<ManifestEntry>,
 }
@@ -3703,6 +3766,9 @@ const RQ_STREAM_HASH_BUFFER_SIZE: usize = 1024 * 1024;
 struct RqSourceEntry {
     rel_path: String,
     abs_path: PathBuf,
+    /// Metadata for the final logical file. Packed synthetic objects carry bare
+    /// metadata because their members remain the committed logical files.
+    metadata: EntryMetadata,
     /// Byte offset in `abs_path` where this encoded object starts.
     source_offset: u64,
     /// Byte length of this encoded object. `None` means the whole file at
@@ -3755,6 +3821,7 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry
             vec![RqSourceEntry {
                 rel_path: root_name,
                 abs_path: root.to_path_buf(),
+                metadata: EntryMetadata::default(),
                 source_offset: 0,
                 source_len: None,
                 members: Vec::new(),
@@ -3774,13 +3841,179 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry
     )))
 }
 
+async fn capture_source_metadata(
+    entries: &mut [RqSourceEntry],
+    policy: &MetadataPolicy,
+    preserve_hardlinks: bool,
+) -> Result<(), RqError> {
+    let paths = entries
+        .iter()
+        .map(|entry| entry.abs_path.clone())
+        .collect::<Vec<_>>();
+    let policy = policy.clone();
+    let captured = crate::runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| {
+                let metadata = read_entry_metadata_sync(path, &policy)?;
+                let identity = if preserve_hardlinks {
+                    inode_key_if_regular_sync(path)?
+                } else {
+                    None
+                };
+                Ok::<_, StreamingError>((metadata, identity))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+    .map_err(|error| RqError::Source(error.into_message()))?;
+
+    let mut hardlink_primaries = BTreeMap::<HardlinkIdentity, String>::new();
+    for (entry, (metadata, identity)) in entries.iter_mut().zip(captured) {
+        if !matches!(
+            metadata.file_kind,
+            crate::net::atp::transport_common::FileKind::Regular
+        ) {
+            return Err(RqError::Source(format!(
+                "{}: RQ supports regular-file metadata only; found {:?}",
+                entry.abs_path.display(),
+                metadata.file_kind
+            )));
+        }
+        if preserve_hardlinks && identity.is_none() {
+            return Err(RqError::Source(format!(
+                "{}: RQ cannot verify source hardlink identity on this filesystem; use TCP or QUIC",
+                entry.rel_path
+            )));
+        }
+        if let Some(identity) = identity {
+            if let Some(primary) = hardlink_primaries.get(&identity) {
+                return Err(RqError::Source(format!(
+                    "{}: RQ cannot preserve hardlink identity with {primary}; use TCP or QUIC",
+                    entry.rel_path
+                )));
+            }
+            hardlink_primaries.insert(identity, entry.rel_path.clone());
+        }
+        entry.metadata = metadata;
+    }
+    Ok(())
+}
+
+/// Directory-less commitment wrapper kept for test fixtures; production
+/// callers commit through `rq_metadata_commitment_with_directories`.
+#[cfg(test)]
+fn rq_metadata_commitment(entries: &[(&str, &EntryMetadata)]) -> String {
+    rq_metadata_commitment_with_directories(entries, None)
+}
+
+fn rq_metadata_commitment_with_directories(
+    entries: &[(&str, &EntryMetadata)],
+    directories: Option<&DirectoryMetadataManifest>,
+) -> String {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.atp.rq.metadata-manifest.v1\0");
+    hasher.update((sorted.len() as u64).to_be_bytes());
+    for (path, _) in &sorted {
+        hasher.update((path.len() as u64).to_be_bytes());
+        hasher.update(path.as_bytes());
+    }
+    match metadata_commitment(&sorted) {
+        Some(commitment) => {
+            hasher.update([1]);
+            hasher.update(commitment.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    if let Some(directories) = directories {
+        let directory_pairs = directories.commitment_pairs();
+        hasher.update(b"asupersync.atp.rq.directory-metadata.v1\0");
+        hasher.update((directory_pairs.len() as u64).to_be_bytes());
+        match metadata_commitment(&directory_pairs) {
+            Some(commitment) => {
+                hasher.update([1]);
+                hasher.update(commitment.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+    hex_encode(&hasher.finalize())
+}
+
+fn metadata_manifest_from_source_entries(
+    entries: &[RqSourceEntry],
+    directories: DirectoryMetadataManifest,
+) -> RqMetadataManifest {
+    let pairs = entries
+        .iter()
+        .map(|entry| (entry.rel_path.as_str(), &entry.metadata))
+        .collect::<Vec<_>>();
+    let directories = (!directories.is_empty()).then_some(directories);
+    let commitment_hex = rq_metadata_commitment_with_directories(&pairs, directories.as_ref());
+    let entries = entries
+        .iter()
+        .filter(|entry| !entry.metadata.is_bare())
+        .map(|entry| RqMetadataEntry {
+            rel_path: entry.rel_path.clone(),
+            metadata: entry.metadata.clone(),
+        })
+        .collect();
+    RqMetadataManifest {
+        version: RQ_METADATA_MANIFEST_VERSION,
+        commitment_hex,
+        entries,
+        directories,
+    }
+}
+
 /// Validate that `root` can be represented losslessly by the RQ wire format.
 ///
-/// RQ currently transfers regular-file trees only. It fails closed for
-/// symlinks/reparse points and nested empty directories instead of silently
-/// following or dropping them.
+/// RQ transfers regular files plus metadata for their non-empty directory
+/// tree. It fails closed for symlinks/reparse points and nested empty
+/// directories instead of silently following or dropping them.
 pub async fn validate_source_compatibility(root: &Path) -> Result<(), RqError> {
-    collect_entries(root).await.map(|_| ())
+    validate_source_compatibility_with_config(root, &RqConfig::default()).await
+}
+
+/// Validate RQ source topology and metadata with the exact real-send config.
+///
+/// Dry-run callers should use this form so requested hardlink preservation and
+/// metadata capture fail at the same point as [`send_path`], before network I/O.
+pub async fn validate_source_compatibility_with_config(
+    root: &Path,
+    config: &RqConfig,
+) -> Result<(), RqError> {
+    source_metadata_manifest_with_config(root, config)
+        .await
+        .map(|_| ())
+}
+
+/// Capture the exact versioned metadata block for a bonded RQ descriptor.
+///
+/// This performs the same topology, metadata-policy, and hardlink-fidelity
+/// checks as a real RQ send before returning the mandatory protocol-v4
+/// commitment.
+pub async fn source_metadata_manifest_with_config(
+    root: &Path,
+    config: &RqConfig,
+) -> Result<RqMetadataManifest, RqError> {
+    let (_, is_directory, mut entries) = collect_entries(root).await?;
+    capture_source_metadata(
+        &mut entries,
+        &config.metadata_policy,
+        config.preserve_hardlinks,
+    )
+    .await?;
+    let directories = if is_directory {
+        capture_directory_metadata_manifest(root, &config.metadata_policy)
+            .await
+            .map_err(|error| RqError::Source(error.into_message()))?
+    } else {
+        DirectoryMetadataManifest::default()
+    };
+    Ok(metadata_manifest_from_source_entries(&entries, directories))
 }
 
 fn collect_dir<'a>(
@@ -3848,6 +4081,7 @@ fn collect_dir<'a>(
                 out.push(RqSourceEntry {
                     rel_path: rel,
                     abs_path: path,
+                    metadata: EntryMetadata::default(),
                     source_offset: 0,
                     source_len: None,
                     members: Vec::new(),
@@ -4081,6 +4315,7 @@ async fn pack_small_files_with_deferred_singleton_digests(
         new_entries.push(RqSourceEntry {
             rel_path: format!(".atp-pack-{pack_idx}"),
             abs_path: pack_path,
+            metadata: EntryMetadata::default(),
             source_offset: 0,
             source_len: None,
             members,
@@ -4205,6 +4440,7 @@ async fn split_large_entries_with_digest_mode(
             out.push(RqSourceEntry {
                 rel_path: object_rel_path,
                 abs_path: entry.abs_path.clone(),
+                metadata: entry.metadata.clone(),
                 source_offset: shard.logical_offset,
                 source_len: Some(shard.len),
                 members: Vec::new(),
@@ -4241,6 +4477,258 @@ fn safe_base_for_root_name(dest_dir: &Path, root_name: &str) -> Result<PathBuf, 
     Ok(dest_dir.join(root_name))
 }
 
+fn validate_rq_metadata_value(
+    rel_path: &str,
+    metadata: &EntryMetadata,
+    expected_kind: crate::net::atp::transport_common::FileKind,
+    config: &RqConfig,
+) -> Result<(), RqError> {
+    if metadata.file_kind != expected_kind || metadata.hardlink_target.is_some() {
+        return Err(RqError::Frame(format!(
+            "metadata manifest entry {rel_path} is not a plain {expected_kind:?}"
+        )));
+    }
+    validate_entry_metadata_for_receive(rel_path, metadata, &config.metadata_policy).map_err(
+        |error| {
+            RqError::Frame(format!(
+                "metadata manifest entry {rel_path} is denied: {error}"
+            ))
+        },
+    )
+}
+
+fn rq_directory_metadata_has_fidelity_fields(metadata: &EntryMetadata) -> bool {
+    metadata.unix_mode.is_some()
+        || metadata.mtime_unix_secs.is_some()
+        || metadata.mtime_nanos.is_some()
+        || metadata.uid.is_some()
+        || metadata.gid.is_some()
+        || metadata.windows_attributes.is_some()
+        || !metadata.xattrs.is_empty()
+}
+
+fn implicit_directory_paths(logical_paths: &BTreeSet<&str>) -> BTreeMap<String, String> {
+    let mut directories = BTreeMap::new();
+    for logical_path in logical_paths {
+        let components = logical_path.split('/').collect::<Vec<_>>();
+        let mut current = String::new();
+        for component in components.iter().take(components.len().saturating_sub(1)) {
+            if !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(component);
+            directories.insert(portable_path_collision_key(&current), current.clone());
+        }
+    }
+    directories
+}
+
+fn validate_directory_metadata_manifest(
+    directories: &DirectoryMetadataManifest,
+    logical_paths: &BTreeSet<&str>,
+    is_directory: bool,
+    config: &RqConfig,
+) -> Result<(), RqError> {
+    if !is_directory && !directories.is_empty() {
+        return Err(RqError::Frame(
+            "single-file RQ manifest declares directory metadata".to_string(),
+        ));
+    }
+    let expected = implicit_directory_paths(logical_paths);
+    if directories.entries.len() > expected.len() {
+        return Err(RqError::Frame(format!(
+            "directory metadata declares {} entries for {} implicit directories",
+            directories.entries.len(),
+            expected.len()
+        )));
+    }
+    if let Some(root) = &directories.root {
+        if !rq_directory_metadata_has_fidelity_fields(root) {
+            return Err(RqError::Frame(
+                "directory metadata root carries no fidelity fields and must be omitted"
+                    .to_string(),
+            ));
+        }
+        validate_rq_metadata_value(
+            ".",
+            root,
+            crate::net::atp::transport_common::FileKind::Directory,
+            config,
+        )?;
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut previous_rel_path: Option<&str> = None;
+    for entry in &directories.entries {
+        validate_manifest_rel_path(&entry.rel_path)?;
+        if previous_rel_path.is_some_and(|previous| previous >= entry.rel_path.as_str()) {
+            return Err(RqError::Frame(format!(
+                "directory metadata entries are not strictly lexicographically increasing at {}",
+                entry.rel_path
+            )));
+        }
+        previous_rel_path = Some(&entry.rel_path);
+        let key = portable_path_collision_key(&entry.rel_path);
+        let Some(expected_path) = expected.get(&key) else {
+            return Err(RqError::Frame(format!(
+                "directory metadata entry {} is not an implicit non-empty directory",
+                entry.rel_path
+            )));
+        };
+        if *expected_path != entry.rel_path {
+            return Err(RqError::Frame(format!(
+                "directory metadata path {} aliases implicit directory {expected_path}",
+                entry.rel_path
+            )));
+        }
+        if !seen.insert(key) {
+            return Err(RqError::Frame(format!(
+                "duplicate directory metadata path (including case collision): {}",
+                entry.rel_path
+            )));
+        }
+        if !rq_directory_metadata_has_fidelity_fields(&entry.metadata) {
+            return Err(RqError::Frame(format!(
+                "directory metadata entry {} carries no fidelity fields and must be omitted",
+                entry.rel_path
+            )));
+        }
+        validate_rq_metadata_value(
+            &entry.rel_path,
+            &entry.metadata,
+            crate::net::atp::transport_common::FileKind::Directory,
+            config,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_metadata_manifest(
+    metadata_manifest: Option<&RqMetadataManifest>,
+    logical_paths: &BTreeSet<&str>,
+    is_directory: bool,
+    config: &RqConfig,
+) -> Result<(), RqError> {
+    let Some(metadata_manifest) = metadata_manifest else {
+        return Err(RqError::Frame(
+            "protocol-v4 manifest is missing its metadata commitment".to_string(),
+        ));
+    };
+    if metadata_manifest.version != RQ_METADATA_MANIFEST_VERSION {
+        return Err(RqError::Frame(format!(
+            "unsupported RQ metadata manifest version {} (expected {RQ_METADATA_MANIFEST_VERSION})",
+            metadata_manifest.version
+        )));
+    }
+    validate_manifest_sha256_hex(
+        "manifest metadata commitment",
+        &metadata_manifest.commitment_hex,
+    )?;
+    if metadata_manifest
+        .directories
+        .as_ref()
+        .is_some_and(DirectoryMetadataManifest::is_empty)
+    {
+        return Err(RqError::Frame(
+            "directory metadata block is present but empty".to_string(),
+        ));
+    }
+    let directory_records = metadata_manifest
+        .directories
+        .as_ref()
+        .map_or(0, |directories| {
+            directories
+                .entries
+                .len()
+                .saturating_add(usize::from(directories.root.is_some()))
+        });
+    let metadata_records = metadata_manifest
+        .entries
+        .len()
+        .saturating_add(directory_records);
+    if metadata_records > MAX_MANIFEST_ENTRIES {
+        return Err(RqError::Frame(format!(
+            "metadata manifest declares {metadata_records} records (max {MAX_MANIFEST_ENTRIES})"
+        )));
+    }
+    if metadata_manifest.entries.len() > logical_paths.len() {
+        return Err(RqError::Frame(format!(
+            "metadata manifest declares {} entries for {} logical files",
+            metadata_manifest.entries.len(),
+            logical_paths.len()
+        )));
+    }
+
+    let logical_by_key = logical_paths
+        .iter()
+        .map(|path| (portable_path_collision_key(path), *path))
+        .collect::<BTreeMap<_, _>>();
+    let mut metadata_by_key = BTreeMap::<String, (&str, &EntryMetadata)>::new();
+    for entry in &metadata_manifest.entries {
+        validate_manifest_rel_path(&entry.rel_path)?;
+        if entry.metadata.is_bare() {
+            return Err(RqError::Frame(format!(
+                "metadata manifest entry {} is bare and must be omitted",
+                entry.rel_path
+            )));
+        }
+        let key = portable_path_collision_key(&entry.rel_path);
+        let Some(expected_path) = logical_by_key.get(&key) else {
+            return Err(RqError::Frame(format!(
+                "metadata manifest entry {} has no logical file",
+                entry.rel_path
+            )));
+        };
+        if *expected_path != entry.rel_path {
+            return Err(RqError::Frame(format!(
+                "metadata manifest path {} aliases logical path {expected_path}",
+                entry.rel_path
+            )));
+        }
+        if metadata_by_key
+            .insert(key, (entry.rel_path.as_str(), &entry.metadata))
+            .is_some()
+        {
+            return Err(RqError::Frame(format!(
+                "duplicate metadata manifest path (including case collision): {}",
+                entry.rel_path
+            )));
+        }
+        validate_rq_metadata_value(
+            &entry.rel_path,
+            &entry.metadata,
+            crate::net::atp::transport_common::FileKind::Regular,
+            config,
+        )?;
+    }
+
+    if let Some(directories) = &metadata_manifest.directories {
+        validate_directory_metadata_manifest(directories, logical_paths, is_directory, config)?;
+    }
+
+    let bare_metadata = EntryMetadata::default();
+    let canonical_refs = logical_paths
+        .iter()
+        .map(|path| {
+            let key = portable_path_collision_key(path);
+            let metadata = metadata_by_key
+                .get(&key)
+                .map_or(&bare_metadata, |(_, metadata)| *metadata);
+            (*path, metadata)
+        })
+        .collect::<Vec<_>>();
+    if rq_metadata_commitment_with_directories(
+        &canonical_refs,
+        metadata_manifest.directories.as_ref(),
+    ) != metadata_manifest.commitment_hex
+    {
+        return Err(RqError::Frame(
+            "manifest metadata commitment mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate an incoming transfer manifest before allocating per-entry decoders.
 ///
 /// The manifest is fully controlled by the peer. `total_bytes` alone is not a
@@ -4273,6 +4761,31 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
         return Err(RqError::Frame(format!(
             "manifest declares {} entries (max {MAX_MANIFEST_ENTRIES})",
             manifest.entries.len()
+        )));
+    }
+    let content_records = manifest.entries.iter().try_fold(0usize, |count, entry| {
+        count
+            .checked_add(if entry.members.is_empty() {
+                1
+            } else {
+                entry.members.len()
+            })
+            .ok_or_else(|| RqError::Frame("manifest content record count overflows".to_string()))
+    })?;
+    let directory_records = manifest
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.directories.as_ref())
+        .map_or(0, |directories| {
+            directories
+                .entries
+                .len()
+                .saturating_add(usize::from(directories.root.is_some()))
+        });
+    let combined_records = content_records.saturating_add(directory_records);
+    if combined_records > MAX_MANIFEST_ENTRIES {
+        return Err(RqError::Frame(format!(
+            "manifest declares {combined_records} combined content and directory records (max {MAX_MANIFEST_ENTRIES})"
         )));
     }
     let single_file_fragmented = !manifest.is_directory
@@ -4507,8 +5020,14 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
             committed_paths.extend(entry.members.iter().map(|member| member.rel_path.as_str()));
         }
     }
-    validate_portable_path_set(committed_paths)
+    validate_portable_path_set(committed_paths.iter().copied())
         .map_err(|error| RqError::Frame(format!("unsafe manifest path tree: {error}")))?;
+    validate_metadata_manifest(
+        manifest.metadata.as_ref(),
+        &committed_paths,
+        manifest.is_directory,
+        config,
+    )?;
     Ok(())
 }
 
@@ -5340,6 +5859,61 @@ fn decoder_position_for_entry(decoders: &[EntryDecoder], entry: u32) -> Option<u
     decoders.iter().position(|decoder| decoder.index == entry)
 }
 
+/// Build the RaptorQ decode state for one UDP-fed manifest entry.
+///
+/// Shared by the single-source receive path (`receive_connection`) and the
+/// bonded N-donor receive path (`receive_bonded`) so both configure the
+/// per-entry [`DecodingPipeline`] identically — the z01bbr.8.5 invariant is
+/// that a one-donor bonded receive is isomorphic to today's receive path.
+#[allow(clippy::too_many_arguments)]
+fn new_udp_entry_decode_state(
+    e: &ManifestEntry,
+    object_id: ObjectId,
+    symbol_size: u16,
+    receiver_max_block_size: usize,
+    wire_max_block_size: u64,
+    config: &RqConfig,
+    symbol_auth: Option<&SecurityContext>,
+    source_streaming: bool,
+) -> (Option<DecodingPipeline>, bool, Vec<SourceBlockProgress>) {
+    let dconfig = DecodingConfig {
+        symbol_size,
+        max_block_size: receiver_max_block_size,
+        repair_overhead: config.repair_overhead,
+        min_overhead: 0,
+        // RQ repair rows are round-critical: dropping an undecoded
+        // block's repair symbols makes the sender re-spray another
+        // round. Keep them until block completion; mark_block_complete
+        // clears the block immediately after decode.
+        max_buffered_symbols: RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK,
+        block_timeout: std::time::Duration::from_secs(0),
+        verify_auth: symbol_auth.is_some(),
+    };
+    let mut pipeline = if let Some(context) = symbol_auth {
+        DecodingPipeline::with_auth(dconfig, context.clone())
+    } else {
+        DecodingPipeline::new(dconfig)
+    };
+    let params = object_params_for(object_id, e.size, symbol_size, wire_max_block_size);
+    // set_object_params failure is a metadata bug, surfaced on first feed.
+    if let Err(err) = pipeline.set_object_params(params) {
+        rqtrace!(
+            "receiver: entry {} set_object_params FAILED: {err:?} (size={}, blocks={}, k={})",
+            e.index,
+            e.size,
+            params.source_blocks,
+            params.symbols_per_block
+        );
+    }
+    let source_blocks = source_block_progress_for(e.size, receiver_max_block_size, symbol_size);
+    let entry_source_streaming = source_streaming && source_blocks.is_some();
+    (
+        Some(pipeline),
+        entry_source_streaming,
+        source_blocks.unwrap_or_default(),
+    )
+}
+
 #[cfg(test)]
 fn should_parallel_decode_entry_geometry(
     entry_size: u64,
@@ -5595,17 +6169,28 @@ struct SourceBlockProgress {
 /// transport's staging guard.
 struct RqStagingDirGuard {
     dir: PathBuf,
+    armed: bool,
 }
 
 impl RqStagingDirGuard {
     fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self { dir, armed: true }
+    }
+
+    fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
 impl Drop for RqStagingDirGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -5628,7 +6213,20 @@ pub async fn send_path(
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
-    let (root_name, is_directory, raw_entries) = collect_entries(source).await?;
+    let (root_name, is_directory, mut raw_entries) = collect_entries(source).await?;
+    capture_source_metadata(
+        &mut raw_entries,
+        &config.metadata_policy,
+        config.preserve_hardlinks,
+    )
+    .await?;
+    let directory_metadata = if is_directory {
+        capture_directory_metadata_manifest(source, &config.metadata_policy)
+            .await
+            .map_err(|error| RqError::Source(error.into_message()))?
+    } else {
+        DirectoryMetadataManifest::default()
+    };
     let preflight_total_bytes = source_entries_total_bytes(&raw_entries).await?;
     if preflight_total_bytes > config.max_transfer_bytes {
         return Err(RqError::TooLarge {
@@ -5689,6 +6287,7 @@ pub async fn send_path(
             root_name,
             is_directory,
             raw_entries,
+            directory_metadata.clone(),
             &config,
             preflight_total_bytes,
         )
@@ -5793,6 +6392,7 @@ pub async fn send_path(
     // no-packing case `entries == raw_entries` and `logical_digests` equals the
     // per-file digests, so everything is byte-identical to a prior transfer. The
     // temp dir owns every pack temp file and must outlive the spray loop below.
+    let metadata = metadata_manifest_from_source_entries(&raw_entries, directory_metadata);
     let (packed_entries, logical_digests, _pack_tempdir) =
         pack_small_files(raw_entries, &config).await?;
     let entries = split_large_entries(packed_entries, &logical_digests, &config).await?;
@@ -5860,6 +6460,7 @@ pub async fn send_path(
         is_directory,
         total_bytes,
         merkle_root_hex: merkle_root_hex.clone(),
+        metadata: Some(metadata),
         entries: manifest_entries,
     };
     let prefer_control_source_stream = control_source_stream_eligible(total_bytes, &config);
@@ -7331,9 +7932,11 @@ async fn prepare_control_source_transfer(
     root_name: String,
     is_directory: bool,
     raw_entries: Vec<RqSourceEntry>,
+    directory_metadata: DirectoryMetadataManifest,
     config: &RqConfig,
     expected_total_bytes: u64,
 ) -> Result<ControlSourcePreparedTransfer, RqError> {
+    let metadata = metadata_manifest_from_source_entries(&raw_entries, directory_metadata);
     let (packed_entries, precomputed_logical_digests, pack_tempdir) =
         pack_small_files_with_deferred_singleton_digests(raw_entries, config, true).await?;
     let entries = split_large_entries_with_digest_mode(
@@ -7384,6 +7987,7 @@ async fn prepare_control_source_transfer(
         is_directory,
         total_bytes,
         merkle_root_hex: sha256_hex_placeholder(),
+        metadata: Some(metadata),
         entries: manifest_entries,
     };
 
@@ -7964,8 +8568,8 @@ pub async fn receive_connection(
             hello.max_block_size
         ))
     })?;
-    let staging_dir = create_receive_staging_dir(dest_dir, &manifest.transfer_id).await?;
-    let _staging_guard = RqStagingDirGuard::new(staging_dir.clone());
+    let mut staging_guard = create_receive_staging_guard(dest_dir, &manifest.transfer_id).await?;
+    let staging_dir = staging_guard.dir().to_path_buf();
     let single_file_fragment_staging = single_file_fragment_staging_path(&manifest, &staging_dir);
     let source_streaming = config.repair_overhead <= 1.0 && config.source_retransmit_rounds > 0;
 
@@ -7975,56 +8579,24 @@ pub async fn receive_connection(
         .iter()
         .map(|e| {
             let object_id = entry_object_id(&manifest.transfer_id, e.index);
-            let (
-                staging_path,
-                staging_write_offset,
-                staging_file_len,
-                staging_shared,
-            ) = receive_staging_layout_for_entry(
-                e,
-                &staging_dir,
-                single_file_fragment_staging.as_deref(),
-            );
+            let (staging_path, staging_write_offset, staging_file_len, staging_shared) =
+                receive_staging_layout_for_entry(
+                    e,
+                    &staging_dir,
+                    single_file_fragment_staging.as_deref(),
+                );
             let (pipeline, entry_source_streaming, source_blocks) = if control_source_stream {
                 (None, false, Vec::new())
             } else {
-                let dconfig = DecodingConfig {
+                new_udp_entry_decode_state(
+                    e,
+                    object_id,
                     symbol_size,
-                    max_block_size: receiver_max_block_size,
-                    repair_overhead: config.repair_overhead,
-                    min_overhead: 0,
-                    // RQ repair rows are round-critical: dropping an undecoded
-                    // block's repair symbols makes the sender re-spray another
-                    // round. Keep them until block completion; mark_block_complete
-                    // clears the block immediately after decode.
-                    max_buffered_symbols: RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK,
-                    block_timeout: std::time::Duration::from_secs(0),
-                    verify_auth: symbol_auth_enabled,
-                };
-                let mut pipeline = if let Some(context) = &symbol_auth {
-                    DecodingPipeline::with_auth(dconfig, context.clone())
-                } else {
-                    DecodingPipeline::new(dconfig)
-                };
-                let params =
-                    object_params_for(object_id, e.size, symbol_size, hello.max_block_size);
-                // set_object_params failure is a metadata bug, surfaced on first feed.
-                if let Err(err) = pipeline.set_object_params(params) {
-                    rqtrace!(
-                        "receiver: entry {} set_object_params FAILED: {err:?} (size={}, blocks={}, k={})",
-                        e.index,
-                        e.size,
-                        params.source_blocks,
-                        params.symbols_per_block
-                    );
-                }
-                let source_blocks =
-                    source_block_progress_for(e.size, receiver_max_block_size, symbol_size);
-                let entry_source_streaming = source_streaming && source_blocks.is_some();
-                (
-                    Some(pipeline),
-                    entry_source_streaming,
-                    source_blocks.unwrap_or_default(),
+                    receiver_max_block_size,
+                    hello.max_block_size,
+                    &config,
+                    symbol_auth.as_ref(),
+                    source_streaming,
                 )
             };
             EntryDecoder {
@@ -8065,8 +8637,9 @@ pub async fn receive_connection(
         })
         .collect();
 
-    if control_source_stream {
-        return receive_control_source_stream(
+    let receive_result: Result<ReceiveReport, RqError> = async {
+        if control_source_stream {
+            return receive_control_source_stream(
             cx,
             &mut control,
             &manifest,
@@ -8075,10 +8648,10 @@ pub async fn receive_connection(
             dest_dir,
             peer,
         )
-        .await;
-    }
+            .await;
+        }
 
-    let mut udp = udp.expect("UDP receiver is bound for non-control-source transfers");
+        let mut udp = udp.expect("UDP receiver is bound for non-control-source transfers");
     let tag = transfer_tag(&manifest.transfer_id);
     let mut symbols_accepted: u64 = 0;
     let mut round_stats = RqDatagramRoundStats::default();
@@ -8434,6 +9007,20 @@ pub async fn receive_connection(
             }
         }
     }
+    }
+    .await;
+
+    // Close every cached staging handle before cooperative removal. The armed
+    // guard remains a cancellation/error backstop if Windows AV or sharing
+    // contention still makes this explicit cleanup fail.
+    drop(decoders);
+    match crate::fs::remove_dir_all(&staging_dir).await {
+        Ok(()) => staging_guard.disarm(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => staging_guard.disarm(),
+        Err(error) if receive_result.is_ok() => return Err(RqError::Io(error)),
+        Err(_) => {}
+    }
+    receive_result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9852,29 +10439,46 @@ async fn write_entry_staging_range_unbuffered(
     Ok(())
 }
 
-async fn create_receive_staging_dir(
+async fn create_receive_staging_guard(
     dest_dir: &Path,
     transfer_id: &str,
-) -> Result<PathBuf, RqError> {
+) -> Result<RqStagingDirGuard, RqError> {
     reject_rq_destination_ancestors(dest_dir).await?;
     crate::fs::create_dir_all(dest_dir).await?;
     reject_rq_destination_ancestors(dest_dir).await?;
-    for _ in 0..RQ_STAGING_CREATE_ATTEMPTS {
-        let staging_seq = RQ_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
-        let staging_nonce = OsEntropy.next_u64();
-        let staging_dir = dest_dir.join(format!(
-            ".atp-rq-staging-{transfer_id}-{staging_nonce:016x}-{staging_seq}"
-        ));
-        match crate::fs::create_dir(&staging_dir).await {
-            Ok(()) => return Ok(staging_dir),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(err) => return Err(RqError::Io(err)),
+    let dest_dir = dest_dir.to_path_buf();
+    let transfer_id = transfer_id.to_string();
+    let guard = crate::runtime::spawn_blocking_io(move || {
+        for _ in 0..RQ_STAGING_CREATE_ATTEMPTS {
+            let staging_seq = RQ_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+            let staging_nonce = OsEntropy.next_u64();
+            let staging_dir = dest_dir.join(format!(
+                ".atp-rq-staging-{transfer_id}-{staging_nonce:016x}-{staging_seq}"
+            ));
+            match std::fs::create_dir(&staging_dir) {
+                Ok(()) => return Ok(RqStagingDirGuard::new(staging_dir)),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
         }
-    }
 
-    Err(RqError::Frame(format!(
-        "unable to create unique receiver staging directory for transfer {transfer_id}"
-    )))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "unable to create unique receiver staging directory for transfer {transfer_id}"
+            ),
+        ))
+    })
+    .await
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            RqError::Frame(error.to_string())
+        } else {
+            RqError::Io(error)
+        }
+    })?;
+    reject_rq_destination_ancestors(guard.dir()).await?;
+    Ok(guard)
 }
 
 async fn reject_rq_destination_ancestors(path: &Path) -> Result<(), RqError> {
@@ -9894,13 +10498,9 @@ async fn reject_rq_destination_ancestors(path: &Path) -> Result<(), RqError> {
     Ok(())
 }
 
-// Reference full-check variant of the receiver symlink-prefix guard. All hot call
-// sites now use `reject_destination_symlink_prefix_cached` (same fail-closed
-// guarantee, per-prefix `lstat` caching), leaving this uncached form with no live
-// caller. Kept as the canonical, cache-free reference implementation of the guard;
-// per-fn `#[allow(dead_code)]` (asupersync convention) so `#![deny(dead_code)]`
-// stays green without removing the primitive.
-#[allow(dead_code)]
+// Full, uncached destination check used immediately before filesystem mutation.
+// The earlier cached planning pass is only an optimization and cannot authorize
+// a later write because another process may replace a previously missing prefix.
 async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Result<(), RqError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         RqError::Source(format!(
@@ -9910,29 +10510,21 @@ async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Resu
         ))
     })?;
 
-    let mut current = base.to_path_buf();
-    reject_existing_symlink(&current).await?;
     for component in rel.components() {
-        let Component::Normal(component) = component else {
+        let Component::Normal(_) = component else {
             return Err(RqError::Source(format!(
                 "unsafe destination component in {}",
                 out_path.display()
             )));
         };
-        current.push(component);
-        reject_existing_symlink(&current).await?;
     }
-    Ok(())
+    reject_rq_destination_ancestors(out_path).await
 }
 
-/// Like [`reject_destination_symlink_prefix`] but skips path prefixes already proven non-symlink
-/// in `verified`. During a single commit the receiver is the sole writer, so a prefix verified
-/// non-symlink stays non-symlink; caching the per-component `lstat` across many files that share
-/// parent directories turns O(files × depth) syscalls into O(unique prefixes). This is the
-/// dominant receiver cost for many-small-file trees (tree_small `symlink_guard_micros`).
-/// The per-component `Normal`-component safety check still runs for every path (it is a pure,
-/// syscall-free check); only the redundant `lstat` of an already-verified prefix is elided, so
-/// the fail-closed guarantee (any crossed symlink → error) is unchanged.
+/// Planning-time variant that skips path prefixes already inspected in
+/// `verified`. This catches ordinary conflicts cheaply across many files, but it
+/// is not write authorization: every mutation repeats
+/// [`reject_destination_symlink_prefix`] uncached immediately beforehand.
 async fn reject_destination_symlink_prefix_cached(
     base: &Path,
     out_path: &Path,
@@ -10079,7 +10671,166 @@ struct LargeObjectCommitShard {
 struct PackedMemberWrite {
     offset: u64,
     len: u64,
+    write_path: PathBuf,
     out_path: PathBuf,
+    metadata: EntryMetadata,
+}
+
+/// Own every file a packed-member writer can leave behind.
+///
+/// The one-shot path runs in the blocking pool and can outlive a cancelled
+/// receiver future. Keeping this guard inside that task until its result is
+/// claimed ensures a dropped task result removes both the derived members and
+/// their no-longer-needed packed source before the outer directory guard races
+/// with them.
+struct PackedMemberStagingGuard {
+    paths: Vec<PathBuf>,
+    parents: Vec<PathBuf>,
+}
+
+impl PackedMemberStagingGuard {
+    fn new(pack_staging_path: &Path, members: &[PackedMemberWrite]) -> Self {
+        let mut paths = members
+            .iter()
+            .map(|member| member.write_path.clone())
+            .collect::<Vec<_>>();
+        paths.push(pack_staging_path.to_path_buf());
+
+        let mut parents = paths
+            .iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        parents.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        Self { paths, parents }
+    }
+}
+
+impl Drop for PackedMemberStagingGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+        for parent in &self.parents {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
+fn packed_member_staging_path(pack_staging_path: &Path, member_index: usize) -> PathBuf {
+    let mut file_name = pack_staging_path.file_name().map_or_else(
+        || std::ffi::OsString::from("rq-pack"),
+        std::ffi::OsString::from,
+    );
+    file_name.push(format!(".member-{member_index}.staged"));
+    pack_staging_path.with_file_name(file_name)
+}
+
+async fn apply_rq_entry_metadata(
+    out_path: &Path,
+    metadata: &EntryMetadata,
+) -> Result<MetadataApplyReport, RqError> {
+    if metadata.is_bare() {
+        return Ok(MetadataApplyReport::default());
+    }
+    let report = apply_entry_metadata(out_path, metadata)
+        .await
+        .map_err(|error| RqError::Source(error.into_message()))?;
+    for (field, reason) in &report.skipped {
+        rqtrace!(
+            "receiver: metadata field {field} skipped for {}: {reason}",
+            out_path.display()
+        );
+    }
+    for (required, field) in [
+        (cfg!(unix) && metadata.unix_mode.is_some(), "mode"),
+        (
+            cfg!(any(unix, windows)) && metadata.mtime_unix_secs.is_some(),
+            "mtime",
+        ),
+        (
+            cfg!(windows) && metadata.windows_attributes.is_some(),
+            "windows_attributes",
+        ),
+    ] {
+        if required && !report.applied.contains(&field) {
+            let reason = report
+                .skipped
+                .iter()
+                .find_map(|(skipped, reason)| (*skipped == field).then_some(reason.as_str()))
+                .unwrap_or("metadata field was not applied");
+            return Err(RqError::Source(format!(
+                "{}: required metadata field {field} was not preserved: {reason}",
+                out_path.display()
+            )));
+        }
+    }
+    Ok(report)
+}
+
+fn split_rq_metadata_for_commit(
+    metadata: &EntryMetadata,
+) -> (EntryMetadata, Option<EntryMetadata>) {
+    let before_commit = metadata.clone();
+    #[cfg(windows)]
+    {
+        const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+        if let Some(attributes) = metadata
+            .windows_attributes
+            .filter(|attributes| attributes & FILE_ATTRIBUTE_READONLY != 0)
+        {
+            let mut before_commit = before_commit;
+            before_commit.windows_attributes = Some(attributes & !FILE_ATTRIBUTE_READONLY);
+            // SetFileAttributesW replaces the complete attribute word, so the
+            // post-commit record carries that word even though READONLY is the
+            // only field intentionally deferred.
+            let after_commit = EntryMetadata {
+                windows_attributes: Some(attributes),
+                ..EntryMetadata::default()
+            };
+            return (before_commit, Some(after_commit));
+        }
+    }
+    (before_commit, None)
+}
+
+async fn prepare_rq_entry_metadata_for_commit(
+    staging_path: &Path,
+    metadata: &EntryMetadata,
+) -> Result<Option<EntryMetadata>, RqError> {
+    let (before_commit, after_commit) = split_rq_metadata_for_commit(metadata);
+    apply_rq_entry_metadata(staging_path, &before_commit).await?;
+    Ok(after_commit)
+}
+
+async fn apply_rq_directory_metadata(
+    base: &Path,
+    directories: &DirectoryMetadataManifest,
+) -> Result<(), RqError> {
+    let mut entries: Vec<&DirectoryMetadataEntry> = directories.entries.iter().collect();
+    entries.sort_by(|left, right| {
+        right
+            .rel_path
+            .split('/')
+            .count()
+            .cmp(&left.rel_path.split('/').count())
+            .then_with(|| left.rel_path.cmp(&right.rel_path))
+    });
+    for entry in entries {
+        let out_path = join_relative(base, &entry.rel_path)?;
+        reject_destination_symlink_prefix(base, &out_path).await?;
+        crate::fs::create_dir_all(&out_path).await?;
+        reject_destination_symlink_prefix(base, &out_path).await?;
+        apply_rq_entry_metadata(&out_path, &entry.metadata).await?;
+    }
+    if let Some(root) = &directories.root {
+        reject_destination_symlink_prefix(base, base).await?;
+        crate::fs::create_dir_all(base).await?;
+        reject_destination_symlink_prefix(base, base).await?;
+        apply_rq_entry_metadata(base, root).await?;
+    }
+    Ok(())
 }
 
 async fn hash_packed_members_streaming(
@@ -10164,17 +10915,19 @@ fn write_packed_member_batch_oneshot(
     members: Vec<PackedMemberWrite>,
     span_start: u64,
     span_len: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<PackedMemberStagingGuard> {
     use std::io::{Read, Seek};
 
+    let staging_guard = PackedMemberStagingGuard::new(&staging_path, &members);
     let mut staged = vec![0u8; span_len];
     let mut source = std::fs::File::open(&staging_path)?;
     source.seek(std::io::SeekFrom::Start(span_start))?;
     source.read_exact(&mut staged)?;
+    drop(source);
 
     let mut created_parents: BTreeSet<PathBuf> = BTreeSet::new();
     for member in &members {
-        if let Some(parent) = member.out_path.parent()
+        if let Some(parent) = member.write_path.parent()
             && created_parents.insert(parent.to_path_buf())
         {
             std::fs::create_dir_all(parent)?;
@@ -10187,16 +10940,16 @@ fn write_packed_member_batch_oneshot(
             .checked_add(len)
             .filter(|end| *end <= staged.len())
             .ok_or_else(|| std::io::Error::other("packed member range exceeds staged span"))?;
-        std::fs::write(&member.out_path, &staged[start..end])?;
+        std::fs::write(&member.write_path, &staged[start..end])?;
     }
-    Ok(())
+    Ok(staging_guard)
 }
 
 async fn write_packed_member_batch(
     staging_path: &Path,
     members: &[PackedMemberWrite],
     buf: &mut [u8],
-) -> Result<(), RqError> {
+) -> Result<PackedMemberStagingGuard, RqError> {
     let span_start = members.iter().map(|member| member.offset).min();
     let span_end = members
         .iter()
@@ -10217,9 +10970,10 @@ async fn write_packed_member_batch(
         .map_err(|e| RqError::Source(format!("{staging_display}: {e}")));
     }
 
+    let staging_guard = PackedMemberStagingGuard::new(staging_path, members);
     let mut created_parents: BTreeSet<PathBuf> = BTreeSet::new();
     for member in members {
-        if let Some(parent) = member.out_path.parent()
+        if let Some(parent) = member.write_path.parent()
             && created_parents.insert(parent.to_path_buf())
         {
             crate::fs::create_dir_all(parent).await?;
@@ -10244,7 +10998,7 @@ async fn write_packed_member_batch(
             cursor = member.offset;
         }
 
-        let mut out = crate::fs::File::create(&member.out_path).await?;
+        let mut out = crate::fs::File::create(&member.write_path).await?;
         let mut remaining = member.len;
         while remaining > 0 {
             let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
@@ -10267,7 +11021,7 @@ async fn write_packed_member_batch(
         cursor = next_cursor;
     }
 
-    Ok(())
+    Ok(staging_guard)
 }
 
 async fn hash_large_object_fragments(
@@ -10361,18 +11115,19 @@ fn contiguous_fragment_staging_path(shards: &[LargeObjectCommitShard]) -> Option
     all_contiguous_shared.then(|| staging_path.clone())
 }
 
-fn is_cross_device_rename_error(err: &std::io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        const EXDEV_RAW_OS_ERROR: i32 = 18;
-        err.raw_os_error() == Some(EXDEV_RAW_OS_ERROR)
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = err;
-        false
-    }
+fn assembled_fragment_staging_path(
+    shards: &[LargeObjectCommitShard],
+    commit_index: usize,
+) -> Result<PathBuf, RqError> {
+    let first = shards
+        .first()
+        .ok_or_else(|| RqError::Coding("fragment commit has no shards".to_string()))?;
+    let mut file_name = first.staging_path.file_name().map_or_else(
+        || std::ffi::OsString::from("rq-fragment"),
+        std::ffi::OsString::from,
+    );
+    file_name.push(format!(".assembled-{commit_index}.staged"));
+    Ok(first.staging_path.with_file_name(file_name))
 }
 
 async fn remove_failed_fragment_staging_file(path: &Path) -> Result<(), RqError> {
@@ -10409,6 +11164,17 @@ async fn verify_and_commit(
     let mut commit_plan_micros = 0u64;
     let mut symlink_guard_micros = 0u64;
     let mut commit_write_micros = 0u64;
+    let metadata_by_path = manifest
+        .metadata
+        .as_ref()
+        .map(|metadata| {
+            metadata
+                .entries
+                .iter()
+                .map(|entry| (entry.rel_path.as_str(), &entry.metadata))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
 
     for d in decoders.iter_mut() {
         let close_started = trace_commit.then(Instant::now);
@@ -10433,6 +11199,7 @@ async fn verify_and_commit(
         Rename {
             rel_path: String,
             staging_path: PathBuf,
+            metadata: EntryMetadata,
         },
         /// Packed entry: split the staging file into member byte ranges.
         Split {
@@ -10444,6 +11211,7 @@ async fn verify_and_commit(
         Fragments {
             rel_path: String,
             shards: Vec<LargeObjectCommitShard>,
+            metadata: EntryMetadata,
         },
     }
     let mut commits: Vec<EntryCommit> = Vec::with_capacity(manifest.entries.len());
@@ -10527,6 +11295,9 @@ async fn verify_and_commit(
             commits.push(EntryCommit::Rename {
                 rel_path: e.rel_path.clone(),
                 staging_path: decoder.staging_path.clone(),
+                metadata: metadata_by_path
+                    .get(e.rel_path.as_str())
+                    .map_or_else(EntryMetadata::default, |metadata| (*metadata).clone()),
             });
         } else {
             // E-15 packed object: split the staging file into member byte ranges,
@@ -10589,7 +11360,14 @@ async fn verify_and_commit(
             content_sha256,
         });
         logical_files = logical_files.saturating_add(1);
-        commits.push(EntryCommit::Fragments { rel_path, shards });
+        let metadata = metadata_by_path
+            .get(rel_path.as_str())
+            .map_or_else(EntryMetadata::default, |metadata| (*metadata).clone());
+        commits.push(EntryCommit::Fragments {
+            rel_path,
+            shards,
+            metadata,
+        });
     }
 
     let merkle_started = trace_commit.then(Instant::now);
@@ -10617,9 +11395,9 @@ async fn verify_and_commit(
         let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
         reject_existing_symlink(dest_dir).await?;
         if manifest.is_directory && manifest.entries.is_empty() {
-            let mut verified_prefixes = BTreeSet::new();
-            reject_destination_symlink_prefix_cached(&base, &base, &mut verified_prefixes).await?;
+            reject_destination_symlink_prefix(&base, &base).await?;
             crate::fs::create_dir_all(&base).await?;
+            reject_destination_symlink_prefix(&base, &base).await?;
             committed_paths.push(base.display().to_string());
         }
 
@@ -10630,6 +11408,7 @@ async fn verify_and_commit(
             Rename {
                 staging_path: PathBuf,
                 out_path: PathBuf,
+                metadata: EntryMetadata,
             },
             Members {
                 staging_path: PathBuf,
@@ -10637,8 +11416,10 @@ async fn verify_and_commit(
             },
             Fragments {
                 shards: Vec<LargeObjectCommitShard>,
-                rename_staging_path: Option<PathBuf>,
+                staging_path: PathBuf,
+                requires_assembly: bool,
                 out_path: PathBuf,
+                metadata: EntryMetadata,
             },
         }
         let mut writes: Vec<CommitWrite> = Vec::with_capacity(logical_digests.len());
@@ -10647,6 +11428,7 @@ async fn verify_and_commit(
                 EntryCommit::Rename {
                     rel_path,
                     staging_path,
+                    metadata,
                 } => {
                     let out_path = if manifest.is_directory {
                         join_relative(&base, rel_path)?
@@ -10656,6 +11438,7 @@ async fn verify_and_commit(
                     writes.push(CommitWrite::Rename {
                         staging_path: staging_path.clone(),
                         out_path,
+                        metadata: metadata.clone(),
                     });
                 }
                 EntryCommit::Split {
@@ -10665,12 +11448,18 @@ async fn verify_and_commit(
                     // A packed object only ever occurs inside a directory transfer
                     // (the single-file path never packs), so members join under base.
                     let mut member_writes = Vec::with_capacity(members.len());
-                    for member in members {
+                    for (member_index, member) in members.iter().enumerate() {
                         let out_path = join_relative(&base, &member.rel_path)?;
                         member_writes.push(PackedMemberWrite {
                             offset: member.offset,
                             len: member.len,
+                            write_path: packed_member_staging_path(staging_path, member_index),
                             out_path,
+                            metadata: metadata_by_path
+                                .get(member.rel_path.as_str())
+                                .map_or_else(EntryMetadata::default, |metadata| {
+                                    (*metadata).clone()
+                                }),
                         });
                     }
                     writes.push(CommitWrite::Members {
@@ -10678,17 +11467,28 @@ async fn verify_and_commit(
                         members: member_writes,
                     });
                 }
-                EntryCommit::Fragments { rel_path, shards } => {
+                EntryCommit::Fragments {
+                    rel_path,
+                    shards,
+                    metadata,
+                } => {
                     let out_path = if manifest.is_directory {
                         join_relative(&base, rel_path)?
                     } else {
                         base.clone()
                     };
-                    let rename_staging_path = contiguous_fragment_staging_path(shards);
+                    let (staging_path, requires_assembly) =
+                        if let Some(staging_path) = contiguous_fragment_staging_path(shards) {
+                            (staging_path, false)
+                        } else {
+                            (assembled_fragment_staging_path(shards, writes.len())?, true)
+                        };
                     writes.push(CommitWrite::Fragments {
                         shards: shards.clone(),
-                        rename_staging_path,
+                        staging_path,
+                        requires_assembly,
                         out_path,
+                        metadata: metadata.clone(),
                     });
                 }
             }
@@ -10696,10 +11496,9 @@ async fn verify_and_commit(
         commit_plan_micros = commit_plan_micros.saturating_add(elapsed_micros_since(plan_started));
 
         let symlink_started = trace_commit.then(Instant::now);
-        // Dedup the per-component symlink `lstat` across all destination paths: many files in a
-        // tree share parent directories, so verifying each unique prefix once (instead of per file)
-        // eliminates the redundant syscalls that dominate `symlink_guard_micros` for small-file
-        // trees. Fail-closed is preserved (every unique prefix + every final path is still checked).
+        // Dedup the planning-time prefix checks across paths. This rejects
+        // ordinary conflicts before any write; every mutation below repeats an
+        // uncached full-path check to catch prefixes replaced after this pass.
         let mut verified_prefixes: BTreeSet<PathBuf> = BTreeSet::new();
         for write in &writes {
             match write {
@@ -10732,11 +11531,21 @@ async fn verify_and_commit(
                 CommitWrite::Rename {
                     staging_path,
                     out_path,
+                    metadata,
                 } => {
+                    let deferred_metadata =
+                        prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
+                    reject_destination_symlink_prefix(&base, &out_path).await?;
                     if let Some(parent) = out_path.parent() {
                         crate::fs::create_dir_all(parent).await?;
                     }
-                    crate::fs::rename(&staging_path, &out_path).await?;
+                    reject_destination_symlink_prefix(&base, &out_path).await?;
+                    commit_staged_regular_file_transactionally(&staging_path, &out_path)
+                        .await
+                        .map_err(|error| RqError::Source(error.into_message()))?;
+                    if let Some(deferred_metadata) = deferred_metadata {
+                        apply_rq_entry_metadata(&out_path, &deferred_metadata).await?;
+                    }
                     committed_paths.push(out_path.display().to_string());
                 }
                 CommitWrite::Members {
@@ -10747,7 +11556,36 @@ async fn verify_and_commit(
                     // staging file once, in offset order. This preserves the
                     // per-file outputs while avoiding one staging open/seek and
                     // one allocation per small tree file.
-                    write_packed_member_batch(&staging_path, &members, &mut hash_buf).await?;
+                    let _member_staging_guard =
+                        write_packed_member_batch(&staging_path, &members, &mut hash_buf).await?;
+                    let mut deferred_metadata = Vec::with_capacity(members.len());
+                    for member in &members {
+                        deferred_metadata.push(
+                            prepare_rq_entry_metadata_for_commit(
+                                &member.write_path,
+                                &member.metadata,
+                            )
+                            .await?,
+                        );
+                    }
+                    for member in &members {
+                        reject_destination_symlink_prefix(&base, &member.out_path).await?;
+                        if let Some(parent) = member.out_path.parent() {
+                            crate::fs::create_dir_all(parent).await?;
+                        }
+                        reject_destination_symlink_prefix(&base, &member.out_path).await?;
+                        commit_staged_regular_file_transactionally(
+                            &member.write_path,
+                            &member.out_path,
+                        )
+                        .await
+                        .map_err(|error| RqError::Source(error.into_message()))?;
+                    }
+                    for (member, deferred_metadata) in members.iter().zip(deferred_metadata) {
+                        if let Some(deferred_metadata) = deferred_metadata {
+                            apply_rq_entry_metadata(&member.out_path, &deferred_metadata).await?;
+                        }
+                    }
                     committed_paths.extend(
                         members
                             .into_iter()
@@ -10756,27 +11594,38 @@ async fn verify_and_commit(
                 }
                 CommitWrite::Fragments {
                     shards,
-                    rename_staging_path,
+                    staging_path,
+                    requires_assembly,
                     out_path,
+                    metadata,
                 } => {
+                    if requires_assembly {
+                        write_large_object_fragments(&shards, &staging_path, &mut hash_buf).await?;
+                    }
+                    let deferred_metadata =
+                        prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
+                    reject_destination_symlink_prefix(&base, &out_path).await?;
                     if let Some(parent) = out_path.parent() {
                         crate::fs::create_dir_all(parent).await?;
                     }
-                    if let Some(staging_path) = rename_staging_path {
-                        match crate::fs::rename(&staging_path, &out_path).await {
-                            Ok(()) => {}
-                            Err(err) if is_cross_device_rename_error(&err) => {
-                                write_large_object_fragments(&shards, &out_path, &mut hash_buf)
-                                    .await?;
-                            }
-                            Err(err) => return Err(RqError::Io(err)),
-                        }
-                    } else {
-                        write_large_object_fragments(&shards, &out_path, &mut hash_buf).await?;
+                    reject_destination_symlink_prefix(&base, &out_path).await?;
+                    commit_staged_regular_file_transactionally(&staging_path, &out_path)
+                        .await
+                        .map_err(|error| RqError::Source(error.into_message()))?;
+                    if let Some(deferred_metadata) = deferred_metadata {
+                        apply_rq_entry_metadata(&out_path, &deferred_metadata).await?;
                     }
                     committed_paths.push(out_path.display().to_string());
                 }
             }
+        }
+        if let Some(directories) = manifest
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.directories.as_ref())
+            && !directories.is_empty()
+        {
+            apply_rq_directory_metadata(&base, directories).await?;
         }
         commit_write_micros =
             commit_write_micros.saturating_add(elapsed_micros_since(write_started));
@@ -14502,13 +15351,48 @@ mod tests {
         assert!(safe_base_for_root_name(dest, "NUL.txt").is_err());
     }
 
+    fn bare_metadata_manifest<'a>(
+        logical_paths: impl IntoIterator<Item = &'a str>,
+    ) -> RqMetadataManifest {
+        let canonical = logical_paths
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|path| (path.to_string(), EntryMetadata::default()))
+            .collect::<Vec<_>>();
+        let canonical_refs = canonical
+            .iter()
+            .map(|(path, metadata)| (path.as_str(), metadata))
+            .collect::<Vec<_>>();
+        RqMetadataManifest {
+            version: RQ_METADATA_MANIFEST_VERSION,
+            commitment_hex: rq_metadata_commitment(&canonical_refs),
+            entries: Vec::new(),
+            directories: None,
+        }
+    }
+
     fn manifest_with(entries: Vec<ManifestEntry>, total_bytes: u64) -> TransferManifest {
+        let metadata = bare_metadata_manifest(entries.iter().flat_map(|entry| {
+            if let Some(fragment) = &entry.fragment {
+                vec![fragment.rel_path.as_str()]
+            } else if entry.members.is_empty() {
+                vec![entry.rel_path.as_str()]
+            } else {
+                entry
+                    .members
+                    .iter()
+                    .map(|member| member.rel_path.as_str())
+                    .collect()
+            }
+        }));
         TransferManifest {
             transfer_id: "rqtransfer1".to_string(),
             root_name: "payload".to_string(),
             is_directory: true,
             total_bytes,
             merkle_root_hex: "0".repeat(64),
+            metadata: Some(metadata),
             entries,
         }
     }
@@ -14570,6 +15454,629 @@ mod tests {
     fn validate_manifest_accepts_sane_bounds() {
         let manifest = manifest_with(vec![manifest_entry(0, 100), manifest_entry(1, 200)], 300);
         assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
+    }
+
+    fn one_entry_metadata_manifest(path: &str, metadata: EntryMetadata) -> RqMetadataManifest {
+        let commitment_hex = rq_metadata_commitment(&[(path, &metadata)]);
+        RqMetadataManifest {
+            version: RQ_METADATA_MANIFEST_VERSION,
+            commitment_hex,
+            entries: vec![RqMetadataEntry {
+                rel_path: path.to_string(),
+                metadata,
+            }],
+            directories: None,
+        }
+    }
+
+    #[test]
+    fn rq_protocol_v4_commits_metadata_and_rejects_tamper_or_policy_mismatch() {
+        assert_eq!(ATP_RQ_PROTOCOL, 4, "older RQ peers must fail negotiation");
+        let metadata = EntryMetadata {
+            mtime_unix_secs: Some(1_700_000_000),
+            mtime_nanos: Some(123_400_000),
+            ..EntryMetadata::default()
+        };
+        let mut manifest = manifest_with(vec![manifest_entry(0, 10)], 10);
+        manifest.metadata = Some(one_entry_metadata_manifest("f0", metadata));
+        let preserving_receiver = RqConfig {
+            metadata_policy: MetadataPolicy::full_preservation(),
+            ..RqConfig::default()
+        };
+        validate_manifest(&manifest, &preserving_receiver)
+            .expect("committed regular-file metadata validates");
+
+        let mut stripped = manifest.clone();
+        stripped.metadata = None;
+        assert!(matches!(
+            validate_manifest(&stripped, &preserving_receiver),
+            Err(RqError::Frame(ref message)) if message.contains("missing its metadata commitment")
+        ));
+
+        let mut tampered = manifest.clone();
+        tampered.metadata.as_mut().expect("metadata block").entries[0]
+            .metadata
+            .mtime_unix_secs = Some(1_700_000_001);
+        assert!(matches!(
+            validate_manifest(&tampered, &preserving_receiver),
+            Err(RqError::Frame(ref message)) if message.contains("commitment mismatch")
+        ));
+
+        let mut wrong_version = manifest.clone();
+        wrong_version
+            .metadata
+            .as_mut()
+            .expect("metadata block")
+            .version += 1;
+        assert!(matches!(
+            validate_manifest(&wrong_version, &preserving_receiver),
+            Err(RqError::Frame(ref message)) if message.contains("metadata manifest version")
+        ));
+
+        let portable_receiver = RqConfig {
+            metadata_policy: MetadataPolicy::portable(),
+            ..RqConfig::default()
+        };
+        assert!(matches!(
+            validate_manifest(&manifest, &portable_receiver),
+            Err(RqError::Frame(ref message)) if message.contains("denied")
+        ));
+    }
+
+    #[test]
+    fn rq_directory_metadata_is_optional_on_wire_and_committed_when_present() {
+        let old_json = format!(
+            r#"{{"version":{RQ_METADATA_MANIFEST_VERSION},"commitment_hex":"{}","entries":[]}}"#,
+            "0".repeat(64)
+        );
+        let old: RqMetadataManifest =
+            serde_json::from_str(&old_json).expect("decode metadata without directories");
+        assert!(old.directories.is_none());
+        let old_round_trip = serde_json::to_string(&old).expect("encode old metadata shape");
+        assert!(!old_round_trip.contains("directories"));
+
+        let root_metadata = EntryMetadata {
+            file_kind: crate::net::atp::transport_common::FileKind::Directory,
+            mtime_unix_secs: Some(1_700_000_000),
+            ..EntryMetadata::default()
+        };
+        let nested_metadata = EntryMetadata {
+            file_kind: crate::net::atp::transport_common::FileKind::Directory,
+            mtime_unix_secs: Some(1_700_000_001),
+            ..EntryMetadata::default()
+        };
+        let directories = DirectoryMetadataManifest {
+            root: Some(root_metadata),
+            entries: vec![DirectoryMetadataEntry {
+                rel_path: "Dir".to_string(),
+                metadata: nested_metadata,
+            }],
+        };
+        let bare_file = EntryMetadata::default();
+        let mut entry = manifest_entry(0, 10);
+        entry.rel_path = "Dir/file".to_string();
+        let mut manifest = manifest_with(vec![entry], 10);
+        manifest.metadata = Some(RqMetadataManifest {
+            version: RQ_METADATA_MANIFEST_VERSION,
+            commitment_hex: rq_metadata_commitment_with_directories(
+                &[("Dir/file", &bare_file)],
+                Some(&directories),
+            ),
+            entries: Vec::new(),
+            directories: Some(directories),
+        });
+        let preserving = RqConfig {
+            metadata_policy: MetadataPolicy::full_preservation(),
+            ..RqConfig::default()
+        };
+        validate_manifest(&manifest, &preserving).expect("directory metadata validates");
+
+        let mut noncanonical_order = manifest.clone();
+        noncanonical_order.total_bytes = 20;
+        let mut alpha_file = manifest_entry(1, 10);
+        alpha_file.rel_path = "Alpha/file".to_string();
+        noncanonical_order.entries.push(alpha_file);
+        let metadata = noncanonical_order.metadata.as_mut().expect("metadata");
+        let directories = metadata.directories.as_mut().expect("directory metadata");
+        let alpha_metadata = directories.entries[0].metadata.clone();
+        directories.entries.push(DirectoryMetadataEntry {
+            rel_path: "Alpha".to_string(),
+            metadata: alpha_metadata,
+        });
+        let commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file), ("Alpha/file", &bare_file)],
+            Some(directories),
+        );
+        metadata.commitment_hex = commitment_hex;
+        assert!(matches!(
+            validate_manifest(&noncanonical_order, &preserving),
+            Err(RqError::Frame(ref message))
+                if message.contains("strictly lexicographically increasing")
+        ));
+
+        assert!(matches!(
+            validate_directory_metadata_manifest(
+                manifest
+                    .metadata
+                    .as_ref()
+                    .expect("metadata")
+                    .directories
+                    .as_ref()
+                    .expect("directory metadata"),
+                &BTreeSet::from(["Dir/file"]),
+                false,
+                &preserving,
+            ),
+            Err(RqError::Frame(ref message)) if message.contains("single-file")
+        ));
+
+        let mut explicitly_empty = manifest.clone();
+        let metadata = explicitly_empty.metadata.as_mut().expect("metadata");
+        metadata.directories = Some(DirectoryMetadataManifest::default());
+        metadata.commitment_hex = rq_metadata_commitment(&[("Dir/file", &bare_file)]);
+        assert!(matches!(
+            validate_manifest(&explicitly_empty, &preserving),
+            Err(RqError::Frame(ref message)) if message.contains("present but empty")
+        ));
+
+        let empty_directory_metadata = EntryMetadata {
+            file_kind: crate::net::atp::transport_common::FileKind::Directory,
+            ..EntryMetadata::default()
+        };
+        let mut empty_root = manifest.clone();
+        let metadata = empty_root.metadata.as_mut().expect("metadata");
+        metadata
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .root = Some(empty_directory_metadata.clone());
+        metadata.commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file)],
+            metadata.directories.as_ref(),
+        );
+        assert!(matches!(
+            validate_manifest(&empty_root, &preserving),
+            Err(RqError::Frame(ref message)) if message.contains("root carries no fidelity fields")
+        ));
+
+        let mut empty_nested = manifest.clone();
+        let metadata = empty_nested.metadata.as_mut().expect("metadata");
+        metadata
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .entries[0]
+            .metadata = empty_directory_metadata;
+        metadata.commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file)],
+            metadata.directories.as_ref(),
+        );
+        assert!(matches!(
+            validate_manifest(&empty_nested, &preserving),
+            Err(RqError::Frame(ref message))
+                if message.contains("entry Dir carries no fidelity fields")
+        ));
+
+        let mut equal_to_content = manifest.clone();
+        let metadata = equal_to_content.metadata.as_mut().expect("metadata");
+        metadata
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .entries[0]
+            .rel_path = "Dir/file".to_string();
+        metadata.commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file)],
+            metadata.directories.as_ref(),
+        );
+        assert!(matches!(
+            validate_manifest(&equal_to_content, &preserving),
+            Err(RqError::Frame(ref message)) if message.contains("not an implicit")
+        ));
+
+        let mut tampered = manifest.clone();
+        tampered
+            .metadata
+            .as_mut()
+            .expect("metadata")
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .entries[0]
+            .metadata
+            .mtime_unix_secs = Some(1_700_000_002);
+        assert!(matches!(
+            validate_manifest(&tampered, &preserving),
+            Err(RqError::Frame(ref message)) if message.contains("commitment mismatch")
+        ));
+
+        let mut wrong_kind = manifest.clone();
+        let metadata = wrong_kind.metadata.as_mut().expect("metadata");
+        metadata
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .entries[0]
+            .metadata
+            .file_kind = crate::net::atp::transport_common::FileKind::Regular;
+        metadata.commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file)],
+            metadata.directories.as_ref(),
+        );
+        assert!(matches!(
+            validate_manifest(&wrong_kind, &preserving),
+            Err(RqError::Frame(ref message)) if message.contains("Directory")
+        ));
+
+        let mut aliased = manifest;
+        let metadata = aliased.metadata.as_mut().expect("metadata");
+        metadata
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .entries[0]
+            .rel_path = "dir".to_string();
+        metadata.commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file)],
+            metadata.directories.as_ref(),
+        );
+        assert!(matches!(
+            validate_manifest(&aliased, &preserving),
+            Err(RqError::Frame(ref message)) if message.contains("aliases implicit directory")
+        ));
+    }
+
+    #[test]
+    fn rq_metadata_manifest_uses_final_packed_member_paths() {
+        let a = EntryMetadata {
+            mtime_unix_secs: Some(1_700_000_000),
+            ..EntryMetadata::default()
+        };
+        let b = EntryMetadata {
+            mtime_unix_secs: Some(1_700_000_001),
+            ..EntryMetadata::default()
+        };
+        let commitment_hex = rq_metadata_commitment(&[("dir/a", &a), ("dir/b", &b)]);
+        let mut packed = manifest_entry(0, 15);
+        packed.rel_path = ".atp-pack-0".to_string();
+        packed.members = vec![
+            PackedMember {
+                rel_path: "dir/a".to_string(),
+                offset: 0,
+                len: 10,
+                sha256_hex: "a".repeat(64),
+            },
+            PackedMember {
+                rel_path: "dir/b".to_string(),
+                offset: 10,
+                len: 5,
+                sha256_hex: "b".repeat(64),
+            },
+        ];
+        let mut manifest = manifest_with(vec![packed], 15);
+        manifest.metadata = Some(RqMetadataManifest {
+            version: RQ_METADATA_MANIFEST_VERSION,
+            commitment_hex,
+            entries: vec![
+                RqMetadataEntry {
+                    rel_path: "dir/a".to_string(),
+                    metadata: a,
+                },
+                RqMetadataEntry {
+                    rel_path: "dir/b".to_string(),
+                    metadata: b,
+                },
+            ],
+            directories: None,
+        });
+        let preserving_receiver = RqConfig {
+            metadata_policy: MetadataPolicy::full_preservation(),
+            ..RqConfig::default()
+        };
+        validate_manifest(&manifest, &preserving_receiver)
+            .expect("packed object metadata resolves through logical member paths");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rq_receiver_accepts_and_reports_unsupported_windows_metadata() {
+        let metadata = EntryMetadata {
+            windows_attributes: Some(0x0000_0020),
+            ..EntryMetadata::default()
+        };
+        let mut manifest = manifest_with(vec![manifest_entry(0, 10)], 10);
+        manifest.metadata = Some(one_entry_metadata_manifest("f0", metadata.clone()));
+        validate_manifest(&manifest, &RqConfig::default())
+            .expect("cross-platform Windows attributes remain committed metadata");
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("payload");
+        std::fs::write(&path, b"payload").expect("write payload");
+        let report = futures_lite::future::block_on(apply_rq_entry_metadata(&path, &metadata))
+            .expect("unsupported cross-platform field is an explicit skip");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|(field, _)| *field == "windows_attributes"),
+            "{report:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rq_receiver_accepts_and_reports_unsupported_unix_metadata() {
+        let metadata = EntryMetadata {
+            unix_mode: Some(0o640),
+            ..EntryMetadata::default()
+        };
+        let mut manifest = manifest_with(vec![manifest_entry(0, 10)], 10);
+        manifest.metadata = Some(one_entry_metadata_manifest("f0", metadata.clone()));
+        validate_manifest(&manifest, &RqConfig::default())
+            .expect("cross-platform Unix permissions remain committed metadata");
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("payload");
+        std::fs::write(&path, b"payload").expect("write payload");
+        let report = futures_lite::future::block_on(apply_rq_entry_metadata(&path, &metadata))
+            .expect("unsupported cross-platform field is an explicit skip");
+        assert!(
+            report.skipped.iter().any(|(field, _)| *field == "mode"),
+            "{report:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rq_metadata_application_reports_and_sets_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("payload");
+        std::fs::write(&path, b"payload").expect("write payload");
+        let metadata = EntryMetadata {
+            unix_mode: Some(0o640),
+            ..EntryMetadata::default()
+        };
+        let report = futures_lite::future::block_on(apply_rq_entry_metadata(&path, &metadata))
+            .expect("apply RQ metadata");
+        assert!(report.applied.contains(&"mode"), "{report:?}");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("stat payload")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o640
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rq_metadata_application_reports_windows_attributes_and_mtime() {
+        use std::os::windows::fs::MetadataExt;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("payload");
+        std::fs::write(&path, b"payload").expect("write payload");
+        let metadata = EntryMetadata {
+            mtime_unix_secs: Some(1_700_000_000),
+            mtime_nanos: Some(123_400_000),
+            windows_attributes: Some(0x0000_0021),
+            ..EntryMetadata::default()
+        };
+        let report = futures_lite::future::block_on(apply_rq_entry_metadata(&path, &metadata))
+            .expect("apply RQ metadata");
+        assert!(report.applied.contains(&"mtime"), "{report:?}");
+        assert!(report.applied.contains(&"windows_attributes"), "{report:?}");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("stat payload")
+                .file_attributes()
+                & 0x0000_0021,
+            0x0000_0021
+        );
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat payload for cleanup")
+            .permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).expect("clear readonly for cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rq_readonly_metadata_is_deferred_until_after_transactional_commit() {
+        let readonly = EntryMetadata {
+            mtime_unix_secs: Some(1_700_000_000),
+            windows_attributes: Some(0x0000_0021),
+            ..EntryMetadata::default()
+        };
+        let writable = EntryMetadata {
+            windows_attributes: Some(0x0000_0020),
+            ..EntryMetadata::default()
+        };
+        let (before_commit, after_commit) = split_rq_metadata_for_commit(&readonly);
+        assert_eq!(before_commit.mtime_unix_secs, readonly.mtime_unix_secs);
+        assert_eq!(before_commit.windows_attributes, Some(0x0000_0020));
+        assert_eq!(
+            after_commit.expect("readonly replay").windows_attributes,
+            Some(0x0000_0021)
+        );
+
+        let (before_commit, after_commit) = split_rq_metadata_for_commit(&writable);
+        assert_eq!(before_commit, writable);
+        assert!(after_commit.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rq_readonly_with_invalid_mtime_fails_before_destination_replacement() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staging_path = root.path().join("staging");
+        let out_path = root.path().join("output");
+        std::fs::write(&staging_path, b"new payload").expect("write staging payload");
+        std::fs::write(&out_path, b"old payload").expect("write existing payload");
+        let metadata = EntryMetadata {
+            mtime_unix_secs: Some(i64::MIN),
+            windows_attributes: Some(0x0000_0021),
+            ..EntryMetadata::default()
+        };
+
+        let error = futures_lite::future::block_on(prepare_rq_entry_metadata_for_commit(
+            &staging_path,
+            &metadata,
+        ))
+        .expect_err("invalid required mtime must fail before commit");
+
+        assert!(error.to_string().contains("required metadata field mtime"));
+        assert_eq!(
+            std::fs::read(&out_path).expect("read unchanged destination"),
+            b"old payload"
+        );
+        assert!(staging_path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rq_directory_metadata_preserves_root_and_nested_on_initial_and_update() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let base = root.path().join("payload");
+        let nested = base.join("nested");
+        std::fs::create_dir_all(&nested).expect("create destination directories");
+        let directory_metadata = |seconds, nanos| EntryMetadata {
+            file_kind: crate::net::atp::transport_common::FileKind::Directory,
+            mtime_unix_secs: Some(seconds),
+            mtime_nanos: Some(nanos),
+            windows_attributes: Some(0x0000_0003),
+            ..EntryMetadata::default()
+        };
+        let manifest = |seconds, nanos| DirectoryMetadataManifest {
+            root: Some(directory_metadata(seconds, nanos)),
+            entries: vec![DirectoryMetadataEntry {
+                rel_path: "nested".to_string(),
+                metadata: directory_metadata(seconds + 1, nanos),
+            }],
+        };
+        let policy = MetadataPolicy::full_preservation();
+
+        for (seconds, nanos) in [(1_700_000_000, 123_400_000), (1_700_000_100, 567_800_000)] {
+            futures_lite::future::block_on(apply_rq_directory_metadata(
+                &base,
+                &manifest(seconds, nanos),
+            ))
+            .expect("apply RQ directory metadata");
+
+            let captured_root = read_entry_metadata_sync(&base, &policy)
+                .expect("capture transfer-root directory metadata");
+            let captured_nested = read_entry_metadata_sync(&nested, &policy)
+                .expect("capture nested directory metadata");
+            assert_eq!(captured_root.mtime_unix_secs, Some(seconds));
+            assert_eq!(captured_root.mtime_nanos, Some(nanos));
+            assert_eq!(captured_nested.mtime_unix_secs, Some(seconds + 1));
+            assert_eq!(captured_nested.mtime_nanos, Some(nanos));
+            assert_eq!(captured_root.windows_attributes.unwrap_or(0) & 0x3, 0x3);
+            assert_eq!(captured_nested.windows_attributes.unwrap_or(0) & 0x3, 0x3);
+        }
+
+        for path in [&nested, &base] {
+            let mut permissions = std::fs::metadata(path)
+                .expect("directory cleanup metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(path, permissions)
+                .expect("clear directory readonly for cleanup");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rq_source_topology_keeps_links_and_nested_empty_directories_fail_closed() {
+        let empty_root = tempfile::tempdir().expect("empty transfer root");
+        futures_lite::future::block_on(validate_source_compatibility(empty_root.path()))
+            .expect("an explicit empty transfer root remains representable");
+
+        let populated = tempfile::tempdir().expect("populated transfer root");
+        std::fs::create_dir(populated.path().join("nested")).expect("create nested directory");
+        std::fs::write(populated.path().join("nested/file"), b"payload")
+            .expect("write nested payload");
+        let captured = futures_lite::future::block_on(source_metadata_manifest_with_config(
+            populated.path(),
+            &RqConfig::default(),
+        ))
+        .expect("capture file and directory metadata");
+        let directories = captured.directories.expect("captured directory metadata");
+        assert!(directories.root.is_some());
+        assert_eq!(directories.entries.len(), 1);
+        assert_eq!(directories.entries[0].rel_path, "nested");
+
+        let nested = tempfile::tempdir().expect("nested-empty transfer root");
+        std::fs::create_dir(nested.path().join("empty")).expect("create nested empty directory");
+        assert!(matches!(
+            futures_lite::future::block_on(validate_source_compatibility(nested.path())),
+            Err(RqError::Source(ref message)) if message.contains("empty directories")
+        ));
+
+        let linked = tempfile::tempdir().expect("linked transfer root");
+        std::fs::write(linked.path().join("target"), b"target").expect("write target");
+        std::os::unix::fs::symlink("target", linked.path().join("link"))
+            .expect("create source symlink");
+        assert!(matches!(
+            futures_lite::future::block_on(validate_source_compatibility(linked.path())),
+            Err(RqError::Source(ref message)) if message.contains("symlink")
+        ));
+    }
+
+    #[test]
+    fn rq_receive_staging_creation_returns_cleanup_owner() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let dest = root.path().join("destination");
+        let guard =
+            futures_lite::future::block_on(create_receive_staging_guard(&dest, "rqtransfer1"))
+                .expect("create guarded receive staging directory");
+        let staging_dir = guard.dir().to_path_buf();
+        assert!(staging_dir.starts_with(&dest));
+        assert!(staging_dir.is_dir());
+
+        drop(guard);
+
+        assert!(!staging_dir.exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn rq_requested_hardlink_fidelity_fails_before_transfer() {
+        let root = tempfile::tempdir().expect("hardlink source root");
+        let primary = root.path().join("a-primary");
+        let secondary = root.path().join("b-secondary");
+        std::fs::write(&primary, b"shared inode").expect("write hardlink primary");
+        std::fs::hard_link(&primary, &secondary).expect("create hardlink secondary");
+        let preserving = RqConfig {
+            metadata_policy: MetadataPolicy::full_preservation(),
+            preserve_hardlinks: true,
+            ..RqConfig::default()
+        };
+        let error = futures_lite::future::block_on(validate_source_compatibility_with_config(
+            root.path(),
+            &preserving,
+        ))
+        .expect_err("requested RQ hardlink fidelity must fail closed during dry-run preflight");
+        assert!(error.to_string().contains("hardlink identity"), "{error}");
+
+        let flattened = futures_lite::future::block_on(source_metadata_manifest_with_config(
+            root.path(),
+            &RqConfig::default(),
+        ))
+        .expect("explicitly unpreserved hardlinks may flatten");
+        assert_eq!(flattened.version, RQ_METADATA_MANIFEST_VERSION);
+        assert_eq!(flattened.commitment_hex.len(), 64);
+        assert_eq!(
+            flattened
+                .entries
+                .iter()
+                .map(|entry| entry.rel_path.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["a-primary", "b-secondary"])
+        );
     }
 
     #[test]
@@ -14771,6 +16278,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn rq_uncached_commit_guard_rejects_prefix_created_after_cached_plan() {
+        let dest = tempfile::tempdir().expect("destination root");
+        let outside = tempfile::tempdir().expect("outside root");
+        let base = dest.path().join("payload");
+        std::fs::create_dir_all(&base).expect("create destination base");
+        let out_path = base.join("late/payload.txt");
+        let mut verified = BTreeSet::new();
+        futures_lite::future::block_on(reject_destination_symlink_prefix_cached(
+            &base,
+            &out_path,
+            &mut verified,
+        ))
+        .expect("missing prefix passes planning check");
+
+        std::os::unix::fs::symlink(outside.path(), base.join("late"))
+            .expect("replace missing prefix with symlink");
+
+        let error =
+            futures_lite::future::block_on(reject_destination_symlink_prefix(&base, &out_path))
+                .expect_err("uncached commit check must detect the new symlink");
+        assert!(
+            matches!(error, RqError::Source(ref message) if message.contains("existing symlink")),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rq_commit_rejects_existing_destination_symlink_prefix() {
         let dest = tempfile::tempdir().expect("dest dir");
         let outside = tempfile::tempdir().expect("outside dir");
@@ -14803,6 +16338,7 @@ mod tests {
             is_directory: true,
             total_bytes: size,
             merkle_root_hex,
+            metadata: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path,
@@ -17713,6 +19249,7 @@ mod tests {
             is_directory: false,
             total_bytes: bytes.len() as u64,
             merkle_root_hex: "00".repeat(32),
+            metadata: None,
             entries: vec![entry],
         };
         BondTransferDescriptor::from_manifest(
@@ -18123,6 +19660,125 @@ mod tests {
         }
     }
 
+    #[test]
+    fn verify_and_commit_replaces_readonly_regular_file_with_staged_metadata() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let staging_dir = dest.path().join(".atp-rq-regular-staging");
+        std::fs::create_dir_all(&staging_dir).expect("staging dir");
+        let staging_path = staging_dir.join("0");
+        let bytes = b"new regular-file payload".to_vec();
+        std::fs::write(&staging_path, &bytes).expect("write staged payload");
+
+        let out_path = dest.path().join("payload.bin");
+        std::fs::write(&out_path, b"old readonly payload").expect("write existing output");
+        let mut existing_permissions = std::fs::metadata(&out_path)
+            .expect("existing output metadata")
+            .permissions();
+        existing_permissions.set_readonly(true);
+        std::fs::set_permissions(&out_path, existing_permissions)
+            .expect("make existing output readonly");
+
+        let mut entry_metadata = EntryMetadata::default();
+        #[cfg(unix)]
+        {
+            entry_metadata.unix_mode = Some(0o440);
+        }
+        #[cfg(windows)]
+        {
+            entry_metadata.windows_attributes = Some(0x0000_0021);
+            entry_metadata.mtime_unix_secs = Some(1_700_000_000);
+            entry_metadata.mtime_nanos = Some(123_400_000);
+        }
+
+        let digest = digest_for_bytes("payload.bin", &bytes);
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "payload.bin".to_string(),
+            is_directory: false,
+            total_bytes: bytes.len() as u64,
+            merkle_root_hex: flat_merkle_root_from_digests(std::slice::from_ref(&digest)),
+            metadata: Some(one_entry_metadata_manifest("payload.bin", entry_metadata)),
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: "payload.bin".to_string(),
+                size: bytes.len() as u64,
+                sha256_hex: hex_encode(&digest.content_sha256),
+                members: Vec::new(),
+                fragment: None,
+            }],
+        };
+        let mut decoders = vec![EntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: bytes.len() as u64,
+            pipeline: None,
+            complete: true,
+            staging_path,
+            staging_write_offset: 0,
+            staging_file_len: bytes.len() as u64,
+            staging_shared: false,
+            staging_created: true,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
+            bytes_written: bytes.len() as u64,
+            max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+            source_streaming: false,
+            source_blocks: Vec::new(),
+            pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
+        }];
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+            &std::collections::BTreeMap::new(),
+            &CompletionDigestIndex::default(),
+        ))
+        .expect("verify regular file");
+
+        assert!(receipt.committed, "regular transfer must commit");
+        assert_eq!(std::fs::read(&out_path).expect("regular output"), bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&out_path)
+                    .expect("regular output metadata")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o440
+            );
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            assert_eq!(
+                std::fs::metadata(&out_path)
+                    .expect("regular output metadata")
+                    .file_attributes()
+                    & 0x0000_0021,
+                0x0000_0021
+            );
+            let mut permissions = std::fs::metadata(&out_path)
+                .expect("regular output cleanup metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&out_path, permissions)
+                .expect("clear regular output readonly for cleanup");
+        }
+    }
+
     fn fragment_entry(
         index: u32,
         object_rel_path: &str,
@@ -18150,6 +19806,7 @@ mod tests {
             is_directory: false,
             total_bytes: whole.len() as u64,
             merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
+            metadata: None,
             entries: vec![
                 fragment_entry(
                     0,
@@ -18313,6 +19970,7 @@ mod tests {
             is_directory: false,
             total_bytes: whole.len() as u64,
             merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
+            metadata: Some(bare_metadata_manifest(["huge.bin"])),
             entries,
         };
         assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
@@ -18355,6 +20013,28 @@ mod tests {
         std::fs::write(&a_path, &a).expect("write first shard");
         std::fs::write(&b_path, &b).expect("write second shard");
 
+        let out_path = dest.path().join("huge.bin");
+        std::fs::write(&out_path, b"old readonly fragment output")
+            .expect("write existing fragmented output");
+        let mut existing_permissions = std::fs::metadata(&out_path)
+            .expect("existing fragmented output metadata")
+            .permissions();
+        existing_permissions.set_readonly(true);
+        std::fs::set_permissions(&out_path, existing_permissions)
+            .expect("make existing fragmented output readonly");
+
+        let mut entry_metadata = EntryMetadata::default();
+        #[cfg(unix)]
+        {
+            entry_metadata.unix_mode = Some(0o440);
+        }
+        #[cfg(windows)]
+        {
+            entry_metadata.windows_attributes = Some(0x0000_0021);
+            entry_metadata.mtime_unix_secs = Some(1_700_000_000);
+            entry_metadata.mtime_nanos = Some(123_400_000);
+        }
+
         let whole_sha = hex_encode(&Sha256::digest(&whole));
         let manifest = TransferManifest {
             transfer_id: "rqtransfer1".to_string(),
@@ -18362,6 +20042,7 @@ mod tests {
             is_directory: false,
             total_bytes: whole.len() as u64,
             merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
+            metadata: Some(one_entry_metadata_manifest("huge.bin", entry_metadata)),
             entries: vec![
                 fragment_entry(
                     0,
@@ -18461,7 +20142,38 @@ mod tests {
         assert!(receipt.sha_ok);
         assert!(receipt.merkle_ok);
         assert_eq!(receipt.files, 1);
-        assert_eq!(std::fs::read(dest.path().join("huge.bin")).unwrap(), whole);
+        assert_eq!(std::fs::read(&out_path).unwrap(), whole);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&out_path)
+                    .expect("fragmented output metadata")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o440
+            );
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            assert_eq!(
+                std::fs::metadata(&out_path)
+                    .expect("fragmented output metadata")
+                    .file_attributes()
+                    & 0x0000_0021,
+                0x0000_0021
+            );
+            let mut permissions = std::fs::metadata(&out_path)
+                .expect("fragmented output cleanup metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&out_path, permissions)
+                .expect("clear fragmented output readonly for cleanup");
+        }
     }
 
     #[test]
@@ -18623,6 +20335,7 @@ mod tests {
             is_directory: false,
             total_bytes: whole.len() as u64,
             merkle_root_hex: placeholder.clone(),
+            metadata: None,
             entries: vec![
                 ManifestEntry {
                     index: 0,
@@ -18792,6 +20505,7 @@ mod tests {
             is_directory: false,
             total_bytes: payload.len() as u64,
             merkle_root_hex: sha256_hex_placeholder(),
+            metadata: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "payload.bin".to_string(),
@@ -18876,6 +20590,7 @@ mod tests {
         RqSourceEntry {
             rel_path: rel.to_string(),
             abs_path: abs,
+            metadata: EntryMetadata::default(),
             source_offset: 0,
             source_len: None,
             members: Vec::new(),
@@ -19114,12 +20829,54 @@ mod tests {
         let merkle_root_hex = flat_merkle_root_from_digests(&logical);
         let object_sha = hex_encode(&Sha256::digest(&object));
 
+        let mut a_metadata = EntryMetadata::default();
+        #[cfg(unix)]
+        {
+            a_metadata.unix_mode = Some(0o440);
+        }
+        #[cfg(windows)]
+        {
+            a_metadata.windows_attributes = Some(0x0000_0021);
+            a_metadata.mtime_unix_secs = Some(1_700_000_000);
+            a_metadata.mtime_nanos = Some(123_400_000);
+        }
+        let bare_metadata = EntryMetadata::default();
+        let metadata_commitment_hex = rq_metadata_commitment(&[
+            ("dir/a.txt", &a_metadata),
+            ("dir/sub/b.txt", &bare_metadata),
+        ]);
+        let metadata_entries = (!a_metadata.is_bare())
+            .then(|| RqMetadataEntry {
+                rel_path: "dir/a.txt".to_string(),
+                metadata: a_metadata,
+            })
+            .into_iter()
+            .collect();
+
+        let out_a = dest.path().join("payload/dir/a.txt");
+        let out_b = dest.path().join("payload/dir/sub/b.txt");
+        std::fs::create_dir_all(out_a.parent().expect("member a parent"))
+            .expect("create existing member a parent");
+        std::fs::write(&out_a, b"old readonly member").expect("write existing member a");
+        let mut existing_permissions = std::fs::metadata(&out_a)
+            .expect("existing member a metadata")
+            .permissions();
+        existing_permissions.set_readonly(true);
+        std::fs::set_permissions(&out_a, existing_permissions)
+            .expect("make existing member a readonly");
+
         let manifest = TransferManifest {
             transfer_id: "rqtransfer1".to_string(),
             root_name: "payload".to_string(),
             is_directory: true,
             total_bytes: object.len() as u64,
             merkle_root_hex,
+            metadata: Some(RqMetadataManifest {
+                version: RQ_METADATA_MANIFEST_VERSION,
+                commitment_hex: metadata_commitment_hex,
+                entries: metadata_entries,
+                directories: None,
+            }),
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: ".atp-pack-0".to_string(),
@@ -19174,10 +20931,39 @@ mod tests {
         assert!(receipt.merkle_ok);
         assert_eq!(receipt.files, 2, "two LOGICAL files delivered");
 
-        let out_a = dest.path().join("payload/dir/a.txt");
-        let out_b = dest.path().join("payload/dir/sub/b.txt");
         assert_eq!(std::fs::read(&out_a).expect("member a"), a);
         assert_eq!(std::fs::read(&out_b).expect("member b"), b);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&out_a)
+                    .expect("member a metadata")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o440
+            );
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            assert_eq!(
+                std::fs::metadata(&out_a)
+                    .expect("member a metadata")
+                    .file_attributes()
+                    & 0x0000_0021,
+                0x0000_0021
+            );
+            let mut permissions = std::fs::metadata(&out_a)
+                .expect("member a cleanup metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&out_a, permissions)
+                .expect("clear member a readonly for cleanup");
+        }
         // The synthetic packed object name must not appear on disk.
         assert!(!dest.path().join("payload/.atp-pack-0").exists());
     }
@@ -19234,16 +21020,20 @@ mod tests {
             PackedMemberWrite {
                 offset: members[0].offset,
                 len: members[0].len,
+                write_path: out_root.join(&members[0].rel_path),
                 out_path: out_root.join(&members[0].rel_path),
+                metadata: EntryMetadata::default(),
             },
             PackedMemberWrite {
                 offset: members[1].offset,
                 len: members[1].len,
+                write_path: out_root.join(&members[1].rel_path),
                 out_path: out_root.join(&members[1].rel_path),
+                metadata: EntryMetadata::default(),
             },
         ];
         let mut write_buf = [0u8; 4];
-        futures_lite::future::block_on(write_packed_member_batch(
+        let _staging_guard = futures_lite::future::block_on(write_packed_member_batch(
             &staging_path,
             &writes,
             &mut write_buf,
@@ -19282,16 +21072,20 @@ mod tests {
             PackedMemberWrite {
                 offset: b_off,
                 len: b.len() as u64,
+                write_path: out_root.join("deep/nested/b.bin"),
                 out_path: out_root.join("deep/nested/b.bin"),
+                metadata: EntryMetadata::default(),
             },
             PackedMemberWrite {
                 offset: a_off,
                 len: a.len() as u64,
+                write_path: out_root.join("a.bin"),
                 out_path: out_root.join("a.bin"),
+                metadata: EntryMetadata::default(),
             },
         ];
         let mut write_buf = [0u8; 4];
-        futures_lite::future::block_on(write_packed_member_batch(
+        let _batch_guard = futures_lite::future::block_on(write_packed_member_batch(
             &staging_path,
             &writes,
             &mut write_buf,
@@ -19307,9 +21101,11 @@ mod tests {
         let solo = vec![PackedMemberWrite {
             offset: a_off,
             len: a.len() as u64,
+            write_path: out_root.join("solo/a-again.bin"),
             out_path: out_root.join("solo/a-again.bin"),
+            metadata: EntryMetadata::default(),
         }];
-        futures_lite::future::block_on(write_packed_member_batch(
+        let _solo_guard = futures_lite::future::block_on(write_packed_member_batch(
             &staging_path,
             &solo,
             &mut write_buf,
@@ -19319,6 +21115,54 @@ mod tests {
             std::fs::read(out_root.join("solo/a-again.bin")).expect("read solo"),
             a
         );
+    }
+
+    #[test]
+    fn packed_member_staging_guard_cleans_unclaimed_blocking_result() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging_path = temp.path().join("pack-object");
+        let a = b"member-a";
+        let b = b"member-b";
+        let mut packed = Vec::new();
+        packed.extend_from_slice(a);
+        packed.extend_from_slice(b);
+        std::fs::write(&staging_path, &packed).expect("write packed object");
+
+        let member_dir = temp.path().join("derived-members");
+        let a_path = member_dir.join("a");
+        let b_path = member_dir.join("b");
+        let writes = vec![
+            PackedMemberWrite {
+                offset: 0,
+                len: a.len() as u64,
+                write_path: a_path.clone(),
+                out_path: temp.path().join("out/a"),
+                metadata: EntryMetadata::default(),
+            },
+            PackedMemberWrite {
+                offset: a.len() as u64,
+                len: b.len() as u64,
+                write_path: b_path.clone(),
+                out_path: temp.path().join("out/b"),
+                metadata: EntryMetadata::default(),
+            },
+        ];
+        let mut write_buf = [0u8; 4];
+        let staging_guard = futures_lite::future::block_on(write_packed_member_batch(
+            &staging_path,
+            &writes,
+            &mut write_buf,
+        ))
+        .expect("create derived packed members");
+        assert!(staging_path.exists());
+        assert!(a_path.exists());
+        assert!(b_path.exists());
+
+        drop(staging_guard);
+
+        assert!(!staging_path.exists());
+        assert!(!a_path.exists());
+        assert!(!b_path.exists());
     }
 
     #[test]
@@ -19433,6 +21277,7 @@ mod tests {
             is_directory: true,
             total_bytes: object.len() as u64,
             merkle_root_hex,
+            metadata: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: ".atp-pack-0".to_string(),

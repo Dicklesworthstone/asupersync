@@ -1899,6 +1899,7 @@ mod tests {
             is_directory: false,
             total_bytes: 13,
             merkle_root_hex: "schedule-root".to_string(),
+            metadata: None,
             entries: vec![BondEntry {
                 index: 0,
                 rel_path: "payload.bin".to_string(),

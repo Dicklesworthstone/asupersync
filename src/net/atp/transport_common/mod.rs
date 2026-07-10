@@ -18,9 +18,10 @@ pub use compression::{
 };
 pub use filter::{FilterAction, FilterDecision, FilterError, FilterRule, FilterSet};
 pub use metadata::{
-    DirtyPathSet, EntryMetadata, FileIdentity, FileKind, MetadataApplyReport, SimilaritySignature,
-    ZeroScanDecision, ZeroScanEntry, ZeroScanFingerprint, ZeroScanHashReason, ZeroScanPlan,
-    ZeroScanPolicy, ZeroScanPrefilter, apply_entry_metadata, apply_entry_metadata_sync,
+    DirectoryMetadataEntry, DirectoryMetadataManifest, DirtyPathSet, EntryMetadata, FileIdentity,
+    FileKind, MetadataApplyReport, SimilaritySignature, ZeroScanDecision, ZeroScanEntry,
+    ZeroScanFingerprint, ZeroScanHashReason, ZeroScanPlan, ZeroScanPolicy, ZeroScanPrefilter,
+    apply_entry_metadata, apply_entry_metadata_sync, capture_directory_metadata_manifest,
     metadata_commitment, read_entry_metadata,
 };
 pub use mirror::{

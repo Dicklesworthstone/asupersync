@@ -13,11 +13,11 @@
 //!
 //! * [`BondTransferDescriptor`] is the small, agreed object every participant
 //!   shares. It is the existing [`TransferManifest`] (`transfer_id`, `root_name`,
-//!   `is_directory`, `total_bytes`, `merkle_root_hex`, per-entry
-//!   `{index, rel_path, size, sha256_hex}`) plus the object params every donor must
-//!   agree on (`symbol_size`, `max_block_size`) and a reference to the shared
-//!   symbol-auth key. Phase A's job is to confirm this is *sufficient*: every field
-//!   here comes from the manifest or an agreed param.
+//!   `is_directory`, `total_bytes`, `merkle_root_hex`, protocol-v4 metadata
+//!   commitment, per-entry `{index, rel_path, size, sha256_hex}`) plus the object
+//!   params every donor must agree on (`symbol_size`, `max_block_size`) and a
+//!   reference to the shared symbol-auth key. Phase A's job is to confirm this is
+//!   *sufficient*: every field here comes from the manifest or an agreed param.
 //! * The identity helpers ([`BondTransferDescriptor::entry_object_id`] and
 //!   [`BondTransferDescriptor::entry_block_geometry`]) make the agreed RaptorQ
 //!   view explicit: for every entry and source block, all donors derive the same
@@ -46,7 +46,7 @@ use sha2::{Digest, Sha256};
 use crate::net::atp::transport_common::{
     EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
 };
-use crate::net::atp::transport_rq::{ManifestEntry, TransferManifest};
+use crate::net::atp::transport_rq::{ManifestEntry, RqMetadataManifest, TransferManifest};
 use crate::types::symbol::ObjectId as RaptorqObjectId;
 
 /// Reused streaming-hash buffer for the donor proof (per file, 64 KiB).
@@ -98,6 +98,13 @@ pub struct BondTransferDescriptor {
     pub total_bytes: u64,
     /// Lowercase hex flat-graph merkle root over the object.
     pub merkle_root_hex: String,
+    /// Protocol-v4 metadata commitment for every logical file.
+    ///
+    /// Bonded receivers pass this through unchanged to the RQ manifest
+    /// validator; `None` is retained only for backward-compatible descriptor
+    /// decoding and fails closed before a protocol-v4 receive can commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<RqMetadataManifest>,
     /// File entries in manifest order.
     pub entries: Vec<BondEntry>,
     /// RaptorQ symbol size in bytes — all donors must agree.
@@ -331,6 +338,7 @@ impl BondTransferDescriptor {
             is_directory: manifest.is_directory,
             total_bytes: manifest.total_bytes,
             merkle_root_hex: manifest.merkle_root_hex.clone(),
+            metadata: manifest.metadata.clone(),
             entries: manifest
                 .entries
                 .iter()
@@ -629,6 +637,8 @@ fn safe_entry_path(root_dir: &Path, rel_path: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::atp::object::{ContentId, ObjectId};
+    use crate::net::atp::transport_common::EntryMetadata;
+    use crate::net::atp::transport_rq::{RqMetadataEntry, RqMetadataManifest};
     use sha2::{Digest, Sha256};
 
     fn sha_hex(bytes: &[u8]) -> String {
@@ -663,6 +673,7 @@ mod tests {
             is_directory: files.len() != 1,
             total_bytes: total,
             merkle_root_hex: flat_merkle_root_from_digests(&digests),
+            metadata: None,
             entries,
             symbol_size: 1200,
             max_block_size: 8 << 20,
@@ -859,7 +870,19 @@ mod tests {
 
     #[test]
     fn descriptor_serde_round_trips() {
-        let desc = descriptor_for(FILES);
+        let mut desc = descriptor_for(FILES);
+        desc.metadata = Some(RqMetadataManifest {
+            version: 1,
+            commitment_hex: "44".repeat(32),
+            entries: vec![RqMetadataEntry {
+                rel_path: "a.bin".to_string(),
+                metadata: EntryMetadata {
+                    unix_mode: Some(0o640),
+                    ..EntryMetadata::default()
+                },
+            }],
+            directories: None,
+        });
         let json = serde_json::to_string(&desc).expect("serialize");
         let back: BondTransferDescriptor = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(desc, back);
@@ -941,12 +964,26 @@ mod tests {
 
     #[test]
     fn from_manifest_carries_every_agreed_field() {
+        let metadata = RqMetadataManifest {
+            version: 1,
+            commitment_hex: "11".repeat(32),
+            entries: vec![RqMetadataEntry {
+                rel_path: "a.bin".to_string(),
+                metadata: EntryMetadata {
+                    mtime_unix_secs: Some(123),
+                    mtime_nanos: Some(456),
+                    ..EntryMetadata::default()
+                },
+            }],
+            directories: None,
+        };
         let manifest = TransferManifest {
             transfer_id: "tid-deadbeef".to_string(),
             root_name: "root".to_string(),
             is_directory: true,
             total_bytes: 18,
             merkle_root_hex: "abc123".to_string(),
+            metadata: Some(metadata.clone()),
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "a.bin".to_string(),
@@ -966,10 +1003,26 @@ mod tests {
         assert_eq!(desc.merkle_root_hex, "abc123");
         assert_eq!(desc.symbol_size, 1200);
         assert_eq!(desc.max_block_size, 8 << 20);
+        assert_eq!(desc.metadata, Some(metadata));
         assert_eq!(desc.entries.len(), 1);
         assert_eq!(desc.entries[0].rel_path, "a.bin");
         assert_eq!(desc.entries[0].sha256_hex, "00ff");
         assert_eq!(desc.auth_key_id.as_deref(), Some("key-1"));
+    }
+
+    #[test]
+    fn metadata_commitment_participates_in_donor_agreement() {
+        let mut first = descriptor_for(FILES);
+        first.metadata = Some(RqMetadataManifest {
+            version: 1,
+            commitment_hex: "22".repeat(32),
+            entries: Vec::new(),
+            directories: None,
+        });
+        let mut second = first.clone();
+        second.metadata.as_mut().expect("metadata").commitment_hex = "33".repeat(32);
+
+        assert!(!first.agrees_with(&second));
     }
 
     #[test]

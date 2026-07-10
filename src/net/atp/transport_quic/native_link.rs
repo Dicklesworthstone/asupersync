@@ -178,6 +178,14 @@ impl Drop for QuicStagingDirGuard {
     }
 }
 
+async fn create_quic_staging_dir_guard(path: PathBuf) -> std::io::Result<QuicStagingDirGuard> {
+    crate::runtime::spawn_blocking_io(move || {
+        std::fs::create_dir(&path)?;
+        Ok(QuicStagingDirGuard::new(path))
+    })
+    .await
+}
+
 /// Bytes of the simplified 1-RTT data-plane header (flags + 8-byte packet number).
 const ONE_RTT_HEADER_LEN: usize = 9;
 /// QUIC AES-128-GCM authentication tag length.
@@ -8069,10 +8077,49 @@ impl NativeReceiverIntakeStats {
 struct QuicPackedMemberWrite {
     offset: u64,
     len: u64,
+    staging_path: PathBuf,
     out_path: PathBuf,
     /// Member metadata applied inside the one-shot batch task (sync core) so
     /// a 2000-member tree pays zero per-file pool dispatches for metadata.
     metadata: Option<EntryMetadata>,
+}
+
+struct QuicPackedStagingGuard {
+    path: PathBuf,
+    staging_root: PathBuf,
+    armed: bool,
+}
+
+impl QuicPackedStagingGuard {
+    fn new(path: PathBuf, staging_root: PathBuf) -> Self {
+        Self {
+            path,
+            staging_root,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for QuicPackedStagingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+            // A dropped blocking future can race the outer directory guard.
+            // Once the batch closure returns, this second owned cleanup runs
+            // after all source/output handles are closed.
+            let _ = std::fs::remove_dir_all(&self.staging_root);
+        }
+    }
+}
+
+struct QuicPackedBatchWrite {
+    reports: Vec<(PathBuf, MetadataApplyReport)>,
+    guards: Vec<QuicPackedStagingGuard>,
+    metadata_deferred: Vec<bool>,
 }
 
 /// One-shot packed-member commit cap (mirrors the RQ tier): above this staged
@@ -8088,49 +8135,134 @@ fn write_quic_packed_member_batch_oneshot(
     staging_path: PathBuf,
     members: Vec<QuicPackedMemberWrite>,
     span_len: usize,
-) -> std::io::Result<Vec<(PathBuf, MetadataApplyReport)>> {
-    use std::io::Read;
+) -> std::io::Result<QuicPackedBatchWrite> {
+    use std::io::{Read as _, Write as _};
 
-    let mut staged = vec![0u8; span_len];
-    let mut source = std::fs::File::open(&staging_path)?;
-    source.read_exact(&mut staged)?;
-
-    let mut created_parents: std::collections::BTreeSet<PathBuf> =
-        std::collections::BTreeSet::new();
+    let staging_root = staging_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("packed staging path has no parent"))?
+        .to_path_buf();
     let mut reports = Vec::new();
-    for member in &members {
-        if let Some(parent) = member.out_path.parent()
-            && created_parents.insert(parent.to_path_buf())
-        {
-            std::fs::create_dir_all(parent)?;
+    let mut guards = Vec::with_capacity(members.len());
+    let mut metadata_deferred = Vec::with_capacity(members.len());
+    let operation = (|| -> std::io::Result<()> {
+        let mut staged = vec![0u8; span_len];
+        let mut source = std::fs::File::open(&staging_path)?;
+        source.read_exact(&mut staged)?;
+
+        for member in &members {
+            let start = usize::try_from(member.offset)
+                .map_err(|_| std::io::Error::other("packed member offset exceeds span"))?;
+            let len = usize::try_from(member.len)
+                .map_err(|_| std::io::Error::other("packed member length exceeds span"))?;
+            let end = start
+                .checked_add(len)
+                .filter(|end| *end <= staged.len())
+                .ok_or_else(|| std::io::Error::other("packed member range exceeds staged span"))?;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&member.staging_path)?;
+            let guard =
+                QuicPackedStagingGuard::new(member.staging_path.clone(), staging_root.clone());
+            out.write_all(&staged[start..end])?;
+            out.sync_all()?;
+            drop(out);
+            let deferred = member
+                .metadata
+                .as_ref()
+                .is_some_and(super::metadata_makes_windows_staging_readonly);
+            if let Some(metadata) = &member.metadata
+                && !deferred
+            {
+                let report = apply_entry_metadata_sync(&member.staging_path, metadata)
+                    .map_err(|err| std::io::Error::other(err.into_message()))?;
+                reports.push((member.out_path.clone(), report));
+            }
+            metadata_deferred.push(deferred);
+            guards.push(guard);
         }
-        let start = usize::try_from(member.offset)
-            .map_err(|_| std::io::Error::other("packed member offset exceeds span"))?;
-        let len = usize::try_from(member.len)
-            .map_err(|_| std::io::Error::other("packed member length exceeds span"))?;
-        let end = start
-            .checked_add(len)
-            .filter(|end| *end <= staged.len())
-            .ok_or_else(|| std::io::Error::other("packed member range exceeds staged span"))?;
-        std::fs::write(&member.out_path, &staged[start..end])?;
-        if let Some(metadata) = &member.metadata {
-            let report = apply_entry_metadata_sync(&member.out_path, metadata)
-                .map_err(|err| std::io::Error::other(err.into_message()))?;
-            reports.push((member.out_path.clone(), report));
-        }
+        Ok(())
+    })();
+    if let Err(error) = operation {
+        drop(guards);
+        return Err(error);
     }
-    Ok(reports)
+    Ok(QuicPackedBatchWrite {
+        reports,
+        guards,
+        metadata_deferred,
+    })
 }
 
-/// Split a verified staged pack into member files. Returns `Some(reports)`
-/// when the one-shot blocking-pool path also applied member metadata inline;
-/// `None` when the streaming fallback ran and the caller owns the async
-/// per-member metadata applies.
+fn write_quic_packed_member_batch_streaming(
+    staging_path: PathBuf,
+    members: Vec<QuicPackedMemberWrite>,
+) -> std::io::Result<QuicPackedBatchWrite> {
+    use std::io::{Read as _, Seek as _, Write as _};
+
+    let staging_root = staging_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("packed staging path has no parent"))?
+        .to_path_buf();
+    let mut reports = Vec::new();
+    let mut guards = Vec::with_capacity(members.len());
+    let mut metadata_deferred = Vec::with_capacity(members.len());
+    let operation = (|| -> std::io::Result<()> {
+        let mut source = std::fs::File::open(&staging_path)?;
+        for member in &members {
+            source.seek(std::io::SeekFrom::Start(member.offset))?;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&member.staging_path)?;
+            let guard =
+                QuicPackedStagingGuard::new(member.staging_path.clone(), staging_root.clone());
+            let copied = std::io::copy(
+                &mut std::io::Read::by_ref(&mut source).take(member.len),
+                &mut out,
+            )?;
+            if copied != member.len {
+                return Err(std::io::Error::other(format!(
+                    "short read while splitting packed member {}",
+                    member.out_path.display()
+                )));
+            }
+            out.flush()?;
+            out.sync_all()?;
+            drop(out);
+            let deferred = member
+                .metadata
+                .as_ref()
+                .is_some_and(super::metadata_makes_windows_staging_readonly);
+            if let Some(metadata) = &member.metadata
+                && !deferred
+            {
+                let report = apply_entry_metadata_sync(&member.staging_path, metadata)
+                    .map_err(|err| std::io::Error::other(err.into_message()))?;
+                reports.push((member.out_path.clone(), report));
+            }
+            metadata_deferred.push(deferred);
+            guards.push(guard);
+        }
+        Ok(())
+    })();
+    if let Err(error) = operation {
+        drop(guards);
+        return Err(error);
+    }
+    Ok(QuicPackedBatchWrite {
+        reports,
+        guards,
+        metadata_deferred,
+    })
+}
+
+/// Split a verified staged pack into guarded member staging files.
 async fn write_quic_packed_member_batch(
     staging_path: &Path,
     members: &[QuicPackedMemberWrite],
-    read_buf: &mut [u8],
-) -> Result<Option<Vec<(PathBuf, MetadataApplyReport)>>, QuicTransportError> {
+) -> Result<QuicPackedBatchWrite, QuicTransportError> {
     let span_end = members
         .iter()
         .map(|member| member.offset.saturating_add(member.len))
@@ -8146,6 +8278,7 @@ async fn write_quic_packed_member_batch(
             .map(|member| QuicPackedMemberWrite {
                 offset: member.offset,
                 len: member.len,
+                staging_path: member.staging_path.clone(),
                 out_path: member.out_path.clone(),
                 metadata: member.metadata.clone(),
             })
@@ -8155,53 +8288,26 @@ async fn write_quic_packed_member_batch(
             write_quic_packed_member_batch_oneshot(staging, batch, span_len)
         })
         .await
-        .map(Some)
         .map_err(|err| QuicTransportError::Source(format!("{staging_display}: {err}")));
     }
 
-    // Streaming fallback: sequential per-member copy out of the staged pack.
-    let mut source = crate::fs::File::open(staging_path)
-        .await
-        .map_err(|err| QuicTransportError::Source(format!("{}: {err}", staging_path.display())))?;
-    let mut cursor = 0u64;
-    for member in members {
-        if let Some(parent) = member.out_path.parent() {
-            crate::fs::create_dir_all(parent).await?;
-        }
-        if cursor != member.offset {
-            source.seek(std::io::SeekFrom::Start(member.offset)).await?;
-            cursor = member.offset;
-        }
-        let mut out = crate::fs::File::create(&member.out_path)
-            .await
-            .map_err(|err| {
-                QuicTransportError::Source(format!("{}: {err}", member.out_path.display()))
-            })?;
-        let mut remaining = member.len;
-        while remaining > 0 {
-            let want =
-                usize::try_from(remaining.min(read_buf.len() as u64)).unwrap_or(read_buf.len());
-            let n = source.read(&mut read_buf[..want]).await.map_err(|err| {
-                QuicTransportError::Source(format!("{}: {err}", staging_path.display()))
-            })?;
-            if n == 0 {
-                return Err(QuicTransportError::Source(format!(
-                    "{}: short read while splitting packed member {}",
-                    staging_path.display(),
-                    member.out_path.display()
-                )));
-            }
-            out.write_all(&read_buf[..n]).await.map_err(|err| {
-                QuicTransportError::Source(format!("{}: {err}", member.out_path.display()))
-            })?;
-            remaining -= n as u64;
-            cursor = cursor.saturating_add(n as u64);
-        }
-        out.flush().await.map_err(|err| {
-            QuicTransportError::Source(format!("{}: {err}", member.out_path.display()))
-        })?;
-    }
-    Ok(None)
+    let staging = staging_path.to_path_buf();
+    let batch = members
+        .iter()
+        .map(|member| QuicPackedMemberWrite {
+            offset: member.offset,
+            len: member.len,
+            staging_path: member.staging_path.clone(),
+            out_path: member.out_path.clone(),
+            metadata: member.metadata.clone(),
+        })
+        .collect::<Vec<_>>();
+    let staging_display = staging_path.display().to_string();
+    crate::runtime::spawn_blocking_io(move || {
+        write_quic_packed_member_batch_streaming(staging, batch)
+    })
+    .await
+    .map_err(|err| QuicTransportError::Source(format!("{staging_display}: {err}")))
 }
 
 /// Verify each packed member's SHA-256 against the staged pack and append the
@@ -8315,6 +8421,7 @@ async fn commit_staged_entries(
         if manifest.is_directory && manifest.entries.is_empty() {
             super::reject_quic_destination_symlink_prefix(&base, &base).await?;
             crate::fs::create_dir_all(&base).await?;
+            super::reject_quic_destination_symlink_prefix(&base, &base).await?;
             committed_paths.push(base.clone());
             send_and_flush_native_keep_alive(cx, link, control).await?;
         }
@@ -8328,35 +8435,39 @@ async fn commit_staged_entries(
                 // batch (the staged pack itself is scratch; the staging-dir
                 // guard reclaims it).
                 let mut writes = Vec::with_capacity(entry.members.len());
-                for member in &entry.members {
+                for (member_index, member) in entry.members.iter().enumerate() {
                     let member_path = super::quic_join_relative(&base, &member.rel_path)?;
                     super::reject_quic_destination_symlink_prefix(&base, &member_path).await?;
                     writes.push(QuicPackedMemberWrite {
                         offset: member.offset,
                         len: member.len,
+                        staging_path: staged_entry
+                            .staging_path
+                            .with_file_name(format!("member-{}-{member_index}", entry.index)),
                         out_path: member_path,
                         metadata: member.metadata.clone(),
                     });
                 }
-                match write_quic_packed_member_batch(
-                    &staged_entry.staging_path,
-                    &writes,
-                    &mut read_buf,
-                )
-                .await?
-                {
-                    Some(reports) => {
-                        for (path, report) in &reports {
-                            super::trace_quic_metadata_skips(cx, path, report);
-                        }
-                    }
-                    None => {
-                        for (member, write) in entry.members.iter().zip(&writes) {
-                            super::apply_quic_member_metadata(cx, &write.out_path, member).await?;
-                        }
-                    }
+                let mut batch =
+                    write_quic_packed_member_batch(&staged_entry.staging_path, &writes).await?;
+                for (path, report) in &batch.reports {
+                    super::trace_quic_metadata_skips(cx, path, report);
                 }
-                for write in &writes {
+                for (member_index, (member, write)) in entry.members.iter().zip(&writes).enumerate()
+                {
+                    if let Some(parent) = write.out_path.parent() {
+                        crate::fs::create_dir_all(parent).await?;
+                    }
+                    super::reject_quic_destination_symlink_prefix(&base, &write.out_path).await?;
+                    crate::net::atp::transport_common::metadata::commit_staged_regular_file_transactionally(
+                        &write.staging_path,
+                        &write.out_path,
+                    )
+                    .await?;
+                    batch.guards[member_index].disarm();
+                    if batch.metadata_deferred[member_index] {
+                        super::apply_quic_member_metadata(cx, &write.out_path, member).await?;
+                    }
                     committed_paths.push(write.out_path.clone());
                 }
                 send_and_flush_native_keep_alive(cx, link, control).await?;
@@ -8380,11 +8491,27 @@ async fn commit_staged_entries(
             if let Some(parent) = out_path.parent() {
                 crate::fs::create_dir_all(parent).await?;
             }
-            crate::fs::rename(&staged_entry.staging_path, &out_path).await?;
-            super::apply_quic_entry_metadata(cx, &out_path, entry).await?;
+            let metadata_deferred = entry
+                .metadata
+                .as_ref()
+                .is_some_and(super::metadata_makes_windows_staging_readonly);
+            if !metadata_deferred {
+                super::apply_quic_entry_metadata(cx, &staged_entry.staging_path, entry).await?;
+            }
+            super::reject_quic_destination_symlink_prefix(&base, &out_path).await?;
+            crate::net::atp::transport_common::metadata::commit_staged_regular_file_transactionally(
+                &staged_entry.staging_path,
+                &out_path,
+            )
+            .await?;
+            if metadata_deferred {
+                super::apply_quic_entry_metadata(cx, &out_path, entry).await?;
+            }
             committed_paths.push(out_path);
             send_and_flush_native_keep_alive(cx, link, control).await?;
         }
+        super::apply_quic_directory_metadata(cx, &base, manifest).await?;
+        send_and_flush_native_keep_alive(cx, link, control).await?;
     }
 
     let bytes_received = digests
@@ -9206,7 +9333,7 @@ async fn run_receiver_session(
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
     super::prepare_quic_destination_root(dest_dir).await?;
-    let mut staging_dir = None;
+    let mut staging_guard = None;
     for _ in 0..32 {
         let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
         let staging_nonce = quic_staging_nonce_hex()?;
@@ -9214,22 +9341,24 @@ async fn run_receiver_session(
             ".atp-quic-staging-{}-{staging_nonce}-{staging_seq}",
             manifest.transfer_id
         ));
-        match crate::fs::create_dir(&candidate).await {
-            Ok(()) => {
-                staging_dir = Some(candidate);
+        match create_quic_staging_dir_guard(candidate).await {
+            Ok(guard) => {
+                super::prepare_quic_destination_root(dest_dir).await?;
+                super::reject_quic_existing_symlink(&guard.dir).await?;
+                staging_guard = Some(guard);
                 break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
     }
-    let staging_dir = staging_dir.ok_or_else(|| {
+    let mut staging_guard = staging_guard.ok_or_else(|| {
         QuicTransportError::Source(format!(
             "unable to create a unique owned QUIC staging directory under {}",
             dest_dir.display()
         ))
     })?;
-    let mut staging_guard = QuicStagingDirGuard::new(staging_dir.clone());
+    let staging_dir = staging_guard.dir.clone();
     let mut staged = manifest
         .entries
         .iter()
@@ -9319,8 +9448,12 @@ async fn run_receiver_session(
         for staged_entry in &mut staged {
             let _ = staged_entry.close_cached_staging_file().await;
         }
-        let _ = crate::fs::remove_dir_all(&staging_dir).await;
-        staging_guard.disarm();
+        match crate::fs::remove_dir_all(&staging_dir).await {
+            Ok(()) => staging_guard.disarm(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => staging_guard.disarm(),
+            Err(error) if source_receive_result.is_ok() => return Err(error.into()),
+            Err(_) => {}
+        }
         return source_receive_result;
     }
 
@@ -9788,8 +9921,12 @@ async fn run_receiver_session(
     // `.atp-quic-staging-*` directory into the destination — restoring the
     // cleanup that 2a3400567 dropped, caught by
     // atp_quic_real_udp_transfer_e2e::assert_no_staging_residue.
-    let _ = crate::fs::remove_dir_all(&staging_dir).await;
-    staging_guard.disarm();
+    match crate::fs::remove_dir_all(&staging_dir).await {
+        Ok(()) => staging_guard.disarm(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => staging_guard.disarm(),
+        Err(error) if receive_result.is_ok() => return Err(error.into()),
+        Err(_) => {}
+    }
     receive_result
 }
 
@@ -11380,6 +11517,7 @@ mod tests {
             total_bytes: 1024 * 1024,
             merkle_root_hex: "00".repeat(32),
             metadata_root_hex: None,
+            directory_metadata: None,
             delta_manifest: None,
             entries: vec![crate::net::atp::transport_tcp::ManifestEntry {
                 index: 0,

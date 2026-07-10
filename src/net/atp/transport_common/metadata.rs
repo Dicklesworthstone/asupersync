@@ -394,6 +394,61 @@ impl EntryMetadata {
     }
 }
 
+/// Metadata for one non-root directory in a transfer tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryMetadataEntry {
+    /// Portable path relative to the transfer root.
+    pub rel_path: String,
+    /// Directory attributes applied after all descendants commit.
+    pub metadata: EntryMetadata,
+}
+
+/// Metadata for the transfer root and non-empty directories that are otherwise
+/// implicit in file paths.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DirectoryMetadataManifest {
+    /// Transfer-root directory metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<EntryMetadata>,
+    /// Non-root directories, in portable relative-path form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<DirectoryMetadataEntry>,
+}
+
+impl DirectoryMetadataManifest {
+    /// Whether no directory carries policy-selected fidelity metadata.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.root.is_none() && self.entries.is_empty()
+    }
+
+    /// Canonical metadata commitment pairs. `.` is reserved for the transfer
+    /// root and cannot collide with a portable relative entry path.
+    #[must_use]
+    pub fn commitment_pairs(&self) -> Vec<(&str, &EntryMetadata)> {
+        let mut pairs = Vec::with_capacity(self.entries.len() + usize::from(self.root.is_some()));
+        if let Some(root) = &self.root {
+            pairs.push((".", root));
+        }
+        pairs.extend(
+            self.entries
+                .iter()
+                .map(|entry| (entry.rel_path.as_str(), &entry.metadata)),
+        );
+        pairs
+    }
+}
+
+fn metadata_has_fidelity_fields(metadata: &EntryMetadata) -> bool {
+    metadata.unix_mode.is_some()
+        || metadata.mtime_unix_secs.is_some()
+        || metadata.mtime_nanos.is_some()
+        || metadata.uid.is_some()
+        || metadata.gid.is_some()
+        || metadata.windows_attributes.is_some()
+        || !metadata.xattrs.is_empty()
+}
+
 fn classify_symlink_target_semantics(target: &str) -> SymlinkTargetSemantics {
     if validate_portable_symlink_target_syntax(target).is_ok() {
         SymlinkTargetSemantics::PortableRelative
@@ -402,6 +457,18 @@ fn classify_symlink_target_semantics(target: &str) -> SymlinkTargetSemantics {
     } else {
         SymlinkTargetSemantics::Unix
     }
+}
+
+#[cfg(windows)]
+fn canonicalize_windows_relative_symlink_target(target: &str) -> Option<String> {
+    // Win32 commonly returns relative link text with `\` separators. Convert
+    // only when the result satisfies ATP's strict portable grammar; drive,
+    // UNC, device, rooted, and otherwise native targets remain non-portable and
+    // are rejected by receive validation instead of changing meaning.
+    let normalized = target.replace('\\', "/");
+    validate_portable_symlink_target_syntax(&normalized)
+        .is_ok()
+        .then_some(normalized)
 }
 
 fn validate_portable_symlink_target_syntax(target: &str) -> Result<(), String> {
@@ -503,6 +570,19 @@ pub fn validate_entry_metadata_for_receive(
     policy: &MetadataPolicy,
 ) -> Result<(), String> {
     validate_symlink_metadata_for_receive(rel_path, metadata)?;
+    if metadata.unix_mode.is_some_and(|mode| mode & !0o7777 != 0) {
+        return Err("Unix mode declares bits outside the canonical 0o7777 mask".to_string());
+    }
+    if metadata.uid.is_some() != metadata.gid.is_some() {
+        return Err("platform ownership must declare both uid and gid".to_string());
+    }
+    if metadata.mtime_nanos.is_some() && metadata.mtime_unix_secs.is_none()
+        || metadata
+            .mtime_nanos
+            .is_some_and(|nanos| nanos >= 1_000_000_000)
+    {
+        return Err("invalid modification time tuple".to_string());
+    }
     if metadata.unix_mode.is_some() && !policy.preserve_unix_permissions {
         return Err("Unix permissions are denied by receiver metadata policy".to_string());
     }
@@ -546,17 +626,167 @@ pub fn filesystem_symlink_kind(
 
 static SYMLINK_COMMIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplaceableLeafKind {
     RegularFile,
     Symlink(crate::fs::SymlinkKind),
 }
 
+struct TemporaryLeafGuard {
+    path: PathBuf,
+    kind: ReplaceableLeafKind,
+    armed: bool,
+}
+
+impl TemporaryLeafGuard {
+    fn new(path: PathBuf, kind: ReplaceableLeafKind) -> Self {
+        Self {
+            path,
+            kind,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn cleanup(mut self) -> io::Result<()> {
+        let result = remove_temporary_leaf_sync(&self.path, self.kind);
+        if result.is_ok() {
+            self.disarm();
+        }
+        result
+    }
+}
+
+impl Drop for TemporaryLeafGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = remove_temporary_leaf_sync(&self.path, self.kind);
+    }
+}
+
+fn remove_temporary_leaf_sync(path: &Path, kind: ReplaceableLeafKind) -> io::Result<()> {
+    #[cfg(windows)]
+    if matches!(kind, ReplaceableLeafKind::RegularFile) {
+        let readonly_restore = clear_windows_readonly(path)?;
+        let remove = std::fs::remove_file(path);
+        let restore = readonly_restore
+            .map(ReadonlyRestore::restore)
+            .transpose()
+            .map(|_| ());
+        return match (remove, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) | (Err(_), Err(error)) => Err(error),
+        };
+    }
+    #[cfg(windows)]
+    let result = if matches!(
+        kind,
+        ReplaceableLeafKind::Symlink(crate::fs::SymlinkKind::Directory)
+    ) {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    #[cfg(not(windows))]
+    let result = {
+        let _ = kind;
+        std::fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_typed_symlink_sync(
+    target: &Path,
+    link: &Path,
+    kind: crate::fs::SymlinkKind,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = kind;
+        return std::os::unix::fs::symlink(target, link);
+    }
+    #[cfg(windows)]
+    {
+        return match kind {
+            crate::fs::SymlinkKind::File => std::os::windows::fs::symlink_file(target, link),
+            crate::fs::SymlinkKind::Directory => std::os::windows::fs::symlink_dir(target, link),
+        };
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link, kind);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symbolic links are unsupported on this platform",
+        ))
+    }
+}
+
+async fn create_guarded_temporary_symlink(
+    target: PathBuf,
+    candidate: PathBuf,
+    kind: crate::fs::SymlinkKind,
+) -> io::Result<TemporaryLeafGuard> {
+    crate::runtime::spawn_blocking_io(move || {
+        create_typed_symlink_sync(&target, &candidate, kind)?;
+        Ok(TemporaryLeafGuard::new(
+            candidate,
+            ReplaceableLeafKind::Symlink(kind),
+        ))
+    })
+    .await
+}
+
+async fn create_guarded_temporary_hardlink(
+    primary: PathBuf,
+    candidate: PathBuf,
+) -> io::Result<TemporaryLeafGuard> {
+    crate::runtime::spawn_blocking_io(move || {
+        std::fs::hard_link(primary, &candidate)?;
+        Ok(TemporaryLeafGuard::new(
+            candidate,
+            ReplaceableLeafKind::RegularFile,
+        ))
+    })
+    .await
+}
+
+async fn create_guarded_temporary_file(
+    candidate: PathBuf,
+    contents: Vec<u8>,
+) -> io::Result<TemporaryLeafGuard> {
+    crate::runtime::spawn_blocking_io(move || {
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)?;
+        let guard = TemporaryLeafGuard::new(candidate, ReplaceableLeafKind::RegularFile);
+        file.write_all(&contents)?;
+        file.sync_all()?;
+        drop(file);
+        Ok(guard)
+    })
+    .await
+}
+
 /// Create and transactionally install a typed symbolic link.
 ///
-/// The new link is created at a unique sibling before the existing leaf is
-/// moved aside. A failed final rename rolls the old leaf back into place.
-/// Existing real directories and unsupported reparse points fail closed.
+/// The new link is created at a unique sibling before one atomic rename
+/// replaces the existing leaf. Existing real directories and unsupported
+/// reparse points fail closed.
 ///
 /// # Errors
 ///
@@ -574,14 +804,13 @@ pub async fn commit_symlink_transactionally(
     })?;
     let kind = filesystem_symlink_kind(rel_path, metadata)
         .map_err(|error| StreamingError::new(format!("{rel_path}: {error}")))?;
-    let existing = replaceable_leaf_kind(out_path).await?;
-
-    let mut temporary = None;
+    let target = PathBuf::from(target);
+    let mut temporary_guard = None;
     for _ in 0..32 {
         let candidate = unique_symlink_sibling(out_path, "new")?;
-        match crate::fs::symlink_typed(target, &candidate, kind).await {
-            Ok(()) => {
-                temporary = Some(candidate);
+        match create_guarded_temporary_symlink(target.clone(), candidate, kind).await {
+            Ok(guard) => {
+                temporary_guard = Some(guard);
                 break;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -593,47 +822,363 @@ pub async fn commit_symlink_transactionally(
             }
         }
     }
-    let temporary = temporary.ok_or_else(|| {
+    let mut temporary_guard = temporary_guard.ok_or_else(|| {
         StreamingError::new(format!(
             "{}: unable to allocate unique symlink staging leaf",
             out_path.display()
         ))
     })?;
+    let temporary = temporary_guard.path.clone();
 
-    let backup = if existing.is_some() {
-        let backup = unique_absent_symlink_sibling(out_path, "backup").await?;
-        if let Err(error) = crate::fs::rename(out_path, &backup).await {
-            let _ = remove_typed_symlink(&temporary, kind).await;
-            return Err(StreamingError::new(format!(
-                "{}: move existing leaf to backup: {error}",
-                out_path.display()
-            )));
-        }
-        Some(backup)
-    } else {
-        None
-    };
-
-    if let Err(error) = crate::fs::rename(&temporary, out_path).await {
-        let _ = remove_typed_symlink(&temporary, kind).await;
-        let rollback = if let Some(backup) = &backup {
-            crate::fs::rename(backup, out_path).await
-        } else {
-            Ok(())
-        };
-        let rollback = rollback.err().map_or_else(String::new, |rollback| {
-            format!("; rollback failed: {rollback}")
-        });
+    if let Err(error) = install_staged_leaf_transactionally(
+        &temporary,
+        out_path,
+        ReplaceableLeafKind::Symlink(kind),
+    )
+    .await
+    {
+        let _ = temporary_guard.cleanup();
         return Err(StreamingError::new(format!(
-            "{}: install typed symlink: {error}{rollback}",
+            "{}: install typed symlink: {error}",
             out_path.display()
         )));
     }
-
-    if let (Some(backup), Some(existing)) = (backup, existing) {
-        remove_replaceable_leaf(&backup, existing).await?;
-    }
+    temporary_guard.disarm();
     Ok(())
+}
+
+/// Transactionally replace a regular-file destination with a staged file.
+///
+/// The final rename directly replaces an existing regular file or symlink, so
+/// readers observe either the old or new leaf and never an absent gap. On
+/// Windows, a read-only destination is made replaceable only after the first
+/// rename is denied. Real directories and unsupported reparse points fail
+/// closed.
+///
+/// # Errors
+///
+/// Returns a validation or filesystem error. A failed rename leaves the prior
+/// destination intact.
+pub async fn commit_staged_regular_file_transactionally(
+    staging_path: &Path,
+    out_path: &Path,
+) -> Result<(), StreamingError> {
+    install_staged_leaf_transactionally(staging_path, out_path, ReplaceableLeafKind::RegularFile)
+        .await
+}
+
+/// Write bytes to a unique sibling and atomically replace a regular-file
+/// destination, including stale read-only Windows destinations.
+///
+/// # Errors
+///
+/// Returns a write, sync, cleanup, or transactional replacement error.
+pub async fn commit_regular_bytes_transactionally(
+    out_path: &Path,
+    contents: &[u8],
+) -> Result<(), StreamingError> {
+    commit_regular_bytes_with_metadata_transactionally(out_path, contents, None)
+        .await
+        .map(|_| ())
+}
+
+/// Write bytes and apply metadata to an owned sibling before atomically
+/// replacing the destination.
+///
+/// # Errors
+///
+/// Returns without changing the destination when staging or metadata replay
+/// fails. A final rename failure also leaves the prior destination intact.
+pub async fn commit_regular_bytes_with_metadata_transactionally(
+    out_path: &Path,
+    contents: &[u8],
+    metadata: Option<&EntryMetadata>,
+) -> Result<MetadataApplyReport, StreamingError> {
+    let mut staged = None;
+    for _ in 0..32 {
+        let candidate = unique_symlink_sibling(out_path, "file-new")?;
+        match create_guarded_temporary_file(candidate, contents.to_vec()).await {
+            Ok(guard) => {
+                staged = Some(guard);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(StreamingError::new(format!(
+                    "{}: create staged regular file: {error}",
+                    out_path.display()
+                )));
+            }
+        }
+    }
+    let mut staged_guard = staged.ok_or_else(|| {
+        StreamingError::new(format!(
+            "{}: unable to allocate unique regular-file staging leaf",
+            out_path.display()
+        ))
+    })?;
+    let staged = staged_guard.path.clone();
+    let report = match metadata {
+        Some(metadata) => apply_entry_metadata(&staged, metadata).await?,
+        None => MetadataApplyReport::default(),
+    };
+    commit_staged_regular_file_transactionally(&staged, out_path).await?;
+    staged_guard.disarm();
+    Ok(report)
+}
+
+async fn install_staged_leaf_transactionally(
+    staging_path: &Path,
+    out_path: &Path,
+    expected_staging_kind: ReplaceableLeafKind,
+) -> Result<(), StreamingError> {
+    let staging_kind = replaceable_leaf_kind(staging_path).await?;
+    let staging_matches = match (staging_kind, expected_staging_kind) {
+        (Some(ReplaceableLeafKind::RegularFile), ReplaceableLeafKind::RegularFile) => true,
+        (Some(ReplaceableLeafKind::Symlink(_)), ReplaceableLeafKind::Symlink(_)) => true,
+        _ => false,
+    };
+    if !staging_matches {
+        return Err(StreamingError::new(format!(
+            "{}: staged commit leaf has the wrong filesystem kind",
+            staging_path.display()
+        )));
+    }
+
+    let existing = replaceable_leaf_kind(out_path).await?;
+    match rename_staged_leaf_durably(staging_path, out_path).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            #[cfg(windows)]
+            if error.kind() == io::ErrorKind::PermissionDenied && existing.is_some() {
+                let readonly_restore = match existing.expect("checked as present") {
+                    ReplaceableLeafKind::RegularFile => clear_windows_readonly(out_path),
+                    ReplaceableLeafKind::Symlink(kind) => {
+                        clear_windows_symlink_readonly(out_path, kind)
+                    }
+                };
+                let Some(readonly_restore) = readonly_restore.map_err(|clear| {
+                    StreamingError::new(format!(
+                        "{}: clear read-only attribute for atomic replacement after {error}: {clear}",
+                        out_path.display()
+                    ))
+                })?
+                else {
+                    return Err(StreamingError::new(format!(
+                        "{}: atomic replacement denied: {error}",
+                        out_path.display()
+                    )));
+                };
+                return match rename_staged_leaf_durably(staging_path, out_path).await {
+                    Ok(()) => readonly_restore.finish_after_replace().map_err(|restore| {
+                        StreamingError::new(format!(
+                            "{}: replacement committed but old hardlink attributes could not be restored: {restore}",
+                            out_path.display()
+                        ))
+                    }),
+                    Err(retry) => {
+                        let restore = readonly_restore.restore().err().map_or_else(
+                            String::new,
+                            |restore| format!("; restore read-only attribute: {restore}"),
+                        );
+                        Err(StreamingError::new(format!(
+                            "{}: atomic replacement after clearing read-only attribute: {retry}{restore}",
+                            out_path.display()
+                        )))
+                    }
+                };
+            }
+            let _ = existing;
+            Err(StreamingError::new(format!(
+                "{}: atomic staged replacement: {error}",
+                out_path.display()
+            )))
+        }
+    }
+}
+
+async fn rename_staged_leaf_durably(from: &Path, to: &Path) -> io::Result<()> {
+    crate::fs::rename(from, to).await?;
+    sync_committed_parent(to).await
+}
+
+#[cfg(unix)]
+async fn sync_committed_parent(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    crate::runtime::spawn_blocking_io(move || std::fs::File::open(parent)?.sync_all()).await
+}
+
+#[cfg(not(unix))]
+async fn sync_committed_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Transactionally install a hardlink at `out_path` without deleting the old
+/// destination first.
+///
+/// The hardlink is created at a unique sibling, then installed through
+/// [`commit_staged_regular_file_transactionally`]. This gives hardlink commits
+/// the same read-only handling and rollback behavior as regular files.
+///
+/// # Errors
+///
+/// Returns a filesystem or transactional replacement error.
+pub async fn commit_hardlink_transactionally(
+    primary_path: &Path,
+    out_path: &Path,
+) -> Result<(), StreamingError> {
+    let mut temporary_guard = None;
+    for _ in 0..32 {
+        let candidate = unique_symlink_sibling(out_path, "hardlink-new")?;
+        match create_guarded_temporary_hardlink(primary_path.to_path_buf(), candidate).await {
+            Ok(guard) => {
+                temporary_guard = Some(guard);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(StreamingError::new(format!(
+                    "{}: create staged hardlink to {}: {error}",
+                    out_path.display(),
+                    primary_path.display()
+                )));
+            }
+        }
+    }
+    let mut temporary_guard = temporary_guard.ok_or_else(|| {
+        StreamingError::new(format!(
+            "{}: unable to allocate unique hardlink staging leaf",
+            out_path.display()
+        ))
+    })?;
+    let temporary = temporary_guard.path.clone();
+
+    if let Err(error) = commit_staged_regular_file_transactionally(&temporary, out_path).await {
+        let cleanup = temporary_guard.cleanup();
+        let cleanup = cleanup.err().map_or_else(String::new, |cleanup| {
+            format!("; staged hardlink cleanup failed: {cleanup}")
+        });
+        return Err(StreamingError::new(format!("{error}{cleanup}")));
+    }
+    temporary_guard.disarm();
+    Ok(())
+}
+
+#[cfg(windows)]
+struct ReadonlyRestore {
+    file: std::fs::File,
+    permissions: Option<std::fs::Permissions>,
+}
+
+#[cfg(windows)]
+impl ReadonlyRestore {
+    fn restore(mut self) -> io::Result<()> {
+        let Some(permissions) = self.permissions.take() else {
+            return Ok(());
+        };
+        match self.file.set_permissions(permissions.clone()) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // Keep the original attributes armed so Drop gets one final
+                // restoration attempt if the explicit call loses a transient
+                // race with antivirus/indexer handles.
+                self.permissions = Some(permissions);
+                Err(error)
+            }
+        }
+    }
+
+    fn finish_after_replace(self) -> io::Result<()> {
+        // Restore through the retained old-file handle unconditionally. If the
+        // replaced inode had no other links this only updates an unlinked file;
+        // if another link appeared or disappeared during rename, it avoids a
+        // stale pre-rename link-count decision.
+        self.restore()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ReadonlyRestore {
+    fn drop(&mut self) {
+        if let Some(permissions) = self.permissions.take() {
+            let _ = self.file.set_permissions(permissions);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn clear_windows_readonly(path: &Path) -> io::Result<Option<ReadonlyRestore>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    let file = options
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    reject_windows_reparse_handle(&metadata)?;
+    let permissions = metadata.permissions();
+    if !permissions.readonly() {
+        return Ok(None);
+    }
+    let mut writable = permissions.clone();
+    writable.set_readonly(false);
+    file.set_permissions(writable)?;
+    Ok(Some(ReadonlyRestore {
+        file,
+        permissions: Some(permissions),
+    }))
+}
+
+#[cfg(windows)]
+fn clear_windows_symlink_readonly(
+    path: &Path,
+    expected_kind: crate::fs::SymlinkKind,
+) -> io::Result<Option<ReadonlyRestore>> {
+    use std::os::windows::fs::{FileTypeExt as _, OpenOptionsExt as _};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    let file = options
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    let file_type = metadata.file_type();
+    let kind_matches = match expected_kind {
+        crate::fs::SymlinkKind::File => file_type.is_symlink_file(),
+        crate::fs::SymlinkKind::Directory => file_type.is_symlink_dir(),
+    };
+    if !kind_matches {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "atomic replacement target changed symlink kind",
+        ));
+    }
+    let permissions = metadata.permissions();
+    if !permissions.readonly() {
+        return Ok(None);
+    }
+    let mut writable = permissions.clone();
+    writable.set_readonly(false);
+    file.set_permissions(writable)?;
+    Ok(Some(ReadonlyRestore {
+        file,
+        permissions: Some(permissions),
+    }))
 }
 
 async fn replaceable_leaf_kind(path: &Path) -> Result<Option<ReplaceableLeafKind>, StreamingError> {
@@ -686,66 +1231,6 @@ fn unique_symlink_sibling(path: &Path, label: &str) -> Result<PathBuf, Streaming
     )))
 }
 
-async fn unique_absent_symlink_sibling(
-    path: &Path,
-    label: &str,
-) -> Result<PathBuf, StreamingError> {
-    for _ in 0..32 {
-        let candidate = unique_symlink_sibling(path, label)?;
-        match crate::fs::symlink_metadata(&candidate).await {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
-            Ok(_) => {}
-            Err(error) => {
-                return Err(StreamingError::new(format!(
-                    "{}: inspect backup candidate: {error}",
-                    candidate.display()
-                )));
-            }
-        }
-    }
-    Err(StreamingError::new(format!(
-        "{}: unable to allocate unique symlink backup leaf",
-        path.display()
-    )))
-}
-
-async fn remove_typed_symlink(path: &Path, kind: crate::fs::SymlinkKind) -> io::Result<()> {
-    #[cfg(windows)]
-    if matches!(kind, crate::fs::SymlinkKind::Directory) {
-        return crate::fs::remove_dir(path).await;
-    }
-    let _ = kind;
-    crate::fs::remove_file(path).await
-}
-
-async fn remove_replaceable_leaf(
-    path: &Path,
-    kind: ReplaceableLeafKind,
-) -> Result<(), StreamingError> {
-    // `result` is reassigned only on the Windows read-only-retry path below, so
-    // on other targets the binding is never mutated after this point.
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut result = match kind {
-        ReplaceableLeafKind::RegularFile => crate::fs::remove_file(path).await,
-        ReplaceableLeafKind::Symlink(kind) => remove_typed_symlink(path, kind).await,
-    };
-    #[cfg(windows)]
-    if result
-        .as_ref()
-        .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
-        && matches!(kind, ReplaceableLeafKind::RegularFile)
-        && set_windows_attributes(path, 0).is_ok()
-    {
-        result = crate::fs::remove_file(path).await;
-    }
-    result.map_err(|error| {
-        StreamingError::new(format!(
-            "{}: remove replaced backup: {error}",
-            path.display()
-        ))
-    })
-}
-
 /// Stable filesystem identity for a regular file on platforms that expose it.
 ///
 /// A rename within the same filesystem preserves this identity, letting the
@@ -758,6 +1243,35 @@ pub struct FileIdentity {
     pub device: u64,
     /// Inode/file index on that device.
     pub inode: u64,
+}
+
+/// Platform-native identity used only to detect hardlinks during one source
+/// walk. Windows keeps the complete 128-bit file ID required by ReFS; this is
+/// intentionally separate from serialized zero-scan identity state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct HardlinkIdentity {
+    namespace: u64,
+    id: [u8; 16],
+}
+
+impl HardlinkIdentity {
+    #[cfg(unix)]
+    fn unix(device: u64, inode: u64) -> Self {
+        let mut id = [0u8; 16];
+        id[8..].copy_from_slice(&inode.to_be_bytes());
+        Self {
+            namespace: device,
+            id,
+        }
+    }
+
+    #[cfg(windows)]
+    const fn windows(volume_serial: u64, file_id: [u8; 16]) -> Self {
+        Self {
+            namespace: volume_serial,
+            id: file_id,
+        }
+    }
 }
 
 impl FileIdentity {
@@ -1297,6 +1811,210 @@ pub async fn read_entry_metadata(
     crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
 }
 
+/// Capture policy-selected metadata for a transfer root and every non-root
+/// directory, including non-empty directories that content walks reconstruct
+/// only implicitly.
+///
+/// # Errors
+///
+/// Returns a source-scoped error for an unreadable tree, non-directory root,
+/// non-portable name, or unsupported reparse point.
+pub async fn capture_directory_metadata_manifest(
+    root: &Path,
+    policy: &MetadataPolicy,
+) -> Result<DirectoryMetadataManifest, StreamingError> {
+    let root = root.to_path_buf();
+    let policy = policy.clone();
+    crate::runtime::spawn_blocking(move || capture_directory_metadata_manifest_sync(&root, &policy))
+        .await
+}
+
+fn capture_directory_metadata_manifest_sync(
+    root: &Path,
+    policy: &MetadataPolicy,
+) -> Result<DirectoryMetadataManifest, StreamingError> {
+    let root_frame = open_directory_metadata_walk_frame(root.to_path_buf(), String::new())?;
+    let root_metadata = read_entry_metadata_sync(root, policy)?;
+    if !matches!(root_metadata.file_kind, FileKind::Directory) {
+        return Err(StreamingError::new(format!(
+            "{}: directory metadata root is not a directory",
+            root.display()
+        )));
+    }
+    let mut manifest = DirectoryMetadataManifest {
+        root: metadata_has_fidelity_fields(&root_metadata).then_some(root_metadata),
+        entries: Vec::new(),
+    };
+    capture_directory_metadata_children_sync(root_frame, policy, &mut manifest.entries)?;
+    manifest
+        .entries
+        .sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    Ok(manifest)
+}
+
+struct DirectoryMetadataTraversalGuard {
+    // Omitting FILE_SHARE_DELETE keeps each Windows ancestor bound to the path
+    // while its descendants are enumerated. This closes the junction-swap gap
+    // between a no-follow stat and the subsequent path-based `read_dir` call.
+    #[cfg(windows)]
+    _handle: std::fs::File,
+}
+
+impl DirectoryMetadataTraversalGuard {
+    fn acquire(path: &Path) -> Result<Self, StreamingError> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+                FILE_SHARE_WRITE,
+            };
+
+            let mut options = std::fs::OpenOptions::new();
+            let handle = options
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?;
+            let metadata = handle
+                .metadata()
+                .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(StreamingError::new(format!(
+                    "{}: directory metadata traversal crossed a reparse point",
+                    path.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(StreamingError::new(format!(
+                    "{}: directory metadata path changed filesystem kind",
+                    path.display()
+                )));
+            }
+            return Ok(Self { _handle: handle });
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            Ok(Self {})
+        }
+    }
+}
+
+struct DirectoryMetadataWalkFrame {
+    rel_path: String,
+    children: Vec<std::fs::DirEntry>,
+    next_child: usize,
+    // Frames remain on the explicit DFS stack until all descendants finish, so
+    // Windows keeps the complete ancestor handle chain open without recursion.
+    _guard: DirectoryMetadataTraversalGuard,
+}
+
+fn open_directory_metadata_walk_frame(
+    path: PathBuf,
+    rel_path: String,
+) -> Result<DirectoryMetadataWalkFrame, StreamingError> {
+    let guard = DirectoryMetadataTraversalGuard::acquire(&path)?;
+    match classify_path_link_sync(&path)
+        .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?
+    {
+        PathLinkKind::NotLink => {}
+        PathLinkKind::Symlink(_) | PathLinkKind::UnsupportedReparse => {
+            return Err(StreamingError::new(format!(
+                "{}: directory metadata traversal crossed a symlink or reparse point",
+                path.display()
+            )));
+        }
+    }
+    if !std::fs::symlink_metadata(&path)
+        .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?
+        .is_dir()
+    {
+        return Err(StreamingError::new(format!(
+            "{}: directory metadata path changed filesystem kind",
+            path.display()
+        )));
+    }
+    let mut children = std::fs::read_dir(&path)
+        .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?;
+    children.sort_by_key(std::fs::DirEntry::file_name);
+    Ok(DirectoryMetadataWalkFrame {
+        rel_path,
+        children,
+        next_child: 0,
+        _guard: guard,
+    })
+}
+
+fn capture_directory_metadata_children_sync(
+    root_frame: DirectoryMetadataWalkFrame,
+    policy: &MetadataPolicy,
+    out: &mut Vec<DirectoryMetadataEntry>,
+) -> Result<(), StreamingError> {
+    let mut stack = vec![root_frame];
+    while let Some(frame) = stack.last_mut() {
+        if frame.next_child == frame.children.len() {
+            stack.pop();
+            continue;
+        }
+        let child = &frame.children[frame.next_child];
+        frame.next_child += 1;
+        let path = child.path();
+        let name = child.file_name().into_string().map_err(|_| {
+            StreamingError::new(format!(
+                "{}: source directory name is not valid Unicode",
+                path.display()
+            ))
+        })?;
+        validate_portable_path_component(&name).map_err(|_| {
+            StreamingError::new(format!(
+                "{}: source directory name is not portable: {name:?}",
+                path.display()
+            ))
+        })?;
+        match classify_path_link_sync(&path)
+            .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?
+        {
+            PathLinkKind::NotLink => {}
+            PathLinkKind::Symlink(_) => continue,
+            PathLinkKind::UnsupportedReparse => {
+                return Err(StreamingError::new(format!(
+                    "{}: unsupported Windows reparse point",
+                    path.display()
+                )));
+            }
+        }
+        if !child
+            .file_type()
+            .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?
+            .is_dir()
+        {
+            continue;
+        }
+        let rel_path = if frame.rel_path.is_empty() {
+            name
+        } else {
+            format!("{}/{name}", frame.rel_path)
+        };
+        let child_frame = open_directory_metadata_walk_frame(path.clone(), rel_path.clone())?;
+        // Empty directories already travel as explicit zero-content entries;
+        // only otherwise-implicit non-empty directories belong here.
+        if !child_frame.children.is_empty() {
+            let metadata = read_entry_metadata_sync(&path, policy)?;
+            if metadata_has_fidelity_fields(&metadata) {
+                out.push(DirectoryMetadataEntry { rel_path, metadata });
+            }
+        }
+        stack.push(child_frame);
+    }
+    Ok(())
+}
+
 /// Synchronous core of [`read_entry_metadata`].
 ///
 /// One blocking-pool dispatch can capture a whole tree's metadata instead of
@@ -1441,6 +2159,25 @@ fn system_time_to_unix_parts(time: std::time::SystemTime) -> Option<(i64, u32)> 
     }
 }
 
+fn unix_parts_to_system_time(seconds: i64, nanos: u32) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let nanos = nanos % 1_000_000_000;
+    if seconds >= 0 {
+        return UNIX_EPOCH.checked_add(Duration::new(u64::try_from(seconds).ok()?, nanos));
+    }
+
+    let seconds_before_epoch = seconds.unsigned_abs();
+    if nanos == 0 {
+        UNIX_EPOCH.checked_sub(Duration::new(seconds_before_epoch, 0))
+    } else {
+        UNIX_EPOCH.checked_sub(Duration::new(
+            seconds_before_epoch.checked_sub(1)?,
+            1_000_000_000 - nanos,
+        ))
+    }
+}
+
 /// Windows capture: regular/directory metadata plus typed symbolic links.
 ///
 /// # Errors
@@ -1492,12 +2229,21 @@ pub fn read_entry_metadata_sync(
                 abs_path.display()
             ))
         })?;
+        let (target, semantics) = canonicalize_windows_relative_symlink_target(target).map_or_else(
+            || {
+                (
+                    target.to_string(),
+                    classify_symlink_target_semantics(target),
+                )
+            },
+            |target| (target, SymlinkTargetSemantics::PortableRelative),
+        );
         return Ok(EntryMetadata {
             file_kind: FileKind::Symlink,
-            symlink_target: Some(target.to_string()),
+            symlink_target: Some(target),
             symlink_target_info: Some(SymlinkTargetInfo {
                 kind: Some(kind),
-                semantics: classify_symlink_target_semantics(target),
+                semantics,
             }),
             ..EntryMetadata::default()
         });
@@ -1559,7 +2305,9 @@ pub fn read_entry_metadata_sync(
 ///
 /// Returns [`StreamingError`] if the path cannot be stat'd.
 #[cfg(unix)]
-pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+pub(crate) async fn inode_key_if_regular(
+    abs_path: &Path,
+) -> Result<Option<HardlinkIdentity>, StreamingError> {
     let path_buf = abs_path.to_path_buf();
     crate::runtime::spawn_blocking(move || inode_key_if_regular_sync(&path_buf)).await
 }
@@ -1571,12 +2319,14 @@ pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>,
 ///
 /// Same contract as [`inode_key_if_regular`].
 #[cfg(unix)]
-pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+pub(crate) fn inode_key_if_regular_sync(
+    abs_path: &Path,
+) -> Result<Option<HardlinkIdentity>, StreamingError> {
     use std::os::unix::fs::MetadataExt;
     let lmeta = std::fs::symlink_metadata(abs_path)
         .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
     if lmeta.is_file() {
-        Ok(Some((lmeta.dev(), lmeta.ino())))
+        Ok(Some(HardlinkIdentity::unix(lmeta.dev(), lmeta.ino())))
     } else {
         Ok(None)
     }
@@ -1588,7 +2338,9 @@ pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, 
 ///
 /// Returns [`StreamingError`] if the path cannot be inspected.
 #[cfg(windows)]
-pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+pub(crate) async fn inode_key_if_regular(
+    abs_path: &Path,
+) -> Result<Option<HardlinkIdentity>, StreamingError> {
     let path_buf = abs_path.to_path_buf();
     crate::runtime::spawn_blocking(move || inode_key_if_regular_sync(&path_buf)).await
 }
@@ -1600,13 +2352,15 @@ pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>,
 /// Returns [`StreamingError`] if the path cannot be inspected.
 #[cfg(windows)]
 #[allow(unsafe_code)] // Stable Win32 file identity query over an RAII-owned std::fs::File.
-pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
-    use std::os::windows::fs::OpenOptionsExt;
+pub(crate) fn inode_key_if_regular_sync(
+    abs_path: &Path,
+) -> Result<Option<HardlinkIdentity>, StreamingError> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileIdInfo, GetFileInformationByHandleEx,
     };
 
     match classify_path_link_sync(abs_path)
@@ -1623,31 +2377,47 @@ pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, 
         .open(abs_path)
         .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?;
 
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    let queried = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) };
-    if queried == 0 {
-        return Err(StreamingError::new(format!(
-            "{}: {}",
-            abs_path.display(),
-            io::Error::last_os_error()
-        )));
-    }
-    if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+    let metadata = file
+        .metadata()
+        .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_file() {
         return Ok(None);
     }
-    let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-    Ok(Some((u64::from(info.dwVolumeSerialNumber), file_index)))
+
+    let mut info = FILE_ID_INFO::default();
+    let queried = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            std::ptr::addr_of_mut!(info).cast(),
+            u32::try_from(std::mem::size_of::<FILE_ID_INFO>()).unwrap_or(u32::MAX),
+        )
+    };
+    if queried == 0 {
+        // Failing to identify a file sends duplicate bytes in TCP/QUIC and
+        // makes RQ's hardlink mode fail closed. Never fall back to the legacy
+        // 64-bit index, which can collide for distinct files on ReFS.
+        return Ok(None);
+    }
+    Ok(Some(HardlinkIdentity::windows(
+        info.VolumeSerialNumber,
+        info.FileId.Identifier,
+    )))
 }
 
 /// Unsupported-platform hardlink fallback.
 #[cfg(not(any(unix, windows)))]
-pub async fn inode_key_if_regular(_abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+pub(crate) async fn inode_key_if_regular(
+    _abs_path: &Path,
+) -> Result<Option<HardlinkIdentity>, StreamingError> {
     Ok(None)
 }
 
 /// Synchronous unsupported-platform hardlink fallback.
 #[cfg(not(any(unix, windows)))]
-pub fn inode_key_if_regular_sync(_abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+pub(crate) fn inode_key_if_regular_sync(
+    _abs_path: &Path,
+) -> Result<Option<HardlinkIdentity>, StreamingError> {
     Ok(None)
 }
 
@@ -1691,7 +2461,6 @@ pub fn apply_entry_metadata_sync(
     meta: &EntryMetadata,
 ) -> Result<MetadataApplyReport, StreamingError> {
     use std::os::unix::fs::PermissionsExt;
-    use std::time::{Duration, UNIX_EPOCH};
 
     let mut report = MetadataApplyReport::default();
     let special_file = meta.file_kind.is_special();
@@ -1702,21 +2471,9 @@ pub fn apply_entry_metadata_sync(
     // FIFOs, where opening the path can block.
     if let Some(secs) = (!special_file).then_some(meta.mtime_unix_secs).flatten() {
         let mtime_nanos = meta.mtime_nanos.unwrap_or(0);
-        let applied = u64::try_from(secs)
-            .map_err(|_| "pre-epoch mtime not representable".to_string())
-            .and_then(|secs_u64| {
-                // `secs`/`mtime_nanos` arrive off-wire and are untrusted.
-                // Normalise the sub-second part into [0, 1e9) (mirroring the
-                // read path's `rem_euclid`) so an out-of-range value can't
-                // carry into the seconds count, and add via `checked_add` so a
-                // crafted huge `secs` (up to i64::MAX, which passes the u64
-                // conversion) degrades to a skipped mtime instead of panicking
-                // the blocking pool by overflowing `SystemTime` (DoS via a
-                // malicious manifest).
-                let nanos = mtime_nanos % 1_000_000_000;
-                let when = UNIX_EPOCH
-                    .checked_add(Duration::new(secs_u64, nanos))
-                    .ok_or_else(|| "mtime out of representable range".to_string())?;
+        let applied = unix_parts_to_system_time(secs, mtime_nanos)
+            .ok_or_else(|| "mtime out of representable range".to_string())
+            .and_then(|when| {
                 let times = std::fs::FileTimes::new().set_modified(when);
                 std::fs::File::open(out_path)
                     .and_then(|f| f.set_times(times))
@@ -1801,12 +2558,9 @@ pub fn apply_entry_metadata_sync(
     let mut report = MetadataApplyReport::default();
     if let Some(seconds) = meta.mtime_unix_secs {
         let nanos = meta.mtime_nanos.unwrap_or(0) % 1_000_000_000;
-        let applied = u64::try_from(seconds)
-            .map_err(|_| "pre-epoch mtime not representable".to_string())
-            .and_then(|seconds| {
-                let modified = std::time::UNIX_EPOCH
-                    .checked_add(std::time::Duration::new(seconds, nanos))
-                    .ok_or_else(|| "mtime out of representable range".to_string())?;
+        let applied = unix_parts_to_system_time(seconds, nanos)
+            .ok_or_else(|| "mtime out of representable range".to_string())
+            .and_then(|modified| {
                 open_windows_metadata_handle(out_path)
                     .and_then(|file| {
                         file.set_times(std::fs::FileTimes::new().set_modified(modified))
@@ -1844,36 +2598,66 @@ pub fn apply_entry_metadata_sync(
 fn open_windows_metadata_handle(path: &Path) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_WRITE_ATTRIBUTES,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
     };
 
     let mut options = std::fs::OpenOptions::new();
-    options
-        .access_mode(FILE_WRITE_ATTRIBUTES)
+    let file = options
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    reject_windows_reparse_handle(&file.metadata()?)?;
+    Ok(file)
 }
 
 #[cfg(windows)]
-#[allow(unsafe_code)] // SetFileAttributesW requires a NUL-terminated UTF-16 path.
+fn reject_windows_reparse_handle(metadata: &std::fs::Metadata) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    if windows_attributes_contain_reparse_point(metadata.file_attributes()) {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "refusing to apply metadata through a reparse-point handle",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)] // Win32 metadata update through an RAII-owned file handle.
 fn set_windows_attributes(path: &Path, attributes: u32) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FileBasicInfo, SetFileInformationByHandle,
+    };
 
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
     let attributes = if attributes == 0 {
         FILE_ATTRIBUTE_NORMAL
     } else {
         attributes
     };
-    if unsafe { SetFileAttributesW(wide.as_ptr(), attributes) } == 0 {
+    // Rust's handle-opening path supports extended-length paths. Zero time
+    // fields tell FileBasicInfo to preserve the existing timestamps.
+    let file = open_windows_metadata_handle(path)?;
+    let info = FILE_BASIC_INFO {
+        FileAttributes: attributes,
+        ..FILE_BASIC_INFO::default()
+    };
+    let size = u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>())
+        .expect("FILE_BASIC_INFO size fits in u32");
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            std::ptr::from_ref(&info).cast(),
+            size,
+        )
+    } == 0
+    {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
@@ -1964,12 +2748,133 @@ pub async fn recreate_fifo(_out_path: &Path, _mode: u32) -> Result<(), Streaming
 mod tests {
     use super::*;
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn directory_metadata_capture_includes_root_and_nonempty_directories() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let nested = root.path().join("nested");
+        let deep = nested.join("deep");
+        std::fs::create_dir_all(&deep).expect("create non-empty directory tree");
+        std::fs::create_dir(root.path().join("empty")).expect("create explicit empty directory");
+        std::fs::write(deep.join("payload.bin"), b"payload").expect("write nested payload");
+
+        let captured = futures_lite::future::block_on(capture_directory_metadata_manifest(
+            root.path(),
+            &MetadataPolicy::default(),
+        ))
+        .expect("capture directory metadata");
+        assert!(captured.root.is_some());
+        assert_eq!(
+            captured
+                .entries
+                .iter()
+                .map(|entry| entry.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nested", "nested/deep"]
+        );
+        assert!(
+            captured
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.metadata.file_kind, FileKind::Directory))
+        );
+
+        let portable = futures_lite::future::block_on(capture_directory_metadata_manifest(
+            root.path(),
+            &MetadataPolicy::portable(),
+        ))
+        .expect("portable capture");
+        assert!(portable.is_empty());
+    }
+
     #[test]
     fn windows_reparse_attribute_is_treated_as_link_like() {
         assert!(windows_attributes_contain_reparse_point(
             WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
         ));
         assert!(!windows_attributes_contain_reparse_point(0));
+    }
+
+    #[test]
+    fn receive_metadata_validation_rejects_noncanonical_wire_values() {
+        let mut policy = MetadataPolicy::default();
+        policy.preserve_timestamps = true;
+
+        let invalid_mode = EntryMetadata {
+            unix_mode: Some(0o10_000),
+            ..EntryMetadata::default()
+        };
+        assert!(
+            validate_entry_metadata_for_receive("file", &invalid_mode, &policy)
+                .expect_err("noncanonical mode must fail")
+                .contains("0o7777")
+        );
+
+        let incomplete_owner = EntryMetadata {
+            uid: Some(1000),
+            ..EntryMetadata::default()
+        };
+        assert!(
+            validate_entry_metadata_for_receive("file", &incomplete_owner, &policy)
+                .expect_err("partial owner tuple must fail")
+                .contains("both uid and gid")
+        );
+
+        for invalid_time in [
+            EntryMetadata {
+                mtime_nanos: Some(1),
+                ..EntryMetadata::default()
+            },
+            EntryMetadata {
+                mtime_unix_secs: Some(1),
+                mtime_nanos: Some(1_000_000_000),
+                ..EntryMetadata::default()
+            },
+        ] {
+            assert!(
+                validate_entry_metadata_for_receive("file", &invalid_time, &policy)
+                    .expect_err("invalid time tuple must fail")
+                    .contains("modification time")
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hardlink_identity_keeps_high_64_file_id_bits() {
+        let mut first_id = [0u8; 16];
+        first_id[0] = 7;
+        let mut second_id = first_id;
+        second_id[12] = 1;
+        let first = HardlinkIdentity::windows(42, first_id);
+        let second = HardlinkIdentity::windows(42, second_id);
+        assert_ne!(first, second, "ReFS high file-id bits must remain distinct");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_normalizes_contained_backslash_symlink_target() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let target = root.path().join("targets/file.txt");
+        std::fs::create_dir_all(target.parent().expect("target parent"))
+            .expect("create target directory");
+        std::fs::write(&target, b"target").expect("write target");
+        let link = root.path().join("link");
+        std::os::windows::fs::symlink_file(Path::new(r"targets\file.txt"), &link)
+            .expect("create Windows relative symlink");
+
+        let metadata = read_entry_metadata_sync(&link, &MetadataPolicy::default())
+            .expect("capture Windows symlink metadata");
+        assert_eq!(metadata.symlink_target.as_deref(), Some("targets/file.txt"));
+        assert!(matches!(
+            metadata.symlink_target_info,
+            Some(SymlinkTargetInfo {
+                semantics: SymlinkTargetSemantics::PortableRelative,
+                ..
+            })
+        ));
+        validate_entry_metadata_for_receive("link", &metadata, &MetadataPolicy::default())
+            .expect("normalized target validates for receive");
     }
 
     #[cfg(unix)]
@@ -2005,6 +2910,285 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".atp-sym-"))
         );
+    }
+
+    #[test]
+    fn transactional_regular_commit_replaces_file_without_temp_leaks() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staging = root.path().join("staging");
+        let destination = root.path().join("destination");
+        std::fs::write(&staging, b"new").expect("write staged file");
+        std::fs::write(&destination, b"old").expect("write destination");
+
+        futures_lite::future::block_on(commit_staged_regular_file_transactionally(
+            &staging,
+            &destination,
+        ))
+        .expect("commit staged regular file");
+        assert_eq!(
+            std::fs::read(&destination).expect("read destination"),
+            b"new"
+        );
+        assert!(!staging.exists(), "staging leaf must be consumed");
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("read root")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atp-sym-backup-"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transactional_regular_commit_replaces_readonly_windows_file() {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+        const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let staging = root.path().join("staging");
+        let destination = root.path().join("destination");
+        std::fs::write(&staging, b"new").expect("write staged file");
+        std::fs::write(&destination, b"old").expect("write destination");
+        set_windows_attributes(
+            &destination,
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
+        )
+        .expect("make destination read-only");
+
+        futures_lite::future::block_on(commit_staged_regular_file_transactionally(
+            &staging,
+            &destination,
+        ))
+        .expect("replace read-only destination");
+        assert_eq!(
+            std::fs::read(&destination).expect("read destination"),
+            b"new"
+        );
+        let attributes = std::fs::symlink_metadata(&destination)
+            .expect("destination metadata")
+            .file_attributes();
+        assert_eq!(
+            attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+            0
+        );
+        assert!(!staging.exists(), "staging leaf must be consumed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transactional_regular_commit_replaces_readonly_windows_symlinks() {
+        use std::os::windows::fs::{
+            FileTypeExt as _, OpenOptionsExt as _, symlink_dir, symlink_file,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        };
+
+        fn make_link_readonly(path: &Path) {
+            let mut options = std::fs::OpenOptions::new();
+            let file = options
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .expect("open symlink itself");
+            let mut permissions = file.metadata().expect("symlink metadata").permissions();
+            permissions.set_readonly(true);
+            file.set_permissions(permissions)
+                .expect("make symlink read-only");
+            assert!(
+                file.metadata()
+                    .expect("read-only symlink metadata")
+                    .permissions()
+                    .readonly()
+            );
+        }
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let file_target = root.path().join("file-target");
+        let directory_target = root.path().join("directory-target");
+        std::fs::write(&file_target, b"target").expect("write file target");
+        std::fs::create_dir(&directory_target).expect("create directory target");
+
+        for (label, directory_link) in [("file", false), ("directory", true)] {
+            let destination = root.path().join(format!("{label}-destination"));
+            if directory_link {
+                symlink_dir(&directory_target, &destination).expect("create directory symlink");
+            } else {
+                symlink_file(&file_target, &destination).expect("create file symlink");
+            }
+            make_link_readonly(&destination);
+            let staging = root.path().join(format!("{label}-staging"));
+            std::fs::write(&staging, format!("new-{label}")).expect("write staged file");
+
+            futures_lite::future::block_on(commit_staged_regular_file_transactionally(
+                &staging,
+                &destination,
+            ))
+            .unwrap_or_else(|error| panic!("replace read-only {label} symlink: {error}"));
+            assert_eq!(
+                std::fs::read(&destination).expect("read replacement"),
+                format!("new-{label}").as_bytes()
+            );
+            assert!(
+                std::fs::symlink_metadata(&destination)
+                    .expect("replacement metadata")
+                    .file_type()
+                    .is_file(),
+                "{label} symlink must be replaced by a regular file"
+            );
+            assert!(
+                !std::fs::symlink_metadata(&destination)
+                    .expect("replacement metadata")
+                    .file_type()
+                    .is_symlink_file()
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transactional_bytes_commit_installs_incoming_readonly_attributes() {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+        const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let destination = root.path().join("destination");
+        std::fs::write(&destination, b"stale").expect("write stale destination");
+        let metadata = EntryMetadata {
+            windows_attributes: Some(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+            ..EntryMetadata::default()
+        };
+
+        let report =
+            futures_lite::future::block_on(commit_regular_bytes_with_metadata_transactionally(
+                &destination,
+                b"replacement",
+                Some(&metadata),
+            ))
+            .expect("commit bytes with read-only metadata");
+        assert!(report.applied.contains(&"windows_attributes"));
+        assert_eq!(
+            std::fs::read(&destination).expect("read destination"),
+            b"replacement"
+        );
+        let attributes = std::fs::symlink_metadata(&destination)
+            .expect("destination metadata")
+            .file_attributes();
+        assert_eq!(
+            attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN),
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN
+        );
+
+        set_windows_attributes(&destination, 0).expect("clear attributes for cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transactional_hardlink_commit_replaces_readonly_windows_file() {
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+        const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let primary = root.path().join("primary");
+        let destination = root.path().join("destination");
+        std::fs::write(&primary, b"shared").expect("write primary");
+        std::fs::write(&destination, b"old").expect("write destination");
+        set_windows_attributes(&primary, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN)
+            .expect("make primary read-only");
+        set_windows_attributes(&destination, FILE_ATTRIBUTE_READONLY)
+            .expect("make destination read-only");
+
+        futures_lite::future::block_on(commit_hardlink_transactionally(&primary, &destination))
+            .expect("replace destination with hardlink");
+        assert_eq!(
+            std::fs::read(&destination).expect("read destination"),
+            b"shared"
+        );
+        assert_eq!(
+            inode_key_if_regular_sync(&primary).expect("primary identity"),
+            inode_key_if_regular_sync(&destination).expect("destination identity")
+        );
+
+        // TempDir cleanup must not be defeated by the intentionally preserved
+        // read-only attribute on the shared file record.
+        set_windows_attributes(&primary, 0).expect("clear primary attributes for cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unix_time_parts_round_trip_before_and_after_epoch() {
+        for (seconds, nanos) in [
+            (-2_i64, 125_000_000_u32),
+            (-1, 0),
+            (-1, 999_999_999),
+            (0, 0),
+            (1, 500_000_000),
+        ] {
+            let time = unix_parts_to_system_time(seconds, nanos).expect("representable timestamp");
+            assert_eq!(system_time_to_unix_parts(time), Some((seconds, nanos)));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_applies_pre_epoch_mtime() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("pre-epoch");
+        std::fs::write(&path, b"timestamp").expect("write fixture");
+        let metadata = EntryMetadata {
+            mtime_unix_secs: Some(-315_619_200),
+            mtime_nanos: Some(123_456_700),
+            ..EntryMetadata::default()
+        };
+
+        let report = apply_entry_metadata_sync(&path, &metadata).expect("apply metadata");
+        assert!(report.applied.contains(&"mtime"), "report: {report:?}");
+        let captured = read_entry_metadata_sync(
+            &path,
+            &MetadataPolicy {
+                preserve_timestamps: true,
+                ..MetadataPolicy::portable()
+            },
+        )
+        .expect("capture applied metadata");
+        assert_eq!(captured.mtime_unix_secs, metadata.mtime_unix_secs);
+        assert_eq!(captured.mtime_nanos, metadata.mtime_nanos);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_applies_attributes_beyond_legacy_max_path() {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let mut parent = root.path().to_path_buf();
+        for index in 0..8 {
+            parent.push(format!(
+                "segment-{index:02}-0123456789abcdef0123456789abcdef"
+            ));
+        }
+        std::fs::create_dir_all(&parent).expect("create extended-length parent");
+        let path = parent.join("payload.bin");
+        assert!(
+            path.as_os_str().len() > 260,
+            "fixture must exceed legacy MAX_PATH: {}",
+            path.display()
+        );
+        std::fs::write(&path, b"long-path").expect("write extended-length file");
+
+        set_windows_attributes(&path, FILE_ATTRIBUTE_HIDDEN)
+            .expect("apply attributes through a long-path-safe handle");
+        let attributes = std::fs::symlink_metadata(&path)
+            .expect("read extended-length metadata")
+            .file_attributes();
+        assert_ne!(attributes & FILE_ATTRIBUTE_HIDDEN, 0);
     }
 
     #[cfg(windows)]
@@ -2426,22 +3610,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn apply_metadata_pre_epoch_mtime_is_skipped() {
+    fn apply_metadata_preserves_pre_epoch_mtime() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("pre-epoch");
+        std::fs::write(&path, b"timestamp").expect("write fixture");
         let meta = EntryMetadata {
-            mtime_unix_secs: Some(-1),
-            mtime_nanos: Some(999_999_999),
+            mtime_unix_secs: Some(-315_619_200),
+            mtime_nanos: Some(123_456_789),
             ..Default::default()
         };
-        let path = Path::new("/asupersync-metadata-pre-epoch-regression-missing-file");
 
-        let report = futures_lite::future::block_on(apply_entry_metadata(path, &meta))
-            .expect("pre-epoch off-wire mtime must degrade into a metadata report");
+        let report = futures_lite::future::block_on(apply_entry_metadata(&path, &meta))
+            .expect("apply pre-epoch mtime");
+        assert!(report.applied.contains(&"mtime"), "report: {report:?}");
 
-        assert!(report.applied.is_empty());
-        assert_eq!(
-            report.skipped,
-            vec![("mtime", "pre-epoch mtime not representable".to_string())]
-        );
+        let captured = read_entry_metadata_sync(
+            &path,
+            &MetadataPolicy {
+                preserve_timestamps: true,
+                ..MetadataPolicy::portable()
+            },
+        )
+        .expect("capture pre-epoch mtime");
+        assert_eq!(captured.mtime_unix_secs, meta.mtime_unix_secs);
+        assert_eq!(captured.mtime_nanos, meta.mtime_nanos);
     }
 
     #[test]
