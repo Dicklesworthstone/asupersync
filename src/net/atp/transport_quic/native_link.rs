@@ -380,18 +380,15 @@ const QUIC_SOURCE_STREAM_BDP_CWND_MIN_BYTES: u64 = QUIC_SOURCE_STREAM_RECV_WINDO
 /// Until an RTprop sample exists (or while the delivery filter is empty)
 /// the cap falls back to the 16 MiB runaway ceiling — admission then
 /// behaves exactly as before the cap existed.
-fn source_stream_bdp_admission_cap(
-    bottleneck_bytes_per_s: u64,
-    rtprop_micros: Option<u64>,
-) -> u64 {
+fn source_stream_bdp_admission_cap(bottleneck_bytes_per_s: u64, rtprop_micros: Option<u64>) -> u64 {
     let Some(rtt_micros) = rtprop_micros.filter(|micros| *micros > 0) else {
         return QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES;
     };
     if bottleneck_bytes_per_s == 0 {
         return QUIC_SOURCE_STREAM_UNACKED_MAX_BYTES;
     }
-    let bdp = u128::from(bottleneck_bytes_per_s).saturating_mul(u128::from(rtt_micros))
-        / 1_000_000u128;
+    let bdp =
+        u128::from(bottleneck_bytes_per_s).saturating_mul(u128::from(rtt_micros)) / 1_000_000u128;
     let cwnd = bdp.saturating_mul(u128::from(QUIC_SOURCE_STREAM_BDP_CWND_GAIN_X1000)) / 1000u128;
     u64::try_from(cwnd).unwrap_or(u64::MAX).clamp(
         QUIC_SOURCE_STREAM_BDP_CWND_MIN_BYTES,
@@ -2177,7 +2174,26 @@ impl NativeDataPlanePacer {
             crate::time::sleep(cx.now(), wait).await;
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         }
+        self.note_bytes_paced(frame_bytes);
+        Ok(())
+    }
 
+    /// Absolute instant before which the byte pacer holds the next paced send,
+    /// or `None` when a send may proceed immediately. Read by the source-stream
+    /// flush loop so it can drain inbound ACKs while the pacer waits
+    /// (MATRIX-235) instead of sleeping the interval opaquely — the datagram
+    /// spray path keeps using `before_send_bytes`, which sleeps.
+    fn byte_pacer_deadline(&self) -> Option<Instant> {
+        self.byte_pacer_next_send_at
+    }
+
+    /// Advance the byte pacer's burst accounting for the `frame_bytes` just
+    /// paced, recomputing the next absolute deadline when a burst is exhausted.
+    /// The wait itself is performed by the caller: `before_send_bytes` for the
+    /// datagram spray (a plain sleep), or the source-stream flush loop (which
+    /// drains ACKs during the wait). Splitting the accounting out keeps the
+    /// pacing RATE and burst shape identical on both paths.
+    fn note_bytes_paced(&mut self, frame_bytes: usize) {
         let now = Instant::now();
         let pacer_bytes = frame_bytes.max(1);
         if self.byte_pacer_burst_remaining == 0 {
@@ -2209,7 +2225,6 @@ impl NativeDataPlanePacer {
             });
             self.byte_pacer_next_send_at = Some(base.checked_add(interval).unwrap_or(now));
         }
-        Ok(())
     }
 }
 
@@ -3296,18 +3311,40 @@ impl QuicLink {
                         .unwrap_or(usize::MAX)
                         .min(max_frame_bytes)
                         .max(1);
-                let bytes_in_flight = self.conn.transport().bytes_in_flight();
-                let congestion_window = self.conn.transport().congestion_window_bytes();
                 let pacer_wait_started = Instant::now();
-                self.data_plane_pacer
-                    .before_send_bytes(
+                // Pacer wait with concurrent ACK drain (MATRIX-235): while the
+                // byte pacer holds the source stream below its delivery-clocked
+                // deadline, pump inbound so ACKs are processed as they arrive.
+                // This keeps `stream_unacked_bytes` fresh so the downstream
+                // `wait_source_stream_send_admission` gate no longer serializes
+                // a whole ACK-drain phase AFTER the pacer idle — the ~40%
+                // clean-large duty-cycle loss (MATRIX-232). The pacing RATE and
+                // burst shape are unchanged (the deadline still comes from the
+                // delivery-clocked schedule; only accounting is split out into
+                // `note_bytes_paced`), so mild-loss behavior is untouched
+                // (the MATRIX-202 refutation is not re-tread: no cwnd/rate
+                // change, just when ACKs are drained relative to the wait).
+                while let Some(deadline) = self.data_plane_pacer.byte_pacer_deadline() {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let wait = deadline.duration_since(now).clamp(
+                        QUIC_DATA_PLANE_PACER_MIN_PAUSE,
+                        QUIC_DATA_PLANE_PACER_MAX_PAUSE,
+                    );
+                    trace_quic_data_plane_pacer_limited(
                         cx,
-                        frame_bytes,
                         self.conn.pending_stream_frame_count(),
-                        bytes_in_flight,
-                        congestion_window,
-                    )
-                    .await?;
+                        wait,
+                        self.data_plane_pacer.pacing_rate_bps,
+                        self.conn.transport().bytes_in_flight(),
+                        self.conn.transport().congestion_window_bytes(),
+                    );
+                    self.pump_inbound_for(cx, wait).await?;
+                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                }
+                self.data_plane_pacer.note_bytes_paced(frame_bytes);
                 pacer_wait_elapsed += pacer_wait_started.elapsed();
             }
             let frames = if control_stream_pending {
@@ -3432,7 +3469,9 @@ impl QuicLink {
                 time_sent_micros: self.clock,
             });
         }
-        let generate_elapsed = generate_started.elapsed().saturating_sub(pacer_wait_elapsed);
+        let generate_elapsed = generate_started
+            .elapsed()
+            .saturating_sub(pacer_wait_elapsed);
         let count = plain_packets.len();
         if !plain_packets.is_empty() {
             let protect_started = Instant::now();
@@ -3674,7 +3713,8 @@ impl QuicLink {
                                 self.stream_unacked_bytes.saturating_sub(frame.len);
                         }
                         // Flight ended in a requeue, not an ACK: no sample.
-                        self.stream_delivery_sampler.on_packet_dropped(packet_number);
+                        self.stream_delivery_sampler
+                            .on_packet_dropped(packet_number);
                         stale_frames.extend(frames);
                     }
                 }
@@ -4099,7 +4139,8 @@ impl QuicLink {
                 for frame in &frames {
                     self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
                 }
-                self.stream_delivery_sampler.on_packet_dropped(packet_number);
+                self.stream_delivery_sampler
+                    .on_packet_dropped(packet_number);
                 lost.extend(frames);
             } else {
                 retained.insert(packet_number, frames);
@@ -4115,7 +4156,8 @@ impl QuicLink {
         }
         let drained = std::mem::take(&mut self.in_flight_stream_frames);
         for packet_number in drained.keys() {
-            self.stream_delivery_sampler.on_packet_dropped(*packet_number);
+            self.stream_delivery_sampler
+                .on_packet_dropped(*packet_number);
         }
         let frames = drained.into_values().flatten().collect::<Vec<_>>();
         for frame in &frames {
@@ -4141,7 +4183,8 @@ impl QuicLink {
                 for frame in &packet_frames {
                     self.stream_unacked_bytes = self.stream_unacked_bytes.saturating_sub(frame.len);
                 }
-                self.stream_delivery_sampler.on_packet_dropped(packet_number);
+                self.stream_delivery_sampler
+                    .on_packet_dropped(packet_number);
                 frames.extend(packet_frames);
             } else {
                 retained.insert(packet_number, packet_frames);
@@ -8267,6 +8310,7 @@ async fn commit_staged_entries(
     let committed = sha_ok && merkle_ok && metadata_ok;
     let mut committed_paths = Vec::new();
     if committed {
+        super::prepare_quic_destination_root(dest_dir).await?;
         let base = super::quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
         if manifest.is_directory && manifest.entries.is_empty() {
             super::reject_quic_destination_symlink_prefix(&base, &base).await?;
@@ -9161,17 +9205,30 @@ async fn run_receiver_session(
     link.flush(cx).await?;
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
-    let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
-    let staging_nonce = quic_staging_nonce_hex()?;
-    let staging_dir = dest_dir.join(format!(
-        ".atp-quic-staging-{}-{staging_nonce}-{staging_seq}",
-        manifest.transfer_id
-    ));
-    // Reclaim any stale scratch directory before use. This mirrors the TCP
-    // receiver and prevents stale entries or hostile symlinks under a reused
-    // staging name from being trusted by the decoded-block writer.
-    let _ = crate::fs::remove_dir_all(&staging_dir).await;
-    crate::fs::create_dir_all(&staging_dir).await?;
+    super::prepare_quic_destination_root(dest_dir).await?;
+    let mut staging_dir = None;
+    for _ in 0..32 {
+        let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+        let staging_nonce = quic_staging_nonce_hex()?;
+        let candidate = dest_dir.join(format!(
+            ".atp-quic-staging-{}-{staging_nonce}-{staging_seq}",
+            manifest.transfer_id
+        ));
+        match crate::fs::create_dir(&candidate).await {
+            Ok(()) => {
+                staging_dir = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let staging_dir = staging_dir.ok_or_else(|| {
+        QuicTransportError::Source(format!(
+            "unable to create a unique owned QUIC staging directory under {}",
+            dest_dir.display()
+        ))
+    })?;
     let mut staging_guard = QuicStagingDirGuard::new(staging_dir.clone());
     let mut staged = manifest
         .entries
@@ -9899,7 +9956,10 @@ mod tests {
         // 120 MB/s a 25 ms window aggregate would have claimed.
         let max = window.max_bps.expect("clean samples");
         assert!(max <= 37_500_000, "clump sample must not spike: {max}");
-        assert!(max >= 18_000_000, "sample must reflect real delivery: {max}");
+        assert!(
+            max >= 18_000_000,
+            "sample must reflect real delivery: {max}"
+        );
         // A second identical round with steady clumped ACKs converges to the
         // true rate: flights now span a full clump cycle.
         sampler.on_packet_sent(4, 160_000, false);
@@ -9956,8 +10016,8 @@ mod tests {
                     max_app_limited_bps: Some(6_000_000),
                 },
                 0,
-            0,
-            None,
+                0,
+                None,
             );
         }
         assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
@@ -10080,8 +10140,7 @@ mod tests {
                     }
                 }
             }
-            if now.saturating_sub(window_start) >= 25_000 && (acked_window > 0 || lost_window > 0)
-            {
+            if now.saturating_sub(window_start) >= 25_000 && (acked_window > 0 || lost_window > 0) {
                 let window = sampler.take_window();
                 let rate = pacer.on_delivery_window(
                     window,
@@ -10108,10 +10167,8 @@ mod tests {
             if can_send && now >= send_due && send_due <= next_event {
                 pn += 1;
                 let app_limited = lab.app_rate_bps.is_some() && app_ready_at > next_send;
-                let backlog_bytes = queue_free_at
-                    .saturating_sub(now)
-                    .saturating_mul(link_bps)
-                    / 1_000_000;
+                let backlog_bytes =
+                    queue_free_at.saturating_sub(now).saturating_mul(link_bps) / 1_000_000;
                 let random_drop = lab.drop_every.is_some_and(|n| pn.is_multiple_of(n));
                 if random_drop || backlog_bytes + PKT > lab.queue_cap_bytes {
                     drops
@@ -10123,8 +10180,7 @@ mod tests {
                     let service_end = service_start + PKT.saturating_mul(1_000_000) / link_bps;
                     queue_free_at = service_end;
                     let ack_arrival = service_end + lab.one_way_micros * 2;
-                    let process_at =
-                        ack_arrival.next_multiple_of(lab.ack_batch_micros.max(1));
+                    let process_at = ack_arrival.next_multiple_of(lab.ack_batch_micros.max(1));
                     acks.entry(process_at).or_default().push((pn, PKT));
                 }
                 sampler.on_packet_sent(pn, now, app_limited);
@@ -10297,7 +10353,10 @@ mod tests {
         let outcome = run_delivery_lab(&lab);
         assert_honest_estimate(&outcome, 25_000_000);
         let rtprop = outcome.rtprop_micros.expect("samples");
-        assert!((50_000..=70_000).contains(&rtprop), "rtprop stable: {rtprop}");
+        assert!(
+            (50_000..=70_000).contains(&rtprop),
+            "rtprop stable: {rtprop}"
+        );
     }
 
     #[test]
@@ -10445,7 +10504,6 @@ mod tests {
         assert_eq!(pacer.bottleneck_bytes_per_s(), 24_000_000);
         assert_eq!(rate, 30_000_000);
     }
-
 
     #[test]
     fn native_feedback_round_budget_allows_first_pending_round() {
@@ -11626,6 +11684,84 @@ mod tests {
                 .saturating_sub(first_packet)
                 .saturating_sub(second_packet),
             "source STREAM pacing must charge actual frame bytes, not rounded symbol units"
+        );
+    }
+
+    #[test]
+    fn source_stream_pacer_split_preserves_schedule_and_exposes_deadline() {
+        // MATRIX-235: the source-stream flush loop now waits for the pacer
+        // deadline itself (draining inbound ACKs meanwhile) via
+        // `byte_pacer_deadline` + `note_bytes_paced`, instead of the opaque
+        // `before_send_bytes` sleep. That split must NOT change the pacing rate
+        // or burst shape: the deadline schedule stays exactly delivery-clocked
+        // (no cwnd/rate change — the MATRIX-202 mild-loss refutation is not
+        // re-tread; only WHEN ACKs are drained relative to the wait changes).
+        let pacing = QuicSprayPacingDecision {
+            max_burst_symbols: 4,
+            pause_after_burst: Duration::from_millis(1),
+            pacing_rate_bps: 24 * 1024 * 1024,
+            cwnd_symbols: 4,
+            cwnd_share_symbols: 4,
+            burst_cap_share_symbols: 4,
+            loss_backoff: 1.0,
+            responsiveness_backoff: 1.0,
+            path_rtt_s: 0.025,
+            path_cwnd_bytes: 12_000,
+            path_loss_rate: 0.001,
+            fec_loss_budget: 0.0,
+            congestion_loss_rate: 0.0,
+            limiter: super::super::QuicSprayPacingLimiter::PacingRate,
+        };
+        let mut pacer = NativeDataPlanePacer::new(1200, 4, pacing.pacing_rate_bps);
+        pacer.configure_source_stream(&pacing);
+        let burst = pacer.byte_pacer_burst_bytes;
+        assert_eq!(
+            burst,
+            usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap()
+        );
+
+        // A burst sends back-to-back with no pacer deadline armed: the flush
+        // loop only waits between bursts, so ACK-draining-during-wait never
+        // stalls an in-progress burst.
+        let packet = source_stream_max_frame_bytes();
+        let mut frames = 0usize;
+        loop {
+            assert!(
+                pacer.byte_pacer_deadline().is_none(),
+                "no pacer deadline until the burst is exhausted (frame {frames})"
+            );
+            pacer.note_bytes_paced(packet);
+            frames += 1;
+            if pacer.byte_pacer_burst_remaining == 0 {
+                break;
+            }
+            assert!(frames < 10_000, "burst must exhaust in bounded frames");
+        }
+        // The exhausted burst charged exactly `burst` bytes (frame-accurate,
+        // not rounded symbol units) across `ceil(burst/packet)` frames.
+        assert_eq!(frames, burst.div_ceil(packet));
+
+        // Burst exhausted → a deadline is armed at most one pacing interval
+        // ahead of now (the absolute deadline-credit schedule), matching the
+        // configured rate exactly as `before_send_bytes` would have.
+        let deadline = pacer
+            .byte_pacer_deadline()
+            .expect("deadline armed once a burst is exhausted");
+        let interval = source_stream_pacing_interval(burst.max(packet), pacing.pacing_rate_bps);
+        let ahead = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            ahead > Duration::ZERO && ahead <= interval,
+            "armed deadline must sit within one pacing interval ahead (schedule unchanged): ahead={ahead:?} interval={interval:?}"
+        );
+
+        // A rate change resets the deadline to `None` (send-now, re-pace),
+        // exactly as before: the flush loop's wait breaks and re-arms on the
+        // next `note_bytes_paced`. This is the same behavior that makes an
+        // ACK-driven mid-wait rate update safe.
+        pacer.set_pacing_rate_bytes_per_s(pacing.pacing_rate_bps * 2);
+        assert!(
+            pacer.byte_pacer_deadline().is_none(),
+            "a delivery-clocked rate change clears the deadline (send-now, re-pace)"
         );
     }
 
