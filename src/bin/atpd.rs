@@ -574,7 +574,9 @@ fn load_atpd_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer
 fn atpd_quic_config(
     config: &AtpdConfig,
 ) -> Result<asupersync::net::atp::transport_quic::QuicConfig> {
-    use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicServerTls};
+    use asupersync::net::atp::transport_quic::{
+        QUIC_DEFAULT_SYMBOL_SIZE, QuicConfig, native_link::QuicServerTls,
+    };
     use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, server_config};
 
     let quic = &config.network.quic;
@@ -592,6 +594,7 @@ fn atpd_quic_config(
         .map_err(|err| cli_error(format!("build QUIC server TLS config: {err:?}")))?;
 
     let base = QuicConfig {
+        symbol_size: QUIC_DEFAULT_SYMBOL_SIZE,
         max_transfer_bytes: config.transfers.max_transfer_size,
         ..QuicConfig::default()
     };

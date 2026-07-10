@@ -3362,6 +3362,53 @@ fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError>
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
 }
 
+/// Receive the sender-side handshake acknowledgement and preserve its protocol
+/// stage in the error type. Auto selection may fall back after this function,
+/// but never after the manifest or payload phase begins.
+async fn receive_sender_handshake_ack<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    timeout: Duration,
+) -> Result<HelloAck, RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let frame = match crate::time::timeout(cx.now(), timeout, control.recv()).await {
+        Ok(result) => result.map_err(|err| {
+            RqError::HandshakeRejected(format!("invalid handshake response: {err}"))
+        })?,
+        Err(_elapsed) => {
+            return Err(RqError::HandshakeRejected(format!(
+                "handshake unavailable: receive sender acknowledgement timed out after {timeout:?}"
+            )));
+        }
+    };
+    if frame.frame_type() != FrameType::HandshakeAck {
+        return Err(RqError::HandshakeRejected(format!(
+            "unexpected {:?} frame while awaiting HandshakeAck",
+            frame.frame_type()
+        )));
+    }
+    let ack: HelloAck = parse_json(&frame).map_err(|err| {
+        RqError::HandshakeRejected(format!("invalid handshake acknowledgement: {err}"))
+    })?;
+    if !ack.accepted {
+        return Err(RqError::HandshakeRejected(
+            ack.reason.unwrap_or_else(|| "no reason given".to_string()),
+        ));
+    }
+    Ok(ack)
+}
+
+fn sender_handshake_transport_error(stage: &str, error: RqError) -> RqError {
+    match error {
+        error @ RqError::Io(_) => {
+            RqError::HandshakeRejected(format!("handshake unavailable during {stage}: {error}"))
+        }
+        error => error,
+    }
+}
+
 fn control_source_data_chunk_bytes(auth_enabled: bool) -> usize {
     if auth_enabled {
         RQ_CONTROL_SOURCE_AUTH_CHUNK_BYTES
@@ -5527,50 +5574,46 @@ pub async fn send_path(
     let prefer_control_source_stream =
         control_source_stream_eligible(preflight_total_bytes, &config);
     if prefer_control_source_stream {
-        let stream =
-            match crate::time::timeout(cx.now(), DEFAULT_CONNECT_TIMEOUT, TcpStream::connect(addr))
-                .await
-            {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(err)) => return Err(RqError::Io(err)),
-                Err(_elapsed) => {
-                    return Err(RqError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!("connect to {addr} timed out after {DEFAULT_CONNECT_TIMEOUT:?}"),
-                    )));
-                }
-            };
+        let stream = match crate::time::timeout(
+            cx.now(),
+            DEFAULT_CONNECT_TIMEOUT,
+            TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                return Err(RqError::HandshakeRejected(format!(
+                    "handshake unavailable while connecting to {addr}: {err}"
+                )));
+            }
+            Err(_elapsed) => {
+                return Err(RqError::HandshakeRejected(format!(
+                    "handshake unavailable: connect to {addr} timed out after {DEFAULT_CONNECT_TIMEOUT:?}"
+                )));
+            }
+        };
         tune_control_stream_for_bulk_source(&stream);
         let peer = stream.peer_addr().unwrap_or(addr);
         let mut control = FrameTransport::new(stream);
+        let hello = json_frame(
+            FrameType::Handshake,
+            &Hello {
+                protocol: ATP_RQ_PROTOCOL,
+                role: "sender".to_string(),
+                peer_id: peer_id.to_string(),
+                symbol_size: config.symbol_size,
+                max_block_size: config.max_block_size as u64,
+                symbol_auth: symbol_auth_enabled,
+                total_bytes: preflight_total_bytes,
+                prefer_control_source_stream,
+            },
+        )?;
         control
-            .send(&json_frame(
-                FrameType::Handshake,
-                &Hello {
-                    protocol: ATP_RQ_PROTOCOL,
-                    role: "sender".to_string(),
-                    peer_id: peer_id.to_string(),
-                    symbol_size: config.symbol_size,
-                    max_block_size: config.max_block_size as u64,
-                    symbol_auth: symbol_auth_enabled,
-                    total_bytes: preflight_total_bytes,
-                    prefer_control_source_stream,
-                },
-            )?)
-            .await?;
-        let ack_frame = control.recv().await?;
-        if ack_frame.frame_type() != FrameType::HandshakeAck {
-            return Err(RqError::Unexpected {
-                got: ack_frame.frame_type(),
-                expected: "HandshakeAck",
-            });
-        }
-        let ack: HelloAck = parse_json(&ack_frame)?;
-        if !ack.accepted {
-            return Err(RqError::HandshakeRejected(
-                ack.reason.unwrap_or_else(|| "no reason given".to_string()),
-            ));
-        }
+            .send(&hello)
+            .await
+            .map_err(|err| sender_handshake_transport_error("send sender handshake", err))?;
+        let ack = receive_sender_handshake_ack(cx, &mut control, DEFAULT_CONNECT_TIMEOUT).await?;
         if !ack.control_source_stream {
             return Err(RqError::HandshakeRejected(
                 "receiver declined required control source stream".to_string(),
@@ -5757,52 +5800,48 @@ pub async fn send_path(
     let prefer_control_source_stream = control_source_stream_eligible(total_bytes, &config);
 
     // Control plane: TCP connect + handshake.
-    let stream =
-        match crate::time::timeout(cx.now(), DEFAULT_CONNECT_TIMEOUT, TcpStream::connect(addr))
-            .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(err)) => return Err(RqError::Io(err)),
-            Err(_elapsed) => {
-                return Err(RqError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("connect to {addr} timed out after {DEFAULT_CONNECT_TIMEOUT:?}"),
-                )));
-            }
-        };
+    let stream = match crate::time::timeout(
+        cx.now(),
+        DEFAULT_CONNECT_TIMEOUT,
+        TcpStream::connect(addr),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
+            return Err(RqError::HandshakeRejected(format!(
+                "handshake unavailable while connecting to {addr}: {err}"
+            )));
+        }
+        Err(_elapsed) => {
+            return Err(RqError::HandshakeRejected(format!(
+                "handshake unavailable: connect to {addr} timed out after {DEFAULT_CONNECT_TIMEOUT:?}"
+            )));
+        }
+    };
     if prefer_control_source_stream {
         tune_control_stream_for_bulk_source(&stream);
     }
     let peer = stream.peer_addr().unwrap_or(addr);
     let mut control = FrameTransport::new(stream);
+    let hello = json_frame(
+        FrameType::Handshake,
+        &Hello {
+            protocol: ATP_RQ_PROTOCOL,
+            role: "sender".to_string(),
+            peer_id: peer_id.to_string(),
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size as u64,
+            symbol_auth: symbol_auth_enabled,
+            total_bytes,
+            prefer_control_source_stream,
+        },
+    )?;
     control
-        .send(&json_frame(
-            FrameType::Handshake,
-            &Hello {
-                protocol: ATP_RQ_PROTOCOL,
-                role: "sender".to_string(),
-                peer_id: peer_id.to_string(),
-                symbol_size: config.symbol_size,
-                max_block_size: config.max_block_size as u64,
-                symbol_auth: symbol_auth_enabled,
-                total_bytes,
-                prefer_control_source_stream,
-            },
-        )?)
-        .await?;
-    let ack_frame = control.recv().await?;
-    if ack_frame.frame_type() != FrameType::HandshakeAck {
-        return Err(RqError::Unexpected {
-            got: ack_frame.frame_type(),
-            expected: "HandshakeAck",
-        });
-    }
-    let ack: HelloAck = parse_json(&ack_frame)?;
-    if !ack.accepted {
-        return Err(RqError::HandshakeRejected(
-            ack.reason.unwrap_or_else(|| "no reason given".to_string()),
-        ));
-    }
+        .send(&hello)
+        .await
+        .map_err(|err| sender_handshake_transport_error("send sender handshake", err))?;
+    let ack = receive_sender_handshake_ack(cx, &mut control, DEFAULT_CONNECT_TIMEOUT).await?;
     if ack.control_source_stream && !prefer_control_source_stream {
         return Err(RqError::HandshakeRejected(
             "receiver selected control source stream for an ineligible transfer".to_string(),
@@ -16871,6 +16910,22 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "post-Proof close drain must not wait for the 60s accept/connect timeout"
         );
+    }
+
+    #[test]
+    fn sender_handshake_ack_wait_has_typed_pre_transfer_timeout() {
+        let cx = Cx::for_testing();
+        let mut control = FrameTransport::new(PendingCloseControlIo);
+
+        let error = futures_lite::future::block_on(receive_sender_handshake_ack(
+            &cx,
+            &mut control,
+            Duration::ZERO,
+        ))
+        .expect_err("a stalled peer must not hold auto selection forever");
+
+        assert!(matches!(error, RqError::HandshakeRejected(_)));
+        assert!(error.to_string().contains("timed out"));
     }
 
     #[test]

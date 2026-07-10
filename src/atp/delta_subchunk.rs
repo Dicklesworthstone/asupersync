@@ -77,6 +77,45 @@ impl SubBlockSignature {
     pub fn block_size(&self) -> usize {
         self.block_size as usize
     }
+
+    /// Validate the structural invariants required by [`diff`] before accepting
+    /// a signature from an untrusted peer.
+    ///
+    /// A canonical signature has one entry for every full block, in ascending
+    /// contiguous order, and exactly describes the advertised base length.
+    #[must_use]
+    pub fn has_canonical_shape(&self, expected_total_len: u64, expected_block_size: usize) -> bool {
+        let Ok(expected_block_size) = u32::try_from(expected_block_size) else {
+            return false;
+        };
+        if expected_block_size == 0
+            || self.block_size != expected_block_size
+            || self.total_len != expected_total_len
+        {
+            return false;
+        }
+        let expected_blocks_u64 = expected_total_len / u64::from(expected_block_size);
+        let Ok(expected_blocks) = usize::try_from(expected_blocks_u64) else {
+            return false;
+        };
+        if self.blocks.len() != expected_blocks {
+            return false;
+        }
+        self.blocks.iter().enumerate().all(|(index, block)| {
+            let Ok(index) = u64::try_from(index) else {
+                return false;
+            };
+            let Some(expected_offset) = index.checked_mul(u64::from(expected_block_size)) else {
+                return false;
+            };
+            block.len == expected_block_size
+                && block.offset == expected_offset
+                && block
+                    .offset
+                    .checked_add(u64::from(block.len))
+                    .is_some_and(|end| end <= expected_total_len)
+        })
+    }
 }
 
 /// One reconstruction op: copy a range of the OLD buffer, or insert literal bytes.
@@ -224,8 +263,11 @@ pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
     let block_size = sig.block_size as usize;
     let mut ops: Vec<SubDeltaOp> = Vec::new();
 
-    // New shorter than a block (or no signed blocks): nothing to match → literal.
-    if new.len() < block_size || sig.blocks.is_empty() {
+    // New shorter than a block, malformed zero-width input, or no signed
+    // blocks: nothing to match, so emit a literal without entering the rolling
+    // loop. The zero-width guard is required because signatures are
+    // deserializable and may come from an untrusted peer.
+    if block_size == 0 || new.len() < block_size || sig.blocks.is_empty() {
         if !new.is_empty() {
             ops.push(SubDeltaOp::Literal(new.to_vec()));
         }
@@ -402,6 +444,25 @@ mod tests {
                 SubDeltaOp::Copy { .. } => 0,
             })
             .sum()
+    }
+
+    #[test]
+    fn malformed_zero_width_signature_is_noncanonical_and_cannot_stall_diff() {
+        let mut signature = signature(&[0x5a; 64], 64);
+        assert!(signature.has_canonical_shape(64, 64));
+
+        signature.block_size = 0;
+        signature.blocks[0].weak = RollingWeak::new(&[]).digest();
+        signature.blocks[0].strong = strong_checksum(&[]);
+        signature.blocks[0].len = 0;
+        assert!(!signature.has_canonical_shape(64, 64));
+
+        let new = b"untrusted peer input";
+        assert_eq!(
+            diff(new, &signature),
+            vec![SubDeltaOp::Literal(new.to_vec())],
+            "malformed zero-width signatures must make finite literal progress"
+        );
     }
 
     #[test]

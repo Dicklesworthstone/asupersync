@@ -551,12 +551,16 @@ fn atp_send_auto_falls_back_to_tcp_after_quic_and_rq_fail() {
     let listen_addr = wait_for_tcp_listen_addr(&receiver_stderr);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .env_remove("SSL_CERT_FILE")
+        .env_remove("SSL_CERT_DIR")
         .args([
             "send",
             payload_path.to_str().unwrap(),
             &listen_addr.to_string(),
             "--transport",
             "auto",
+            "--no-delta",
+            "--allow-plaintext-fallback",
             "--rq-auth-key-hex",
             VALID_KEY_HEX,
             "--quic-handshake-timeout-ms",
@@ -651,12 +655,16 @@ fn atp_send_auto_falls_back_to_rq_after_quic_fails() {
     let listen_addr = wait_for_rq_listen_addr(&receiver_stderr);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .env_remove("SSL_CERT_FILE")
+        .env_remove("SSL_CERT_DIR")
         .args([
             "send",
             payload_path.to_str().unwrap(),
             &listen_addr.to_string(),
             "--transport",
             "auto",
+            "--no-delta",
+            "--allow-plaintext-fallback",
             "--rq-auth-key-hex",
             VALID_KEY_HEX,
             "--quic-handshake-timeout-ms",

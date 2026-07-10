@@ -6776,12 +6776,14 @@ async fn spray_block_repair_requests(
 /// Receiver `HandshakeAck` parse (mirrors `super::receive_native_sender_hello_ack`).
 fn parse_hello_ack(frame: &Frame) -> Result<QuicHelloAck, QuicTransportError> {
     if frame.frame_type() != FrameType::HandshakeAck {
-        return Err(QuicTransportError::Unexpected {
-            got: frame.frame_type(),
-            expected: "HandshakeAck",
-        });
+        return Err(QuicTransportError::HandshakeRejected(format!(
+            "unexpected {:?} frame while awaiting HandshakeAck",
+            frame.frame_type()
+        )));
     }
-    let ack: QuicHelloAck = super::parse_json(frame)?;
+    let ack: QuicHelloAck = super::parse_json(frame).map_err(|err| {
+        QuicTransportError::HandshakeRejected(format!("invalid handshake acknowledgement: {err}"))
+    })?;
     if !ack.accepted {
         return Err(QuicTransportError::HandshakeRejected(
             ack.reason
@@ -9824,6 +9826,31 @@ mod tests {
             max_bps: Some(bps),
             max_app_limited_bps: None,
         }
+    }
+
+    #[test]
+    fn malformed_sender_hello_ack_is_typed_as_pre_transfer_rejection() {
+        let wrong_type = Frame::new(
+            crate::net::atp::protocol::frames::ProtocolVersion::CURRENT,
+            FrameType::KeepAlive,
+            Vec::new(),
+        )
+        .expect("valid wrong-type fixture");
+        assert!(matches!(
+            parse_hello_ack(&wrong_type),
+            Err(QuicTransportError::HandshakeRejected(_))
+        ));
+
+        let malformed = Frame::new(
+            crate::net::atp::protocol::frames::ProtocolVersion::CURRENT,
+            FrameType::HandshakeAck,
+            b"{".to_vec(),
+        )
+        .expect("valid malformed-payload fixture");
+        assert!(matches!(
+            parse_hello_ack(&malformed),
+            Err(QuicTransportError::HandshakeRejected(_))
+        ));
     }
 
     #[test]

@@ -13,9 +13,10 @@
 //!   (`asupersync::net::atp::transport_rq`). Built to saturate a lossy,
 //!   high-latency path and tolerate packet loss without head-of-line blocking.
 //! - `--transport quic`: ATP over QUIC/TLS-1.3 when built with `--features tls`.
-//! - `--transport auto`: sender-side selection that tries QUIC, then RQ, then
-//!   TCP, recording the selected transport and failed attempts in the JSON
-//!   report.
+//! - `--transport auto`: sender-side selection that tries authenticated,
+//!   encrypted QUIC and records failed attempts in the JSON report. Unencrypted
+//!   RQ/TCP join the ladder only with the explicit
+//!   `--allow-plaintext-fallback` downgrade opt-in.
 //!
 //! ```text
 //! KEY=$(atp rq-keygen)
@@ -57,7 +58,7 @@ use asupersync::net::TcpListener;
 use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
-    DEFAULT_SYMBOL_SIZE, DEFAULT_UDP_FANOUT, RqConfig,
+    DEFAULT_SYMBOL_SIZE, DEFAULT_UDP_FANOUT, RqConfig, RqError,
 };
 use asupersync::net::atp::transport_tcp::{
     self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendReport, TransferConfig, TransportError,
@@ -92,9 +93,8 @@ const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 /// data where a low-bit mask degenerates to max-cap-only chunks
 /// (br-asupersync-iz269u).
 const DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS: u32 = 15;
-const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 =
-    ((1u64 << DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS) - 1)
-        << (64 - DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS);
+const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = ((1u64 << DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS) - 1)
+    << (64 - DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS);
 const _: () = assert!(
     DELTA_TREE_OBJECT_AVG_CHUNK_BYTES == 1 << DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS,
     "boundary mask bits must track the average chunk size"
@@ -110,6 +110,19 @@ const DEFAULT_RECV_LISTEN_TIMEOUT_MS: u64 = 0;
 const DIRECT_DELTA_SIDECAR_CONNECT_ATTEMPT_MS: u64 = 750;
 const DIRECT_DELTA_SIDECAR_CONNECT_DEADLINE_MS: u64 = 5_000;
 const DIRECT_DELTA_SIDECAR_CONNECT_RETRY_SLEEP_MS: u64 = 50;
+const DIRECT_DELTA_SIDECAR_CONNECTION_DEADLINE_MS: u64 = 2_000;
+const DIRECT_DELTA_SIDECAR_FIRST_BYTE_TIMEOUT_MS: u64 = 50;
+/// Upper bound for any one JSON request or response on the unauthenticated
+/// direct-delta sidecar. Large 4 GiB manifests can contain ~131k CDC chunks, so
+/// keep enough room for legitimate state while bounding hostile allocations.
+const DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
+/// A 4 GiB object at the 16 KiB minimum CDC size has at most this many chunks.
+const DIRECT_DELTA_SIDECAR_MAX_REQUEST_CHUNKS: usize = 4 * 1024 * 1024 * 1024 / 16_384;
+/// Bound signature hashing and in-memory response construction before JSON
+/// serialization. Each block covers 64 source bytes and expands substantially
+/// in JSON, so this remains below the 64 MiB wire ceiling.
+const DIRECT_DELTA_SIDECAR_MAX_SIGNATURE_BLOCKS: usize = 256 * 1024;
+const DIRECT_DELTA_SIDECAR_RESPONSE_OVERHEAD_BYTES: usize = 1024;
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -135,7 +148,7 @@ enum Command {
 /// Which real transport to use.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Transport {
-    /// Sender-side fallback: try QUIC, then RQ, then TCP.
+    /// Sender-side selection. Unencrypted RQ/TCP fallback requires opt-in.
     Auto,
     /// One reliable TCP stream.
     Tcp,
@@ -158,11 +171,23 @@ impl Transport {
         }
     }
 
-    const fn auto_fallback_order(delta_enabled: bool) -> &'static [Self] {
+    const fn auto_fallback_order(
+        delta_enabled: bool,
+        allow_plaintext_fallback: bool,
+        rq_configured: bool,
+    ) -> &'static [Self] {
         if delta_enabled {
-            &[Self::Tcp]
-        } else {
+            if allow_plaintext_fallback {
+                &[Self::Tcp]
+            } else {
+                &[]
+            }
+        } else if allow_plaintext_fallback && rq_configured {
             &[Self::Quic, Self::Rq, Self::Tcp]
+        } else if allow_plaintext_fallback {
+            &[Self::Quic, Self::Tcp]
+        } else {
+            &[Self::Quic]
         }
     }
 }
@@ -288,6 +313,14 @@ struct SendArgs {
     /// transfer path.
     #[arg(long)]
     no_delta: bool,
+    /// Enable the legacy plaintext delta-state sidecar on direct RQ/QUIC sends.
+    /// This can leak hashes and can spoof AlreadyInSync; trusted labs only.
+    #[arg(long)]
+    allow_unauthenticated_delta_sidecar: bool,
+    /// Permit `--transport auto` to fall back from encrypted QUIC to unencrypted
+    /// RQ and plaintext TCP. Without this opt-in, trust failures never downgrade.
+    #[arg(long)]
+    allow_plaintext_fallback: bool,
 }
 
 #[derive(Parser)]
@@ -362,6 +395,10 @@ struct RecvArgs {
     /// Disable receiver-side delta package application and state refresh.
     #[arg(long)]
     no_delta: bool,
+    /// Expose the legacy plaintext delta-state sidecar on listen-port + 1.
+    /// This leaks receiver hashes/signatures; trusted labs only.
+    #[arg(long)]
+    allow_unauthenticated_delta_sidecar: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -583,6 +620,54 @@ fn load_cert_chain(
     Ok(certs)
 }
 
+/// Load the platform trust store without consulting environment-selected CA
+/// paths. `atp-cli` enables the loader dependency directly, so an empty result is an
+/// actionable host-configuration error rather than a silent empty trust store.
+#[cfg(feature = "tls")]
+fn reject_environment_selected_native_roots(
+    cert_file: Option<&std::ffi::OsStr>,
+    cert_dir: Option<&std::ffi::OsStr>,
+) -> Result<(), String> {
+    if cert_file.is_some() || cert_dir.is_some() {
+        return Err(
+            "SSL_CERT_FILE/SSL_CERT_DIR would replace the platform trust store; \
+             unset them and retry, or pass the intended certificate with --ca <PEM>"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "tls", feature = "atp-cli"))]
+fn load_native_root_certs() -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    let cert_file = env::var_os("SSL_CERT_FILE");
+    let cert_dir = env::var_os("SSL_CERT_DIR");
+    reject_environment_selected_native_roots(cert_file.as_deref(), cert_dir.as_deref())?;
+    let result = rustls_native_certs::load_native_certs();
+    if result.certs.is_empty() {
+        let details = result.errors.first().map_or_else(
+            || "no platform certificates found".to_string(),
+            ToString::to_string,
+        );
+        return Err(format!(
+            "load system trust roots: {details}; pass --ca <PEM> explicitly"
+        ));
+    }
+    if !result.errors.is_empty() {
+        eprintln!(
+            "[atp] warning: loaded {} system trust root(s) with {} rejected certificate(s)",
+            result.certs.len(),
+            result.errors.len()
+        );
+    }
+    Ok(result.certs)
+}
+
+#[cfg(all(feature = "tls", not(feature = "atp-cli")))]
+fn load_native_root_certs() -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    Err("this atp build has no native trust-root support; pass --ca <PEM> explicitly".to_string())
+}
+
 /// Load a single PEM private key from `path`.
 #[cfg(feature = "tls")]
 fn load_private_key(
@@ -757,40 +842,55 @@ fn verify_quic_cli_pinned_leaf(
 #[cfg(feature = "tls")]
 fn quic_cli_client_config(
     roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    pinned_leafs: Vec<Vec<u8>>,
     alpn: Vec<Vec<u8>>,
 ) -> Result<Arc<rustls::ClientConfig>, asupersync::net::quic_native::tls::QuicTlsError> {
-    use asupersync::net::quic_native::handshake_driver::client_config;
-
-    if roots.is_empty() {
-        return client_config(roots, alpn);
-    }
-
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut root_store = rustls::RootCertStore::empty();
-    let pinned_leafs = roots
-        .iter()
-        .map(|cert| cert.as_ref().to_vec())
-        .collect::<Vec<_>>();
-    for cert in roots {
-        root_store.add(cert).map_err(|_| {
-            asupersync::net::quic_native::tls::QuicTlsError::CryptoProviderFailure {
-                provider: "rustls-quic-handshake",
-                code: "client_root_add_failed",
-            }
-        })?;
+    if pinned_leafs.is_empty() {
+        let (accepted, rejected) = root_store.add_parsable_certificates(roots);
+        if accepted == 0 {
+            return Err(
+                asupersync::net::quic_native::tls::QuicTlsError::CryptoProviderFailure {
+                    provider: "rustls-quic-handshake",
+                    code: "client_no_valid_native_roots",
+                },
+            );
+        }
+        if rejected > 0 {
+            eprintln!(
+                "[atp] warning: ignored {rejected} malformed or unsupported system trust root(s)"
+            );
+        }
+    } else {
+        for cert in roots {
+            root_store.add(cert).map_err(|_| {
+                asupersync::net::quic_native::tls::QuicTlsError::CryptoProviderFailure {
+                    provider: "rustls-quic-handshake",
+                    code: "client_root_add_failed",
+                }
+            })?;
+        }
     }
-    let verifier = QuicCliServerVerifier::new(root_store, pinned_leafs, provider.clone())?;
-    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(
             |_| asupersync::net::quic_native::tls::QuicTlsError::CryptoProviderFailure {
                 provider: "rustls-quic-handshake",
                 code: "client_protocol_versions",
             },
-        )?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth();
+        )?;
+    let mut config = if pinned_leafs.is_empty() {
+        builder
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    } else {
+        let verifier = QuicCliServerVerifier::new(root_store, pinned_leafs, provider)?;
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth()
+    };
     config.alpn_protocols = alpn;
     Ok(Arc::new(config))
 }
@@ -879,16 +979,20 @@ fn quic_config_send(
     use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicClientTls};
     use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
 
-    let roots = match args.ca.as_deref() {
-        Some(path) => load_cert_chain(path)?,
-        None => Vec::new(),
+    let (roots, pinned_leafs) = match args.ca.as_deref() {
+        Some(path) => {
+            let roots = load_cert_chain(path)?;
+            let pinned_leafs = roots.iter().map(|cert| cert.as_ref().to_vec()).collect();
+            (roots, pinned_leafs)
+        }
+        None => (load_native_root_certs()?, Vec::new()),
     };
     let name = args
         .server_name
         .clone()
         .unwrap_or_else(|| default_server_name(&args.target));
     let server_name = quic_server_name(name)?;
-    let config = quic_cli_client_config(roots, vec![ATP_QUIC_ALPN.to_vec()])
+    let config = quic_cli_client_config(roots, pinned_leafs, vec![ATP_QUIC_ALPN.to_vec()])
         .map_err(|e| format!("build QUIC client TLS config: {e:?}"))?;
 
     let symbol_size = resolved_symbol_size(args.symbol_size, true);
@@ -960,12 +1064,8 @@ enum RqAuthChoice {
     UnauthenticatedLab,
 }
 
-fn resolve_rq_auth_choice(
-    explicit_key_hex: Option<&str>,
-    allow_unauthenticated_lab: bool,
-    generate_if_missing: bool,
-) -> Result<RqAuthChoice, String> {
-    let configured_key = explicit_key_hex
+fn configured_rq_auth_key(explicit_key_hex: Option<&str>) -> Option<String> {
+    explicit_key_hex
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(ToOwned::to_owned)
@@ -974,7 +1074,15 @@ fn resolve_rq_auth_choice(
                 .ok()
                 .map(|key| key.trim().to_string())
                 .filter(|key| !key.is_empty())
-        });
+        })
+}
+
+fn resolve_rq_auth_choice(
+    explicit_key_hex: Option<&str>,
+    allow_unauthenticated_lab: bool,
+    generate_if_missing: bool,
+) -> Result<RqAuthChoice, String> {
+    let configured_key = configured_rq_auth_key(explicit_key_hex);
 
     if allow_unauthenticated_lab {
         if configured_key.is_some() {
@@ -1178,6 +1286,7 @@ fn run_send(args: SendArgs) -> Result<(), String> {
     if args.dry_run {
         return run_send_dry_run(&args);
     }
+    validate_auto_security_policy(&args)?;
     match resolve(&args.target) {
         Ok(addr) => run_send_to_addr(args, addr, true),
         Err(resolve_error) => {
@@ -1188,6 +1297,21 @@ fn run_send(args: SendArgs) -> Result<(), String> {
             }
         }
     }
+}
+
+fn validate_auto_security_policy(args: &SendArgs) -> Result<(), String> {
+    if args.allow_plaintext_fallback && args.transport != Transport::Auto {
+        return Err("--allow-plaintext-fallback is valid only with --transport auto".to_string());
+    }
+    if args.transport == Transport::Auto && !args.no_delta && !args.allow_plaintext_fallback {
+        return Err(
+            "--transport auto with delta planning would select plaintext TCP; choose an explicit \
+             transport, pass --no-delta for QUIC-only fail-closed selection, or explicitly \
+             allow downgrade with --allow-plaintext-fallback"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Print the transfer plan (file list, sizes, total bytes, merkle root) the
@@ -1313,7 +1437,12 @@ fn auto_transport_exhausted_error(attempts: &[TransportAttempt]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ");
-    format!("atp --transport auto exhausted fallback order (quic -> rq -> tcp): {details}")
+    let order = attempts
+        .iter()
+        .map(|attempt| attempt.transport.cli_arg())
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    format!("atp --transport auto exhausted permitted fallback order ({order}): {details}")
 }
 
 fn run_send_to_addr(
@@ -1352,7 +1481,8 @@ fn run_send_to_addr(
     let mut report = if args.transport == Transport::Auto {
         run_send_auto_to_addr(&runtime, &args, addr)?
     } else {
-        send_to_addr_with_transport(&runtime, &args, args.transport, addr)?
+        send_to_addr_with_transport(&runtime, &args, args.transport, addr)
+            .map_err(|failure| failure.message)?
     };
     if let Some((plan, package_payload_bytes, subdelta_chunks)) = direct_delta_plan.as_ref() {
         annotate_direct_delta_package_report(
@@ -1366,15 +1496,81 @@ fn run_send_to_addr(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SendTransportFailure {
+    message: String,
+    fallback_eligible: bool,
+}
+
+impl SendTransportFailure {
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            fallback_eligible: false,
+        }
+    }
+
+    fn fallback_eligible(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            fallback_eligible: true,
+        }
+    }
+}
+
+impl From<String> for SendTransportFailure {
+    fn from(message: String) -> Self {
+        Self::fatal(message)
+    }
+}
+
+fn classify_rq_send_failure(error: RqError) -> SendTransportFailure {
+    let fallback_eligible = matches!(&error, RqError::HandshakeRejected(_));
+    if fallback_eligible {
+        SendTransportFailure::fallback_eligible(error.to_string())
+    } else {
+        SendTransportFailure::fatal(error.to_string())
+    }
+}
+
+#[cfg(feature = "tls")]
+fn classify_quic_send_failure(
+    error: asupersync::net::atp::transport_quic::QuicTransportError,
+) -> SendTransportFailure {
+    use asupersync::net::atp::transport_quic::QuicTransportError;
+
+    let fallback_eligible = matches!(
+        &error,
+        QuicTransportError::HandshakeRejected(_)
+            | QuicTransportError::Timeout {
+                operation: "quic client handshake",
+                ..
+            }
+            | QuicTransportError::Timeout {
+                operation: "receive sender handshake ack",
+                ..
+            }
+            | QuicTransportError::NotImplemented { .. }
+    ) || matches!(&error, QuicTransportError::Quic(message) if message.starts_with("quic handshake: "));
+    if fallback_eligible {
+        SendTransportFailure::fallback_eligible(error.to_string())
+    } else {
+        SendTransportFailure::fatal(error.to_string())
+    }
+}
+
 fn run_send_auto_to_addr(
     runtime: &asupersync::runtime::Runtime,
     args: &SendArgs,
     addr: SocketAddr,
 ) -> Result<serde_json::Value, String> {
     let mut attempts = Vec::new();
-    for transport in Transport::auto_fallback_order(!args.no_delta)
-        .iter()
-        .copied()
+    let rq_configured = args.rq_allow_unauthenticated_lab
+        || configured_rq_auth_key(args.rq_auth_key_hex.as_deref()).is_some();
+    for transport in
+        Transport::auto_fallback_order(!args.no_delta, args.allow_plaintext_fallback, rq_configured)
+            .iter()
+            .copied()
     {
         eprintln!("[atp] transport selection: trying {}", transport.cli_arg());
         match send_to_addr_with_transport(runtime, args, transport, addr) {
@@ -1389,14 +1585,23 @@ fn run_send_auto_to_addr(
                 });
                 return Ok(add_auto_selection_metadata(report, &attempts));
             }
-            Err(error) => {
+            Err(SendTransportFailure {
+                message,
+                fallback_eligible,
+            }) => {
+                if !fallback_eligible {
+                    return Err(format!(
+                        "atp --transport auto aborted after non-fallback-safe {} failure: {message}",
+                        transport.cli_arg()
+                    ));
+                }
                 eprintln!(
-                    "[atp] transport selection: {} unavailable: {error}",
+                    "[atp] transport selection: {} unavailable before transfer: {message}",
                     transport.cli_arg()
                 );
                 attempts.push(TransportAttempt {
                     transport,
-                    status: TransportAttemptStatus::Failed(error),
+                    status: TransportAttemptStatus::Failed(message),
                 });
             }
         }
@@ -1409,22 +1614,22 @@ fn send_to_addr_with_transport(
     args: &SendArgs,
     transport: Transport,
     addr: SocketAddr,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, SendTransportFailure> {
     let bwlimit_bps = normalize_bwlimit_bps(args.bwlimit_bps)?;
     if bwlimit_bps.is_some() && transport != Transport::Quic {
-        return Err(format!(
+        return Err(SendTransportFailure::fatal(format!(
             "--bwlimit is currently wired only for quic; {} fallback skipped \
              to avoid ignoring the cap",
             transport.cli_arg()
-        ));
+        )));
     }
 
     let source = args.source.clone();
     let peer_id = args.peer_id.clone();
     match transport {
-        Transport::Auto => {
-            Err("internal error: auto is a selector, not a concrete transport".to_string())
-        }
+        Transport::Auto => Err(SendTransportFailure::fatal(
+            "internal error: auto is a selector, not a concrete transport",
+        )),
         Transport::Tcp => {
             let cfg = tcp_config(args.max_bytes, !args.no_delta);
             // Monotonic progress + ETA on stderr (stdout stays the JSON report).
@@ -1457,7 +1662,7 @@ fn send_to_addr_with_transport(
                     )
                     .await
                 }))
-                .map_err(|e: TransportError| e.to_string())?;
+                .map_err(|e: TransportError| SendTransportFailure::fatal(e.to_string()))?;
             let elapsed = start.elapsed();
             print_atp_metrics_line(
                 "send",
@@ -1492,7 +1697,7 @@ fn send_to_addr_with_transport(
                     let cx = Cx::current().expect("sender cx");
                     transport_rq::send_path(&cx, addr, &source, cfg, &peer_id).await
                 }))
-                .map_err(|e| e.to_string())?;
+                .map_err(classify_rq_send_failure)?;
             let elapsed = start.elapsed();
             print_atp_metrics_line(
                 "send",
@@ -1522,9 +1727,7 @@ fn send_to_addr_with_transport(
                         )
                         .await
                     }))
-                    .map_err(
-                        |e: asupersync::net::atp::transport_quic::QuicTransportError| e.to_string(),
-                    )?;
+                    .map_err(classify_quic_send_failure)?;
                 let elapsed = start.elapsed();
                 print_atp_metrics_line(
                     "send",
@@ -1541,7 +1744,9 @@ fn send_to_addr_with_transport(
             }
             #[cfg(not(feature = "tls"))]
             {
-                Err("atp --transport quic requires building atp with --features tls".to_string())
+                Err(SendTransportFailure::fatal(
+                    "atp --transport quic requires building atp with --features tls",
+                ))
             }
         }
     }
@@ -1862,6 +2067,21 @@ fn prepare_direct_delta_send(
     args: &SendArgs,
     addr: SocketAddr,
 ) -> Result<Option<DeltaPreparedSend>, String> {
+    if !args.allow_unauthenticated_delta_sidecar {
+        if !args.no_delta
+            && matches!(
+                args.transport,
+                Transport::Auto | Transport::Rq | Transport::Quic
+            )
+        {
+            eprintln!(
+                "[atp] delta planner: direct plaintext sidecar disabled; using full-object \
+                 transfer (trusted labs may opt in with \
+                 --allow-unauthenticated-delta-sidecar)"
+            );
+        }
+        return Ok(None);
+    }
     if args.no_delta
         || !matches!(
             args.transport,
@@ -2022,26 +2242,196 @@ fn fetch_remote_delta_state(
         .map_err(|err| format!("parse remote delta state {}: {err}", state_path))
 }
 
+#[cfg(test)]
+fn read_utf8_body_limited(reader: &mut impl Read, max_bytes: usize) -> std::io::Result<String> {
+    let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "body limit overflow")
+    })?;
+    let mut bytes = Vec::with_capacity(read_limit.min(8 * 1024));
+    reader
+        .take(u64::try_from(read_limit).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("JSON body exceeds {max_bytes} byte limit"),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    deadline: Option<Instant>,
+    deadline_operation: &'static str,
+}
+
+impl BoundedJsonWriter {
+    fn new(max_bytes: usize) -> Self {
+        Self::before(max_bytes, None, "encode JSON body")
+    }
+
+    fn before(
+        max_bytes: usize,
+        deadline: Option<Instant>,
+        deadline_operation: &'static str,
+    ) -> Self {
+        Self {
+            bytes: Vec::with_capacity(max_bytes.min(8 * 1024)),
+            max_bytes,
+            deadline,
+            deadline_operation,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "{} exceeded the connection deadline",
+                    self.deadline_operation
+                ),
+            ));
+        }
+        let next_len = self.bytes.len().checked_add(buf.len()).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "JSON body length overflow")
+        })?;
+        if next_len > self.max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("JSON body exceeds {} byte limit", self.max_bytes),
+            ));
+        }
+        self.bytes.extend_from_slice(buf);
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "{} exceeded the connection deadline",
+                    self.deadline_operation
+                ),
+            ));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "{} exceeded the connection deadline",
+                    self.deadline_operation
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn encode_json_body_limited<T: serde::Serialize>(
+    value: &T,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut writer = BoundedJsonWriter::new(max_bytes);
+    serde_json::to_writer(&mut writer, value).map_err(|err| format!("encode JSON body: {err}"))?;
+    Ok(writer.into_inner())
+}
+
+fn encode_json_body_limited_before<T: serde::Serialize>(
+    value: &T,
+    max_bytes: usize,
+    deadline: Instant,
+    operation: &'static str,
+) -> Result<Vec<u8>, String> {
+    let mut writer = BoundedJsonWriter::before(max_bytes, Some(deadline), operation);
+    serde_json::to_writer(&mut writer, value).map_err(|err| format!("encode JSON body: {err}"))?;
+    Ok(writer.into_inner())
+}
+
+struct DeadlineSliceReader<'a> {
+    remaining: &'a [u8],
+    deadline: Instant,
+    operation: &'static str,
+}
+
+impl Read for DeadlineSliceReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if Instant::now() >= self.deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{} exceeded the connection deadline", self.operation),
+            ));
+        }
+        let count = buf.len().min(self.remaining.len());
+        buf[..count].copy_from_slice(&self.remaining[..count]);
+        self.remaining = &self.remaining[count..];
+        Ok(count)
+    }
+}
+
+fn decode_json_body_before_deadline<T: for<'de> serde::Deserialize<'de>>(
+    bytes: &[u8],
+    deadline: Instant,
+    operation: &'static str,
+) -> Result<T, String> {
+    let reader = BufReader::with_capacity(
+        8 * 1024,
+        DeadlineSliceReader {
+            remaining: bytes,
+            deadline,
+            operation,
+        },
+    );
+    let value = serde_json::from_reader(reader)
+        .map_err(|err| format!("{operation} before deadline: {err}"))?;
+    check_delta_sidecar_deadline(Some(deadline), operation)?;
+    Ok(value)
+}
+
+fn check_delta_sidecar_deadline(deadline: Option<Instant>, operation: &str) -> Result<(), String> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err(format!("{operation} exceeded the connection deadline"))
+    } else {
+        Ok(())
+    }
+}
+
 fn fetch_direct_delta_state(state_addr: SocketAddr) -> Result<Option<DeltaCliState>, String> {
     let mut stream = connect_direct_delta_state_sidecar(state_addr)?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|err| format!("set read timeout: {err}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|err| format!("set write timeout: {err}"))?;
-
-    let mut body = String::new();
-    stream
-        .read_to_string(&mut body)
-        .map_err(|err| format!("read state: {err}"))?;
+    let deadline =
+        Instant::now() + Duration::from_millis(DIRECT_DELTA_SIDECAR_CONNECTION_DEADLINE_MS);
+    let body =
+        read_utf8_body_before_deadline(&mut stream, DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES, deadline)
+            .map_err(|err| format!("read state: {err}"))?;
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    serde_json::from_str(trimmed)
-        .map(Some)
-        .map_err(|err| format!("parse direct receiver delta state: {err}"))
+    decode_json_body_before_deadline(
+        trimmed.as_bytes(),
+        deadline,
+        "parse direct receiver delta state",
+    )
+    .map(Some)
 }
 
 fn fetch_direct_subchunk_signatures(
@@ -2051,14 +2441,6 @@ fn fetch_direct_subchunk_signatures(
     if chunks.is_empty() {
         return Ok(Vec::new());
     }
-
-    let mut stream = connect_direct_delta_state_sidecar(state_addr)?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|err| format!("set read timeout: {err}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|err| format!("set write timeout: {err}"))?;
 
     let request = DeltaSubchunkSignatureRequest {
         schema: DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA.to_string(),
@@ -2070,22 +2452,25 @@ fn fetch_direct_subchunk_signatures(
             })
             .collect(),
     };
-    serde_json::to_writer(&mut stream, &request)
+    let request_body = encode_json_body_limited(&request, DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES)
         .map_err(|err| format!("write subchunk signature request: {err}"))?;
-    stream
-        .write_all(b"\n")
-        .and_then(|_| stream.flush())
-        .map_err(|err| format!("finish subchunk signature request: {err}"))?;
+    let mut stream = connect_direct_delta_state_sidecar(state_addr)?;
+    let deadline =
+        Instant::now() + Duration::from_millis(DIRECT_DELTA_SIDECAR_CONNECTION_DEADLINE_MS);
+    write_all_tcp_before_deadline(&mut stream, &request_body, deadline)
+        .map_err(|err| format!("write subchunk signature request: {err}"))?;
     stream
         .shutdown(Shutdown::Write)
         .map_err(|err| format!("shutdown subchunk signature request: {err}"))?;
 
-    let mut body = String::new();
-    stream
-        .read_to_string(&mut body)
-        .map_err(|err| format!("read subchunk signature response: {err}"))?;
-    let response: DeltaSubchunkSignatureResponse = serde_json::from_str(body.trim())
-        .map_err(|err| format!("parse subchunk signature response: {err}"))?;
+    let body =
+        read_utf8_body_before_deadline(&mut stream, DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES, deadline)
+            .map_err(|err| format!("read subchunk signature response: {err}"))?;
+    let response: DeltaSubchunkSignatureResponse = decode_json_body_before_deadline(
+        body.trim().as_bytes(),
+        deadline,
+        "parse subchunk signature response",
+    )?;
     if response.schema != DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA {
         return Err(format!(
             "unsupported subchunk signature response schema: {}",
@@ -2282,15 +2667,21 @@ fn receiver_subchunk_signatures_from_states(
     candidates: &[CasChunkRef],
     states: &[DeltaChunkSignatureState],
 ) -> Vec<ReceiverSubchunkSignature> {
+    let states_by_key = states
+        .iter()
+        .filter(|entry| {
+            entry
+                .signature
+                .has_canonical_shape(entry.size_bytes, delta_subchunk::DEFAULT_SUBBLOCK_BYTES)
+        })
+        .map(|entry| ((entry.content_id_hex.as_str(), entry.size_bytes), entry))
+        .collect::<BTreeMap<_, _>>();
     candidates
         .iter()
         .filter_map(|chunk| {
             let content_id_hex = chunk.content_id.to_hex();
-            states
-                .iter()
-                .find(|entry| {
-                    entry.content_id_hex == content_id_hex && entry.size_bytes == chunk.size_bytes
-                })
+            states_by_key
+                .get(&(content_id_hex.as_str(), chunk.size_bytes))
                 .map(|entry| ReceiverSubchunkSignature {
                     chunk: chunk.clone(),
                     signature: entry.signature.clone(),
@@ -2309,7 +2700,7 @@ fn delta_store_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<DeltaChun
             .ok_or_else(|| format!("source CAS missing planned chunk {content_id_hex}"))?;
         let payload_len = u64::try_from(payload.len())
             .map_err(|_| "delta chunk payload length exceeds u64::MAX".to_string())?;
-        if payload_len != chunk.size_bytes || ContentId::from_bytes(payload) != chunk.content_id {
+        if payload_len != chunk.size_bytes || ContentId::from_bytes(&payload) != chunk.content_id {
             return Err(format!(
                 "source CAS payload does not match planned chunk {content_id_hex}"
             ));
@@ -3043,7 +3434,7 @@ fn delta_cli_state_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<Delta
             .ok_or_else(|| format!("delta state source missing chunk {content_id_hex}"))?;
         let payload_len = u64::try_from(payload.len())
             .map_err(|_| "delta state chunk payload length exceeds u64::MAX".to_string())?;
-        if payload_len != chunk.size_bytes || ContentId::from_bytes(payload) != chunk.content_id {
+        if payload_len != chunk.size_bytes || ContentId::from_bytes(&payload) != chunk.content_id {
             return Err(format!(
                 "delta state source chunk {content_id_hex} does not match manifest"
             ));
@@ -3060,16 +3451,75 @@ fn delta_cli_state_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<Delta
     })
 }
 
-fn read_local_delta_state(dest: &Path) -> Result<Option<DeltaCliState>, String> {
+fn read_file_limited_before_deadline(
+    file: &mut fs::File,
+    max_bytes: usize,
+    deadline: Option<Instant>,
+    operation: &str,
+) -> Result<Vec<u8>, String> {
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| format!("{operation} byte limit overflow"))?;
+    let metadata_len = file
+        .metadata()
+        .map_err(|err| format!("inspect file before {operation}: {err}"))?
+        .len();
+    if metadata_len > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+        return Err(format!("{operation} exceeds {max_bytes} byte limit"));
+    }
+
+    let mut bytes = Vec::with_capacity(read_limit.min(8 * 1024));
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        check_delta_sidecar_deadline(deadline, operation)?;
+        let remaining = read_limit.saturating_sub(bytes.len());
+        if remaining == 0 {
+            return Err(format!("{operation} exceeds {max_bytes} byte limit"));
+        }
+        let chunk_limit = remaining.min(chunk.len());
+        let count = file
+            .read(&mut chunk[..chunk_limit])
+            .map_err(|err| format!("{operation}: {err}"))?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.len() > max_bytes {
+            return Err(format!("{operation} exceeds {max_bytes} byte limit"));
+        }
+    }
+    check_delta_sidecar_deadline(deadline, operation)?;
+    Ok(bytes)
+}
+
+fn read_local_delta_state_before(
+    dest: &Path,
+    deadline: Option<Instant>,
+) -> Result<Option<DeltaCliState>, String> {
     let path = dest.join(DELTA_STATE_DIR).join(DELTA_STATE_FILE);
     if !path.exists() {
         return Ok(None);
     }
-    let bytes =
-        fs::read(&path).map_err(|err| format!("read delta state {}: {err}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|err| format!("parse delta state {}: {err}", path.display()))
+    let mut file = fs::File::open(&path)
+        .map_err(|err| format!("open delta state {}: {err}", path.display()))?;
+    let bytes = read_file_limited_before_deadline(
+        &mut file,
+        DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES,
+        deadline,
+        "read delta state",
+    )
+    .map_err(|err| format!("{}: {err}", path.display()))?;
+    let state = if let Some(deadline) = deadline {
+        decode_json_body_before_deadline(&bytes, deadline, "parse delta state")
+    } else {
+        serde_json::from_slice(&bytes).map_err(|err| format!("parse delta state: {err}"))
+    }
+    .map_err(|err| format!("{}: {err}", path.display()))?;
+    Ok(Some(state))
+}
+
+fn read_local_delta_state(dest: &Path) -> Result<Option<DeltaCliState>, String> {
+    read_local_delta_state_before(dest, None)
 }
 
 fn delta_state_addr(base: SocketAddr) -> Option<SocketAddr> {
@@ -3136,9 +3586,13 @@ fn spawn_delta_state_server(
 }
 
 fn serve_delta_state_connection(mut stream: std::net::TcpStream, dest: &Path) {
-    match read_delta_state_sidecar_request(&mut stream) {
+    let deadline =
+        Instant::now() + Duration::from_millis(DIRECT_DELTA_SIDECAR_CONNECTION_DEADLINE_MS);
+    match read_delta_state_sidecar_request(&mut stream, deadline) {
         Ok(Some(body)) => {
-            if let Err(err) = serve_delta_subchunk_signature_request(&mut stream, dest, &body) {
+            if let Err(err) =
+                serve_delta_subchunk_signature_request(&mut stream, dest, &body, deadline)
+            {
                 eprintln!("atp: delta state sidecar signature request failed: {err}");
             }
             return;
@@ -3150,13 +3604,21 @@ fn serve_delta_state_connection(mut stream: std::net::TcpStream, dest: &Path) {
         }
     }
 
-    match read_local_delta_state(dest) {
+    match read_local_delta_state_before(dest, Some(deadline)) {
         Ok(Some(state)) => {
-            if let Err(err) = serde_json::to_writer(&mut stream, &state) {
-                eprintln!("atp: delta state sidecar write failed: {err}");
-                return;
-            }
-            if let Err(err) = stream.write_all(b"\n").and_then(|_| stream.flush()) {
+            let body = match encode_json_body_limited_before(
+                &state,
+                DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES,
+                deadline,
+                "encode delta state response",
+            ) {
+                Ok(body) => body,
+                Err(err) => {
+                    eprintln!("atp: delta state sidecar response rejected: {err}");
+                    return;
+                }
+            };
+            if let Err(err) = write_all_tcp_before_deadline(&mut stream, &body, deadline) {
                 eprintln!("atp: delta state sidecar finish failed: {err}");
             }
         }
@@ -3167,49 +3629,209 @@ fn serve_delta_state_connection(mut stream: std::net::TcpStream, dest: &Path) {
 
 fn read_delta_state_sidecar_request(
     stream: &mut std::net::TcpStream,
+    deadline: Instant,
 ) -> std::io::Result<Option<String>> {
-    stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-    let mut body = String::new();
-    match stream.read_to_string(&mut body) {
-        Ok(_) => {
-            let trimmed = body.trim();
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(trimmed.to_string()))
-            }
-        }
+    let first_byte_timeout = deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or_default()
+        .min(Duration::from_millis(
+            DIRECT_DELTA_SIDECAR_FIRST_BYTE_TIMEOUT_MS,
+        ));
+    if first_byte_timeout.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "delta sidecar connection deadline elapsed",
+        ));
+    }
+    stream.set_read_timeout(Some(first_byte_timeout))?;
+
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    let mut chunk = [0u8; 8 * 1024];
+    match stream.read(&mut chunk) {
+        Ok(0) => return Ok(None),
+        Ok(read) => bytes.extend_from_slice(&chunk[..read]),
         Err(err)
             if matches!(
                 err.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
             ) =>
         {
-            Ok(None)
+            return Ok(None);
         }
-        Err(err) => Err(err),
+        Err(err) => return Err(err),
     }
+
+    loop {
+        if bytes.len() > DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "JSON body exceeds {} byte limit",
+                    DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES
+                ),
+            ));
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "delta sidecar request exceeded the absolute connection deadline",
+                )
+            })?;
+        stream.set_read_timeout(Some(remaining))?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "delta sidecar request exceeded the absolute connection deadline",
+                ));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    if bytes.len() > DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "JSON body exceeds {} byte limit",
+                DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES
+            ),
+        ));
+    }
+    let body = String::from_utf8(bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn read_utf8_body_before_deadline(
+    stream: &mut std::net::TcpStream,
+    max_bytes: usize,
+    deadline: Instant,
+) -> std::io::Result<String> {
+    stream.set_nonblocking(true)?;
+    let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "body limit overflow")
+    })?;
+    let mut bytes = Vec::with_capacity(read_limit.min(8 * 1024));
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "delta sidecar read exceeded the absolute connection deadline",
+            ));
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                let remaining = read_limit.saturating_sub(bytes.len());
+                bytes.extend_from_slice(&chunk[..count.min(remaining)]);
+                if bytes.len() > max_bytes || count > remaining {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("JSON body exceeds {max_bytes} byte limit"),
+                    ));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or_default();
+                thread::sleep(remaining.min(Duration::from_millis(1)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+fn write_all_tcp_before_deadline(
+    stream: &mut std::net::TcpStream,
+    bytes: &[u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
+    stream.set_nonblocking(true)?;
+    let mut written = 0;
+    while written < bytes.len() {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "delta sidecar response exceeded the absolute connection deadline",
+            ));
+        }
+        match stream.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "delta sidecar response socket accepted zero bytes",
+                ));
+            }
+            Ok(count) => written += count,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or_default();
+                thread::sleep(remaining.min(Duration::from_millis(1)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 
 fn serve_delta_subchunk_signature_request(
     stream: &mut std::net::TcpStream,
     dest: &Path,
     body: &str,
+    deadline: Instant,
 ) -> Result<(), String> {
-    let request: DeltaSubchunkSignatureRequest = serde_json::from_str(body)
-        .map_err(|err| format!("parse subchunk signature request: {err}"))?;
-    let response = build_delta_subchunk_signature_response(dest, request)?;
-    serde_json::to_writer(&mut *stream, &response)
-        .map_err(|err| format!("write subchunk signature response: {err}"))?;
-    stream
-        .write_all(b"\n")
-        .and_then(|_| stream.flush())
+    let request: DeltaSubchunkSignatureRequest = decode_json_body_before_deadline(
+        body.as_bytes(),
+        deadline,
+        "parse subchunk signature request",
+    )?;
+    let response = build_delta_subchunk_signature_response_before(dest, request, Some(deadline))?;
+    let response_body = encode_json_body_limited_before(
+        &response,
+        DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES,
+        deadline,
+        "encode subchunk signature response",
+    )
+    .map_err(|err| format!("write subchunk signature response: {err}"))?;
+    write_all_tcp_before_deadline(stream, &response_body, deadline)
         .map_err(|err| format!("finish subchunk signature response: {err}"))
 }
 
+#[cfg(test)]
 fn build_delta_subchunk_signature_response(
     dest: &Path,
     request: DeltaSubchunkSignatureRequest,
+) -> Result<DeltaSubchunkSignatureResponse, String> {
+    build_delta_subchunk_signature_response_before(dest, request, None)
+}
+
+fn build_delta_subchunk_signature_response_before(
+    dest: &Path,
+    request: DeltaSubchunkSignatureRequest,
+    deadline: Option<Instant>,
 ) -> Result<DeltaSubchunkSignatureResponse, String> {
     if request.schema != DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA {
         return Err(format!(
@@ -3217,43 +3839,148 @@ fn build_delta_subchunk_signature_response(
             request.schema
         ));
     }
-    let receiver_state = read_local_delta_state(dest)?.ok_or_else(|| {
+    if request.chunks.len() > DIRECT_DELTA_SIDECAR_MAX_REQUEST_CHUNKS {
+        return Err(format!(
+            "subchunk signature request has {} chunks; maximum is {}",
+            request.chunks.len(),
+            DIRECT_DELTA_SIDECAR_MAX_REQUEST_CHUNKS
+        ));
+    }
+    check_delta_sidecar_deadline(deadline, "load delta state")?;
+    let receiver_state = read_local_delta_state_before(dest, deadline)?.ok_or_else(|| {
         "subchunk signature request received but receiver has no delta state".to_string()
     })?;
+    check_delta_sidecar_deadline(deadline, "decode delta state manifest")?;
     let receiver_manifest = receiver_state.manifest()?;
-    let store = load_delta_store_from_state(dest, &receiver_manifest)?;
+    check_delta_sidecar_deadline(deadline, "decode delta state manifest")?;
+    let mut manifest_by_key = BTreeMap::new();
+    for (index, chunk) in receiver_manifest.chunks.iter().enumerate() {
+        if index % 1024 == 0 {
+            check_delta_sidecar_deadline(deadline, "index delta state manifest")?;
+        }
+        manifest_by_key.insert((chunk.content_id.to_hex(), chunk.size_bytes), chunk);
+    }
+    check_delta_sidecar_deadline(deadline, "index delta state manifest")?;
 
     let mut signatures = Vec::new();
+    let mut seen = BTreeMap::<(String, u64), ()>::new();
+    let mut signature_blocks = 0usize;
+    let mut signature_json_bytes = 0usize;
     for requested in request.chunks {
+        check_delta_sidecar_deadline(deadline, "build subchunk signature response")?;
         validate_hex_hash(&requested.content_id_hex)?;
-        let Some(chunk) = receiver_manifest.chunks.iter().find(|chunk| {
-            chunk.content_id.to_hex() == requested.content_id_hex
-                && chunk.size_bytes == requested.size_bytes
-        }) else {
+        let key = (requested.content_id_hex, requested.size_bytes);
+        if seen.insert(key.clone(), ()).is_some() {
+            continue;
+        }
+        let Some(chunk) = manifest_by_key.get(&key).copied() else {
             continue;
         };
-        let Some(payload) = store.get(&chunk.content_id) else {
-            continue;
-        };
+        let block_size = u64::try_from(delta_subchunk::DEFAULT_SUBBLOCK_BYTES)
+            .map_err(|_| "delta subchunk block size exceeds u64::MAX".to_string())?;
+        let signature_block_count = usize::try_from(chunk.size_bytes / block_size)
+            .map_err(|_| "subchunk signature block count exceeds usize::MAX".to_string())?;
+        charge_delta_signature_blocks(
+            &mut signature_blocks,
+            signature_block_count,
+            DIRECT_DELTA_SIDECAR_MAX_SIGNATURE_BLOCKS,
+        )?;
+        let payload = read_delta_state_chunk_before(dest, chunk, deadline)?;
         let payload_len = u64::try_from(payload.len())
             .map_err(|_| "delta state chunk payload length exceeds u64::MAX".to_string())?;
-        if payload_len != chunk.size_bytes || ContentId::from_bytes(payload) != chunk.content_id {
+        if payload_len != chunk.size_bytes || ContentId::from_bytes(&payload) != chunk.content_id {
             return Err(format!(
                 "delta state source chunk {} does not match manifest",
-                requested.content_id_hex
+                key.0
             ));
         }
-        signatures.push(DeltaChunkSignatureState {
-            content_id_hex: requested.content_id_hex,
-            size_bytes: requested.size_bytes,
-            signature: delta_subchunk::signature(payload, delta_subchunk::DEFAULT_SUBBLOCK_BYTES),
-        });
+        let state = DeltaChunkSignatureState {
+            content_id_hex: key.0,
+            size_bytes: key.1,
+            signature: delta_subchunk::signature(&payload, delta_subchunk::DEFAULT_SUBBLOCK_BYTES),
+        };
+        let encoded_state = if let Some(deadline) = deadline {
+            encode_json_body_limited_before(
+                &state,
+                DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES,
+                deadline,
+                "encode subchunk signature entry",
+            )?
+        } else {
+            encode_json_body_limited(&state, DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES)?
+        };
+        signature_json_bytes = signature_json_bytes
+            .checked_add(encoded_state.len())
+            .and_then(|bytes| bytes.checked_add(usize::from(!signatures.is_empty())))
+            .ok_or_else(|| "subchunk signature response size overflow".to_string())?;
+        if signature_json_bytes
+            > DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES
+                .saturating_sub(DIRECT_DELTA_SIDECAR_RESPONSE_OVERHEAD_BYTES)
+        {
+            return Err("subchunk signature response exceeds JSON work budget".to_string());
+        }
+        signatures.push(state);
     }
 
     Ok(DeltaSubchunkSignatureResponse {
         schema: DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA.to_string(),
         signatures,
     })
+}
+
+fn charge_delta_signature_blocks(
+    used: &mut usize,
+    additional: usize,
+    limit: usize,
+) -> Result<(), String> {
+    let next = used
+        .checked_add(additional)
+        .ok_or_else(|| "subchunk signature block budget overflow".to_string())?;
+    if next > limit {
+        return Err(format!(
+            "subchunk signature response exceeds {limit} block work limit"
+        ));
+    }
+    *used = next;
+    Ok(())
+}
+
+fn read_delta_state_chunk_before(
+    dest: &Path,
+    chunk: &CasChunkRef,
+    deadline: Option<Instant>,
+) -> Result<Vec<u8>, String> {
+    let content_id_hex = chunk.content_id.to_hex();
+    let path = dest
+        .join(DELTA_STATE_DIR)
+        .join(DELTA_CHUNK_DIR)
+        .join(format!("{content_id_hex}.chunk"));
+    let expected_len = usize::try_from(chunk.size_bytes)
+        .map_err(|_| format!("delta state chunk {} exceeds usize::MAX", path.display()))?;
+    if expected_len > DELTA_TREE_OBJECT_MAX_CHUNK_BYTES {
+        return Err(format!(
+            "delta state chunk {} exceeds {} byte chunk limit",
+            path.display(),
+            DELTA_TREE_OBJECT_MAX_CHUNK_BYTES
+        ));
+    }
+    let mut file = fs::File::open(&path)
+        .map_err(|err| format!("open delta state chunk {}: {err}", path.display()))?;
+    let bytes = read_file_limited_before_deadline(
+        &mut file,
+        expected_len,
+        deadline,
+        "read delta state chunk",
+    )
+    .map_err(|err| format!("{}: {err}", path.display()))?;
+    if bytes.len() != expected_len || ContentId::from_bytes(&bytes) != chunk.content_id {
+        return Err(format!(
+            "delta state chunk {} does not match manifest",
+            path.display()
+        ));
+    }
+    check_delta_sidecar_deadline(deadline, "verify delta state chunk")?;
+    Ok(bytes)
 }
 
 fn load_delta_store_from_state(
@@ -4318,6 +5045,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
     let one_shot = args.once && !persistent;
     let udp_bind_ip = listen.ip().to_string();
     let delta_enabled = !args.no_delta;
+    let direct_delta_sidecar_enabled = delta_enabled && args.allow_unauthenticated_delta_sidecar;
 
     match args.transport {
         Transport::Auto => Err(
@@ -4413,7 +5141,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                     .map_err(|e| format!("bind {listen}: {e}"))?;
                 let bound = listener.local_addr().map_err(|e| e.to_string())?;
                 let _delta_state_server =
-                    spawn_delta_state_server(dest.clone(), bound, delta_enabled);
+                    spawn_delta_state_server(dest.clone(), bound, direct_delta_sidecar_enabled);
                 eprintln!(
                     "atp: rq control listening on {bound} (udp on {udp_bind_ip}), dest {}",
                     dest.display()
@@ -4502,7 +5230,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         let _delta_state_server = spawn_delta_state_server(
                             dest.clone(),
                             endpoint.local_addr(),
-                            delta_enabled,
+                            direct_delta_sidecar_enabled,
                         );
                         eprintln!(
                             "atp: quic listening on {}, dest {}",
@@ -4530,8 +5258,11 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         Ok::<(), String>(())
                     } else {
                         eprintln!("atp: quic listening on {listen}, dest {}", dest.display());
-                        let _delta_state_server =
-                            spawn_delta_state_server(dest.clone(), listen, delta_enabled);
+                        let _delta_state_server = spawn_delta_state_server(
+                            dest.clone(),
+                            listen,
+                            direct_delta_sidecar_enabled,
+                        );
                         // Each accepted transfer consumes the endpoint; rebind the
                         // same address for the next one. `--listen` must use a fixed
                         // port for persistent serving (port 0 would drift).
@@ -5156,10 +5887,106 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
 
         let cert = parse_quic_pinned_leaf_cert();
-        let config = quic_cli_client_config(vec![cert], vec![ATP_QUIC_ALPN.to_vec()])
-            .expect("leaf PEM supplied via --ca should build pinned verifier");
+        let pinned_leaf = cert.as_ref().to_vec();
+        let config =
+            quic_cli_client_config(vec![cert], vec![pinned_leaf], vec![ATP_QUIC_ALPN.to_vec()])
+                .expect("leaf PEM supplied via --ca should build pinned verifier");
 
         assert_eq!(config.alpn_protocols, vec![ATP_QUIC_ALPN.to_vec()]);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn quic_cli_client_config_accepts_unpinned_trust_roots() {
+        use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
+
+        let cert = parse_quic_pinned_leaf_cert();
+        let config = quic_cli_client_config(vec![cert], Vec::new(), vec![ATP_QUIC_ALPN.to_vec()])
+            .expect("system-style roots should use the standard WebPKI verifier");
+
+        assert_eq!(config.alpn_protocols, vec![ATP_QUIC_ALPN.to_vec()]);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn quic_cli_native_roots_tolerate_malformed_entries_but_require_one_valid_anchor() {
+        use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
+        use asupersync::net::quic_native::tls::QuicTlsError;
+
+        let invalid = rustls::pki_types::CertificateDer::from(vec![0, 1, 2, 3]);
+        let valid = parse_quic_pinned_leaf_cert();
+        quic_cli_client_config(
+            vec![invalid.clone(), valid],
+            Vec::new(),
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .expect("one malformed native entry must not discard valid system roots");
+
+        let error = quic_cli_client_config(vec![invalid], Vec::new(), vec![ATP_QUIC_ALPN.to_vec()])
+            .expect_err("an entirely invalid native store must fail closed");
+        assert!(matches!(
+            error,
+            QuicTlsError::CryptoProviderFailure {
+                code: "client_no_valid_native_roots",
+                ..
+            }
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn native_root_loading_rejects_environment_store_replacement() {
+        let injected = std::ffi::OsStr::new("/tmp/injected-ca.pem");
+        assert!(reject_environment_selected_native_roots(None, None).is_ok());
+        for (file, dir) in [(Some(injected), None), (None, Some(injected))] {
+            let error = reject_environment_selected_native_roots(file, dir)
+                .expect_err("environment-selected roots must require explicit --ca");
+            assert!(error.contains("--ca"));
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn auto_fallback_only_admits_pre_transfer_quic_failures() {
+        use asupersync::net::atp::transport_quic::QuicTransportError;
+
+        assert!(
+            classify_quic_send_failure(QuicTransportError::Quic(
+                "quic handshake: certificate unknown".to_string()
+            ))
+            .fallback_eligible
+        );
+        assert!(
+            classify_quic_send_failure(QuicTransportError::Timeout {
+                operation: "receive sender handshake ack",
+                timeout: Duration::from_secs(1),
+            })
+            .fallback_eligible
+        );
+        assert!(
+            !classify_quic_send_failure(QuicTransportError::Integrity(
+                "tampered manifest".to_string()
+            ))
+            .fallback_eligible
+        );
+        assert!(
+            !classify_quic_send_failure(QuicTransportError::Quic(
+                "packet protection: invalid tag".to_string()
+            ))
+            .fallback_eligible
+        );
+    }
+
+    #[test]
+    fn auto_fallback_only_admits_pre_transfer_rq_rejection() {
+        assert!(
+            classify_rq_send_failure(RqError::HandshakeRejected("unsupported".to_string()))
+                .fallback_eligible
+        );
+        assert!(
+            !classify_rq_send_failure(RqError::Integrity("tampered manifest".to_string()))
+                .fallback_eligible
+        );
     }
 
     #[test]
@@ -5175,17 +6002,105 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn auto_transport_order_prefers_quic_then_rq_then_tcp() {
+    fn auto_transport_order_requires_opt_in_for_unencrypted_fallbacks() {
         assert_eq!(
-            Transport::auto_fallback_order(false),
+            Transport::auto_fallback_order(false, false, true),
+            &[Transport::Quic]
+        );
+        assert_eq!(
+            Transport::auto_fallback_order(false, true, true),
             &[Transport::Quic, Transport::Rq, Transport::Tcp]
+        );
+        assert_eq!(
+            Transport::auto_fallback_order(false, true, false),
+            &[Transport::Quic, Transport::Tcp]
         );
         assert_eq!(Transport::Auto.cli_arg(), "auto");
     }
 
     #[test]
-    fn auto_transport_order_uses_tcp_for_delta_resync() {
-        assert_eq!(Transport::auto_fallback_order(true), &[Transport::Tcp]);
+    fn auto_transport_delta_requires_plaintext_opt_in() {
+        assert!(Transport::auto_fallback_order(true, false, true).is_empty());
+        assert_eq!(
+            Transport::auto_fallback_order(true, true, true),
+            &[Transport::Tcp]
+        );
+    }
+
+    #[test]
+    fn auto_security_policy_rejects_implicit_plaintext_delta_path() {
+        let cli = Cli::parse_from([
+            "atp",
+            "send",
+            "./src",
+            "receiver.example:8472",
+            "--transport",
+            "auto",
+        ]);
+        let Command::Send(args) = cli.command else {
+            panic!("expected send command");
+        };
+
+        let error = validate_auto_security_policy(&args)
+            .expect_err("delta-enabled auto must not silently select plaintext TCP");
+        assert!(error.contains("--allow-plaintext-fallback"));
+    }
+
+    #[test]
+    fn auto_security_policy_allows_explicit_plaintext_fallback() {
+        let cli = Cli::parse_from([
+            "atp",
+            "send",
+            "./src",
+            "receiver.example:8472",
+            "--transport",
+            "auto",
+            "--allow-plaintext-fallback",
+        ]);
+        let Command::Send(args) = cli.command else {
+            panic!("expected send command");
+        };
+
+        validate_auto_security_policy(&args).expect("operator explicitly allowed downgrade");
+    }
+
+    #[test]
+    fn plaintext_fallback_flag_rejects_non_auto_transport() {
+        let cli = Cli::parse_from([
+            "atp",
+            "send",
+            "./src",
+            "receiver.example:8472",
+            "--transport",
+            "tcp",
+            "--allow-plaintext-fallback",
+        ]);
+        let Command::Send(args) = cli.command else {
+            panic!("expected send command");
+        };
+
+        assert!(validate_auto_security_policy(&args).is_err());
+    }
+
+    #[test]
+    fn direct_delta_sidecar_is_disabled_without_explicit_lab_opt_in() {
+        let cli = Cli::parse_from([
+            "atp",
+            "send",
+            "./source-does-not-need-to-exist",
+            "127.0.0.1:9",
+            "--transport",
+            "quic",
+        ]);
+        let Command::Send(args) = cli.command else {
+            panic!("expected send command");
+        };
+
+        assert!(
+            prepare_direct_delta_send(&args, "127.0.0.1:9".parse().unwrap())
+                .expect("disabled sidecar must not perform network I/O")
+                .is_none()
+        );
     }
 
     #[test]
@@ -5466,10 +6381,16 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             dest,
             DeltaSubchunkSignatureRequest {
                 schema: DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA.to_string(),
-                chunks: vec![DeltaSubchunkSignatureRequestChunk {
-                    content_id_hex: chunk.content_id.to_hex(),
-                    size_bytes: chunk.size_bytes,
-                }],
+                chunks: vec![
+                    DeltaSubchunkSignatureRequestChunk {
+                        content_id_hex: chunk.content_id.to_hex(),
+                        size_bytes: chunk.size_bytes,
+                    },
+                    DeltaSubchunkSignatureRequestChunk {
+                        content_id_hex: chunk.content_id.to_hex(),
+                        size_bytes: chunk.size_bytes,
+                    },
+                ],
             },
         )
         .expect("signature response");
@@ -5694,6 +6615,139 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert!(!retryable_delta_state_connect_error(&Error::from(
             ErrorKind::InvalidInput,
         )));
+    }
+
+    #[test]
+    fn delta_sidecar_reader_accepts_exact_limit_and_rejects_limit_plus_one() {
+        let mut exact = std::io::Cursor::new(b"12345678".to_vec());
+        assert_eq!(
+            read_utf8_body_limited(&mut exact, 8).expect("exact limit should fit"),
+            "12345678"
+        );
+
+        let mut oversized = std::io::Cursor::new(b"123456789".to_vec());
+        let error =
+            read_utf8_body_limited(&mut oversized, 8).expect_err("limit plus one must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds 8 byte limit"));
+    }
+
+    #[test]
+    fn delta_sidecar_json_encoder_stops_at_limit() {
+        assert_eq!(
+            encode_json_body_limited(&"1234", 6).expect("encoded JSON is exactly six bytes"),
+            br#""1234""#
+        );
+        let error = encode_json_body_limited(&"1234", 5)
+            .expect_err("bounded writer must reject an oversized response");
+        assert!(error.contains("exceeds 5 byte limit"));
+    }
+
+    #[test]
+    fn delta_sidecar_signature_work_budget_accepts_limit_and_rejects_limit_plus_one() {
+        let mut used = 0;
+        charge_delta_signature_blocks(&mut used, 8, 8).expect("exact work limit should fit");
+        assert_eq!(used, 8);
+        let error = charge_delta_signature_blocks(&mut used, 1, 8)
+            .expect_err("work limit plus one must fail before signature allocation");
+        assert!(error.contains("8 block work limit"));
+        assert_eq!(used, 8);
+    }
+
+    #[test]
+    fn delta_sidecar_request_enforces_absolute_deadline_against_trickle() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("loopback addr");
+        let writer = thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(addr).expect("connect loopback");
+            for _ in 0..20 {
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let (mut stream, _) = listener.accept().expect("accept loopback");
+        let started = Instant::now();
+        let error =
+            read_delta_state_sidecar_request(&mut stream, started + Duration::from_millis(60))
+                .expect_err("continuous trickle must not extend the absolute deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        writer.join().expect("join trickle writer");
+    }
+
+    #[test]
+    fn delta_sidecar_client_read_enforces_absolute_deadline_against_trickle() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("loopback addr");
+        let writer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept loopback");
+            for _ in 0..20 {
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let mut stream = std::net::TcpStream::connect(addr).expect("connect loopback");
+        let started = Instant::now();
+        let error =
+            read_utf8_body_before_deadline(&mut stream, 1024, started + Duration::from_millis(60))
+                .expect_err("peer trickle must not reset the client deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        writer.join().expect("join trickle writer");
+    }
+
+    #[test]
+    fn delta_sidecar_file_reader_rejects_limit_plus_one() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("oversized-state.json");
+        fs::write(&path, b"123456789").expect("write oversized fixture");
+        let mut file = fs::File::open(&path).expect("open oversized fixture");
+
+        let error = read_file_limited_before_deadline(&mut file, 8, None, "read test delta state")
+            .expect_err("limit+1 file must reject before unbounded allocation");
+
+        assert!(error.contains("exceeds 8 byte limit"));
+    }
+
+    #[test]
+    fn delta_sidecar_json_parse_honors_expired_compute_deadline() {
+        let deadline = Instant::now();
+        let error = decode_json_body_before_deadline::<DeltaSubchunkSignatureRequest>(
+            br#"{"schema":"ignored","chunks":[]}"#,
+            deadline,
+            "parse test request",
+        )
+        .expect_err("expired compute deadline must reject before parsing");
+
+        assert!(error.contains("connection deadline"));
+    }
+
+    #[test]
+    fn delta_sidecar_rejects_noncanonical_remote_signature_before_diff() {
+        let payload = vec![0x5a; delta_subchunk::DEFAULT_SUBBLOCK_BYTES];
+        let candidate = CasChunkRef::from_bytes(0, 0, &payload).expect("candidate chunk");
+        let malformed: SubBlockSignature = serde_json::from_value(serde_json::json!({
+            "block_size": 0,
+            "total_len": payload.len(),
+            "blocks": [{
+                "weak": 0,
+                "strong": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "offset": 0,
+                "len": 0
+            }]
+        }))
+        .expect("deserialize hostile signature fixture");
+        let states = vec![DeltaChunkSignatureState {
+            content_id_hex: candidate.content_id.to_hex(),
+            size_bytes: candidate.size_bytes,
+            signature: malformed,
+        }];
+
+        assert!(receiver_subchunk_signatures_from_states(&[candidate], &states).is_empty());
     }
 
     #[test]

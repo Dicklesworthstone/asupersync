@@ -172,7 +172,7 @@ cli = [
 # binary with `--features atp-cli`. If this feature omits `tls`, the CLI still
 # parses `--transport quic` but exits immediately from the cfg-disabled QUIC
 # branch instead of running the TLS-1.3 data plane.
-atp-cli = ["dep:clap", "tls"]
+atp-cli = ["dep:clap", "tls", "dep:rustls-native-certs"]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite", "dep:sqlparser"]
 # Enable PostgreSQL async client with wire protocol.
