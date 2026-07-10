@@ -61,6 +61,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
+use crate::atp::safety::{
+    portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
+    validate_portable_relative_path,
+};
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
@@ -83,6 +87,7 @@ use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::protocol::varint::VarInt;
+use crate::net::atp::transport_common::metadata::path_is_link_or_reparse;
 use crate::net::atp::transport_common::{
     EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode, plan_multi_object_split,
@@ -93,6 +98,7 @@ use crate::security::tag::TAG_SIZE;
 use crate::security::{AuthMode, AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
+use crate::util::entropy::{EntropySource, OsEntropy};
 use adaptive::{AdaptiveController, AdaptivePolicy, BlockPlan, PathEstimate, PathSignalSample};
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
@@ -3713,13 +3719,34 @@ struct RqSourceEntry {
 }
 
 async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry>), RqError> {
+    if path_is_link_or_reparse(root).await.map_err(RqError::Io)? {
+        return Err(RqError::Source(format!(
+            "{}: RQ does not support symlink or reparse-point sources; use TCP or QUIC with portable metadata",
+            root.display()
+        )));
+    }
+
     let meta = crate::fs::metadata(root)
         .await
         .map_err(|e| RqError::Source(format!("{}: {e}", root.display())))?;
-    let root_name = root.file_name().map_or_else(
-        || "transfer".to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
+    let root_name = match root.file_name() {
+        None => "transfer".to_string(),
+        Some(name) => name
+            .to_str()
+            .ok_or_else(|| {
+                RqError::Source(format!(
+                    "{}: source file name is not valid Unicode",
+                    root.display()
+                ))
+            })?
+            .to_string(),
+    };
+    validate_portable_path_component(&root_name).map_err(|_| {
+        RqError::Source(format!(
+            "{}: source file name is not portable: {root_name:?}",
+            root.display()
+        ))
+    })?;
 
     if meta.is_file() {
         return Ok((
@@ -3747,6 +3774,15 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry
     )))
 }
 
+/// Validate that `root` can be represented losslessly by the RQ wire format.
+///
+/// RQ currently transfers regular-file trees only. It fails closed for
+/// symlinks/reparse points and nested empty directories instead of silently
+/// following or dropping them.
+pub async fn validate_source_compatibility(root: &Path) -> Result<(), RqError> {
+    collect_entries(root).await.map(|_| ())
+}
+
 fn collect_dir<'a>(
     dir: &'a Path,
     prefix: String,
@@ -3762,8 +3798,29 @@ fn collect_dir<'a>(
             .await
             .map_err(|e| RqError::Source(format!("{}: {e}", dir.display())))?
         {
-            let name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
+            if path_is_link_or_reparse(&path).await.map_err(RqError::Io)? {
+                return Err(RqError::Source(format!(
+                    "{}: RQ does not support symlink or reparse-point entries; use TCP or QUIC with portable metadata",
+                    path.display()
+                )));
+            }
+            let name = entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| {
+                    RqError::Source(format!(
+                        "{}: source entry name is not valid Unicode",
+                        path.display()
+                    ))
+                })?
+                .to_string();
+            validate_portable_path_component(&name).map_err(|_| {
+                RqError::Source(format!(
+                    "{}: source entry name is not portable: {name:?}",
+                    path.display()
+                ))
+            })?;
             let ft = entry
                 .file_type()
                 .await
@@ -3771,6 +3828,13 @@ fn collect_dir<'a>(
             children.push((name, path, ft.is_dir()));
         }
         children.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if children.is_empty() && !prefix.is_empty() {
+            return Err(RqError::Source(format!(
+                "{}: RQ cannot represent nested empty directories; use TCP or QUIC",
+                dir.display()
+            )));
+        }
 
         for (name, path, is_dir) in children {
             let rel = if prefix.is_empty() {
@@ -4168,29 +4232,13 @@ async fn split_large_entries_with_digest_mode(
 /// absolute (or separator-bearing) `root_name` would escape the destination
 /// directory entirely — `crate::fs::write_atomic` validates with
 /// `allow_absolute = true`, so it would not catch an absolute target. Senders
-/// already set `root_name` to a bare file name (see `collect_entries`), so
-/// collapsing to the final path component is loss-free for legitimate
-/// transfers while fully containing hostile ones (matches `transport_tcp`).
+/// already set `root_name` to a bare file name (see `collect_entries`), so a
+/// legitimate manifest is accepted unchanged while hostile or platform-
+/// aliasing forms are rejected fail closed (matching `transport_tcp`).
 fn safe_base_for_root_name(dest_dir: &Path, root_name: &str) -> Result<PathBuf, RqError> {
-    if root_name.is_empty() {
-        return Err(RqError::Source("manifest root_name is empty".to_string()));
-    }
-    let component = Path::new(root_name)
-        .file_name()
-        .ok_or_else(|| RqError::Source(format!("unsafe manifest root_name: {root_name}")))?;
-    // `file_name()` never yields `.`/`..`/separators, but guard defensively
-    // in case of platform-specific surprises.
-    let component_str = component.to_string_lossy();
-    if component_str == "."
-        || component_str == ".."
-        || component_str.contains('/')
-        || component_str.contains('\\')
-    {
-        return Err(RqError::Source(format!(
-            "unsafe manifest root_name: {root_name}"
-        )));
-    }
-    Ok(dest_dir.join(component))
+    validate_portable_path_component(root_name)
+        .map_err(|_| RqError::Source(format!("unsafe manifest root_name: {root_name}")))?;
+    Ok(dest_dir.join(root_name))
 }
 
 /// Validate an incoming transfer manifest before allocating per-entry decoders.
@@ -4211,6 +4259,9 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
             manifest.transfer_id
         )));
     }
+    validate_portable_path_component(&manifest.root_name).map_err(|_| {
+        RqError::Source(format!("unsafe manifest root_name: {}", manifest.root_name))
+    })?;
     if manifest.total_bytes > config.max_transfer_bytes {
         return Err(RqError::TooLarge {
             size: manifest.total_bytes,
@@ -4239,6 +4290,7 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
 
     #[derive(Debug)]
     struct FragmentGroupValidation {
+        rel_path: String,
         logical_size: u64,
         shard_count: u32,
         sha256_hex: String,
@@ -4264,9 +4316,10 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                     )));
                 }
                 validate_manifest_rel_path(&entry.rel_path)?;
-                if !seen_object_rel_paths.insert(entry.rel_path.clone()) {
+                let object_path_key = portable_path_collision_key(&entry.rel_path);
+                if !seen_object_rel_paths.insert(object_path_key) {
                     return Err(RqError::Frame(format!(
-                        "duplicate manifest rel_path: {}",
+                        "duplicate manifest rel_path (including case collision): {}",
                         entry.rel_path
                     )));
                 }
@@ -4310,14 +4363,22 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                             fragment.rel_path, fragment.logical_size
                         )));
                     }
-                    let group = fragment_groups.entry(fragment.rel_path.clone()).or_insert_with(
-                        || FragmentGroupValidation {
+                    let fragment_path_key = portable_path_collision_key(&fragment.rel_path);
+                    let group = fragment_groups.entry(fragment_path_key).or_insert_with(|| {
+                        FragmentGroupValidation {
+                            rel_path: fragment.rel_path.clone(),
                             logical_size: fragment.logical_size,
                             shard_count: fragment.shard_count,
                             sha256_hex: fragment.sha256_hex.clone(),
                             shards: Vec::new(),
-                        },
-                    );
+                        }
+                    });
+                    if group.rel_path != fragment.rel_path {
+                        return Err(RqError::Frame(format!(
+                            "duplicate logical rel_path by case: {} conflicts with {}",
+                            fragment.rel_path, group.rel_path
+                        )));
+                    }
                     if group.logical_size != fragment.logical_size
                         || group.shard_count != fragment.shard_count
                         || group.sha256_hex != fragment.sha256_hex
@@ -4331,10 +4392,11 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                         .shards
                         .push((fragment.shard_index, fragment.logical_offset, fragment.len));
                 } else if entry.members.is_empty()
-                    && !seen_logical_rel_paths.insert(entry.rel_path.clone())
+                    && !seen_logical_rel_paths
+                        .insert(portable_path_collision_key(&entry.rel_path))
                 {
                     return Err(RqError::Frame(format!(
-                        "duplicate logical rel_path: {}",
+                        "duplicate logical rel_path (including case collision): {}",
                         entry.rel_path
                     )));
                 }
@@ -4352,9 +4414,11 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                             "manifest packed member sha256_hex",
                             &member.sha256_hex,
                         )?;
-                        if !seen_logical_rel_paths.insert(member.rel_path.clone()) {
+                        if !seen_logical_rel_paths
+                            .insert(portable_path_collision_key(&member.rel_path))
+                        {
                             return Err(RqError::Frame(format!(
-                                "duplicate packed member rel_path: {}",
+                                "duplicate packed member rel_path (including case collision): {}",
                                 member.rel_path
                             )));
                         }
@@ -4394,10 +4458,11 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
             fragment_groups.len()
         )));
     }
-    for (rel_path, group) in fragment_groups {
-        if !seen_logical_rel_paths.insert(rel_path.clone()) {
+    for (rel_path_key, group) in fragment_groups {
+        let rel_path = group.rel_path;
+        if !seen_logical_rel_paths.insert(rel_path_key) {
             return Err(RqError::Frame(format!(
-                "duplicate logical rel_path: {rel_path}"
+                "duplicate logical rel_path (including case collision): {rel_path}"
             )));
         }
         if group.shards.len() != usize::try_from(group.shard_count).unwrap_or(usize::MAX) {
@@ -4432,6 +4497,18 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
             )));
         }
     }
+    let mut committed_paths = BTreeSet::<&str>::new();
+    for entry in &manifest.entries {
+        if let Some(fragment) = &entry.fragment {
+            committed_paths.insert(fragment.rel_path.as_str());
+        } else if entry.members.is_empty() {
+            committed_paths.insert(entry.rel_path.as_str());
+        } else {
+            committed_paths.extend(entry.members.iter().map(|member| member.rel_path.as_str()));
+        }
+    }
+    validate_portable_path_set(committed_paths)
+        .map_err(|error| RqError::Frame(format!("unsafe manifest path tree: {error}")))?;
     Ok(())
 }
 
@@ -4447,20 +4524,8 @@ fn sha256_hex_placeholder() -> String {
 }
 
 fn validate_manifest_rel_path(rel: &str) -> Result<(), RqError> {
-    if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
-        return Err(RqError::Source(format!("unsafe manifest rel_path: {rel}")));
-    }
-    for component in rel.split('/') {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.contains('\\')
-            || component.contains(':')
-        {
-            return Err(RqError::Source(format!("unsafe manifest rel_path: {rel}")));
-        }
-    }
-    Ok(())
+    validate_portable_relative_path(rel)
+        .map_err(|_| RqError::Source(format!("unsafe manifest rel_path: {rel}")))
 }
 
 #[derive(Debug, Default)]
@@ -9791,9 +9856,15 @@ async fn create_receive_staging_dir(
     dest_dir: &Path,
     transfer_id: &str,
 ) -> Result<PathBuf, RqError> {
+    reject_rq_destination_ancestors(dest_dir).await?;
+    crate::fs::create_dir_all(dest_dir).await?;
+    reject_rq_destination_ancestors(dest_dir).await?;
     for _ in 0..RQ_STAGING_CREATE_ATTEMPTS {
         let staging_seq = RQ_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
-        let staging_dir = dest_dir.join(format!(".atp-rq-staging-{transfer_id}-{staging_seq}"));
+        let staging_nonce = OsEntropy.next_u64();
+        let staging_dir = dest_dir.join(format!(
+            ".atp-rq-staging-{transfer_id}-{staging_nonce:016x}-{staging_seq}"
+        ));
         match crate::fs::create_dir(&staging_dir).await {
             Ok(()) => return Ok(staging_dir),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -9804,6 +9875,23 @@ async fn create_receive_staging_dir(
     Err(RqError::Frame(format!(
         "unable to create unique receiver staging directory for transfer {transfer_id}"
     )))
+}
+
+async fn reject_rq_destination_ancestors(path: &Path) -> Result<(), RqError> {
+    for candidate in path.ancestors() {
+        match path_is_link_or_reparse(candidate).await {
+            Ok(true) => {
+                return Err(RqError::Source(format!(
+                    "destination path crosses existing symlink or reparse point: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RqError::Io(error)),
+        }
+    }
+    Ok(())
 }
 
 // Reference full-check variant of the receiver symlink-prefix guard. All hot call
@@ -9878,12 +9966,12 @@ async fn reject_destination_symlink_prefix_cached(
 }
 
 async fn reject_existing_symlink(path: &Path) -> Result<(), RqError> {
-    match crate::fs::symlink_metadata(path).await {
-        Ok(metadata) if metadata.is_symlink() => Err(RqError::Source(format!(
-            "destination path crosses existing symlink: {}",
+    match path_is_link_or_reparse(path).await {
+        Ok(true) => Err(RqError::Source(format!(
+            "destination path crosses existing symlink or reparse point: {}",
             path.display()
         ))),
-        Ok(_) => Ok(()),
+        Ok(false) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(RqError::Io(err)),
     }
@@ -10523,10 +10611,17 @@ async fn verify_and_commit(
         }
     }
     if committed {
-        // `root_name` is attacker-controlled off the wire; collapse it to a
-        // single safe component so a hostile (absolute / separator-bearing)
-        // value cannot escape `dest_dir`.
+        // `root_name` is attacker-controlled off the wire; require one
+        // portable component so hostile and platform-aliasing values cannot
+        // escape or collide under `dest_dir`.
         let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+        reject_existing_symlink(dest_dir).await?;
+        if manifest.is_directory && manifest.entries.is_empty() {
+            let mut verified_prefixes = BTreeSet::new();
+            reject_destination_symlink_prefix_cached(&base, &base, &mut verified_prefixes).await?;
+            crate::fs::create_dir_all(&base).await?;
+            committed_paths.push(base.display().to_string());
+        }
 
         // Resolve every LOGICAL destination path, rejecting any symlink prefix,
         // before writing anything.
@@ -14398,19 +14493,13 @@ mod tests {
             safe_base_for_root_name(dest, "payload").unwrap(),
             dest.join("payload")
         );
-        // Absolute root_name would otherwise replace the base via Path::join;
-        // collapse to the final component instead.
-        assert_eq!(
-            safe_base_for_root_name(dest, "/etc/cron.d/evil").unwrap(),
-            dest.join("evil")
-        );
-        assert_eq!(
-            safe_base_for_root_name(dest, "../../etc/passwd").unwrap(),
-            dest.join("passwd")
-        );
+        // Hostile names fail closed instead of being silently rewritten.
+        assert!(safe_base_for_root_name(dest, "/etc/cron.d/evil").is_err());
+        assert!(safe_base_for_root_name(dest, "../../etc/passwd").is_err());
         assert!(safe_base_for_root_name(dest, "").is_err());
         assert!(safe_base_for_root_name(dest, "/").is_err());
         assert!(safe_base_for_root_name(dest, "..").is_err());
+        assert!(safe_base_for_root_name(dest, "NUL.txt").is_err());
     }
 
     fn manifest_with(entries: Vec<ManifestEntry>, total_bytes: u64) -> TransferManifest {
@@ -14552,6 +14641,28 @@ mod tests {
         assert!(matches!(
             validate_manifest(&manifest, &RqConfig::default()),
             Err(RqError::Frame(msg)) if msg.contains("duplicate manifest rel_path")
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_windows_path_aliases_before_decode() {
+        for rel_path in ["NUL.txt", "dir/COM1.log", "trailing.", "trailing "] {
+            let mut entry = manifest_entry(0, 10);
+            entry.rel_path = rel_path.to_string();
+            let manifest = manifest_with(vec![entry], 10);
+            assert!(
+                validate_manifest(&manifest, &RqConfig::default()).is_err(),
+                "Windows-unsafe path {rel_path:?} must fail closed"
+            );
+        }
+
+        let mut entries = vec![manifest_entry(0, 10), manifest_entry(1, 20)];
+        entries[0].rel_path = "Docs/Readme.txt".to_string();
+        entries[1].rel_path = "docs/README.TXT".to_string();
+        let manifest = manifest_with(entries, 30);
+        assert!(matches!(
+            validate_manifest(&manifest, &RqConfig::default()),
+            Err(RqError::Frame(message)) if message.contains("case collision")
         ));
     }
 

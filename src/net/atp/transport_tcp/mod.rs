@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io::SeekFrom;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -47,11 +47,23 @@ use crate::atp::delta::{
     DeltaResyncMode, PersistentChunkManifest, plan_incremental_resync,
 };
 use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
+use crate::atp::safety::{
+    portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
+    validate_portable_relative_path,
+};
+#[cfg(test)]
+use crate::net::atp::transport_common::metadata::{
+    SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
+};
+use crate::net::atp::transport_common::metadata::{
+    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
+    validate_symlink_metadata_for_receive,
+};
+use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, FilterSet, MirrorError, MirrorPolicy, SourceEntry,
-    StagedEntryReceive, StreamingError, apply_entry_metadata, collect_entries,
-    flat_merkle_root_from_digests, hash_file_streaming, hex_encode, metadata_commitment,
-    mirror_dest, read_entry_metadata,
+    StagedEntryReceive, StreamingError, apply_entry_metadata, flat_merkle_root_from_digests,
+    hash_file_streaming, hex_encode, metadata_commitment, mirror_dest, read_entry_metadata,
 };
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
@@ -69,6 +81,7 @@ use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, Protoc
 #[cfg(test)]
 use crate::net::atp::transport_common::flat_merkle_root_from_slices;
 use crate::net::{TcpListener, TcpStream};
+use crate::util::entropy::{EntropySource, OsEntropy};
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
 /// changes.
@@ -778,7 +791,7 @@ mod unused_delta_legacy {
         source: &Path,
         config: &TransferConfig,
     ) -> Result<Option<DeltaTransferBasis>, TransportError> {
-        let (_, _, entries) = collect_entries(source).await?;
+        let (_, _, entries) = collect_entries_with_policy(source, &config.metadata_policy).await?;
         let mut read_buf = vec![0u8; config.chunk_size.max(1)];
         let mut digests = Vec::with_capacity(entries.len());
         let mut metadatas = Vec::with_capacity(entries.len());
@@ -1248,6 +1261,9 @@ fn validate_manifest(
             manifest.transfer_id
         )));
     }
+    validate_portable_path_component(&manifest.root_name).map_err(|_| {
+        TransportError::Source(format!("unsafe manifest root_name: {}", manifest.root_name))
+    })?;
     if manifest.total_bytes > config.max_transfer_bytes {
         return Err(TransportError::TooLarge {
             size: manifest.total_bytes,
@@ -1266,7 +1282,8 @@ fn validate_manifest(
             manifest.entries.len()
         )));
     }
-    let mut seen_rel_paths = std::collections::BTreeSet::new();
+    let mut seen_rel_paths = BTreeMap::<String, (String, FileKind, bool)>::new();
+    let empty_sha_hex = hex_encode(&Sha256::digest(b""));
     let declared_total: u64 =
         manifest
             .entries
@@ -1283,42 +1300,153 @@ fn validate_manifest(
                     )));
                 }
                 validate_manifest_rel_path(&entry.rel_path)?;
-                if !seen_rel_paths.insert(entry.rel_path.as_str()) {
+                if !entry.members.is_empty() {
                     return Err(TransportError::Frame(format!(
-                        "duplicate manifest rel_path: {}",
+                        "TCP manifest entry {} unexpectedly contains packed members",
+                        entry.rel_path
+                    )));
+                }
+                if entry.sha256_hex.len() != 64
+                    || !entry.sha256_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(TransportError::Frame(format!(
+                        "manifest entry {} has invalid sha256_hex",
+                        entry.rel_path
+                    )));
+                }
+
+                let metadata = entry.metadata.clone().unwrap_or_default();
+                if metadata.hardlink_target.is_some()
+                    && !matches!(metadata.file_kind, FileKind::Regular)
+                {
+                    return Err(TransportError::Frame(format!(
+                        "manifest entry {} declares a hardlink on non-regular kind {:?}",
+                        entry.rel_path, metadata.file_kind
+                    )));
+                }
+                validate_entry_metadata_for_receive(
+                    &entry.rel_path,
+                    &metadata,
+                    &config.metadata_policy,
+                )
+                .map_err(
+                    |error| {
+                        TransportError::Frame(format!(
+                            "manifest entry {} has invalid metadata: {error}",
+                            entry.rel_path
+                        ))
+                    },
+                )?;
+                if metadata.hardlink_target.is_some() && !config.preserve_hardlinks {
+                    return Err(TransportError::Frame(format!(
+                        "manifest hardlink entry {} is denied by receiver policy",
+                        entry.rel_path
+                    )));
+                }
+                if let Some(primary_rel) = &metadata.hardlink_target {
+                    validate_manifest_rel_path(primary_rel)?;
+                    let primary_key = portable_path_collision_key(primary_rel);
+                    let valid_primary = seen_rel_paths.get(&primary_key).is_some_and(
+                        |(seen_path, seen_kind, seen_is_hardlink)| {
+                            seen_path == primary_rel
+                                && matches!(seen_kind, FileKind::Regular)
+                                && !seen_is_hardlink
+                        },
+                    );
+                    if primary_rel == &entry.rel_path || !valid_primary {
+                        return Err(TransportError::Frame(format!(
+                            "manifest hardlink entry {} targets missing, aliased, later, or non-primary entry {}",
+                            entry.rel_path, primary_rel
+                        )));
+                    }
+                }
+                if (!matches!(metadata.file_kind, FileKind::Regular)
+                    || metadata.hardlink_target.is_some())
+                    && (entry.size != 0 || entry.sha256_hex != empty_sha_hex)
+                {
+                    return Err(TransportError::Frame(format!(
+                        "manifest metadata-only entry {} must carry zero content",
+                        entry.rel_path
+                    )));
+                }
+
+                let path_key = portable_path_collision_key(&entry.rel_path);
+                if seen_rel_paths
+                    .insert(
+                        path_key,
+                        (
+                            entry.rel_path.clone(),
+                            metadata.file_kind,
+                            metadata.hardlink_target.is_some(),
+                        ),
+                    )
+                    .is_some()
+                {
+                    return Err(TransportError::Frame(format!(
+                        "duplicate manifest rel_path (including case collision): {}",
                         entry.rel_path
                     )));
                 }
                 Ok(acc.saturating_add(entry.size))
             })?;
+    validate_portable_path_set(manifest.entries.iter().map(|entry| entry.rel_path.as_str()))
+        .map_err(TransportError::Frame)?;
     if declared_total > config.max_transfer_bytes {
         return Err(TransportError::TooLarge {
             size: declared_total,
             max: config.max_transfer_bytes,
         });
     }
+    if declared_total != manifest.total_bytes {
+        return Err(TransportError::Frame(format!(
+            "manifest total_bytes {} does not match entry sum {declared_total}",
+            manifest.total_bytes
+        )));
+    }
+    if manifest.merkle_root_hex.len() != 64
+        || !manifest
+            .merkle_root_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(TransportError::Frame(
+            "manifest merkle_root_hex is not a 64-byte hex digest".to_string(),
+        ));
+    }
+    if manifest
+        .metadata_root_hex
+        .as_ref()
+        .is_some_and(|root| root.len() != 64 || !root.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(TransportError::Frame(
+            "manifest metadata_root_hex is not a 64-byte hex digest".to_string(),
+        ));
+    }
+    let metadata = manifest
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.rel_path.as_str(),
+                entry.metadata.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let metadata_refs = metadata
+        .iter()
+        .map(|(path, metadata)| (*path, metadata))
+        .collect::<Vec<_>>();
+    if metadata_commitment(&metadata_refs) != manifest.metadata_root_hex {
+        return Err(TransportError::Frame(
+            "manifest metadata commitment mismatch".to_string(),
+        ));
+    }
     Ok(())
 }
 
 fn validate_manifest_rel_path(rel: &str) -> Result<(), TransportError> {
-    if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
-        return Err(TransportError::Source(format!(
-            "unsafe manifest rel_path: {rel}"
-        )));
-    }
-    for component in rel.split('/') {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.contains('\\')
-            || component.contains(':')
-        {
-            return Err(TransportError::Source(format!(
-                "unsafe manifest rel_path: {rel}"
-            )));
-        }
-    }
-    Ok(())
+    validate_portable_relative_path(rel)
+        .map_err(|_| TransportError::Source(format!("unsafe manifest rel_path: {rel}")))
 }
 
 /// Reject a manifest where any entry path is nested under another entry declared
@@ -1342,11 +1470,16 @@ fn reject_symlink_traversal(manifest: &TransferManifest) -> Result<(), Transport
     }
     for entry in &manifest.entries {
         let p = entry.rel_path.as_str();
+        let p_key = portable_path_collision_key(p);
         for sym in &symlink_paths {
+            let sym_key = portable_path_collision_key(sym);
             // `p` is nested under symlink `sym` iff `sym` is a strict,
             // component-aligned prefix of `p` (so `p` would be written through
             // the link). The symlink entry itself (`p == sym`) is fine.
-            if p.len() > sym.len() && p.as_bytes()[sym.len()] == b'/' && p.starts_with(sym) {
+            if p_key.len() > sym_key.len()
+                && p_key.as_bytes()[sym_key.len()] == b'/'
+                && p_key.starts_with(&sym_key)
+            {
                 return Err(TransportError::Source(format!(
                     "manifest entry {p} is nested under symlink entry {sym}; refusing to \
                      write through a link (would escape the destination)"
@@ -1877,7 +2010,7 @@ async fn build_receiver_delta_baseline(
     if !base.exists() {
         return Ok(None);
     }
-    let (_, _, entries) = collect_entries(&base).await?;
+    let (_, _, entries) = collect_entries_with_policy(&base, &config.metadata_policy).await?;
     let mut store = DeltaPlannerStore::new();
     let mut chunks_by_content = BTreeMap::new();
     let mut planner_chunks = Vec::new();
@@ -1888,7 +2021,10 @@ async fn build_receiver_delta_baseline(
 
     for entry in entries {
         let metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
-        if !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some() {
+        if !metadata.is_bare()
+            || !matches!(metadata.file_kind, FileKind::Regular)
+            || metadata.hardlink_target.is_some()
+        {
             return Ok(None);
         }
         let (size, content_id, content_sha256) =
@@ -2005,12 +2141,31 @@ async fn commit_verified_staging(
 ) -> Result<Vec<PathBuf>, TransportError> {
     let mut committed_paths = Vec::new();
     let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    reject_manifest_destination_link_prefixes(dest_dir, &base, manifest).await?;
+    if manifest.is_directory && manifest.entries.is_empty() {
+        reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
+        crate::fs::create_dir_all(&base).await?;
+        committed_paths.push(base.clone());
+    }
     for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
         let out_path = if manifest.is_directory {
             join_relative(&base, &entry.rel_path)?
         } else {
             base.clone()
         };
+        reject_entry_destination_link_prefixes(
+            &base,
+            &out_path,
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.hardlink_target.as_deref()),
+            entry
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| matches!(metadata.file_kind, FileKind::Symlink)),
+        )
+        .await?;
 
         if let Some(meta) = &entry.metadata {
             if meta.file_kind.is_special() {
@@ -2051,14 +2206,12 @@ async fn commit_verified_staging(
             }
         }
 
-        let symlink_target = entry.metadata.as_ref().and_then(|m| {
-            matches!(m.file_kind, FileKind::Symlink)
-                .then(|| m.symlink_target.clone())
-                .flatten()
-        });
-        if let Some(target) = symlink_target {
-            let _ = crate::fs::remove_file(&out_path).await;
-            crate::fs::symlink(&target, &out_path).await?;
+        if let Some(metadata) = entry
+            .metadata
+            .as_ref()
+            .filter(|metadata| matches!(metadata.file_kind, FileKind::Symlink))
+        {
+            commit_symlink_transactionally(&entry.rel_path, &out_path, metadata).await?;
             committed_paths.push(out_path);
             continue;
         }
@@ -2457,7 +2610,8 @@ pub async fn send_path_filtered(
 ) -> Result<SendReport, TransportError> {
     cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
 
-    let (root_name, is_directory, mut entries) = collect_entries(source).await?;
+    let (root_name, is_directory, mut entries) =
+        collect_entries_with_policy(source, &config.metadata_policy).await?;
     if !filter.is_empty() {
         entries.retain(|entry| filter.is_path_included(&entry.rel_path));
     }
@@ -2489,6 +2643,12 @@ pub async fn send_path_filtered(
                 }
             }
         }
+        validate_symlink_metadata_for_receive(&entry.rel_path, &metadata).map_err(|error| {
+            TransportError::Source(format!(
+                "{}: invalid symlink metadata: {error}",
+                entry.abs_path.display()
+            ))
+        })?;
         // Only regular files carry content bytes. Symlinks (target in
         // `metadata`), empty directories, special files (FIFO/socket/device),
         // and hardlinks-to-a-primary are zero-content — crucially this avoids
@@ -2882,13 +3042,7 @@ where
     .await;
     recv_result?;
 
-    let staging_seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
-    let staging_dir = dest_dir.join(format!(
-        ".atp-staging-{}-{staging_seq}",
-        manifest.transfer_id
-    ));
-    let _ = crate::fs::remove_dir_all(&staging_dir).await;
-    crate::fs::create_dir_all(&staging_dir).await?;
+    let staging_dir = create_owned_staging_dir(dest_dir, &manifest.transfer_id).await?;
     let mut staging_guard = StagingDirGuard::new(staging_dir.clone());
 
     let mut chunks_by_entry = BTreeMap::<u32, Vec<&DeltaChunkWire>>::new();
@@ -3211,14 +3365,7 @@ pub async fn receive_connection(
     // hashing. At most one staging file handle is open at a time, and nothing
     // ever holds a whole entry (or the whole transfer) in memory — peak RSS is
     // O(chunk_size) regardless of transfer size.
-    let staging_seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
-    let staging_dir = dest_dir.join(format!(
-        ".atp-staging-{}-{staging_seq}",
-        manifest.transfer_id
-    ));
-    // Reclaim any leftover staging dir from a crashed prior attempt, then create.
-    let _ = crate::fs::remove_dir_all(&staging_dir).await;
-    crate::fs::create_dir_all(&staging_dir).await?;
+    let staging_dir = create_owned_staging_dir(dest_dir, &manifest.transfer_id).await?;
     // Reclaim the staging dir even if this future is dropped before reaching a
     // cooperative cleanup path (e.g. `serve` aborting an in-flight receive task
     // via `TaskHandle::abort`, which drops the future without polling it to a
@@ -3389,12 +3536,31 @@ pub async fn receive_connection(
         // path is sanitized so a hostile `root_name` cannot escape `dest_dir`.
         let commit: Result<(), TransportError> = async {
             let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+            reject_manifest_destination_link_prefixes(dest_dir, &base, &manifest).await?;
+            if manifest.is_directory && manifest.entries.is_empty() {
+                reject_entry_destination_link_prefixes(&base, &base, None, false).await?;
+                crate::fs::create_dir_all(&base).await?;
+                committed_paths.push(base.clone());
+            }
             for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
                 let out_path = if manifest.is_directory {
                     join_relative(&base, &entry.rel_path)?
                 } else {
                     base.clone()
                 };
+                reject_entry_destination_link_prefixes(
+                    &base,
+                    &out_path,
+                    entry
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.hardlink_target.as_deref()),
+                    entry
+                        .metadata
+                        .as_ref()
+                        .is_some_and(|metadata| matches!(metadata.file_kind, FileKind::Symlink)),
+                )
+                .await?;
 
                 // Special files (FIFO/socket/device). A FIFO is recreated via
                 // `mkfifo` only when `allow_special_files` is set; everything else
@@ -3445,14 +3611,12 @@ pub async fn receive_connection(
 
                 // A symlink commits by creating the link from its recorded target
                 // rather than renaming the (empty) staged file into place.
-                let symlink_target = entry.metadata.as_ref().and_then(|m| {
-                    matches!(m.file_kind, FileKind::Symlink)
-                        .then(|| m.symlink_target.clone())
-                        .flatten()
-                });
-                if let Some(target) = symlink_target {
-                    let _ = crate::fs::remove_file(&out_path).await;
-                    crate::fs::symlink(&target, &out_path).await?;
+                if let Some(metadata) = entry
+                    .metadata
+                    .as_ref()
+                    .filter(|metadata| matches!(metadata.file_kind, FileKind::Symlink))
+                {
+                    commit_symlink_transactionally(&entry.rel_path, &out_path, metadata).await?;
                     committed_paths.push(out_path);
                     continue;
                 }
@@ -3572,47 +3736,159 @@ pub async fn receive_connection(
 /// absolute (or separator-bearing) `root_name` would escape the destination
 /// directory entirely — `crate::fs::write_atomic` validates with
 /// `allow_absolute = true`, so it would not catch an absolute target. Senders
-/// already set `root_name` to a bare file name (see `collect_entries`), so
-/// collapsing to the final path component is loss-free for legitimate
-/// transfers while fully containing hostile ones.
+/// already set `root_name` to a bare file name (see `collect_entries`), so a
+/// legitimate manifest is accepted unchanged while hostile or platform-
+/// aliasing forms are rejected fail closed.
 fn safe_base_for_root_name(dest_dir: &Path, root_name: &str) -> Result<PathBuf, TransportError> {
-    if root_name.is_empty() {
-        return Err(TransportError::Source(
-            "manifest root_name is empty".to_string(),
-        ));
-    }
-    let component = Path::new(root_name)
-        .file_name()
-        .ok_or_else(|| TransportError::Source(format!("unsafe manifest root_name: {root_name}")))?;
-    // `file_name()` never yields `.`/`..`/separators, but guard defensively
-    // in case of platform-specific surprises.
-    let component_str = component.to_string_lossy();
-    if component_str == "."
-        || component_str == ".."
-        || component_str.contains('/')
-        || component_str.contains('\\')
-    {
-        return Err(TransportError::Source(format!(
-            "unsafe manifest root_name: {root_name}"
-        )));
-    }
-    Ok(dest_dir.join(component))
+    validate_portable_path_component(root_name)
+        .map_err(|_| TransportError::Source(format!("unsafe manifest root_name: {root_name}")))?;
+    Ok(dest_dir.join(root_name))
 }
 
 fn join_relative(base: &Path, rel: &str) -> Result<PathBuf, TransportError> {
+    validate_manifest_rel_path(rel)?;
     let mut out = base.to_path_buf();
     for component in rel.split('/') {
-        if component.is_empty() || component == "." {
-            continue;
-        }
-        if component == ".." || component.contains('\\') || component.contains(':') {
-            return Err(TransportError::Source(format!(
-                "unsafe path component in entry: {rel}"
-            )));
-        }
         out.push(component);
     }
     Ok(out)
+}
+
+async fn reject_existing_destination_ancestors(path: &Path) -> Result<(), TransportError> {
+    for candidate in path.ancestors() {
+        match path_is_link_or_reparse(candidate).await {
+            Ok(true) => {
+                return Err(TransportError::Source(format!(
+                    "destination path crosses existing symlink or reparse point: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(TransportError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+async fn create_owned_staging_dir(
+    dest_dir: &Path,
+    transfer_id: &str,
+) -> Result<PathBuf, TransportError> {
+    reject_existing_destination_ancestors(dest_dir).await?;
+    crate::fs::create_dir_all(dest_dir).await?;
+    reject_existing_destination_ancestors(dest_dir).await?;
+
+    for _ in 0..32 {
+        let sequence = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nonce = OsEntropy.next_u64();
+        let staging_dir = dest_dir.join(format!(
+            ".atp-staging-{transfer_id}-{nonce:016x}-{sequence}"
+        ));
+        match crate::fs::create_dir(&staging_dir).await {
+            Ok(()) => return Ok(staging_dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(TransportError::Io(error)),
+        }
+    }
+    Err(TransportError::Source(format!(
+        "unable to create a unique owned staging directory under {}",
+        dest_dir.display()
+    )))
+}
+
+async fn reject_manifest_destination_link_prefixes(
+    dest_dir: &Path,
+    base: &Path,
+    manifest: &TransferManifest,
+) -> Result<(), TransportError> {
+    reject_existing_link_or_reparse(dest_dir).await?;
+    let mut verified = BTreeSet::new();
+    for entry in &manifest.entries {
+        let out_path = if manifest.is_directory {
+            join_relative(base, &entry.rel_path)?
+        } else {
+            base.to_path_buf()
+        };
+        let replace_symlink_leaf = entry
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| matches!(metadata.file_kind, FileKind::Symlink));
+        reject_destination_link_prefix_cached(
+            base,
+            &out_path,
+            &mut verified,
+            !replace_symlink_leaf,
+        )
+        .await?;
+    }
+    if manifest.entries.is_empty() {
+        reject_destination_link_prefix_cached(base, base, &mut verified, true).await?;
+    }
+    Ok(())
+}
+
+async fn reject_entry_destination_link_prefixes(
+    base: &Path,
+    out_path: &Path,
+    hardlink_target: Option<&str>,
+    replace_symlink_leaf: bool,
+) -> Result<(), TransportError> {
+    let mut verified = BTreeSet::new();
+    reject_destination_link_prefix_cached(base, out_path, &mut verified, !replace_symlink_leaf)
+        .await?;
+    if let Some(primary_rel) = hardlink_target {
+        let primary_path = join_relative(base, primary_rel)?;
+        reject_destination_link_prefix_cached(base, &primary_path, &mut verified, true).await?;
+    }
+    Ok(())
+}
+
+async fn reject_destination_link_prefix_cached(
+    base: &Path,
+    out_path: &Path,
+    verified: &mut BTreeSet<PathBuf>,
+    include_leaf: bool,
+) -> Result<(), TransportError> {
+    let rel = out_path.strip_prefix(base).map_err(|_| {
+        TransportError::Source(format!(
+            "destination path {} is outside safe base {}",
+            out_path.display(),
+            base.display()
+        ))
+    })?;
+
+    let components = rel.components().collect::<Vec<_>>();
+    let mut current = base.to_path_buf();
+    if (include_leaf || !components.is_empty()) && verified.insert(current.clone()) {
+        reject_existing_link_or_reparse(&current).await?;
+    }
+    let component_count = components.len();
+    for (index, component) in components.into_iter().enumerate() {
+        let Component::Normal(component) = component else {
+            return Err(TransportError::Source(format!(
+                "unsafe destination component in {}",
+                out_path.display()
+            )));
+        };
+        current.push(component);
+        if (include_leaf || index + 1 < component_count) && verified.insert(current.clone()) {
+            reject_existing_link_or_reparse(&current).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn reject_existing_link_or_reparse(path: &Path) -> Result<(), TransportError> {
+    match path_is_link_or_reparse(path).await {
+        Ok(true) => Err(TransportError::Source(format!(
+            "destination path crosses existing symlink or reparse point: {}",
+            path.display()
+        ))),
+        Ok(false) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TransportError::Io(error)),
+    }
 }
 
 /// Run a persistent accept loop, handling each connection as a receive. Returns
@@ -3893,21 +4169,13 @@ mod tests {
             safe_base_for_root_name(dest, "payload").unwrap(),
             Path::new("/tmp/inbox/payload")
         );
-        // Absolute root_name would otherwise replace the base via Path::join;
-        // it must be collapsed to its final component, contained under dest.
-        assert_eq!(
-            safe_base_for_root_name(dest, "/etc/cron.d/evil").unwrap(),
-            Path::new("/tmp/inbox/evil")
-        );
-        // Parent-traversal names collapse to a contained component as well.
-        assert_eq!(
-            safe_base_for_root_name(dest, "../../etc/passwd").unwrap(),
-            Path::new("/tmp/inbox/passwd")
-        );
-        // Names with no usable final component are rejected outright.
+        // Hostile names fail closed instead of being silently rewritten.
+        assert!(safe_base_for_root_name(dest, "/etc/cron.d/evil").is_err());
+        assert!(safe_base_for_root_name(dest, "../../etc/passwd").is_err());
         assert!(safe_base_for_root_name(dest, "").is_err());
         assert!(safe_base_for_root_name(dest, "/").is_err());
         assert!(safe_base_for_root_name(dest, "..").is_err());
+        assert!(safe_base_for_root_name(dest, "NUL.txt").is_err());
     }
 
     fn manifest_with(entries: Vec<ManifestEntry>, total_bytes: u64) -> TransferManifest {
@@ -3921,6 +4189,24 @@ mod tests {
             entries,
             delta_manifest: None,
         }
+    }
+
+    fn refresh_manifest_metadata_commitment(manifest: &mut TransferManifest) {
+        let metadata = manifest
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.rel_path.as_str(),
+                    entry.metadata.clone().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let metadata_refs = metadata
+            .iter()
+            .map(|(path, metadata)| (*path, metadata))
+            .collect::<Vec<_>>();
+        manifest.metadata_root_hex = metadata_commitment(&metadata_refs);
     }
 
     fn entry(index: u32, size: u64) -> ManifestEntry {
@@ -3941,6 +4227,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_manifest_rejects_windows_path_aliases_before_staging() {
+        for rel_path in ["NUL.txt", "dir/COM1.log", "trailing.", "trailing "] {
+            let mut manifest_entry = entry(0, 10);
+            manifest_entry.rel_path = rel_path.to_string();
+            let manifest = manifest_with(vec![manifest_entry], 10);
+            assert!(
+                validate_manifest(&manifest, &TransferConfig::default()).is_err(),
+                "Windows-unsafe path {rel_path:?} must fail closed"
+            );
+        }
+
+        let mut entries = vec![entry(0, 10), entry(1, 20)];
+        entries[0].rel_path = "Docs/Readme.txt".to_string();
+        entries[1].rel_path = "docs/README.TXT".to_string();
+        let manifest = manifest_with(entries, 30);
+        assert!(matches!(
+            validate_manifest(&manifest, &TransferConfig::default()),
+            Err(TransportError::Frame(message)) if message.contains("case collision")
+        ));
+    }
+
+    #[test]
     fn validate_manifest_rejects_lying_entry_size() {
         // total_bytes is small but a single entry declares u64::MAX — the
         // pre-fix code would `Vec::with_capacity(u64::MAX as usize)` and abort.
@@ -3956,14 +4264,49 @@ mod tests {
             index,
             rel_path: rel.to_string(),
             size: 0,
-            sha256_hex: "0".repeat(64),
+            sha256_hex: sha256_hex(b""),
             metadata: Some(EntryMetadata {
                 file_kind: FileKind::Symlink,
                 symlink_target: Some(target.to_string()),
+                symlink_target_info: Some(SymlinkTargetInfo {
+                    kind: Some(SymlinkTargetKind::File),
+                    semantics: SymlinkTargetSemantics::PortableRelative,
+                }),
                 ..Default::default()
             }),
             members: Vec::new(),
         }
+    }
+
+    #[test]
+    fn validate_manifest_enforces_symlink_containment_and_receiver_policy() {
+        let mut contained = manifest_with(vec![symlink_entry(0, "dir/link", "../target")], 0);
+        refresh_manifest_metadata_commitment(&mut contained);
+        validate_manifest(&contained, &TransferConfig::default())
+            .expect("contained portable symlink validates");
+
+        for target in ["../../escape", "/rooted", r"C:\escape", r"..\escape"] {
+            let mut rejected = manifest_with(vec![symlink_entry(0, "dir/link", target)], 0);
+            refresh_manifest_metadata_commitment(&mut rejected);
+            assert!(
+                matches!(
+                    validate_manifest(&rejected, &TransferConfig::default()),
+                    Err(TransportError::Frame(ref message))
+                        if message.contains("invalid metadata")
+                ),
+                "unsafe symlink target {target:?} must fail before staging"
+            );
+        }
+
+        let portable_receiver = TransferConfig {
+            metadata_policy: MetadataPolicy::portable(),
+            ..TransferConfig::default()
+        };
+        assert!(matches!(
+            validate_manifest(&contained, &portable_receiver),
+            Err(TransportError::Frame(ref message))
+                if message.contains("denied by receiver metadata policy")
+        ));
     }
 
     fn named_entry(index: u32, rel: &str) -> ManifestEntry {

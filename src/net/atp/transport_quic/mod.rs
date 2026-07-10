@@ -73,7 +73,7 @@ pub mod native_link;
 pub mod symbol_datagram;
 pub mod symbol_envelope;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -82,6 +82,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::atp::object::{ContentId, MetadataPolicy};
+use crate::atp::safety::{
+    portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
+    validate_portable_relative_path,
+};
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
 use crate::config::EncodingConfig;
@@ -96,10 +100,19 @@ use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::quic::AtpTransportMetrics;
+#[cfg(test)]
+use crate::net::atp::transport_common::metadata::{
+    SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
+};
+use crate::net::atp::transport_common::metadata::{
+    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
+    validate_symlink_metadata_for_receive,
+};
+use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, MetadataApplyReport, StreamingError,
-    apply_entry_metadata, collect_entries, flat_merkle_root_from_digests,
-    flat_merkle_root_from_slices, hash_file_streaming, hex_encode, metadata_commitment,
+    apply_entry_metadata, flat_merkle_root_from_digests, flat_merkle_root_from_slices,
+    hash_file_streaming, hex_encode, metadata_commitment,
 };
 use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
@@ -3612,7 +3625,8 @@ async fn prepare_source_manifest(
     config: &QuicConfig,
 ) -> Result<QuicPreparedSource, QuicTransportError> {
     config.validate()?;
-    let (root_name, is_directory, source_entries) = collect_entries(source).await?;
+    let (root_name, is_directory, source_entries) =
+        collect_entries_with_policy(source, &config.metadata_policy).await?;
     let _ = quic_safe_base_for_root_name(Path::new("base"), &root_name)?;
     let mut read_buf = vec![0_u8; config.chunk_size];
 
@@ -3654,6 +3668,12 @@ async fn prepare_source_manifest(
                         }
                     }
                 }
+                validate_symlink_metadata_for_receive(&rel_path, &metadata).map_err(|error| {
+                    QuicTransportError::Source(format!(
+                        "{}: invalid symlink metadata: {error}",
+                        abs_path.display()
+                    ))
+                })?;
                 let zero_content = !matches!(metadata.file_kind, FileKind::Regular)
                     || metadata.hardlink_target.is_some();
                 let size = if zero_content {
@@ -7777,6 +7797,9 @@ fn validate_quic_manifest(
             manifest.transfer_id
         )));
     }
+    validate_portable_path_component(&manifest.root_name).map_err(|_| {
+        QuicTransportError::Source(format!("unsafe manifest root_name: {}", manifest.root_name))
+    })?;
     if manifest.total_bytes > config.max_transfer_bytes {
         return Err(QuicTransportError::TooLarge {
             size: manifest.total_bytes,
@@ -7798,7 +7821,8 @@ fn validate_quic_manifest(
         ));
     }
 
-    let mut seen_paths = std::collections::BTreeSet::new();
+    let mut seen_paths = std::collections::BTreeMap::<String, String>::new();
+    let mut hardlink_primaries = BTreeSet::<String>::new();
     let mut total = 0u64;
     let empty_sha_hex = hex_encode(&Sha256::digest(b""));
     for (expected, entry) in manifest.entries.iter().enumerate() {
@@ -7822,17 +7846,28 @@ fn validate_quic_manifest(
                 entry.rel_path, metadata.file_kind
             )));
         }
-        if matches!(metadata.file_kind, FileKind::Symlink)
-            && metadata.symlink_target.as_deref().is_none_or(str::is_empty)
-        {
+        validate_entry_metadata_for_receive(&entry.rel_path, &metadata, &config.metadata_policy)
+            .map_err(|error| {
+                QuicTransportError::Source(format!(
+                    "manifest entry {} has invalid metadata: {error}",
+                    entry.rel_path
+                ))
+            })?;
+        if metadata.hardlink_target.is_some() && !config.preserve_hardlinks {
             return Err(QuicTransportError::Source(format!(
-                "manifest symlink entry {} is missing symlink_target",
+                "manifest hardlink entry {} is denied by receiver policy",
                 entry.rel_path
             )));
         }
         if let Some(primary_rel) = &metadata.hardlink_target {
             quic_join_relative(Path::new("base"), primary_rel)?;
-            if primary_rel == &entry.rel_path || !seen_paths.contains(primary_rel.as_str()) {
+            let primary_key = portable_path_collision_key(primary_rel);
+            if primary_rel == &entry.rel_path
+                || !hardlink_primaries.contains(&primary_key)
+                || seen_paths
+                    .get(&primary_key)
+                    .is_none_or(|seen| seen != primary_rel)
+            {
                 return Err(QuicTransportError::Source(format!(
                     "manifest hardlink entry {} targets missing or later primary {}",
                     entry.rel_path, primary_rel
@@ -7847,11 +7882,23 @@ fn validate_quic_manifest(
                 entry.rel_path
             )));
         }
-        if !seen_paths.insert(entry.rel_path.clone()) {
+        if seen_paths
+            .insert(
+                portable_path_collision_key(&entry.rel_path),
+                entry.rel_path.clone(),
+            )
+            .is_some()
+        {
             return Err(QuicTransportError::Source(format!(
-                "duplicate manifest entry path {}",
+                "duplicate manifest entry path (including case collision) {}",
                 entry.rel_path
             )));
+        }
+        if matches!(metadata.file_kind, FileKind::Regular)
+            && metadata.hardlink_target.is_none()
+            && entry.members.is_empty()
+        {
+            hardlink_primaries.insert(portable_path_collision_key(&entry.rel_path));
         }
         if entry.sha256_hex.len() != 64 || !entry.sha256_hex.bytes().all(|b| b.is_ascii_hexdigit())
         {
@@ -7881,9 +7928,15 @@ fn validate_quic_manifest(
                     ));
                 }
                 quic_join_relative(Path::new("base"), &member.rel_path)?;
-                if !seen_paths.insert(member.rel_path.clone()) {
+                if seen_paths
+                    .insert(
+                        portable_path_collision_key(&member.rel_path),
+                        member.rel_path.clone(),
+                    )
+                    .is_some()
+                {
                     return Err(QuicTransportError::Source(format!(
-                        "duplicate manifest entry path {}",
+                        "duplicate manifest entry path (including case collision) {}",
                         member.rel_path
                     )));
                 }
@@ -7908,6 +7961,17 @@ fn validate_quic_manifest(
                     )));
                 }
                 let member_metadata = member.metadata.clone().unwrap_or_default();
+                validate_entry_metadata_for_receive(
+                    &member.rel_path,
+                    &member_metadata,
+                    &config.metadata_policy,
+                )
+                .map_err(|error| {
+                    QuicTransportError::Source(format!(
+                        "packed member {} has invalid metadata: {error}",
+                        member.rel_path
+                    ))
+                })?;
                 if !matches!(member_metadata.file_kind, FileKind::Regular)
                     || member_metadata.hardlink_target.is_some()
                     || member_metadata.symlink_target.is_some()
@@ -7939,6 +8003,17 @@ fn validate_quic_manifest(
             manifest.total_bytes
         )));
     }
+    let mut committed_paths = Vec::new();
+    for entry in &manifest.entries {
+        if entry.members.is_empty() {
+            committed_paths.push(entry.rel_path.as_str());
+        } else {
+            committed_paths.extend(entry.members.iter().map(|member| member.rel_path.as_str()));
+        }
+    }
+    validate_portable_path_set(committed_paths).map_err(|error| {
+        QuicTransportError::Source(format!("unsafe manifest path tree: {error}"))
+    })?;
     if manifest_metadata_commitment(manifest) != manifest.metadata_root_hex {
         return Err(QuicTransportError::Source(
             "manifest metadata commitment mismatch".to_string(),
@@ -7952,60 +8027,18 @@ fn quic_safe_base_for_root_name(
     dest_dir: &Path,
     root_name: &str,
 ) -> Result<PathBuf, QuicTransportError> {
-    if root_name.is_empty() {
-        return Err(QuicTransportError::Source(
-            "manifest root_name is empty".to_string(),
-        ));
-    }
-    let root = Path::new(root_name);
-    if root.is_absolute() {
-        return Err(QuicTransportError::Source(format!(
-            "unsafe manifest root_name: {root_name}"
-        )));
-    }
-    let mut components = root.components();
-    let Some(Component::Normal(component)) = components.next() else {
-        return Err(QuicTransportError::Source(format!(
-            "unsafe manifest root_name: {root_name}"
-        )));
-    };
-    if components.next().is_some() {
-        return Err(QuicTransportError::Source(format!(
-            "unsafe manifest root_name: {root_name}"
-        )));
-    }
-    let component_str = component.to_string_lossy();
-    if component_str == "."
-        || component_str == ".."
-        || component_str.contains('/')
-        || component_str.contains('\\')
-        || component_str.contains(':')
-    {
-        return Err(QuicTransportError::Source(format!(
-            "unsafe manifest root_name: {root_name}"
-        )));
-    }
-    Ok(dest_dir.join(component))
+    validate_portable_path_component(root_name).map_err(|_| {
+        QuicTransportError::Source(format!("unsafe manifest root_name: {root_name}"))
+    })?;
+    Ok(dest_dir.join(root_name))
 }
 
 fn quic_join_relative(base: &Path, rel: &str) -> Result<PathBuf, QuicTransportError> {
-    if rel.is_empty() || Path::new(rel).is_absolute() {
-        return Err(QuicTransportError::Source(format!(
-            "unsafe path component in entry: {rel}"
-        )));
-    }
+    validate_portable_relative_path(rel).map_err(|_| {
+        QuicTransportError::Source(format!("unsafe path component in entry: {rel}"))
+    })?;
     let mut out = base.to_path_buf();
     for component in rel.split('/') {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.contains('\\')
-            || component.contains(':')
-        {
-            return Err(QuicTransportError::Source(format!(
-                "unsafe path component in entry: {rel}"
-            )));
-        }
         out.push(component);
     }
     Ok(out)
@@ -8015,6 +8048,21 @@ async fn reject_quic_destination_symlink_prefix(
     base: &Path,
     out_path: &Path,
 ) -> Result<(), QuicTransportError> {
+    reject_quic_destination_symlink_path(base, out_path, true).await
+}
+
+async fn reject_quic_destination_symlink_ancestors(
+    base: &Path,
+    out_path: &Path,
+) -> Result<(), QuicTransportError> {
+    reject_quic_destination_symlink_path(base, out_path, false).await
+}
+
+async fn reject_quic_destination_symlink_path(
+    base: &Path,
+    out_path: &Path,
+    include_leaf: bool,
+) -> Result<(), QuicTransportError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         QuicTransportError::Source(format!(
             "destination path {} is outside safe base {}",
@@ -8023,9 +8071,13 @@ async fn reject_quic_destination_symlink_prefix(
         ))
     })?;
 
+    let components = rel.components().collect::<Vec<_>>();
     let mut current = base.to_path_buf();
-    reject_quic_existing_symlink(&current).await?;
-    for component in rel.components() {
+    if include_leaf || !components.is_empty() {
+        reject_quic_existing_symlink(&current).await?;
+    }
+    let component_count = components.len();
+    for (index, component) in components.into_iter().enumerate() {
         let Component::Normal(component) = component else {
             return Err(QuicTransportError::Source(format!(
                 "unsafe destination component in {}",
@@ -8033,21 +8085,53 @@ async fn reject_quic_destination_symlink_prefix(
             )));
         };
         current.push(component);
-        reject_quic_existing_symlink(&current).await?;
+        if include_leaf || index + 1 < component_count {
+            reject_quic_existing_symlink(&current).await?;
+        }
     }
     Ok(())
 }
 
 async fn reject_quic_existing_symlink(path: &Path) -> Result<(), QuicTransportError> {
-    match crate::fs::symlink_metadata(path).await {
-        Ok(metadata) if metadata.is_symlink() => Err(QuicTransportError::Source(format!(
-            "destination path crosses existing symlink: {}",
+    match path_is_link_or_reparse(path).await {
+        Ok(true) => Err(QuicTransportError::Source(format!(
+            "destination path crosses existing symlink or reparse point: {}",
             path.display()
         ))),
-        Ok(_) => Ok(()),
+        Ok(false) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
     }
+}
+
+async fn prepare_quic_destination_root(dest_dir: &Path) -> Result<(), QuicTransportError> {
+    for candidate in dest_dir.ancestors() {
+        match path_is_link_or_reparse(candidate).await {
+            Ok(true) => {
+                return Err(QuicTransportError::Source(format!(
+                    "destination path crosses existing symlink or reparse point: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    crate::fs::create_dir_all(dest_dir).await?;
+    for candidate in dest_dir.ancestors() {
+        match path_is_link_or_reparse(candidate).await {
+            Ok(true) => {
+                return Err(QuicTransportError::Source(format!(
+                    "destination path became a symlink or reparse point: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(false) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
@@ -8107,10 +8191,12 @@ fn reject_quic_symlink_traversal(manifest: &TransferManifest) -> Result<(), Quic
             .chain(entry.members.iter().map(|member| member.rel_path.as_str()))
     });
     for path in entry_and_member_paths {
+        let path_key = portable_path_collision_key(path);
         for symlink in &symlink_paths {
-            if path.len() > symlink.len()
-                && path.as_bytes()[symlink.len()] == b'/'
-                && path.starts_with(symlink)
+            let symlink_key = portable_path_collision_key(symlink);
+            if path_key.len() > symlink_key.len()
+                && path_key.as_bytes()[symlink_key.len()] == b'/'
+                && path_key.starts_with(&symlink_key)
             {
                 return Err(QuicTransportError::Source(format!(
                     "manifest entry {path} is nested under symlink entry {symlink}; refusing to \
@@ -8192,7 +8278,11 @@ async fn commit_quic_metadata_entry(
     let Some(metadata) = &entry.metadata else {
         return Ok(QuicMetadataCommit::Regular);
     };
-    reject_quic_destination_symlink_prefix(base, out_path).await?;
+    if matches!(metadata.file_kind, FileKind::Symlink) {
+        reject_quic_destination_symlink_ancestors(base, out_path).await?;
+    } else {
+        reject_quic_destination_symlink_prefix(base, out_path).await?;
+    }
 
     if metadata.file_kind.is_special() {
         if matches!(metadata.file_kind, FileKind::Fifo) && config.allow_special_files {
@@ -8218,18 +8308,14 @@ async fn commit_quic_metadata_entry(
         return Ok(QuicMetadataCommit::Committed);
     }
 
-    if let Some(target) = metadata
-        .symlink_target
-        .as_ref()
-        .filter(|_| matches!(metadata.file_kind, FileKind::Symlink))
-    {
-        let _ = crate::fs::remove_file(out_path).await;
-        crate::fs::symlink(target, out_path).await?;
+    if matches!(metadata.file_kind, FileKind::Symlink) {
+        commit_symlink_transactionally(&entry.rel_path, out_path, metadata).await?;
         return Ok(QuicMetadataCommit::Committed);
     }
 
     if let Some(primary_rel) = &metadata.hardlink_target {
         let primary_path = quic_join_relative(base, primary_rel)?;
+        reject_quic_destination_symlink_prefix(base, &primary_path).await?;
         let _ = crate::fs::remove_file(out_path).await;
         crate::fs::hard_link(&primary_path, out_path).await?;
         return Ok(QuicMetadataCommit::Committed);
@@ -8257,7 +8343,9 @@ async fn commit_decoded_entries(
         return Ok((receipt, Vec::new()));
     }
 
+    prepare_quic_destination_root(dest_dir).await?;
     let base = quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    reject_quic_existing_symlink(dest_dir).await?;
     let mut committed_paths = Vec::with_capacity(manifest.entries.len().saturating_add(1));
     if manifest.is_directory && manifest.entries.is_empty() {
         reject_quic_destination_symlink_prefix(&base, &base).await?;
@@ -9239,6 +9327,10 @@ mod tests {
             metadata: Some(EntryMetadata {
                 file_kind: FileKind::Symlink,
                 symlink_target: Some(target.to_string()),
+                symlink_target_info: Some(SymlinkTargetInfo {
+                    kind: Some(SymlinkTargetKind::File),
+                    semantics: SymlinkTargetSemantics::PortableRelative,
+                }),
                 ..Default::default()
             }),
             members: Vec::new(),
@@ -9319,7 +9411,7 @@ mod tests {
 
         // Member paths nested under a symlink entry fail closed.
         let through_link = quic_manifest_with_metadata(vec![
-            quic_symlink_entry(0, "link", "/tmp/outside"),
+            quic_symlink_entry(0, "link", "target"),
             quic_packed_entry(1, 0, &[("link/evil.txt", b"aaaa"), ("dir/b.txt", b"bb")]),
         ]);
         assert!(matches!(
@@ -9332,7 +9424,7 @@ mod tests {
     fn validate_quic_manifest_rejects_entries_nested_under_manifest_symlink() {
         let config = trusted_quic_config();
         let bad = quic_manifest_with_metadata(vec![
-            quic_symlink_entry(0, "link", "/tmp/outside"),
+            quic_symlink_entry(0, "link", "target"),
             quic_empty_regular_entry(1, "link/payload.txt"),
         ]);
 
@@ -9346,8 +9438,8 @@ mod tests {
         );
 
         let nested_symlink = quic_manifest_with_metadata(vec![
-            quic_symlink_entry(0, "a", "/tmp/a"),
-            quic_symlink_entry(1, "a/b", "/tmp/b"),
+            quic_symlink_entry(0, "a", "target-a"),
+            quic_symlink_entry(1, "a/b", "target-b"),
         ]);
         assert!(
             matches!(
@@ -14727,6 +14819,9 @@ mod tests {
             "/tmp/payload",
             "payload\\evil",
             "C:payload",
+            "NUL.txt",
+            "trailing.",
+            "trailing ",
         ] {
             match quic_safe_base_for_root_name(dest, root_name) {
                 Err(QuicTransportError::Source(message)) => {
@@ -14758,6 +14853,9 @@ mod tests {
             "nested//file.bin",
             "nested\\file.bin",
             "C:file.bin",
+            "nested/NUL.txt",
+            "nested/trailing.",
+            "nested/trailing ",
         ] {
             match quic_join_relative(base, rel_path) {
                 Err(QuicTransportError::Source(message)) => {
@@ -14769,6 +14867,18 @@ mod tests {
                 other => panic!("unsafe rel_path {rel_path:?} must fail closed, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn quic_manifest_rejects_case_colliding_windows_paths() {
+        let manifest = quic_manifest_with_metadata(vec![
+            quic_empty_regular_entry(0, "Docs/Readme.txt"),
+            quic_empty_regular_entry(1, "docs/README.TXT"),
+        ]);
+        assert!(matches!(
+            validate_quic_manifest(&manifest, &trusted_quic_config()),
+            Err(QuicTransportError::Source(message)) if message.contains("case collision")
+        ));
     }
 
     #[cfg(unix)]
