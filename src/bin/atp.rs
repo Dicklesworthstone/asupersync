@@ -2221,9 +2221,14 @@ fn bond_pull_ssh_tunnel_plan(receiver_endpoint: SocketAddr) -> BondPullSshTunnel
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         local_port,
     );
+    // Bracket IPv6 hosts: an `ssh -L` forward spec is colon-delimited, so a bare
+    // v6 address (`2001:db8::1`) is ambiguous to ssh — it needs `[2001:db8::1]`.
+    let target_host = match receiver_endpoint.ip() {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+    };
     let forward_arg = format!(
-        "-L 127.0.0.1:{local_port}:{}:{}",
-        receiver_endpoint.ip(),
+        "-L 127.0.0.1:{local_port}:{target_host}:{}",
         receiver_endpoint.port()
     );
     BondPullSshTunnel {
@@ -10442,6 +10447,16 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             "127.0.0.1:8473".parse::<SocketAddr>().expect("loopback")
         );
         assert_eq!(plan.forward_arg, "-L 127.0.0.1:8473:192.0.2.7:8473");
+
+        // IPv6 control endpoints must be bracketed in the `-L` forward spec, else
+        // the colon-delimited spec is ambiguous to ssh.
+        let control_v6: SocketAddr = "[2001:db8::1]:8473".parse().expect("v6 control addr");
+        let plan_v6 = bond_pull_ssh_tunnel_plan(control_v6);
+        assert_eq!(plan_v6.forward_arg, "-L 127.0.0.1:8473:[2001:db8::1]:8473");
+        assert_eq!(
+            plan_v6.donor_dial,
+            "127.0.0.1:8473".parse::<SocketAddr>().expect("loopback")
+        );
 
         assert_eq!(bond_transport_label(BondTransport::DirectIp), "direct");
         assert_eq!(bond_transport_label(BondTransport::Ssh), "ssh");
