@@ -205,6 +205,13 @@ pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// admit the largest single transfer the CLI/bench surface exercises (5 GiB)
 /// with headroom. Transfers above it continue using the FEC DATAGRAM fountain.
 pub(crate) const QUIC_RELIABLE_SOURCE_STREAM_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Largest RaptorQ symbol payload that fits one default-size QUIC DATAGRAM
+/// (`max_datagram_size` 1200) together with the worst-case authenticated
+/// symbol envelope header. CLI front ends use this as the QUIC symbol-size
+/// default so users never size symbols by hand; explicitly configured larger
+/// values still fail closed in [`QuicConfig::validate`].
+pub const QUIC_DEFAULT_SYMBOL_SIZE: u16 = 1144;
 const QUIC_SOURCE_STREAM_FRAME_MAX_BYTES: usize = MAX_FRAME_SIZE as usize;
 const QUIC_SOURCE_STREAM_WIRE_HEADER_MAX_BYTES: usize = 1 + 2 + 4 + 1;
 const QUIC_SOURCE_STREAM_DATA_HEADER_BYTES: usize = 4 + 8;
@@ -9760,6 +9767,29 @@ mod tests {
             quic_transfer_decode_width(std::slice::from_ref(&dec_50m), &config_50m),
             QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
             "eligible encrypted bulk transfers should open the transfer-wide decode window"
+        );
+    }
+
+    #[test]
+    fn quic_default_symbol_size_is_the_largest_that_validates() {
+        let fits = QuicConfig {
+            symbol_size: QUIC_DEFAULT_SYMBOL_SIZE,
+            ..trusted_quic_config()
+        };
+        fits.validate()
+            .expect("QUIC_DEFAULT_SYMBOL_SIZE must fit one datagram");
+        assert_eq!(
+            usize::from(QUIC_DEFAULT_SYMBOL_SIZE) + AUTH_ENVELOPE_HEADER_LEN,
+            QuicConfig::default().max_datagram_size,
+            "QUIC_DEFAULT_SYMBOL_SIZE must track max_datagram_size minus the envelope header"
+        );
+        let too_big = QuicConfig {
+            symbol_size: QUIC_DEFAULT_SYMBOL_SIZE + 1,
+            ..trusted_quic_config()
+        };
+        assert!(
+            too_big.validate().is_err(),
+            "one byte past the datagram budget must fail closed"
         );
     }
 

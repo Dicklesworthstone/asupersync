@@ -82,11 +82,23 @@ const DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA: &str =
     "asupersync.atp.cli-delta-subchunk-signature-response.v1";
 const DELTA_PACKAGE_SCHEMA: &str = "asupersync.atp.cli-delta-package.v1";
 const DELTA_TREE_OBJECT_MAGIC: &[u8] = b"ASUP_ATP_CLI_DELTA_TREE_OBJECT_V2\0";
-const DELTA_TREE_OBJECT_CDC_WINDOW_BYTES: usize = 64;
 const DELTA_TREE_OBJECT_MIN_CHUNK_BYTES: usize = 16 * 1024;
 const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
-const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
+/// Gear boundary mask: log2(AVG) = 15 bits placed in the TOP of the hash.
+/// Gear's low bits only carry the last few bytes of history (and freeze on
+/// runs of equal bytes), while the high bits accumulate ~64 bytes through the
+/// shift-add carries — masking the top bits finds boundaries on structured
+/// data where a low-bit mask degenerates to max-cap-only chunks
+/// (br-asupersync-iz269u).
+const DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS: u32 = 15;
+const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 =
+    ((1u64 << DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS) - 1)
+        << (64 - DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS);
+const _: () = assert!(
+    DELTA_TREE_OBJECT_AVG_CHUNK_BYTES == 1 << DELTA_TREE_OBJECT_BOUNDARY_MASK_BITS,
+    "boundary mask bits must track the average chunk size"
+);
 const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
 const QUIC_AUTO_MAX_BLOCK_SIZE: usize = AUTO_MAX_BLOCK_SIZE;
 const RQ_LOSSY_TAIL_DRAIN_ENABLE_LOSS: f64 = 0.005;
@@ -209,9 +221,10 @@ struct SendArgs {
     #[arg(long, default_value_t = 15)]
     ssh_ready_timeout_secs: u64,
     // ─── RaptorQ (`--transport rq`) tuning ───
-    /// RaptorQ symbol size in bytes (rq only).
-    #[arg(long, default_value_t = DEFAULT_SYMBOL_SIZE)]
-    symbol_size: u16,
+    /// RaptorQ symbol size in bytes. Defaults per transport: 1400 on rq,
+    /// auto-sized to fit one QUIC datagram (1144) on quic.
+    #[arg(long)]
+    symbol_size: Option<u16>,
     /// Number of RQ UDP sender/receiver socket pairs to spray across (rq only).
     #[arg(long, default_value_t = DEFAULT_UDP_FANOUT)]
     streams: usize,
@@ -306,9 +319,12 @@ struct RecvArgs {
     /// Worker threads for the local runtime.
     #[arg(long, default_value_t = 4)]
     workers: usize,
-    /// RaptorQ symbol size in bytes (rq only; must match the sender).
-    #[arg(long, default_value_t = DEFAULT_SYMBOL_SIZE)]
-    symbol_size: u16,
+    /// RaptorQ symbol size in bytes (must match the sender). Defaults per
+    /// transport: 1400 on rq, auto-sized to fit one QUIC datagram (1144) on
+    /// quic — the sender's defaults, so set it explicitly only when the
+    /// sender did.
+    #[arg(long)]
+    symbol_size: Option<u16>,
     /// Maximum RaptorQ source-block size in bytes, `auto`, or `0` (rq/quic only; must match the sender).
     #[arg(
         long,
@@ -826,11 +842,32 @@ fn default_quic_server_name_for_ssh(remote: &RemoteTarget) -> String {
 
 /// Apply the direct QUIC/TLS authentication posture to a base QUIC config.
 #[cfg(feature = "tls")]
+/// Resolve the effective RaptorQ symbol size for a transport.
+///
+/// An explicit `--symbol-size` always wins (and still fails closed downstream
+/// when it cannot fit the transport, e.g. > 1144 on QUIC). Without one, each
+/// transport gets a default that just works: 1400 on rq, and the largest
+/// payload that fits one QUIC DATAGRAM on quic — so users never have to size
+/// symbols by hand.
+fn resolved_symbol_size(explicit: Option<u16>, quic: bool) -> u16 {
+    explicit.unwrap_or(if quic {
+        asupersync::net::atp::transport_quic::QUIC_DEFAULT_SYMBOL_SIZE
+    } else {
+        DEFAULT_SYMBOL_SIZE
+    })
+}
+
 fn quic_with_transport_auth(
     base: asupersync::net::atp::transport_quic::QuicConfig,
-    _rq_auth_key_hex: Option<&str>,
+    rq_auth_key_hex: Option<&str>,
     _rq_allow_unauthenticated_lab: bool,
 ) -> asupersync::net::atp::transport_quic::QuicConfig {
+    if rq_auth_key_hex.is_some() {
+        eprintln!(
+            "[atp] note: --rq-auth-key-hex is ignored on --transport quic — QUIC's TLS 1.3 AEAD \
+             already authenticates every symbol datagram"
+        );
+    }
     base.use_transport_authenticated_symbols()
 }
 
@@ -854,9 +891,10 @@ fn quic_config_send(
     let config = quic_cli_client_config(roots, vec![ATP_QUIC_ALPN.to_vec()])
         .map_err(|e| format!("build QUIC client TLS config: {e:?}"))?;
 
+    let symbol_size = resolved_symbol_size(args.symbol_size, true);
     let base = QuicConfig {
-        symbol_size: args.symbol_size,
-        max_block_size: args.max_block_size.effective_for_quic(args.symbol_size)?,
+        symbol_size,
+        max_block_size: args.max_block_size.effective_for_quic(symbol_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
         max_transfer_bytes: args.max_bytes,
@@ -896,9 +934,10 @@ fn quic_config_recv(
     let config = server_config(cert_chain, key, vec![ATP_QUIC_ALPN.to_vec()])
         .map_err(|e| format!("build QUIC server TLS config: {e:?}"))?;
 
+    let symbol_size = resolved_symbol_size(args.symbol_size, true);
     let base = QuicConfig {
-        symbol_size: args.symbol_size,
-        max_block_size: args.max_block_size.effective_for_quic(args.symbol_size)?,
+        symbol_size,
+        max_block_size: args.max_block_size.effective_for_quic(symbol_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
         max_transfer_bytes: args.max_bytes,
@@ -1434,11 +1473,12 @@ fn send_to_addr_with_transport(
             Ok(tcp_send_json(&report, Some(elapsed)))
         }
         Transport::Rq => {
+            let symbol_size = resolved_symbol_size(args.symbol_size, false);
             let cfg = rq_config(
                 args.max_bytes,
-                args.symbol_size,
+                symbol_size,
                 args.streams,
-                args.max_block_size.effective(args.symbol_size)?,
+                args.max_block_size.effective(symbol_size)?,
                 args.repair_overhead,
                 args.rq_round0_loss_pct,
                 args.rq_tail_drain_ms,
@@ -2534,38 +2574,24 @@ fn split_delta_tree_object_chunks(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> 
     Ok(chunks)
 }
 
+/// FastCDC-style gear hash: `hash = (hash << 1) + T[byte]`. No explicit
+/// window or eviction — the shift ages old bytes out of any fixed bit range
+/// naturally, and the ADD's carry propagation mixes across bit positions
+/// (matching `net::atp::chunk::dedupe::RollingHash`). The previous
+/// rotate-XOR variant with an explicit 64-byte window was GF(2)-linear and
+/// rotation-periodic, so 64-periodic or low-entropy input collapsed its hash
+/// orbit and boundaries stopped firing entirely (br-asupersync-iz269u).
 struct DeltaTreeRollingGear {
     hash: u64,
-    window: [u8; DELTA_TREE_OBJECT_CDC_WINDOW_BYTES],
-    cursor: usize,
-    filled: usize,
 }
 
 impl DeltaTreeRollingGear {
     fn new() -> Self {
-        Self {
-            hash: 0,
-            window: [0; DELTA_TREE_OBJECT_CDC_WINDOW_BYTES],
-            cursor: 0,
-            filled: 0,
-        }
+        Self { hash: 0 }
     }
 
     fn update(&mut self, byte: u8) {
-        if self.filled < DELTA_TREE_OBJECT_CDC_WINDOW_BYTES {
-            self.hash = self.hash.rotate_left(1) ^ delta_tree_gear_value(byte);
-            self.window[self.cursor] = byte;
-            self.cursor = (self.cursor + 1) % DELTA_TREE_OBJECT_CDC_WINDOW_BYTES;
-            self.filled += 1;
-            return;
-        }
-
-        let old = self.window[self.cursor];
-        self.window[self.cursor] = byte;
-        self.cursor = (self.cursor + 1) % DELTA_TREE_OBJECT_CDC_WINDOW_BYTES;
-        self.hash = self.hash.rotate_left(1)
-            ^ delta_tree_gear_value(byte)
-            ^ delta_tree_gear_value(old).rotate_left(DELTA_TREE_OBJECT_CDC_WINDOW_BYTES as u32);
+        self.hash = (self.hash << 1).wrapping_add(delta_tree_gear_value(byte));
     }
 
     fn hash(&self) -> u64 {
@@ -3605,8 +3631,6 @@ fn spawn_remote_receiver(
         args.max_bytes.to_string(),
         "--workers".to_string(),
         args.workers.max(1).to_string(),
-        "--symbol-size".to_string(),
-        args.symbol_size.to_string(),
         "--max-block-size".to_string(),
         args.max_block_size.remote_arg(),
         "--repair-overhead".to_string(),
@@ -3616,6 +3640,14 @@ fn spawn_remote_receiver(
         "--rq-tail-drain-ms".to_string(),
         args.rq_tail_drain_ms.to_string(),
     ];
+    // Forward --symbol-size only when the local user set it explicitly: both
+    // ends resolve the same per-transport default (1400 rq, 1144 quic), so an
+    // omitted flag stays consistent across the pair — including through the
+    // auto ladder, where each leg picks its own fitting default.
+    if let Some(symbol_size) = args.symbol_size {
+        argv.push("--symbol-size".to_string());
+        argv.push(symbol_size.to_string());
+    }
     if matches!(rq_auth, Some(RqAuthChoice::UnauthenticatedLab)) {
         argv.push("--rq-allow-unauthenticated-lab".to_string());
     }
@@ -4357,11 +4389,12 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             }))
         }
         Transport::Rq => {
+            let symbol_size = resolved_symbol_size(args.symbol_size, false);
             let mut cfg = rq_config(
                 args.max_bytes,
-                args.symbol_size,
+                symbol_size,
                 1,
-                args.max_block_size.effective(args.symbol_size)?,
+                args.max_block_size.effective(symbol_size)?,
                 args.repair_overhead,
                 args.rq_round0_loss_pct,
                 args.rq_tail_drain_ms,
@@ -4717,6 +4750,18 @@ fn quic_send_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbol_size_defaults_per_transport_and_respects_explicit_values() {
+        use asupersync::net::atp::transport_quic::QUIC_DEFAULT_SYMBOL_SIZE;
+        // No flag: each transport gets a default that just works.
+        assert_eq!(resolved_symbol_size(None, false), DEFAULT_SYMBOL_SIZE);
+        assert_eq!(resolved_symbol_size(None, true), QUIC_DEFAULT_SYMBOL_SIZE);
+        // Explicit values always win — including ones that will fail closed
+        // downstream (an explicit 1400 on quic must NOT be silently shrunk).
+        assert_eq!(resolved_symbol_size(Some(1400), true), 1400);
+        assert_eq!(resolved_symbol_size(Some(512), false), 512);
+    }
 
     const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     #[cfg(feature = "tls")]
@@ -5145,9 +5190,11 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[test]
     fn delta_tree_chunker_uses_smaller_content_defined_chunks() {
-        let data = (0..(512 * 1024))
-            .map(|idx| ((idx * 31 + idx / 7 + 13) % 251) as u8)
-            .collect::<Vec<_>>();
+        // Deterministic high-entropy fixture data. Affine byte patterns like
+        // `(idx * 31 + idx / 7) % 251` are short-periodic, so the whole
+        // stream contains only ~1.7k distinct hash windows — far too few for
+        // any content-defined boundary rule targeting 32 KiB averages.
+        let data = delta_tree_fixture_bytes(512 * 1024, 0x5eed);
 
         let chunks = split_delta_tree_object_chunks(&data).expect("delta chunks");
         let rebuilt = chunks.concat();
@@ -5173,9 +5220,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[test]
     fn delta_tree_chunker_resynchronizes_after_insert() {
-        let mut original = (0..(768 * 1024))
-            .map(|idx| ((idx * 17 + idx / 11 + 29) % 253) as u8)
-            .collect::<Vec<_>>();
+        let mut original = delta_tree_fixture_bytes(768 * 1024, 0xfeed);
         let original_chunks = split_delta_tree_object_chunks(&original).expect("original chunks");
         original.splice(96 * 1024..96 * 1024, [0xA5; 257]);
         let shifted_chunks = split_delta_tree_object_chunks(&original).expect("shifted chunks");
@@ -5198,9 +5243,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[test]
     fn delta_tree_chunker_localizes_same_length_edit() {
-        let original = (0..(2 * 1024 * 1024))
-            .map(|idx| ((idx * 131 + idx / 17 + 91) % 251) as u8)
-            .collect::<Vec<_>>();
+        let original = delta_tree_fixture_bytes(2 * 1024 * 1024, 0xabcd);
         let mut edited = original.clone();
         let edit_start = 1024 * 1024;
         let edit_len = 100 * 1024;
