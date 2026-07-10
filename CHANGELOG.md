@@ -14,7 +14,9 @@ Scope window: current Unreleased work through 2026-07-05, reconstructed from git
 
 ## Version Timeline
 
-- **Unreleased**: post-`v0.3.4` ATP, proof-lane, runtime, and skill-refresh work.
+- **Unreleased**: post-`v0.3.8` ATP, proof-lane, runtime, and skill-refresh work.
+- **v0.3.8 workspace version marker**: source for the standalone ATP v0.3.8
+  seven-platform release on 2026-07-10; no upstream asupersync tag is implied.
 - **v0.3.5 workspace version marker**: internal package/version update on 2026-06-18; no `v0.3.5` git tag or GitHub Release existed when this changelog was refreshed.
 - **v0.3.4 Release**: latest published GitHub Release/tag baseline, dated 2026-06-07.
 - **v0.3.3 Pre-release**: superseded by `v0.3.4`.
@@ -226,6 +228,24 @@ Scope window: current Unreleased work through 2026-07-05, reconstructed from git
   already addressed (the multi-lane park reads the clock once per cycle; the
   single-thread worker parks on a constant timeout).
   (`br-asupersync-runtime-cpu-overhaul-5vt09v.4`, `.5`)
+
+## v0.3.8 workspace version marker -- 2026-07-10
+
+> Source marker for the standalone ATP v0.3.8 binary release. The ATP
+> distribution repository pins this exact asupersync commit and builds its
+> seven archives with DSR; this marker does not create an asupersync release.
+
+### ATP release highlights
+
+- Added native Windows x64/MSVC release support with typed symlink and hardlink
+  fidelity, long-path-safe and read-only-safe transactional replacement,
+  Windows attributes and 100 ns timestamp handling, full file identities, and
+  containment-safe reparse-point and mirror behavior.
+- Hardened TCP, RaptorQ, QUIC/TLS, and bonded transfers across platforms with
+  canonical manifests, portable bonded descriptors, geometry-bound enrollment,
+  fail-closed staging/cleanup, and Windows OpenSSH PowerShell bootstrapping.
+- Added real native Windows regression coverage for filesystem metadata,
+  transport loopbacks, PowerShell command encoding, and the release installer.
 
 ## v0.3.5 workspace version marker -- 2026-06-18
 
