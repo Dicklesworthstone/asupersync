@@ -1596,8 +1596,15 @@ pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>,
 ///
 /// Returns [`StreamingError`] if the path cannot be inspected.
 #[cfg(windows)]
+#[allow(unsafe_code)] // Stable Win32 file identity query over an RAII-owned std::fs::File.
 pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
-    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    };
 
     match classify_path_link_sync(abs_path)
         .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?
@@ -1605,15 +1612,28 @@ pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, 
         PathLinkKind::NotLink => {}
         PathLinkKind::Symlink(_) | PathLinkKind::UnsupportedReparse => return Ok(None),
     }
-    let metadata = std::fs::symlink_metadata(abs_path)
+    let mut options = std::fs::OpenOptions::new();
+    let file = options
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(abs_path)
         .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?;
-    if !metadata.is_file() {
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let queried = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) };
+    if queried == 0 {
+        return Err(StreamingError::new(format!(
+            "{}: {}",
+            abs_path.display(),
+            io::Error::last_os_error()
+        )));
+    }
+    if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
         return Ok(None);
     }
-    Ok(metadata
-        .volume_serial_number()
-        .zip(metadata.file_index())
-        .map(|(volume, index)| (u64::from(volume), index)))
+    let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Ok(Some((u64::from(info.dwVolumeSerialNumber), file_index)))
 }
 
 /// Unsupported-platform hardlink fallback.
