@@ -58,7 +58,12 @@ pub async fn derive_bonded_descriptor(
     // posture), so a hardlink secondary is sent content-free identically here.
     let descriptor_config = RqConfig {
         symbol_size,
-        max_block_size: usize::try_from(max_block_size).unwrap_or(usize::MAX),
+        // Clamp to >= symbol_size, mirroring the SDK/CLI `build_config` posture
+        // so every caller derives a byte-identical enrollment descriptor even if
+        // handed an unclamped max_block_size below the symbol size.
+        max_block_size: usize::try_from(max_block_size)
+            .unwrap_or(usize::MAX)
+            .max(usize::from(symbol_size.max(1))),
         max_transfer_bytes: max_bytes,
         metadata_policy: MetadataPolicy::portable(),
         preserve_hardlinks: true,

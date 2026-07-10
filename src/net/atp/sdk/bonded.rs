@@ -523,8 +523,11 @@ pub struct BondedTransferProgress {
     pub enrolled_donors: u32,
     /// Per-donor ingress counters (only donors that delivered a datagram).
     pub donor_ingress: Vec<(u32, BondedDonorIngressStats)>,
-    /// Current transfer phase (`DataTransfer` while pending, `Completed` at
-    /// the terminal snapshot).
+    /// Current transfer phase: `DataTransfer` while blocks are pending, then a
+    /// terminal `Completed` (success) or `Failed` (decoded but verification
+    /// failed) snapshot. Cancellation and other terminal errors are observed as
+    /// the progress stream closes; the authoritative outcome is the receiver
+    /// handle's join result.
     pub phase: TransferPhase,
 }
 

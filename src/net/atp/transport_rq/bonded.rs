@@ -1125,6 +1125,10 @@ pub async fn receive_bonded(
         if pending.is_empty() {
             // Verify + commit exactly like the single-source path, then tell
             // every surviving donor to stop (Close wins over stale deficits).
+            // Final cancel checkpoint before the irreversible commit: a Cx
+            // aborted after the last decode round still unwinds here and
+            // commits nothing (the module's cancel-correctness contract).
+            cx.checkpoint().map_err(|_| RqError::Cancelled)?;
             let receipt = verify_and_commit(
                 &manifest,
                 &mut decoders,
@@ -1144,6 +1148,22 @@ pub async fn receive_bonded(
                 drain_sender_close_after_proof(cx, &mut conn.control, "bonded").await;
             }
             if !receipt.committed {
+                // Terminal failure snapshot: a progress consumer watching the
+                // phase sees `Failed` for the decoded-but-unverified case
+                // (other terminal errors/cancels are observed as the stream
+                // closes plus the receiver's join outcome).
+                emit_bonded_progress(
+                    progress.as_ref(),
+                    &manifest,
+                    &blocks,
+                    &decoders,
+                    &symbol_set,
+                    symbols_accepted,
+                    feedback_rounds,
+                    reallocated_repair_windows,
+                    enrolled_donors,
+                    TransferPhase::Failed,
+                );
                 return Err(RqError::Integrity(
                     receipt
                         .reason
