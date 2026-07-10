@@ -222,9 +222,7 @@ pub fn select_donor_path(
 
     // Last resort: a tailnet endpoint with no direct path, usable only when the
     // donor shares the tailnet.
-    if donor_on_tailnet
-        && let Some(dial) = endpoints.tailnet
-    {
+    if donor_on_tailnet && let Some(dial) = endpoints.tailnet {
         return Some(DonorPathChoice {
             transport: BondTransport::Tailscale,
             dial,
@@ -286,8 +284,7 @@ mod tests {
             },
             "Peer": {}
         }"#;
-        let (ipv4, magic_dns) =
-            parse_tailscale_status_ipv4(json).expect("self cgnat ip present");
+        let (ipv4, magic_dns) = parse_tailscale_status_ipv4(json).expect("self cgnat ip present");
         assert_eq!(ipv4, Ipv4Addr::new(100, 101, 102, 103));
         // Trailing dot stripped.
         assert_eq!(magic_dns.as_deref(), Some("workstation.tail9f00.ts.net"));
@@ -302,8 +299,7 @@ mod tests {
                 "TailscaleIPs": ["192.0.2.9", "fd7a:115c::1", "100.64.0.5"]
             }
         }"#;
-        let (ipv4, magic_dns) =
-            parse_tailscale_status_ipv4(json).expect("later cgnat ip found");
+        let (ipv4, magic_dns) = parse_tailscale_status_ipv4(json).expect("later cgnat ip found");
         assert_eq!(ipv4, Ipv4Addr::new(100, 64, 0, 5));
         assert_eq!(magic_dns.as_deref(), Some("host.example.ts.net"));
     }
@@ -367,8 +363,8 @@ mod tests {
             direct: Some(direct_addr()),
             tailnet: Some(tailnet_addr()),
         };
-        let choice = select_donor_path(TransportPreference::Auto, &endpoints, true)
-            .expect("usable path");
+        let choice =
+            select_donor_path(TransportPreference::Auto, &endpoints, true).expect("usable path");
         assert_eq!(choice.transport, BondTransport::Tailscale);
         assert_eq!(choice.dial, tailnet_addr());
     }
@@ -379,8 +375,8 @@ mod tests {
             direct: Some(direct_addr()),
             tailnet: Some(tailnet_addr()),
         };
-        let choice = select_donor_path(TransportPreference::Auto, &endpoints, false)
-            .expect("usable path");
+        let choice =
+            select_donor_path(TransportPreference::Auto, &endpoints, false).expect("usable path");
         assert_eq!(choice.transport, BondTransport::DirectIp);
         assert_eq!(choice.dial, direct_addr());
     }
@@ -391,8 +387,8 @@ mod tests {
             direct: Some(direct_addr()),
             tailnet: Some(tailnet_addr()),
         };
-        let choice = select_donor_path(TransportPreference::Direct, &endpoints, true)
-            .expect("usable path");
+        let choice =
+            select_donor_path(TransportPreference::Direct, &endpoints, true).expect("usable path");
         assert_eq!(choice.transport, BondTransport::DirectIp);
         assert_eq!(choice.dial, direct_addr());
     }
@@ -427,8 +423,8 @@ mod tests {
             direct: Some(direct_addr()),
             tailnet: Some(tailnet_addr()),
         };
-        let choice = select_donor_path(TransportPreference::Ssh, &endpoints, true)
-            .expect("usable path");
+        let choice =
+            select_donor_path(TransportPreference::Ssh, &endpoints, true).expect("usable path");
         assert_eq!(choice.transport, BondTransport::Ssh);
         assert_eq!(choice.dial, direct_addr());
     }
@@ -439,8 +435,8 @@ mod tests {
             direct: None,
             tailnet: Some(tailnet_addr()),
         };
-        let choice = select_donor_path(TransportPreference::Ssh, &endpoints, false)
-            .expect("usable path");
+        let choice =
+            select_donor_path(TransportPreference::Ssh, &endpoints, false).expect("usable path");
         assert_eq!(choice.transport, BondTransport::Ssh);
         assert_eq!(choice.dial, tailnet_addr());
     }
@@ -478,8 +474,8 @@ mod tests {
         };
         // Direct pref but only a tailnet endpoint: still usable via the shared
         // tailnet, so we return it rather than None.
-        let choice = select_donor_path(TransportPreference::Direct, &endpoints, true)
-            .expect("usable path");
+        let choice =
+            select_donor_path(TransportPreference::Direct, &endpoints, true).expect("usable path");
         assert_eq!(choice.transport, BondTransport::Tailscale);
         assert_eq!(choice.dial, tailnet_addr());
         // But if the donor is not on the tailnet, that endpoint is unusable.
