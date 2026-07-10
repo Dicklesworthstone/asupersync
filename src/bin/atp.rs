@@ -12,7 +12,8 @@
 //!   sockets with a reliable TCP control plane
 //!   (`asupersync::net::atp::transport_rq`). Built to saturate a lossy,
 //!   high-latency path and tolerate packet loss without head-of-line blocking.
-//! - `--transport quic`: ATP over QUIC/TLS-1.3 when built with `--features tls`.
+//! - `--transport quic`: ATP over QUIC/TLS-1.3. Built into every atp binary —
+//!   the required `atp-cli` feature bundles TLS and native roots.
 //! - `--transport auto`: sender-side selection that tries authenticated,
 //!   encrypted QUIC and records failed attempts in the JSON report. Unencrypted
 //!   RQ/TCP join the ladder only with the explicit
@@ -53,8 +54,11 @@ use asupersync::atp::delta::{
 };
 use asupersync::atp::delta_subchunk::{self, SubBlockSignature};
 use asupersync::atp::object::ContentId;
+use asupersync::atp::safety::{portable_path_collision_key, validate_portable_relative_path};
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
+#[cfg(windows)]
+use asupersync::net::atp::transport_common::metadata::path_is_link_or_reparse_sync;
 use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
@@ -156,8 +160,8 @@ enum Transport {
     Rq,
     /// RaptorQ fountain symbols over a real QUIC/TLS-1.3 connection: symbols ride
     /// QUIC DATAGRAMs and the ATP control protocol rides one bidirectional
-    /// stream, all under a single authenticated, encrypted UDP flow. Requires
-    /// building `atp` with `--features tls`.
+    /// stream, all under a single authenticated, encrypted UDP flow. Built into
+    /// every atp binary (the `atp-cli` feature bundles TLS and native roots).
     Quic,
 }
 
@@ -1745,7 +1749,7 @@ fn send_to_addr_with_transport(
             #[cfg(not(feature = "tls"))]
             {
                 Err(SendTransportFailure::fatal(
-                    "atp --transport quic requires building atp with --features tls",
+                    "this atp binary was built without TLS (non-standard: the required atp-cli feature always bundles it) — rebuild with --features atp-cli",
                 ))
             }
         }
@@ -3003,6 +3007,15 @@ const fn delta_tree_splitmix64(mut value: u64) -> u64 {
 }
 
 fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, String> {
+    #[cfg(windows)]
+    if path_is_link_or_reparse_sync(dest)
+        .map_err(|err| format!("read metadata {}: {err}", dest.display()))?
+    {
+        return Err(format!(
+            "delta destination is a Windows reparse point: {}",
+            dest.display()
+        ));
+    }
     let metadata = fs::symlink_metadata(dest)
         .map_err(|err| format!("read metadata {}: {err}", dest.display()))?;
     if !metadata.is_dir() {
@@ -3029,6 +3042,15 @@ fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, Stri
         }
         validate_delta_rel_path(&name)?;
         let path = entry.path();
+        #[cfg(windows)]
+        if path_is_link_or_reparse_sync(&path)
+            .map_err(|err| format!("read metadata {}: {err}", path.display()))?
+        {
+            return Err(format!(
+                "delta destination contains a Windows reparse point: {}",
+                path.display()
+            ));
+        }
         let metadata = fs::symlink_metadata(&path)
             .map_err(|err| format!("read metadata {}: {err}", path.display()))?;
         if metadata.is_dir() {
@@ -3046,6 +3068,15 @@ fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, Stri
 }
 
 fn collect_delta_tree_files(source: &Path) -> Result<Vec<DeltaTreeFile>, String> {
+    #[cfg(windows)]
+    if path_is_link_or_reparse_sync(source)
+        .map_err(|err| format!("read metadata {}: {err}", source.display()))?
+    {
+        return Err(format!(
+            "delta source is a Windows reparse point: {}",
+            source.display()
+        ));
+    }
     let metadata = fs::symlink_metadata(source)
         .map_err(|err| format!("read metadata {}: {err}", source.display()))?;
     let root_name = source
@@ -3096,6 +3127,15 @@ fn collect_delta_dir(
         let rel_path = format!("{rel_prefix}/{name}");
         validate_delta_rel_path(&rel_path)?;
         let path = entry.path();
+        #[cfg(windows)]
+        if path_is_link_or_reparse_sync(&path)
+            .map_err(|err| format!("read metadata {}: {err}", path.display()))?
+        {
+            return Err(format!(
+                "delta source contains a Windows reparse point: {}",
+                path.display()
+            ));
+        }
         let metadata = fs::symlink_metadata(&path)
             .map_err(|err| format!("read metadata {}: {err}", path.display()))?;
         if metadata.is_dir() {
@@ -3115,6 +3155,7 @@ fn collect_delta_dir(
 }
 
 fn encode_delta_tree_object(files: &[DeltaTreeFile]) -> Result<Vec<u8>, String> {
+    validate_distinct_delta_paths(files.iter().map(|file| file.rel_path.as_str()))?;
     let mut out = Vec::new();
     let mut payloads = BTreeMap::<([u8; 32], u64), &[u8]>::new();
 
@@ -3161,14 +3202,26 @@ fn put_u64(out: &mut Vec<u8>, value: u64) {
 }
 
 fn validate_delta_rel_path(rel_path: &str) -> Result<(), String> {
-    if rel_path.is_empty()
-        || rel_path.starts_with('/')
-        || rel_path.contains('\\')
-        || rel_path
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == ".." || part == DELTA_STATE_DIR)
+    if validate_portable_relative_path(rel_path).is_err()
+        || rel_path.split('/').any(|part| part == DELTA_STATE_DIR)
     {
         return Err(format!("unsafe delta relative path: {rel_path}"));
+    }
+    Ok(())
+}
+
+fn validate_distinct_delta_paths<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
+    let mut seen = BTreeMap::<String, String>::new();
+    for path in paths {
+        validate_delta_rel_path(path)?;
+        let key = portable_path_collision_key(path);
+        if let Some(existing) = seen.insert(key, path.to_string()) {
+            return Err(format!(
+                "duplicate or case-colliding delta paths: {existing} and {path}"
+            ));
+        }
     }
     Ok(())
 }
@@ -4061,6 +4114,7 @@ fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> 
         let payload_sha256 = reader.read_sha256()?;
         entries.push((rel_path, len, payload_sha256));
     }
+    validate_distinct_delta_paths(entries.iter().map(|(path, _, _)| path.as_str()))?;
 
     let payload_count = reader.read_u64()?;
     let payload_count = usize::try_from(payload_count)
@@ -4163,6 +4217,7 @@ fn commit_delta_tree_files(
 }
 
 fn write_delta_files_under(root: &Path, files: &[DeltaTreeFile]) -> Result<(), String> {
+    validate_distinct_delta_paths(files.iter().map(|file| file.rel_path.as_str()))?;
     for file in files {
         let rel = safe_delta_path(&file.rel_path)?;
         let path = root.join(rel);
@@ -5299,7 +5354,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             #[cfg(not(feature = "tls"))]
             {
                 let _ = (&dest, &listen, &peer_id, one_shot, &udp_bind_ip);
-                Err("atp --transport quic requires building atp with --features tls".to_string())
+                Err("this atp binary was built without TLS (non-standard: the required atp-cli feature always bundles it) — rebuild with --features atp-cli".to_string())
             }
         }
     }
@@ -5492,6 +5547,32 @@ mod tests {
         // downstream (an explicit 1400 on quic must NOT be silently shrunk).
         assert_eq!(resolved_symbol_size(Some(1400), true), 1400);
         assert_eq!(resolved_symbol_size(Some(512), false), 512);
+    }
+
+    #[test]
+    fn delta_paths_reject_windows_aliases_before_materialization() {
+        validate_delta_rel_path("nested/payload.bin").expect("portable delta path");
+        for path in [
+            "NUL.txt",
+            "nested/COM1.log",
+            "trailing.",
+            "trailing ",
+            "alternate:stream",
+            ".asupersync-atp-delta-v1/state.json",
+        ] {
+            assert!(
+                validate_delta_rel_path(path).is_err(),
+                "Windows-unsafe delta path {path:?} must fail closed"
+            );
+        }
+
+        assert!(validate_distinct_delta_paths(["Docs/Readme", "docs/README"]).is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_fd_limit_setup_is_a_noop() {
+        raise_fd_limit();
     }
 
     const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -6824,6 +6905,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 /// to the hard limit is the standard stopgap; the complete fix is a bounded FD
 /// pool in the receiver. Best-effort: any error is ignored.
 #[allow(unsafe_code)]
+#[cfg(unix)]
 fn raise_fd_limit() {
     // SAFETY: `getrlimit`/`setrlimit` are invoked with the valid `RLIMIT_NOFILE`
     // resource identifier and a fully-initialized, non-aliased `rlimit` value
@@ -6841,6 +6923,9 @@ fn raise_fd_limit() {
         }
     }
 }
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
 
 fn main() -> ExitCode {
     raise_fd_limit();
