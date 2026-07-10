@@ -59,6 +59,8 @@ use asupersync::atp::safety::{
 };
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
+use asupersync::net::atp::bonding::{BondAuthKeyRef, BondTransferDescriptor, DonorAssignment};
+use asupersync::net::atp::channel_bonding;
 use asupersync::net::atp::transport_common::metadata::{
     path_is_link_or_reparse, path_is_link_or_reparse_sync,
 };
@@ -155,6 +157,10 @@ enum Command {
     Recv(RecvArgs),
     /// Alias for `recv` that listens persistently (daemon-style).
     Serve(RecvArgs),
+    /// Donate this host's byte-identical copy as one donor of a bonded
+    /// multi-donor transfer (RQ symbols; run one instance per donor host).
+    #[command(name = "bond-donate")]
+    BondDonate(BondDonateArgs),
     /// Generate a validator-accepted RQ symbol-auth key as lowercase hex.
     #[command(name = "rq-keygen")]
     RqKeygen,
@@ -416,6 +422,51 @@ struct RecvArgs {
     /// This leaks receiver hashes/signatures; trusted labs only.
     #[arg(long)]
     allow_unauthenticated_delta_sidecar: bool,
+}
+
+#[derive(Parser)]
+struct BondDonateArgs {
+    /// Source file or directory this donor holds. Every donor must hold a
+    /// byte-identical copy: the bonded descriptor is derived from these bytes,
+    /// and the donor byte proof refuses to spray on any mismatch.
+    source: PathBuf,
+    /// Receiver UDP endpoint (host:port) that ingests bonded symbols.
+    #[arg(long = "to", value_name = "HOST:PORT")]
+    to: String,
+    /// Zero-based index of this donor within the bonded donor set.
+    #[arg(long)]
+    donor_index: u32,
+    /// Total number of donors participating in the bonded transfer.
+    #[arg(long)]
+    donor_count: u32,
+    /// Maximum transfer size in bytes.
+    #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
+    max_bytes: u64,
+    /// Worker threads for the local runtime.
+    #[arg(long, default_value_t = 4)]
+    workers: usize,
+    /// RaptorQ symbol size in bytes (default 1400). Must be identical on every
+    /// donor: it is part of the agreed bonded descriptor.
+    #[arg(long)]
+    symbol_size: Option<u16>,
+    /// Maximum RaptorQ source-block size in bytes, `auto`, or `0`. Must be
+    /// identical on every donor: it fixes per-block K in the bonded descriptor.
+    #[arg(
+        long,
+        default_value_t = MaxBlockSizeArg::Auto,
+        value_parser = parse_max_block_size_arg
+    )]
+    max_block_size: MaxBlockSizeArg,
+    /// Round-0 repair overhead factor, >= 1.0.
+    #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
+    repair_overhead: f64,
+    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    /// All bonded donors and the receiver must share the same key.
+    #[arg(long, value_name = "HEX")]
+    rq_auth_key_hex: Option<String>,
+    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    #[arg(long)]
+    rq_allow_unauthenticated_lab: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1372,6 +1423,221 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     print_json(&plan);
     Ok(())
+}
+
+// ─── Channel bonding: donor leg (`atp bond-donate`) ──────────────────────────
+
+/// Run one donor leg of a bonded multi-donor transfer (z01bbr Phase F, donor
+/// side): derive the shared descriptor from the LOCAL source bytes, build this
+/// donor's static-residue assignment, and spray only the assigned slice of the
+/// fountain at the receiver endpoint via [`transport_rq::donate_path`].
+///
+/// `donate_path` itself re-proves the donor's bytes against the descriptor
+/// (per-entry SHA-256 + merkle root) before any symbol is sent, so a donor
+/// whose copy has drifted refuses instead of poisoning the bonded fountain.
+fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
+    let receiver = resolve(&args.to)?;
+    let symbol_size = resolved_symbol_size(args.symbol_size, false);
+    let config = rq_config(
+        args.max_bytes,
+        symbol_size,
+        DEFAULT_UDP_FANOUT,
+        args.max_block_size.effective(symbol_size)?,
+        args.repair_overhead,
+        0.0,
+        DEFAULT_ROUND_TAIL_DRAIN_MS,
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    let auth_key_id = bond_auth_key_id(
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    let assignment = bond_donor_assignment(
+        args.donor_index,
+        args.donor_count,
+        receiver,
+        auth_key_id.clone(),
+    )?;
+    let source_root = bond_source_root(&args.source)?;
+    let runtime = build_runtime(args.workers)?;
+    let source = args.source.clone();
+    let max_bytes = args.max_bytes;
+    let start = Instant::now();
+    let report = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("bond donor cx");
+        let descriptor =
+            derive_bond_transfer_descriptor(&cx, &source, &config, max_bytes, auth_key_id).await?;
+        transport_rq::donate_path(
+            &cx,
+            &descriptor,
+            &assignment,
+            receiver,
+            &source_root,
+            config,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }))?;
+    let elapsed = start.elapsed();
+    print_atp_metrics_line(
+        "bond-donate",
+        Transport::Rq,
+        report.udp_send_acceleration.payload_bytes,
+        Some(report.symbols_sent),
+        None,
+        0,
+        None,
+        report.receiver_endpoints.len(),
+        Some(elapsed),
+    );
+    print_rq_udp_send_acceleration_line(&report.udp_send_acceleration);
+    print_json(&bond_donate_json(&report, Some(elapsed)));
+    Ok(())
+}
+
+/// Derive the shared bonded-transfer descriptor from the donor's local source
+/// bytes.
+///
+/// The bonding invariant (z01bbr Phase A) is that every donor and the receiver
+/// agree on the exact same object so a `(sbn, esi)` pair names the same bytes
+/// everywhere. This derivation is a pure function of the source bytes plus the
+/// agreed `(symbol_size, max_block_size)` params: [`plan_transfer`] makes the
+/// same deterministic sorted walk + streaming SHA-256 pass a real send commits
+/// (byte-identical trees at different absolute roots produce identical plans),
+/// the merkle root is the flat object-graph root over those digests, and the
+/// transfer id is the rq derivation ([`channel_bonding::transfer_id_hex`]).
+/// E-15 small-file packing and large-object splitting are deliberately NOT
+/// applied: descriptor entries are the logical files themselves — exactly what
+/// `donate_path`'s donor byte proof re-hashes from disk — and how a donor
+/// materialises entry bytes is a donor-local concern that must not change the
+/// agreed `(sbn, esi)` → bytes map.
+async fn derive_bond_transfer_descriptor(
+    cx: &Cx,
+    source: &Path,
+    config: &RqConfig,
+    max_bytes: u64,
+    auth_key_id: Option<String>,
+) -> Result<BondTransferDescriptor, String> {
+    let plan_cfg = tcp_config(max_bytes, false);
+    let plan = plan_transfer(
+        cx,
+        source,
+        plan_cfg.chunk_size,
+        &plan_cfg.metadata_policy,
+        plan_cfg.preserve_hardlinks,
+    )
+    .await
+    .map_err(|error| format!("bond descriptor derivation: {error}"))?;
+    if plan.total_bytes > max_bytes {
+        return Err(format!(
+            "bond-donate source is {} bytes which exceeds --max-bytes {max_bytes}",
+            plan.total_bytes
+        ));
+    }
+    let entries: Vec<transport_rq::ManifestEntry> = plan
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            u32::try_from(index)
+                .map(|index| transport_rq::ManifestEntry {
+                    index,
+                    rel_path: entry.rel_path.clone(),
+                    size: entry.size,
+                    sha256_hex: entry.sha256_hex.clone(),
+                    members: Vec::new(),
+                    fragment: None,
+                })
+                .map_err(|_| {
+                    format!(
+                        "bond descriptor has too many entries: {}",
+                        plan.entries.len()
+                    )
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    let manifest = transport_rq::TransferManifest {
+        transfer_id: channel_bonding::transfer_id_hex(
+            &plan.merkle_root_hex,
+            plan.total_bytes,
+            entries.len(),
+        ),
+        root_name: plan.root_name.clone(),
+        is_directory: plan.is_directory,
+        total_bytes: plan.total_bytes,
+        merkle_root_hex: plan.merkle_root_hex.clone(),
+        entries,
+    };
+    let descriptor = BondTransferDescriptor::from_manifest(
+        &manifest,
+        config.symbol_size,
+        config.max_block_size as u64,
+        auth_key_id,
+    );
+    descriptor
+        .validate()
+        .map_err(|error| format!("bond descriptor validation: {error}"))?;
+    Ok(descriptor)
+}
+
+/// Build and validate this donor's static-residue assignment
+/// (`esi % donor_count == donor_index`). The single `--to` endpoint doubles as
+/// the primary spray target passed to `donate_path`.
+fn bond_donor_assignment(
+    donor_index: u32,
+    donor_count: u32,
+    receiver: SocketAddr,
+    auth_key_id: Option<String>,
+) -> Result<DonorAssignment, String> {
+    let auth_key_ref = auth_key_id.map(BondAuthKeyRef::ControlPlane);
+    let assignment =
+        DonorAssignment::new_static(donor_index, donor_count, vec![receiver], auth_key_ref);
+    assignment
+        .validate()
+        .map_err(|error| format!("invalid bonded donor assignment: {error}"))?;
+    Ok(assignment)
+}
+
+/// Derive the non-secret shared-key identifier carried in the bonded
+/// descriptor and assignment.
+///
+/// Every donor must derive the same id from the same key material regardless
+/// of whether the key arrived via `--rq-auth-key-hex` or the environment, so
+/// the id is a truncated SHA-256 fingerprint of the raw key bytes — never the
+/// key itself (descriptors and assignments may be logged or serialized for
+/// coordination).
+fn bond_auth_key_id(
+    explicit_key_hex: Option<&str>,
+    allow_unauthenticated_lab: bool,
+) -> Result<Option<String>, String> {
+    match resolve_rq_auth_choice(explicit_key_hex, allow_unauthenticated_lab, false)? {
+        RqAuthChoice::UnauthenticatedLab => Ok(None),
+        RqAuthChoice::KeyHex(key_hex) => {
+            let mut bytes = [0u8; AUTH_KEY_SIZE];
+            hex::decode_to_slice(&key_hex, &mut bytes)
+                .map_err(|err| format!("decode RQ auth key hex: {err}"))?;
+            let digest: [u8; 32] = Sha256::digest(bytes).into();
+            Ok(Some(format!("rq-auth-sha256:{}", hex::encode(&digest[..8]))))
+        }
+    }
+}
+
+/// Resolve the root directory whose relative entry paths back the descriptor.
+///
+/// The source walk keys a single-file source by its file name, so the donor
+/// byte proof must resolve entries against the file's parent directory; a
+/// directory source is its own root.
+fn bond_source_root(source: &Path) -> Result<PathBuf, String> {
+    if source.is_dir() {
+        return Ok(source.to_path_buf());
+    }
+    source.parent().map(Path::to_path_buf).ok_or_else(|| {
+        format!(
+            "bond-donate source {} has no parent directory",
+            source.display()
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6110,6 +6376,48 @@ fn rq_send_json(
     })
 }
 
+fn bond_donate_json(
+    report: &transport_rq::BondedDonorSendReport,
+    elapsed: Option<Duration>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "atp_bond_donate", "transport": "rq",
+        "transfer_id": report.transfer_id,
+        "donor_index": report.donor_index,
+        "donor_count": report.donor_count,
+        "receiver_endpoints": report
+            .receiver_endpoints
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "entries": report.entries,
+        "blocks": report.blocks,
+        "source_symbols_sent": report.source_symbols_sent,
+        "repair_symbols_sent": report.repair_symbols_sent,
+        "symbols_sent": report.symbols_sent,
+        "payload_bytes_sent": report.udp_send_acceleration.payload_bytes,
+        "pacing": {
+            "initial_rate_bytes_per_sec": report.pacing.initial_rate_bytes_per_sec,
+            "final_rate_bytes_per_sec": report.pacing.final_rate_bytes_per_sec,
+            "burst_symbols": report.pacing.burst_symbols,
+            "burst_bytes": report.pacing.burst_bytes,
+            "datagram_bytes": report.pacing.datagram_bytes,
+            "clean_round0_ramp_enabled": report.pacing.clean_round0_ramp_enabled,
+        },
+        "udp_send_acceleration": report.udp_send_acceleration,
+        "metrics": atp_metrics_json(
+            report.udp_send_acceleration.payload_bytes,
+            Some(report.symbols_sent),
+            None,
+            0,
+            None,
+            None,
+            report.receiver_endpoints.len(),
+            elapsed,
+        ),
+    })
+}
+
 #[cfg(feature = "tls")]
 fn quic_recv_json(
     report: &asupersync::net::atp::transport_quic::ReceiveReport,
@@ -7708,6 +8016,195 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert!(error.contains("rq: rq refused"));
         assert!(error.contains("tcp: tcp refused"));
     }
+
+    // ─── Channel bonding: donor leg (`atp bond-donate`) ───────────────────────
+
+    fn bond_test_config() -> RqConfig {
+        // Descriptor derivation reads only the agreed object params; building the
+        // config directly keeps these tests independent of ATP_RQ_AUTH_KEY_HEX.
+        RqConfig {
+            symbol_size: DEFAULT_SYMBOL_SIZE,
+            max_block_size: AUTO_MAX_BLOCK_SIZE,
+            ..RqConfig::default()
+        }
+    }
+
+    fn bond_test_derive(
+        runtime: &asupersync::runtime::Runtime,
+        path: &Path,
+    ) -> BondTransferDescriptor {
+        let source = path.to_path_buf();
+        let config = bond_test_config();
+        runtime
+            .block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("bond test cx");
+                derive_bond_transfer_descriptor(
+                    &cx,
+                    &source,
+                    &config,
+                    DEFAULT_MAX_TRANSFER_BYTES,
+                    None,
+                )
+                .await
+            }))
+            .expect("derive bonded descriptor")
+    }
+
+    fn write_bond_payload(root: &Path, first: &[u8]) {
+        fs::create_dir_all(root.join("sub")).expect("payload dirs");
+        fs::write(root.join("a.bin"), first).expect("write a.bin");
+        fs::write(root.join("sub/b.bin"), b"second donor file").expect("write b.bin");
+    }
+
+    #[test]
+    fn bond_descriptor_derivation_is_deterministic_and_content_addressed() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("payload");
+        write_bond_payload(&root, b"hello bonded world");
+        // A byte-identical copy at a different absolute path (a second donor's
+        // disk) and a tampered copy (a drifted donor).
+        let copy = temp.path().join("donor2").join("payload");
+        write_bond_payload(&copy, b"hello bonded world");
+        let tampered = temp.path().join("donor3").join("payload");
+        write_bond_payload(&tampered, b"HELLO bonded world");
+
+        let runtime = build_runtime(2).expect("bond test runtime");
+        let first = bond_test_derive(&runtime, &root);
+        let second = bond_test_derive(&runtime, &root);
+        let other_donor = bond_test_derive(&runtime, &copy);
+        let drifted = bond_test_derive(&runtime, &tampered);
+
+        assert_eq!(
+            first, second,
+            "same path twice must derive identical descriptors"
+        );
+        assert!(
+            first.agrees_with(&other_donor),
+            "byte-identical copies at different roots must agree"
+        );
+        assert_eq!(first.entry_object_id(0), second.entry_object_id(0));
+        assert_eq!(first.entry_object_id(1), other_donor.entry_object_id(1));
+        assert_eq!(
+            first.transfer_id,
+            channel_bonding::transfer_id_hex(
+                &first.merkle_root_hex,
+                first.total_bytes,
+                first.entries.len(),
+            ),
+            "transfer id must be the rq merkle-derived id"
+        );
+        assert_eq!(first.entries.len(), 2);
+        assert_eq!(first.symbol_size, DEFAULT_SYMBOL_SIZE);
+        assert_eq!(first.max_block_size, AUTO_MAX_BLOCK_SIZE as u64);
+
+        assert_ne!(
+            first.transfer_id, drifted.transfer_id,
+            "different bytes must produce a different transfer id"
+        );
+        assert!(!first.agrees_with(&drifted), "drifted copy must not agree");
+        assert_ne!(first.entry_object_id(0), drifted.entry_object_id(0));
+    }
+
+    #[test]
+    fn bond_donor_assignment_validates_index_count_and_auth() {
+        let receiver: SocketAddr = "127.0.0.1:9600".parse().expect("receiver addr");
+
+        let assignment =
+            bond_donor_assignment(2, 3, receiver, Some("rq-auth-sha256:00ff".to_string()))
+                .expect("valid assignment");
+        assert_eq!(assignment.donor_index, 2);
+        assert_eq!(assignment.donor_count, 3);
+        assert_eq!(assignment.receiver_udp_endpoints, vec![receiver]);
+        assert!(assignment.requires_symbol_auth());
+        assert!(assignment.owns_esi(2), "donor 2 of 3 owns esi 2");
+        assert!(!assignment.owns_esi(1), "donor 2 of 3 must not own esi 1");
+
+        let lab = bond_donor_assignment(0, 1, receiver, None).expect("lab assignment");
+        assert!(!lab.requires_symbol_auth());
+
+        // index >= count, zero donors, and counts above the bonding ceiling all
+        // fail closed before any socket or file is touched.
+        assert!(bond_donor_assignment(3, 3, receiver, None).is_err());
+        assert!(bond_donor_assignment(0, 0, receiver, None).is_err());
+        assert!(
+            bond_donor_assignment(
+                0,
+                asupersync::net::atp::bonding::MAX_BONDING_DONORS + 1,
+                receiver,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bond_auth_key_id_is_a_stable_nonsecret_fingerprint() {
+        // High-entropy fixed key (SHA-256 of "test") so AuthKey validation passes.
+        let key_hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let upper = key_hex.to_ascii_uppercase();
+        let id_a = bond_auth_key_id(Some(key_hex), false).expect("auth key id");
+        let id_b =
+            bond_auth_key_id(Some(upper.as_str()), false).expect("case-insensitive auth key id");
+        assert_eq!(id_a, id_b, "same key bytes must fingerprint identically");
+
+        let id = id_a.expect("authenticated key produces an id");
+        assert!(id.starts_with("rq-auth-sha256:"));
+        assert!(
+            !id.contains(key_hex),
+            "fingerprint must never embed the key material"
+        );
+    }
+
+    #[test]
+    fn bond_donate_json_reports_the_donor_leg() {
+        let report = transport_rq::BondedDonorSendReport {
+            transfer_id: "tid-bond".to_string(),
+            donor_index: 1,
+            donor_count: 4,
+            receiver_endpoints: vec!["127.0.0.1:9600".parse().expect("receiver addr")],
+            entries: 2,
+            blocks: 3,
+            source_symbols_sent: 10,
+            repair_symbols_sent: 5,
+            symbols_sent: 15,
+            pacing: transport_rq::BondedDonorPacingReport {
+                initial_rate_bytes_per_sec: 1_000_000,
+                final_rate_bytes_per_sec: 2_000_000,
+                burst_symbols: 32,
+                burst_bytes: 44_800,
+                datagram_bytes: 1_400,
+                clean_round0_ramp_enabled: true,
+            },
+            udp_send_acceleration: transport_rq::UdpSendAccelerationReport::default(),
+        };
+
+        let json = bond_donate_json(&report, Some(Duration::from_millis(10)));
+
+        assert_eq!(json["event"], "atp_bond_donate");
+        assert_eq!(json["transport"], "rq");
+        assert_eq!(json["transfer_id"], "tid-bond");
+        assert_eq!(json["donor_index"], 1);
+        assert_eq!(json["donor_count"], 4);
+        assert_eq!(json["receiver_endpoints"][0], "127.0.0.1:9600");
+        assert_eq!(json["source_symbols_sent"], 10);
+        assert_eq!(json["repair_symbols_sent"], 5);
+        assert_eq!(json["symbols_sent"], 15);
+        assert_eq!(json["pacing"]["burst_symbols"], 32);
+        assert_eq!(json["pacing"]["clean_round0_ramp_enabled"], true);
+        assert_eq!(json["metrics"]["chosen_fanout"], 1);
+    }
+
+    #[test]
+    fn bond_source_root_uses_parent_for_files_and_self_for_dirs() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dir = temp.path().join("tree");
+        fs::create_dir_all(&dir).expect("tree dir");
+        let file = dir.join("payload.bin");
+        fs::write(&file, b"bytes").expect("payload file");
+
+        assert_eq!(bond_source_root(&dir).expect("dir root"), dir);
+        assert_eq!(bond_source_root(&file).expect("file root"), dir);
+    }
 }
 
 /// Raise the soft open-file-descriptor limit to the hard limit at startup.
@@ -7749,6 +8246,7 @@ fn main() -> ExitCode {
         Command::Send(args) => run_send(args),
         Command::Recv(args) => run_recv(args, false),
         Command::Serve(args) => run_recv(args, true),
+        Command::BondDonate(args) => run_bond_donate(args),
         Command::RqKeygen => generate_rq_auth_key_hex().map(|key| {
             println!("{key}");
         }),
