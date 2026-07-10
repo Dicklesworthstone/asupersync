@@ -30,8 +30,13 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::atp::object::{ContentId, ContentIdHasher, Object, ObjectEdge, ObjectId, ObjectKind};
+use crate::atp::object::{
+    ContentId, ContentIdHasher, MetadataPolicy, Object, ObjectEdge, ObjectId, ObjectKind,
+};
+use crate::atp::safety::validate_portable_path_component;
 use crate::io::AsyncReadExt;
+
+use super::metadata::{PathLinkKind, classify_path_link};
 
 /// Failure from a transport-agnostic streaming/walk helper.
 ///
@@ -244,13 +249,69 @@ pub struct SourceEntry {
 pub async fn collect_entries(
     root: &Path,
 ) -> Result<(String, bool, Vec<SourceEntry>), StreamingError> {
+    collect_entries_with_policy(root, &MetadataPolicy::default()).await
+}
+
+/// Policy-aware source walk used by metadata-preserving transports.
+///
+/// Symbolic links are emitted as leaves when preservation is enabled. Other
+/// reparse points and links disallowed by policy fail closed before traversal.
+pub async fn collect_entries_with_policy(
+    root: &Path,
+    policy: &MetadataPolicy,
+) -> Result<(String, bool, Vec<SourceEntry>), StreamingError> {
+    let root_link_kind = classify_path_link(root)
+        .await
+        .map_err(|e| StreamingError::new(format!("{}: {e}", root.display())))?;
+
+    let root_name = match root.file_name() {
+        None => "transfer".to_string(),
+        Some(name) => name
+            .to_str()
+            .ok_or_else(|| {
+                StreamingError::new(format!(
+                    "{}: source file name is not valid Unicode",
+                    root.display()
+                ))
+            })?
+            .to_string(),
+    };
+    validate_portable_path_component(&root_name).map_err(|_| {
+        StreamingError::new(format!(
+            "{}: source file name is not portable: {root_name:?}",
+            root.display()
+        ))
+    })?;
+
+    match root_link_kind {
+        PathLinkKind::Symlink(_) if policy.preserve_symlinks => {
+            return Ok((
+                root_name.clone(),
+                false,
+                vec![SourceEntry {
+                    rel_path: root_name,
+                    abs_path: root.to_path_buf(),
+                }],
+            ));
+        }
+        PathLinkKind::Symlink(_) => {
+            return Err(StreamingError::new(format!(
+                "{}: source symlink rejected by metadata policy",
+                root.display()
+            )));
+        }
+        PathLinkKind::UnsupportedReparse => {
+            return Err(StreamingError::new(format!(
+                "{}: unsupported Windows reparse point",
+                root.display()
+            )));
+        }
+        PathLinkKind::NotLink => {}
+    }
+
     let meta = crate::fs::metadata(root)
         .await
         .map_err(|e| StreamingError::new(format!("{}: {e}", root.display())))?;
-    let root_name = root.file_name().map_or_else(
-        || "transfer".to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
 
     if meta.is_file() {
         return Ok((
@@ -264,7 +325,7 @@ pub async fn collect_entries(
     }
     if meta.is_dir() {
         let mut entries = Vec::new();
-        collect_dir(root, String::new(), &mut entries).await?;
+        collect_dir(root, String::new(), policy, &mut entries).await?;
         entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
         return Ok((root_name, true, entries));
     }
@@ -280,6 +341,7 @@ pub async fn collect_entries(
 fn collect_dir<'a>(
     dir: &'a Path,
     prefix: String,
+    policy: &'a MetadataPolicy,
     out: &'a mut Vec<SourceEntry>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StreamingError>> + Send + 'a>> {
     Box::pin(async move {
@@ -293,13 +355,47 @@ fn collect_dir<'a>(
             .await
             .map_err(|e| StreamingError::new(format!("{}: {e}", dir.display())))?
         {
-            let name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
+            let link_kind = classify_path_link(&path)
+                .await
+                .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
+            let name = entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| {
+                    StreamingError::new(format!(
+                        "{}: source entry name is not valid Unicode",
+                        path.display()
+                    ))
+                })?
+                .to_string();
+            validate_portable_path_component(&name).map_err(|_| {
+                StreamingError::new(format!(
+                    "{}: source entry name is not portable: {name:?}",
+                    path.display()
+                ))
+            })?;
             let ft = entry
                 .file_type()
                 .await
                 .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
-            children.push((name, path, ft.is_dir()));
+            let is_dir = match link_kind {
+                PathLinkKind::NotLink => ft.is_dir(),
+                PathLinkKind::Symlink(_) if policy.preserve_symlinks => false,
+                PathLinkKind::Symlink(_) => {
+                    return Err(StreamingError::new(format!(
+                        "{}: source symlink rejected by metadata policy",
+                        path.display()
+                    )));
+                }
+                PathLinkKind::UnsupportedReparse => {
+                    return Err(StreamingError::new(format!(
+                        "{}: unsupported Windows reparse point",
+                        path.display()
+                    )));
+                }
+            };
+            children.push((name, path, is_dir));
         }
         children.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -325,7 +421,7 @@ fn collect_dir<'a>(
                 format!("{prefix}/{name}")
             };
             if is_dir {
-                collect_dir(&path, rel, out).await?;
+                collect_dir(&path, rel, policy, out).await?;
             } else {
                 out.push(SourceEntry {
                     rel_path: rel,
@@ -572,5 +668,67 @@ mod tests {
             format!("{e}"),
             "path/to/x: No such file or directory (os error 2)"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_aware_walk_emits_directory_symlink_as_leaf() {
+        let root = tempfile::tempdir().expect("temporary source root");
+        std::fs::create_dir(root.path().join("target")).expect("create target dir");
+        std::fs::create_dir(root.path().join("dir")).expect("create link parent");
+        std::os::unix::fs::symlink("../target", root.path().join("dir/nested-link"))
+            .expect("create directory symlink");
+
+        let (_, is_directory, entries) = futures_lite::future::block_on(
+            collect_entries_with_policy(root.path(), &MetadataPolicy::default()),
+        )
+        .expect("walk preserved symlink");
+        assert!(is_directory);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].rel_path, "dir/nested-link");
+
+        let error = futures_lite::future::block_on(collect_entries_with_policy(
+            root.path(),
+            &MetadataPolicy::portable(),
+        ))
+        .expect_err("non-preserving policy must fail closed on source links");
+        assert!(error.message().contains("metadata policy"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collect_entries_rejects_non_unicode_windows_names() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().expect("temporary source root");
+        let invalid_name = OsString::from_wide(&[0xd800, b'.' as u16, b'b' as u16]);
+        std::fs::write(root.path().join(invalid_name), b"payload")
+            .expect("create non-Unicode Windows path");
+
+        let error = futures_lite::future::block_on(collect_entries(root.path()))
+            .expect_err("non-Unicode source names must fail closed");
+        assert!(error.message().contains("not valid Unicode"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collect_entries_rejects_windows_junctions() {
+        let root = tempfile::tempdir().expect("temporary source root");
+        let target = tempfile::tempdir().expect("temporary reparse target");
+        std::fs::write(target.path().join("outside.txt"), b"outside")
+            .expect("write target payload");
+        let link = root.path().join("real-junction");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(target.path())
+            .status()
+            .expect("run mklink /J");
+        assert!(status.success(), "mklink /J fixture must succeed");
+
+        let error = futures_lite::future::block_on(collect_entries(root.path()))
+            .expect_err("junction source entries must fail closed");
+        assert!(error.message().contains("reparse point"), "{error}");
     }
 }

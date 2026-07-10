@@ -21,21 +21,67 @@
 //!
 //! # Cross-platform posture
 //!
-//! Capturing and applying metadata is `#[cfg(unix)]`. On non-unix targets the
-//! reader returns a bare [`EntryMetadata`] (file kind only) and the applier is a
-//! no-op, so portable transfers still work. Fields the receiver cannot apply
-//! (e.g. `uid`/`gid` without privilege) are reported as skipped, never fatal —
-//! rsync-style graceful degradation.
+//! Unix and Windows capture the metadata their native filesystems can represent.
+//! Targets without native metadata support retain the portable bare-entry
+//! fallback. Fields the receiver cannot apply (for example `uid`/`gid` without
+//! privilege) are reported as skipped, never fatal.
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::atp::object::MetadataPolicy;
+use crate::atp::safety::validate_portable_path_component;
+use crate::util::entropy::{EntropySource, OsEntropy};
 
 use super::streaming::{StreamingError, hex_encode};
+
+#[cfg(any(windows, test))]
+const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+#[cfg(windows)]
+const WINDOWS_IO_REPARSE_TAG_SYMLINK: u32 = 0xa000_000c;
+
+const WINDOWS_SETTABLE_ATTRIBUTE_MASK: u32 =
+    0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_0020 | 0x0000_2000;
+
+#[cfg(any(windows, test))]
+#[inline]
+const fn windows_attributes_contain_reparse_point(attributes: u32) -> bool {
+    attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Return whether `path` is a symbolic link or a Windows reparse point without
+/// following it.
+///
+/// Windows junctions and mount-point reparse records are not reported by
+/// `Metadata::is_symlink`, but following either while walking a source or
+/// committing a destination can escape the selected transfer root. ATP treats
+/// every reparse point as link-like until a tag-specific policy is implemented.
+///
+/// # Errors
+///
+/// Returns the underlying `symlink_metadata` error when the path cannot be
+/// inspected.
+pub async fn path_is_link_or_reparse(path: &Path) -> std::io::Result<bool> {
+    let path = path.to_path_buf();
+    crate::runtime::spawn_blocking(move || path_is_link_or_reparse_sync(&path)).await
+}
+
+/// Synchronous counterpart of [`path_is_link_or_reparse`] for filesystem walks
+/// that already run outside the async runtime.
+///
+/// # Errors
+///
+/// Returns the underlying `symlink_metadata` error when the path cannot be
+/// inspected.
+pub fn path_is_link_or_reparse_sync(path: &Path) -> std::io::Result<bool> {
+    classify_path_link_sync(path).map(|kind| !matches!(kind, PathLinkKind::NotLink))
+}
 
 /// Kind of filesystem entry recorded in a manifest.
 ///
@@ -94,6 +140,174 @@ impl FileKind {
     }
 }
 
+/// File-versus-directory semantics required when creating a Windows symlink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymlinkTargetKind {
+    /// File-target symlink semantics.
+    File,
+    /// Directory-target symlink semantics.
+    Directory,
+}
+
+impl SymlinkTargetKind {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::File => 0,
+            Self::Directory => 1,
+        }
+    }
+}
+
+/// Lstat-level classification used by source walks and destination guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathLinkKind {
+    /// A regular filesystem entry rather than a link or reparse point.
+    NotLink,
+    /// A real symbolic link with its declared file-versus-directory type.
+    Symlink(SymlinkTargetKind),
+    /// A Windows junction, mount point, or other unsupported reparse record.
+    UnsupportedReparse,
+}
+
+/// Classify a path without following it.
+///
+/// # Errors
+///
+/// Returns the underlying metadata or Windows reparse-tag inspection error.
+pub async fn classify_path_link(path: &Path) -> io::Result<PathLinkKind> {
+    let path = path.to_path_buf();
+    crate::runtime::spawn_blocking(move || classify_path_link_sync(&path)).await
+}
+
+/// Synchronous counterpart of [`classify_path_link`].
+///
+/// # Errors
+///
+/// Returns the underlying metadata or Windows reparse-tag inspection error.
+pub fn classify_path_link_sync(path: &Path) -> io::Result<PathLinkKind> {
+    let metadata = std::fs::symlink_metadata(path)?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{FileTypeExt, MetadataExt};
+
+        let attributes = metadata.file_attributes();
+        if !windows_attributes_contain_reparse_point(attributes) {
+            return Ok(PathLinkKind::NotLink);
+        }
+        if windows_reparse_tag(path)? != WINDOWS_IO_REPARSE_TAG_SYMLINK {
+            return Ok(PathLinkKind::UnsupportedReparse);
+        }
+        let file_type = metadata.file_type();
+        if file_type.is_symlink_dir() {
+            return Ok(PathLinkKind::Symlink(SymlinkTargetKind::Directory));
+        }
+        if file_type.is_symlink_file() {
+            return Ok(PathLinkKind::Symlink(SymlinkTargetKind::File));
+        }
+        return Ok(PathLinkKind::UnsupportedReparse);
+    }
+
+    #[cfg(not(windows))]
+    {
+        if metadata.file_type().is_symlink() {
+            let kind = std::fs::metadata(path)
+                .ok()
+                .map_or(SymlinkTargetKind::File, |target| {
+                    if target.is_dir() {
+                        SymlinkTargetKind::Directory
+                    } else {
+                        SymlinkTargetKind::File
+                    }
+                });
+            Ok(PathLinkKind::Symlink(kind))
+        } else {
+            Ok(PathLinkKind::NotLink)
+        }
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)] // Win32 handle/tag query; every handle is closed before return.
+fn windows_reparse_tag(path: &Path) -> io::Result<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+    };
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    let queried = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            std::ptr::addr_of_mut!(info).cast::<std::ffi::c_void>(),
+            u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>()).unwrap_or(u32::MAX),
+        )
+    };
+    let query_error = (queried == 0).then(io::Error::last_os_error);
+    let _ = unsafe { CloseHandle(handle) };
+    if let Some(error) = query_error {
+        return Err(error);
+    }
+    Ok(info.ReparseTag)
+}
+
+/// Path interpretation used by a captured symlink target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymlinkTargetSemantics {
+    /// A portable, relative, forward-slash path.
+    PortableRelative,
+    /// A Unix-native target that is not portable across operating systems.
+    Unix,
+    /// A Windows-native target that is not portable across operating systems.
+    Windows,
+}
+
+impl SymlinkTargetSemantics {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::PortableRelative => 0,
+            Self::Unix => 1,
+            Self::Windows => 2,
+        }
+    }
+}
+
+/// Versioned symlink target information carried by metadata commitment v2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymlinkTargetInfo {
+    /// Declared Windows link type. POSIX dangling links may leave this unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SymlinkTargetKind>,
+    /// Target path interpretation on the sender.
+    pub semantics: SymlinkTargetSemantics,
+}
+
 /// Per-entry filesystem metadata captured on the sender and applied on the
 /// receiver, subject to a [`MetadataPolicy`].
 ///
@@ -120,9 +334,16 @@ pub struct EntryMetadata {
     /// Owning group id, when ownership is preserved (apply needs privilege).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gid: Option<u32>,
+    /// Safe Win32 file-attribute bits (read-only, hidden, system, archive, and
+    /// not-content-indexed). Structural/storage-management bits are never replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_attributes: Option<u32>,
     /// Symlink target (forward-slash or platform path text) for `Symlink` kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symlink_target: Option<String>,
+    /// Explicit target semantics/type for portable cross-platform recreation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target_info: Option<SymlinkTargetInfo>,
     /// Hardlink primary: when set, this entry is a hardlink to another entry in
     /// the same transfer (the value is that primary's transfer-relative path).
     /// Such an entry carries no content — the receiver `hard_link`s it to the
@@ -147,7 +368,9 @@ impl EntryMetadata {
             && self.mtime_nanos.is_none()
             && self.uid.is_none()
             && self.gid.is_none()
+            && self.windows_attributes.is_none()
             && self.symlink_target.is_none()
+            && self.symlink_target_info.is_none()
             && self.hardlink_target.is_none()
             && self.xattrs.is_empty()
     }
@@ -155,7 +378,7 @@ impl EntryMetadata {
     /// Append this entry's canonical, domain-separated encoding to `hasher`. The
     /// presence byte before each optional field keeps "absent" distinct from a
     /// zero value so the commitment is collision-resistant across schemas.
-    fn hash_into(&self, rel_path: &str, hasher: &mut Sha256) {
+    fn hash_v1_into(&self, rel_path: &str, hasher: &mut Sha256) {
         hasher.update((rel_path.len() as u64).to_be_bytes());
         hasher.update(rel_path.as_bytes());
         hasher.update([self.file_kind.tag()]);
@@ -168,6 +391,371 @@ impl EntryMetadata {
         hash_opt_str(hasher, self.hardlink_target.as_deref());
         hash_xattrs(hasher, &self.xattrs);
     }
+
+    fn hash_v2_into(&self, rel_path: &str, hasher: &mut Sha256) {
+        self.hash_v1_into(rel_path, hasher);
+        hash_opt_u32(hasher, self.windows_attributes);
+        match &self.symlink_target_info {
+            Some(info) => {
+                hasher.update([1]);
+                match info.kind {
+                    Some(kind) => hasher.update([1, kind.tag()]),
+                    None => hasher.update([0]),
+                }
+                hasher.update([info.semantics.tag()]);
+            }
+            None => hasher.update([0]),
+        }
+    }
+}
+
+fn classify_symlink_target_semantics(target: &str) -> SymlinkTargetSemantics {
+    if validate_portable_symlink_target_syntax(target).is_ok() {
+        SymlinkTargetSemantics::PortableRelative
+    } else if cfg!(windows) {
+        SymlinkTargetSemantics::Windows
+    } else {
+        SymlinkTargetSemantics::Unix
+    }
+}
+
+fn validate_portable_symlink_target_syntax(target: &str) -> Result<(), String> {
+    if target.is_empty()
+        || target.starts_with('/')
+        || target.starts_with('\\')
+        || target.contains('\\')
+    {
+        return Err(target.to_string());
+    }
+    for component in target.split('/') {
+        if component.is_empty() {
+            return Err(target.to_string());
+        }
+        if matches!(component, "." | "..") {
+            continue;
+        }
+        validate_portable_path_component(component).map_err(|_| target.to_string())?;
+    }
+    Ok(())
+}
+
+fn validate_contained_symlink_target(rel_path: &str, target: &str) -> Result<(), String> {
+    validate_portable_symlink_target_syntax(target)?;
+    let mut resolved = rel_path.split('/').collect::<Vec<_>>();
+    if resolved.pop().is_none() {
+        return Err("symlink entry path is empty".to_string());
+    }
+    for component in target.split('/') {
+        match component {
+            "." => {}
+            ".." => {
+                if resolved.pop().is_none() {
+                    return Err("symlink target escapes the transfer root".to_string());
+                }
+            }
+            component => resolved.push(component),
+        }
+    }
+    Ok(())
+}
+
+/// Validate symlink metadata before any receiver filesystem mutation.
+///
+/// ATP v2 accepts only contained portable-relative targets. Native absolute,
+/// parent-traversing, drive/UNC, backslash, device, and ambiguous targets fail
+/// closed rather than changing meaning across operating systems.
+pub fn validate_symlink_metadata_for_receive(
+    rel_path: &str,
+    metadata: &EntryMetadata,
+) -> Result<(), String> {
+    if let Some(attributes) = metadata.windows_attributes {
+        if attributes & !WINDOWS_SETTABLE_ATTRIBUTE_MASK != 0 {
+            return Err("metadata declares unsafe Windows attribute bits".to_string());
+        }
+        if matches!(metadata.file_kind, FileKind::Symlink) {
+            return Err("symlink metadata must not declare Windows attributes".to_string());
+        }
+    }
+    if !matches!(metadata.file_kind, FileKind::Symlink) {
+        if metadata.symlink_target.is_some() || metadata.symlink_target_info.is_some() {
+            return Err("non-symlink metadata declares a symlink target".to_string());
+        }
+        return Ok(());
+    }
+
+    let target = metadata
+        .symlink_target
+        .as_deref()
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| "symlink metadata is missing its target".to_string())?;
+    let Some(info) = &metadata.symlink_target_info else {
+        #[cfg(windows)]
+        return Err("legacy symlink metadata has no explicit Windows target type".to_string());
+        #[cfg(not(windows))]
+        return validate_contained_symlink_target(rel_path, target);
+    };
+    if !matches!(info.semantics, SymlinkTargetSemantics::PortableRelative) {
+        return Err("symlink target uses non-portable native path semantics".to_string());
+    }
+    validate_contained_symlink_target(rel_path, target)
+        .map_err(|error| format!("symlink target is not contained and portable: {error}"))?;
+    #[cfg(windows)]
+    if info.kind.is_none() {
+        return Err("symlink target type is ambiguous on Windows".to_string());
+    }
+    Ok(())
+}
+
+/// Validate an entry's committed metadata against receiver policy.
+///
+/// # Errors
+///
+/// Returns a field-specific rejection before the receiver creates staging or
+/// destination filesystem state.
+pub fn validate_entry_metadata_for_receive(
+    rel_path: &str,
+    metadata: &EntryMetadata,
+    policy: &MetadataPolicy,
+) -> Result<(), String> {
+    validate_symlink_metadata_for_receive(rel_path, metadata)?;
+    if metadata.unix_mode.is_some() && !policy.preserve_unix_permissions {
+        return Err("Unix permissions are denied by receiver metadata policy".to_string());
+    }
+    if (metadata.mtime_unix_secs.is_some() || metadata.mtime_nanos.is_some())
+        && !policy.preserve_timestamps
+    {
+        return Err("timestamps are denied by receiver metadata policy".to_string());
+    }
+    if (metadata.uid.is_some() || metadata.gid.is_some()) && !policy.record_platform_metadata {
+        return Err("platform ownership is denied by receiver metadata policy".to_string());
+    }
+    if metadata.windows_attributes.is_some() && !policy.preserve_windows_attributes {
+        return Err("Windows attributes are denied by receiver metadata policy".to_string());
+    }
+    if !metadata.xattrs.is_empty() && !policy.preserve_extended_attributes {
+        return Err("extended attributes are denied by receiver metadata policy".to_string());
+    }
+    if matches!(metadata.file_kind, FileKind::Symlink) && !policy.preserve_symlinks {
+        return Err("symlinks are denied by receiver metadata policy".to_string());
+    }
+    Ok(())
+}
+
+/// Map committed metadata to the explicit filesystem symlink kind.
+pub fn filesystem_symlink_kind(
+    rel_path: &str,
+    metadata: &EntryMetadata,
+) -> Result<crate::fs::SymlinkKind, String> {
+    validate_symlink_metadata_for_receive(rel_path, metadata)?;
+    match metadata
+        .symlink_target_info
+        .as_ref()
+        .and_then(|info| info.kind)
+    {
+        Some(SymlinkTargetKind::Directory) => Ok(crate::fs::SymlinkKind::Directory),
+        Some(SymlinkTargetKind::File) => Ok(crate::fs::SymlinkKind::File),
+        None if cfg!(not(windows)) => Ok(crate::fs::SymlinkKind::File),
+        None => Err("symlink target type is ambiguous on Windows".to_string()),
+    }
+}
+
+static SYMLINK_COMMIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy)]
+enum ReplaceableLeafKind {
+    RegularFile,
+    Symlink(crate::fs::SymlinkKind),
+}
+
+/// Create and transactionally install a typed symbolic link.
+///
+/// The new link is created at a unique sibling before the existing leaf is
+/// moved aside. A failed final rename rolls the old leaf back into place.
+/// Existing real directories and unsupported reparse points fail closed.
+///
+/// # Errors
+///
+/// Returns a validation or filesystem error without following the destination
+/// leaf.
+pub async fn commit_symlink_transactionally(
+    rel_path: &str,
+    out_path: &Path,
+    metadata: &EntryMetadata,
+) -> Result<(), StreamingError> {
+    let target = metadata.symlink_target.as_deref().ok_or_else(|| {
+        StreamingError::new(format!(
+            "{rel_path}: symlink metadata is missing its target"
+        ))
+    })?;
+    let kind = filesystem_symlink_kind(rel_path, metadata)
+        .map_err(|error| StreamingError::new(format!("{rel_path}: {error}")))?;
+    let existing = replaceable_leaf_kind(out_path).await?;
+
+    let mut temporary = None;
+    for _ in 0..32 {
+        let candidate = unique_symlink_sibling(out_path, "new")?;
+        match crate::fs::symlink_typed(target, &candidate, kind).await {
+            Ok(()) => {
+                temporary = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(StreamingError::new(format!(
+                    "{}: create typed symlink: {error}",
+                    out_path.display()
+                )));
+            }
+        }
+    }
+    let temporary = temporary.ok_or_else(|| {
+        StreamingError::new(format!(
+            "{}: unable to allocate unique symlink staging leaf",
+            out_path.display()
+        ))
+    })?;
+
+    let backup = if existing.is_some() {
+        let backup = unique_absent_symlink_sibling(out_path, "backup").await?;
+        if let Err(error) = crate::fs::rename(out_path, &backup).await {
+            let _ = remove_typed_symlink(&temporary, kind).await;
+            return Err(StreamingError::new(format!(
+                "{}: move existing leaf to backup: {error}",
+                out_path.display()
+            )));
+        }
+        Some(backup)
+    } else {
+        None
+    };
+
+    if let Err(error) = crate::fs::rename(&temporary, out_path).await {
+        let _ = remove_typed_symlink(&temporary, kind).await;
+        let rollback = if let Some(backup) = &backup {
+            crate::fs::rename(backup, out_path).await
+        } else {
+            Ok(())
+        };
+        let rollback = rollback.err().map_or_else(String::new, |rollback| {
+            format!("; rollback failed: {rollback}")
+        });
+        return Err(StreamingError::new(format!(
+            "{}: install typed symlink: {error}{rollback}",
+            out_path.display()
+        )));
+    }
+
+    if let (Some(backup), Some(existing)) = (backup, existing) {
+        remove_replaceable_leaf(&backup, existing).await?;
+    }
+    Ok(())
+}
+
+async fn replaceable_leaf_kind(path: &Path) -> Result<Option<ReplaceableLeafKind>, StreamingError> {
+    let link_kind = match classify_path_link(path).await {
+        Ok(kind) => kind,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StreamingError::new(format!("{}: {error}", path.display())));
+        }
+    };
+    match link_kind {
+        PathLinkKind::Symlink(SymlinkTargetKind::File) => Ok(Some(ReplaceableLeafKind::Symlink(
+            crate::fs::SymlinkKind::File,
+        ))),
+        PathLinkKind::Symlink(SymlinkTargetKind::Directory) => Ok(Some(
+            ReplaceableLeafKind::Symlink(crate::fs::SymlinkKind::Directory),
+        )),
+        PathLinkKind::UnsupportedReparse => Err(StreamingError::new(format!(
+            "{}: destination leaf is an unsupported reparse point",
+            path.display()
+        ))),
+        PathLinkKind::NotLink => {
+            let metadata = crate::fs::symlink_metadata(path)
+                .await
+                .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?;
+            if metadata.is_dir() {
+                Err(StreamingError::new(format!(
+                    "{}: refusing to replace a real directory with a symlink",
+                    path.display()
+                )))
+            } else {
+                Ok(Some(ReplaceableLeafKind::RegularFile))
+            }
+        }
+    }
+}
+
+fn unique_symlink_sibling(path: &Path, label: &str) -> Result<PathBuf, StreamingError> {
+    let parent = path.parent().ok_or_else(|| {
+        StreamingError::new(format!(
+            "{}: symlink destination has no parent",
+            path.display()
+        ))
+    })?;
+    let sequence = SYMLINK_COMMIT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = OsEntropy.next_u64();
+    Ok(parent.join(format!(
+        ".atp-sym-{label}-{}-{nonce:016x}-{sequence}",
+        std::process::id()
+    )))
+}
+
+async fn unique_absent_symlink_sibling(
+    path: &Path,
+    label: &str,
+) -> Result<PathBuf, StreamingError> {
+    for _ in 0..32 {
+        let candidate = unique_symlink_sibling(path, label)?;
+        match crate::fs::symlink_metadata(&candidate).await {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(StreamingError::new(format!(
+                    "{}: inspect backup candidate: {error}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    Err(StreamingError::new(format!(
+        "{}: unable to allocate unique symlink backup leaf",
+        path.display()
+    )))
+}
+
+async fn remove_typed_symlink(path: &Path, kind: crate::fs::SymlinkKind) -> io::Result<()> {
+    #[cfg(windows)]
+    if matches!(kind, crate::fs::SymlinkKind::Directory) {
+        return crate::fs::remove_dir(path).await;
+    }
+    let _ = kind;
+    crate::fs::remove_file(path).await
+}
+
+async fn remove_replaceable_leaf(
+    path: &Path,
+    kind: ReplaceableLeafKind,
+) -> Result<(), StreamingError> {
+    let mut result = match kind {
+        ReplaceableLeafKind::RegularFile => crate::fs::remove_file(path).await,
+        ReplaceableLeafKind::Symlink(kind) => remove_typed_symlink(path, kind).await,
+    };
+    #[cfg(windows)]
+    if result
+        .as_ref()
+        .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+        && matches!(kind, ReplaceableLeafKind::RegularFile)
+        && set_windows_attributes(path, 0).is_ok()
+    {
+        result = crate::fs::remove_file(path).await;
+    }
+    result.map_err(|error| {
+        StreamingError::new(format!(
+            "{}: remove replaced backup: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Stable filesystem identity for a regular file on platforms that expose it.
@@ -660,10 +1248,21 @@ pub fn metadata_commitment(entries: &[(&str, &EntryMetadata)]) -> Option<String>
     sorted.sort_by(|a, b| a.0.cmp(b.0));
 
     let mut hasher = Sha256::new();
-    hasher.update(b"asupersync.atp.metadata-commitment.v1\0");
+    let v2 = sorted.iter().any(|(_, metadata)| {
+        metadata.symlink_target_info.is_some() || metadata.windows_attributes.is_some()
+    });
+    if v2 {
+        hasher.update(b"asupersync.atp.metadata-commitment.v2\0");
+    } else {
+        hasher.update(b"asupersync.atp.metadata-commitment.v1\0");
+    }
     hasher.update((sorted.len() as u64).to_be_bytes());
     for (rel_path, meta) in sorted {
-        meta.hash_into(rel_path, &mut hasher);
+        if v2 {
+            meta.hash_v2_into(rel_path, &mut hasher);
+        } else {
+            meta.hash_v1_into(rel_path, &mut hasher);
+        }
     }
     Some(hex_encode(&hasher.finalize()))
 }
@@ -680,6 +1279,7 @@ pub struct MetadataApplyReport {
 }
 
 impl MetadataApplyReport {
+    #[cfg(any(unix, windows))]
     fn mark_applied(&mut self, field: &'static str) {
         self.applied.push(field);
     }
@@ -692,16 +1292,13 @@ impl MetadataApplyReport {
 ///
 /// When `policy.preserve_symlinks` is set, a symlink is recorded as a
 /// [`FileKind::Symlink`] carrying its target (never followed). Otherwise the link
-/// is **followed** and the entry takes its target's kind/content/metadata — so a
-/// non-preserved symlink to a file transfers as that file rather than being
-/// silently dropped to an empty placeholder. Returns a bare [`EntryMetadata`] on
-/// non-unix targets.
+/// fails closed so a policy change cannot silently turn a link into traversal of
+/// the sender's filesystem namespace.
 ///
 /// # Errors
 ///
 /// Returns [`StreamingError`] if the path cannot be stat'd, a preserved symlink's
-/// target cannot be read, or a non-preserved symlink dangles (stat through the
-/// link fails).
+/// target cannot be read, or a symlink is denied by policy.
 #[cfg(unix)]
 pub async fn read_entry_metadata(
     abs_path: &Path,
@@ -735,26 +1332,39 @@ pub fn read_entry_metadata_sync(
 
     let mut meta = EntryMetadata::default();
 
-    if lmeta.is_symlink() && policy.preserve_symlinks {
+    if lmeta.is_symlink() {
+        if !policy.preserve_symlinks {
+            return Err(StreamingError::new(format!(
+                "{}: source symlink rejected by metadata policy",
+                abs_path.display()
+            )));
+        }
         meta.file_kind = FileKind::Symlink;
         let target = std::fs::read_link(abs_path)
             .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
-        meta.symlink_target = Some(target.to_string_lossy().into_owned());
+        let target = target.to_str().ok_or_else(|| {
+            StreamingError::new(format!(
+                "{}: symlink target is not valid Unicode",
+                abs_path.display()
+            ))
+        })?;
+        meta.symlink_target = Some(target.to_string());
+        meta.symlink_target_info = Some(SymlinkTargetInfo {
+            kind: std::fs::metadata(abs_path).ok().map(|target_metadata| {
+                if target_metadata.is_dir() {
+                    SymlinkTargetKind::Directory
+                } else {
+                    SymlinkTargetKind::File
+                }
+            }),
+            semantics: classify_symlink_target_semantics(target),
+        });
         // Mode/owner/time on a symlink itself are rarely meaningful and need
         // lchown/lutimes; ATP preserves the link + target, not link metadata.
         return Ok(meta);
     }
 
-    // For a non-preserved symlink, stat through the link so the entry reflects
-    // its target (the streaming hash also follows the link); otherwise use the
-    // path's own metadata.
-    let read_xattrs_through_symlink = lmeta.is_symlink();
-    let effective = if read_xattrs_through_symlink {
-        std::fs::metadata(abs_path)
-            .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?
-    } else {
-        lmeta
-    };
+    let effective = lmeta;
 
     if effective.is_dir() {
         meta.file_kind = FileKind::Directory;
@@ -786,7 +1396,7 @@ pub fn read_entry_metadata_sync(
         meta.gid = Some(effective.gid());
     }
     if policy.preserve_extended_attributes {
-        meta.xattrs = read_xattrs_best_effort_sync(abs_path, read_xattrs_through_symlink);
+        meta.xattrs = read_xattrs_best_effort_sync(abs_path, false);
     }
     Ok(meta)
 }
@@ -819,15 +1429,37 @@ fn read_xattrs_best_effort_sync(abs_path: &Path, deref_symlink: bool) -> BTreeMa
     attrs
 }
 
-/// Non-unix capture: file kind only (regular vs directory), no platform
-/// metadata. Symlinks are not represented on non-unix targets, so the link is
-/// followed and the entry takes its target's kind (avoids an empty placeholder).
+#[cfg(windows)]
+fn system_time_to_unix_parts(time: std::time::SystemTime) -> Option<(i64, u32)> {
+    use std::time::UNIX_EPOCH;
+
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => Some((
+            i64::try_from(duration.as_secs()).ok()?,
+            duration.subsec_nanos(),
+        )),
+        Err(error) => {
+            let duration = error.duration();
+            let seconds = i64::try_from(duration.as_secs()).ok()?;
+            if duration.subsec_nanos() == 0 {
+                Some((seconds.checked_neg()?, 0))
+            } else {
+                Some((
+                    seconds.checked_neg()?.checked_sub(1)?,
+                    1_000_000_000 - duration.subsec_nanos(),
+                ))
+            }
+        }
+    }
+}
+
+/// Windows capture: regular/directory metadata plus typed symbolic links.
 ///
 /// # Errors
 ///
-/// Returns [`StreamingError`] if the path cannot be stat'd (a dangling symlink
-/// fails closed here).
-#[cfg(not(unix))]
+/// Returns [`StreamingError`] if the path cannot be inspected or is an
+/// unsupported reparse point.
+#[cfg(windows)]
 pub async fn read_entry_metadata(
     abs_path: &Path,
     policy: &MetadataPolicy,
@@ -837,17 +1469,89 @@ pub async fn read_entry_metadata(
     crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
 }
 
-/// Synchronous core of [`read_entry_metadata`] (non-unix): file kind only.
+/// Synchronous core of [`read_entry_metadata`] on Windows.
 ///
 /// # Errors
 ///
 /// Same contract as [`read_entry_metadata`].
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn read_entry_metadata_sync(
+    abs_path: &Path,
+    policy: &MetadataPolicy,
+) -> Result<EntryMetadata, StreamingError> {
+    use std::os::windows::fs::MetadataExt;
+
+    let link_kind = classify_path_link_sync(abs_path)
+        .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?;
+    if let PathLinkKind::UnsupportedReparse = link_kind {
+        return Err(StreamingError::new(format!(
+            "{}: unsupported Windows reparse point",
+            abs_path.display()
+        )));
+    }
+    if let PathLinkKind::Symlink(kind) = link_kind {
+        if !policy.preserve_symlinks {
+            return Err(StreamingError::new(format!(
+                "{}: source symlink rejected by metadata policy",
+                abs_path.display()
+            )));
+        }
+        let target = std::fs::read_link(abs_path)
+            .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?;
+        let target = target.to_str().ok_or_else(|| {
+            StreamingError::new(format!(
+                "{}: symlink target is not valid Unicode",
+                abs_path.display()
+            ))
+        })?;
+        return Ok(EntryMetadata {
+            file_kind: FileKind::Symlink,
+            symlink_target: Some(target.to_string()),
+            symlink_target_info: Some(SymlinkTargetInfo {
+                kind: Some(kind),
+                semantics: classify_symlink_target_semantics(target),
+            }),
+            ..EntryMetadata::default()
+        });
+    }
+
+    let effective = std::fs::symlink_metadata(abs_path)
+        .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
+    let mut meta = EntryMetadata::default();
+    if effective.is_dir() {
+        meta.file_kind = FileKind::Directory;
+    }
+    if policy.preserve_windows_attributes {
+        meta.windows_attributes =
+            Some(effective.file_attributes() & WINDOWS_SETTABLE_ATTRIBUTE_MASK);
+    }
+    if policy.preserve_timestamps
+        && let Ok(modified) = effective.modified()
+        && let Some((seconds, nanos)) = system_time_to_unix_parts(modified)
+    {
+        meta.mtime_unix_secs = Some(seconds);
+        meta.mtime_nanos = Some(nanos);
+    }
+    Ok(meta)
+}
+
+/// Portable fallback for targets that are neither Unix nor Windows.
+#[cfg(not(any(unix, windows)))]
+pub async fn read_entry_metadata(
+    abs_path: &Path,
+    policy: &MetadataPolicy,
+) -> Result<EntryMetadata, StreamingError> {
+    let path_buf = abs_path.to_path_buf();
+    let policy = policy.clone();
+    crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path_buf, &policy)).await
+}
+
+/// Synchronous portable fallback: regular-versus-directory kind only.
+#[cfg(not(any(unix, windows)))]
 pub fn read_entry_metadata_sync(
     abs_path: &Path,
     _policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, StreamingError> {
-    // `metadata` follows symlinks, so the recorded kind is the target's.
     let effective = std::fs::metadata(abs_path)
         .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
     let mut meta = EntryMetadata::default();
@@ -890,22 +1594,51 @@ pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, 
     }
 }
 
-/// Non-unix: hardlink detection is unsupported; never reports an inode identity.
+/// Windows hardlink identity from volume serial number and file index.
 ///
 /// # Errors
 ///
-/// Never returns an error on non-unix targets.
-#[cfg(not(unix))]
+/// Returns [`StreamingError`] if the path cannot be inspected.
+#[cfg(windows)]
+pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+    let path_buf = abs_path.to_path_buf();
+    crate::runtime::spawn_blocking(move || inode_key_if_regular_sync(&path_buf)).await
+}
+
+/// Synchronous Windows hardlink identity capture.
+///
+/// # Errors
+///
+/// Returns [`StreamingError`] if the path cannot be inspected.
+#[cfg(windows)]
+pub fn inode_key_if_regular_sync(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+    use std::os::windows::fs::MetadataExt;
+
+    match classify_path_link_sync(abs_path)
+        .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?
+    {
+        PathLinkKind::NotLink => {}
+        PathLinkKind::Symlink(_) | PathLinkKind::UnsupportedReparse => return Ok(None),
+    }
+    let metadata = std::fs::symlink_metadata(abs_path)
+        .map_err(|error| StreamingError::new(format!("{}: {error}", abs_path.display())))?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    Ok(metadata
+        .volume_serial_number()
+        .zip(metadata.file_index())
+        .map(|(volume, index)| (u64::from(volume), index)))
+}
+
+/// Unsupported-platform hardlink fallback.
+#[cfg(not(any(unix, windows)))]
 pub async fn inode_key_if_regular(_abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
     Ok(None)
 }
 
-/// Non-unix: hardlink detection is unsupported (sync core mirror).
-///
-/// # Errors
-///
-/// Never returns an error on non-unix targets.
-#[cfg(not(unix))]
+/// Synchronous unsupported-platform hardlink fallback.
+#[cfg(not(any(unix, windows)))]
 pub fn inode_key_if_regular_sync(_abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
     Ok(None)
 }
@@ -1016,6 +1749,13 @@ pub fn apply_entry_metadata_sync(
         }
     }
 
+    if meta.windows_attributes.is_some() {
+        report.mark_skipped(
+            "windows_attributes",
+            "Windows attributes unsupported on this platform",
+        );
+    }
+
     if let Some(mode) = meta.unix_mode {
         std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(mode))
             .map_err(|e| StreamingError::new(format!("{}: {e}", out_path.display())))?;
@@ -1025,25 +1765,124 @@ pub fn apply_entry_metadata_sync(
     Ok(report)
 }
 
-/// Non-unix apply: nothing to do; report every present field as skipped.
+/// Apply supported metadata on Windows.
 ///
 /// # Errors
 ///
-/// Never returns an error on non-unix targets.
-#[cfg(not(unix))]
+/// Returns an error only when the blocking task cannot complete.
+#[cfg(windows)]
 pub async fn apply_entry_metadata(
-    _out_path: &Path,
+    out_path: &Path,
     meta: &EntryMetadata,
 ) -> Result<MetadataApplyReport, StreamingError> {
-    apply_entry_metadata_sync(_out_path, meta)
+    let path = out_path.to_path_buf();
+    let meta = meta.clone();
+    crate::runtime::spawn_blocking(move || apply_entry_metadata_sync(&path, &meta)).await
 }
 
-/// Non-unix sync apply: nothing to do; report every present field as skipped.
+/// Synchronous Windows metadata application.
 ///
 /// # Errors
 ///
-/// Never returns an error on non-unix targets.
-#[cfg(not(unix))]
+/// Invalid or unsupported fields are reported as skipped.
+#[cfg(windows)]
+pub fn apply_entry_metadata_sync(
+    out_path: &Path,
+    meta: &EntryMetadata,
+) -> Result<MetadataApplyReport, StreamingError> {
+    let mut report = MetadataApplyReport::default();
+    if let Some(seconds) = meta.mtime_unix_secs {
+        let nanos = meta.mtime_nanos.unwrap_or(0) % 1_000_000_000;
+        let applied = u64::try_from(seconds)
+            .map_err(|_| "pre-epoch mtime not representable".to_string())
+            .and_then(|seconds| {
+                let modified = std::time::UNIX_EPOCH
+                    .checked_add(std::time::Duration::new(seconds, nanos))
+                    .ok_or_else(|| "mtime out of representable range".to_string())?;
+                open_windows_metadata_handle(out_path)
+                    .and_then(|file| {
+                        file.set_times(std::fs::FileTimes::new().set_modified(modified))
+                    })
+                    .map_err(|error| error.to_string())
+            });
+        match applied {
+            Ok(()) => report.mark_applied("mtime"),
+            Err(error) => report.mark_skipped("mtime", error),
+        }
+    }
+    if let Some(attributes) = meta.windows_attributes {
+        if attributes & !WINDOWS_SETTABLE_ATTRIBUTE_MASK != 0 {
+            report.mark_skipped("windows_attributes", "unsafe attribute bits rejected");
+        } else {
+            match set_windows_attributes(out_path, attributes) {
+                Ok(()) => report.mark_applied("windows_attributes"),
+                Err(error) => report.mark_skipped("windows_attributes", error.to_string()),
+            }
+        }
+    }
+    if meta.unix_mode.is_some() {
+        report.mark_skipped("mode", "unix permissions unsupported on this platform");
+    }
+    if meta.uid.is_some() || meta.gid.is_some() {
+        report.mark_skipped("owner", "ownership unsupported on this platform");
+    }
+    if !meta.xattrs.is_empty() {
+        report.mark_skipped("xattr", "extended attributes unsupported on this platform");
+    }
+    Ok(report)
+}
+
+#[cfg(windows)]
+fn open_windows_metadata_handle(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_WRITE_ATTRIBUTES,
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)] // SetFileAttributesW requires a NUL-terminated UTF-16 path.
+fn set_windows_attributes(path: &Path, attributes: u32) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let attributes = if attributes == 0 {
+        FILE_ATTRIBUTE_NORMAL
+    } else {
+        attributes
+    };
+    if unsafe { SetFileAttributesW(wide.as_ptr(), attributes) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Portable fallback: report metadata that cannot be applied.
+#[cfg(not(any(unix, windows)))]
+pub async fn apply_entry_metadata(
+    out_path: &Path,
+    meta: &EntryMetadata,
+) -> Result<MetadataApplyReport, StreamingError> {
+    apply_entry_metadata_sync(out_path, meta)
+}
+
+/// Synchronous portable metadata fallback.
+#[cfg(not(any(unix, windows)))]
 pub fn apply_entry_metadata_sync(
     _out_path: &Path,
     meta: &EntryMetadata,
@@ -1054,6 +1893,12 @@ pub fn apply_entry_metadata_sync(
     }
     if meta.mtime_unix_secs.is_some() {
         report.mark_skipped("mtime", "timestamp apply unsupported on this platform");
+    }
+    if meta.windows_attributes.is_some() {
+        report.mark_skipped(
+            "windows_attributes",
+            "Windows attributes unsupported on this platform",
+        );
     }
     if meta.uid.is_some() || meta.gid.is_some() {
         report.mark_skipped("owner", "ownership unsupported on this platform");
@@ -1110,6 +1955,93 @@ pub async fn recreate_fifo(_out_path: &Path, _mode: u32) -> Result<(), Streaming
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_reparse_attribute_is_treated_as_link_like() {
+        assert!(windows_attributes_contain_reparse_point(
+            WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+        ));
+        assert!(!windows_attributes_contain_reparse_point(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transactional_symlink_commit_replaces_file_without_temp_leaks() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let target = root.path().join("target");
+        let link = root.path().join("link");
+        std::fs::write(&target, b"target").expect("write target");
+        std::fs::write(&link, b"old").expect("write old destination");
+        let metadata = EntryMetadata {
+            file_kind: FileKind::Symlink,
+            symlink_target: Some("target".to_string()),
+            symlink_target_info: Some(SymlinkTargetInfo {
+                kind: Some(SymlinkTargetKind::File),
+                semantics: SymlinkTargetSemantics::PortableRelative,
+            }),
+            ..EntryMetadata::default()
+        };
+
+        futures_lite::future::block_on(commit_symlink_transactionally("link", &link, &metadata))
+            .expect("commit symlink");
+        assert_eq!(
+            std::fs::read_link(&link).expect("read link"),
+            Path::new("target")
+        );
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("read root")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atp-sym-"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_distinguishes_file_and_directory_symlinks() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        std::fs::write(root.path().join("file-target"), b"target").expect("write file target");
+        std::fs::create_dir(root.path().join("dir-target")).expect("create dir target");
+        let file_link = root.path().join("file-link");
+        let dir_link = root.path().join("dir-link");
+        std::os::windows::fs::symlink_file("file-target", &file_link)
+            .expect("create Windows file symlink");
+        std::os::windows::fs::symlink_dir("dir-target", &dir_link)
+            .expect("create Windows directory symlink");
+
+        let file = read_entry_metadata_sync(&file_link, &MetadataPolicy::default())
+            .expect("capture file link");
+        let directory = read_entry_metadata_sync(&dir_link, &MetadataPolicy::default())
+            .expect("capture directory link");
+        assert_eq!(
+            file.symlink_target_info.and_then(|info| info.kind),
+            Some(SymlinkTargetKind::File)
+        );
+        assert_eq!(
+            directory.symlink_target_info.and_then(|info| info.kind),
+            Some(SymlinkTargetKind::Directory)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hardlinks_share_the_same_identity() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::write(&first, b"same inode").expect("write primary");
+        std::fs::hard_link(&first, &second).expect("create hardlink");
+        let first_key = inode_key_if_regular_sync(&first)
+            .expect("first identity query")
+            .expect("first identity available");
+        let second_key = inode_key_if_regular_sync(&second)
+            .expect("second identity query")
+            .expect("second identity available");
+        assert_eq!(first_key, second_key);
+    }
 
     fn meta(mode: Option<u32>) -> EntryMetadata {
         EntryMetadata {
@@ -1294,6 +2226,88 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_symlink_commitment_is_frozen() {
+        let legacy = EntryMetadata {
+            file_kind: FileKind::Symlink,
+            symlink_target: Some("../t".to_string()),
+            ..EntryMetadata::default()
+        };
+        assert_eq!(
+            metadata_commitment(&[("f", &legacy)]).as_deref(),
+            Some("4af5addb7e13dbcad54a31d2b2c2567f17c5954026294388e8051e76a4f4efe0")
+        );
+    }
+
+    #[test]
+    fn v2_commitment_covers_symlink_kind_semantics_and_windows_attributes() {
+        let mut file_link = EntryMetadata {
+            file_kind: FileKind::Symlink,
+            symlink_target: Some("target".to_string()),
+            symlink_target_info: Some(SymlinkTargetInfo {
+                kind: Some(SymlinkTargetKind::File),
+                semantics: SymlinkTargetSemantics::PortableRelative,
+            }),
+            ..EntryMetadata::default()
+        };
+        let file_root = metadata_commitment(&[("link", &file_link)]).expect("v2 root");
+
+        file_link.symlink_target_info.as_mut().expect("info").kind =
+            Some(SymlinkTargetKind::Directory);
+        let directory_root = metadata_commitment(&[("link", &file_link)]).expect("v2 root");
+        assert_ne!(file_root, directory_root);
+
+        file_link
+            .symlink_target_info
+            .as_mut()
+            .expect("info")
+            .semantics = SymlinkTargetSemantics::Unix;
+        let native_root = metadata_commitment(&[("link", &file_link)]).expect("v2 root");
+        assert_ne!(directory_root, native_root);
+
+        let attributes = EntryMetadata {
+            windows_attributes: Some(0x21),
+            ..EntryMetadata::default()
+        };
+        assert_ne!(
+            metadata_commitment(&[("f", &attributes)]),
+            metadata_commitment(&[("f", &EntryMetadata::default())])
+        );
+    }
+
+    #[test]
+    fn symlink_target_validation_normalizes_against_manifest_parent() {
+        let metadata = EntryMetadata {
+            file_kind: FileKind::Symlink,
+            symlink_target: Some("../target".to_string()),
+            symlink_target_info: Some(SymlinkTargetInfo {
+                kind: Some(SymlinkTargetKind::File),
+                semantics: SymlinkTargetSemantics::PortableRelative,
+            }),
+            ..EntryMetadata::default()
+        };
+        assert!(validate_symlink_metadata_for_receive("dir/link", &metadata).is_ok());
+        assert!(validate_symlink_metadata_for_receive("link", &metadata).is_err());
+
+        for target in ["/rooted", "\\rooted", "C:relative", "dir\\file", "../NUL"] {
+            let mut invalid = metadata.clone();
+            invalid.symlink_target = Some(target.to_string());
+            assert!(
+                validate_symlink_metadata_for_receive("dir/link", &invalid).is_err(),
+                "target {target:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn unsafe_windows_attribute_bits_are_rejected() {
+        let metadata = EntryMetadata {
+            windows_attributes: Some(WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT),
+            ..EntryMetadata::default()
+        };
+        assert!(validate_symlink_metadata_for_receive("file", &metadata).is_err());
+    }
+
+    #[test]
     fn changing_mtime_or_symlink_changes_the_commitment() {
         let base = EntryMetadata {
             unix_mode: Some(0o644),
@@ -1370,7 +2384,12 @@ mod tests {
             mtime_nanos: Some(123),
             uid: Some(1000),
             gid: Some(1000),
+            windows_attributes: None,
             symlink_target: Some("../t".to_string()),
+            symlink_target_info: Some(SymlinkTargetInfo {
+                kind: Some(SymlinkTargetKind::Directory),
+                semantics: SymlinkTargetSemantics::PortableRelative,
+            }),
             hardlink_target: None,
             xattrs: BTreeMap::from([("user.asupersync.note".to_string(), b"hello".to_vec())]),
         };
