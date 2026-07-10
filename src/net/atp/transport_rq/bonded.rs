@@ -21,6 +21,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+use crate::channel::mpsc;
 use crate::io::AsyncRead;
 use crate::net::atp::bonding::{
     BondAuthKeyRef, BondEntryBlockGeometry, BondTransport, BondedDonorIngressStats,
@@ -31,6 +32,7 @@ use crate::net::atp::bonding::{
     reallocate_failed_bonded_repair_windows, schedule_bonded_repair_continuation,
     verify_bonded_symbol_tag,
 };
+use crate::net::atp::sdk::{BondedTransferProgress, TransferPhase};
 
 /// Bonded control-plane protocol version carried in the donor hello.
 ///
@@ -828,6 +830,59 @@ async fn drain_bonded_round_tail(
     }
 }
 
+/// Emit one best-effort live [`BondedTransferProgress`] snapshot to an
+/// optional SDK progress sink.
+///
+/// Everything a snapshot needs is derivable at the receiver's round boundary:
+/// `blocks_remaining` is the count of tracked blocks whose owning entry has
+/// not yet decoded, `blocks_total` is the number of tracked blocks, and the
+/// per-donor ingress is exactly the tuple the terminal report carries. The
+/// send uses `try_send` and ignores a full or closed channel so live progress
+/// can never block or fail the transfer.
+#[allow(clippy::too_many_arguments)]
+fn emit_bonded_progress(
+    progress: Option<&mpsc::Sender<BondedTransferProgress>>,
+    manifest: &TransferManifest,
+    blocks: &BTreeMap<(u32, u8), BondedBlockState>,
+    decoders: &[EntryDecoder],
+    symbol_set: &BondedReceiverSymbolSet,
+    symbols_accepted: u64,
+    feedback_rounds: u32,
+    reallocated_repair_windows: u64,
+    enrolled_donors: u32,
+    phase: TransferPhase,
+) {
+    let Some(sink) = progress else {
+        return;
+    };
+    let blocks_total = u32::try_from(blocks.len()).unwrap_or(u32::MAX);
+    let blocks_remaining = u32::try_from(
+        blocks
+            .values()
+            .filter(|state| !decoders[state.decoder_pos].complete)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let donor_ingress: Vec<(u32, BondedDonorIngressStats)> = symbol_set
+        .donor_targets()
+        .into_iter()
+        .filter_map(|donor| symbol_set.donor_stats(donor).map(|stats| (donor, stats)))
+        .collect();
+    let snapshot = BondedTransferProgress {
+        transfer_id: manifest.transfer_id.clone(),
+        symbols_accepted,
+        bytes_total: manifest.total_bytes,
+        blocks_total,
+        blocks_remaining,
+        feedback_rounds,
+        reallocated_repair_windows,
+        enrolled_donors,
+        donor_ingress,
+        phase,
+    };
+    let _ = sink.try_send(snapshot);
+}
+
 /// Receive one bonded transfer from up to `expected_donors` simultaneous
 /// donors, verify it fail-closed, and commit it into `dest_dir`.
 ///
@@ -855,6 +910,7 @@ pub async fn receive_bonded(
     expected_donors: u32,
     mut config: RqConfig,
     peer_id: &str,
+    progress: Option<mpsc::Sender<BondedTransferProgress>>,
 ) -> Result<BondedReceiveReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     descriptor
@@ -1049,6 +1105,23 @@ pub async fn receive_bonded(
             },
         );
 
+        // Live progress snapshot at the round boundary (best-effort; never
+        // blocks or fails the transfer). `blocks_remaining` is the count of
+        // blocks whose owning entry has not yet decoded, and the per-donor
+        // ingress mirrors the terminal report's `donor_ingress`.
+        emit_bonded_progress(
+            progress.as_ref(),
+            &manifest,
+            &blocks,
+            &decoders,
+            &symbol_set,
+            symbols_accepted,
+            feedback_rounds,
+            reallocated_repair_windows,
+            enrolled_donors,
+            TransferPhase::DataTransfer,
+        );
+
         if pending.is_empty() {
             // Verify + commit exactly like the single-source path, then tell
             // every surviving donor to stop (Close wins over stale deficits).
@@ -1079,6 +1152,19 @@ pub async fn receive_bonded(
             }
             let committed_paths: Vec<PathBuf> =
                 receipt.committed_paths.iter().map(PathBuf::from).collect();
+            // Final terminal snapshot: all blocks decoded and committed.
+            emit_bonded_progress(
+                progress.as_ref(),
+                &manifest,
+                &blocks,
+                &decoders,
+                &symbol_set,
+                symbols_accepted,
+                feedback_rounds,
+                reallocated_repair_windows,
+                enrolled_donors,
+                TransferPhase::Completed,
+            );
             return Ok(BondedReceiveReport {
                 transfer_id: manifest.transfer_id,
                 bytes_received: receipt.bytes_received,
@@ -1906,6 +1992,7 @@ mod tests {
                     expected_donors,
                     config,
                     "bonded-receiver",
+                    None,
                 )
                 .await
             }))

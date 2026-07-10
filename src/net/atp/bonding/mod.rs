@@ -15,6 +15,7 @@
 //! * A4 — bonded handshake version + capability negotiation (`z01bbr.1.4`).
 
 pub mod assignment;
+pub mod derive;
 pub mod descriptor;
 pub mod esi;
 pub mod handshake;
@@ -33,6 +34,7 @@ pub use assignment::{
     schedule_bonded_repair_continuation, schedule_bonded_repair_window_assignments,
     schedule_bonded_source_first_coverage, verify_bonded_symbol_tag,
 };
+pub use derive::derive_bonded_descriptor;
 pub use descriptor::{
     BondEntry, BondEntryBlockGeometry, BondProofError, BondTransferDescriptor,
     BondedDonorHoldingProof, bonded_entry_object_id,

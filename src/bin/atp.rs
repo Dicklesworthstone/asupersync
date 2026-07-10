@@ -60,6 +60,7 @@ use asupersync::atp::safety::{
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
 use asupersync::net::atp::bonding::BondTransferDescriptor;
+#[cfg(test)]
 use asupersync::net::atp::channel_bonding;
 use asupersync::net::atp::transport_common::metadata::{
     path_is_link_or_reparse, path_is_link_or_reparse_sync,
@@ -1849,6 +1850,7 @@ async fn bond_recv_serve(
         expected_donors,
         config,
         peer_id,
+        None,
     )
     .await
     .map_err(|error| error.to_string())
@@ -2364,76 +2366,20 @@ async fn derive_bond_transfer_descriptor(
     max_bytes: u64,
     auth_key_id: Option<String>,
 ) -> Result<BondTransferDescriptor, String> {
-    // Donors can legitimately run on different operating systems. Platform
-    // modes, attributes, ownership, and timestamps are not byte identity and
-    // would make identical content derive different enrollment descriptors.
-    // Keep topology checks (including hardlink rejection) but commit only the
-    // portable content/path shape for bonded transfers.
-    let mut descriptor_config = config.clone();
-    descriptor_config.metadata_policy = MetadataPolicy::portable();
-    let metadata = transport_rq::source_metadata_manifest_with_config(source, &descriptor_config)
-        .await
-        .map_err(|error| format!("bond descriptor source validation: {error}"))?;
-    let plan = plan_transfer(
+    // Single source of truth for "local bytes -> bonded descriptor": the
+    // library helper preserves the `MetadataPolicy::portable()` capture and the
+    // exact plan/merkle/transfer-id derivation this CLI used to inline. The CLI
+    // owns only the String error surface for its human-facing diagnostics.
+    asupersync::net::atp::bonding::derive_bonded_descriptor(
         cx,
         source,
-        tcp_config(max_bytes, false).chunk_size,
-        &descriptor_config.metadata_policy,
-        descriptor_config.preserve_hardlinks,
-    )
-    .await
-    .map_err(|error| format!("bond descriptor derivation: {error}"))?;
-    if plan.total_bytes > max_bytes {
-        return Err(format!(
-            "bond-donate source is {} bytes which exceeds --max-bytes {max_bytes}",
-            plan.total_bytes
-        ));
-    }
-    let entries: Vec<transport_rq::ManifestEntry> = plan
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            u32::try_from(index)
-                .map(|index| transport_rq::ManifestEntry {
-                    index,
-                    rel_path: entry.rel_path.clone(),
-                    size: entry.size,
-                    sha256_hex: entry.sha256_hex.clone(),
-                    members: Vec::new(),
-                    fragment: None,
-                })
-                .map_err(|_| {
-                    format!(
-                        "bond descriptor has too many entries: {}",
-                        plan.entries.len()
-                    )
-                })
-        })
-        .collect::<Result<_, _>>()?;
-    let manifest = transport_rq::TransferManifest {
-        transfer_id: channel_bonding::transfer_id_hex(
-            &plan.merkle_root_hex,
-            plan.total_bytes,
-            entries.len(),
-        ),
-        root_name: plan.root_name.clone(),
-        is_directory: plan.is_directory,
-        total_bytes: plan.total_bytes,
-        merkle_root_hex: plan.merkle_root_hex.clone(),
-        metadata: Some(metadata),
-        entries,
-    };
-    let descriptor = BondTransferDescriptor::from_manifest(
-        &manifest,
         config.symbol_size,
         config.max_block_size as u64,
+        max_bytes,
         auth_key_id,
-    );
-    descriptor
-        .validate()
-        .map_err(|error| format!("bond descriptor validation: {error}"))?;
-    Ok(descriptor)
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Derive the non-secret shared-key identifier carried in the bonded

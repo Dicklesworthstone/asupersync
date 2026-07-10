@@ -14,12 +14,14 @@
 use crate::net::atp::protocol::PeerId;
 use serde::{Deserialize, Serialize};
 
+pub mod bonded;
 pub mod diagnostics;
 pub mod object;
 pub mod session;
 pub mod stream;
 pub mod transfer;
 
+pub use bonded::*;
 pub use diagnostics::*;
 pub use object::*;
 pub use session::*;
