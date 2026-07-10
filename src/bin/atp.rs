@@ -59,7 +59,10 @@ use asupersync::atp::safety::{
 };
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
-use asupersync::net::atp::bonding::BondTransferDescriptor;
+use asupersync::net::atp::bonding::{
+    BondTransferDescriptor, BondTransport, DonorPathChoice, ReceiverEndpoints, TransportPreference,
+    detect_local_tailnet, parse_tailscale_ip_line, select_donor_path,
+};
 #[cfg(test)]
 use asupersync::net::atp::channel_bonding;
 use asupersync::net::atp::transport_common::metadata::{
@@ -250,6 +253,58 @@ enum RemoteShell {
     Posix,
     /// Invoke Windows PowerShell through a UTF-16LE encoded command.
     Powershell,
+}
+
+/// Per-donor dial-transport selection for `bond-pull`.
+///
+/// Distinct from the wire [`Transport`] enum (`tcp`/`rq`/`quic`): this only
+/// steers *which receiver endpoint each donor dials* (direct IP, shared
+/// tailnet, or an SSH tunnel), mapping to the pure
+/// [`TransportPreference`] selection logic in the bonding module.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum BondDialPreference {
+    /// Pick the most-preferred usable transport automatically (tailnet when
+    /// both ends share one, else direct IP).
+    Auto,
+    /// Prefer the shared Tailscale path; fall back to direct when unusable.
+    Tailscale,
+    /// Bootstrap each donor over an SSH tunnel to the receiver.
+    Ssh,
+    /// Prefer a direct IP path, ignoring any tailnet endpoint.
+    Ip,
+}
+
+impl BondDialPreference {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Tailscale => "tailscale",
+            Self::Ssh => "ssh",
+            Self::Ip => "ip",
+        }
+    }
+}
+
+impl From<BondDialPreference> for TransportPreference {
+    fn from(pref: BondDialPreference) -> Self {
+        match pref {
+            BondDialPreference::Auto => Self::Auto,
+            BondDialPreference::Tailscale => Self::Tailscale,
+            BondDialPreference::Ssh => Self::Ssh,
+            // `Ip` names the direct-IP path in CLI terms; the selection layer
+            // calls that `Direct`.
+            BondDialPreference::Ip => Self::Direct,
+        }
+    }
+}
+
+/// Human/JSON label for a negotiated bonded transport family.
+const fn bond_transport_label(transport: BondTransport) -> &'static str {
+    match transport {
+        BondTransport::DirectIp => "direct",
+        BondTransport::Ssh => "ssh",
+        BondTransport::Tailscale => "tailscale",
+    }
 }
 
 #[derive(Parser)]
@@ -581,6 +636,12 @@ struct BondPullArgs {
     /// Remote donor command interpreter. Auto probes each SSH host.
     #[arg(long, value_enum, default_value_t = RemoteShell::Auto)]
     remote_shell: RemoteShell,
+    /// Per-donor dial-transport preference. `auto` prefers a shared tailnet
+    /// endpoint when both ends are on Tailscale, otherwise a direct IP;
+    /// `tailscale`/`ip` force those paths; `ssh` bootstraps each donor over an
+    /// SSH tunnel to the receiver control endpoint.
+    #[arg(long, value_enum, default_value_t = BondDialPreference::Auto)]
+    transport: BondDialPreference,
     /// Extra raw OpenSSH option; repeat for multiple argv words.
     #[arg(long = "ssh-option")]
     ssh_options: Vec<String>,
@@ -2093,12 +2154,94 @@ fn bond_pull_fetch_descriptor(
     Ok(descriptor)
 }
 
+/// One enrolled donor plus its selected dial transport (`z01bbr.4.2`/`.4.4`).
+struct DonorSpec {
+    /// SSH host (`user@host` or `host`) the `bond-donate` leg runs on.
+    host: String,
+    /// Resolved remote command interpreter for this host.
+    shell: RemoteShell,
+    /// The per-donor transport family + dial endpoint chosen by
+    /// [`select_donor_path`].
+    choice: DonorPathChoice,
+}
+
+/// Probe one donor's Tailscale membership over SSH by running
+/// `tailscale ip -4` there and parsing the first CGNAT line.
+///
+/// Mirrors the send-path [`probe_remote_tailscale_ipv4`], but returns the parsed
+/// [`Ipv4Addr`](std::net::Ipv4Addr) (a `Some` result *is* the "donor is on the
+/// tailnet" signal) and is `bond-pull`-local so it can be driven by the resolved
+/// per-donor [`RemoteShell`]. Any failure (ssh error, tailscale not installed,
+/// non-CGNAT output) is treated as "not on the tailnet".
+fn probe_donor_tailnet_ipv4(
+    host: &str,
+    ssh_options: &[String],
+    remote_shell: RemoteShell,
+) -> Option<std::net::Ipv4Addr> {
+    let argv = ["tailscale".to_string(), "ip".to_string(), "-4".to_string()];
+    let mut command = ssh_base_command(ssh_options, host);
+    command
+        .arg(remote_shell_command(remote_shell, &[], &argv).ok()?)
+        .stdin(Stdio::null());
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_tailscale_ip_line(&stdout)
+}
+
+/// The intended `ssh -L` local-forward plan for an SSH-tunnel donor whose UDP is
+/// assumed blocked (`z01bbr.4.4` D2).
+///
+/// The donor would open a loopback listener that forwards TCP (and UDP-in-TCP)
+/// to the receiver's control endpoint, then dial `127.0.0.1:<local_port>`.
+/// Deriving this is a pure function of the chosen receiver endpoint so the
+/// decision is observable in the JSON report even while the live forward is
+/// stubbed (see [`run_bond_pull`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BondPullSshTunnel {
+    /// Loopback port on the donor the forward listens on.
+    local_port: u16,
+    /// Receiver control endpoint the forward targets.
+    receiver_endpoint: SocketAddr,
+    /// The `ssh -L` forward argument the live tunnel would install.
+    forward_arg: String,
+    /// The address the donor dials once the forward is live.
+    donor_dial: SocketAddr,
+}
+
+/// Compute the `ssh -L` forward plan for a donor dialing `receiver_endpoint`.
+///
+/// The donor-side loopback port reuses the receiver control port so the forward
+/// is deterministic and unlikely to collide on a fresh donor host.
+fn bond_pull_ssh_tunnel_plan(receiver_endpoint: SocketAddr) -> BondPullSshTunnel {
+    let local_port = receiver_endpoint.port();
+    let donor_dial = SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        local_port,
+    );
+    let forward_arg = format!(
+        "-L 127.0.0.1:{local_port}:{}:{}",
+        receiver_endpoint.ip(),
+        receiver_endpoint.port()
+    );
+    BondPullSshTunnel {
+        local_port,
+        receiver_endpoint,
+        forward_arg,
+        donor_dial,
+    }
+}
+
 /// One donor leg launched by `bond-pull`.
 struct BondPullDonorLeg {
     host: String,
     child: Child,
     stdout: CapturedChildPipe,
     stderr: CapturedChildPipe,
+    /// The transport family + dial endpoint this leg was launched with.
+    choice: DonorPathChoice,
 }
 
 /// Orchestrate a bonded pull (z01bbr Phase F, the headline UX): fetch the
@@ -2209,17 +2352,68 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
     };
     let control = bond_pull_control_advertise(args.advertise, args.listen, bound.port())?;
 
-    // Launch one bond-donate leg per donor host, all dialing the same
-    // explicit control address.
-    let mut legs: Vec<BondPullDonorLeg> = Vec::with_capacity(donors.len());
-    let argv_control = bond_pull_donor_argv(&args, control);
-    let mut spawn_error: Option<String> = None;
+    // Receiver dial endpoints. The receiver binds UDP on 0.0.0.0 by default, so
+    // it can receive on its direct control IP or on its tailnet IP; advertise
+    // both so each donor can pick the endpoint it can actually reach.
+    let endpoints = ReceiverEndpoints {
+        direct: Some(control),
+        tailnet: detect_local_tailnet()
+            .map(|identity| SocketAddr::new(identity.ipv4.into(), control.port())),
+    };
+
+    // Per-donor transport selection (z01bbr.4.2/.4.4): probe each donor's
+    // tailnet membership, then pick its dial endpoint from the operator's
+    // --transport preference. Fail closed before launching any leg if a donor
+    // has no usable path.
+    let mut donor_specs: Vec<DonorSpec> = Vec::with_capacity(donors.len());
     for (host, remote_shell) in donors.iter().zip(donor_shells) {
+        let donor_on_tailnet =
+            probe_donor_tailnet_ipv4(host, &args.ssh_options, remote_shell).is_some();
+        let choice = select_donor_path(args.transport.into(), &endpoints, donor_on_tailnet)
+            .ok_or_else(|| {
+                format!(
+                    "no usable {} dial transport for donor {host}: receiver advertised \
+                     direct={:?} tailnet={:?}, donor_on_tailnet={donor_on_tailnet}",
+                    args.transport.as_str(),
+                    endpoints.direct,
+                    endpoints.tailnet,
+                )
+            })?;
+        donor_specs.push(DonorSpec {
+            host: host.clone(),
+            shell: remote_shell,
+            choice,
+        });
+    }
+
+    // Launch one bond-donate leg per donor host, each dialing its own selected
+    // endpoint (per-donor, not a single shared control address).
+    let mut legs: Vec<BondPullDonorLeg> = Vec::with_capacity(donor_specs.len());
+    let mut spawn_error: Option<String> = None;
+    for spec in &donor_specs {
+        let host = &spec.host;
+        // SSH-tunnel donors (UDP assumed blocked) would dial 127.0.0.1:<port>
+        // through an `ssh -L` local forward to the receiver control endpoint.
+        // TODO(z01bbr.8.3 H3): open the live `ssh -L` child + prove UDP-in-TCP
+        // over the forward against real NAT'd hosts. Until then the tunnel plan
+        // is computed and reported, but the leg falls back to a direct dial of
+        // the selected endpoint so the enrollment still reaches the receiver.
+        if spec.choice.transport == BondTransport::Ssh {
+            let tunnel = bond_pull_ssh_tunnel_plan(spec.choice.dial);
+            eprintln!(
+                "atp: bond-pull donor {host} selected ssh-tunnel (would forward `{}` \
+                 then dial {}); live `ssh -L` not yet wired — falling back to a direct \
+                 dial of {}",
+                tunnel.forward_arg, tunnel.donor_dial, spec.choice.dial
+            );
+        }
+        let dial = spec.choice.dial;
+        let argv = bond_pull_donor_argv(&args, dial);
         let env_vars = match &rq_auth {
             RqAuthChoice::KeyHex(key_hex) => vec![(RQ_AUTH_ENV, key_hex.as_str())],
             RqAuthChoice::UnauthenticatedLab => Vec::new(),
         };
-        let remote_command = match remote_shell_command(remote_shell, &env_vars, &argv_control) {
+        let remote_command = match remote_shell_command(spec.shell, &env_vars, &argv) {
             Ok(command) => command,
             Err(error) => {
                 spawn_error = Some(format!(
@@ -2244,12 +2438,16 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
                     spawn_error = Some(format!("ssh pipes unavailable for donor {host}"));
                     break;
                 };
-                eprintln!("atp: bond-pull launched donor {host} -> {control}");
+                eprintln!(
+                    "atp: bond-pull launched donor {host} -> {dial} ({})",
+                    bond_transport_label(spec.choice.transport)
+                );
                 legs.push(BondPullDonorLeg {
                     host: host.clone(),
                     child,
                     stdout,
                     stderr,
+                    choice: spec.choice,
                 });
             }
             Err(err) => {
@@ -2297,13 +2495,27 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
             Ok(status) => (status.success(), status.to_string()),
             Err(error) => (false, error.clone()),
         };
-        donor_outcomes.push(serde_json::json!({
+        let mut donor_json = serde_json::json!({
             "host": leg.host,
+            "transport": bond_transport_label(leg.choice.transport),
+            "dial": leg.choice.dial.to_string(),
             "exit_ok": exit_ok,
             "exit_status": exit_detail,
             "report": report,
             "stderr_tail": last_log_lines(&stderr, 5),
-        }));
+        });
+        if leg.choice.transport == BondTransport::Ssh {
+            let tunnel = bond_pull_ssh_tunnel_plan(leg.choice.dial);
+            donor_json["ssh_tunnel"] = serde_json::json!({
+                "local_port": tunnel.local_port,
+                "receiver_endpoint": tunnel.receiver_endpoint.to_string(),
+                "forward_arg": tunnel.forward_arg,
+                "donor_dial": tunnel.donor_dial.to_string(),
+                // Stubbed: the leg dialed the direct endpoint, not the tunnel.
+                "live_forward_wired": false,
+            });
+        }
+        donor_outcomes.push(donor_json);
     }
 
     let elapsed = start.elapsed();
@@ -2323,6 +2535,7 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
             print_json(&serde_json::json!({
                 "event": "atp_bond_pull", "transport": "rq",
                 "control_advertise": control.to_string(),
+                "transport_preference": args.transport.as_str(),
                 "donor_hosts": donors,
                 "receiver": bond_recv_json(&report, chosen_fanout, Some(elapsed)),
                 "donors": donor_outcomes,
@@ -2333,6 +2546,7 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
             print_json(&serde_json::json!({
                 "event": "atp_bond_pull", "transport": "rq",
                 "control_advertise": control.to_string(),
+                "transport_preference": args.transport.as_str(),
                 "donor_hosts": donors,
                 "error": error,
                 "donors": donor_outcomes,
@@ -2353,7 +2567,8 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
 /// (byte-identical trees at different absolute roots and on different operating
 /// systems produce identical plans),
 /// the merkle root is the flat object-graph root over those digests, and the
-/// transfer id is the rq derivation ([`channel_bonding::transfer_id_hex`]).
+/// transfer id is the rq derivation
+/// ([`asupersync::net::atp::channel_bonding::transfer_id_hex`]).
 /// E-15 small-file packing and large-object splitting are deliberately NOT
 /// applied: descriptor entries are the logical files themselves — exactly what
 /// `donate_path`'s donor byte proof re-hashes from disk — and how a donor
@@ -9943,6 +10158,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             udp_bind: None,
             remote_atp: "atp".to_string(),
             remote_shell: RemoteShell::Auto,
+            transport: BondDialPreference::Auto,
             ssh_options: Vec::new(),
             descriptor_timeout_secs: 300,
             peer_id: "atp-bond-pull".to_string(),
@@ -10068,6 +10284,168 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 .any(|arg| arg.contains("--rq-auth-key-hex")),
             "the auth key travels via {RQ_AUTH_ENV}, never argv"
         );
+    }
+
+    /// `--transport` parses all four dial preferences and defaults to `auto`.
+    #[test]
+    fn bond_pull_transport_flag_parses_all_values() {
+        for (arg, expected) in [
+            ("auto", BondDialPreference::Auto),
+            ("tailscale", BondDialPreference::Tailscale),
+            ("ssh", BondDialPreference::Ssh),
+            ("ip", BondDialPreference::Ip),
+        ] {
+            let parsed = Cli::try_parse_from([
+                "atp",
+                "bond-pull",
+                "/srv/payload.bin",
+                "/tmp/dst",
+                "--donors",
+                "donor@h1",
+                "--advertise",
+                "192.0.2.7:8473",
+                "--transport",
+                arg,
+                "--rq-allow-unauthenticated-lab",
+            ])
+            .unwrap_or_else(|err| panic!("parse --transport {arg}: {err}"));
+            let Command::BondPull(pull) = parsed.command else {
+                panic!("expected bond-pull command");
+            };
+            assert_eq!(pull.transport, expected);
+        }
+
+        // Omitted flag defaults to auto.
+        let default = Cli::try_parse_from([
+            "atp",
+            "bond-pull",
+            "/srv/payload.bin",
+            "/tmp/dst",
+            "--donors",
+            "donor@h1",
+            "--advertise",
+            "192.0.2.7:8473",
+            "--rq-allow-unauthenticated-lab",
+        ])
+        .expect("parse default bond-pull");
+        let Command::BondPull(pull) = default.command else {
+            panic!("expected bond-pull command");
+        };
+        assert_eq!(pull.transport, BondDialPreference::Auto);
+    }
+
+    /// The CLI dial preference maps onto the pure [`select_donor_path`] matrix
+    /// across receiver-endpoint shapes and donor tailnet membership.
+    #[test]
+    fn bond_pull_transport_preference_maps_to_selection() {
+        let direct: SocketAddr = "192.0.2.7:8473".parse().expect("direct addr");
+        let tailnet: SocketAddr = "100.101.102.103:8473".parse().expect("tailnet addr");
+        let both = ReceiverEndpoints {
+            direct: Some(direct),
+            tailnet: Some(tailnet),
+        };
+        let direct_only = ReceiverEndpoints {
+            direct: Some(direct),
+            tailnet: None,
+        };
+        let choose = |pref: BondDialPreference, ep: &ReceiverEndpoints, on_tailnet: bool| {
+            select_donor_path(pref.into(), ep, on_tailnet).expect("usable path")
+        };
+
+        // Auto: shared tailnet -> tailscale; off-tailnet donor -> direct.
+        let c = choose(BondDialPreference::Auto, &both, true);
+        assert_eq!(c.transport, BondTransport::Tailscale);
+        assert_eq!(c.dial, tailnet);
+        let c = choose(BondDialPreference::Auto, &both, false);
+        assert_eq!(c.transport, BondTransport::DirectIp);
+        assert_eq!(c.dial, direct);
+
+        // Ip forces direct even with a shared tailnet endpoint available.
+        let c = choose(BondDialPreference::Ip, &both, true);
+        assert_eq!(c.transport, BondTransport::DirectIp);
+        assert_eq!(c.dial, direct);
+
+        // Tailscale prefers the tailnet when shared, else falls back to direct.
+        let c = choose(BondDialPreference::Tailscale, &both, true);
+        assert_eq!(c.transport, BondTransport::Tailscale);
+        assert_eq!(c.dial, tailnet);
+        let c = choose(BondDialPreference::Tailscale, &both, false);
+        assert_eq!(c.transport, BondTransport::DirectIp);
+        assert_eq!(c.dial, direct);
+
+        // Ssh always bootstraps a tunnel over the best reachable endpoint.
+        let c = choose(BondDialPreference::Ssh, &both, true);
+        assert_eq!(c.transport, BondTransport::Ssh);
+        assert_eq!(c.dial, direct);
+
+        // With only a direct endpoint, even a tailscale preference lands direct.
+        let c = choose(BondDialPreference::Tailscale, &direct_only, true);
+        assert_eq!(c.transport, BondTransport::DirectIp);
+        assert_eq!(c.dial, direct);
+
+        // No usable endpoint at all -> None.
+        let empty = ReceiverEndpoints {
+            direct: None,
+            tailnet: None,
+        };
+        assert!(select_donor_path(BondDialPreference::Auto.into(), &empty, true).is_none());
+    }
+
+    /// Under `Auto`, two donors with different tailnet membership dial
+    /// different receiver endpoints, and the auth key is never in either argv.
+    #[test]
+    fn bond_pull_per_donor_argv_diverges_by_tailnet_membership() {
+        let direct: SocketAddr = "192.0.2.7:8473".parse().expect("direct addr");
+        let tailnet: SocketAddr = "100.101.102.103:8473".parse().expect("tailnet addr");
+        let endpoints = ReceiverEndpoints {
+            direct: Some(direct),
+            tailnet: Some(tailnet),
+        };
+        let args = bond_pull_test_args(Some(direct), "0.0.0.0:0".parse().expect("listen"));
+
+        // Donor A shares the tailnet; donor B does not.
+        let choice_a =
+            select_donor_path(args.transport.into(), &endpoints, true).expect("donor a path");
+        let choice_b =
+            select_donor_path(args.transport.into(), &endpoints, false).expect("donor b path");
+        assert_eq!(choice_a.transport, BondTransport::Tailscale);
+        assert_eq!(choice_b.transport, BondTransport::DirectIp);
+
+        let argv_a = bond_pull_donor_argv(&args, choice_a.dial);
+        let argv_b = bond_pull_donor_argv(&args, choice_b.dial);
+        let to_of = |argv: &[String]| {
+            let idx = argv.iter().position(|a| a == "--to").expect("--to present");
+            argv[idx + 1].clone()
+        };
+        assert_eq!(to_of(&argv_a), tailnet.to_string());
+        assert_eq!(to_of(&argv_b), direct.to_string());
+        assert_ne!(to_of(&argv_a), to_of(&argv_b));
+
+        for argv in [&argv_a, &argv_b] {
+            assert!(
+                !argv.iter().any(|a| a.contains("--rq-auth-key-hex")),
+                "auth key must travel via {RQ_AUTH_ENV}, never argv"
+            );
+        }
+    }
+
+    /// The SSH-tunnel plan redirects the donor dial to a loopback forward, and
+    /// transport labels round-trip to their JSON strings.
+    #[test]
+    fn bond_pull_ssh_tunnel_plan_redirects_dial_to_loopback() {
+        let control: SocketAddr = "192.0.2.7:8473".parse().expect("control addr");
+        let plan = bond_pull_ssh_tunnel_plan(control);
+        assert_eq!(plan.local_port, 8473);
+        assert_eq!(plan.receiver_endpoint, control);
+        assert_eq!(
+            plan.donor_dial,
+            "127.0.0.1:8473".parse::<SocketAddr>().expect("loopback")
+        );
+        assert_eq!(plan.forward_arg, "-L 127.0.0.1:8473:192.0.2.7:8473");
+
+        assert_eq!(bond_transport_label(BondTransport::DirectIp), "direct");
+        assert_eq!(bond_transport_label(BondTransport::Ssh), "ssh");
+        assert_eq!(bond_transport_label(BondTransport::Tailscale), "tailscale");
     }
 
     /// MANDATORY trio e2e: two in-process donor legs (the exact
