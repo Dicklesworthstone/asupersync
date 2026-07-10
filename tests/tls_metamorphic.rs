@@ -9,7 +9,7 @@
 //! 3. Session resumption with valid ticket produces 0-RTT/1-RTT equivalent to full handshake
 //! 4. Alert frames during handshake consistently abort without partial-state leaks
 //!
-//! Uses lab runtime with deterministic test vectors and virtual time for reproducible results.
+//! Uses deterministic test vectors and a cooperative executor for reproducible results.
 
 #[macro_use]
 mod common;
@@ -17,16 +17,12 @@ mod common;
 #[cfg(feature = "tls")]
 mod tls_metamorphic_tests {
     use crate::common::init_test_logging;
-    use asupersync::cx::Cx;
     use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-    use asupersync::lab::LabRuntime;
     use asupersync::net::tcp::VirtualTcpStream;
-    use asupersync::time::{TimerDriverHandle, VirtualClock};
     use asupersync::tls::{
         Certificate, CertificateChain, ClientAuth, PrivateKey, RootCertStore, TlsAcceptor,
         TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder, TlsError, TlsStream,
     };
-    use asupersync::types::{Budget, RegionId, TaskId, Time};
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, UnixTime};
     use rustls::{DigitallySignedStruct, SignatureScheme};
@@ -127,13 +123,6 @@ W7n9v0wIyo4e/O0DO2fczXZD
         }
     }
 
-    fn make_lab_runtime() -> LabRuntime {
-        LabRuntime::builder()
-            .deterministic()
-            .with_virtual_clock(VirtualClock::starting_at(Time::from_secs(1000)))
-            .build()
-    }
-
     fn make_deterministic_client_config(seed: u64) -> rustls::ClientConfig {
         // Use deterministic provider to ensure reproducible handshakes
         use std::sync::Arc;
@@ -159,6 +148,12 @@ W7n9v0wIyo4e/O0DO2fczXZD
         config
     }
 
+    fn make_resumption_connector(seed: u64) -> TlsConnector {
+        let mut config = make_deterministic_client_config(seed);
+        config.resumption = rustls::client::Resumption::in_memory_sessions(64);
+        TlsConnector::new(config)
+    }
+
     fn make_test_acceptor() -> TlsAcceptor {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
         let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -175,8 +170,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
         )
     }
 
-    async fn perform_handshake_with_runtime(
-        runtime: &LabRuntime,
+    async fn perform_handshake(
         connector: TlsConnector,
         acceptor: TlsAcceptor,
         port_base: u16,
@@ -184,22 +178,12 @@ W7n9v0wIyo4e/O0DO2fczXZD
         Result<TlsStream<VirtualTcpStream>, TlsError>,
         Result<TlsStream<VirtualTcpStream>, TlsError>,
     ) {
-        runtime
-            .scope()
-            .run(|scope| async move {
-                let (client_io, server_io) = make_pair(port_base);
-
-                let client_fut =
-                    scope.spawn(async move { connector.connect("localhost", client_io).await });
-
-                let server_fut = scope.spawn(async move { acceptor.accept(server_io).await });
-
-                let (client_result, server_result) =
-                    futures_lite::future::zip(client_fut, server_fut).await;
-
-                (client_result, server_result)
-            })
-            .await
+        let (client_io, server_io) = make_pair(port_base);
+        futures_lite::future::zip(
+            connector.connect("localhost", client_io),
+            acceptor.accept(server_io),
+        )
+        .await
     }
 
     /// Captures TLS handshake messages for replay testing
@@ -286,7 +270,6 @@ W7n9v0wIyo4e/O0DO2fczXZD
         init_test_logging();
         test_phase!("mr1_handshake_determinism_same_seed");
 
-        let runtime = make_lab_runtime();
         let acceptor = make_test_acceptor();
 
         // Run same handshake with same seed multiple times
@@ -299,10 +282,11 @@ W7n9v0wIyo4e/O0DO2fczXZD
             let connector = TlsConnector::new(make_deterministic_client_config(seed));
             let port_base = 7000 + iteration * 10;
 
-            let result = runtime.block_on(async {
-                perform_handshake_with_runtime(&runtime, connector, acceptor.clone(), port_base)
-                    .await
-            });
+            let result = futures_lite::future::block_on(perform_handshake(
+                connector,
+                acceptor.clone(),
+                port_base,
+            ));
 
             let (client, server) = result;
             let client = client.unwrap();
@@ -335,7 +319,6 @@ W7n9v0wIyo4e/O0DO2fczXZD
         init_test_logging();
         test_phase!("mr1_handshake_determinism_different_seeds");
 
-        let runtime = make_lab_runtime();
         let acceptor = make_test_acceptor();
 
         // Test with different seeds - results may differ due to cipher ordering
@@ -346,12 +329,13 @@ W7n9v0wIyo4e/O0DO2fczXZD
             test_section!(format!("seed_{}", seed));
 
             let connector = TlsConnector::new(make_deterministic_client_config(seed));
-            let port_base = 7100 + i * 10;
+            let port_base = 7100 + u16::try_from(i).unwrap() * 10;
 
-            let result = runtime.block_on(async {
-                perform_handshake_with_runtime(&runtime, connector, acceptor.clone(), port_base)
-                    .await
-            });
+            let result = futures_lite::future::block_on(perform_handshake(
+                connector,
+                acceptor.clone(),
+                port_base,
+            ));
 
             let (client, server) = result;
             let client = client.unwrap();
@@ -386,11 +370,10 @@ W7n9v0wIyo4e/O0DO2fczXZD
         init_test_logging();
         test_phase!("mr2_client_hello_replay_equivalence");
 
-        let runtime = make_lab_runtime();
         let acceptor1 = make_test_acceptor();
         let acceptor2 = make_test_acceptor();
 
-        runtime.block_on(async {
+        futures_lite::future::block_on(async {
             test_section!("initial_handshake");
 
             // Perform initial handshake and capture ClientHello
@@ -456,19 +439,12 @@ W7n9v0wIyo4e/O0DO2fczXZD
         init_test_logging();
         test_phase!("mr3_session_resumption_equivalence");
 
-        let runtime = make_lab_runtime();
-
-        runtime.block_on(async {
+        futures_lite::future::block_on(async {
             test_section!("full_handshake");
 
             // Perform full handshake first
             let acceptor = make_test_acceptor();
-            let connector = TlsConnectorBuilder::new()
-                .add_root_certificate(&Certificate::from_pem(TEST_CERT_PEM).unwrap()[0])
-                .session_resumption(rustls::client::Resumption::in_memory_sessions(64))
-                .alpn_http()
-                .build()
-                .unwrap();
+            let connector = make_resumption_connector(42);
 
             let (client_io, server_io) = make_pair(7300);
             let client_fut = connector.connect("localhost", client_io);
@@ -535,9 +511,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
         init_test_logging();
         test_phase!("mr4_alert_frame_consistency");
 
-        let runtime = make_lab_runtime();
-
-        runtime.block_on(async {
+        futures_lite::future::block_on(async {
             test_section!("timeout_alert_consistency");
 
             // Create connector with very short timeout to force alert
@@ -569,28 +543,16 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
             test_section!("invalid_cert_alert_consistency");
 
-            // Test invalid certificate alerts
-            let bad_connector = TlsConnectorBuilder::new()
-                .handshake_timeout(Duration::from_millis(100))
-                .build() // No root certificates - will fail validation
-                .unwrap();
-
-            let acceptor = make_test_acceptor();
-            let mut cert_alert_results = Vec::new();
-
-            for attempt in 0..3 {
-                let (client_io, server_io) = make_pair(7450 + attempt);
-
-                let client_fut = bad_connector.connect("localhost", client_io);
-                let server_fut = acceptor.accept(server_io);
-
-                let (client_result, _server_result) =
-                    futures_lite::future::zip(client_fut, server_fut).await;
-
-                // Should consistently fail certificate validation
-                let is_handshake_error = matches!(client_result, Err(TlsError::Handshake(_)));
-                cert_alert_results.push(is_handshake_error);
-            }
+            // Missing trust roots now fail at construction, before any network
+            // state exists. Repeated builds must return the same error class.
+            let cert_alert_results = (0..3)
+                .map(|_| {
+                    matches!(
+                        TlsConnectorBuilder::new().build(),
+                        Err(TlsError::Certificate(_))
+                    )
+                })
+                .collect::<Vec<_>>();
 
             // All certificate validation failures should be consistent
             assert!(
@@ -612,21 +574,14 @@ W7n9v0wIyo4e/O0DO2fczXZD
         init_test_logging();
         test_phase!("mr_composite_determinism_with_resumption");
 
-        let runtime = make_lab_runtime();
-
         // Test that resumption behavior is also deterministic
-        runtime.block_on(async {
+        futures_lite::future::block_on(async {
             let mut resumption_results = Vec::new();
 
             for iteration in 0..2 {
                 test_section!(format!("deterministic_resumption_iteration_{}", iteration));
 
-                let connector = TlsConnectorBuilder::new()
-                    .add_root_certificate(&Certificate::from_pem(TEST_CERT_PEM).unwrap()[0])
-                    .session_resumption(rustls::client::Resumption::in_memory_sessions(64))
-                    .alpn_http()
-                    .build()
-                    .unwrap();
+                let connector = make_resumption_connector(42);
 
                 // Full handshake
                 let acceptor1 = make_test_acceptor();
@@ -676,9 +631,7 @@ W7n9v0wIyo4e/O0DO2fczXZD
         init_test_logging();
         test_phase!("mr_state_machine_invariant");
 
-        let runtime = make_lab_runtime();
-
-        runtime.block_on(async {
+        futures_lite::future::block_on(async {
             let connector = TlsConnector::new(make_deterministic_client_config(999));
             let acceptor = make_test_acceptor();
 
