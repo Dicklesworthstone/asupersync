@@ -143,6 +143,274 @@ pub enum MirrorError {
     /// The destination root itself is link-like and must never be traversed.
     #[error("mirror refused symlink or reparse-point destination root: {0}")]
     ReparseRoot(String),
+    /// An ancestor was replaced with a symlink or Windows reparse point after
+    /// the mirror plan was built.
+    #[error("mirror refused symlink or reparse-point destination ancestor: {0}")]
+    ReparseAncestor(String),
+}
+
+/// Revalidate every existing path component that an operation would traverse.
+///
+/// Mirror planning and deletion are separated by async suspension points. A
+/// local process can replace a previously scanned directory with a symlink or
+/// Windows junction during that interval, so lexical containment alone is not
+/// sufficient. `include_target` is true before reading a directory and false
+/// before deleting a leaf (a symlink leaf itself is safe to unlink).
+async fn reject_mirror_reparse_ancestors(
+    dest_base: &Path,
+    target: &Path,
+    include_target: bool,
+) -> Result<(), MirrorError> {
+    let rel = target
+        .strip_prefix(dest_base)
+        .map_err(|_| MirrorError::PathEscape {
+            path: target.display().to_string(),
+            root: dest_base.display().to_string(),
+        })?;
+
+    let components = rel.components().collect::<Vec<_>>();
+    let mut current = dest_base.to_path_buf();
+    reject_mirror_reparse_component(&current).await?;
+    let component_count = components.len();
+    for (index, component) in components.into_iter().enumerate() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(MirrorError::PathEscape {
+                path: target.display().to_string(),
+                root: dest_base.display().to_string(),
+            });
+        };
+        current.push(component);
+        if include_target || index + 1 < component_count {
+            reject_mirror_reparse_component(&current).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn reject_mirror_reparse_component(path: &Path) -> Result<(), MirrorError> {
+    match path_is_link_or_reparse(path).await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(MirrorError::ReparseAncestor(path.display().to_string())),
+        Err(error) => Err(MirrorError::Io(error)),
+    }
+}
+
+async fn remove_mirror_entry(
+    dest_base: &Path,
+    path: &Path,
+    expected_kind: MirrorEntryKind,
+) -> Result<(), MirrorError> {
+    #[cfg(windows)]
+    {
+        let dest_base = dest_base.to_path_buf();
+        let path = path.to_path_buf();
+        return crate::runtime::spawn_blocking_io(move || {
+            remove_mirror_entry_windows(&dest_base, &path, expected_kind)
+        })
+        .await
+        .map_err(MirrorError::Io);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = dest_base;
+        let metadata = crate::fs::symlink_metadata(path).await?;
+        let kind_matches = match expected_kind {
+            MirrorEntryKind::File => metadata.is_file() && !metadata.file_type().is_symlink(),
+            MirrorEntryKind::Dir => metadata.is_dir() && !metadata.file_type().is_symlink(),
+            MirrorEntryKind::Symlink => metadata.file_type().is_symlink(),
+        };
+        if !kind_matches {
+            return Err(MirrorError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "mirror deletion target changed filesystem kind: {}",
+                    path.display()
+                ),
+            )));
+        }
+        match expected_kind {
+            MirrorEntryKind::Dir => crate::fs::remove_dir(path).await?,
+            MirrorEntryKind::File | MirrorEntryKind::Symlink => {
+                crate::fs::remove_file(path).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_final_path_is_strict_descendant(root: &[u16], target: &[u16]) -> bool {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const SLASH: u16 = b'/' as u16;
+
+    let mut root_len = root.len();
+    while root_len > 0 && matches!(root[root_len - 1], BACKSLASH | SLASH) {
+        root_len -= 1;
+    }
+    target.len() > root_len
+        && target.get(..root_len) == root.get(..root_len)
+        && matches!(target[root_len], BACKSLASH | SLASH)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)] // Query the kernel-resolved name for an RAII-owned handle.
+fn windows_final_path(file: &std::fs::File) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    };
+
+    const INITIAL_PATH_UNITS: usize = 512;
+    const MAX_PATH_UNITS: usize = 1024 * 1024;
+
+    let mut capacity = INITIAL_PATH_UNITS;
+    loop {
+        let mut path = vec![0_u16; capacity];
+        let path_capacity = u32::try_from(path.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "mirror handle path buffer exceeds Win32 limits",
+            )
+        })?;
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                path.as_mut_ptr(),
+                path_capacity,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        };
+        if len == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let len = usize::try_from(len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "mirror handle path length does not fit usize",
+            )
+        })?;
+        if len < path.len() {
+            path.truncate(len);
+            return Ok(path);
+        }
+        capacity = len
+            .checked_add(1)
+            .filter(|len| *len <= MAX_PATH_UNITS)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "mirror handle path exceeds the containment-proof limit",
+                )
+            })?;
+    }
+}
+
+#[cfg(windows)]
+fn windows_handle_path_display(path: &[u16]) -> String {
+    String::from_utf16_lossy(path)
+}
+
+#[cfg(windows)]
+fn open_mirror_windows_handle(path: &Path, access: u32) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .access_mode(access)
+        // Deliberately omit FILE_SHARE_DELETE. A successful open pins this
+        // namespace entry against rename/delete until the containment proof and
+        // handle-based disposition complete.
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)] // Delete one proven-contained no-follow handle without mutating inode attrs.
+fn remove_mirror_entry_windows(
+    dest_base: &Path,
+    path: &Path,
+    expected_kind: MirrorEntryKind,
+) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FILE_READ_ATTRIBUTES, FileDispositionInfoEx,
+        SetFileInformationByHandle,
+    };
+
+    let root = open_mirror_windows_handle(dest_base, FILE_READ_ATTRIBUTES)?;
+    let root_metadata = root.metadata()?;
+    if root_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !root_metadata.is_dir()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "mirror destination root handle is not a real directory",
+        ));
+    }
+
+    let file = open_mirror_windows_handle(path, DELETE | FILE_READ_ATTRIBUTES)?;
+    let metadata = file.metadata()?;
+    let reparse = metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    let kind_matches = match expected_kind {
+        MirrorEntryKind::File => !reparse && metadata.is_file(),
+        MirrorEntryKind::Dir => !reparse && metadata.is_dir(),
+        MirrorEntryKind::Symlink => reparse,
+    };
+    if !kind_matches {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "mirror deletion target changed from expected {} kind: {}",
+                expected_kind.as_str(),
+                path.display()
+            ),
+        ));
+    }
+
+    let root_path = windows_final_path(&root)?;
+    let target_path = windows_final_path(&file)?;
+    if !windows_final_path_is_strict_descendant(&root_path, &target_path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "mirror target handle {} is not strictly under root handle {}",
+                windows_handle_path_display(&target_path),
+                windows_handle_path_display(&root_path)
+            ),
+        ));
+    }
+
+    // IGNORE_READONLY deletes this directory entry without clearing the inode's
+    // shared READONLY attribute, so hardlinks outside the mirror root retain it.
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    let disposition_size = u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+        .expect("FILE_DISPOSITION_INFO_EX size fits in u32");
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            std::ptr::from_ref(&disposition).cast(),
+            disposition_size,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    drop(file);
+    drop(root);
+    Ok(())
 }
 
 /// Reconcile `dest_base` against the sender manifest's kept paths.
@@ -220,6 +488,7 @@ pub async fn mirror_dest(
 
     while let Some((dir_abs, dir_rel)) = stack.pop() {
         cx.checkpoint().map_err(|_| MirrorError::Cancelled)?;
+        reject_mirror_reparse_ancestors(dest_base, &dir_abs, true).await?;
         let mut rd = crate::fs::read_dir(&dir_abs).await?;
         while let Some(entry) = rd.next_entry().await? {
             let abs = entry.path();
@@ -325,27 +594,20 @@ pub async fn mirror_dest(
             "atp.mirror.delete",
             &[("rel_path", x.rel_path.as_str()), ("kind", x.kind.as_str())],
         );
+        // Re-check the complete real-directory chain immediately before the
+        // leaf operation. The earlier scan is planning evidence, not an
+        // authority to traverse a path that another process may have swapped.
+        reject_mirror_reparse_ancestors(dest_base, &x.abs_path, false).await?;
         let current_link_like = path_is_link_or_reparse(&x.abs_path).await?;
-        match (x.kind, current_link_like) {
+        let delete_kind = match (x.kind, current_link_like) {
             // Files and symlinks: remove the entry itself (a symlink is unlinked,
             // never its target).
-            (MirrorEntryKind::File, false) => {
-                crate::fs::remove_file(&x.abs_path).await?;
-            }
-            (_, true) => {
-                let metadata = crate::fs::symlink_metadata(&x.abs_path).await?;
-                if metadata.is_dir() {
-                    crate::fs::remove_dir(&x.abs_path).await?;
-                } else {
-                    crate::fs::remove_file(&x.abs_path).await?;
-                }
-            }
+            (MirrorEntryKind::File, false) => MirrorEntryKind::File,
+            (_, true) => MirrorEntryKind::Symlink,
             // Directories are empty by now (deepest-first ordering removed their
             // extra children); remove_dir refuses a non-empty dir, which would
             // surface an unexpected kept child rather than silently nuking it.
-            (MirrorEntryKind::Dir, false) => {
-                crate::fs::remove_dir(&x.abs_path).await?;
-            }
+            (MirrorEntryKind::Dir, false) => MirrorEntryKind::Dir,
             (MirrorEntryKind::Symlink, false) => {
                 return Err(MirrorError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -355,7 +617,8 @@ pub async fn mirror_dest(
                     ),
                 )));
             }
-        }
+        };
+        remove_mirror_entry(dest_base, &x.abs_path, delete_kind).await?;
         deleted += 1;
     }
 
@@ -432,6 +695,26 @@ mod tests {
         paths.iter().map(|p| (*p).to_string()).collect()
     }
 
+    #[cfg(unix)]
+    fn create_directory_link(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("create directory symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(target: &Path, link: &Path) {
+        std::os::windows::fs::symlink_dir(target, link).expect("create directory symlink");
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("create file symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &Path, link: &Path) {
+        std::os::windows::fs::symlink_file(target, link).expect("create file symlink");
+    }
+
     #[test]
     fn expand_keep_adds_all_ancestors() {
         let keep = expand_keep_set(&keep_set(&["a/b/c.txt", "a/d.txt"]));
@@ -470,6 +753,57 @@ mod tests {
         let p = MirrorPolicy::default();
         assert!(!p.enabled);
         assert!(p.max_delete_fraction > 0.0 && p.max_delete_fraction <= 1.0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_handle_paths_require_a_strict_component_descendant() {
+        let wide = |value: &str| value.encode_utf16().collect::<Vec<_>>();
+        let root = wide(r"\\?\C:\mirror\root");
+
+        assert!(windows_final_path_is_strict_descendant(
+            &root,
+            &wide(r"\\?\C:\mirror\root\child.txt")
+        ));
+        assert!(windows_final_path_is_strict_descendant(
+            &wide(r"\\?\C:\mirror\root\"),
+            &wide(r"\\?\C:\mirror\root\nested\child.txt")
+        ));
+        assert!(!windows_final_path_is_strict_descendant(&root, &root));
+        assert!(!windows_final_path_is_strict_descendant(
+            &root,
+            &wide(r"\\?\C:\mirror\root-sibling\child.txt")
+        ));
+        assert!(!windows_final_path_is_strict_descendant(
+            &root,
+            &wide(r"\\?\D:\mirror\root\child.txt")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_handle_delete_checks_containment_and_filesystem_kind() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dest = temp.path().join("dest");
+        let outside = temp.path().join("outside.txt");
+        let stale_dir = dest.join("stale-dir");
+        std::fs::create_dir_all(&stale_dir).expect("create stale directory");
+        std::fs::write(&outside, b"outside").expect("write outside file");
+
+        remove_mirror_entry_windows(&dest, &outside, MirrorEntryKind::File)
+            .expect_err("outside handle must fail containment proof");
+        assert_eq!(
+            std::fs::read(&outside).expect("outside file remains"),
+            b"outside"
+        );
+
+        remove_mirror_entry_windows(&dest, &stale_dir, MirrorEntryKind::File)
+            .expect_err("wrong-kind directory handle must fail closed");
+        assert!(stale_dir.is_dir());
+
+        remove_mirror_entry_windows(&dest, &stale_dir, MirrorEntryKind::Dir)
+            .expect("empty contained directory is deleted by handle");
+        assert!(!stale_dir.exists());
     }
 
     #[test]
@@ -526,5 +860,130 @@ mod tests {
             &keep_aliases,
             &destination,
         ));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn mirror_ancestor_recheck_rejects_reparse_before_delete() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dest = temp.path().join("dest");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&dest).expect("create destination");
+        std::fs::create_dir_all(&outside).expect("create outside directory");
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, b"outside").expect("write outside victim");
+        let pivot = dest.join("pivot");
+        create_directory_link(&outside, &pivot);
+
+        let read_error =
+            futures_lite::future::block_on(reject_mirror_reparse_ancestors(&dest, &pivot, true))
+                .expect_err("reparse directory must be rejected before read_dir");
+        assert!(matches!(read_error, MirrorError::ReparseAncestor(_)));
+
+        let error = futures_lite::future::block_on(reject_mirror_reparse_ancestors(
+            &dest,
+            &pivot.join("victim.txt"),
+            false,
+        ))
+        .expect_err("reparse ancestor must fail closed");
+        assert!(matches!(error, MirrorError::ReparseAncestor(_)));
+        assert_eq!(
+            std::fs::read(&victim).expect("outside victim remains readable"),
+            b"outside"
+        );
+
+        #[cfg(windows)]
+        {
+            let error = remove_mirror_entry_windows(
+                &dest,
+                &pivot.join("victim.txt"),
+                MirrorEntryKind::File,
+            )
+            .expect_err("resolved outside handle must fail containment proof");
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                std::fs::read(&victim).expect("outside victim survives handle guard"),
+                b"outside"
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn mirror_deletes_link_leaf_without_touching_outside_target() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("create destination");
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&outside, b"outside").expect("write outside target");
+        let link = dest.join("stale-link");
+        create_file_link(&outside, &link);
+
+        let report = futures_lite::future::block_on(mirror_dest(
+            &cx,
+            &dest,
+            &BTreeSet::new(),
+            MirrorPolicy {
+                enabled: true,
+                max_delete_fraction: 1.0,
+            },
+        ))
+        .expect("mirror removes only link leaf");
+        assert_eq!(report.deleted, 1);
+        assert!(!link.exists());
+        assert_eq!(
+            std::fs::read(&outside).expect("outside target remains readable"),
+            b"outside"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mirror_deletes_readonly_name_without_mutating_external_hardlink() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("create destination");
+        let stale = dest.join("stale.txt");
+        let external = temp.path().join("external.txt");
+        std::fs::write(&stale, b"shared").expect("write stale file");
+        std::fs::hard_link(&stale, &external).expect("create external hardlink");
+        let mut permissions = std::fs::metadata(&stale)
+            .expect("stale metadata")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&stale, permissions).expect("make shared inode read-only");
+
+        let report = futures_lite::future::block_on(mirror_dest(
+            &cx,
+            &dest,
+            &BTreeSet::new(),
+            MirrorPolicy {
+                enabled: true,
+                max_delete_fraction: 1.0,
+            },
+        ))
+        .expect("mirror deletes read-only stale name");
+        assert_eq!(report.deleted, 1);
+        assert!(!stale.exists());
+        assert_eq!(
+            std::fs::read(&external).expect("external hardlink remains readable"),
+            b"shared"
+        );
+        assert!(
+            std::fs::metadata(&external)
+                .expect("external hardlink metadata")
+                .permissions()
+                .readonly(),
+            "mirror must not clear shared READONLY attributes"
+        );
+
+        let mut permissions = std::fs::metadata(&external)
+            .expect("external cleanup metadata")
+            .permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&external, permissions)
+            .expect("clear external read-only attribute for cleanup");
     }
 }
