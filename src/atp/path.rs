@@ -104,6 +104,36 @@ impl PathKind {
         }
     }
 
+    /// Total-order preference rank across every path family (lower = preferred).
+    ///
+    /// The ordering intent mirrors the live discovery ranker: **Tailscale first,
+    /// then every direct route, then every relay route, then the offline
+    /// mailbox**. Ranks are a strict total order — no two variants tie — so a
+    /// sort by `preference_rank` is deterministic. Within the direct band the
+    /// order prefers less-NAT-dependent, cheaper-to-validate routes
+    /// (public IPv6 > explicit public UDP > LAN multicast > NAT-punched UDP).
+    /// The relay band is ordered MASQUE CONNECT-UDP > ATP relay TCP/TLS-443 >
+    /// ATP relay UDP; the exact intra-band order only breaks ties and never
+    /// crosses a family boundary.
+    #[must_use]
+    pub const fn preference_rank(self) -> u8 {
+        match self {
+            // Tailscale / private-route: most preferred.
+            Self::TailscaleIp => 10,
+            // Direct peer-to-peer band.
+            Self::PublicIpv6 => 20,
+            Self::ExplicitPublicUdp => 22,
+            Self::LanMulticast => 24,
+            Self::NatPunchedUdp => 26,
+            // Relay band.
+            Self::MasqueConnectUdp => 40,
+            Self::AtpRelayTcpTls443 => 42,
+            Self::AtpRelayUdp => 44,
+            // Store-and-forward mailbox: last resort.
+            Self::OfflineMailbox => 60,
+        }
+    }
+
     /// Whether this candidate is a direct peer-to-peer route.
     #[must_use]
     pub const fn is_direct(self) -> bool {
@@ -855,6 +885,57 @@ mod tests {
         );
         assert!(PathKind::PublicIpv6.is_direct());
         assert!(PathKind::AtpRelayTcpTls443.is_relay());
+    }
+
+    #[test]
+    fn preference_rank_is_a_strict_total_order_tailscale_direct_relay_mailbox() {
+        // Every variant has a distinct rank — a strict total order, no ties.
+        let mut ranks: Vec<u8> = PathKind::ALL
+            .iter()
+            .map(|kind| kind.preference_rank())
+            .collect();
+        let distinct = ranks.len();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(ranks.len(), distinct, "preference_rank must be injective");
+
+        // Sorting all kinds by rank yields Tailscale first, mailbox last.
+        let mut sorted = PathKind::ALL;
+        sorted.sort_by_key(|kind| kind.preference_rank());
+        assert_eq!(sorted[0], PathKind::TailscaleIp);
+        assert_eq!(sorted[sorted.len() - 1], PathKind::OfflineMailbox);
+
+        // Tailscale ranks strictly below every other family.
+        for kind in PathKind::ALL {
+            if kind != PathKind::TailscaleIp {
+                assert!(
+                    PathKind::TailscaleIp.preference_rank() < kind.preference_rank(),
+                    "tailscale must outrank {kind:?}"
+                );
+            }
+        }
+
+        // Every direct variant ranks below every relay variant, and every relay
+        // variant ranks below the offline mailbox.
+        for direct in PathKind::ALL.iter().filter(|k| k.is_direct()) {
+            for relay in PathKind::ALL.iter().filter(|k| k.is_relay()) {
+                assert!(
+                    direct.preference_rank() < relay.preference_rank(),
+                    "direct {direct:?} must outrank relay {relay:?}"
+                );
+            }
+        }
+        let mailbox_rank = PathKind::OfflineMailbox.preference_rank();
+        for relay in PathKind::ALL.iter().filter(|k| k.is_relay()) {
+            assert!(
+                relay.preference_rank() < mailbox_rank,
+                "relay {relay:?} must outrank the offline mailbox"
+            );
+        }
+        // And every direct variant outranks the mailbox transitively.
+        for direct in PathKind::ALL.iter().filter(|k| k.is_direct()) {
+            assert!(direct.preference_rank() < mailbox_rank);
+        }
     }
 
     #[test]

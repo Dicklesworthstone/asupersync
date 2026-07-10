@@ -20,6 +20,7 @@ pub mod descriptor;
 pub mod esi;
 pub mod handshake;
 pub mod receiver;
+pub mod transport_select;
 
 pub use assignment::{
     BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondScheduleError, BondedBlockRepairSchedule,
@@ -55,4 +56,8 @@ pub use receiver::{
     BondedReceiverIngressStats, BondedReceiverLiveProgressMetrics, BondedReceiverProgressSnapshot,
     BondedReceiverRetentionPolicy, BondedReceiverRetentionRejectReason, BondedReceiverSymbolSet,
     BondedSymbolDisposition, BondedSymbolKey,
+};
+pub use transport_select::{
+    DonorPathChoice, ReceiverEndpoints, TailnetIdentity, TransportPreference, detect_local_tailnet,
+    is_cgnat_ipv4, parse_tailscale_ip_line, parse_tailscale_status_ipv4, select_donor_path,
 };
