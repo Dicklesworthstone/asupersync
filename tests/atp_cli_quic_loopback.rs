@@ -7,10 +7,16 @@
 #![cfg(all(feature = "atp-cli", feature = "tls"))]
 #![allow(missing_docs)]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+#[cfg(feature = "atpd-daemon")]
+use std::io::Write;
+use std::io::{BufRead, BufReader, Read};
+use std::net::SocketAddr;
+#[cfg(feature = "atpd-daemon")]
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+#[cfg(feature = "atpd-daemon")]
+use std::process::{ChildStderr, ChildStdout};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -114,6 +120,7 @@ where
     });
 }
 
+#[cfg(feature = "atpd-daemon")]
 fn spawn_atpd_output_reader(child: &mut Child) -> mpsc::Receiver<String> {
     let stdout: ChildStdout = child.stdout.take().expect("daemon stdout is piped");
     let stderr: ChildStderr = child.stderr.take().expect("daemon stderr is piped");
@@ -141,6 +148,7 @@ fn parse_rq_listen_line(line: &str) -> Option<SocketAddr> {
     addr.parse().ok()
 }
 
+#[cfg(feature = "atpd-daemon")]
 fn parse_tracing_bind_addr(line: &str, marker: &str) -> Option<SocketAddr> {
     if !line.contains(marker) {
         return None;
@@ -223,6 +231,7 @@ fn wait_for_rq_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
     }
 }
 
+#[cfg(feature = "atpd-daemon")]
 fn wait_for_atpd_quic_and_diagnostics_addrs(
     rx: &mpsc::Receiver<String>,
 ) -> (SocketAddr, SocketAddr) {
@@ -325,6 +334,96 @@ impl Drop for ChildKillGuard {
     }
 }
 
+#[cfg(windows)]
+fn windows_payload(len: usize, multiplier: u32) -> Vec<u8> {
+    (0..len)
+        .map(|index| {
+            (u32::try_from(index)
+                .unwrap_or(u32::MAX)
+                .wrapping_mul(multiplier)
+                % 251) as u8
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn parse_cli_json(output: &Output, label: &str) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "{label} stdout was not one JSON report: {error}; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+#[cfg(windows)]
+fn staging_dirs(dest: &Path) -> Vec<PathBuf> {
+    if !dest.is_dir() {
+        return Vec::new();
+    }
+    std::fs::read_dir(dest)
+        .unwrap_or_else(|error| panic!("read destination {}: {error}", dest.display()))
+        .map(|entry| entry.expect("read destination entry"))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".atp-staging-")
+                || name.starts_with(".atp-rq-staging-")
+                || name.starts_with(".atp-quic-staging-")
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+#[cfg(windows)]
+fn wait_for_staging_dir(dest: &Path, label: &str) -> PathBuf {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Some(path) = staging_dirs(dest).into_iter().next() {
+            return path;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!(
+        "{label} did not create a staging directory under {}",
+        dest.display()
+    );
+}
+
+#[cfg(windows)]
+fn create_windows_junction(target: &Path, junction: &Path) {
+    use std::os::windows::fs::MetadataExt;
+
+    let output = Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(junction)
+        .arg(target)
+        .output()
+        .expect("run cmd.exe mklink /J");
+    assert!(
+        output.status.success(),
+        "mklink /J failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let metadata = std::fs::symlink_metadata(junction).unwrap_or_else(|error| {
+        panic!(
+            "junction was not created at {}: {error}",
+            junction.display()
+        )
+    });
+    assert_ne!(
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
+        0,
+        "mklink reported success but {} is not a reparse point",
+        junction.display()
+    );
+}
+
+#[cfg(feature = "atpd-daemon")]
 fn fetch_diagnostics_json(addr: SocketAddr) -> serde_json::Value {
     let mut stream = TcpStream::connect(addr).expect("connect diagnostics endpoint");
     stream
@@ -360,6 +459,7 @@ fn atp_send_recv_quic_loopback_moves_file_bytes() {
         .collect::<Vec<_>>();
     write_file(&payload_path, &payload);
     std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+    write_file(&dest_dir.join("payload.bin"), b"stale destination bytes");
 
     let mut receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
         .args([
@@ -532,6 +632,7 @@ fn atp_send_auto_falls_back_to_tcp_after_quic_and_rq_fail() {
         .collect::<Vec<_>>();
     write_file(&payload_path, &payload);
     std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+    write_file(&dest_dir.join("payload.bin"), b"stale destination bytes");
 
     let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
         .args([
@@ -724,6 +825,502 @@ fn atp_send_auto_falls_back_to_rq_after_quic_fails() {
     assert!(sender_stderr.contains("transport selection: selected rq"));
 }
 
+#[cfg(windows)]
+#[test]
+fn atp_dry_run_rejects_non_unicode_windows_source_names() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    let root = unique_tmp("windows-non-unicode");
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).expect("create source dir");
+    let invalid_name = OsString::from_wide(&[0xd800, b'.' as u16, b'b' as u16]);
+    std::fs::write(source.join(invalid_name), b"must not be aliased")
+        .expect("create non-Unicode source path");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg("127.0.0.1:9")
+        .arg("--dry-run")
+        .output()
+        .expect("run atp dry-run");
+    assert!(
+        !output.status.success(),
+        "non-Unicode source must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not valid Unicode"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_tcp_round_trips_nested_zero_large_and_replacement_files() {
+    let root = unique_tmp("windows-tcp-tree");
+    let source = root.join("source");
+    let dest = root.join("dest");
+    let nested = source.join("nested/deeper");
+    std::fs::create_dir_all(&nested).expect("create nested source tree");
+    std::fs::create_dir_all(dest.join("source/nested")).expect("create destination tree");
+
+    let tiny = b"windows tcp nested payload";
+    let replacement = b"authoritative replacement bytes";
+    let large = windows_payload(16 * 1024 * 1024 + 37, 65_537);
+    write_file(&source.join("tiny.txt"), tiny);
+    write_file(&nested.join("large.bin"), &large);
+    write_file(&source.join("nested/replace.txt"), replacement);
+    write_file(&source.join("nested/empty.bin"), b"");
+    write_file(
+        &dest.join("source/nested/replace.txt"),
+        b"stale destination bytes that must be replaced",
+    );
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "tcp",
+            "--once",
+            "--no-delta",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows TCP receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_tcp_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg(listen_addr.to_string())
+        .args(["--transport", "tcp", "--no-delta"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows TCP sender");
+    let sender = wait_with_timeout(sender, "Windows TCP sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "Windows TCP sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+    let receiver = wait_with_timeout(receiver.into_inner(), "Windows TCP receiver");
+    assert!(
+        receiver.status.success(),
+        "Windows TCP receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+
+    let expected_bytes =
+        u64::try_from(tiny.len() + replacement.len() + large.len()).expect("fixture size fits u64");
+    let sender_report = parse_cli_json(&sender, "Windows TCP sender");
+    let receiver_report = parse_cli_json(&receiver, "Windows TCP receiver");
+    assert_eq!(sender_report["transport"], serde_json::json!("tcp"));
+    assert_eq!(sender_report["committed"], serde_json::json!(true));
+    assert_eq!(
+        sender_report["bytes_sent"],
+        serde_json::json!(expected_bytes)
+    );
+    assert_eq!(receiver_report["transport"], serde_json::json!("tcp"));
+    assert_eq!(receiver_report["committed"], serde_json::json!(true));
+    assert_eq!(
+        receiver_report["bytes_received"],
+        serde_json::json!(expected_bytes)
+    );
+
+    assert_eq!(
+        std::fs::read(dest.join("source/tiny.txt")).expect("read nested tiny file"),
+        tiny
+    );
+    assert_eq!(
+        std::fs::read(dest.join("source/nested/deeper/large.bin")).expect("read nested large file"),
+        large
+    );
+    assert_eq!(
+        std::fs::read(dest.join("source/nested/replace.txt")).expect("read replacement file"),
+        replacement
+    );
+    assert_eq!(
+        std::fs::metadata(dest.join("source/nested/empty.bin"))
+            .expect("stat zero-byte file")
+            .len(),
+        0
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "successful TCP transfer left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_quic_round_trip_requires_and_accepts_explicit_ca() {
+    let root = unique_tmp("windows-quic-explicit-ca");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let ca = root.join("tls/ca.pem");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    write_file(&ca, CA_CERT_PEM.as_bytes());
+
+    let source = root.join("source/quic-explicit-ca.bin");
+    let dest = root.join("dest");
+    let payload = windows_payload(256 * 1024 + 19, 8_191);
+    write_file(&source, &payload);
+    std::fs::create_dir_all(&dest).expect("create QUIC destination");
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "quic",
+            "--once",
+            "--no-delta",
+            "--server-cert",
+        ])
+        .arg(&cert)
+        .arg("--server-key")
+        .arg(&key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows QUIC receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg(listen_addr.to_string())
+        .args(["--transport", "quic", "--no-delta", "--ca"])
+        .arg(&ca)
+        .args(["--server-name", "localhost"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows QUIC sender");
+    let sender = wait_with_timeout(sender, "Windows QUIC sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "Windows QUIC sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+    let receiver = wait_with_timeout(receiver.into_inner(), "Windows QUIC receiver");
+    assert!(
+        receiver.status.success(),
+        "Windows QUIC receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+
+    let sender_report = parse_cli_json(&sender, "Windows QUIC sender");
+    let receiver_report = parse_cli_json(&receiver, "Windows QUIC receiver");
+    assert_eq!(sender_report["transport"], serde_json::json!("quic"));
+    assert_eq!(sender_report["committed"], serde_json::json!(true));
+    assert_eq!(sender_report["sha_ok"], serde_json::json!(true));
+    assert_eq!(sender_report["merkle_ok"], serde_json::json!(true));
+    assert_eq!(receiver_report["transport"], serde_json::json!("quic"));
+    assert_eq!(receiver_report["committed"], serde_json::json!(true));
+    assert_eq!(
+        std::fs::read(dest.join("quic-explicit-ca.bin")).expect("read QUIC payload"),
+        payload
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "successful QUIC transfer left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_rq_round_trip_uses_real_udp_datagrams() {
+    let root = unique_tmp("windows-rq-real-udp");
+    let source = root.join("source/rq-real-udp.bin");
+    let dest = root.join("dest");
+    let payload = windows_payload(2 * 1024 * 1024 + 101, 131_071);
+    write_file(&source, &payload);
+    std::fs::create_dir_all(&dest).expect("create RQ destination");
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "rq",
+            "--once",
+            "--no-delta",
+            "--repair-overhead",
+            "1.10",
+            "--rq-round0-loss-pct",
+            "2",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows RQ receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_rq_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg(listen_addr.to_string())
+        .args([
+            "--transport",
+            "rq",
+            "--no-delta",
+            "--streams",
+            "1",
+            "--repair-overhead",
+            "1.10",
+            "--rq-round0-loss-pct",
+            "2",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows RQ sender");
+    let sender = wait_with_timeout(sender, "Windows RQ sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "Windows RQ sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+    let receiver = wait_with_timeout(receiver.into_inner(), "Windows RQ receiver");
+    assert!(
+        receiver.status.success(),
+        "Windows RQ receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+
+    let sender_report = parse_cli_json(&sender, "Windows RQ sender");
+    let receiver_report = parse_cli_json(&receiver, "Windows RQ receiver");
+    let symbols_sent = sender_report["symbols_sent"]
+        .as_u64()
+        .expect("RQ sender symbols_sent counter");
+    let udp_datagrams = sender_report["udp_send_acceleration"]["datagrams"]
+        .as_u64()
+        .expect("RQ sender UDP datagram counter");
+    let udp_payload_bytes = sender_report["udp_send_acceleration"]["payload_bytes"]
+        .as_u64()
+        .expect("RQ sender UDP payload counter");
+    let symbols_accepted = receiver_report["symbols_accepted"]
+        .as_u64()
+        .expect("RQ receiver symbols_accepted counter");
+    assert!(symbols_sent > 0, "RQ sender report: {sender_report}");
+    assert!(udp_datagrams > 0, "RQ sender report: {sender_report}");
+    assert!(udp_payload_bytes > 0, "RQ sender report: {sender_report}");
+    assert!(
+        symbols_accepted > 0,
+        "RQ receiver report: {receiver_report}"
+    );
+    assert_eq!(sender_report["transport"], serde_json::json!("rq"));
+    assert_eq!(sender_report["committed"], serde_json::json!(true));
+    assert_eq!(receiver_report["transport"], serde_json::json!("rq"));
+    assert_eq!(receiver_report["committed"], serde_json::json!(true));
+    assert_eq!(
+        std::fs::read(dest.join("rq-real-udp.bin")).expect("read RQ payload"),
+        payload
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "successful RQ transfer left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_quic_peer_cancellation_rolls_back_and_reclaims_staging() {
+    let root = unique_tmp("windows-quic-cancel-cleanup");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let ca = root.join("tls/ca.pem");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    write_file(&ca, CA_CERT_PEM.as_bytes());
+
+    let source = root.join("source/cancel.bin");
+    let dest = root.join("dest");
+    let payload = windows_payload(4 * 1024 * 1024 + 23, 524_287);
+    write_file(&source, &payload);
+    std::fs::create_dir_all(&dest).expect("create cancellation destination");
+    let sentinel = b"preexisting destination must survive cancellation";
+    write_file(&dest.join("cancel.bin"), sentinel);
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "quic",
+            "--once",
+            "--no-delta",
+            "--server-cert",
+        ])
+        .arg(&cert)
+        .arg("--server-key")
+        .arg(&key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cancellable Windows QUIC receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg(listen_addr.to_string())
+        .args([
+            "--transport",
+            "quic",
+            "--no-delta",
+            "--bwlimit",
+            "65536",
+            "--ca",
+        ])
+        .arg(&ca)
+        .args(["--server-name", "localhost"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cancellable Windows QUIC sender");
+    let mut sender = ChildKillGuard::new(sender);
+
+    let staging = wait_for_staging_dir(&dest, "Windows QUIC receiver");
+    assert!(
+        sender
+            .child_mut()
+            .try_wait()
+            .expect("poll Windows QUIC sender before cancellation")
+            .is_none(),
+        "sender completed before cancellation after staging appeared at {}",
+        staging.display()
+    );
+    sender
+        .child_mut()
+        .kill()
+        .expect("terminate in-flight Windows QUIC sender");
+    let sender = wait_with_timeout(sender.into_inner(), "cancelled Windows QUIC sender");
+    assert!(
+        !sender.status.success(),
+        "cancelled sender unexpectedly succeeded; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&sender.stdout),
+        String::from_utf8_lossy(&sender.stderr)
+    );
+
+    let receiver = wait_with_timeout(
+        receiver.into_inner(),
+        "Windows QUIC receiver after peer cancellation",
+    );
+    assert!(
+        !receiver.status.success(),
+        "receiver unexpectedly committed a cancelled transfer; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dest.join("cancel.bin")).expect("read preserved cancellation sentinel"),
+        sentinel
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "cancelled QUIC transfer leaked staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_tcp_rejects_junction_destination_ancestor_without_writes() {
+    let root = unique_tmp("windows-junction-destination");
+    let junction_target = root.join("junction-target");
+    let junction = root.join("junction");
+    std::fs::create_dir_all(&junction_target).expect("create junction target");
+    create_windows_junction(&junction_target, &junction);
+    let dest = junction.join("receive");
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "tcp",
+            "--once",
+            "--no-delta",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Windows TCP receiver with junction destination");
+    let receiver = wait_with_timeout(receiver, "Windows TCP junction preflight");
+    assert!(
+        !receiver.status.success(),
+        "receiver unexpectedly accepted a destination junction; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    )
+    .to_ascii_lowercase();
+    assert!(
+        diagnostics.contains("reparse") || diagnostics.contains("symlink"),
+        "junction rejection was not attributed to the link/reparse guard: {diagnostics}"
+    );
+    assert!(
+        !junction_target.join("receive").exists(),
+        "receiver wrote through the junction into {}",
+        junction_target.display()
+    );
+    assert!(
+        staging_dirs(&junction_target).is_empty(),
+        "junction rejection left staging directories in the target: {:?}",
+        staging_dirs(&junction_target)
+    );
+}
+
+#[cfg(feature = "atpd-daemon")]
 #[test]
 fn atpd_quic_listener_accepts_atp_send_and_reports_diagnostics() {
     let root = unique_tmp("atpd-loopback");

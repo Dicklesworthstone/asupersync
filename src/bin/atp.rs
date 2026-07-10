@@ -52,13 +52,16 @@ use asupersync::atp::delta::{
     build_delta_resync_send_plan, decode_subdelta_ops,
     plan_incremental_resync_with_receiver_coverage,
 };
-use asupersync::atp::delta_subchunk::{self, SubBlockSignature};
+use asupersync::atp::delta_subchunk::{self, SubBlockSignature, SubDeltaOp};
 use asupersync::atp::object::ContentId;
-use asupersync::atp::safety::{portable_path_collision_key, validate_portable_relative_path};
+use asupersync::atp::safety::{
+    portable_path_collision_key, validate_portable_path_set, validate_portable_relative_path,
+};
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
-#[cfg(windows)]
-use asupersync::net::atp::transport_common::metadata::path_is_link_or_reparse_sync;
+use asupersync::net::atp::transport_common::metadata::{
+    path_is_link_or_reparse, path_is_link_or_reparse_sync,
+};
 use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
@@ -120,6 +123,14 @@ const DIRECT_DELTA_SIDECAR_FIRST_BYTE_TIMEOUT_MS: u64 = 50;
 /// direct-delta sidecar. Large 4 GiB manifests can contain ~131k CDC chunks, so
 /// keep enough room for legitimate state while bounding hostile allocations.
 const DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
+const DELTA_MAX_METADATA_BYTES: usize = DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES;
+const DELTA_MAX_CHUNK_BYTES: usize = DELTA_TREE_OBJECT_MAX_CHUNK_BYTES;
+const DELTA_MAX_SUBDELTA_OPS_BYTES: usize = DELTA_TREE_OBJECT_MAX_CHUNK_BYTES;
+const DELTA_SUBDELTA_OPS_MAGIC: &[u8] = b"ASUP_ATP_DELTA_SUBCHUNK_OPS_V1\0";
+const DELTA_MIN_SUBDELTA_OP_BYTES: usize = 1 + 8;
+const DELTA_MIN_FILE_ENTRY_BYTES: usize = 4 + 1 + 8 + 32;
+const DELTA_MIN_PAYLOAD_ENTRY_BYTES: usize = 32 + 8;
+const DELTA_MAX_FILE_COUNT: usize = 1_000_000;
 /// A 4 GiB object at the 16 KiB minimum CDC size has at most this many chunks.
 const DIRECT_DELTA_SIDECAR_MAX_REQUEST_CHUNKS: usize = 4 * 1024 * 1024 * 1024 / 16_384;
 /// Bound signature hashing and in-memory response construction before JSON
@@ -147,6 +158,8 @@ enum Command {
     /// Generate a validator-accepted RQ symbol-auth key as lowercase hex.
     #[command(name = "rq-keygen")]
     RqKeygen,
+    #[command(name = "__delta-state-export", hide = true)]
+    DeltaStateExport { dest: PathBuf },
 }
 
 /// Which real transport to use.
@@ -510,6 +523,15 @@ fn tcp_config(max_bytes: u64, enable_delta: bool) -> TransferConfig {
         enable_delta,
         ..TransferConfig::default()
     }
+}
+
+fn tcp_receive_config(max_bytes: u64, enable_delta: bool, one_shot: bool) -> TransferConfig {
+    let mut config = tcp_config(max_bytes, enable_delta);
+    if !one_shot {
+        // Delta refresh and commit mutate one destination-wide state tree.
+        config.max_active_connections = 1;
+    }
+    config
 }
 
 fn recv_accept_timeout(seconds: u64) -> Result<Duration, String> {
@@ -1328,9 +1350,15 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     // plan matches what the transfer commits: same chunk size, metadata policy
     // (symlink/dir/special-file handling), and hardlink dedup.
     let cfg = tcp_config(args.max_bytes, false);
+    let validate_rq = args.transport == Transport::Rq;
     let plan = runtime
         .block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("dry-run cx");
+            if validate_rq {
+                transport_rq::validate_source_compatibility(&source)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             plan_transfer(
                 &cx,
                 &source,
@@ -1339,6 +1367,7 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
                 cfg.preserve_hardlinks,
             )
             .await
+            .map_err(|error| error.to_string())
         }))
         .map_err(|e| e.to_string())?;
     print_json(&plan);
@@ -1772,7 +1801,8 @@ impl RemoteTarget {
             || remote_path.starts_with('/')
             || remote_path.starts_with("./")
             || remote_path.starts_with("../")
-            || remote_path.starts_with('~');
+            || remote_path.starts_with('~')
+            || looks_like_windows_shell_path(remote_path);
         if !looks_like_remote_path {
             return None;
         }
@@ -1796,7 +1826,40 @@ fn split_remote_target(target: &str) -> Option<(&str, &str)> {
     target.split_once(':')
 }
 
+fn looks_like_windows_shell_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.contains('\\')
+        || value.starts_with("//")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+fn validate_posix_ssh_path(label: &str, path: &str) -> Result<(), String> {
+    if looks_like_windows_shell_path(path) {
+        return Err(format!(
+            "SSH bootstrap uses POSIX shell commands and cannot use Windows-style {label} path \
+             {path:?}; start `atp recv` directly on Windows and send to its listener address"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_posix_ssh_bootstrap(args: &SendArgs, remote: &RemoteTarget) -> Result<(), String> {
+    validate_posix_ssh_path("remote destination", &remote.remote_path)?;
+    validate_posix_ssh_path("remote atp executable", &args.remote_atp)?;
+    for (label, path) in [
+        ("remote server certificate", args.server_cert.as_deref()),
+        ("remote server key", args.server_key.as_deref()),
+    ] {
+        if let Some(path) = path {
+            let path = path.to_string_lossy();
+            validate_posix_ssh_path(label, &path)?;
+        }
+    }
+    Ok(())
+}
+
 fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), String> {
+    validate_posix_ssh_bootstrap(&args, remote)?;
     if args.no_tailscale && args.prefer == PathPreference::Tailscale {
         return Err("--no-tailscale conflicts with --prefer tailscale".to_string());
     }
@@ -2047,6 +2110,303 @@ struct DeltaTreeFile {
     bytes: Vec<u8>,
 }
 
+#[derive(Debug)]
+enum DeltaSnapshotFailure {
+    UnsupportedCapability(String),
+    Fatal(String),
+}
+
+impl DeltaSnapshotFailure {
+    fn unsupported(message: impl Into<String>) -> Self {
+        Self::UnsupportedCapability(message.into())
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self::Fatal(message.into())
+    }
+}
+
+impl std::fmt::Display for DeltaSnapshotFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedCapability(message) | Self::Fatal(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+fn delta_link_or_reparse_prefix(path: &Path, operation: &str) -> Result<Option<PathBuf>, String> {
+    let mut ancestors = path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                if path_is_link_or_reparse_sync(ancestor).map_err(|err| {
+                    format!(
+                        "inspect path prefix {} before {operation}: {err}",
+                        ancestor.display()
+                    )
+                })? {
+                    return Ok(Some(ancestor.to_path_buf()));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "inspect path prefix {} before {operation}: {err}",
+                    ancestor.display()
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn ensure_delta_path_chain(path: &Path, operation: &str) -> Result<(), String> {
+    if let Some(prefix) = delta_link_or_reparse_prefix(path, operation)? {
+        return Err(format!(
+            "refusing to {operation} through symlink or reparse-point prefix {}",
+            prefix.display()
+        ));
+    }
+    Ok(())
+}
+
+fn delta_path_metadata(path: &Path, operation: &str) -> Result<Option<fs::Metadata>, String> {
+    ensure_delta_path_chain(path, operation)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!(
+            "inspect delta path {} before {operation}: {err}",
+            path.display()
+        )),
+    }
+}
+
+fn require_delta_directory(path: &Path, operation: &str) -> Result<(), String> {
+    let metadata = delta_path_metadata(path, operation)?
+        .ok_or_else(|| format!("delta directory does not exist: {}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("delta path is not a directory: {}", path.display()));
+    }
+    Ok(())
+}
+
+fn create_delta_dir(path: &Path, operation: &str) -> Result<(), String> {
+    ensure_delta_path_chain(path, operation)?;
+    fs::create_dir(path).map_err(|err| format!("{operation} {}: {err}", path.display()))?;
+    require_delta_directory(path, operation)
+}
+
+fn create_delta_dir_all(path: &Path, operation: &str) -> Result<(), String> {
+    ensure_delta_path_chain(path, operation)?;
+    fs::create_dir_all(path).map_err(|err| format!("{operation} {}: {err}", path.display()))?;
+    require_delta_directory(path, operation)
+}
+
+fn create_delta_file(path: &Path, operation: &str) -> Result<fs::File, String> {
+    if let Some(metadata) = delta_path_metadata(path, operation)?
+        && !metadata.is_file()
+    {
+        return Err(format!(
+            "refusing to replace non-file delta path {}",
+            path.display()
+        ));
+    }
+    fs::File::create(path).map_err(|err| format!("{operation} {}: {err}", path.display()))
+}
+
+fn write_delta_file(
+    file: &mut fs::File,
+    path: &Path,
+    bytes: &[u8],
+    operation: &str,
+) -> Result<(), String> {
+    ensure_delta_path_chain(path, operation)?;
+    file.write_all(bytes)
+        .map_err(|err| format!("{operation} {}: {err}", path.display()))
+}
+
+fn read_delta_file_bounded_before(
+    path: &Path,
+    max_bytes: usize,
+    deadline: Option<Instant>,
+    operation: &str,
+) -> Result<Vec<u8>, String> {
+    let metadata = delta_path_metadata(path, operation)?
+        .ok_or_else(|| format!("delta file does not exist: {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "delta path is not a regular file: {}",
+            path.display()
+        ));
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|err| format!("open delta file {} for {operation}: {err}", path.display()))?;
+    read_file_limited_before_deadline(&mut file, max_bytes, deadline, operation)
+        .map_err(|err| format!("{}: {err}", path.display()))
+}
+
+fn read_delta_file_exact_before(
+    path: &Path,
+    declared_bytes: u64,
+    hard_cap: usize,
+    deadline: Option<Instant>,
+    operation: &str,
+) -> Result<Vec<u8>, String> {
+    let expected = usize::try_from(declared_bytes)
+        .map_err(|_| format!("{operation} declared size exceeds usize::MAX"))?;
+    if expected > hard_cap {
+        return Err(format!(
+            "{operation} declared size {expected} exceeds {hard_cap} byte limit"
+        ));
+    }
+    let bytes = read_delta_file_bounded_before(path, expected, deadline, operation)?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "{operation} size mismatch: expected {expected}, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn rename_delta_path(from: &Path, to: &Path, operation: &str) -> Result<(), String> {
+    if delta_path_metadata(from, operation)?.is_none() {
+        return Err(format!(
+            "delta rename source does not exist: {}",
+            from.display()
+        ));
+    }
+    if delta_path_metadata(to, operation)?.is_some() {
+        return Err(format!(
+            "delta rename destination already exists: {}",
+            to.display()
+        ));
+    }
+    fs::rename(from, to)
+        .map_err(|err| format!("{operation} {} to {}: {err}", from.display(), to.display()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeltaInternalName {
+    State,
+    Package,
+}
+
+fn delta_internal_name(name: &str) -> Option<DeltaInternalName> {
+    let key = portable_path_collision_key(name);
+    let state_key = portable_path_collision_key(DELTA_STATE_DIR);
+    let package_key = portable_path_collision_key(DELTA_PACKAGE_PREFIX);
+    if key == state_key {
+        Some(DeltaInternalName::State)
+    } else if key.starts_with(&package_key) {
+        Some(DeltaInternalName::Package)
+    } else {
+        None
+    }
+}
+
+fn validate_canonical_hex_hash(value: &str, label: &str) -> Result<(), String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} must be exactly 64 lowercase hexadecimal characters"
+        ))
+    }
+}
+
+fn canonical_delta_chunk_file_name(content_id_hex: &str) -> Result<String, String> {
+    validate_canonical_hex_hash(content_id_hex, "delta chunk content id")?;
+    Ok(format!("{content_id_hex}.chunk"))
+}
+
+fn canonical_delta_ops_file_name(
+    target_content_id_hex: &str,
+    base_content_id_hex: &str,
+) -> Result<String, String> {
+    validate_canonical_hex_hash(target_content_id_hex, "delta ops target content id")?;
+    validate_canonical_hex_hash(base_content_id_hex, "delta ops base content id")?;
+    Ok(format!(
+        "{target_content_id_hex}-from-{}.subdelta.ops",
+        &base_content_id_hex[..16]
+    ))
+}
+
+fn require_canonical_delta_file_name(
+    actual: &str,
+    expected: &str,
+    label: &str,
+) -> Result<(), String> {
+    if actual != expected {
+        return Err(format!(
+            "noncanonical {label} filename {actual:?}; expected {expected:?}"
+        ));
+    }
+    validate_portable_relative_path(actual)
+        .map_err(|_| format!("unsafe {label} filename: {actual:?}"))
+}
+
+fn validate_subdelta_output_size(ops: &[SubDeltaOp], expected_bytes: u64) -> Result<(), String> {
+    if expected_bytes > u64::try_from(DELTA_MAX_CHUNK_BYTES).unwrap_or(u64::MAX) {
+        return Err(format!(
+            "delta sub-delta target size {expected_bytes} exceeds {} byte limit",
+            DELTA_MAX_CHUNK_BYTES
+        ));
+    }
+    let output_bytes = ops.iter().try_fold(0u64, |total, op| {
+        let len = match op {
+            SubDeltaOp::Copy { len, .. } => u64::from(*len),
+            SubDeltaOp::Literal(bytes) => u64::try_from(bytes.len())
+                .map_err(|_| "delta sub-delta literal length exceeds u64::MAX".to_string())?,
+        };
+        total
+            .checked_add(len)
+            .ok_or_else(|| "delta sub-delta output length overflow".to_string())
+    })?;
+    if output_bytes != expected_bytes {
+        return Err(format!(
+            "delta sub-delta output size mismatch: expected {expected_bytes}, ops produce {output_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_subdelta_op_count_before_decode(bytes: &[u8]) -> Result<(), String> {
+    let header_len = DELTA_SUBDELTA_OPS_MAGIC
+        .len()
+        .checked_add(8)
+        .ok_or_else(|| "delta sub-delta header length overflow".to_string())?;
+    let header = bytes
+        .get(..header_len)
+        .ok_or_else(|| "delta sub-delta op stream is truncated".to_string())?;
+    if !header.starts_with(DELTA_SUBDELTA_OPS_MAGIC) {
+        return Err("delta sub-delta op stream has invalid magic".to_string());
+    }
+    let count_bytes: [u8; 8] = header[DELTA_SUBDELTA_OPS_MAGIC.len()..]
+        .try_into()
+        .map_err(|_| "delta sub-delta op count is truncated".to_string())?;
+    let op_count = usize::try_from(u64::from_be_bytes(count_bytes))
+        .map_err(|_| "delta sub-delta op count exceeds usize::MAX".to_string())?;
+    let max_op_count = bytes.len().saturating_sub(header_len) / DELTA_MIN_SUBDELTA_OP_BYTES;
+    if op_count > max_op_count {
+        return Err(format!(
+            "delta sub-delta op count {op_count} exceeds the {max_op_count} entries possible in the remaining body"
+        ));
+    }
+    Ok(())
+}
+
 fn prepare_delta_ssh_send(
     args: &SendArgs,
     remote: &RemoteTarget,
@@ -2223,30 +2583,45 @@ fn fetch_remote_delta_state(
     args: &SendArgs,
     remote: &RemoteTarget,
 ) -> Result<Option<DeltaCliState>, String> {
-    let state_path = remote_delta_state_path(&remote.remote_path);
     let mut command = ssh_command(args, &remote.ssh_host);
-    command.arg(format!(
-        "if test -r {}; then cat {}; fi",
-        shell_quote(&state_path),
-        shell_quote(&state_path)
-    ));
-    let output = command
-        .output()
+    command
+        .arg(shell_command(&[
+            args.remote_atp.clone(),
+            "__delta-state-export".to_string(),
+            remote.remote_path.clone(),
+        ]))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
         .map_err(|err| format!("fetch remote delta state via ssh: {err}"))?;
-    if !output.status.success() {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "fetch remote delta state stdout pipe unavailable".to_string())?;
+    let body = match read_utf8_body_limited(&mut stdout, DELTA_MAX_METADATA_BYTES) {
+        Ok(body) => body,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("fetch remote delta state via ssh: {err}"));
+        }
+    };
+    let status = child
+        .wait()
+        .map_err(|err| format!("wait for remote delta state via ssh: {err}"))?;
+    if !status.success() {
         return Ok(None);
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
+    let trimmed = body.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
     serde_json::from_str(trimmed)
         .map(Some)
-        .map_err(|err| format!("parse remote delta state {}: {err}", state_path))
+        .map_err(|err| format!("parse remote delta state: {err}"))
 }
 
-#[cfg(test)]
 fn read_utf8_body_limited(reader: &mut impl Read, max_bytes: usize) -> std::io::Result<String> {
     let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "body limit overflow")
@@ -2518,15 +2893,6 @@ fn retryable_delta_state_connect_error(err: &std::io::Error) -> bool {
     )
 }
 
-fn remote_delta_state_path(remote_path: &str) -> String {
-    let base = remote_path.trim_end_matches('/');
-    if base.is_empty() {
-        format!("{DELTA_STATE_DIR}/{DELTA_STATE_FILE}")
-    } else {
-        format!("{base}/{DELTA_STATE_DIR}/{DELTA_STATE_FILE}")
-    }
-}
-
 fn create_delta_package(
     snapshot: &DeltaSourceSnapshot,
     plan: &DeltaResyncPlan,
@@ -2722,32 +3088,25 @@ fn write_delta_package(
 ) -> Result<DeltaPackageWrite, String> {
     let package_root = create_unique_delta_package_root(&snapshot.object_sha256_hex)?;
     let chunk_dir = package_root.join(DELTA_CHUNK_DIR);
-    fs::create_dir(&chunk_dir).map_err(|err| {
-        format!(
-            "create delta package chunk dir {}: {err}",
-            chunk_dir.display()
-        )
-    })?;
+    create_delta_dir(&chunk_dir, "create delta package chunk directory")?;
     let subchunk_dir = package_root.join(DELTA_SUBCHUNK_DIR);
     if !package.subdelta_chunks.is_empty() {
-        fs::create_dir(&subchunk_dir).map_err(|err| {
-            format!(
-                "create delta package subchunk dir {}: {err}",
-                subchunk_dir.display()
-            )
-        })?;
+        create_delta_dir(&subchunk_dir, "create delta package subchunk directory")?;
     }
 
     let mut missing_chunks = Vec::with_capacity(package.whole_chunks.len());
     for whole in &package.whole_chunks {
         let chunk = &whole.chunk;
         let content_id_hex = chunk.content_id.to_hex();
-        let file_name = format!("{content_id_hex}.chunk");
+        let file_name = canonical_delta_chunk_file_name(&content_id_hex)?;
         let path = chunk_dir.join(&file_name);
-        let mut file = fs::File::create(&path)
-            .map_err(|err| format!("create delta chunk {}: {err}", path.display()))?;
-        file.write_all(&whole.payload)
-            .map_err(|err| format!("write delta chunk {}: {err}", path.display()))?;
+        let mut file = create_delta_file(&path, "create delta package chunk")?;
+        write_delta_file(
+            &mut file,
+            &path,
+            &whole.payload,
+            "write delta package chunk",
+        )?;
         missing_chunks.push(DeltaPackageChunkMetadata {
             content_id_hex,
             size_bytes: chunk.size_bytes,
@@ -2759,15 +3118,16 @@ fn write_delta_package(
     for subdelta in &package.subdelta_chunks {
         let target_content_id_hex = subdelta.target_chunk.content_id.to_hex();
         let base_content_id_hex = subdelta.base_chunk.content_id.to_hex();
-        let file_name = format!(
-            "{target_content_id_hex}-from-{}.subdelta.ops",
-            &base_content_id_hex[..16]
-        );
+        let file_name =
+            canonical_delta_ops_file_name(&target_content_id_hex, &base_content_id_hex)?;
         let path = subchunk_dir.join(&file_name);
-        let mut file = fs::File::create(&path)
-            .map_err(|err| format!("create delta subchunk ops {}: {err}", path.display()))?;
-        file.write_all(&subdelta.encoded_ops)
-            .map_err(|err| format!("write delta subchunk ops {}: {err}", path.display()))?;
+        let mut file = create_delta_file(&path, "create delta subchunk ops")?;
+        write_delta_file(
+            &mut file,
+            &path,
+            &subdelta.encoded_ops,
+            "write delta subchunk ops",
+        )?;
         subdelta_chunks.push(DeltaPackageSubdeltaMetadata {
             target_content_id_hex,
             target_sha256_hex: subdelta.target_sha256_hex.clone(),
@@ -2801,24 +3161,20 @@ fn write_delta_package(
         repeated_chunks,
     };
     let manifest_path = package_root.join(DELTA_PACKAGE_FILE);
-    let mut file = fs::File::create(&manifest_path).map_err(|err| {
-        format!(
-            "create delta package manifest {}: {err}",
-            manifest_path.display()
-        )
-    })?;
+    let mut file = create_delta_file(&manifest_path, "create delta package manifest")?;
+    ensure_delta_path_chain(&manifest_path, "write delta package manifest")?;
     serde_json::to_writer(&mut file, &metadata).map_err(|err| {
         format!(
             "write delta package manifest {}: {err}",
             manifest_path.display()
         )
     })?;
-    file.write_all(b"\n").map_err(|err| {
-        format!(
-            "finish delta package manifest {}: {err}",
-            manifest_path.display()
-        )
-    })?;
+    write_delta_file(
+        &mut file,
+        &manifest_path,
+        b"\n",
+        "finish delta package manifest",
+    )?;
 
     Ok(DeltaPackageWrite {
         package_root,
@@ -2840,15 +3196,21 @@ fn encode_delta_package_target_manifest(bytes: &[u8]) -> (Option<String>, Option
 fn decode_delta_package_target_manifest(
     metadata: &DeltaPackageMetadata,
 ) -> Result<PersistentChunkManifest, String> {
-    let target_manifest_bytes = if let Some(encoded) = &metadata.target_manifest_b64 {
-        STANDARD
+    let target_manifest_bytes = match (
+        metadata.target_manifest_hex.as_deref(),
+        metadata.target_manifest_b64.as_deref(),
+    ) {
+        (None, Some(encoded)) => STANDARD
             .decode(encoded)
-            .map_err(|err| format!("decode delta package target manifest base64: {err}"))?
-    } else if let Some(encoded) = &metadata.target_manifest_hex {
-        hex::decode(encoded)
-            .map_err(|err| format!("decode delta package target manifest: {err}"))?
-    } else {
-        return Err("delta package target manifest is missing".to_string());
+            .map_err(|err| format!("decode delta package target manifest base64: {err}"))?,
+        (Some(encoded), None) => hex::decode(encoded)
+            .map_err(|err| format!("decode delta package target manifest: {err}"))?,
+        (None, None) => return Err("delta package target manifest is missing".to_string()),
+        (Some(_), Some(_)) => {
+            return Err(
+                "delta package target manifest must use exactly one canonical encoding".to_string(),
+            );
+        }
     };
     PersistentChunkManifest::from_canonical_bytes(&target_manifest_bytes)
         .map_err(|err| format!("decode delta package target manifest: {err}"))
@@ -2859,8 +3221,12 @@ fn create_unique_delta_package_root(object_sha256_hex: &str) -> Result<PathBuf, 
     for attempt in 0..32u32 {
         let nonce = unique_micros();
         let path = env::temp_dir().join(format!("{DELTA_PACKAGE_PREFIX}{short}-{nonce}-{attempt}"));
+        ensure_delta_path_chain(&path, "create delta package root")?;
         match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
+            Ok(()) => {
+                require_delta_directory(&path, "create delta package root")?;
+                return Ok(path);
+            }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(format!(
@@ -2874,13 +3240,13 @@ fn create_unique_delta_package_root(object_sha256_hex: &str) -> Result<PathBuf, 
 }
 
 fn build_delta_source_snapshot(source: &Path) -> Result<DeltaSourceSnapshot, String> {
-    let files = collect_delta_tree_files(source)?;
+    let files = collect_delta_tree_files(source).map_err(|error| error.to_string())?;
     build_delta_snapshot_from_files(files)
 }
 
-fn build_delta_dest_snapshot(dest: &Path) -> Result<DeltaSourceSnapshot, String> {
+fn build_delta_dest_snapshot(dest: &Path) -> Result<DeltaSourceSnapshot, DeltaSnapshotFailure> {
     let files = collect_delta_dest_tree_files(dest)?;
-    build_delta_snapshot_from_files(files)
+    build_delta_snapshot_from_files(files).map_err(DeltaSnapshotFailure::fatal)
 }
 
 fn build_delta_snapshot_from_files(
@@ -3006,88 +3372,124 @@ const fn delta_tree_splitmix64(mut value: u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
-fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, String> {
-    #[cfg(windows)]
-    if path_is_link_or_reparse_sync(dest)
-        .map_err(|err| format!("read metadata {}: {err}", dest.display()))?
-    {
-        return Err(format!(
-            "delta destination is a Windows reparse point: {}",
-            dest.display()
-        ));
+fn delta_snapshot_metadata(
+    path: &Path,
+    operation: &str,
+) -> Result<fs::Metadata, DeltaSnapshotFailure> {
+    match delta_link_or_reparse_prefix(path, operation) {
+        Ok(Some(prefix)) => Err(DeltaSnapshotFailure::unsupported(format!(
+            "{operation} is unsupported through symlink or reparse-point prefix {}",
+            prefix.display()
+        ))),
+        Ok(None) => fs::symlink_metadata(path).map_err(|err| {
+            DeltaSnapshotFailure::fatal(format!(
+                "read metadata {} for {operation}: {err}",
+                path.display()
+            ))
+        }),
+        Err(error) => Err(DeltaSnapshotFailure::fatal(error)),
     }
-    let metadata = fs::symlink_metadata(dest)
-        .map_err(|err| format!("read metadata {}: {err}", dest.display()))?;
+}
+
+fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, DeltaSnapshotFailure> {
+    let metadata = delta_snapshot_metadata(dest, "snapshot delta destination")?;
     if !metadata.is_dir() {
-        return Err(format!(
+        return Err(DeltaSnapshotFailure::unsupported(format!(
             "delta destination is not a directory: {}",
             dest.display()
-        ));
+        )));
     }
 
     let mut files = Vec::new();
+    ensure_delta_path_chain(dest, "read delta destination directory")
+        .map_err(DeltaSnapshotFailure::fatal)?;
     let mut entries = fs::read_dir(dest)
-        .map_err(|err| format!("read directory {}: {err}", dest.display()))?
+        .map_err(|err| {
+            DeltaSnapshotFailure::fatal(format!("read directory {}: {err}", dest.display()))
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("read directory entry {}: {err}", dest.display()))?;
+        .map_err(|err| {
+            DeltaSnapshotFailure::fatal(format!("read directory entry {}: {err}", dest.display()))
+        })?;
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| format!("non-UTF-8 path under {}", dest.display()))?;
-        if name == DELTA_STATE_DIR || name.starts_with(DELTA_PACKAGE_PREFIX) {
+        let name = entry.file_name().into_string().map_err(|_| {
+            DeltaSnapshotFailure::unsupported(format!(
+                "non-UTF-8 path under {} is not delta-packable",
+                dest.display()
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = delta_snapshot_metadata(&path, "snapshot delta destination entry")?;
+        if let Some(kind) = delta_internal_name(&name) {
+            let canonical = match kind {
+                DeltaInternalName::State => name == DELTA_STATE_DIR,
+                DeltaInternalName::Package => name.starts_with(DELTA_PACKAGE_PREFIX),
+            };
+            if !canonical {
+                return Err(DeltaSnapshotFailure::fatal(format!(
+                    "noncanonical reserved delta path under {}: {name:?}",
+                    dest.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(DeltaSnapshotFailure::fatal(format!(
+                    "reserved delta path is not a directory: {}",
+                    path.display()
+                )));
+            }
             continue;
         }
-        validate_delta_rel_path(&name)?;
-        let path = entry.path();
-        #[cfg(windows)]
-        if path_is_link_or_reparse_sync(&path)
-            .map_err(|err| format!("read metadata {}: {err}", path.display()))?
-        {
-            return Err(format!(
-                "delta destination contains a Windows reparse point: {}",
-                path.display()
-            ));
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|err| format!("read metadata {}: {err}", path.display()))?;
+        validate_delta_rel_path(&name).map_err(DeltaSnapshotFailure::fatal)?;
         if metadata.is_dir() {
             collect_delta_dir(&path, &name, &mut files)?;
         } else if metadata.is_file() {
-            let bytes = fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+            ensure_delta_path_chain(&path, "read delta destination file")
+                .map_err(DeltaSnapshotFailure::fatal)?;
+            let bytes = fs::read(&path).map_err(|err| {
+                DeltaSnapshotFailure::fatal(format!("read {}: {err}", path.display()))
+            })?;
             files.push(DeltaTreeFile {
                 rel_path: name,
                 bytes,
             });
+        } else {
+            return Err(DeltaSnapshotFailure::unsupported(format!(
+                "unsupported metadata in delta destination: {}",
+                path.display()
+            )));
         }
     }
 
+    if files.is_empty() {
+        return Err(DeltaSnapshotFailure::unsupported(
+            "empty directory trees use full-object transfer",
+        ));
+    }
     Ok(files)
 }
 
-fn collect_delta_tree_files(source: &Path) -> Result<Vec<DeltaTreeFile>, String> {
-    #[cfg(windows)]
-    if path_is_link_or_reparse_sync(source)
-        .map_err(|err| format!("read metadata {}: {err}", source.display()))?
-    {
-        return Err(format!(
-            "delta source is a Windows reparse point: {}",
-            source.display()
-        ));
-    }
-    let metadata = fs::symlink_metadata(source)
-        .map_err(|err| format!("read metadata {}: {err}", source.display()))?;
+fn collect_delta_tree_files(source: &Path) -> Result<Vec<DeltaTreeFile>, DeltaSnapshotFailure> {
+    let metadata = delta_snapshot_metadata(source, "snapshot delta source")?;
     let root_name = source
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("delta source has no UTF-8 file name: {}", source.display()))?;
-    validate_delta_rel_path(root_name)?;
+        .ok_or_else(|| {
+            DeltaSnapshotFailure::unsupported(format!(
+                "delta source has no UTF-8 file name: {}",
+                source.display()
+            ))
+        })?;
+    validate_delta_rel_path(root_name).map_err(DeltaSnapshotFailure::fatal)?;
 
     let mut files = Vec::new();
     if metadata.is_file() {
-        let bytes = fs::read(source).map_err(|err| format!("read {}: {err}", source.display()))?;
+        ensure_delta_path_chain(source, "read delta source file")
+            .map_err(DeltaSnapshotFailure::fatal)?;
+        let bytes = fs::read(source).map_err(|err| {
+            DeltaSnapshotFailure::fatal(format!("read {}: {err}", source.display()))
+        })?;
         files.push(DeltaTreeFile {
             rel_path: root_name.to_string(),
             bytes,
@@ -3096,58 +3498,67 @@ fn collect_delta_tree_files(source: &Path) -> Result<Vec<DeltaTreeFile>, String>
     }
     if metadata.is_dir() {
         collect_delta_dir(source, root_name, &mut files)?;
+        if files.is_empty() {
+            return Err(DeltaSnapshotFailure::unsupported(
+                "empty directory trees use full-object transfer",
+            ));
+        }
         return Ok(files);
     }
 
-    Err(format!(
+    Err(DeltaSnapshotFailure::unsupported(format!(
         "unsupported source type for transparent delta: {}",
         source.display()
-    ))
+    )))
 }
 
 fn collect_delta_dir(
     dir: &Path,
     rel_prefix: &str,
     files: &mut Vec<DeltaTreeFile>,
-) -> Result<(), String> {
+) -> Result<(), DeltaSnapshotFailure> {
+    delta_snapshot_metadata(dir, "read delta directory")?;
     let mut entries = fs::read_dir(dir)
-        .map_err(|err| format!("read directory {}: {err}", dir.display()))?
+        .map_err(|err| {
+            DeltaSnapshotFailure::fatal(format!("read directory {}: {err}", dir.display()))
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("read directory entry {}: {err}", dir.display()))?;
+        .map_err(|err| {
+            DeltaSnapshotFailure::fatal(format!("read directory entry {}: {err}", dir.display()))
+        })?;
     entries.sort_by_key(|entry| entry.file_name());
+    if entries.is_empty() {
+        return Err(DeltaSnapshotFailure::unsupported(format!(
+            "empty directory {} requires full-object transfer",
+            dir.display()
+        )));
+    }
 
     for entry in entries {
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| format!("non-UTF-8 path under {}", dir.display()))?;
-        if name == DELTA_STATE_DIR || name.starts_with(DELTA_PACKAGE_PREFIX) {
-            continue;
-        }
+        let name = entry.file_name().into_string().map_err(|_| {
+            DeltaSnapshotFailure::unsupported(format!(
+                "non-UTF-8 path under {} is not delta-packable",
+                dir.display()
+            ))
+        })?;
         let rel_path = format!("{rel_prefix}/{name}");
-        validate_delta_rel_path(&rel_path)?;
+        validate_delta_rel_path(&rel_path).map_err(DeltaSnapshotFailure::fatal)?;
         let path = entry.path();
-        #[cfg(windows)]
-        if path_is_link_or_reparse_sync(&path)
-            .map_err(|err| format!("read metadata {}: {err}", path.display()))?
-        {
-            return Err(format!(
-                "delta source contains a Windows reparse point: {}",
-                path.display()
-            ));
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|err| format!("read metadata {}: {err}", path.display()))?;
+        let metadata = delta_snapshot_metadata(&path, "snapshot delta tree entry")?;
         if metadata.is_dir() {
             collect_delta_dir(&path, &rel_path, files)?;
         } else if metadata.is_file() {
-            let bytes = fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+            ensure_delta_path_chain(&path, "read delta tree file")
+                .map_err(DeltaSnapshotFailure::fatal)?;
+            let bytes = fs::read(&path).map_err(|err| {
+                DeltaSnapshotFailure::fatal(format!("read {}: {err}", path.display()))
+            })?;
             files.push(DeltaTreeFile { rel_path, bytes });
         } else {
-            return Err(format!(
+            return Err(DeltaSnapshotFailure::unsupported(format!(
                 "unsupported source type for transparent delta: {}",
                 path.display()
-            ));
+            )));
         }
     }
 
@@ -3203,7 +3614,9 @@ fn put_u64(out: &mut Vec<u8>, value: u64) {
 
 fn validate_delta_rel_path(rel_path: &str) -> Result<(), String> {
     if validate_portable_relative_path(rel_path).is_err()
-        || rel_path.split('/').any(|part| part == DELTA_STATE_DIR)
+        || rel_path
+            .split('/')
+            .any(|component| delta_internal_name(component).is_some())
     {
         return Err(format!("unsafe delta relative path: {rel_path}"));
     }
@@ -3213,17 +3626,8 @@ fn validate_delta_rel_path(rel_path: &str) -> Result<(), String> {
 fn validate_distinct_delta_paths<'a>(
     paths: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), String> {
-    let mut seen = BTreeMap::<String, String>::new();
-    for path in paths {
-        validate_delta_rel_path(path)?;
-        let key = portable_path_collision_key(path);
-        if let Some(existing) = seen.insert(key, path.to_string()) {
-            return Err(format!(
-                "duplicate or case-colliding delta paths: {existing} and {path}"
-            ));
-        }
-    }
-    Ok(())
+    validate_portable_path_set(paths)
+        .map_err(|error| format!("unsafe or colliding delta path set: {error}"))
 }
 
 fn unique_micros() -> u128 {
@@ -3238,16 +3642,33 @@ fn handle_post_receive_delta(dest: &Path, enabled: bool) -> Result<(), String> {
         return Ok(());
     }
     let applied = apply_delta_packages(dest)?;
-    if applied == 0 && !dest.is_dir() {
-        return Ok(());
+    finish_delta_refresh(applied, refresh_delta_state(dest))
+}
+
+fn finish_delta_refresh(
+    applied: usize,
+    refresh: Result<DeltaCliState, DeltaSnapshotFailure>,
+) -> Result<(), String> {
+    match refresh {
+        Ok(_) => Ok(()),
+        Err(DeltaSnapshotFailure::UnsupportedCapability(reason)) if applied == 0 => {
+            eprintln!(
+                "[atp] delta refresh skipped ({reason}); future sends will use full-object transfer"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
     }
-    refresh_delta_state(dest).map(|_| ())
 }
 
 fn apply_delta_packages(dest: &Path) -> Result<usize, String> {
-    if !dest.is_dir() {
+    let Some(metadata) = delta_path_metadata(dest, "scan delta packages")? else {
+        return Ok(0);
+    };
+    if !metadata.is_dir() {
         return Ok(0);
     }
+    ensure_delta_path_chain(dest, "read delta package directory")?;
     let mut packages = fs::read_dir(dest)
         .map_err(|err| format!("read destination {}: {err}", dest.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -3260,26 +3681,72 @@ fn apply_delta_packages(dest: &Path) -> Result<usize, String> {
             .file_name()
             .into_string()
             .map_err(|_| format!("non-UTF-8 path under {}", dest.display()))?;
-        if !name.starts_with(DELTA_PACKAGE_PREFIX) {
-            continue;
-        }
         let path = entry.path();
-        if path.is_dir() && !path.join(".applied").exists() {
-            apply_delta_package(dest, &path)?;
-            let receipt = path.join(".applied");
-            fs::write(&receipt, unique_micros().to_string()).map_err(|err| {
-                format!("write delta package receipt {}: {err}", receipt.display())
-            })?;
-            applied += 1;
+        let Some(internal) = delta_internal_name(&name) else {
+            continue;
+        };
+        match internal {
+            DeltaInternalName::State => {
+                if name != DELTA_STATE_DIR {
+                    return Err(format!(
+                        "noncanonical reserved delta state path under {}: {name:?}",
+                        dest.display()
+                    ));
+                }
+                continue;
+            }
+            DeltaInternalName::Package if !name.starts_with(DELTA_PACKAGE_PREFIX) => {
+                return Err(format!(
+                    "noncanonical reserved delta package path under {}: {name:?}",
+                    dest.display()
+                ));
+            }
+            DeltaInternalName::Package => {}
+        }
+        let package_metadata = delta_path_metadata(&path, "inspect delta package root")?
+            .ok_or_else(|| format!("delta package disappeared: {}", path.display()))?;
+        if !package_metadata.is_dir() {
+            return Err(format!(
+                "reserved delta package path is not a directory: {}",
+                path.display()
+            ));
+        }
+        let receipt = path.join(".applied");
+        match delta_path_metadata(&receipt, "inspect delta package receipt")? {
+            Some(metadata) if metadata.is_file() => continue,
+            Some(_) => {
+                return Err(format!(
+                    "delta package receipt is not a regular file: {}",
+                    receipt.display()
+                ));
+            }
+            None => {
+                apply_delta_package(dest, &path)?;
+                let mut file = create_delta_file(&receipt, "create delta package receipt")?;
+                let receipt_body = unique_micros().to_string();
+                write_delta_file(
+                    &mut file,
+                    &receipt,
+                    receipt_body.as_bytes(),
+                    "write delta package receipt",
+                )?;
+                applied += 1;
+            }
         }
     }
     Ok(applied)
 }
 
 fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
+    require_delta_directory(dest, "apply delta package")?;
+    require_delta_directory(package_root, "apply delta package")?;
     let metadata_path = package_root.join(DELTA_PACKAGE_FILE);
-    let metadata_bytes = fs::read(&metadata_path)
-        .map_err(|err| format!("read delta package {}: {err}", metadata_path.display()))?;
+    let metadata_bytes = read_delta_file_bounded_before(
+        &metadata_path,
+        DELTA_MAX_METADATA_BYTES,
+        None,
+        "read delta package metadata",
+    )?;
     let metadata: DeltaPackageMetadata = serde_json::from_slice(&metadata_bytes)
         .map_err(|err| format!("parse delta package {}: {err}", metadata_path.display()))?;
     if metadata.schema != DELTA_PACKAGE_SCHEMA {
@@ -3291,6 +3758,56 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
     }
 
     let target_manifest = decode_delta_package_target_manifest(&metadata)?;
+    validate_canonical_hex_hash(&metadata.object_sha256_hex, "delta package object sha256")?;
+
+    let mut package_paths = Vec::new();
+    let mut carried_targets = BTreeMap::<String, &'static str>::new();
+    for chunk in &metadata.missing_chunks {
+        let expected = canonical_delta_chunk_file_name(&chunk.content_id_hex)?;
+        require_canonical_delta_file_name(&chunk.file_name, &expected, "delta chunk")?;
+        if !target_manifest.chunks.iter().any(|target| {
+            target.content_id.to_hex() == chunk.content_id_hex
+                && target.size_bytes == chunk.size_bytes
+        }) {
+            return Err(format!(
+                "delta package chunk {}:{} is absent from the target manifest",
+                chunk.content_id_hex, chunk.size_bytes
+            ));
+        }
+        if let Some(existing) = carried_targets.insert(chunk.content_id_hex.clone(), "whole chunk")
+        {
+            return Err(format!(
+                "delta package carries target {} more than once ({existing} and whole chunk)",
+                chunk.content_id_hex
+            ));
+        }
+        package_paths.push(format!("{DELTA_CHUNK_DIR}/{expected}"));
+    }
+    for subdelta in &metadata.subdelta_chunks {
+        validate_canonical_hex_hash(
+            &subdelta.target_sha256_hex,
+            "delta package sub-delta target sha256",
+        )?;
+        let expected = canonical_delta_ops_file_name(
+            &subdelta.target_content_id_hex,
+            &subdelta.base_content_id_hex,
+        )?;
+        require_canonical_delta_file_name(
+            &subdelta.ops_file_name,
+            &expected,
+            "delta sub-delta ops",
+        )?;
+        if let Some(existing) =
+            carried_targets.insert(subdelta.target_content_id_hex.clone(), "sub-delta")
+        {
+            return Err(format!(
+                "delta package carries target {} more than once ({existing} and sub-delta)",
+                subdelta.target_content_id_hex
+            ));
+        }
+        package_paths.push(format!("{DELTA_SUBCHUNK_DIR}/{expected}"));
+    }
+    validate_distinct_delta_paths(package_paths.iter().map(String::as_str))?;
 
     let receiver_state = read_local_delta_state(dest)?.ok_or_else(|| {
         "delta package received but receiver has no prior delta state".to_string()
@@ -3299,25 +3816,18 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
     let mut store = load_delta_store_from_state(dest, &receiver_manifest)?;
 
     let chunk_dir = package_root.join(DELTA_CHUNK_DIR);
+    if !metadata.missing_chunks.is_empty() {
+        require_delta_directory(&chunk_dir, "read delta package chunks")?;
+    }
     for chunk in &metadata.missing_chunks {
-        validate_hex_hash(&chunk.content_id_hex)?;
         let path = chunk_dir.join(&chunk.file_name);
-        let bytes = fs::read(&path)
-            .map_err(|err| format!("read delta package chunk {}: {err}", path.display()))?;
-        let len = u64::try_from(bytes.len()).map_err(|_| {
-            format!(
-                "delta package chunk {} length exceeds u64::MAX",
-                path.display()
-            )
-        })?;
-        if len != chunk.size_bytes {
-            return Err(format!(
-                "delta package chunk {} size mismatch: expected {}, got {}",
-                path.display(),
-                chunk.size_bytes,
-                len
-            ));
-        }
+        let bytes = read_delta_file_exact_before(
+            &path,
+            chunk.size_bytes,
+            DELTA_MAX_CHUNK_BYTES,
+            None,
+            "read delta package chunk",
+        )?;
         let content_id = ContentId::from_bytes(&bytes);
         if content_id.to_hex() != chunk.content_id_hex {
             return Err(format!(
@@ -3331,13 +3841,14 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
     }
 
     let subchunk_dir = package_root.join(DELTA_SUBCHUNK_DIR);
+    if !metadata.subdelta_chunks.is_empty() {
+        require_delta_directory(&subchunk_dir, "read delta package sub-delta ops")?;
+    }
     for subdelta in &metadata.subdelta_chunks {
-        validate_hex_hash(&subdelta.target_content_id_hex)?;
         let target_sha256 = decode_sha256_hex(
             &subdelta.target_sha256_hex,
             "delta package sub-delta target sha256",
         )?;
-        validate_hex_hash(&subdelta.base_content_id_hex)?;
         let target_chunk = target_manifest
             .chunks
             .iter()
@@ -3377,22 +3888,17 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
             )
         })?;
         let ops_path = subchunk_dir.join(&subdelta.ops_file_name);
-        let encoded_ops = fs::read(&ops_path).map_err(|err| {
-            format!(
-                "read delta package sub-delta ops {}: {err}",
-                ops_path.display()
-            )
-        })?;
-        let encoded_len = u64::try_from(encoded_ops.len())
-            .map_err(|_| "delta package sub-delta ops length exceeds u64::MAX".to_string())?;
-        if encoded_len != subdelta.ops_wire_bytes {
-            return Err(format!(
-                "delta package sub-delta ops {} size mismatch: expected {}, got {}",
-                subdelta.ops_file_name, subdelta.ops_wire_bytes, encoded_len
-            ));
-        }
+        let encoded_ops = read_delta_file_exact_before(
+            &ops_path,
+            subdelta.ops_wire_bytes,
+            DELTA_MAX_SUBDELTA_OPS_BYTES,
+            None,
+            "read delta package sub-delta ops",
+        )?;
+        validate_subdelta_op_count_before_decode(&encoded_ops)?;
         let ops = decode_subdelta_ops(&encoded_ops)
             .map_err(|err| format!("parse delta package sub-delta ops: {err}"))?;
+        validate_subdelta_output_size(&ops, target_chunk.size_bytes)?;
         let rebuilt = delta_subchunk::reconstruct_verified(old_bytes, &ops, &target_sha256)
             .map_err(|err| format!("reconstruct delta package sub-delta: {err}"))?;
         let rebuilt_len = u64::try_from(rebuilt.len())
@@ -3409,7 +3915,10 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
     }
 
     for repeated in &metadata.repeated_chunks {
-        validate_hex_hash(&repeated.target_content_id_hex)?;
+        validate_canonical_hex_hash(
+            &repeated.target_content_id_hex,
+            "delta package repeated target content id",
+        )?;
         let target_chunk = target_manifest
             .chunks
             .iter()
@@ -3449,32 +3958,58 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
     commit_delta_tree_files(dest, &files, &object_sha256_hex)
 }
 
-fn refresh_delta_state(dest: &Path) -> Result<DeltaCliState, String> {
+fn refresh_delta_state(dest: &Path) -> Result<DeltaCliState, DeltaSnapshotFailure> {
     let snapshot = build_delta_dest_snapshot(dest)?;
     let state_dir = dest.join(DELTA_STATE_DIR);
     let chunk_dir = state_dir.join(DELTA_CHUNK_DIR);
-    fs::create_dir_all(&chunk_dir)
-        .map_err(|err| format!("create delta state dir {}: {err}", chunk_dir.display()))?;
+    create_delta_dir_all(&chunk_dir, "create delta state directory")
+        .map_err(DeltaSnapshotFailure::fatal)?;
 
     for (content_id_hex, payload) in &snapshot.chunks_by_content {
-        validate_hex_hash(content_id_hex)?;
-        let path = chunk_dir.join(format!("{content_id_hex}.chunk"));
-        if !path.exists() {
-            let mut file = fs::File::create(&path)
-                .map_err(|err| format!("create delta state chunk {}: {err}", path.display()))?;
-            file.write_all(payload)
-                .map_err(|err| format!("write delta state chunk {}: {err}", path.display()))?;
+        let file_name =
+            canonical_delta_chunk_file_name(content_id_hex).map_err(DeltaSnapshotFailure::fatal)?;
+        let path = chunk_dir.join(file_name);
+        if delta_path_metadata(&path, "inspect delta state chunk")
+            .map_err(DeltaSnapshotFailure::fatal)?
+            .is_some()
+        {
+            let declared_bytes = u64::try_from(payload.len()).map_err(|_| {
+                DeltaSnapshotFailure::fatal("delta state chunk size exceeds u64::MAX")
+            })?;
+            let existing = read_delta_file_exact_before(
+                &path,
+                declared_bytes,
+                DELTA_MAX_CHUNK_BYTES,
+                None,
+                "read existing delta state chunk",
+            )
+            .map_err(DeltaSnapshotFailure::fatal)?;
+            if existing.as_slice() != payload.as_slice()
+                || ContentId::from_bytes(&existing).to_hex() != *content_id_hex
+            {
+                return Err(DeltaSnapshotFailure::fatal(format!(
+                    "existing delta state chunk does not match {}",
+                    path.display()
+                )));
+            }
+        } else {
+            let mut file = create_delta_file(&path, "create delta state chunk")
+                .map_err(DeltaSnapshotFailure::fatal)?;
+            write_delta_file(&mut file, &path, payload, "write delta state chunk")
+                .map_err(DeltaSnapshotFailure::fatal)?;
         }
     }
 
-    let state = delta_cli_state_from_snapshot(&snapshot)?;
+    let state = delta_cli_state_from_snapshot(&snapshot).map_err(DeltaSnapshotFailure::fatal)?;
     let path = state_dir.join(DELTA_STATE_FILE);
-    let mut file = fs::File::create(&path)
-        .map_err(|err| format!("create delta state {}: {err}", path.display()))?;
-    serde_json::to_writer_pretty(&mut file, &state)
-        .map_err(|err| format!("write delta state {}: {err}", path.display()))?;
-    file.write_all(b"\n")
-        .map_err(|err| format!("finish delta state {}: {err}", path.display()))?;
+    let mut file =
+        create_delta_file(&path, "create delta state").map_err(DeltaSnapshotFailure::fatal)?;
+    ensure_delta_path_chain(&path, "write delta state").map_err(DeltaSnapshotFailure::fatal)?;
+    serde_json::to_writer_pretty(&mut file, &state).map_err(|err| {
+        DeltaSnapshotFailure::fatal(format!("write delta state {}: {err}", path.display()))
+    })?;
+    write_delta_file(&mut file, &path, b"\n", "finish delta state")
+        .map_err(DeltaSnapshotFailure::fatal)?;
     Ok(state)
 }
 
@@ -3550,18 +4085,15 @@ fn read_local_delta_state_before(
     deadline: Option<Instant>,
 ) -> Result<Option<DeltaCliState>, String> {
     let path = dest.join(DELTA_STATE_DIR).join(DELTA_STATE_FILE);
-    if !path.exists() {
+    if delta_path_metadata(&path, "inspect delta state")?.is_none() {
         return Ok(None);
     }
-    let mut file = fs::File::open(&path)
-        .map_err(|err| format!("open delta state {}: {err}", path.display()))?;
-    let bytes = read_file_limited_before_deadline(
-        &mut file,
-        DIRECT_DELTA_SIDECAR_MAX_JSON_BYTES,
+    let bytes = read_delta_file_bounded_before(
+        &path,
+        DELTA_MAX_METADATA_BYTES,
         deadline,
         "read delta state",
-    )
-    .map_err(|err| format!("{}: {err}", path.display()))?;
+    )?;
     let state = if let Some(deadline) = deadline {
         decode_json_body_before_deadline(&bytes, deadline, "parse delta state")
     } else {
@@ -3573,6 +4105,20 @@ fn read_local_delta_state_before(
 
 fn read_local_delta_state(dest: &Path) -> Result<Option<DeltaCliState>, String> {
     read_local_delta_state_before(dest, None)
+}
+
+fn export_delta_state(dest: &Path) -> Result<(), String> {
+    let Some(state) = read_local_delta_state(dest)? else {
+        return Ok(());
+    };
+    let body = encode_json_body_limited(&state, DELTA_MAX_METADATA_BYTES)?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&body)
+        .map_err(|err| format!("write delta state export: {err}"))?;
+    stdout
+        .write_all(b"\n")
+        .map_err(|err| format!("finish delta state export: {err}"))
 }
 
 fn delta_state_addr(base: SocketAddr) -> Option<SocketAddr> {
@@ -3921,7 +4467,10 @@ fn build_delta_subchunk_signature_response_before(
     let mut signature_json_bytes = 0usize;
     for requested in request.chunks {
         check_delta_sidecar_deadline(deadline, "build subchunk signature response")?;
-        validate_hex_hash(&requested.content_id_hex)?;
+        validate_canonical_hex_hash(
+            &requested.content_id_hex,
+            "subchunk signature request content id",
+        )?;
         let key = (requested.content_id_hex, requested.size_bytes);
         if seen.insert(key.clone(), ()).is_some() {
             continue;
@@ -4017,16 +4566,14 @@ fn read_delta_state_chunk_before(
             DELTA_TREE_OBJECT_MAX_CHUNK_BYTES
         ));
     }
-    let mut file = fs::File::open(&path)
-        .map_err(|err| format!("open delta state chunk {}: {err}", path.display()))?;
-    let bytes = read_file_limited_before_deadline(
-        &mut file,
-        expected_len,
+    let bytes = read_delta_file_exact_before(
+        &path,
+        chunk.size_bytes,
+        DELTA_MAX_CHUNK_BYTES,
         deadline,
         "read delta state chunk",
-    )
-    .map_err(|err| format!("{}: {err}", path.display()))?;
-    if bytes.len() != expected_len || ContentId::from_bytes(&bytes) != chunk.content_id {
+    )?;
+    if ContentId::from_bytes(&bytes) != chunk.content_id {
         return Err(format!(
             "delta state chunk {} does not match manifest",
             path.display()
@@ -4049,18 +4596,14 @@ fn load_delta_store_from_state(
             continue;
         }
         let path = chunk_dir.join(format!("{content_id_hex}.chunk"));
-        let mut file = fs::File::open(&path)
-            .map_err(|err| format!("open delta state chunk {}: {err}", path.display()))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|err| format!("read delta state chunk {}: {err}", path.display()))?;
-        let len = u64::try_from(bytes.len()).map_err(|_| {
-            format!(
-                "delta state chunk {} length exceeds u64::MAX",
-                path.display()
-            )
-        })?;
-        if len != chunk.size_bytes || ContentId::from_bytes(&bytes) != chunk.content_id {
+        let bytes = read_delta_file_exact_before(
+            &path,
+            chunk.size_bytes,
+            DELTA_MAX_CHUNK_BYTES,
+            None,
+            "read delta state chunk",
+        )?;
+        if ContentId::from_bytes(&bytes) != chunk.content_id {
             return Err(format!(
                 "delta state chunk {} does not match manifest",
                 path.display()
@@ -4077,9 +4620,18 @@ fn reconstruct_delta_object_bytes(
     manifest: &PersistentChunkManifest,
     store: &DeltaChunkStore,
 ) -> Result<Vec<u8>, String> {
+    if manifest.total_size_bytes > DEFAULT_MAX_TRANSFER_BYTES {
+        return Err(format!(
+            "delta object size {} exceeds {} byte limit",
+            manifest.total_size_bytes, DEFAULT_MAX_TRANSFER_BYTES
+        ));
+    }
     let capacity = usize::try_from(manifest.total_size_bytes)
         .map_err(|_| "delta object exceeds addressable memory on this host".to_string())?;
-    let mut bytes = Vec::with_capacity(capacity);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|err| format!("reserve delta object buffer: {err}"))?;
     for chunk in &manifest.chunks {
         let payload = store.get(&chunk.content_id).ok_or_else(|| {
             format!(
@@ -4106,11 +4658,41 @@ fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> 
     let file_count = reader.read_u64()?;
     let file_count = usize::try_from(file_count)
         .map_err(|_| "delta object file count exceeds usize::MAX".to_string())?;
-    let mut entries = Vec::with_capacity(file_count);
+    if file_count == 0 {
+        return Err("empty directory delta objects must use full-object transfer".to_string());
+    }
+    if file_count > DELTA_MAX_FILE_COUNT {
+        return Err(format!(
+            "delta object file count {file_count} exceeds {DELTA_MAX_FILE_COUNT} file limit"
+        ));
+    }
+    let entry_bytes = reader
+        .remaining_len()
+        .checked_sub(8)
+        .ok_or_else(|| "delta object is missing its payload count".to_string())?;
+    let max_file_count = entry_bytes / DELTA_MIN_FILE_ENTRY_BYTES;
+    if file_count > max_file_count {
+        return Err(format!(
+            "delta object file count {file_count} exceeds the {max_file_count} entries possible in the remaining body"
+        ));
+    }
+    let mut entries = Vec::new();
+    entries
+        .try_reserve(file_count)
+        .map_err(|err| format!("reserve delta object file entries: {err}"))?;
+    let mut logical_file_bytes = 0u64;
     for _ in 0..file_count {
         let rel_path = reader.read_string()?;
         validate_delta_rel_path(&rel_path)?;
         let len = reader.read_u64()?;
+        logical_file_bytes = logical_file_bytes
+            .checked_add(len)
+            .ok_or_else(|| "delta object logical file size overflow".to_string())?;
+        if logical_file_bytes > DEFAULT_MAX_TRANSFER_BYTES {
+            return Err(format!(
+                "delta object logical file size {logical_file_bytes} exceeds {DEFAULT_MAX_TRANSFER_BYTES} byte limit"
+            ));
+        }
         let payload_sha256 = reader.read_sha256()?;
         entries.push((rel_path, len, payload_sha256));
     }
@@ -4119,13 +4701,24 @@ fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> 
     let payload_count = reader.read_u64()?;
     let payload_count = usize::try_from(payload_count)
         .map_err(|_| "delta object payload count exceeds usize::MAX".to_string())?;
+    let max_payload_count = reader.remaining_len() / DELTA_MIN_PAYLOAD_ENTRY_BYTES;
+    if payload_count > file_count || payload_count > max_payload_count {
+        return Err(format!(
+            "delta object payload count {payload_count} exceeds canonical body bounds"
+        ));
+    }
     let mut payloads = BTreeMap::<([u8; 32], u64), Vec<u8>>::new();
     for _ in 0..payload_count {
         let payload_sha256 = reader.read_sha256()?;
         let payload_len = reader.read_u64()?;
         let len = usize::try_from(payload_len)
             .map_err(|_| "delta object payload length exceeds usize::MAX".to_string())?;
-        let payload = reader.read_exact(len)?.to_vec();
+        let payload_bytes = reader.read_exact(len)?;
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(len)
+            .map_err(|err| format!("reserve delta object payload: {err}"))?;
+        payload.extend_from_slice(payload_bytes);
         let observed_sha256 = sha256_array(&payload);
         if observed_sha256 != payload_sha256 {
             return Err("delta object payload sha256 mismatch".to_string());
@@ -4138,7 +4731,10 @@ fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> 
         }
     }
 
-    let mut files = Vec::with_capacity(file_count);
+    let mut files = Vec::new();
+    files
+        .try_reserve(file_count)
+        .map_err(|err| format!("reserve decoded delta files: {err}"))?;
     for (rel_path, len, payload_sha256) in entries {
         let payload = payloads.get(&(payload_sha256, len)).ok_or_else(|| {
             format!(
@@ -4147,9 +4743,14 @@ fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> 
                 len
             )
         })?;
+        let mut file_bytes = Vec::new();
+        file_bytes
+            .try_reserve_exact(payload.len())
+            .map_err(|err| format!("reserve decoded delta file {rel_path}: {err}"))?;
+        file_bytes.extend_from_slice(payload);
         files.push(DeltaTreeFile {
             rel_path,
-            bytes: payload.clone(),
+            bytes: file_bytes,
         });
     }
     reader.expect_eof()?;
@@ -4161,57 +4762,65 @@ fn commit_delta_tree_files(
     files: &[DeltaTreeFile],
     object_sha256_hex: &str,
 ) -> Result<(), String> {
+    require_delta_directory(dest, "commit delta tree")?;
+    validate_canonical_hex_hash(object_sha256_hex, "delta object sha256")?;
     let root_name = delta_tree_root_name(files)?;
     let state_dir = dest.join(DELTA_STATE_DIR);
     let staging_root = state_dir.join(format!("staging-{object_sha256_hex}"));
-    if staging_root.exists() {
+    if delta_path_metadata(&staging_root, "inspect delta staging root")?.is_some() {
         return Err(format!(
             "delta staging root already exists: {}",
             staging_root.display()
         ));
     }
-    fs::create_dir_all(&staging_root).map_err(|err| {
-        format!(
-            "create delta staging root {}: {err}",
-            staging_root.display()
-        )
-    })?;
+    create_delta_dir_all(&staging_root, "create delta staging root")?;
     write_delta_files_under(&staging_root, files)?;
 
     let staged_target = staging_root.join(&root_name);
     let final_target = dest.join(&root_name);
-    let backup = if final_target.exists() {
+    let backup = if delta_path_metadata(&final_target, "inspect final delta target")?.is_some() {
         let backup_dir = state_dir.join("backups");
-        fs::create_dir_all(&backup_dir)
-            .map_err(|err| format!("create delta backup dir {}: {err}", backup_dir.display()))?;
-        let backup = backup_dir.join(format!(
-            "{}-{}",
-            sanitize_backup_name(&root_name),
-            unique_micros()
-        ));
-        fs::rename(&final_target, &backup).map_err(|err| {
-            format!(
-                "move existing target {} to backup {}: {err}",
-                final_target.display(),
-                backup.display()
-            )
-        })?;
+        create_delta_dir_all(&backup_dir, "create delta backup directory")?;
+        let backup = (0..32u32)
+            .map(|attempt| {
+                backup_dir.join(format!(
+                    "{}-{}-{attempt}",
+                    sanitize_backup_name(&root_name),
+                    unique_micros()
+                ))
+            })
+            .find_map(|candidate| {
+                match delta_path_metadata(&candidate, "allocate delta backup path") {
+                    Ok(None) => Some(Ok(candidate)),
+                    Ok(Some(_)) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .transpose()?
+            .ok_or_else(|| "could not allocate a unique delta backup path".to_string())?;
+        rename_delta_path(
+            &final_target,
+            &backup,
+            "move existing delta target to backup",
+        )?;
         Some(backup)
     } else {
         None
     };
 
-    match fs::rename(&staged_target, &final_target) {
+    match rename_delta_path(&staged_target, &final_target, "commit staged delta target") {
         Ok(()) => Ok(()),
-        Err(err) => {
+        Err(commit_error) => {
             if let Some(backup) = backup {
-                let _ = fs::rename(&backup, &final_target);
+                if let Err(rollback_error) =
+                    rename_delta_path(&backup, &final_target, "restore delta target backup")
+                {
+                    return Err(format!(
+                        "{commit_error}; rollback also failed: {rollback_error}"
+                    ));
+                }
             }
-            Err(format!(
-                "commit delta target {} from staging {}: {err}",
-                final_target.display(),
-                staged_target.display()
-            ))
+            Err(commit_error)
         }
     }
 }
@@ -4222,14 +4831,10 @@ fn write_delta_files_under(root: &Path, files: &[DeltaTreeFile]) -> Result<(), S
         let rel = safe_delta_path(&file.rel_path)?;
         let path = root.join(rel);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("create delta output dir {}: {err}", parent.display()))?;
+            create_delta_dir_all(parent, "create delta output directory")?;
         }
-        let mut output = fs::File::create(&path)
-            .map_err(|err| format!("create delta output file {}: {err}", path.display()))?;
-        output
-            .write_all(&file.bytes)
-            .map_err(|err| format!("write delta output file {}: {err}", path.display()))?;
+        let mut output = create_delta_file(&path, "create delta output file")?;
+        write_delta_file(&mut output, &path, &file.bytes, "write delta output file")?;
     }
     Ok(())
 }
@@ -4355,6 +4960,10 @@ impl<'a> DeltaObjectReader<'a> {
             .ok_or_else(|| "delta object is truncated".to_string())?;
         self.cursor = end;
         Ok(slice)
+    }
+
+    fn remaining_len(&self) -> usize {
+        self.bytes.len().saturating_sub(self.cursor)
     }
 
     fn expect_eof(&self) -> Result<(), String> {
@@ -5087,6 +5696,42 @@ mod unused_delta_sidecar_draft {
     }
 }
 
+async fn preflight_receive_destination(dest: &Path, operation: &str) -> Result<(), String> {
+    let mut ancestors = dest
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        match path_is_link_or_reparse(&ancestor).await {
+            Ok(true) => {
+                return Err(format!(
+                    "refusing to {operation} through symlink or reparse-point prefix {}",
+                    ancestor.display()
+                ));
+            }
+            Ok(false) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "inspect receive destination prefix {} before {operation}: {err}",
+                    ancestor.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn create_receive_destination(dest: &Path) -> Result<(), String> {
+    preflight_receive_destination(dest, "create receive destination").await?;
+    asupersync::fs::create_dir_all(dest)
+        .await
+        .map_err(|error| format!("create dest {}: {error}", dest.display()))?;
+    preflight_receive_destination(dest, "use receive destination").await
+}
+
 fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
     if args.transport == Transport::Auto {
         return Err(
@@ -5107,13 +5752,11 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
         ),
         Transport::Tcp => {
-            let mut cfg = tcp_config(args.max_bytes, !args.no_delta);
+            let mut cfg = tcp_receive_config(args.max_bytes, !args.no_delta, one_shot);
             cfg.accept_timeout = recv_listen_timeout(&args)?;
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
-                asupersync::fs::create_dir_all(&dest)
-                    .await
-                    .map_err(|e| format!("create dest {}: {e}", dest.display()))?;
+                create_receive_destination(&dest).await?;
                 let listener = TcpListener::bind(listen)
                     .await
                     .map_err(|e| format!("bind {listen}: {e}"))?;
@@ -5188,9 +5831,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
-                asupersync::fs::create_dir_all(&dest)
-                    .await
-                    .map_err(|e| format!("create dest {}: {e}", dest.display()))?;
+                create_receive_destination(&dest).await?;
                 let listener = TcpListener::bind(listen)
                     .await
                     .map_err(|e| format!("bind {listen}: {e}"))?;
@@ -5275,9 +5916,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         bind_server_endpoint, receive_on_endpoint,
                     };
                     let cx = Cx::current().expect("receiver cx");
-                    asupersync::fs::create_dir_all(&dest)
-                        .await
-                        .map_err(|e| format!("create dest {}: {e}", dest.display()))?;
+                    create_receive_destination(&dest).await?;
                     if one_shot {
                         let endpoint = bind_server_endpoint(&cx, listen)
                             .await
@@ -5559,6 +6198,8 @@ mod tests {
             "trailing ",
             "alternate:stream",
             ".asupersync-atp-delta-v1/state.json",
+            ".ASUPERSYNC-ATP-DELTA-V1/state.json",
+            ".AsUpErSyNc-AtP-DeLtA-PaCkAgE-1/payload",
         ] {
             assert!(
                 validate_delta_rel_path(path).is_err(),
@@ -5567,6 +6208,180 @@ mod tests {
         }
 
         assert!(validate_distinct_delta_paths(["Docs/Readme", "docs/README"]).is_err());
+        assert!(
+            validate_distinct_delta_paths(["root/Foo/a", "root/foo/b"]).is_err(),
+            "case-colliding directory prefixes must reject before Windows materialization"
+        );
+    }
+
+    #[test]
+    fn delta_package_payload_names_are_exact_and_canonical() {
+        let target = "a".repeat(64);
+        let base = "b".repeat(64);
+        let chunk = canonical_delta_chunk_file_name(&target).expect("canonical chunk name");
+        let ops = canonical_delta_ops_file_name(&target, &base).expect("canonical ops name");
+        require_canonical_delta_file_name(&chunk, &chunk, "chunk").expect("exact chunk name");
+        require_canonical_delta_file_name(&ops, &ops, "ops").expect("exact ops name");
+
+        for malicious in [
+            "../payload.chunk",
+            "/payload.chunk",
+            "C:\\payload.chunk",
+            "payload:stream",
+            "nested/payload.chunk",
+            "nested\\payload.chunk",
+        ] {
+            assert!(
+                require_canonical_delta_file_name(malicious, &chunk, "chunk").is_err(),
+                "malicious package filename {malicious:?} must reject"
+            );
+        }
+        assert!(canonical_delta_chunk_file_name(&target.to_ascii_uppercase()).is_err());
+        assert!(
+            require_canonical_delta_file_name(&format!("{}.bin", target), &chunk, "chunk").is_err()
+        );
+    }
+
+    #[test]
+    fn delta_object_counts_are_bounded_by_remaining_body_before_reserve() {
+        let mut huge_file_count = DELTA_TREE_OBJECT_MAGIC.to_vec();
+        put_u64(&mut huge_file_count, 1_000_001);
+        let error = decode_delta_tree_object(&huge_file_count)
+            .expect_err("huge count with tiny body must reject before allocation");
+        assert!(error.contains("file count") || error.contains("payload count"));
+
+        let mut huge_payload_count = DELTA_TREE_OBJECT_MAGIC.to_vec();
+        put_u64(&mut huge_payload_count, 1);
+        put_len_prefixed(&mut huge_payload_count, b"root/file").expect("test path");
+        put_u64(&mut huge_payload_count, 0);
+        huge_payload_count.extend_from_slice(&sha256_array(&[]));
+        put_u64(&mut huge_payload_count, 1_000_000);
+        let error = decode_delta_tree_object(&huge_payload_count)
+            .expect_err("huge payload count with tiny body must reject before allocation");
+        assert!(error.contains("payload count"));
+
+        let mut huge_op_count = DELTA_SUBDELTA_OPS_MAGIC.to_vec();
+        put_u64(&mut huge_op_count, 1_000_000);
+        let error = validate_subdelta_op_count_before_decode(&huge_op_count)
+            .expect_err("huge sub-delta op count must reject before decoder allocation");
+        assert!(error.contains("op count"));
+    }
+
+    #[test]
+    fn delta_exact_file_reader_rejects_declared_limit_plus_one() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("payload.chunk");
+        fs::write(&path, b"123456789").expect("write oversized fixture");
+        let error = read_delta_file_exact_before(&path, 8, 8, None, "read test chunk")
+            .expect_err("declared size plus one must reject");
+        assert!(error.contains("exceeds 8 byte limit"));
+
+        let error = read_delta_file_exact_before(&path, 9, 8, None, "read test chunk")
+            .expect_err("declared size above hard cap must reject before read");
+        assert!(error.contains("declared size 9 exceeds 8 byte limit"));
+    }
+
+    #[test]
+    fn empty_directory_delta_snapshot_selects_capability_fallback() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let error = collect_delta_tree_files(temp.path())
+            .expect_err("empty directory must not produce an unappliable delta object");
+        assert!(matches!(
+            error,
+            DeltaSnapshotFailure::UnsupportedCapability(_)
+        ));
+    }
+
+    #[test]
+    fn full_transfer_ignores_only_capability_limited_delta_refresh() {
+        assert!(
+            finish_delta_refresh(
+                0,
+                Err(DeltaSnapshotFailure::unsupported("unsupported metadata"))
+            )
+            .is_ok()
+        );
+        assert!(
+            finish_delta_refresh(0, Err(DeltaSnapshotFailure::fatal("tampered state"))).is_err()
+        );
+        assert!(
+            finish_delta_refresh(
+                1,
+                Err(DeltaSnapshotFailure::unsupported("unsupported metadata"))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn persistent_tcp_receive_serializes_destination_commits() {
+        assert_eq!(
+            tcp_receive_config(1024, true, false).max_active_connections,
+            1
+        );
+        assert_eq!(
+            tcp_receive_config(1024, true, true).max_active_connections,
+            TransferConfig::default().max_active_connections
+        );
+    }
+
+    #[test]
+    fn ssh_bootstrap_rejects_windows_shell_paths() {
+        assert!(RemoteTarget::parse(r"host:C:\inbox").is_some());
+        for path in [
+            r"C:\inbox",
+            "D:/inbox",
+            r"\\server\share\inbox",
+            r"bin\atp.exe",
+        ] {
+            let error = validate_posix_ssh_path("test", path)
+                .expect_err("Windows path must reject before SSH bootstrap");
+            assert!(error.contains("directly on Windows"));
+        }
+        for path in ["/srv/inbox", "~/bin/atp", "./bin/atp"] {
+            validate_posix_ssh_path("test", path).expect("POSIX path");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delta_path_guard_rejects_symlink_ancestor_before_create() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("target directory");
+        let link = temp.path().join("link");
+        symlink(&target, &link).expect("create symlink");
+        let destination = link.join("must-not-exist");
+
+        assert!(ensure_delta_path_chain(&destination, "test create").is_err());
+        assert!(!target.join("must-not-exist").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delta_path_guard_rejects_junction_ancestor_before_create() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("target directory");
+        let junction = temp.path().join("junction");
+        let status = ProcessCommand::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .expect("run mklink /J");
+        if !status.success() {
+            eprintln!("skipping junction assertion: mklink /J was unavailable");
+            return;
+        }
+        let destination = junction.join("must-not-exist");
+
+        assert!(ensure_delta_path_chain(&destination, "test create").is_err());
+        assert!(!target.join("must-not-exist").exists());
     }
 
     #[cfg(not(unix))]
@@ -6937,6 +7752,7 @@ fn main() -> ExitCode {
         Command::RqKeygen => generate_rq_auth_key_hex().map(|key| {
             println!("{key}");
         }),
+        Command::DeltaStateExport { dest } => export_delta_state(&dest),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
