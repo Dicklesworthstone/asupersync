@@ -1568,6 +1568,37 @@ mod tests {
         assert_eq!(builder.keepalive, KeepaliveConfig::Default);
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn unconnected_socket_write_retries_wsaenotconn_before_surfacing_bound() {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+            .expect("create unconnected socket");
+        socket
+            .set_nonblocking(true)
+            .expect("make unconnected socket nonblocking");
+        let std_stream: net::TcpStream = socket.into();
+        let mut stream = TcpStream::from_std(std_stream).expect("wrap unconnected socket");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_write(&mut cx, b"tls client hello");
+        assert!(
+            first.is_pending(),
+            "the first WSAENOTCONN must be retried, got {first:?}"
+        );
+        assert_eq!(stream.connect_settle_retries, 1);
+
+        stream.connect_settle_retries = MAX_CONNECT_SETTLE_RETRIES;
+        let bounded = Pin::new(&mut stream).poll_write(&mut cx, b"tls client hello");
+        match bounded {
+            Poll::Ready(Err(err)) => {
+                assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+                assert_eq!(err.raw_os_error(), Some(10057));
+            }
+            other => panic!("retry bound must surface WSAENOTCONN, got {other:?}"),
+        }
+    }
+
     #[test]
     fn tcp_stream_builder_chain() {
         let builder = TcpStreamBuilder::new("127.0.0.1:0")

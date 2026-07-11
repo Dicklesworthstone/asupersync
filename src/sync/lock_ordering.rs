@@ -786,7 +786,6 @@ impl LockOrderEnforcer {
 mod tests {
     use super::*;
 
-    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
         match payload.downcast::<String>() {
             Ok(message) => *message,

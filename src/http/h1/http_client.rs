@@ -524,6 +524,17 @@ impl ParsedUrl {
             format!("{}:{}", self.host, self.port)
         }
     }
+
+    /// Returns the authority-form target required by HTTP CONNECT.
+    ///
+    /// Unlike [`Self::authority`], this always includes the port, including
+    /// scheme defaults. RFC 9110 section 9.3.6 requires CONNECT targets to use
+    /// `host:port`; omitting `:443` makes standard forward proxies reject a
+    /// tunnel for an ordinary `https://host/` URL.
+    #[must_use]
+    pub fn connect_authority(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
 }
 
 /// Redirect policy for the HTTP client.
@@ -1792,7 +1803,7 @@ impl HttpClient {
                 }
                 let tunnel = establish_http_connect_tunnel(
                     proxy_io,
-                    &parsed.authority(),
+                    &parsed.connect_authority(),
                     self.config.user_agent.as_deref(),
                     &connect_headers,
                 )
@@ -3321,6 +3332,21 @@ mod tests {
     fn authority_custom_port_included() {
         let url = ParsedUrl::parse("http://example.com:8080/path").unwrap();
         assert_eq!(url.authority(), "example.com:8080");
+    }
+
+    #[test]
+    fn connect_authority_always_includes_port() {
+        let https = ParsedUrl::parse("https://example.com/path").unwrap();
+        assert_eq!(https.connect_authority(), "example.com:443");
+
+        let http = ParsedUrl::parse("http://example.com/path").unwrap();
+        assert_eq!(http.connect_authority(), "example.com:80");
+
+        let custom = ParsedUrl::parse("https://example.com:8443/path").unwrap();
+        assert_eq!(custom.connect_authority(), "example.com:8443");
+
+        let ipv6 = ParsedUrl::parse("https://[2001:db8::1]/path").unwrap();
+        assert_eq!(ipv6.connect_authority(), "[2001:db8::1]:443");
     }
 
     // =========================================================================
@@ -5295,6 +5321,78 @@ mod tests {
             request_text.starts_with("GET http://example.com/oversized HTTP/1.1\r\n"),
             "forward-proxy request must use absolute-form and hit the non-streaming proxy path"
         );
+    }
+
+    #[test]
+    fn configured_https_proxy_connect_includes_default_port() {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy listener");
+        listener
+            .set_nonblocking(true)
+            .expect("make proxy listener nonblocking");
+        let addr = listener.local_addr().expect("proxy listener address");
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept proxy request: {err}"),
+                }
+            };
+            // Windows inherits the listener's nonblocking mode on the accepted
+            // socket. Switch the connected stream back to blocking I/O so the
+            // bounded read timeout, rather than an immediate WSAEWOULDBLOCK,
+            // governs this small wire-capture server.
+            stream
+                .set_nonblocking(false)
+                .expect("make accepted proxy stream blocking");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set proxy read timeout");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                assert!(
+                    request.len() < CONNECT_MAX_HEADERS_SIZE,
+                    "CONNECT request exceeded the header limit"
+                );
+                let n = stream.read(&mut buf).expect("read CONNECT request");
+                assert!(n > 0, "CONNECT request must arrive before peer closes");
+                request.extend_from_slice(&buf[..n]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                .expect("write proxy refusal");
+            stream.flush().expect("flush proxy refusal");
+            request
+        });
+
+        let client = HttpClient::builder()
+            .proxy(format!("http://{addr}"))
+            .request_timeout(std::time::Duration::from_secs(5))
+            .build();
+        let cx = Cx::for_testing();
+        let err = block_on(client.send_get(&cx, "https://example.com/path"))
+            .expect_err("proxy refusal should stop before TLS");
+        assert!(matches!(
+            err,
+            ClientError::ConnectTunnelRefused { status: 502, .. }
+        ));
+
+        let request = server.join().expect("proxy server thread should join");
+        let request_text = String::from_utf8(request).expect("CONNECT request should be utf8");
+        assert!(
+            request_text.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"),
+            "configured HTTPS proxy path must preserve the CONNECT port: {request_text:?}"
+        );
+        assert!(request_text.contains("\r\nHost: example.com:443\r\n"));
     }
 
     // --- br-asupersync-server-stack-hardening-eeexl1.1.3: outbound ---
