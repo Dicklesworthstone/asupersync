@@ -349,7 +349,6 @@ fn windows_payload(len: usize, multiplier: u32) -> Vec<u8> {
         .collect()
 }
 
-#[cfg(windows)]
 fn parse_cli_json(output: &Output, label: &str) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
@@ -360,7 +359,6 @@ fn parse_cli_json(output: &Output, label: &str) -> serde_json::Value {
     })
 }
 
-#[cfg(windows)]
 fn staging_dirs(dest: &Path) -> Vec<PathBuf> {
     if !dest.is_dir() {
         return Vec::new();
@@ -991,6 +989,326 @@ fn fetch_diagnostics_json(addr: SocketAddr) -> serde_json::Value {
         .map(|idx| response.split_at(idx + 4))
         .expect("diagnostics response has headers");
     serde_json::from_slice(body).expect("diagnostics body is json")
+}
+
+#[test]
+fn atp_tcp_and_rq_send_resolve_localhost_against_ipv4_listener() {
+    for transport in ["tcp", "rq"] {
+        let root = unique_tmp(&format!("localhost-{transport}"));
+        let source = root.join("source/payload.bin");
+        let dest = root.join("dest");
+        let payload = (0..128 * 1024u32)
+            .map(|index| (index.wrapping_mul(31) % 251) as u8)
+            .collect::<Vec<_>>();
+        write_file(&source, &payload);
+        std::fs::create_dir_all(&dest).expect("create localhost destination");
+
+        let mut receiver_command = Command::new(env!("CARGO_BIN_EXE_atp"));
+        receiver_command.arg("recv").arg(&dest).args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            transport,
+            "--once",
+            "--no-delta",
+        ]);
+        if transport == "rq" {
+            receiver_command.args(["--rq-auth-key-hex", VALID_KEY_HEX]);
+        }
+        let receiver = receiver_command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn {transport} receiver: {error}"));
+        let mut receiver = ChildKillGuard::new(receiver);
+        let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+        let listen_addr = if transport == "tcp" {
+            wait_for_tcp_listen_addr(&receiver_stderr)
+        } else {
+            wait_for_rq_listen_addr(&receiver_stderr)
+        };
+
+        let mut sender_command = Command::new(env!("CARGO_BIN_EXE_atp"));
+        sender_command
+            .arg("send")
+            .arg(&source)
+            .arg(format!("localhost:{}", listen_addr.port()))
+            .args(["--transport", transport, "--no-delta"]);
+        if transport == "rq" {
+            sender_command.args(["--streams", "1", "--rq-auth-key-hex", VALID_KEY_HEX]);
+        }
+        let sender = wait_with_timeout(
+            sender_command
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|error| panic!("spawn {transport} sender: {error}")),
+            &format!("{transport} localhost sender"),
+        );
+        if !sender.status.success() {
+            receiver.kill_and_wait();
+            panic!(
+                "{transport} localhost sender failed; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&sender.stdout),
+                String::from_utf8_lossy(&sender.stderr)
+            );
+        }
+        let receiver = wait_with_timeout(
+            receiver.into_inner(),
+            &format!("{transport} localhost receiver"),
+        );
+        assert!(
+            receiver.status.success(),
+            "{transport} localhost receiver failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&receiver.stdout),
+            String::from_utf8_lossy(&receiver.stderr)
+        );
+        let sender_report = parse_cli_json(&sender, &format!("{transport} localhost sender"));
+        assert_eq!(sender_report["transport"], serde_json::json!(transport));
+        assert_eq!(sender_report["committed"], serde_json::json!(true));
+        assert_eq!(
+            std::fs::read(dest.join("payload.bin")).expect("read localhost payload"),
+            payload
+        );
+        assert!(staging_dirs(&dest).is_empty());
+    }
+}
+
+#[test]
+fn atp_quic_persistent_serve_rejects_port_zero_before_side_effects() {
+    let root = unique_tmp("persistent-port-zero");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let dest = root.join("dest-must-not-exist");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+
+    let output = wait_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_atp"))
+            .arg("serve")
+            .arg(&dest)
+            .args([
+                "--listen",
+                "127.0.0.1:0",
+                "--transport",
+                "quic",
+                "--no-delta",
+                "--server-cert",
+            ])
+            .arg(&cert)
+            .arg("--server-key")
+            .arg(&key)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn persistent QUIC port-zero receiver"),
+        "persistent QUIC port-zero receiver",
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("requires a fixed non-zero --listen port"));
+    assert!(!stderr.contains("listening on"));
+    assert!(!dest.exists(), "port-zero rejection created destination");
+}
+
+#[test]
+fn atp_quic_persistent_serve_does_not_report_readiness_when_bind_fails() {
+    let root = unique_tmp("persistent-bind-failure");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let dest = root.join("dest-must-not-exist");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    let occupied = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UDP port");
+    let occupied_addr = occupied.local_addr().expect("reserved UDP address");
+
+    let output = wait_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_atp"))
+            .arg("serve")
+            .arg(&dest)
+            .arg("--listen")
+            .arg(occupied_addr.to_string())
+            .args(["--transport", "quic", "--no-delta", "--server-cert"])
+            .arg(&cert)
+            .arg("--server-key")
+            .arg(&key)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn persistent QUIC receiver on occupied port"),
+        "persistent QUIC occupied-port receiver",
+    );
+    drop(occupied);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("listening on"),
+        "false readiness: {stderr}"
+    );
+    assert!(!dest.exists(), "bind failure created destination");
+}
+
+#[test]
+fn atp_quic_persistent_serve_reuses_one_fixed_port_for_two_localhost_transfers() {
+    let root = unique_tmp("persistent-two-transfers");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let ca = root.join("tls/ca.pem");
+    let dest = root.join("dest");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    write_file(&ca, CA_CERT_PEM.as_bytes());
+
+    let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve QUIC port");
+    let listen = reservation.local_addr().expect("reserved QUIC address");
+    drop(reservation);
+    let server = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("serve")
+        .arg(&dest)
+        .arg("--listen")
+        .arg(listen.to_string())
+        .args(["--transport", "quic", "--no-delta", "--server-cert"])
+        .arg(&cert)
+        .arg("--server-key")
+        .arg(&key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn persistent QUIC server");
+    let mut server = ChildKillGuard::new(server);
+    let server_stderr = spawn_stderr_reader(server.child_mut());
+    let reported = wait_for_quic_listen_addr(&server_stderr);
+    assert_eq!(reported, listen);
+
+    for (name, multiplier) in [("first.bin", 17u32), ("second.bin", 43u32)] {
+        let source = root.join("source").join(name);
+        let payload = (0..96 * 1024u32)
+            .map(|index| (index.wrapping_mul(multiplier) % 251) as u8)
+            .collect::<Vec<_>>();
+        write_file(&source, &payload);
+        let sender = wait_with_timeout(
+            Command::new(env!("CARGO_BIN_EXE_atp"))
+                .arg("send")
+                .arg(&source)
+                .arg(format!("localhost:{}", listen.port()))
+                .args([
+                    "--transport",
+                    "quic",
+                    "--no-delta",
+                    "--quic-handshake-timeout-ms",
+                    "1000",
+                    "--ca",
+                ])
+                .arg(&ca)
+                .args(["--server-name", "localhost"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|error| panic!("spawn persistent sender for {name}: {error}")),
+            &format!("persistent QUIC sender for {name}"),
+        );
+        assert!(
+            sender.status.success(),
+            "persistent QUIC sender for {name} failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+        let report = parse_cli_json(&sender, &format!("persistent QUIC sender for {name}"));
+        assert_eq!(report["committed"], serde_json::json!(true));
+        assert_eq!(
+            std::fs::read(dest.join(name)).expect("read persistent QUIC payload"),
+            payload
+        );
+        assert!(
+            server
+                .child_mut()
+                .try_wait()
+                .expect("poll persistent QUIC server")
+                .is_none(),
+            "persistent QUIC server exited after {name}"
+        );
+    }
+    assert!(staging_dirs(&dest).is_empty());
+    server.kill_and_wait();
+}
+
+#[test]
+fn atp_send_auto_does_not_downgrade_after_quic_certificate_failure() {
+    let root = unique_tmp("auto-cert-no-downgrade");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let source = root.join("source/payload.bin");
+    let dest = root.join("dest");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    write_file(&source, b"certificate failures must not downgrade");
+    std::fs::create_dir_all(&dest).expect("create auto certificate destination");
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "quic",
+            "--once",
+            "--no-delta",
+            "--server-cert",
+        ])
+        .arg(&cert)
+        .arg("--server-key")
+        .arg(&key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn private-CA QUIC receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
+
+    let sender = wait_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_atp"))
+            .arg("send")
+            .arg(&source)
+            .arg(format!("localhost:{}", listen_addr.port()))
+            .args([
+                "--transport",
+                "auto",
+                "--no-delta",
+                "--allow-plaintext-fallback",
+                "--quic-handshake-timeout-ms",
+                "1000",
+                "--server-name",
+                "localhost",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn auto sender with untrusted QUIC receiver"),
+        "auto sender certificate failure",
+    );
+    receiver.kill_and_wait();
+    assert!(!sender.status.success());
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&sender.stdout),
+        String::from_utf8_lossy(&sender.stderr)
+    )
+    .to_ascii_lowercase();
+    assert!(
+        diagnostics.contains("certificate")
+            || diagnostics.contains("issuer")
+            || diagnostics.contains("read_hs_fatal_alert")
+            || diagnostics.contains("quic handshake: crypto provider failure"),
+        "TLS certificate failure was not explicit: {diagnostics}"
+    );
+    assert!(
+        !diagnostics.contains("transport selection: trying tcp"),
+        "certificate failure triggered plaintext downgrade: {diagnostics}"
+    );
+    assert!(!dest.join("payload.bin").exists());
+    assert!(staging_dirs(&dest).is_empty());
 }
 
 #[test]

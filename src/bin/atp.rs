@@ -1614,12 +1614,26 @@ fn print_rq_udp_send_acceleration_line(report: &transport_rq::UdpSendAcceleratio
     );
 }
 
-fn resolve(target: &str) -> Result<SocketAddr, String> {
-    target
+fn deduplicate_resolved_addresses(
+    addresses: impl IntoIterator<Item = SocketAddr>,
+) -> Vec<SocketAddr> {
+    let mut seen = BTreeSet::new();
+    addresses
+        .into_iter()
+        .filter(|address| seen.insert(*address))
+        .collect()
+}
+
+fn resolve(target: &str) -> Result<Vec<SocketAddr>, String> {
+    let addresses = target
         .to_socket_addrs()
-        .map_err(|e| format!("resolve {target}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("{target} resolved to no addresses"))
+        .map_err(|e| format!("resolve {target}: {e}"))?;
+    let addresses = deduplicate_resolved_addresses(addresses);
+    if addresses.is_empty() {
+        Err(format!("{target} resolved to no addresses"))
+    } else {
+        Ok(addresses)
+    }
 }
 
 fn run_send(args: SendArgs) -> Result<(), String> {
@@ -1632,7 +1646,7 @@ fn run_send(args: SendArgs) -> Result<(), String> {
     }
     validate_auto_security_policy(&args)?;
     match resolve(&args.target) {
-        Ok(addr) => run_send_to_addr(args, addr, true),
+        Ok(addresses) => run_send_to_addrs(args, &addresses, true),
         Err(resolve_error) => {
             if let Some(remote) = RemoteTarget::parse(&args.target) {
                 run_send_via_ssh(args, &remote)
@@ -1728,7 +1742,7 @@ fn enforce_transfer_size(label: &str, total_bytes: u64, max_bytes: u64) -> Resul
 /// is sent, so a donor whose copy has drifted refuses instead of poisoning
 /// the bonded fountain.
 fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
-    let control_addr = resolve(&args.to)?;
+    let control_addrs = resolve(&args.to)?;
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
     let config = rq_config(
         args.max_bytes,
@@ -1749,10 +1763,34 @@ fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
     let source = args.source.clone();
     let max_bytes = args.max_bytes;
     let start = Instant::now();
-    let report = runtime.block_on(runtime.handle().spawn(async move {
+    let descriptor_config = config.clone();
+    let descriptor_source = source.clone();
+    let (descriptor, source_root) = runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("bond donor cx");
-        bond_donate_transfer(&cx, &source, control_addr, config, max_bytes, auth_key_id).await
+        let descriptor = derive_bond_transfer_descriptor(
+            &cx,
+            &descriptor_source,
+            &descriptor_config,
+            max_bytes,
+            auth_key_id,
+        )
+        .await?;
+        let source_root = bond_source_root(&descriptor_source)?;
+        Ok::<_, String>((descriptor, source_root))
     }))?;
+    let report = try_address_candidates(Transport::Rq, &control_addrs, |control_addr| {
+        let descriptor = descriptor.clone();
+        let source_root = source_root.clone();
+        let config = config.clone();
+        runtime
+            .block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("bond donor cx");
+                transport_rq::donate_bonded(&cx, &descriptor, control_addr, &source_root, config)
+                    .await
+            }))
+            .map_err(classify_rq_send_failure)
+    })
+    .map_err(|failure| failure.message)?;
     let elapsed = start.elapsed();
     print_atp_metrics_line(
         "bond-donate",
@@ -1785,6 +1823,7 @@ fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
 /// bonded e2e drives): derive the agreed descriptor from local bytes, then run
 /// the full enrollment + spray + feedback loop against the receiver's control
 /// address.
+#[cfg(test)]
 async fn bond_donate_transfer(
     cx: &Cx,
     source: &Path,
@@ -2750,14 +2789,19 @@ fn auto_transport_exhausted_error(attempts: &[TransportAttempt]) -> String {
     format!("atp --transport auto exhausted permitted fallback order ({order}): {details}")
 }
 
-fn run_send_to_addr(
+fn run_send_to_addrs(
     mut args: SendArgs,
-    addr: SocketAddr,
+    addresses: &[SocketAddr],
     use_direct_delta_probe: bool,
 ) -> Result<(), String> {
+    let first_address = addresses
+        .first()
+        .copied()
+        .ok_or_else(|| "send target has no resolved addresses".to_string())?;
     let mut direct_delta_plan = None;
     let mut delta_package_guard = None;
-    if use_direct_delta_probe && let Some(delta) = prepare_direct_delta_send(&args, addr)? {
+    if use_direct_delta_probe && let Some(delta) = prepare_direct_delta_send(&args, first_address)?
+    {
         match delta {
             DeltaPreparedSend::Package {
                 package_root,
@@ -2782,10 +2826,12 @@ fn run_send_to_addr(
 
     let runtime = build_runtime(args.workers)?;
     let mut report = if args.transport == Transport::Auto {
-        run_send_auto_to_addr(&runtime, &args, addr)?
+        run_send_auto_to_addrs(&runtime, &args, addresses)?
     } else {
-        send_to_addr_with_transport(&runtime, &args, args.transport, addr)
-            .map_err(|failure| failure.message)?
+        try_address_candidates(args.transport, addresses, |address| {
+            send_to_addr_with_transport(&runtime, &args, args.transport, address)
+        })
+        .map_err(|failure| failure.message)?
     };
     if let Some((plan, package_payload_bytes, subdelta_chunks)) = direct_delta_plan.as_ref() {
         annotate_direct_delta_package_report(
@@ -2805,21 +2851,40 @@ fn run_send_to_addr(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SendTransportFailure {
     message: String,
-    fallback_eligible: bool,
+    address_fallback_eligible: bool,
+    transport_fallback_eligible: bool,
 }
 
 impl SendTransportFailure {
     fn fatal(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            fallback_eligible: false,
+            address_fallback_eligible: false,
+            transport_fallback_eligible: false,
         }
     }
 
-    fn fallback_eligible(message: impl Into<String>) -> Self {
+    fn address_fallback(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            fallback_eligible: true,
+            address_fallback_eligible: true,
+            transport_fallback_eligible: false,
+        }
+    }
+
+    fn pre_transfer_fallback(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            address_fallback_eligible: true,
+            transport_fallback_eligible: true,
+        }
+    }
+
+    fn transport_fallback(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            address_fallback_eligible: false,
+            transport_fallback_eligible: true,
         }
     }
 }
@@ -2830,12 +2895,52 @@ impl From<String> for SendTransportFailure {
     }
 }
 
-fn classify_rq_send_failure(error: RqError) -> SendTransportFailure {
-    let fallback_eligible = matches!(&error, RqError::HandshakeRejected(_));
-    if fallback_eligible {
-        SendTransportFailure::fallback_eligible(error.to_string())
+fn authentication_rejection(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("authentication")
+        || message.contains("certificate")
+        || message.contains("server identity")
+        || message.contains("trust anchor")
+        || message.contains("unknown ca")
+        || message.contains("issuer")
+}
+
+fn connect_only_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::AddrNotAvailable
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::HostUnreachable
+    )
+}
+
+fn classify_tcp_send_failure(error: TransportError) -> SendTransportFailure {
+    let address_fallback_eligible = match &error {
+        TransportError::Io(error) => connect_only_io_error(error),
+        TransportError::HandshakeRejected(_) => true,
+        TransportError::Timeout { operation, .. } => matches!(
+            *operation,
+            "connect" | "send handshake" | "receive handshake ack"
+        ),
+        _ => false,
+    };
+    if address_fallback_eligible {
+        SendTransportFailure::address_fallback(error.to_string())
     } else {
         SendTransportFailure::fatal(error.to_string())
+    }
+}
+
+fn classify_rq_send_failure(error: RqError) -> SendTransportFailure {
+    match &error {
+        RqError::HandshakeRejected(message) if authentication_rejection(message) => {
+            SendTransportFailure::fatal(error.to_string())
+        }
+        RqError::HandshakeRejected(_) => {
+            SendTransportFailure::pre_transfer_fallback(error.to_string())
+        }
+        _ => SendTransportFailure::fatal(error.to_string()),
     }
 }
 
@@ -2845,30 +2950,86 @@ fn classify_quic_send_failure(
 ) -> SendTransportFailure {
     use asupersync::net::atp::transport_quic::QuicTransportError;
 
-    let fallback_eligible = matches!(
-        &error,
+    match &error {
+        QuicTransportError::HandshakeRejected(message) if authentication_rejection(message) => {
+            SendTransportFailure::fatal(error.to_string())
+        }
         QuicTransportError::HandshakeRejected(_)
-            | QuicTransportError::Timeout {
-                operation: "quic client handshake",
-                ..
-            }
-            | QuicTransportError::Timeout {
-                operation: "receive sender handshake ack",
-                ..
-            }
-            | QuicTransportError::NotImplemented { .. }
-    ) || matches!(&error, QuicTransportError::Quic(message) if message.starts_with("quic handshake: "));
-    if fallback_eligible {
-        SendTransportFailure::fallback_eligible(error.to_string())
-    } else {
-        SendTransportFailure::fatal(error.to_string())
+        | QuicTransportError::Timeout {
+            operation: "quic client handshake" | "receive sender handshake ack",
+            ..
+        } => SendTransportFailure::pre_transfer_fallback(error.to_string()),
+        // Native TLS errors are intentionally flattened into this stable prefix
+        // by the transport. They include certificate, hostname, transcript, and
+        // packet-authentication failures, none of which may trigger a different
+        // address or weaker-transport retry.
+        QuicTransportError::Quic(message) if message.starts_with("quic handshake: ") => {
+            SendTransportFailure::fatal(error.to_string())
+        }
+        QuicTransportError::NotImplemented { .. } => {
+            SendTransportFailure::transport_fallback(error.to_string())
+        }
+        _ => SendTransportFailure::fatal(error.to_string()),
     }
 }
 
-fn run_send_auto_to_addr(
+fn try_address_candidates<T>(
+    transport: Transport,
+    addresses: &[SocketAddr],
+    mut attempt: impl FnMut(SocketAddr) -> Result<T, SendTransportFailure>,
+) -> Result<T, SendTransportFailure> {
+    if addresses.is_empty() {
+        return Err(SendTransportFailure::fatal(
+            "send target has no resolved addresses",
+        ));
+    }
+
+    let mut failed_addresses = Vec::new();
+    for (index, address) in addresses.iter().copied().enumerate() {
+        match attempt(address) {
+            Ok(value) => return Ok(value),
+            Err(mut failure) => {
+                if !failure.address_fallback_eligible {
+                    if !failed_addresses.is_empty() {
+                        failure.message = format!(
+                            "{} (earlier resolved-address failures: {})",
+                            failure.message,
+                            failed_addresses.join("; ")
+                        );
+                    }
+                    return Err(failure);
+                }
+
+                failed_addresses.push(format!("{address}: {}", failure.message));
+                if index + 1 < addresses.len() {
+                    eprintln!(
+                        "[atp] address selection: {} unavailable at {address} before transfer: {}; trying {}",
+                        transport.cli_arg(),
+                        failure.message,
+                        addresses[index + 1]
+                    );
+                    continue;
+                }
+                if failed_addresses.len() > 1 {
+                    failure.message = format!(
+                        "all resolved addresses failed before transfer: {}",
+                        failed_addresses.join("; ")
+                    );
+                }
+                return Err(failure);
+            }
+        }
+    }
+
+    Err(SendTransportFailure::fatal(
+        "send target has no resolved addresses",
+    ))
+}
+
+fn run_send_auto_to_addrs(
     runtime: &asupersync::runtime::Runtime,
     args: &SendArgs,
-    addr: SocketAddr,
+    addresses: &[SocketAddr],
 ) -> Result<serde_json::Value, String> {
     let mut attempts = Vec::new();
     let rq_configured = args.rq_allow_unauthenticated_lab
@@ -2882,7 +3043,9 @@ fn run_send_auto_to_addr(
     .copied()
     {
         eprintln!("[atp] transport selection: trying {}", transport.cli_arg());
-        match send_to_addr_with_transport(runtime, args, transport, addr) {
+        match try_address_candidates(transport, addresses, |address| {
+            send_to_addr_with_transport(runtime, args, transport, address)
+        }) {
             Ok(report) => {
                 eprintln!(
                     "[atp] transport selection: selected {}",
@@ -2896,9 +3059,10 @@ fn run_send_auto_to_addr(
             }
             Err(SendTransportFailure {
                 message,
-                fallback_eligible,
+                transport_fallback_eligible,
+                ..
             }) => {
-                if !fallback_eligible {
+                if !transport_fallback_eligible {
                     return Err(format!(
                         "atp --transport auto aborted after non-fallback-safe {} failure: {message}",
                         transport.cli_arg()
@@ -2971,7 +3135,7 @@ fn send_to_addr_with_transport(
                     )
                     .await
                 }))
-                .map_err(|e: TransportError| SendTransportFailure::fatal(e.to_string()))?;
+                .map_err(classify_tcp_send_failure)?;
             let elapsed = start.elapsed();
             print_atp_metrics_line(
                 "send",
@@ -3208,14 +3372,14 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
         }
     }
     let data_target = socket_target(&data_host, args.remote_listen.port());
-    let addr = resolve(&data_target)?;
+    let addresses = resolve(&data_target)?;
     let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref(), remote_shell)?;
     let stderr_log = wait_for_remote_ready(
         &mut child,
         Duration::from_secs(args.ssh_ready_timeout_secs.max(1)),
     )?;
 
-    let send_result = run_send_to_addr(args, addr, false);
+    let send_result = run_send_to_addrs(args, &addresses, false);
     if send_result.is_err() {
         let _ = child.kill();
         let _ = child.wait();
@@ -7374,11 +7538,17 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
         );
     }
+    let one_shot = args.once && !persistent;
+    if args.transport == Transport::Quic && !one_shot && args.listen.port() == 0 {
+        return Err(
+            "persistent QUIC serve requires a fixed non-zero --listen port; port 0 would change after each transfer"
+                .to_string(),
+        );
+    }
     let runtime = build_runtime(args.workers)?;
     let dest = args.dest.clone();
     let listen = args.listen;
     let peer_id = args.peer_id.clone();
-    let one_shot = args.once && !persistent;
     let udp_bind_ip = listen.ip().to_string();
     let max_bytes = args.max_bytes;
     let delta_enabled = cli_content_delta_enabled(args.no_delta);
@@ -7553,8 +7723,8 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         bind_server_endpoint, receive_on_endpoint,
                     };
                     let cx = Cx::current().expect("receiver cx");
-                    create_receive_destination(&dest).await?;
                     if one_shot {
+                        create_receive_destination(&dest).await?;
                         let endpoint = bind_server_endpoint(&cx, listen)
                             .await
                             .map_err(|e| e.to_string())?;
@@ -7588,20 +7758,30 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         print_json(&quic_recv_json(&report, chosen_fanout, Some(elapsed)));
                         Ok::<(), String>(())
                     } else {
-                        eprintln!("atp: quic listening on {listen}, dest {}", dest.display());
+                        let first_endpoint = bind_server_endpoint(&cx, listen)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let bound = first_endpoint.local_addr();
+                        create_receive_destination(&dest).await?;
                         let _delta_state_server = spawn_delta_state_server(
                             dest.clone(),
-                            listen,
+                            bound,
                             direct_delta_sidecar_enabled,
                         );
-                        // Each accepted transfer consumes the endpoint; rebind the
-                        // same address for the next one. `--listen` must use a fixed
-                        // port for persistent serving (port 0 would drift).
+                        eprintln!("atp: quic listening on {bound}, dest {}", dest.display());
+                        // Each accepted transfer consumes the endpoint. Preserve
+                        // the successfully bound first endpoint, then rebind its
+                        // exact address for every later transfer.
+                        let mut endpoint = Some(first_endpoint);
                         loop {
-                            let endpoint = bind_server_endpoint(&cx, listen)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            match receive_on_endpoint(&cx, endpoint, &dest, &cfg, &peer_id).await {
+                            let current = if let Some(first) = endpoint.take() {
+                                first
+                            } else {
+                                bind_server_endpoint(&cx, bound)
+                                    .await
+                                    .map_err(|e| e.to_string())?
+                            };
+                            match receive_on_endpoint(&cx, current, &dest, &cfg, &peer_id).await {
                                 Ok(r) => {
                                     if let Err(err) =
                                         handle_post_receive_delta(&dest, delta_enabled, max_bytes)
@@ -8850,43 +9030,166 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     fn auto_fallback_only_admits_pre_transfer_quic_failures() {
         use asupersync::net::atp::transport_quic::QuicTransportError;
 
-        assert!(
+        let certificate_failure = classify_quic_send_failure(QuicTransportError::Quic(
+            "quic handshake: server certificate rejected: code=unknown_issuer".to_string(),
+        ));
+        assert!(!certificate_failure.address_fallback_eligible);
+        assert!(!certificate_failure.transport_fallback_eligible);
+
+        let timeout = classify_quic_send_failure(QuicTransportError::Timeout {
+            operation: "receive sender handshake ack",
+            timeout: Duration::from_secs(1),
+        });
+        assert!(timeout.address_fallback_eligible);
+        assert!(timeout.transport_fallback_eligible);
+
+        for failure in [
+            classify_quic_send_failure(QuicTransportError::Integrity(
+                "tampered manifest".to_string(),
+            )),
             classify_quic_send_failure(QuicTransportError::Quic(
-                "quic handshake: certificate unknown".to_string()
-            ))
-            .fallback_eligible
-        );
-        assert!(
-            classify_quic_send_failure(QuicTransportError::Timeout {
-                operation: "receive sender handshake ack",
-                timeout: Duration::from_secs(1),
-            })
-            .fallback_eligible
-        );
-        assert!(
-            !classify_quic_send_failure(QuicTransportError::Integrity(
-                "tampered manifest".to_string()
-            ))
-            .fallback_eligible
-        );
-        assert!(
-            !classify_quic_send_failure(QuicTransportError::Quic(
-                "packet protection: invalid tag".to_string()
-            ))
-            .fallback_eligible
-        );
+                "packet protection: invalid tag".to_string(),
+            )),
+        ] {
+            assert!(!failure.address_fallback_eligible);
+            assert!(!failure.transport_fallback_eligible);
+        }
     }
 
     #[test]
     fn auto_fallback_only_admits_pre_transfer_rq_rejection() {
-        assert!(
-            classify_rq_send_failure(RqError::HandshakeRejected("unsupported".to_string()))
-                .fallback_eligible
+        let unsupported =
+            classify_rq_send_failure(RqError::HandshakeRejected("unsupported".to_string()));
+        assert!(unsupported.address_fallback_eligible);
+        assert!(unsupported.transport_fallback_eligible);
+
+        for failure in [
+            classify_rq_send_failure(RqError::HandshakeRejected(
+                "symbol authentication mismatch".to_string(),
+            )),
+            classify_rq_send_failure(RqError::Authentication("invalid symbol tag".to_string())),
+            classify_rq_send_failure(RqError::Integrity("tampered manifest".to_string())),
+        ] {
+            assert!(!failure.address_fallback_eligible);
+            assert!(!failure.transport_fallback_eligible);
+        }
+    }
+
+    #[test]
+    fn resolved_address_candidates_preserve_order_and_remove_duplicates() {
+        let v6: SocketAddr = "[::1]:8472".parse().unwrap();
+        let v4: SocketAddr = "127.0.0.1:8472".parse().unwrap();
+        assert_eq!(
+            deduplicate_resolved_addresses([v6, v6, v4, v6, v4]),
+            vec![v6, v4]
         );
-        assert!(
-            !classify_rq_send_failure(RqError::Integrity("tampered manifest".to_string()))
-                .fallback_eligible
-        );
+    }
+
+    #[test]
+    fn tcp_and_rq_try_the_next_address_only_after_pre_transfer_failure() {
+        let first: SocketAddr = "[::1]:8472".parse().unwrap();
+        let second: SocketAddr = "127.0.0.1:8472".parse().unwrap();
+        let candidates = [first, second];
+        let cases = [
+            (
+                Transport::Tcp,
+                classify_tcp_send_failure(TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "synthetic connect refusal",
+                ))),
+            ),
+            (
+                Transport::Rq,
+                classify_rq_send_failure(RqError::HandshakeRejected(
+                    "handshake unavailable while connecting".to_string(),
+                )),
+            ),
+        ];
+
+        for (transport, first_failure) in cases {
+            let mut attempted = Vec::new();
+            let selected = try_address_candidates(transport, &candidates, |address| {
+                attempted.push(address);
+                if address == first {
+                    Err(first_failure.clone())
+                } else {
+                    Ok(address)
+                }
+            })
+            .expect("second address should be selected");
+            assert_eq!(selected, second);
+            assert_eq!(attempted, candidates);
+        }
+    }
+
+    #[test]
+    fn address_candidates_stop_after_payload_or_authentication_failure() {
+        let first: SocketAddr = "[::1]:8472".parse().unwrap();
+        let second: SocketAddr = "127.0.0.1:8472".parse().unwrap();
+        let candidates = [first, second];
+        let cases = [
+            (
+                Transport::Tcp,
+                classify_tcp_send_failure(TransportError::Integrity(
+                    "receiver rejected committed bytes".to_string(),
+                )),
+            ),
+            (
+                Transport::Rq,
+                classify_rq_send_failure(RqError::Authentication(
+                    "symbol tag mismatch".to_string(),
+                )),
+            ),
+        ];
+
+        for (transport, fatal) in cases {
+            let mut attempted = Vec::new();
+            let error = try_address_candidates(transport, &candidates, |address| {
+                attempted.push(address);
+                Err::<SocketAddr, _>(fatal.clone())
+            })
+            .expect_err("fatal failure must stop address fallback");
+            assert!(!error.address_fallback_eligible);
+            assert_eq!(attempted, vec![first]);
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn quic_tries_the_next_address_after_handshake_timeout_but_not_tls_failure() {
+        use asupersync::net::atp::transport_quic::QuicTransportError;
+
+        let first: SocketAddr = "[::1]:8472".parse().unwrap();
+        let second: SocketAddr = "127.0.0.1:8472".parse().unwrap();
+        let candidates = [first, second];
+        let timeout = classify_quic_send_failure(QuicTransportError::Timeout {
+            operation: "quic client handshake",
+            timeout: Duration::from_millis(10),
+        });
+        let mut attempted = Vec::new();
+        let selected = try_address_candidates(Transport::Quic, &candidates, |address| {
+            attempted.push(address);
+            if address == first {
+                Err(timeout.clone())
+            } else {
+                Ok(address)
+            }
+        })
+        .expect("second QUIC address should be selected");
+        assert_eq!(selected, second);
+        assert_eq!(attempted, candidates);
+
+        let tls_failure = classify_quic_send_failure(QuicTransportError::Quic(
+            "quic handshake: server certificate rejected: code=unknown_issuer".to_string(),
+        ));
+        attempted.clear();
+        let error = try_address_candidates(Transport::Quic, &candidates, |address| {
+            attempted.push(address);
+            Err::<SocketAddr, _>(tls_failure.clone())
+        })
+        .expect_err("TLS failure must stop address fallback");
+        assert!(!error.address_fallback_eligible);
+        assert_eq!(attempted, vec![first]);
     }
 
     #[test]
