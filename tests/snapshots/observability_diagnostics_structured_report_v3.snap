@@ -90,7 +90,7 @@ report:
     doc: docs/error_codes/ASUP-E301.md
     state: Open
     - task TaskId(0:0) still running (state=Running, polls=0, wait_edges=[TaskId(1:0)], last_checkpoint="<none>")
-    - task TaskId(1:0) still running (state=Running, polls=0, wait_edges=[], last_checkpoint="<none>")
+    - task TaskId(1:0) still running (state=Running, polls=0, wait_edges=[TaskId(0:0)], last_checkpoint="<none>")
     - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Ack, holder_waiters=[TaskId(1:0)], holder_last_checkpoint="<none>")
     -> Wait for live tasks to complete, or cancel the region.
     -> Ensure obligations are committed/aborted before closing.

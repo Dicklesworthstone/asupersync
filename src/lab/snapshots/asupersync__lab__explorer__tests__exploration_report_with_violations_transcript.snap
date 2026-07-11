@@ -67,7 +67,7 @@ expression: transcript
       "steps": "[STEPS]",
       "violations": [
         "2 tasks leaked",
-        "0 obligations leaked"
+        "[ASUP-E101] obligation leak: count=1 leaks=[obligation=ObligationId(3:1) kind=Ack holder=TaskId(2:1) region=RegionId(1:1)]"
       ]
     }
   ]

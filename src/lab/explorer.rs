@@ -1301,9 +1301,10 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::lab::runtime::ObligationLeak;
+    use crate::record::ObligationKind;
     use crate::trace::{TraceData, TraceEventKind};
-    use crate::types::Budget;
-    use crate::types::Time;
+    use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
     use insta::assert_json_snapshot;
     use serde_json::Value as JsonValue;
     use std::collections::BTreeMap;
@@ -2007,12 +2008,20 @@ mod tests {
     #[test]
     fn golden_exploration_report_with_violations_transcript() {
         // Create a synthetic violation scenario for golden testing
+        let obligation_leak = InvariantViolation::ObligationLeak {
+            leaks: vec![ObligationLeak {
+                obligation: ObligationId::new_for_test(3, 1),
+                kind: ObligationKind::Ack,
+                holder: TaskId::new_for_test(2, 1),
+                region: RegionId::new_for_test(1, 1),
+            }],
+        };
         let violations = vec![ViolationReport {
             seed: 123,
             steps: 45,
             violations: vec![
                 InvariantViolation::TaskLeak { count: 2 },
-                InvariantViolation::ObligationLeak { leaks: Vec::new() },
+                obligation_leak.clone(),
             ],
             fingerprint: 9876,
         }];
@@ -2062,10 +2071,7 @@ mod tests {
                     steps: 45,
                     fingerprint: 9876,
                     is_new_class: true,
-                    violations: vec![
-                        InvariantViolation::TaskLeak { count: 2 },
-                        InvariantViolation::ObligationLeak { leaks: Vec::new() },
-                    ],
+                    violations: vec![InvariantViolation::TaskLeak { count: 2 }, obligation_leak],
                     certificate_hash: 8123,
                 },
             ],
