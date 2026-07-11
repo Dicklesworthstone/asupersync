@@ -487,6 +487,9 @@ opencode.json
 /claude-upgrade-progress.json
 /rch_test_output.txt
 
+# Beads recovery snapshots are local forensic artifacts, not tracker state.
+/.beads/issues.jsonl.corrupt-*
+
 # Compiled scratch binaries / libs at root (catch-alls for the
 # patterns above that already list specific names)
 /generate_goldens
