@@ -404,7 +404,7 @@ mod tests {
     use crate::cx::Cx;
     use crate::observability::{LogCollector, LogLevel};
     use crate::runtime::{RuntimeBuilder, yield_now};
-    use crate::types::TaskId;
+    use crate::types::{CancelKind, TaskId};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -421,6 +421,15 @@ mod tests {
             let cx = Cx::current().expect("spawned root task has Cx");
             f(cx).await
         }))
+    }
+
+    fn is_race_lost_or_stronger<T, E>(outcome: &Outcome<T, E>) -> bool {
+        matches!(
+            outcome,
+            Outcome::Cancelled(reason)
+                if reason.is_kind(CancelKind::RaceLost)
+                    || reason.kind.severity() > CancelKind::RaceLost.severity()
+        )
     }
 
     fn manual_handle<T>(task_slot: u32) -> (oneshot::Sender<Result<T, JoinError>>, TaskHandle<T>) {
@@ -790,10 +799,91 @@ mod tests {
 
         assert_eq!(witness.losers_checked(), 2);
         assert!(
-            outcomes
-                .iter()
-                .all(|outcome| matches!(outcome, Outcome::Cancelled(reason) if reason.is_kind(crate::types::CancelKind::RaceLost))),
-            "explicit race-loser cancellation must preserve RaceLost attribution: {outcomes:?}"
+            outcomes.iter().all(is_race_lost_or_stronger),
+            "explicit race-loser cancellation must preserve RaceLost-or-stronger attribution: {outcomes:?}"
         );
+    }
+
+    #[test]
+    fn immediate_race_loser_cancel_survives_mailbox_admission() {
+        let (outcomes, started_before_cancel) = run_in_runtime(|cx| async move {
+            let started = Arc::new(AtomicUsize::new(0));
+            let mut set = JoinSet::<u32, crate::error::Error, _>::in_cx(&cx);
+
+            for _ in 0..2 {
+                let started = Arc::clone(&started);
+                set.spawn(&cx, move |member_cx| async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    for _ in 0..64 {
+                        if let Err(error) = member_cx.checkpoint() {
+                            return Err(error);
+                        }
+                        yield_now().await;
+                    }
+                    Ok(1)
+                })
+                .expect("join-set member spawns");
+            }
+
+            // The current-thread runtime cannot admit the mailbox requests
+            // until this task yields. This pins cancellation before admission.
+            let started_before_cancel = started.load(Ordering::SeqCst);
+            let outcomes = set
+                .cancel_all_with_reason(&cx, CancelReason::race_loser())
+                .await;
+            (outcomes, started_before_cancel)
+        });
+
+        assert_eq!(
+            started_before_cancel, 0,
+            "members must still be provisional when cancellation is requested"
+        );
+        assert!(
+            outcomes.iter().all(is_race_lost_or_stronger),
+            "pre-admission cancellation must replay as RaceLost or stronger: {outcomes:?}"
+        );
+        let loser_refs = outcomes.iter().collect::<Vec<_>>();
+        let witness = crate::combinator::race::verify_losers_drained(&loser_refs)
+            .expect("pre-admission JoinSet losers satisfy L-LOSER-DRAINED");
+        assert_eq!(witness.losers_checked(), 2);
+    }
+
+    #[test]
+    fn immediate_local_race_loser_cancel_survives_mailbox_admission() {
+        let (outcomes, started_before_cancel) = run_in_runtime(|cx| async move {
+            let started = Arc::new(AtomicUsize::new(0));
+            let mut set = JoinSet::<u32, crate::error::Error, _>::in_cx(&cx);
+            let member_started = Arc::clone(&started);
+            set.spawn_local(&cx, move |member_cx| async move {
+                member_started.fetch_add(1, Ordering::SeqCst);
+                for _ in 0..64 {
+                    if let Err(error) = member_cx.checkpoint() {
+                        return Err(error);
+                    }
+                    yield_now().await;
+                }
+                Ok(1)
+            })
+            .expect("local join-set member spawns");
+
+            let started_before_cancel = started.load(Ordering::SeqCst);
+            let outcomes = set
+                .cancel_all_with_reason(&cx, CancelReason::race_loser())
+                .await;
+            (outcomes, started_before_cancel)
+        });
+
+        assert_eq!(
+            started_before_cancel, 0,
+            "local member must still be provisional when cancellation is requested"
+        );
+        assert!(
+            outcomes.iter().all(is_race_lost_or_stronger),
+            "local pre-admission cancellation must replay as RaceLost or stronger: {outcomes:?}"
+        );
+        let loser_refs = outcomes.iter().collect::<Vec<_>>();
+        let witness = crate::combinator::race::verify_losers_drained(&loser_refs)
+            .expect("pre-admission local JoinSet loser satisfies L-LOSER-DRAINED");
+        assert_eq!(witness.losers_checked(), 1);
     }
 }

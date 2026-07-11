@@ -4200,7 +4200,9 @@ where
         Fut: Future + 'static,
         Fut::Output: Send + 'static,
     {
-        use crate::runtime::spawn_mailbox::{AdmittedTask, LocalSpawnFactoryFn, LocalSpawnRequest};
+        use crate::runtime::spawn_mailbox::{
+            AdmittedTaskSlot, LocalSpawnFactoryFn, LocalSpawnRequest,
+        };
         use crate::runtime::task_handle::JoinError;
 
         let Some(_liveness_guard) = gateway.liveness_guard() else {
@@ -4215,8 +4217,9 @@ where
         // Take-once semantics across the mutually exclusive completion and
         // denial paths, as in `spawn_via_gateway`.
         let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
-        let admitted_slot: Arc<std::sync::OnceLock<AdmittedTask>> =
-            Arc::new(std::sync::OnceLock::new());
+        let admitted_slot = Arc::new(AdmittedTaskSlot::new());
+        let pending_cancel_reason =
+            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
@@ -4296,13 +4299,10 @@ where
             trace
                 .record_event(|seq| TraceEvent::task_spawn_enqueued(seq, now, provisional, region));
         }
+        let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
-
-        Ok(crate::runtime::TaskHandle::new_pending(
-            provisional,
-            result_rx,
-            admitted_slot,
-        ))
+        drop(pending_cancel_reason);
+        Ok(handle)
     }
 
     /// Shared producer-side machinery for the lock-free spawn paths
@@ -4325,7 +4325,7 @@ where
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
-        use crate::runtime::spawn_mailbox::{AdmittedTask, SpawnFactoryFn, SpawnRequest};
+        use crate::runtime::spawn_mailbox::{AdmittedTaskSlot, SpawnFactoryFn, SpawnRequest};
         use crate::runtime::task_handle::JoinError;
 
         let Some(_liveness_guard) = gateway.liveness_guard() else {
@@ -4338,8 +4338,9 @@ where
         // the factory-built future) or a denial slot. `Mutex<Option<..>>`
         // gives take-once semantics across those mutually exclusive paths.
         let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
-        let admitted_slot: Arc<std::sync::OnceLock<AdmittedTask>> =
-            Arc::new(std::sync::OnceLock::new());
+        let admitted_slot = Arc::new(AdmittedTaskSlot::new());
+        let pending_cancel_reason =
+            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
         // Parent snapshot for capability inheritance (cheap Arc clones).
         let parent = self.clone();
@@ -4410,13 +4411,10 @@ where
                 }
             }));
 
+        let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         gateway.enqueue_and_notify(request)?;
-
-        Ok(crate::runtime::TaskHandle::new_pending(
-            provisional,
-            result_rx,
-            admitted_slot,
-        ))
+        drop(pending_cancel_reason);
+        Ok(handle)
     }
 
     /// Overlays parent-inherited capability state onto an admission-built

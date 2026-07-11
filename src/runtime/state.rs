@@ -2405,6 +2405,18 @@ impl RuntimeState {
                 task_id,
                 cx_inner: std::sync::Arc::downgrade(&cx.inner),
             });
+            // Publish identity before replaying the cache. A concurrent abort
+            // either lands in this replay or observes the published identity
+            // and applies the reason directly.
+            let requested = crate::runtime::spawn_mailbox::retire_pending_cancel_rendezvous(&slot);
+            let reason = requested.as_ref().and_then(|cache| cache.read().clone());
+            if let Some(reason) = reason {
+                if let Some(waker) =
+                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason)
+                {
+                    waker.wake_by_ref();
+                }
+            }
         }
 
         self.record_task_spawn(task_id, region);
@@ -2471,6 +2483,15 @@ impl RuntimeState {
                 task_id,
                 cx_inner: std::sync::Arc::downgrade(&cx.inner),
             });
+            let requested = crate::runtime::spawn_mailbox::retire_pending_cancel_rendezvous(&slot);
+            let reason = requested.as_ref().and_then(|cache| cache.read().clone());
+            if let Some(reason) = reason {
+                if let Some(waker) =
+                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason)
+                {
+                    waker.wake_by_ref();
+                }
+            }
         }
 
         self.record_task_spawn(task_id, region);

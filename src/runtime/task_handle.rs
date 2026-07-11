@@ -7,7 +7,7 @@ use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::types::{CancelReason, CxInner, PanicPayload, TaskId};
 use parking_lot::RwLock;
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 
 /// Error returned when joining a spawned task fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,10 +71,49 @@ pub struct TaskHandle<T> {
     /// A2.2): admission fills this with the canonical arena id and a live
     /// Cx weak handle. `task_id`/`inner` above hold the provisional values
     /// until then.
-    admitted:
-        Option<std::sync::Arc<std::sync::OnceLock<crate::runtime::spawn_mailbox::AdmittedTask>>>,
+    admitted: Option<Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
+    /// Strongest cancellation reason requested through this handle. This
+    /// outlives the task context so a closed join channel retains attribution.
+    requested_cancel_reason: Arc<RwLock<Option<CancelReason>>>,
     /// Whether this handle already consumed a terminal join result.
     terminal_consumed: bool,
+}
+
+fn strengthen_cancel_reason(slot: &RwLock<Option<CancelReason>>, incoming: &CancelReason) {
+    let mut cached = slot.write();
+    if let Some(existing) = cached.as_mut() {
+        existing.strengthen(incoming);
+    } else {
+        *cached = Some(incoming.clone());
+    }
+}
+
+fn strengthen_cancelled_result<T>(
+    mut result: Result<T, JoinError>,
+    requested: &RwLock<Option<CancelReason>>,
+) -> Result<T, JoinError> {
+    if let Err(JoinError::Cancelled(reason)) = &mut result {
+        if let Some(requested) = requested.read().as_ref() {
+            reason.strengthen(requested);
+        }
+    }
+    result
+}
+
+pub(crate) fn apply_cancel_reason(
+    inner: &RwLock<CxInner>,
+    reason: &CancelReason,
+) -> Option<std::task::Waker> {
+    let mut lock = inner.write();
+    lock.cancel_requested = true;
+    lock.fast_cancel
+        .store(true, std::sync::atomic::Ordering::Release);
+    if let Some(existing) = &mut lock.cancel_reason {
+        existing.strengthen(reason);
+    } else {
+        lock.cancel_reason = Some(reason.clone());
+    }
+    lock.cancel_waker.clone()
 }
 
 impl<T> TaskHandle<T> {
@@ -91,6 +130,7 @@ impl<T> TaskHandle<T> {
             receiver,
             inner,
             admitted: None,
+            requested_cancel_reason: Arc::new(RwLock::new(None)),
             terminal_consumed: false,
         }
     }
@@ -98,8 +138,8 @@ impl<T> TaskHandle<T> {
     /// Creates a handle for a mailbox spawn whose canonical identity is
     /// filled in by admission (br-asupersync-hwjqyo / A2.2). Until the
     /// slot is set, `task_id()` reports the provisional mailbox id and
-    /// abort is a no-op (cancel-before-admission resolves through the
-    /// request's cancel slot instead).
+    /// abort is recorded in the shared admission slot and replayed against
+    /// the canonical task context as soon as admission publishes it.
     #[inline]
     #[doc(hidden)]
     pub fn new_pending(
@@ -107,11 +147,14 @@ impl<T> TaskHandle<T> {
         receiver: oneshot::Receiver<Result<T, JoinError>>,
         admitted: std::sync::Arc<std::sync::OnceLock<crate::runtime::spawn_mailbox::AdmittedTask>>,
     ) -> Self {
+        let requested_cancel_reason =
+            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted);
         Self {
             task_id: provisional_task_id,
             receiver,
             inner: Weak::new(),
             admitted: Some(admitted),
+            requested_cancel_reason,
             terminal_consumed: false,
         }
     }
@@ -195,6 +238,8 @@ impl<T> TaskHandle<T> {
         JoinFuture {
             inner: receiver.recv_uninterruptible(),
             cx_inner,
+            admitted: self.admitted.as_deref(),
+            requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             drop_abort_defused: false,
             drop_reason: None,
@@ -229,6 +274,8 @@ impl<T> TaskHandle<T> {
         JoinFuture {
             inner: receiver.recv_uninterruptible(),
             cx_inner,
+            admitted: self.admitted.as_deref(),
+            requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             drop_abort_defused: false,
             drop_reason: Some(reason),
@@ -251,7 +298,7 @@ impl<T> TaskHandle<T> {
         match self.receiver.try_recv() {
             Ok(result) => {
                 self.terminal_consumed = true;
-                result.map(Some)
+                strengthen_cancelled_result(result, &self.requested_cancel_reason).map(Some)
             }
             Err(oneshot::TryRecvError::Empty) => Ok(None),
             Err(oneshot::TryRecvError::Closed) => {
@@ -281,19 +328,9 @@ impl<T> TaskHandle<T> {
     /// [`CancelReason::strengthen`], preserving deterministic attribution.
     #[inline]
     pub fn abort_with_reason(&self, reason: CancelReason) {
+        strengthen_cancel_reason(&self.requested_cancel_reason, &reason);
         if let Some(inner) = self.live_inner() {
-            let cancel_waker = {
-                let mut lock = inner.write();
-                lock.cancel_requested = true;
-                lock.fast_cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
-                if let Some(existing) = &mut lock.cancel_reason {
-                    existing.strengthen(&reason);
-                } else {
-                    lock.cancel_reason = Some(reason);
-                }
-                lock.cancel_waker.clone()
-            };
+            let cancel_waker = apply_cancel_reason(&inner, &reason);
             if let Some(waker) = cancel_waker {
                 waker.wake_by_ref();
             }
@@ -302,9 +339,9 @@ impl<T> TaskHandle<T> {
 
     #[inline]
     fn closed_reason(&self) -> CancelReason {
-        self.inner
-            .upgrade()
+        self.live_inner()
             .and_then(|inner| inner.read().cancel_reason.clone())
+            .or_else(|| self.requested_cancel_reason.read().clone())
             .unwrap_or_else(|| CancelReason::user("join channel closed"))
     }
 }
@@ -316,34 +353,33 @@ impl<T> TaskHandle<T> {
 pub struct JoinFuture<'a, T> {
     inner: oneshot::RecvUninterruptibleFuture<'a, Result<T, JoinError>>,
     cx_inner: Weak<RwLock<CxInner>>,
+    admitted: Option<&'a crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
+    requested_cancel_reason: &'a RwLock<Option<CancelReason>>,
     terminal_state: &'a mut bool,
     drop_abort_defused: bool,
     drop_reason: Option<CancelReason>,
 }
 
 impl<T> JoinFuture<'_, T> {
+    fn live_inner(&self) -> Option<Arc<RwLock<CxInner>>> {
+        if let Some(admitted) = self.admitted.and_then(|slot| slot.get()) {
+            return admitted.cx_inner.upgrade();
+        }
+        self.cx_inner.upgrade()
+    }
+
     #[inline]
     fn closed_reason(&self) -> CancelReason {
-        self.cx_inner
-            .upgrade()
+        self.live_inner()
             .and_then(|inner| inner.read().cancel_reason.clone())
+            .or_else(|| self.requested_cancel_reason.read().clone())
             .unwrap_or_else(|| CancelReason::user("join channel closed"))
     }
 
     fn abort_with_reason(&self, reason: CancelReason) {
-        if let Some(inner) = self.cx_inner.upgrade() {
-            let cancel_waker = {
-                let mut lock = inner.write();
-                lock.cancel_requested = true;
-                lock.fast_cancel
-                    .store(true, std::sync::atomic::Ordering::Release);
-                if let Some(existing) = &mut lock.cancel_reason {
-                    existing.strengthen(&reason);
-                } else {
-                    lock.cancel_reason = Some(reason);
-                }
-                lock.cancel_waker.clone()
-            };
+        strengthen_cancel_reason(self.requested_cancel_reason, &reason);
+        if let Some(inner) = self.live_inner() {
+            let cancel_waker = apply_cancel_reason(&inner, &reason);
             if let Some(waker) = cancel_waker {
                 waker.wake_by_ref();
             }
@@ -373,7 +409,10 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {
                 *this.terminal_state = true;
-                std::task::Poll::Ready(res)
+                std::task::Poll::Ready(strengthen_cancelled_result(
+                    res,
+                    this.requested_cancel_reason,
+                ))
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
                 *this.terminal_state = true;
@@ -770,6 +809,210 @@ mod tests {
             format!("{result:?}")
         );
         crate::test_complete!("abort_then_join_closed_channel_preserves_abort_reason");
+    }
+
+    #[test]
+    fn abort_reason_survives_task_context_teardown() {
+        init_test("abort_reason_survives_task_context_teardown");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(10, 3));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+
+        handle.abort_with_reason(CancelReason::race_loser());
+        drop(tx);
+
+        let result = block_on(handle.join(&cx));
+        crate::assert_with_log!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::RaceLost,
+                    ..
+                }))
+            ),
+            "closed join retains explicit reason after task context teardown",
+            "Err(JoinError::Cancelled(RaceLost))",
+            format!("{result:?}")
+        );
+        crate::test_complete!("abort_reason_survives_task_context_teardown");
+    }
+
+    #[test]
+    fn pending_try_join_uses_admitted_context_cancel_reason() {
+        init_test("pending_try_join_uses_admitted_context_cancel_reason");
+        let cx = test_cx();
+        let provisional = TaskId::from_arena(ArenaIndex::new(10, 4));
+        let canonical = TaskId::from_arena(ArenaIndex::new(10, 5));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let admitted = Arc::new(crate::runtime::spawn_mailbox::AdmittedTaskSlot::new());
+        let mut handle = TaskHandle::new_pending(provisional, rx, Arc::clone(&admitted));
+
+        admitted
+            .set(crate::runtime::spawn_mailbox::AdmittedTask {
+                task_id: canonical,
+                cx_inner: Arc::downgrade(&cx.inner),
+            })
+            .expect("admitted identity publishes");
+        cx.set_cancel_reason(CancelReason::shutdown());
+        drop(tx);
+
+        let result = handle.try_join();
+        crate::assert_with_log!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::Shutdown,
+                    ..
+                }))
+            ),
+            "try_join resolves the admitted mailbox context dynamically",
+            "Err(JoinError::Cancelled(Shutdown))",
+            format!("{result:?}")
+        );
+        crate::test_complete!("pending_try_join_uses_admitted_context_cancel_reason");
+    }
+
+    #[test]
+    fn pending_join_resolves_admission_after_future_construction() {
+        init_test("pending_join_resolves_admission_after_future_construction");
+        let cx = test_cx();
+        let provisional = TaskId::from_arena(ArenaIndex::new(10, 6));
+        let canonical = TaskId::from_arena(ArenaIndex::new(10, 7));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let admitted = Arc::new(crate::runtime::spawn_mailbox::AdmittedTaskSlot::new());
+        let mut handle = TaskHandle::new_pending(provisional, rx, Arc::clone(&admitted));
+
+        let join = handle.join(&cx);
+        admitted
+            .set(crate::runtime::spawn_mailbox::AdmittedTask {
+                task_id: canonical,
+                cx_inner: Arc::downgrade(&cx.inner),
+            })
+            .expect("late admitted identity publishes");
+        cx.set_cancel_reason(CancelReason::timeout());
+        drop(tx);
+
+        let result = block_on(join);
+        crate::assert_with_log!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::Timeout,
+                    ..
+                }))
+            ),
+            "join future resolves admission published after construction",
+            "Err(JoinError::Cancelled(Timeout))",
+            format!("{result:?}")
+        );
+        crate::test_complete!("pending_join_resolves_admission_after_future_construction");
+    }
+
+    #[test]
+    fn pending_requested_reason_strengthens_queued_denial() {
+        init_test("pending_requested_reason_strengthens_queued_denial");
+        let cx = test_cx();
+        let provisional = TaskId::from_arena(ArenaIndex::new(10, 8));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let admitted = Arc::new(crate::runtime::spawn_mailbox::AdmittedTaskSlot::new());
+        let mut handle = TaskHandle::new_pending(provisional, rx, admitted);
+
+        tx.send(
+            &cx,
+            Err(JoinError::Cancelled(CancelReason::user(
+                "spawn admission failed",
+            ))),
+        )
+        .expect("denial result queues");
+        handle.abort_with_reason(CancelReason::race_loser());
+
+        let result = block_on(handle.join(&cx));
+        crate::assert_with_log!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::RaceLost,
+                    ..
+                }))
+            ),
+            "queued weaker denial is strengthened by pending RaceLost request",
+            "Err(JoinError::Cancelled(RaceLost))",
+            format!("{result:?}")
+        );
+
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let admitted = Arc::new(crate::runtime::spawn_mailbox::AdmittedTaskSlot::new());
+        let mut handle = TaskHandle::new_pending(provisional, rx, admitted);
+        tx.send(
+            &cx,
+            Err(JoinError::Cancelled(CancelReason::user(
+                "spawn admission failed",
+            ))),
+        )
+        .expect("second denial result queues");
+        handle.abort_with_reason(CancelReason::race_loser());
+        let try_result = handle.try_join();
+        crate::assert_with_log!(
+            matches!(
+                try_result,
+                Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::RaceLost,
+                    ..
+                }))
+            ),
+            "try_join also strengthens a queued weaker denial",
+            "Err(JoinError::Cancelled(RaceLost))",
+            format!("{try_result:?}")
+        );
+        crate::test_complete!("pending_requested_reason_strengthens_queued_denial");
+    }
+
+    #[test]
+    fn concurrent_pending_abort_requests_keep_strongest_reason() {
+        init_test("concurrent_pending_abort_requests_keep_strongest_reason");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(10, 9));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let handle = Arc::new(TaskHandle::new(task_id, rx, Weak::new()));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let race_handle = Arc::clone(&handle);
+        let race_barrier = Arc::clone(&barrier);
+        let race = std::thread::spawn(move || {
+            race_barrier.wait();
+            for _ in 0..128 {
+                race_handle.abort_with_reason(CancelReason::race_loser());
+            }
+        });
+        let shutdown_handle = Arc::clone(&handle);
+        let shutdown_barrier = Arc::clone(&barrier);
+        let shutdown = std::thread::spawn(move || {
+            shutdown_barrier.wait();
+            for _ in 0..128 {
+                shutdown_handle.abort_with_reason(CancelReason::shutdown());
+            }
+        });
+        barrier.wait();
+        race.join().expect("RaceLost abort thread completes");
+        shutdown.join().expect("Shutdown abort thread completes");
+
+        let mut handle = Arc::try_unwrap(handle).expect("abort threads release handle");
+        drop(tx);
+        let result = block_on(handle.join(&cx));
+        crate::assert_with_log!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::Shutdown,
+                    ..
+                }))
+            ),
+            "concurrent abort requests retain the strongest reason",
+            "Err(JoinError::Cancelled(Shutdown))",
+            format!("{result:?}")
+        );
+        crate::test_complete!("concurrent_pending_abort_requests_keep_strongest_reason");
     }
 
     #[test]
