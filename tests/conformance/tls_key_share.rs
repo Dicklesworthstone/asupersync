@@ -15,11 +15,17 @@
 mod tls_key_share_tests {
     use asupersync::cx::Cx;
     use asupersync::tls::TlsError;
-    use asupersync::tls::{TlsAcceptor, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder};
+    use asupersync::tls::{
+        CertificateChain, PrivateKey, TlsAcceptor, TlsAcceptorBuilder, TlsConnector,
+        TlsConnectorBuilder,
+    };
     use asupersync::types::{Budget, RegionId, TaskId, Time};
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
+
+    const TEST_CERT_PEM: &[u8] = include_bytes!("../fixtures/tls/server.crt");
+    const TEST_KEY_PEM: &[u8] = include_bytes!("../fixtures/tls/server.key");
 
     /// Create a test context for TLS operations.
     #[allow(dead_code)]
@@ -165,35 +171,9 @@ mod tls_key_share_tests {
 
         /// Generate test certificates and keys for testing.
         #[allow(dead_code)]
-        fn generate_test_cert_and_key() -> Result<
-            (
-                asupersync::tls::CertificateChain,
-                asupersync::tls::PrivateKey,
-            ),
-            TlsError,
-        > {
-            // For testing, we'll create a minimal self-signed certificate
-            // In a real implementation, this would use a proper test certificate
-            // For now, we'll use dummy data that represents a valid cert structure
-
-            // This is a minimal test certificate in DER format (self-signed)
-            let test_cert_der = vec![
-                0x30, 0x82, 0x01,
-                0x00, // SEQUENCE, length
-                     // Certificate content would go here
-                     // For testing purposes, we'll create a minimal structure
-            ];
-
-            let test_key_der = vec![
-                0x30, 0x82, 0x01,
-                0x00, // SEQUENCE, length
-                     // Private key content would go here
-            ];
-
-            let cert = asupersync::tls::Certificate::from_der(test_cert_der);
-            let chain = asupersync::tls::CertificateChain::from(vec![cert]);
-            let key = asupersync::tls::PrivateKey::from_pkcs8_der(test_key_der);
-
+        fn generate_test_cert_and_key() -> Result<(CertificateChain, PrivateKey), TlsError> {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM)?;
+            let key = PrivateKey::from_pem(TEST_KEY_PEM)?;
             Ok((chain, key))
         }
 

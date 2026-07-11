@@ -16,11 +16,18 @@
 #[cfg(feature = "tls")]
 mod tls_sni_conformance_tests {
     use asupersync::cx::Cx;
-    use asupersync::tls::{TlsConnector, TlsConnectorBuilder, TlsError};
+    use asupersync::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsError};
     use asupersync::types::{Budget, RegionId, TaskId};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    const TEST_CERT_PEM: &[u8] = include_bytes!("../fixtures/tls/server.crt");
+
+    fn test_connector_builder() -> Result<TlsConnectorBuilder, TlsError> {
+        let roots = Certificate::from_pem(TEST_CERT_PEM)?;
+        Ok(TlsConnectorBuilder::new().add_root_certificates(roots))
+    }
 
     /// Create a test context for TLS operations.
     #[allow(dead_code)]
@@ -144,7 +151,7 @@ mod tls_sni_conformance_tests {
                 ascii_hostname: "example.com",
                 international_domain: "例え.テスト", // Japanese domain
                 punycode_domain: "xn--r8jz45g.xn--zckzah", // punycode for Japanese domain
-                long_hostname: "this-is-a-very-long-hostname-that-approaches-the-dns-label-length-limit-of-63-characters.example.com",
+                long_hostname: "near-dns-label-limit-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com",
                 invalid_hostname: "invalid..hostname",
                 empty_hostname: "",
                 deep_subdomain: "level1.level2.level3.level4.level5.example.com",
@@ -259,7 +266,7 @@ mod tls_sni_conformance_tests {
             hostname: &str,
         ) -> Result<SniExtensionState, TlsError> {
             // Create connector with SNI enabled
-            let connector = TlsConnectorBuilder::new()
+            let _connector = test_connector_builder()?
                 .build()
                 .map_err(|e| TlsError::Configuration(e.to_string()))?;
 
@@ -867,7 +874,7 @@ mod tls_sni_conformance_tests {
 
         fn validate_sni_disabled_behavior(&self) -> Result<(), TlsError> {
             // Test connector with SNI disabled
-            let connector_result = TlsConnectorBuilder::new().disable_sni().build();
+            let connector_result = test_connector_builder()?.disable_sni().build();
 
             match connector_result {
                 Ok(_connector) => {

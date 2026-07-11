@@ -1104,7 +1104,6 @@ mod tests {
     use asupersync::database::{MySqlConnectOptions, MySqlError};
     use asupersync::test_utils::init_test_logging;
     use asupersync::types::Outcome;
-    use sha1::{Digest as _, Sha1};
     use sha2::{Digest as _, Sha256};
     use std::io::{Read, Write};
     use std::time::Duration;
@@ -1175,7 +1174,8 @@ mod tests {
     }
 
     fn ok_packet(sequence: u8) -> Vec<u8> {
-        mysql_packet(sequence, &[0x00])
+        // OK header, affected rows, last insert id, status flags, warnings.
+        mysql_packet(sequence, &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
     }
 
     fn read_mysql_packet(stream: &mut std::net::TcpStream) -> Vec<u8> {
@@ -1257,25 +1257,6 @@ mod tests {
         combined.extend_from_slice(&double_hash);
         combined.extend_from_slice(nonce);
         let scramble_hash = Sha256::digest(&combined);
-
-        password_hash
-            .iter()
-            .zip(scramble_hash.iter())
-            .map(|(left, right)| left ^ right)
-            .collect()
-    }
-
-    fn mysql_native_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
-        if password.is_empty() {
-            return Vec::new();
-        }
-
-        let password_hash = Sha1::digest(password.as_bytes());
-        let double_hash = Sha1::digest(password_hash);
-        let mut combined = Vec::with_capacity(nonce.len() + double_hash.len());
-        combined.extend_from_slice(nonce);
-        combined.extend_from_slice(&double_hash);
-        let scramble_hash = Sha1::digest(&combined);
 
         password_hash
             .iter()
@@ -1514,8 +1495,8 @@ mod tests {
         match outcome {
             Outcome::Err(MySqlError::UnsupportedAuthPlugin(message)) => {
                 assert!(
-                    message.contains("insecure_legacy_mysql_native_password"),
-                    "expected opt-in guidance in error, got {message:?}"
+                    message.contains("insecure_allow_auth_switch_downgrade"),
+                    "expected downgrade opt-in guidance in error, got {message:?}"
                 );
             }
             other => panic!("expected mysql_native_password auth-switch rejection, got {other:?}"),
@@ -1559,26 +1540,25 @@ mod tests {
                 .expect("write auth switch");
             stream.flush().expect("flush auth switch");
 
-            let auth_switch_response = read_mysql_packet(&mut stream);
-            assert_eq!(
-                auth_switch_response,
-                mysql_native_auth("pass", &switch_nonce),
-                "opted-in legacy auth-switch should send the mysql_native_password scramble"
-            );
-
-            stream.write_all(&ok_packet(4)).expect("write ok");
-            stream.flush().expect("flush ok");
+            assert_no_auth_switch_response(&mut stream);
         });
 
         let mut options = connect_options(addr);
         options.insecure_legacy_mysql_native_password = true;
+        options.insecure_allow_auth_switch_downgrade = true;
         let outcome = futures_lite::future::block_on(async {
             MySqlConnection::connect_with_options(&Cx::for_testing(), options).await
         });
 
         match outcome {
-            Outcome::Ok(_) => {}
-            other => panic!("expected opted-in mysql_native auth switch success, got {other:?}"),
+            Outcome::Err(MySqlError::UnsupportedAuthPlugin(message)) => {
+                assert!(
+                    message.contains("permanently blocked")
+                        && message.contains("caching_sha2_password"),
+                    "legacy opt-ins must not bypass the permanent SHA-1 block: {message:?}"
+                );
+            }
+            other => panic!("expected permanent mysql_native auth-switch rejection, got {other:?}"),
         }
 
         server.join().expect("join server");

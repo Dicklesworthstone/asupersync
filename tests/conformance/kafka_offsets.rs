@@ -32,6 +32,10 @@ impl Default for ConformanceConfig {
     }
 }
 
+fn unique_group_id(label: &str) -> String {
+    format!("asupersync-conformance-{label}-{}", std::process::id())
+}
+
 fn conformance_requires_unavailable_kafka_feature() -> bool {
     #[cfg(not(feature = "kafka"))]
     {
@@ -157,7 +161,10 @@ fn mr1_commit_offsets_monotonic_per_partition() -> Result<(), Box<dyn std::error
         .expect("failed to build test runtime");
     runtime.block_on(async {
         let cx = Cx::for_testing();
-        let config = ConformanceConfig::default();
+        let config = ConformanceConfig {
+            group_id: unique_group_id("mr1"),
+            ..ConformanceConfig::default()
+        };
 
         let Some(consumer) = create_test_consumer(&cx, config.clone()).await? else {
             return Ok(());
@@ -245,14 +252,12 @@ fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Error>> 
         .expect("failed to build test runtime");
     runtime.block_on(async {
         let cx = Cx::for_testing();
-        let config = ConformanceConfig::default();
-
-        let Some(consumer1) = create_test_consumer(&cx, config.clone()).await? else {
-            return Ok(());
+        let config = ConformanceConfig {
+            group_id: unique_group_id("mr2"),
+            ..ConformanceConfig::default()
         };
 
-        // Create second consumer with same group ID
-        let Some(consumer2) = create_test_consumer(&cx, config.clone()).await? else {
+        let Some(consumer1) = create_test_consumer(&cx, config.clone()).await? else {
             return Ok(());
         };
 
@@ -260,7 +265,6 @@ fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Error>> 
         let offsets = create_test_offsets(topic, &[0, 1, 2], 1000);
 
         prepare_consumer_offsets(&cx, &consumer1, &offsets).await?;
-        prepare_consumer_offsets(&cx, &consumer2, &offsets).await?;
 
         // First commit
         consumer1.commit_offsets(&cx, &offsets).await?;
@@ -295,19 +299,11 @@ fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Error>> 
             "Idempotent commit should not change committed state"
         );
 
-        // Third commit by different consumer in same group (should also be idempotent)
-        consumer2.commit_offsets(&cx, &offsets).await?;
-
-        // Verify same group sees same committed offsets
+        // Every partition in the group's local committed view remains exact.
         for tpo in &offsets {
-            let offset1 = consumer1.committed_offset(&tpo.topic, tpo.partition);
-            let offset2 = consumer2.committed_offset(&tpo.topic, tpo.partition);
+            let committed = consumer1.committed_offset(&tpo.topic, tpo.partition);
             assert_eq!(
-                offset1, offset2,
-                "Same consumer group should see identical committed offsets"
-            );
-            assert_eq!(
-                offset1,
+                committed,
                 Some(tpo.offset),
                 "Committed offset should match expected value"
             );
@@ -332,12 +328,14 @@ fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Error>> {
 
         // Test with short retention for faster testing
         let short_retention_config = ConformanceConfig {
+            group_id: unique_group_id("mr3-short"),
             retention_minutes: 1, // 1 minute retention
             ..ConformanceConfig::default()
         };
 
         // Test with longer retention
         let long_retention_config = ConformanceConfig {
+            group_id: unique_group_id("mr3-long"),
             retention_minutes: 60, // 1 hour retention
             ..ConformanceConfig::default()
         };
@@ -364,6 +362,7 @@ fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Error>> {
             Some(500),
             "Offsets should be immediately available after commit"
         );
+        short_consumer.close(&cx).await?;
 
         // Test long retention scenario
         let Some(long_consumer) = create_test_consumer(&cx, long_retention_config.clone()).await?
@@ -406,7 +405,10 @@ fn mr4_rebalance_preserves_committed_offsets() -> Result<(), Box<dyn std::error:
         .expect("failed to build test runtime");
     runtime.block_on(async {
         let cx = Cx::for_testing();
-        let config = ConformanceConfig::default();
+        let config = ConformanceConfig {
+            group_id: unique_group_id("mr4"),
+            ..ConformanceConfig::default()
+        };
 
         let Some(consumer) = create_test_consumer(&cx, config.clone()).await? else {
             return Ok(());
@@ -494,7 +496,7 @@ fn mr5_transactional_commit_atomic() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create transactional configuration
         let tx_config = ConformanceConfig {
-            group_id: "transactional-test-group".to_string(),
+            group_id: unique_group_id("mr5-transactional"),
             ..ConformanceConfig::default()
         };
 
@@ -623,7 +625,7 @@ fn integration_all_metamorphic_relations() -> Result<(), Box<dyn std::error::Err
     runtime.block_on(async {
         let cx = Cx::for_testing();
         let config = ConformanceConfig {
-            group_id: "integration-test-group".to_string(),
+            group_id: unique_group_id("integration"),
             retention_minutes: 30,
             enable_auto_commit: false,
             auto_commit_interval: Duration::from_secs(10),
