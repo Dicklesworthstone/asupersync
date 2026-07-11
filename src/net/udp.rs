@@ -50,13 +50,19 @@ fn suppress_windows_udp_connection_reset(socket: &StdUdpSocket) -> io::Result<()
 
     let report_connection_reset: windows_sys::core::BOOL = 0;
     let mut bytes_returned = 0_u32;
+    let raw_socket = usize::try_from(socket.as_raw_socket()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "raw socket handle does not fit the Windows SOCKET type",
+        )
+    })?;
     // SAFETY: The socket handle is live for the call, the input points to a
     // correctly sized BOOL, and this synchronous ioctl uses no output or
     // overlapped buffers. Disabling SIO_UDP_CONNRESET keeps an ICMP error from
     // terminating a reusable unconnected ATP receiver socket.
     let result = unsafe {
         WSAIoctl(
-            socket.as_raw_socket(),
+            raw_socket,
             SIO_UDP_CONNRESET,
             std::ptr::from_ref(&report_connection_reset).cast(),
             u32::try_from(std::mem::size_of_val(&report_connection_reset))
