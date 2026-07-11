@@ -131,7 +131,10 @@ mod scheduler_metamorphic_tests {
         fn inject_cancel_tasks(&mut self, count: usize) -> Vec<TaskId> {
             let mut tasks = Vec::new();
             for i in 0..count {
-                let task_id = TaskId::new_for_test(1, 100 + i);
+                let task_id = TaskId::new_for_test(
+                    1,
+                    100 + u32::try_from(i).expect("test task generation fits in u32"),
+                );
                 self.scheduler.inject_cancel(task_id, 100);
                 tasks.push(task_id);
             }
@@ -141,7 +144,10 @@ mod scheduler_metamorphic_tests {
         fn inject_ready_tasks(&mut self, count: usize) -> Vec<TaskId> {
             let mut tasks = Vec::new();
             for i in 0..count {
-                let task_id = TaskId::new_for_test(2, 100 + i);
+                let task_id = TaskId::new_for_test(
+                    2,
+                    100 + u32::try_from(i).expect("test task generation fits in u32"),
+                );
                 self.scheduler.inject_ready(task_id, 50);
                 tasks.push(task_id);
             }
@@ -151,7 +157,10 @@ mod scheduler_metamorphic_tests {
         fn inject_timed_tasks(&mut self, deadlines: &[Time]) -> Vec<TaskId> {
             let mut tasks = Vec::new();
             for (i, &deadline) in deadlines.iter().enumerate() {
-                let task_id = TaskId::new_for_test(3, 100 + i);
+                let task_id = TaskId::new_for_test(
+                    3,
+                    100 + u32::try_from(i).expect("test task generation fits in u32"),
+                );
                 self.scheduler.inject_timed(task_id, deadline);
                 tasks.push(task_id);
             }
@@ -167,9 +176,9 @@ mod scheduler_metamorphic_tests {
                     self.step_counter += 1;
 
                     // Determine lane based on task ID prefix
-                    let lane = if task_id.value() & 0xFF000000 == 0x01000000 {
+                    let lane = if task_id.as_u64() as u32 == 1 {
                         Lane::Cancel
-                    } else if task_id.value() & 0xFF000000 == 0x03000000 {
+                    } else if task_id.as_u64() as u32 == 3 {
                         Lane::Timed
                     } else {
                         Lane::Ready
@@ -418,11 +427,8 @@ mod scheduler_metamorphic_tests {
         // Add local tasks to worker 0's local_ready queue
         let local_tasks: Vec<_> = (0..5).map(|i| TaskId::new_for_test(4, 200 + i)).collect();
 
-        {
-            let mut local_ready = scheduler.workers[0].local_ready.lock();
-            for &task_id in &local_tasks {
-                local_ready.push(task_id);
-            }
+        for &task_id in &local_tasks {
+            scheduler.workers[0].enqueue_pinned_local_for_test(task_id);
         }
 
         // Add stealable ready tasks to global queue
@@ -448,11 +454,9 @@ mod scheduler_metamorphic_tests {
             if !worker_0_tasks.contains(&task_id) {
                 // Local task wasn't dispatched by owner - this is acceptable
                 // if the task is still in the local queue
-                let local_ready = scheduler.workers[0].local_ready.lock();
                 assert!(
-                    local_ready.contains(&task_id),
-                    "Local task {} missing from both dispatch and queue",
-                    task_id.value()
+                    scheduler.workers[0].contains_pinned_local_for_test(task_id),
+                    "Local task {task_id} missing from both dispatch and queue",
                 );
             }
         }
@@ -473,14 +477,16 @@ mod scheduler_metamorphic_tests {
         let mut all_local_tasks = HashMap::new();
         for worker_id in 0..worker_count {
             let local_tasks: Vec<_> = (0..local_task_count)
-                .map(|i| TaskId::new_for_test(4 + worker_id as u32, 200 + i))
+                .map(|i| {
+                    TaskId::new_for_test(
+                        4 + worker_id as u32,
+                        200 + u32::try_from(i).expect("test task generation fits in u32"),
+                    )
+                })
                 .collect();
 
-            {
-                let mut local_ready = scheduler.workers[worker_id].local_ready.lock();
-                for &task_id in &local_tasks {
-                    local_ready.push(task_id);
-                }
+            for &task_id in &local_tasks {
+                scheduler.workers[worker_id].enqueue_pinned_local_for_test(task_id);
             }
 
             all_local_tasks.insert(worker_id, local_tasks);
@@ -577,7 +583,7 @@ mod scheduler_metamorphic_tests {
         // Extract timed tasks that were dispatched
         let dispatched_timed: Vec<(TaskId, Time)> = dispatched
             .into_iter()
-            .filter(|&task_id| task_id.value() & 0xFF000000 == 0x03000000)
+            .filter(|&task_id| task_id.as_u64() as u32 == 3)
             .zip(deadlines.iter().copied())
             .collect();
 
@@ -616,7 +622,7 @@ mod scheduler_metamorphic_tests {
         // Extract dispatched timed tasks with their deadlines
         let dispatched_timed: Vec<(TaskId, Time)> = dispatched
             .into_iter()
-            .filter(|&task_id| task_id.value() & 0xFF000000 == 0x03000000)
+            .filter(|&task_id| task_id.as_u64() as u32 == 3)
             .map(|task_id| {
                 // Find deadline for this task
                 let deadline = injection_order
@@ -663,11 +669,8 @@ mod scheduler_metamorphic_tests {
 
         // Add local tasks to worker 0
         let local_tasks: Vec<_> = (0..3).map(|i| TaskId::new_for_test(5, 300 + i)).collect();
-        {
-            let mut local_ready = scheduler.workers[0].local_ready.lock();
-            for &task_id in &local_tasks {
-                local_ready.push(task_id);
-            }
+        for &task_id in &local_tasks {
+            scheduler.workers[0].enqueue_pinned_local_for_test(task_id);
         }
 
         // Run both workers
@@ -750,11 +753,8 @@ mod scheduler_metamorphic_tests {
             let local_tasks: Vec<_> = (0..5)
                 .map(|i| TaskId::new_for_test(10 + worker_id as u32, 400 + i))
                 .collect();
-            {
-                let mut local_ready = scheduler.workers[worker_id].local_ready.lock();
-                for &task_id in &local_tasks {
-                    local_ready.push(task_id);
-                }
+            for &task_id in &local_tasks {
+                scheduler.workers[worker_id].enqueue_pinned_local_for_test(task_id);
             }
         }
 

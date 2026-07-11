@@ -5779,6 +5779,20 @@ impl ThreeLaneWorker {
         local_ready + fast + prefetched_global + global
     }
 
+    /// Enqueues a synthetic non-stealable local task for integration tests.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn enqueue_pinned_local_for_test(&self, task: TaskId) {
+        self.local_ready.lock().push_back(task);
+    }
+
+    /// Reports whether a synthetic local task remains queued for integration tests.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn contains_pinned_local_for_test(&self, task: TaskId) -> bool {
+        self.local_ready.lock().snapshot().contains(&task)
+    }
+
     /// Bench-only accessor for the worker's fast ready queue.
     #[cfg(any(test, feature = "test-internals"))]
     pub fn bench_fast_ready_queue(&self) -> LocalQueue {
