@@ -6,9 +6,11 @@
 //! preserved mtime, a symlink, xattrs, and hardlinks across a loopback TCP
 //! socket, then asserts every metadata field arrives byte-identical — gated by
 //! the sender's
-//! [`MetadataPolicy`]. A portable policy must round-trip content while carrying
-//! no metadata (backward-compatible wire), and the transfer must still commit
-//! (proving the receiver's metadata-commitment recomputation matches).
+//! [`MetadataPolicy`]. A portable policy must round-trip regular-file content
+//! while carrying no metadata (backward-compatible wire), reject symlinks
+//! rather than following them outside the transfer root, and still commit
+//! ordinary transfers (proving the receiver's metadata-commitment recomputation
+//! matches).
 #![allow(missing_docs)]
 #![cfg(unix)]
 
@@ -376,37 +378,23 @@ fn empty_directory_round_trips_and_preserves_mode() {
 }
 
 #[test]
-fn non_preserved_symlink_is_followed_to_target_content() {
-    // Under a policy that does NOT preserve symlinks (portable), a symlink must
-    // be FOLLOWED and arrive as a regular file carrying its target's content —
-    // never a silent empty placeholder (regression for the symlink-without-
-    // preserve_symlinks data-loss bug).
+fn non_preserved_symlink_is_rejected_without_connecting() {
+    // Following an unpreserved symlink could escape the transfer root. Portable
+    // mode must reject it during source planning, before opening a connection.
     let root = unique_tmp("followsym");
     let src_dir = root.join("src");
-    let dst_dir = root.join("dst");
     let tree = src_dir.join("project");
     std::fs::create_dir_all(&tree).unwrap();
-    std::fs::create_dir_all(&dst_dir).unwrap();
 
     std::fs::write(tree.join("data.txt"), b"real payload\n").unwrap();
     std::os::unix::fs::symlink("data.txt", tree.join("alias.txt")).unwrap();
 
-    // MetadataPolicy::portable() has preserve_symlinks = false.
-    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::portable());
-    let send = run_sender(addr, tree.clone(), MetadataPolicy::portable()).expect("send");
-    let recv = recv_handle.join().expect("recv thread").expect("recv");
-    assert!(send.receipt.committed && recv.committed);
-
-    let out_alias = dst_dir.join("project").join("alias.txt");
-    let meta = std::fs::symlink_metadata(&out_alias).expect("alias present on receiver");
+    let unused_addr = "127.0.0.1:9".parse().unwrap();
+    let error = run_sender(unused_addr, tree, MetadataPolicy::portable())
+        .expect_err("portable mode must reject source symlinks");
     assert!(
-        meta.file_type().is_file() && !meta.file_type().is_symlink(),
-        "a non-preserved symlink must arrive as a regular file, not a link or empty file"
-    );
-    assert_eq!(
-        std::fs::read(&out_alias).unwrap(),
-        b"real payload\n",
-        "followed symlink must carry the target's content"
+        matches!(&error, TransportError::Source(message) if message.contains("source symlink rejected by metadata policy")),
+        "unexpected portable-symlink error: {error}"
     );
 }
 
@@ -569,14 +557,14 @@ fn hardlinks_are_preserved_when_enabled() {
         "source files must be hardlinked"
     );
 
-    // Hardlink detection is sender-side; the receiver honors the manifest's
-    // hardlink_target unconditionally.
-    let send_config = TransferConfig {
+    // Hardlink preservation is an explicit policy on both peers.
+    let transfer_config = TransferConfig {
         preserve_hardlinks: true,
+        metadata_policy: MetadataPolicy::portable(),
         ..TransferConfig::default()
     };
-    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::portable());
-    let send = run_sender_with_config(addr, tree.clone(), send_config).expect("send");
+    let (addr, recv_handle) = spawn_receiver_with_config(dst_dir.clone(), transfer_config.clone());
+    let send = run_sender_with_config(addr, tree.clone(), transfer_config).expect("send");
     let recv = recv_handle.join().expect("recv thread").expect("recv");
     assert!(send.receipt.committed && recv.committed);
 

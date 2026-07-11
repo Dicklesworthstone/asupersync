@@ -684,8 +684,13 @@ mod tests {
         )
         .expect("walk preserved symlink");
         assert!(is_directory);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].rel_path, "dir/nested-link");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dir/nested-link", "target"]
+        );
 
         let error = futures_lite::future::block_on(collect_entries_with_policy(
             root.path(),

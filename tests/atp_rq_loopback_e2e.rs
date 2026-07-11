@@ -66,6 +66,15 @@ fn auth_test_config() -> RqConfig {
     .with_symbol_auth(SecurityContext::for_testing(138))
 }
 
+fn auth_datagram_test_config() -> RqConfig {
+    RqConfig {
+        // A declared non-zero loss target keeps this proof on the real UDP
+        // fountain path instead of the clean-link TCP source-stream shortcut.
+        round0_loss_target: 0.02,
+        ..auth_test_config()
+    }
+}
+
 fn profile_config() -> RqConfig {
     RqConfig {
         symbol_size: 60 * 1024,
@@ -278,6 +287,94 @@ fn directory_tree_roundtrip_preserves_structure_and_bytes() {
         vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     );
     assert_eq!(std::fs::read(base.join("sub/deep/b.dat")).unwrap(), big);
+}
+
+#[test]
+fn authenticated_directory_roundtrip_preserves_nested_and_multiple_empty_directories() {
+    let root = unique_tmp("auth_empty_dirs");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(tree.join("empty/one/two")).unwrap();
+    std::fs::create_dir_all(tree.join("multiple/alpha")).unwrap();
+    std::fs::create_dir_all(tree.join("multiple/beta/deep")).unwrap();
+    std::fs::create_dir_all(tree.join("mixed/empty-leaf")).unwrap();
+    std::fs::create_dir_all(tree.join("mixed/content")).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+    std::fs::write(
+        tree.join("mixed/content/payload.bin"),
+        b"authenticated payload\n",
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            tree.join("empty/one/two"),
+            std::fs::Permissions::from_mode(0o751),
+        )
+        .expect("set empty-directory mode");
+    }
+
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), auth_datagram_test_config());
+    let send = run_sender(addr, tree, auth_datagram_test_config())
+        .expect("authenticated directory send succeeds");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("authenticated directory receive succeeds");
+
+    assert!(send.receipt.committed);
+    assert!(send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(send.files, 1);
+    assert!(
+        send.symbols_sent > 0,
+        "test must exercise UDP RaptorQ symbols"
+    );
+    assert!(recv.committed);
+    assert_eq!(recv.files, 1);
+    assert!(
+        recv.symbols_accepted > 0,
+        "receiver must authenticate and accept UDP RaptorQ symbols"
+    );
+
+    let base = dst_dir.join("project");
+    for relative in [
+        "empty/one/two",
+        "multiple/alpha",
+        "multiple/beta/deep",
+        "mixed/empty-leaf",
+    ] {
+        let path = base.join(relative);
+        assert!(path.is_dir(), "missing empty directory {}", path.display());
+        assert_eq!(
+            std::fs::read_dir(&path)
+                .expect("read committed empty directory")
+                .count(),
+            0,
+            "directory must remain empty: {}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read(base.join("mixed/content/payload.bin")).unwrap(),
+        b"authenticated payload\n"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(base.join("empty/one/two"))
+                .expect("empty-directory metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o751,
+            "empty-directory mode must round-trip"
+        );
+    }
 }
 
 #[test]

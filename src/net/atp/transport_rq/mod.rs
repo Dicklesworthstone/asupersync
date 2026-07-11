@@ -92,9 +92,10 @@ use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, Protoc
 use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, HardlinkIdentity,
-    MetadataApplyReport, apply_entry_metadata, capture_directory_metadata_manifest,
-    commit_staged_regular_file_transactionally, inode_key_if_regular_sync, metadata_commitment,
-    path_is_link_or_reparse, read_entry_metadata_sync, validate_entry_metadata_for_receive,
+    MetadataApplyReport, PathLinkKind, apply_entry_metadata, capture_directory_metadata_manifest,
+    classify_path_link_sync, commit_staged_regular_file_transactionally, inode_key_if_regular_sync,
+    metadata_commitment, path_is_link_or_reparse, read_entry_metadata_sync,
+    validate_entry_metadata_for_receive,
 };
 use crate::net::atp::transport_common::{
     EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
@@ -502,9 +503,9 @@ pub struct RqConfig {
     pub max_transfer_bytes: u64,
     /// Filesystem metadata captured by the sender and accepted by the receiver.
     ///
-    /// RQ preserves regular-file and non-empty-directory metadata.
-    /// Symlinks/reparse points and nested empty directories remain fail-closed
-    /// at source preflight.
+    /// RQ preserves regular-file metadata and the complete directory topology,
+    /// including nested empty directories. Symlinks/reparse points remain
+    /// fail-closed at source preflight.
     pub metadata_policy: MetadataPolicy,
     /// Detect source hardlinks and fail before transfer rather than silently
     /// flattening inode identity. RQ does not yet encode hardlink topology; use
@@ -3784,7 +3785,15 @@ struct RqSourceEntry {
     fragment: Option<LargeObjectFragment>,
 }
 
-async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry>), RqError> {
+#[derive(Debug, Clone)]
+struct RqSourceDirectory {
+    rel_path: String,
+    abs_path: PathBuf,
+}
+
+async fn collect_entries(
+    root: &Path,
+) -> Result<(String, bool, Vec<RqSourceEntry>, Vec<RqSourceDirectory>), RqError> {
     if path_is_link_or_reparse(root).await.map_err(RqError::Io)? {
         return Err(RqError::Source(format!(
             "{}: RQ does not support symlink or reparse-point sources; use TCP or QUIC with portable metadata",
@@ -3827,13 +3836,16 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry
                 members: Vec::new(),
                 fragment: None,
             }],
+            Vec::new(),
         ));
     }
     if meta.is_dir() {
         let mut entries = Vec::new();
-        collect_dir(root, String::new(), &mut entries).await?;
+        let mut empty_directories = Vec::new();
+        collect_dir(root, String::new(), &mut entries, &mut empty_directories).await?;
         entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-        return Ok((root_name, true, entries));
+        empty_directories.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        return Ok((root_name, true, entries, empty_directories));
     }
     Err(RqError::Source(format!(
         "{}: not a regular file or directory",
@@ -3898,6 +3910,89 @@ async fn capture_source_metadata(
         entry.metadata = metadata;
     }
     Ok(())
+}
+
+async fn capture_rq_directory_metadata_manifest(
+    root: &Path,
+    empty_directories: &[RqSourceDirectory],
+    policy: &MetadataPolicy,
+) -> Result<DirectoryMetadataManifest, RqError> {
+    let mut manifest = capture_directory_metadata_manifest(root, policy)
+        .await
+        .map_err(|error| RqError::Source(error.into_message()))?;
+    if empty_directories.is_empty() {
+        return Ok(manifest);
+    }
+
+    let directories = empty_directories.to_vec();
+    let policy = policy.clone();
+    let captured = crate::runtime::spawn_blocking(move || {
+        directories
+            .into_iter()
+            .map(|directory| {
+                match classify_path_link_sync(&directory.abs_path).map_err(|error| {
+                    StreamingError::new(format!("{}: {error}", directory.abs_path.display()))
+                })? {
+                    PathLinkKind::NotLink => {}
+                    PathLinkKind::Symlink(_) | PathLinkKind::UnsupportedReparse => {
+                        return Err(StreamingError::new(format!(
+                            "{}: RQ empty directory changed to a symlink or reparse point",
+                            directory.abs_path.display()
+                        )));
+                    }
+                }
+                let mut children = std::fs::read_dir(&directory.abs_path).map_err(|error| {
+                    StreamingError::new(format!("{}: {error}", directory.abs_path.display()))
+                })?;
+                if children
+                    .next()
+                    .transpose()
+                    .map_err(|error| {
+                        StreamingError::new(format!("{}: {error}", directory.abs_path.display()))
+                    })?
+                    .is_some()
+                {
+                    return Err(StreamingError::new(format!(
+                        "{}: RQ empty directory gained entries during source preflight",
+                        directory.abs_path.display()
+                    )));
+                }
+                let metadata = read_entry_metadata_sync(&directory.abs_path, &policy)?;
+                if !matches!(
+                    metadata.file_kind,
+                    crate::net::atp::transport_common::FileKind::Directory
+                ) {
+                    return Err(StreamingError::new(format!(
+                        "{}: RQ empty directory changed filesystem kind",
+                        directory.abs_path.display()
+                    )));
+                }
+                Ok((directory.rel_path, metadata))
+            })
+            .collect::<Result<Vec<_>, StreamingError>>()
+    })
+    .await
+    .map_err(|error| RqError::Source(error.into_message()))?;
+
+    let mut existing = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.rel_path.clone())
+        .collect::<BTreeSet<_>>();
+    for (rel_path, metadata) in captured {
+        if !existing.insert(rel_path.clone()) {
+            return Err(RqError::Source(format!(
+                "{rel_path}: RQ directory topology changed during source preflight"
+            )));
+        }
+        manifest
+            .entries
+            .push(DirectoryMetadataEntry { rel_path, metadata });
+    }
+    manifest
+        .entries
+        .sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    Ok(manifest)
 }
 
 /// Directory-less commitment wrapper kept for test fixtures; production
@@ -3970,9 +4065,9 @@ fn metadata_manifest_from_source_entries(
 
 /// Validate that `root` can be represented losslessly by the RQ wire format.
 ///
-/// RQ transfers regular files plus metadata for their non-empty directory
-/// tree. It fails closed for symlinks/reparse points and nested empty
-/// directories instead of silently following or dropping them.
+/// RQ transfers regular files plus committed metadata for their complete
+/// directory tree, including nested empty directories. It fails closed for
+/// symlinks/reparse points instead of silently following them.
 pub async fn validate_source_compatibility(root: &Path) -> Result<(), RqError> {
     validate_source_compatibility_with_config(root, &RqConfig::default()).await
 }
@@ -3999,7 +4094,7 @@ pub async fn source_metadata_manifest_with_config(
     root: &Path,
     config: &RqConfig,
 ) -> Result<RqMetadataManifest, RqError> {
-    let (_, is_directory, mut entries) = collect_entries(root).await?;
+    let (_, is_directory, mut entries, empty_directories) = collect_entries(root).await?;
     capture_source_metadata(
         &mut entries,
         &config.metadata_policy,
@@ -4007,9 +4102,8 @@ pub async fn source_metadata_manifest_with_config(
     )
     .await?;
     let directories = if is_directory {
-        capture_directory_metadata_manifest(root, &config.metadata_policy)
-            .await
-            .map_err(|error| RqError::Source(error.into_message()))?
+        capture_rq_directory_metadata_manifest(root, &empty_directories, &config.metadata_policy)
+            .await?
     } else {
         DirectoryMetadataManifest::default()
     };
@@ -4020,6 +4114,7 @@ fn collect_dir<'a>(
     dir: &'a Path,
     prefix: String,
     out: &'a mut Vec<RqSourceEntry>,
+    empty_directories: &'a mut Vec<RqSourceDirectory>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), RqError>> + Send + 'a>> {
     Box::pin(async move {
         let mut read_dir = crate::fs::read_dir(dir)
@@ -4063,10 +4158,11 @@ fn collect_dir<'a>(
         children.sort_by(|a, b| a.0.cmp(&b.0));
 
         if children.is_empty() && !prefix.is_empty() {
-            return Err(RqError::Source(format!(
-                "{}: RQ cannot represent nested empty directories; use TCP or QUIC",
-                dir.display()
-            )));
+            empty_directories.push(RqSourceDirectory {
+                rel_path: prefix,
+                abs_path: dir.to_path_buf(),
+            });
+            return Ok(());
         }
 
         for (name, path, is_dir) in children {
@@ -4076,7 +4172,7 @@ fn collect_dir<'a>(
                 format!("{prefix}/{name}")
             };
             if is_dir {
-                collect_dir(&path, rel, out).await?;
+                collect_dir(&path, rel, out, empty_directories).await?;
             } else {
                 out.push(RqSourceEntry {
                     rel_path: rel,
@@ -4535,13 +4631,10 @@ fn validate_directory_metadata_manifest(
         ));
     }
     let expected = implicit_directory_paths(logical_paths);
-    if directories.entries.len() > expected.len() {
-        return Err(RqError::Frame(format!(
-            "directory metadata declares {} entries for {} implicit directories",
-            directories.entries.len(),
-            expected.len()
-        )));
-    }
+    let logical_by_key = logical_paths
+        .iter()
+        .map(|path| (portable_path_collision_key(path), *path))
+        .collect::<BTreeMap<_, _>>();
     if let Some(root) = &directories.root {
         if !rq_directory_metadata_has_fidelity_fields(root) {
             return Err(RqError::Frame(
@@ -4569,29 +4662,40 @@ fn validate_directory_metadata_manifest(
         }
         previous_rel_path = Some(&entry.rel_path);
         let key = portable_path_collision_key(&entry.rel_path);
-        let Some(expected_path) = expected.get(&key) else {
-            return Err(RqError::Frame(format!(
-                "directory metadata entry {} is not an implicit non-empty directory",
-                entry.rel_path
-            )));
-        };
-        if *expected_path != entry.rel_path {
-            return Err(RqError::Frame(format!(
-                "directory metadata path {} aliases implicit directory {expected_path}",
-                entry.rel_path
-            )));
-        }
         if !seen.insert(key) {
             return Err(RqError::Frame(format!(
                 "duplicate directory metadata path (including case collision): {}",
                 entry.rel_path
             )));
         }
-        if !rq_directory_metadata_has_fidelity_fields(&entry.metadata) {
-            return Err(RqError::Frame(format!(
-                "directory metadata entry {} carries no fidelity fields and must be omitted",
-                entry.rel_path
-            )));
+
+        let mut prefix = String::new();
+        for component in entry.rel_path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            if let Some(logical_file) = logical_by_key.get(&portable_path_collision_key(&prefix)) {
+                return Err(RqError::Frame(format!(
+                    "directory metadata path {} collides with or descends from logical file {logical_file}",
+                    entry.rel_path
+                )));
+            }
+        }
+
+        if let Some(expected_path) = expected.get(&portable_path_collision_key(&entry.rel_path)) {
+            if *expected_path != entry.rel_path {
+                return Err(RqError::Frame(format!(
+                    "directory metadata path {} aliases implicit directory {expected_path}",
+                    entry.rel_path
+                )));
+            }
+            if !rq_directory_metadata_has_fidelity_fields(&entry.metadata) {
+                return Err(RqError::Frame(format!(
+                    "implicit directory metadata entry {} carries no fidelity fields and must be omitted",
+                    entry.rel_path
+                )));
+            }
         }
         validate_rq_metadata_value(
             &entry.rel_path,
@@ -6213,7 +6317,8 @@ pub async fn send_path(
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
-    let (root_name, is_directory, mut raw_entries) = collect_entries(source).await?;
+    let (root_name, is_directory, mut raw_entries, empty_directories) =
+        collect_entries(source).await?;
     capture_source_metadata(
         &mut raw_entries,
         &config.metadata_policy,
@@ -6221,9 +6326,8 @@ pub async fn send_path(
     )
     .await?;
     let directory_metadata = if is_directory {
-        capture_directory_metadata_manifest(source, &config.metadata_policy)
-            .await
-            .map_err(|error| RqError::Source(error.into_message()))?
+        capture_rq_directory_metadata_manifest(source, &empty_directories, &config.metadata_policy)
+            .await?
     } else {
         DirectoryMetadataManifest::default()
     };
@@ -15657,6 +15761,30 @@ mod tests {
                 if message.contains("entry Dir carries no fidelity fields")
         ));
 
+        let mut explicit_empty_directory = manifest.clone();
+        let metadata = explicit_empty_directory
+            .metadata
+            .as_mut()
+            .expect("metadata");
+        metadata
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .entries
+            .push(DirectoryMetadataEntry {
+                rel_path: "Empty/Deep".to_string(),
+                metadata: EntryMetadata {
+                    file_kind: crate::net::atp::transport_common::FileKind::Directory,
+                    ..EntryMetadata::default()
+                },
+            });
+        metadata.commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file)],
+            metadata.directories.as_ref(),
+        );
+        validate_manifest(&explicit_empty_directory, &preserving)
+            .expect("explicit empty directory topology validates");
+
         let mut equal_to_content = manifest.clone();
         let metadata = equal_to_content.metadata.as_mut().expect("metadata");
         metadata
@@ -15671,7 +15799,24 @@ mod tests {
         );
         assert!(matches!(
             validate_manifest(&equal_to_content, &preserving),
-            Err(RqError::Frame(ref message)) if message.contains("not an implicit")
+            Err(RqError::Frame(ref message)) if message.contains("collides with")
+        ));
+
+        let mut below_content = explicit_empty_directory;
+        let metadata = below_content.metadata.as_mut().expect("metadata");
+        metadata
+            .directories
+            .as_mut()
+            .expect("directory metadata")
+            .entries[1]
+            .rel_path = "Dir/file/empty".to_string();
+        metadata.commitment_hex = rq_metadata_commitment_with_directories(
+            &[("Dir/file", &bare_file)],
+            metadata.directories.as_ref(),
+        );
+        assert!(matches!(
+            validate_manifest(&below_content, &preserving),
+            Err(RqError::Frame(ref message)) if message.contains("descends from logical file")
         ));
 
         let mut tampered = manifest.clone();
@@ -15990,7 +16135,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rq_source_topology_keeps_links_and_nested_empty_directories_fail_closed() {
+    fn rq_source_topology_captures_nested_empty_directories_and_keeps_links_fail_closed() {
         let empty_root = tempfile::tempdir().expect("empty transfer root");
         futures_lite::future::block_on(validate_source_compatibility(empty_root.path()))
             .expect("an explicit empty transfer root remains representable");
@@ -16010,11 +16155,25 @@ mod tests {
         assert_eq!(directories.entries[0].rel_path, "nested");
 
         let nested = tempfile::tempdir().expect("nested-empty transfer root");
-        std::fs::create_dir(nested.path().join("empty")).expect("create nested empty directory");
-        assert!(matches!(
-            futures_lite::future::block_on(validate_source_compatibility(nested.path())),
-            Err(RqError::Source(ref message)) if message.contains("empty directories")
-        ));
+        std::fs::create_dir_all(nested.path().join("empty/one/two"))
+            .expect("create nested empty directory");
+        std::fs::create_dir(nested.path().join("second-empty"))
+            .expect("create second empty directory");
+        let captured = futures_lite::future::block_on(source_metadata_manifest_with_config(
+            nested.path(),
+            &RqConfig::default(),
+        ))
+        .expect("capture nested empty directories");
+        let directories = captured.directories.expect("captured directory topology");
+        let paths = directories
+            .entries
+            .iter()
+            .map(|entry| entry.rel_path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(paths.contains("empty"));
+        assert!(paths.contains("empty/one"));
+        assert!(paths.contains("empty/one/two"));
+        assert!(paths.contains("second-empty"));
 
         let linked = tempfile::tempdir().expect("linked transfer root");
         std::fs::write(linked.path().join("target"), b"target").expect("write target");
