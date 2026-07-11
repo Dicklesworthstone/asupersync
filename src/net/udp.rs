@@ -42,6 +42,43 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn suppress_windows_udp_connection_reset(socket: &StdUdpSocket) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{SIO_UDP_CONNRESET, SOCKET_ERROR, WSAIoctl};
+
+    let report_connection_reset: windows_sys::core::BOOL = 0;
+    let mut bytes_returned = 0_u32;
+    // SAFETY: The socket handle is live for the call, the input points to a
+    // correctly sized BOOL, and this synchronous ioctl uses no output or
+    // overlapped buffers. Disabling SIO_UDP_CONNRESET keeps an ICMP error from
+    // terminating a reusable unconnected ATP receiver socket.
+    let result = unsafe {
+        WSAIoctl(
+            socket.as_raw_socket(),
+            SIO_UDP_CONNRESET,
+            std::ptr::from_ref(&report_connection_reset).cast(),
+            u32::try_from(std::mem::size_of_val(&report_connection_reset))
+                .expect("BOOL size fits in u32"),
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if result == SOCKET_ERROR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn suppress_windows_udp_connection_reset(_socket: &StdUdpSocket) -> io::Result<()> {
+    Ok(())
+}
+
 /// Smallest UDP socket buffer requested by the tuning helper.
 pub const UDP_MIN_SOCKET_BUFFER_BYTES: usize = 8 * 1024;
 /// Largest UDP socket buffer requested by the tuning helper.
@@ -1345,6 +1382,7 @@ impl UdpSocket {
             for addr in addrs {
                 match StdUdpSocket::bind(addr) {
                     Ok(socket) => {
+                        suppress_windows_udp_connection_reset(&socket)?;
                         socket.set_nonblocking(true)?;
                         return Ok(Self {
                             inner: Arc::new(socket),
@@ -2084,6 +2122,14 @@ impl UdpSocket {
             }
         }
 
+        if !strategy.prefer_sendmmsg
+            || !matches!(
+                self.send_acceleration_capabilities().sendmmsg,
+                UdpCapability::Supported
+            )
+        {
+            return Ok(NativeSendBatchAttempt::Unavailable);
+        }
         self.try_sendmmsg_batch_to_native(packets, connected_peer)
     }
 
@@ -2135,6 +2181,14 @@ impl UdpSocket {
             }
         }
 
+        if !strategy.prefer_sendmmsg
+            || !matches!(
+                self.send_acceleration_capabilities().sendmmsg,
+                UdpCapability::Supported
+            )
+        {
+            return Ok(NativeSendBatchAttempt::Unavailable);
+        }
         self.try_send_connected_sendmmsg_batch_to_native(payloads)
     }
 
@@ -2656,6 +2710,7 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            suppress_windows_udp_connection_reset(&socket)?;
             socket.set_nonblocking(true)?;
             Ok(Self {
                 inner: Arc::new(socket),
@@ -3522,7 +3577,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_portable_batch_send_receive() {
+    fn udp_unconnected_portable_batch_send_receive() {
         future::block_on(async {
             let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let receiver_addr = receiver.local_addr().unwrap();
@@ -3552,6 +3607,47 @@ mod tests {
             assert_eq!(sent.packets_processed, 2);
             assert_eq!(sent.bytes_processed, 6);
             assert!(sent.fallback_used);
+            assert!(!sent.native_send_batch_used);
+            assert!(!sent.gso_send_used);
+
+            let received = receiver.recv_batch_from(2, 16).await.unwrap();
+            assert_eq!(received.report.packets_processed, 2);
+            assert_eq!(
+                received
+                    .packets
+                    .iter()
+                    .map(|packet| packet.payload.as_slice())
+                    .collect::<Vec<_>>(),
+                vec![b"one".as_slice(), b"two".as_slice()]
+            );
+        });
+    }
+
+    #[test]
+    fn udp_connected_portable_batch_send_receive() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sender.connect(receiver_addr).await.unwrap();
+            let payloads = [b"one".as_slice(), b"two".as_slice()];
+
+            let sent = sender
+                .send_connected_batch_with_strategy(
+                    &payloads,
+                    UdpSendBatchStrategy {
+                        prefer_sendmmsg: false,
+                        prefer_gso: false,
+                        ..UdpSendBatchStrategy::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent.packets_processed, 2);
+            assert_eq!(sent.bytes_processed, 6);
+            assert!(sent.fallback_used);
+            assert!(!sent.native_send_batch_used);
+            assert!(!sent.gso_send_used);
 
             let received = receiver.recv_batch_from(2, 16).await.unwrap();
             assert_eq!(received.report.packets_processed, 2);
@@ -4062,6 +4158,44 @@ mod tests {
 
             // Cloned socket should have no registration
             assert!(cloned.registration.is_none());
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn udp_icmp_unreachable_does_not_poison_reusable_windows_socket() {
+        future::block_on(async {
+            let dead_probe = StdUdpSocket::bind("127.0.0.1:0").expect("reserve UDP port");
+            let dead_addr = dead_probe.local_addr().expect("reserved UDP address");
+            drop(dead_probe);
+
+            let mut socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            socket.connect(dead_addr).await.unwrap();
+            socket.send(b"closed-port probe").await.unwrap();
+
+            let mut buf = [0_u8; 32];
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                match socket.inner.recv(&mut buf) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!(
+                        "closed UDP peer poisoned reusable Windows socket: {error} ({:?})",
+                        error.raw_os_error()
+                    ),
+                    Ok(size) => panic!("unexpected {size}-byte datagram from closed UDP peer"),
+                }
+            }
+
+            let receiver = StdUdpSocket::bind(dead_addr).expect("bind replacement UDP peer");
+            receiver
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            socket.connect(dead_addr).await.unwrap();
+            socket.send(b"recovered").await.unwrap();
+            let (size, _) = receiver
+                .recv_from(&mut buf)
+                .expect("receive after ICMP probe");
+            assert_eq!(&buf[..size], b"recovered");
         });
     }
 
