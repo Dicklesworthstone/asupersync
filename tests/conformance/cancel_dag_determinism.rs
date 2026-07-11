@@ -32,7 +32,7 @@ mod cancel_dag_determinism_tests {
     }
 
     /// Test category for cancel DAG determinism conformance tests.
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
     #[allow(dead_code)]
     pub enum TestCategory {
@@ -120,7 +120,7 @@ mod cancel_dag_determinism_tests {
         /// Create a new cancel DAG determinism conformance harness.
         #[allow(dead_code)]
         pub fn new() -> Self {
-            let config = LabConfig::default_for_test();
+            let config = LabConfig::new(42);
             Self { _config: config }
         }
 
@@ -667,12 +667,7 @@ mod cancel_dag_determinism_tests {
             let result = self.run_test_safe("progress_certificate_determinism", || {
                 let seed = 13579u64;
 
-                let config = ProgressConfig {
-                    confidence: 0.95,
-                    max_step_size: 10.0,
-                    min_progress_credit: 0.1,
-                    stall_threshold_steps: 100,
-                };
+                let config = ProgressConfig::default();
 
                 // Create two progress certificates with same config
                 let cert1 = self.create_progress_certificate_trace(seed, config.clone())?;
@@ -839,7 +834,7 @@ mod cancel_dag_determinism_tests {
 
             // Create fixture objects with deterministic IDs based on seed
             for i in 0..5 {
-                let object_id = ObjectId::new_for_test((seed + i) as u32);
+                let object_id = ObjectId::new_for_test(seed + i);
 
                 events.push(CancelEvent {
                     object_id,
@@ -850,7 +845,7 @@ mod cancel_dag_determinism_tests {
 
                 // Create simple dependency chain
                 if i > 0 {
-                    let prev_object_id = ObjectId::new_for_test((seed + i - 1) as u32);
+                    let prev_object_id = ObjectId::new_for_test(seed + i - 1);
                     dependency_graph.insert(object_id, vec![prev_object_id]);
                 }
             }
@@ -1127,23 +1122,23 @@ mod cancel_dag_determinism_tests {
 
         fn has_parent_dependency(&self, _object_id: ObjectId) -> bool {
             // Deterministic fixture implementation
-            _object_id.as_u32() % 2 == 0
+            _object_id.low() % 2 == 0
         }
 
         #[allow(dead_code)]
 
         fn is_parent_of(&self, _potential_parent: ObjectId, _child: ObjectId) -> bool {
             // Deterministic fixture implementation
-            _potential_parent.as_u32() < _child.as_u32()
+            _potential_parent.low() < _child.low()
         }
 
         /// Safe test execution wrapper that catches panics.
         #[allow(dead_code)]
         fn run_test_safe<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
         where
-            F: FnOnce() -> Result<(), String> + std::panic::UnwindSafe,
+            F: FnOnce() -> Result<(), String>,
         {
-            match std::panic::catch_unwind(test_fn) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(test_fn)) {
                 Ok(result) => result,
                 Err(panic_info) => {
                     let panic_msg = if let Some(s) = panic_info.downcast_ref::<String>() {

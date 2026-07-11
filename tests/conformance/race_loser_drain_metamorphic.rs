@@ -20,7 +20,7 @@ mod race_loser_drain_metamorphic_tests {
     use asupersync::lab::config::LabConfig;
     use asupersync::lab::oracle::loser_drain::{LoserDrainOracle, LoserDrainViolation};
     use asupersync::lab::runtime::LabRuntime;
-    use asupersync::types::cancel::CancelReason;
+    use asupersync::types::cancel::{CancelKind, CancelReason};
     use asupersync::types::{Budget, Outcome, RegionId, TaskId, Time};
     use asupersync::util::ArenaIndex;
     use proptest::prelude::*;
@@ -191,7 +191,7 @@ mod race_loser_drain_metamorphic_tests {
         #[allow(dead_code)]
         pub fn new() -> Self {
             Self {
-                config: LabConfig::deterministic_testing(),
+                config: LabConfig::new(42),
             }
         }
 
@@ -278,7 +278,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_race_commutativity_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, delay_a in 10u64..100, delay_b in 10u64..100, result_a in -100i32..100, result_b in -100i32..100)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, delay_a in 10u64..100, delay_b in 10u64..100, result_a in -100i32..100, result_b in -100i32..100)| {
                 // Test that race(a, b) and race(b, a) have consistent results
                 // when using deterministic timing
 
@@ -380,7 +380,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_loser_cancellation_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, winner_delay in 5u64..20, loser_delay in 30u64..100, loser_count in 2usize..6)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, winner_delay in 5u64..20, loser_delay in 30u64..100, loser_count in 2usize..6)| {
                 let current_tick = Arc::new(AtomicU64::new(0));
                 let mut futures = Vec::new();
 
@@ -424,7 +424,7 @@ mod race_loser_drain_metamorphic_tests {
                             "Loser {} should be cancelled", i);
 
                         if let Outcome::Cancelled(reason) = outcome {
-                            prop_assert!(reason.is_race_loser(),
+                            prop_assert!(reason.is_kind(CancelKind::RaceLost),
                                 "Loser {} should be cancelled with race_loser reason", i);
                         }
                     }
@@ -470,23 +470,28 @@ mod race_loser_drain_metamorphic_tests {
         fn run_budget_exhaustion_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, budget_limit in 1u64..10)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, poll_limit in 1u32..10)| {
                 // Create a context with limited budget
-                let cx = Cx::new(
+                let cx: Cx = Cx::new(
                     RegionId::from_arena(ArenaIndex::new(seed as u32, 1)),
                     TaskId::from_arena(ArenaIndex::new(seed as u32, 1)),
-                    Budget::from_ticks(budget_limit),
+                    Budget::new().with_poll_quota(poll_limit),
                 );
 
                 // Verify budget is limited
-                prop_assert!(cx.budget().remaining_ticks() == Some(budget_limit),
-                    "Budget should be limited to {} ticks", budget_limit);
+                prop_assert_eq!(cx.budget().remaining_polls(), poll_limit,
+                    "Budget should be limited to {} polls", poll_limit);
 
                 let current_tick = Arc::new(AtomicU64::new(0));
 
                 // Create futures that would exhaust budget during drain
                 let winner_future = TrackedFuture::new(0, 1, 42, current_tick.clone());
-                let loser_future = TrackedFuture::new(1, budget_limit + 5, 1, current_tick.clone());
+                let loser_future = TrackedFuture::new(
+                    1,
+                    u64::from(poll_limit) + 5,
+                    1,
+                    current_tick.clone(),
+                );
 
                 let futures = vec![winner_future, loser_future];
 
@@ -542,7 +547,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_finalizer_invocation_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 2usize..8)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 2usize..8)| {
                 let current_tick = Arc::new(AtomicU64::new(0));
                 let mut futures = Vec::new();
 
@@ -629,7 +634,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_region_quiescence_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 2usize..10)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 2usize..10)| {
                 let current_tick = Arc::new(AtomicU64::new(0));
                 let start_tick = 0u64;
 
@@ -720,7 +725,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_deterministic_winner_selection_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
                 // Test that identical race setups produce identical results
                 let current_tick = Arc::new(AtomicU64::new(0));
 
@@ -788,7 +793,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_loser_drain_ordering_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 3usize..8)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 3usize..8)| {
                 let current_tick = Arc::new(AtomicU64::new(0));
 
                 // Create race with multiple losers
@@ -818,7 +823,7 @@ mod race_loser_drain_metamorphic_tests {
                         "Loser {} should be cancelled", i);
 
                     if let Outcome::Cancelled(reason) = &outcomes[i] {
-                        prop_assert!(reason.is_race_loser(),
+                        prop_assert!(reason.is_kind(CancelKind::RaceLost),
                             "Loser {} should have race_loser cancellation reason", i);
                     }
                 }
@@ -858,7 +863,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_cancellation_reason_propagation_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 2usize..6)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000, loser_count in 2usize..6)| {
                 let current_tick = Arc::new(AtomicU64::new(0));
 
                 // Create race participants
@@ -891,7 +896,7 @@ mod race_loser_drain_metamorphic_tests {
                     if let Outcome::Cancelled(reason) = outcome {
                         // The metamorphic property: cancellation reasons should be
                         // consistent for all race losers
-                        prop_assert!(reason.is_race_loser(),
+                        prop_assert!(reason.is_kind(CancelKind::RaceLost),
                             "Loser {} should have race_loser reason, got: {:?}", i, reason);
                     }
 
@@ -934,7 +939,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_resource_cleanup_completeness_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, loser_count in 2usize..8)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(500), |(seed in 0u64..1000, loser_count in 2usize..8)| {
                 let current_tick = Arc::new(AtomicU64::new(0));
 
                 // Create race with resource tracking
@@ -1014,7 +1019,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_concurrent_race_independence_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(500), |(seed in 0u64..1000)| {
                 // Test that concurrent races don't interfere with each other
                 let current_tick = Arc::new(AtomicU64::new(0));
 
@@ -1083,7 +1088,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_nested_race_consistency_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(500), |(seed in 0u64..1000)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(500), |(seed in 0u64..1000)| {
                 // Test race(race(a,b), c) consistency properties
                 let current_tick = Arc::new(AtomicU64::new(0));
 
@@ -1169,7 +1174,7 @@ mod race_loser_drain_metamorphic_tests {
         fn run_polling_order_invariance_relation(&self) -> RaceLoserDrainMetamorphicResult {
             let start = std::time::Instant::now();
 
-            let test_result = proptest!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
+            let test_result = proptest_result!(ProptestConfig::with_cases(1000), |(seed in 0u64..1000)| {
                 // Test that polling order doesn't affect race outcome when completion times differ
                 let current_tick = Arc::new(AtomicU64::new(0));
 

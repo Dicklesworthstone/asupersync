@@ -23,6 +23,7 @@ mod obligation_lifecycle_metamorphic_tests {
     use asupersync::types::{ObligationId, RegionId, TaskId, Time};
     use asupersync::util::ArenaIndex;
     use proptest::prelude::*;
+    use std::cell::Cell;
     use std::collections::HashSet;
 
     /// Metamorphic test harness for obligation lifecycle properties.
@@ -32,7 +33,7 @@ mod obligation_lifecycle_metamorphic_tests {
     }
 
     /// Test category for obligation lifecycle metamorphic tests.
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
     #[allow(dead_code)]
     pub enum TestCategory {
@@ -114,7 +115,7 @@ mod obligation_lifecycle_metamorphic_tests {
         /// Create a new obligation lifecycle metamorphic harness.
         #[allow(dead_code)]
         pub fn new() -> Self {
-            let config = LabConfig::default_for_test();
+            let config = LabConfig::new(42);
             Self { config }
         }
 
@@ -169,10 +170,10 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn test_commit_abort_no_op_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("commit_abort_no_op", |_| {
-                proptest!(ProptestConfig::with_cases(1000), |(
+                proptest_result!(ProptestConfig::with_cases(1000), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x))),
                     kind in prop_oneof![
@@ -182,7 +183,7 @@ mod obligation_lifecycle_metamorphic_tests {
                         Just(ObligationKind::IoOp),
                     ]
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     // Create two independent ledger states
                     let mut ledger1 = ObligationLedger::new();
@@ -237,7 +238,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -245,14 +246,14 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn test_abort_then_commit_error_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("abort_then_commit_error", |_| {
-                proptest!(ProptestConfig::with_cases(1000), |(
+                proptest_result!(ProptestConfig::with_cases(1000), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x)))
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     let mut ledger = ObligationLedger::new();
 
@@ -293,7 +294,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -301,10 +302,10 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn test_obligation_count_invariant_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("obligation_count_invariant", |_| {
-                proptest!(ProptestConfig::with_cases(1000), |(
+                proptest_result!(ProptestConfig::with_cases(1000), |(
                     operations in prop::collection::vec(
                         prop_oneof![
                             (any::<u32>(), any::<u32>()).prop_map(|(t, r)| ObligationOp::Acquire {
@@ -316,7 +317,7 @@ mod obligation_lifecycle_metamorphic_tests {
                         1..20
                     )
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     let mut ledger = ObligationLedger::new();
                     let mut active_tokens = Vec::new();
@@ -378,7 +379,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -388,15 +389,15 @@ mod obligation_lifecycle_metamorphic_tests {
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("snapshot_restore_preservation", |_| {
-                proptest!(ProptestConfig::with_cases(500), |(
+                proptest_result!(ProptestConfig::with_cases(500), |(
                     num_obligations in 1..20usize,
                     task_ids in prop::collection::vec(any::<u32>(), 1..20),
                     region_ids in prop::collection::vec(any::<u32>(), 1..10)
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     let mut ledger = ObligationLedger::new();
                     let mut tokens = Vec::new();
@@ -488,7 +489,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -498,16 +499,16 @@ mod obligation_lifecycle_metamorphic_tests {
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("parallel_commits_commutation", |_| {
-                proptest!(ProptestConfig::with_cases(1000), |(
+                proptest_result!(ProptestConfig::with_cases(1000), |(
                     task_id_a in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 100))),
                     task_id_b in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 100))),
                     region_id_a in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 10))),
                     region_id_b in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 10))),
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     // Ensure obligations are independent (different tasks/regions)
                     prop_assume!(task_id_a != task_id_b || region_id_a != region_id_b);
@@ -585,7 +586,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -593,14 +594,14 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn test_acquire_abort_idempotence_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("acquire_abort_idempotence", |_| {
-                proptest!(ProptestConfig::with_cases(1000), |(
+                proptest_result!(ProptestConfig::with_cases(1000), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x))),
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     // Path 1: Single acquire-abort
                     let mut ledger1 = ObligationLedger::new();
@@ -660,7 +661,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -668,14 +669,14 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn test_acquire_commit_idempotence_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("acquire_commit_idempotence", |_| {
-                proptest!(ProptestConfig::with_cases(1000), |(
+                proptest_result!(ProptestConfig::with_cases(1000), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x))),
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     // Path 1: Single acquire-commit
                     let mut ledger1 = ObligationLedger::new();
@@ -735,7 +736,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -745,15 +746,15 @@ mod obligation_lifecycle_metamorphic_tests {
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("cross_task_operation_ordering", |_| {
-                proptest!(ProptestConfig::with_cases(500), |(
+                proptest_result!(ProptestConfig::with_cases(500), |(
                     task_id_1 in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 50))),
                     task_id_2 in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 50))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 10))),
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     // Ensure tasks are different
                     prop_assume!(task_id_1 != task_id_2);
@@ -811,7 +812,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -819,15 +820,15 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn test_region_isolation_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("region_isolation", |_| {
-                proptest!(ProptestConfig::with_cases(500), |(
+                proptest_result!(ProptestConfig::with_cases(500), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 50))),
                     region_id_1 in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 10))),
                     region_id_2 in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 10))),
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     // Ensure regions are different
                     prop_assume!(region_id_1 != region_id_2);
@@ -893,7 +894,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -901,15 +902,15 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn test_leak_detection_consistency_relation(&self) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("leak_detection_consistency", |_| {
-                proptest!(ProptestConfig::with_cases(200), |(
+                proptest_result!(ProptestConfig::with_cases(200), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 50))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 10))),
                     num_tokens in 1..10usize,
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     let mut ledger = ObligationLedger::new();
                     let mut tokens = Vec::new();
@@ -964,7 +965,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -974,14 +975,14 @@ mod obligation_lifecycle_metamorphic_tests {
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("recovery_protocol_convergence", |_| {
-                proptest!(ProptestConfig::with_cases(100), |(
+                proptest_result!(ProptestConfig::with_cases(100), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 20))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 5))),
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     let mut ledger = ObligationLedger::new();
 
@@ -1025,7 +1026,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -1035,14 +1036,14 @@ mod obligation_lifecycle_metamorphic_tests {
             &self,
         ) -> ObligationLifecycleMetamorphicResult {
             let start_time = std::time::Instant::now();
-            let mut iterations = 0;
+            let iterations = Cell::new(0u32);
 
             let result = self.run_metamorphic_test("temporal_ordering_preservation", |_| {
-                proptest!(ProptestConfig::with_cases(500), |(
+                proptest_result!(ProptestConfig::with_cases(500), |(
                     task_id in any::<u32>().prop_map(|x| TaskId::from_arena(ArenaIndex::new(0, x % 50))),
                     region_id in any::<u32>().prop_map(|x| RegionId::from_arena(ArenaIndex::new(0, x % 10))),
                 )| {
-                    iterations += 1;
+                    iterations.set(iterations.get() + 1);
 
                     let mut ledger = ObligationLedger::new();
 
@@ -1084,7 +1085,7 @@ mod obligation_lifecycle_metamorphic_tests {
                 },
                 error_message: result.err(),
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
-                iterations_tested: iterations,
+                iterations_tested: iterations.get(),
             }
         }
 
@@ -1092,10 +1093,9 @@ mod obligation_lifecycle_metamorphic_tests {
         #[allow(dead_code)]
         fn run_metamorphic_test<F>(&self, test_name: &str, test_fn: F) -> Result<(), String>
         where
-            F: FnOnce(&LabConfig) -> Result<(), proptest::test_runner::TestCaseError>
-                + std::panic::UnwindSafe,
+            F: FnOnce(&LabConfig) -> Result<(), proptest::test_runner::TestCaseError>,
         {
-            match std::panic::catch_unwind(|| test_fn(&self.config)) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test_fn(&self.config))) {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(test_error)) => Err(format!("Property test failed: {}", test_error)),
                 Err(panic_info) => {

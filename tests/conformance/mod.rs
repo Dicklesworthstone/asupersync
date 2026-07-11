@@ -5,6 +5,18 @@
 //! This module contains conformance test suites that validate our implementations
 //! against formal specifications (RFCs) and reference implementations.
 
+macro_rules! proptest_result {
+    ($config:expr, |($($parameter:pat in $strategy:expr),+ $(,)?)| $body:block) => {{
+        let strategy = ($($strategy,)+);
+        let mut runner = ::proptest::test_runner::TestRunner::new($config);
+        runner
+            .run(&strategy, |($($parameter,)+)| $body)
+            .map_err(|error| {
+                ::proptest::test_runner::TestCaseError::fail(error.to_string())
+            })
+    }};
+}
+
 pub mod aggregator_flush;
 pub mod codec_framing_properties;
 pub mod codec_round_trip;
@@ -2050,14 +2062,12 @@ mod tests {
         }
 
         // Verify proptest completed full iteration counts
-        let proptest_results = results
-            .iter()
-            .filter(|r| r.description.contains("proptest"))
-            .count();
+        let proptest_results = results.iter().filter(|r| r.iterations_tested > 0).count();
 
-        assert!(
-            proptest_results > 0,
-            "Should have proptest-based metamorphic relations"
+        assert_eq!(
+            proptest_results,
+            results.len(),
+            "Every metamorphic relation should execute proptest cases"
         );
     }
 
