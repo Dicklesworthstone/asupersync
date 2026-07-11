@@ -43,6 +43,7 @@ pub mod cx;
 pub mod macaroon;
 pub mod registry;
 pub mod scope;
+pub mod scoped_cpu;
 pub mod wrappers;
 
 pub use cap::{
@@ -66,6 +67,7 @@ pub use registry::{
     NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,
 };
 pub use scope::Scope;
+pub use scoped_cpu::{CpuCx, ScopedCpu, ScopedCpuError};
 pub use wrappers::{
     BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps, WebCaps,
     WebContext, narrow,
