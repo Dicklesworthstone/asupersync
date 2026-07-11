@@ -1,17 +1,10 @@
 #![allow(dead_code)]
 
-#[path = "../src/atp/actor/mod.rs"]
-mod actor;
-#[path = "../src/atp/autotune.rs"]
-mod autotune;
-#[path = "../src/atp/transfer/mod.rs"]
-mod transfer;
-
-use actor::{
+use asupersync::atp::actor::{
     TransferActorId, TransferActorTopology, TransferChildRole, TransferObligationId,
     TransferRegionId,
 };
-use transfer::{
+use asupersync::atp::transfer::{
     IdempotencyKey, ObligationOutcome, PeerCapabilities, TransferActor, TransferCancelPhase,
     TransferCommand, TransferCommandKind, TransferFailureKind, TransferId, TransferManifestRef,
     TransferState,

@@ -4293,7 +4293,7 @@ mod tests {
                     }
                 }
                 // With ≥ K honest symbols delivered the block must complete.
-                if feed.len() >= k + 1 {
+                if feed.len() > k {
                     assert!(
                         complete || feed.len() < k,
                         "block should complete with {} symbols for k={k} \

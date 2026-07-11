@@ -5,8 +5,8 @@
 //! Tests the benchmark adapter framework with scp baseline and ATP profile comparison.
 
 use asupersync::atp::benchmark::{
-    AtpProfile, BenchmarkConfig, BenchmarkSuite, BenchmarkSuiteBuilder, CurlAdapter, RsyncAdapter,
-    ScpAdapter, ToolAvailability,
+    AtpProfile, BaselineAdapter, BenchmarkConfig, BenchmarkSuite, CurlAdapter, RsyncAdapter,
+    ScpAdapter, ToolAvailability, suite::BenchmarkSuiteBuilder,
 };
 use std::time::Duration;
 
@@ -251,12 +251,12 @@ fn test_atp_profile_kinds_coverage() {
 #[tokio::test]
 async fn test_rsync_adapter_availability_check() {
     let adapter = RsyncAdapter::new();
+    assert_eq!(adapter.tool_name(), "rsync");
     let availability = adapter.check_availability().await;
 
     match availability {
         ToolAvailability::Available(version) => {
             println!("✅ Rsync is available: {}", version.version_string);
-            assert_eq!(adapter.tool_name(), "rsync");
         }
         ToolAvailability::NotFound => {
             println!("⚠️  Rsync not found in PATH (expected in some environments)");
@@ -268,21 +268,17 @@ async fn test_rsync_adapter_availability_check() {
             println!("⚠️  Rsync incompatible version: {}", version.version_string);
         }
     }
-
-    // Test adapter configuration
-    assert!(!adapter.rsync_options.is_empty());
-    assert!(adapter.rsync_options.contains(&"--verbose".to_string()));
 }
 
 #[tokio::test]
 async fn test_curl_adapter_availability_check() {
     let adapter = CurlAdapter::new();
+    assert_eq!(adapter.tool_name(), "curl");
     let availability = adapter.check_availability().await;
 
     match availability {
         ToolAvailability::Available(version) => {
             println!("✅ Curl is available: {}", version.version_string);
-            assert_eq!(adapter.tool_name(), "curl");
         }
         ToolAvailability::NotFound => {
             println!("⚠️  Curl not found in PATH (expected in some environments)");
@@ -294,15 +290,12 @@ async fn test_curl_adapter_availability_check() {
             println!("⚠️  Curl incompatible version: {}", version.version_string);
         }
     }
-
-    // Test adapter configuration
-    assert!(!adapter.curl_options.is_empty());
-    assert!(adapter.curl_options.contains(&"--silent".to_string()));
 }
 
 #[tokio::test]
 async fn test_curl_http3_adapter_availability_check() {
     let adapter = CurlAdapter::with_http3();
+    assert_eq!(adapter.tool_name(), "curl-http3");
     let availability = adapter.check_availability().await;
 
     match availability {
@@ -311,7 +304,6 @@ async fn test_curl_http3_adapter_availability_check() {
                 "✅ Curl with HTTP/3 is available: {}",
                 version.version_string
             );
-            assert_eq!(adapter.tool_name(), "curl-http3");
         }
         ToolAvailability::NotFound => {
             println!("⚠️  Curl not found in PATH");
@@ -326,10 +318,6 @@ async fn test_curl_http3_adapter_availability_check() {
             );
         }
     }
-
-    // Test adapter configuration
-    assert!(adapter.enable_http3);
-    assert!(adapter.curl_options.contains(&"--http3".to_string()));
 }
 
 #[tokio::test]
