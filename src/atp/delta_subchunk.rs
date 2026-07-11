@@ -289,12 +289,32 @@ pub fn diff(new: &[u8], sig: &SubBlockSignature) -> Vec<SubDeltaOp> {
         if let Some(cands) = by_weak.get(&rolling.digest()) {
             let window = &new[pos..pos + block_size];
             let strong = strong_checksum(window);
+            let contiguous_offset = if pos == literal_start {
+                ops.last().and_then(|op| match op {
+                    SubDeltaOp::Copy { old_offset, len } => old_offset.checked_add(u64::from(*len)),
+                    SubDeltaOp::Literal(_) => None,
+                })
+            } else {
+                None
+            };
+            let positional_offset = u64::try_from(pos).ok();
+            let mut first_match = None;
+            let mut positional_match = None;
             for &idx in cands {
                 let b = &sig.blocks[idx];
                 if b.strong == strong {
-                    matched = Some(b);
-                    break;
+                    first_match.get_or_insert(b);
+                    if Some(b.offset) == contiguous_offset {
+                        matched = Some(b);
+                        break;
+                    }
+                    if Some(b.offset) == positional_offset {
+                        positional_match = Some(b);
+                    }
                 }
+            }
+            if matched.is_none() {
+                matched = positional_match.or(first_match);
             }
         }
 
@@ -483,6 +503,44 @@ mod tests {
             "adjacent matching blocks should encode as one copy run"
         );
         assert_eq!(wire_bytes(&ops), 10);
+    }
+
+    #[test]
+    fn duplicate_blocks_prefer_contiguous_copy_run() {
+        let old = b"AAAARRRRRRRRDDDD";
+        let ops = roundtrip(old, old, 4);
+
+        assert_eq!(
+            ops,
+            vec![SubDeltaOp::Copy {
+                old_offset: 0,
+                len: u32::try_from(old.len()).expect("fixture fits u32"),
+            }],
+            "duplicate matches must follow the contiguous old range"
+        );
+    }
+
+    #[test]
+    fn duplicate_blocks_prefer_position_after_pending_literal() {
+        let old = b"AAAARRRRRRRRDDDD";
+        let new = b"AAAAXXXXRRRRDDDD";
+        let ops = roundtrip(old, new, 4);
+
+        assert_eq!(
+            ops,
+            vec![
+                SubDeltaOp::Copy {
+                    old_offset: 0,
+                    len: 4,
+                },
+                SubDeltaOp::Literal(b"XXXX".to_vec()),
+                SubDeltaOp::Copy {
+                    old_offset: 8,
+                    len: 8,
+                },
+            ],
+            "a pending literal must break continuity so the positional duplicate can start a new copy run"
+        );
     }
 
     #[test]

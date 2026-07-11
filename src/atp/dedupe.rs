@@ -221,7 +221,7 @@ impl DeltaDedupSendSet {
         let mut recomputed_unique_bytes = 0u64;
         let mut recomputed_duplicate_chunks = 0u64;
         let mut recomputed_duplicate_bytes = 0u64;
-        for (unique_ordinal, unique) in self.unique_chunks.iter().enumerate() {
+        for unique in &self.unique_chunks {
             if unique.logical_ref_count == 0 {
                 return Err(DeltaError::DeltaSendPlanChunkMismatch {
                     ordinal: unique.first_missing_ordinal,
@@ -258,19 +258,6 @@ impl DeltaDedupSendSet {
                     )
                     .ok_or(DeltaError::ChunkSizeOverflow)?;
             }
-
-            let placement_refs = self
-                .placements
-                .iter()
-                .filter(|placement| placement.unique_ordinal == unique_ordinal)
-                .count();
-            if u64::try_from(placement_refs).map_err(|_| DeltaError::ChunkCountOverflow)?
-                != unique.logical_ref_count
-            {
-                return Err(DeltaError::DeltaSendPlanChunkMismatch {
-                    ordinal: unique.first_missing_ordinal,
-                });
-            }
         }
 
         for (ordinal, placement) in self.placements.iter().enumerate() {
@@ -288,6 +275,21 @@ impl DeltaDedupSendSet {
             };
             if unique.key != DeltaChunkKey::from_chunk(expected_chunk) {
                 return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+            }
+        }
+
+        for (unique_ordinal, unique) in self.unique_chunks.iter().enumerate() {
+            let placement_refs = self
+                .placements
+                .iter()
+                .filter(|placement| placement.unique_ordinal == unique_ordinal)
+                .count();
+            if u64::try_from(placement_refs).map_err(|_| DeltaError::ChunkCountOverflow)?
+                != unique.logical_ref_count
+            {
+                return Err(DeltaError::DeltaSendPlanChunkMismatch {
+                    ordinal: unique.first_missing_ordinal,
+                });
             }
         }
 
@@ -960,12 +962,14 @@ mod tests {
 
     #[test]
     fn dedupe_payload_set_canonical_parts_round_trip() {
+        let repeated = vec![b'a'; 4096];
+        let unique = vec![b'b'; 1024];
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();
         let sender = manifest(
             &mut sender_store,
             "tree-a",
-            &[&b"alpha"[..], &b"beta"[..], &b"alpha"[..]],
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
         );
         let receiver = manifest(&mut receiver_store, "tree-a", &[]);
         let coverage = ReceiverCasCoverage::from_manifest(&receiver);
