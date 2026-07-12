@@ -258,7 +258,10 @@ impl<T> Mutex<T> {
             lock_ordering::record_acquire(self.name, rank);
         }
 
-        Ok(MutexGuard { mutex: self })
+        Ok(MutexGuard {
+            mutex: self,
+            _not_send: PhantomData,
+        })
     }
 
     /// Tries to acquire the mutex without waiting, returning an owned guard.
@@ -478,7 +481,10 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
                         lock_ordering::record_acquire(self.mutex.name, rank);
                     }
 
-                    return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
+                    return Poll::Ready(Ok(MutexGuard {
+                        mutex: self.mutex,
+                        _not_send: PhantomData,
+                    }));
                 }
 
                 // Another caller stole the lock before we resumed. Re-register
@@ -508,7 +514,10 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
                 lock_ordering::record_acquire(self.mutex.name, rank);
             }
 
-            return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
+            return Poll::Ready(Ok(MutexGuard {
+                mutex: self.mutex,
+                _not_send: PhantomData,
+            }));
         }
 
         // Register waiter or update existing waker. We must update the waker
@@ -549,15 +558,30 @@ impl<T, Caps> Drop for LockFuture<'_, '_, T, Caps> {
 }
 
 /// A guard that releases the mutex when dropped.
+///
+/// A borrowed guard is deliberately not [`Send`]: releasing a ranked mutex
+/// updates thread-local lock-order state, so acquisition and release must happen
+/// on the same OS thread.
+///
+/// ```compile_fail,E0277
+/// use asupersync::sync::Mutex;
+///
+/// fn require_send<T: Send>(_: T) {}
+///
+/// let mutex = Mutex::new(42);
+/// let guard = mutex.try_lock().expect("mutex should be unlocked");
+/// require_send(guard);
+/// ```
 #[must_use = "guard will be immediately released if not held"]
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
+    // Raw-pointer ownership markers are neither Send nor Sync. The explicit
+    // Sync impl below restores only the sharing property that is sound here.
+    _not_send: PhantomData<*mut ()>,
 }
 
-// AUDIT: MutexGuard is NOT Send - must be dropped in the same task where acquired
-// to preserve cancel-aware invariants. The Drop implementation calls unlock()
-// which may affect task-local state.
-// unsafe impl<T: Send> Send for MutexGuard<'_, T> {} // REMOVED - guard is !Send
+// Safety: shared access through a guard is equivalent to `&T`. The guard still
+// cannot move to another thread because `_not_send` suppresses the Send auto trait.
 unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}
 
 impl<T: std::fmt::Debug> std::fmt::Debug for MutexGuard<'_, T> {
@@ -2827,23 +2851,9 @@ mod tests {
 
     #[test]
     fn audit_mutex_guard_is_not_send() {
-        // AUDIT: Verify MutexGuard is !Send to prevent cross-task drop invariant violations
-        // CONTEXT: Asupersync cancel-aware design - guards must be dropped in acquisition task
-        // MECHANISM: No Send implementation allows Rust's trait system to enforce this invariant
-
-        // Compile-time test: This function should NOT compile if MutexGuard is Send
-        fn test_guard_not_send() {
-            fn require_send<T: Send>(_: T) {}
-            require_send(());
-
-            // Uncomment the following lines to test - they should fail to compile:
-            // let mutex = Mutex::new(42);
-            // let guard = unsafe { std::mem::zeroed::<MutexGuard<i32>>() };
-            // require_send(guard); // This MUST fail to compile
-        }
-        test_guard_not_send();
-
-        // Runtime test: Verify normal usage still works
+        // The public MutexGuard compile-fail doctest provides the actual trait
+        // proof. This runtime half verifies that the marker does not change
+        // ordinary same-thread guard behavior.
         let mutex = Mutex::new(42);
         let cx = test_cx();
 
@@ -2851,11 +2861,7 @@ mod tests {
             let guard = mutex.lock(&cx).await.expect("lock should succeed");
             assert_eq!(*guard, 42);
 
-            // Verify the guard works in the same task context
-            {
-                let _data: &i32 = &guard;
-                // guard is !Send so it cannot be moved to another task
-            }
+            let _data: &i32 = &guard;
 
             drop(guard);
         });
@@ -3070,82 +3076,6 @@ mod tests {
         crate::test_complete!("audit_mutex_guard_send_constraint_across_await");
     }
 
-    /// Audit test: MutexGuard compile-time !Send verification.
-    ///
-    /// Per asupersync semantics, MutexGuard must be !Send to prevent movement
-    /// between tasks at await points. This ensures cancel-aware drop semantics
-    /// are preserved - the guard must be dropped in the same task context
-    /// where it was acquired.
-    #[test]
-    fn audit_mutex_guard_not_send_trait_bound() {
-        init_test("audit_mutex_guard_not_send_trait_bound");
-
-        /// Helper function to verify a type is NOT Send at compile time.
-        /// This function requires T to NOT implement Send. If T: Send,
-        /// this will fail to compile.
-        fn assert_not_send<T>()
-        where
-            T: 'static,
-        {
-            // We use std::rc::Rc<T> as a wrapper because Rc<T> is never Send,
-            // regardless of whether T is Send or not. However, we can only
-            // construct Rc<T> if T exists, so this verifies the type is real.
-
-            // If MutexGuard were Send, we could call require_send with it.
-            // The fact that we CAN'T proves it's !Send.
-            let _type_exists = std::marker::PhantomData::<std::rc::Rc<T>>;
-
-            // This function compiles successfully, proving T is accessible
-            // but cannot be used in Send contexts.
-        }
-
-        /// This helper would only compile if called with Send types.
-        /// We use it to demonstrate what would fail for !Send types.
-        fn _require_send<T: Send>() {
-            // This is never called in our test, but shows what would
-            // fail to compile if we tried: _require_send::<MutexGuard<()>>();
-        }
-
-        // Test 1: Verify MutexGuard is !Send (this should compile)
-        assert_not_send::<MutexGuard<'static, ()>>();
-
-        // Test 2: Verify some Send types for contrast (these should also compile)
-        let _contrast_send_types = || {
-            fn assert_send<T: Send>() {}
-            assert_send::<i32>(); // i32 is Send
-            assert_send::<String>(); // String is Send
-            assert_send::<Vec<u8>>(); // Vec<u8> is Send
-            // But this would NOT compile: assert_send::<MutexGuard<()>>();
-        };
-
-        // Test 3: Demonstrate actual usage - guard works locally
-        let mutex = Mutex::new(42);
-        let cx = test_cx();
-
-        let usage_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            block_on(async {
-                let guard = mutex.lock(&cx).await.expect("lock should succeed");
-                let _value = *guard; // Guard works within same task
-                // guard is automatically dropped here - no cross-task movement
-            })
-        }));
-
-        crate::assert_with_log!(
-            usage_test.is_ok(),
-            "MutexGuard works correctly within single task context",
-            true,
-            usage_test.is_ok()
-        );
-
-        // COMPILE-TIME PROOF: The following line would NOT compile:
-        // _require_send::<MutexGuard<'_, ()>>();
-        //
-        // Expected error: "`MutexGuard<'_, ()>` cannot be sent between threads safely"
-        // This proves MutexGuard is !Send as required by asupersync semantics.
-
-        crate::test_complete!("audit_mutex_guard_not_send_trait_bound");
-    }
-
     #[test]
     fn audit_lock_future_state_machine_size() {
         // Audit: LockFuture state-machine should be SMALL per asupersync philosophy.
@@ -3274,65 +3204,22 @@ mod tests {
     }
 
     #[test]
-    fn audit_mutex_guard_await_boundary_compile_fail() {
-        // Audit: MutexGuard !Send prevents crossing await boundaries.
-        // This test documents the compile-time enforcement of !Send trait bounds
-        // when attempting to hold a MutexGuard across await points.
-        //
-        // Per asupersync semantics, guards must NOT cross await boundaries to
-        // preserve task-local cancellation and drop semantics.
+    fn audit_mutex_guard_drop_before_await() {
+        init_test("audit_mutex_guard_drop_before_await");
 
-        init_test("audit_mutex_guard_await_boundary_compile_fail");
-
-        // This test demonstrates (but does not execute) code patterns that SHOULD NOT COMPILE
-        // due to MutexGuard being !Send. The examples are in comments to avoid compilation errors.
-
-        /*
-        // EXAMPLE 1: Direct await with guard held (SHOULD NOT COMPILE)
-        async fn bad_pattern_1(mutex: &Mutex<i32>, cx: &Cx) {
-            let guard = mutex.lock(cx).await.unwrap();
-            // ERROR: cannot await while holding guard (guard is !Send)
-            some_async_function().await;
-            drop(guard);
-        }
-
-        // EXAMPLE 2: Function boundary with guard (SHOULD NOT COMPILE)
-        async fn bad_pattern_2(mutex: &Mutex<i32>, cx: &Cx) {
-            let guard = mutex.lock(cx).await.unwrap();
-            // ERROR: cannot call async function while holding guard
-            helper_async_function(guard).await;
-        }
-
-        async fn helper_async_function(guard: MutexGuard<'_, i32>) {
-            // This would require MutexGuard: Send, which is false
-            some_async_function().await;
-            drop(guard);
-        }
-
-        // EXAMPLE 3: Spawning task with guard (SHOULD NOT COMPILE)
-        async fn bad_pattern_3(mutex: &Mutex<i32>, cx: &Cx) {
-            let guard = mutex.lock(cx).await.unwrap();
-            // ERROR: cannot move guard into spawned task (guard is !Send)
-            spawn_task(async move {
-                println!("Value: {}", *guard);
-            });
-        }
-        */
-
-        // CORRECT PATTERN: Guard is dropped before await points
+        // Dropping before an await keeps the enclosing future eligible for a
+        // Send-bound executor. Holding a borrowed guard across an await remains
+        // valid in a strictly same-thread, non-Send future.
         let test_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             block_on(async {
                 let mutex = Mutex::new(42);
                 let cx = test_cx();
 
-                // ✓ CORRECT: Acquire, use, and drop guard before await
                 let value = {
                     let guard = mutex.lock(&cx).await.expect("mutex lock should succeed");
-                    *guard // Copy value out
-                    // Guard drops here, before any await point
+                    *guard
                 };
 
-                // ✓ CORRECT: Now we can safely await without holding guard
                 crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_nanos(1))
                     .await;
 
@@ -3347,39 +3234,7 @@ mod tests {
             test_result.is_ok()
         );
 
-        // The !Send trait bound is enforced at compile time, preventing the anti-patterns
-        // shown in the commented examples above. This test documents the correct pattern
-        // and verifies that proper guard usage (drop before await) works correctly.
-
-        crate::test_complete!("audit_mutex_guard_await_boundary_compile_fail");
-    }
-
-    /// Example of a compile-fail doc test for MutexGuard !Send enforcement.
-    ///
-    /// This function contains a doc test that demonstrates the compile failure
-    /// when attempting to hold a MutexGuard across an await boundary.
-    ///
-    /// ```compile_fail
-    /// use asupersync::sync::Mutex;
-    /// use asupersync::cx::Cx;
-    ///
-    /// async fn bad_await_with_guard(mutex: &Mutex<i32>, cx: &Cx) -> Result<(), asupersync::sync::LockError> {
-    ///     let guard = mutex.lock(cx).await?;
-    ///
-    ///     // This line should cause a compile error because MutexGuard is !Send
-    ///     // and cannot cross the await boundary
-    ///     asupersync::time::sleep(
-    ///         asupersync::types::Time::ZERO,
-    ///         std::time::Duration::from_millis(1)
-    ///     ).await;
-    ///
-    ///     drop(guard);
-    ///     Ok(())
-    /// }
-    /// ```
-    fn _doctest_mutex_guard_compile_fail_example() {
-        // This function exists only to host the doc test above.
-        // The doc test demonstrates that the pattern fails to compile.
+        crate::test_complete!("audit_mutex_guard_drop_before_await");
     }
 
     #[test]
