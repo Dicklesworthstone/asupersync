@@ -231,11 +231,18 @@ impl TaskTable {
             self.phase_counts[idx] = self.phase_counts[idx].saturating_add(1);
             self.live_task_count = self.live_task_count.saturating_add(1);
         }
-        if let Some(d) = deadline {
-            self.deadline_sum_ns = self
-                .deadline_sum_ns
-                .saturating_add(u128::from(d.as_nanos()));
-            self.tasks_with_deadline += 1;
+        // The deadline sum tracks LIVE tasks only (matching `note_deadline_changed`,
+        // which subtracts on the live→terminal transition). Gate the deadline
+        // branch on liveness so it stays symmetric with `note_task_removed` — a
+        // task added directly in a terminal phase contributes no live deadline
+        // pressure and must not be counted.
+        if idx < LIVE_PHASE_COUNT {
+            if let Some(d) = deadline {
+                self.deadline_sum_ns = self
+                    .deadline_sum_ns
+                    .saturating_add(u128::from(d.as_nanos()));
+                self.tasks_with_deadline += 1;
+            }
         }
     }
 
@@ -247,11 +254,20 @@ impl TaskTable {
             self.phase_counts[idx] = self.phase_counts[idx].saturating_sub(1);
             self.live_task_count = self.live_task_count.saturating_sub(1);
         }
-        if let Some(d) = deadline {
-            self.deadline_sum_ns = self
-                .deadline_sum_ns
-                .saturating_sub(u128::from(d.as_nanos()));
-            self.tasks_with_deadline = self.tasks_with_deadline.saturating_sub(1);
+        // Subtract the deadline ONLY if the task is still live at removal. A task
+        // that already transitioned to a terminal phase had its deadline removed
+        // from the sum by `note_deadline_changed(Some(D), None)` in `update_task`
+        // (which leaves `record.deadline == Some(D)`); subtracting again here on
+        // the terminal-phase `remove` double-counts, driving `tasks_with_deadline`
+        // and `deadline_sum_ns` toward zero while other live tasks still hold
+        // deadlines — corrupting the governor's deadline-pressure signal.
+        if idx < LIVE_PHASE_COUNT {
+            if let Some(d) = deadline {
+                self.deadline_sum_ns = self
+                    .deadline_sum_ns
+                    .saturating_sub(u128::from(d.as_nanos()));
+                self.tasks_with_deadline = self.tasks_with_deadline.saturating_sub(1);
+            }
         }
     }
 
@@ -1608,6 +1624,53 @@ mod tests {
         // 7. Remove task
         table.remove(idx2);
         assert_eq!(table.live_task_count(), 1);
+    }
+
+    #[test]
+    fn removing_completed_task_does_not_double_subtract_deadline() {
+        use crate::record::task::TaskRecord;
+        use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
+
+        let mut table = TaskTable::new();
+        let region = RegionId::new_for_test(1, 1);
+
+        // Two live tasks with deadlines 1000 and 2000.
+        let b1 = Budget::INFINITE.with_deadline(Time::from_nanos(1000));
+        let b2 = Budget::INFINITE.with_deadline(Time::from_nanos(2000));
+        let idx1 = table.insert(TaskRecord::new_with_time(
+            TaskId::new_for_test(1, 1),
+            region,
+            b1,
+            Time::ZERO,
+        ));
+        let _idx2 = table.insert(TaskRecord::new_with_time(
+            TaskId::new_for_test(2, 2),
+            region,
+            b2,
+            Time::ZERO,
+        ));
+        let id1 = TaskId::from_arena(idx1);
+        assert_eq!(table.tasks_with_deadline_count(), 2);
+        assert_eq!(table.deadline_sum_ns(), 3000);
+
+        // Complete task1: the live→terminal transition removes its deadline
+        // from the sum via note_deadline_changed.
+        table.update_task(id1, |t| {
+            t.complete(Outcome::Ok(()));
+        });
+        assert_eq!(table.tasks_with_deadline_count(), 1);
+        assert_eq!(table.deadline_sum_ns(), 2000);
+
+        // Reaping the completed task must NOT subtract its deadline a second
+        // time — task2's deadline is still live. Pre-fix, this drove the count
+        // to 0 and the sum to 1000, corrupting the governor's deadline signal.
+        table.remove(idx1);
+        assert_eq!(
+            table.tasks_with_deadline_count(),
+            1,
+            "task2's live deadline must survive reaping the completed task"
+        );
+        assert_eq!(table.deadline_sum_ns(), 2000);
     }
 }
 

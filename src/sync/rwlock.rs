@@ -484,9 +484,20 @@ impl<T> RwLock<T> {
                 // any further writer can proceed. Waking a single queued
                 // reader keeps reader waiting bounded without postponing the
                 // head writer behind an arbitrary tail of younger readers.
+                //
+                // The forced turn is ONLY for cutting a reader in front of
+                // waiting writers. When the writer queue is empty there is no
+                // starvation to bound, and forcing a single-reader turn would
+                // strand every other queued reader: `take_forced_reader_turn`
+                // wakes exactly one, and `release_reader` only ever wakes
+                // writers, so a second queued reader would hang forever with
+                // the lock fully free. Require a non-empty writer queue so the
+                // empty-queue case falls through to `take_eligible_reader_waiters`
+                // (which drains ALL readers when no writer is queued).
                 let force_reader_batch = state.consecutive_writers_served
                     >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
-                    && !state.reader_waiters.is_empty();
+                    && !state.reader_waiters.is_empty()
+                    && !state.writer_queue.is_empty();
 
                 let wake_writer = !force_reader_batch && Self::should_wake_writer(&state);
                 if wake_writer {
@@ -619,9 +630,13 @@ impl<T> RwLock<T> {
                         let wakers = Self::queued_waiter_wakers(&state);
                         (None, wakers)
                     } else {
+                        // See release_writer: the forced-reader turn only makes
+                        // sense with waiting writers to cut in front of. With an
+                        // empty writer queue it would strand all but one reader.
                         let force_reader_batch = state.consecutive_writers_served
                             >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
-                            && !state.reader_waiters.is_empty();
+                            && !state.reader_waiters.is_empty()
+                            && !state.writer_queue.is_empty();
 
                         let wake_writer = !force_reader_batch && Self::should_wake_writer(&state);
                         if wake_writer {
@@ -4285,6 +4300,57 @@ mod metamorphic_tests {
         assert!(
             writer_acquired,
             "jxq2e6: writer MUST acquire after reader-1 release + cancelled-reader cleanup"
+        );
+    }
+
+    #[test]
+    fn forced_reader_batch_does_not_strand_readers_when_writer_queue_drains_empty() {
+        // Regression: when a writer streak reaches the forced-reader-batch
+        // threshold at the exact moment the writer queue drains to empty, the
+        // old code forced a single-reader turn (`take_forced_reader_turn`),
+        // waking only ONE queued reader. `release_reader` only ever wakes
+        // writers, so a second queued reader hung forever with the lock free.
+        let lock = Arc::new(RwLock::new(0_u32));
+        let cx = test_cx();
+        let waker = Waker::noop().clone();
+        let mut tcx = Context::from_waker(&waker);
+
+        // W0 holds the lock.
+        let w0 = block_on(lock.write(&cx)).expect("w0 acquires");
+
+        // Queue exactly MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH writers so
+        // draining them all leaves the counter at the forced-batch threshold
+        // with an empty writer queue.
+        let n = MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH;
+        let mut writers: Vec<_> = (0..n).map(|_| Box::pin(lock.write(&cx))).collect();
+        for w in &mut writers {
+            assert!(w.as_mut().poll(&mut tcx).is_pending(), "writer must queue");
+        }
+
+        // Two readers queue behind the writers (writer-preference).
+        let mut r1 = Box::pin(lock.read(&cx));
+        let mut r2 = Box::pin(lock.read(&cx));
+        assert!(r1.as_mut().poll(&mut tcx).is_pending(), "reader 1 queues");
+        assert!(r2.as_mut().poll(&mut tcx).is_pending(), "reader 2 queues");
+
+        // Release W0, then drain every queued writer one at a time. Each
+        // hand-off bumps the consecutive-writer counter; the final drop leaves
+        // the writer queue empty at the threshold with both readers queued.
+        drop(w0);
+        for (i, w) in writers.iter_mut().enumerate() {
+            match w.as_mut().poll(&mut tcx) {
+                Poll::Ready(Ok(g)) => drop(g),
+                other => panic!("writer {i} should acquire+release, got {other:?}"),
+            }
+        }
+
+        // BOTH readers must now be admitted — not just one.
+        let r1_ok = matches!(r1.as_mut().poll(&mut tcx), Poll::Ready(Ok(_)));
+        let r2_ok = matches!(r2.as_mut().poll(&mut tcx), Poll::Ready(Ok(_)));
+        assert!(r1_ok, "reader 1 must acquire once writers drain");
+        assert!(
+            r2_ok,
+            "reader 2 must acquire — pre-fix it was stranded with the lock free"
         );
     }
 

@@ -949,10 +949,25 @@ impl CircuitBreaker {
                 epoch: permit_epoch,
             } => {
                 let mut current_bits = self.state_bits.load(Ordering::Acquire);
+                // Reserve the next epoch BEFORE publishing the reopened `Open`.
+                // The HalfOpen epoch is derived from `times_opened` (see
+                // should_allow), so if the counter were bumped only AFTER the
+                // CAS, a concurrent should_allow that observes the new `Open`
+                // (with `open_duration ≈ 0`, elapsed is ~0 so the cooldown does
+                // not block it) would mint a HalfOpen with the SAME epoch as
+                // this now-stale episode, letting a stale in-flight probe from
+                // the old episode match and mutate the new generation. Bumping
+                // first makes any observed reopen carry a strictly newer epoch.
+                // The flag keeps this to exactly one bump across CAS retries.
+                let mut epoch_reserved = false;
                 loop {
                     let state = State::from_bits(current_bits);
                     match state {
                         State::HalfOpen { epoch, .. } if epoch == permit_epoch => {
+                            if !epoch_reserved {
+                                self.times_opened.fetch_add(1, Ordering::Relaxed);
+                                epoch_reserved = true;
+                            }
                             // Probe failed -> Reopen
                             let new_state = State::Open {
                                 since_millis: now_millis,
@@ -964,7 +979,6 @@ impl CircuitBreaker {
                                 Ordering::Acquire,
                             ) {
                                 Ok(_) => {
-                                    self.times_opened.fetch_add(1, Ordering::Relaxed);
                                     let mut m = self.metrics.write();
                                     m.current_state = new_state;
                                     if let Some(ref w) = self.sliding_window {
