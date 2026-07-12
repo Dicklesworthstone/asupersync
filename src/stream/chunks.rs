@@ -26,6 +26,7 @@ pub struct Chunks<S: Stream> {
     stream: S,
     items: Vec<S::Item>,
     cap: usize,
+    done: bool,
 }
 
 impl<S: Stream> Chunks<S> {
@@ -37,6 +38,7 @@ impl<S: Stream> Chunks<S> {
             stream,
             items: Vec::with_capacity(cap),
             cap,
+            done: false,
         }
     }
 
@@ -68,6 +70,13 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        // Terminal guard: once the upstream has signalled end-of-stream and the
+        // final partial chunk has been yielded, never poll the (possibly
+        // non-fused) upstream again — a restarting or panicking upstream must
+        // not produce a phantom extra chunk. Consistent with map/filter/take.
+        if *this.done {
+            return Poll::Ready(None);
+        }
         let mut drained_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -83,6 +92,7 @@ where
                     }
                 }
                 Poll::Ready(None) => {
+                    *this.done = true;
                     if this.items.is_empty() {
                         return Poll::Ready(None);
                     }
@@ -115,6 +125,7 @@ pub struct ReadyChunks<S: Stream> {
     stream: S,
     cap: usize,
     items: Vec<S::Item>,
+    done: bool,
 }
 
 impl<S: Stream> ReadyChunks<S> {
@@ -126,6 +137,7 @@ impl<S: Stream> ReadyChunks<S> {
             stream,
             cap,
             items: Vec::with_capacity(cap),
+            done: false,
         }
     }
 
@@ -157,6 +169,11 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        // Terminal guard: never re-poll a (possibly non-fused) upstream after
+        // it has signalled end-of-stream. Consistent with map/filter/take.
+        if *this.done {
+            return Poll::Ready(None);
+        }
         // Reuse the buffer across polls; ensure capacity after a previous take.
         let cap = *this.cap;
         let need = cap.saturating_sub(this.items.capacity());
@@ -179,6 +196,7 @@ where
                     }
                 }
                 Poll::Ready(None) => {
+                    *this.done = true;
                     if this.items.is_empty() {
                         return Poll::Ready(None);
                     }
@@ -292,6 +310,48 @@ mod tests {
         }
     }
 
+    /// A stream that yields `None` once, then (illegally, for a non-fused
+    /// source) restarts yielding items. Used to prove the terminal guard.
+    struct RestartAfterNone {
+        emitted: usize,
+    }
+
+    impl Stream for RestartAfterNone {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.emitted += 1;
+            match self.emitted {
+                1 => Poll::Ready(Some(1)),
+                2 => Poll::Ready(None),
+                // A fused stream would keep returning None here; this one
+                // "restarts" to prove Chunks does not re-poll after None.
+                _ => Poll::Ready(Some(99)),
+            }
+        }
+    }
+
+    #[test]
+    fn chunks_does_not_repoll_upstream_after_none() {
+        init_test("chunks_does_not_repoll_upstream_after_none");
+        let mut stream = Chunks::new(RestartAfterNone { emitted: 0 }, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: item 1 buffered, then None → flush partial chunk [1].
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(ref c)) if c == &vec![1]);
+        crate::assert_with_log!(ok, "partial chunk [1]", true, ok);
+
+        // Subsequent polls must stay terminated, never surfacing the phantom 99.
+        for _ in 0..3 {
+            let poll = Pin::new(&mut stream).poll_next(&mut cx);
+            let is_none = matches!(poll, Poll::Ready(None));
+            crate::assert_with_log!(is_none, "stays terminated after None", true, is_none);
+        }
+        crate::test_complete!("chunks_does_not_repoll_upstream_after_none");
+    }
+
     #[derive(Debug)]
     struct HintOnlyStream {
         lower: usize,
@@ -334,6 +394,7 @@ mod tests {
             stream: iter(Vec::<i32>::new()),
             cap: 4,
             items: vec![1, 2],
+            done: false,
         };
 
         let hint = stream.size_hint();
@@ -377,6 +438,7 @@ mod tests {
             },
             cap: 4,
             items: vec![1, 2],
+            done: false,
         };
 
         let hint = stream.size_hint();

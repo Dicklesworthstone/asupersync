@@ -309,16 +309,38 @@ impl Decoder for LengthDelimitedCodec {
                             return Err(e);
                         }
                     };
-                    let total_frame_len = header_len.checked_add(frame_len).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "frame length overflow")
-                    })?;
+                    // Both length-validation failures below must recover the
+                    // framing exactly like the `adjusted_frame_len` branch
+                    // above (br-asupersync-o7e5xu): consume the header and
+                    // enter Skip to drain this frame's body. Returning `Err`
+                    // with `src` untouched leaves `state == Head`, so a direct
+                    // decode-loop caller re-reads the same header and re-emits
+                    // the identical error forever — a livelock. `frame_len` is
+                    // the adjusted body length, exactly what Skip must drain to
+                    // resynchronize to the next frame boundary.
+                    let total_frame_len = match header_len.checked_add(frame_len) {
+                        Some(n) => n,
+                        None => {
+                            let _ = src.split_to(header_len);
+                            self.state = DecodeState::Skip(frame_len as u64);
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "frame length overflow",
+                            ));
+                        }
+                    };
                     let num_skip = self.num_skip(header_len);
-                    let retained_len = total_frame_len.checked_sub(num_skip).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "num_skip exceeds total frame length",
-                        )
-                    })?;
+                    let retained_len = match total_frame_len.checked_sub(num_skip) {
+                        Some(n) => n,
+                        None => {
+                            let _ = src.split_to(header_len);
+                            self.state = DecodeState::Skip(frame_len as u64);
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "num_skip exceeds total frame length",
+                            ));
+                        }
+                    };
 
                     if src.len() < total_frame_len {
                         return Ok(None);

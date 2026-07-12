@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 /// Cooperative budget for admitting new futures from the source stream.
 ///
@@ -20,17 +20,32 @@ const BUFFERED_ADMISSION_BUDGET: usize = 1024;
 ///
 /// Without this cap, large in-flight buffers can monopolize one executor turn
 /// when every future is ready or repeatedly returns `Poll::Pending`.
+///
+/// A partial scan is only allowed to return a bare `Poll::Pending` once every
+/// in-flight future has been polled at least once with the current task's
+/// waker (tracked via a waker epoch). Until then the combinator self-wakes so
+/// unpolled futures cannot be stranded — but it must NOT self-wake merely
+/// because the buffer is larger than the budget, or an all-pending buffer
+/// turns into a permanent busy-poll loop.
 const BUFFERED_POLL_BUDGET: usize = 1024;
 
 struct BufferedEntry<Fut: Future> {
     fut: Fut,
     output: Option<Fut::Output>,
+    /// Waker epoch this entry was last polled under. Entries whose epoch
+    /// lags the combinator's current epoch have not registered the current
+    /// task waker and keep the self-wake loop alive until scanned.
+    seen_epoch: u64,
 }
 
 impl<Fut: Future> BufferedEntry<Fut> {
     #[inline]
-    fn new(fut: Fut) -> Self {
-        Self { fut, output: None }
+    fn new(fut: Fut, stale_epoch: u64) -> Self {
+        Self {
+            fut,
+            output: None,
+            seen_epoch: stale_epoch,
+        }
     }
 }
 
@@ -48,6 +63,11 @@ where
     limit: usize,
     done: bool,
     next_poll_index: usize,
+    /// Monotonic waker epoch. Incremented whenever the polling task's waker
+    /// changes so newly admitted / not-yet-scanned entries can be detected.
+    poll_epoch: u64,
+    /// Waker the current `poll_epoch` corresponds to.
+    epoch_waker: Option<Waker>,
 }
 
 impl<S> Buffered<S>
@@ -65,6 +85,25 @@ where
             limit,
             done: false,
             next_poll_index: 0,
+            poll_epoch: 0,
+            epoch_waker: None,
+        }
+    }
+
+    /// Refreshes the waker epoch when the polling task's waker changes.
+    ///
+    /// Returns the epoch that entries admitted *before* this poll should be
+    /// compared against: a fresh entry is stamped one below the current epoch
+    /// so it always reads as "not yet polled under the current waker" until it
+    /// is actually scanned.
+    #[inline]
+    fn refresh_epoch(&mut self, cx: &Context<'_>) {
+        match &self.epoch_waker {
+            Some(w) if w.will_wake(cx.waker()) => {}
+            _ => {
+                self.poll_epoch = self.poll_epoch.wrapping_add(1);
+                self.epoch_waker = Some(cx.waker().clone());
+            }
         }
     }
 
@@ -103,6 +142,11 @@ where
 
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.refresh_epoch(cx);
+        let epoch = self.poll_epoch;
+        // Fresh entries are stamped one epoch behind so they read as
+        // "not yet polled under the current waker" until the scan reaches them.
+        let stale = epoch.wrapping_sub(1);
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
         while !self.done && self.in_flight.len() < self.limit {
@@ -112,7 +156,7 @@ where
             }
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(fut)) => {
-                    self.in_flight.push_back(BufferedEntry::new(fut));
+                    self.in_flight.push_back(BufferedEntry::new(fut, stale));
                     admitted_this_poll += 1;
                 }
                 Poll::Ready(None) => {
@@ -144,6 +188,10 @@ where
                         if let Poll::Ready(output) = Pin::new(&mut entry.fut).poll(cx) {
                             entry.output = Some(output);
                         }
+                        // Mark as polled under the current waker whether it
+                        // completed or returned Pending: either way this
+                        // future has registered our waker.
+                        entry.seen_epoch = epoch;
                     }
                 }
                 index += 1;
@@ -152,7 +200,17 @@ where
                 }
             }
             self.next_poll_index = index;
-            if len > BUFFERED_POLL_BUDGET {
+            // Self-wake ONLY while unscanned pending entries remain (buffer
+            // larger than the per-poll scan budget). Once every pending future
+            // has been polled under the current waker, a bare Pending is safe:
+            // each future will wake us on its own progress. A blanket
+            // `len > BUFFERED_POLL_BUDGET` self-wake would busy-loop forever on
+            // an all-pending oversized buffer (br fresh-eyes: buffered-busy-poll).
+            if self
+                .in_flight
+                .iter()
+                .any(|e| e.output.is_none() && e.seen_epoch != epoch)
+            {
                 budget_exhausted = true;
             }
         }
@@ -200,9 +258,22 @@ where
     S::Item: Future,
 {
     stream: S,
-    in_flight: VecDeque<S::Item>,
+    in_flight: VecDeque<UnorderedEntry<S::Item>>,
     limit: usize,
     done: bool,
+    /// Monotonic waker epoch (see `Buffered::refresh_epoch`).
+    poll_epoch: u64,
+    /// Waker the current `poll_epoch` corresponds to.
+    epoch_waker: Option<Waker>,
+}
+
+/// A pending future plus the waker epoch it was last polled under, so an
+/// oversized `BufferUnordered` (limit > `BUFFERED_POLL_BUDGET`) can distinguish
+/// "not yet polled under the current waker" from "already registered" and
+/// avoid a permanent self-wake busy loop on an all-pending buffer.
+struct UnorderedEntry<Fut> {
+    fut: Fut,
+    seen_epoch: u64,
 }
 
 impl<S> fmt::Debug for Buffered<S>
@@ -247,6 +318,20 @@ where
             in_flight: VecDeque::with_capacity(limit),
             limit,
             done: false,
+            poll_epoch: 0,
+            epoch_waker: None,
+        }
+    }
+
+    /// Refreshes the waker epoch when the polling task's waker changes.
+    #[inline]
+    fn refresh_epoch(&mut self, cx: &Context<'_>) {
+        match &self.epoch_waker {
+            Some(w) if w.will_wake(cx.waker()) => {}
+            _ => {
+                self.poll_epoch = self.poll_epoch.wrapping_add(1);
+                self.epoch_waker = Some(cx.waker().clone());
+            }
         }
     }
 
@@ -285,6 +370,9 @@ where
 
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.refresh_epoch(cx);
+        let epoch = self.poll_epoch;
+        let stale = epoch.wrapping_sub(1);
         let mut budget_exhausted = false;
         let mut admitted_this_poll = 0usize;
         while !self.done && self.in_flight.len() < self.limit {
@@ -294,7 +382,10 @@ where
             }
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(fut)) => {
-                    self.in_flight.push_back(fut);
+                    self.in_flight.push_back(UnorderedEntry {
+                        fut,
+                        seen_epoch: stale,
+                    });
                     admitted_this_poll += 1;
                 }
                 Poll::Ready(None) => {
@@ -308,13 +399,22 @@ where
         let len = self.in_flight.len();
         let poll_budget = len.min(BUFFERED_POLL_BUDGET);
         for _ in 0..poll_budget {
-            let mut fut = self.in_flight.pop_front().expect("length checked");
-            match Pin::new(&mut fut).poll(cx) {
+            let mut entry = self.in_flight.pop_front().expect("length checked");
+            match Pin::new(&mut entry.fut).poll(cx) {
                 Poll::Ready(output) => return Poll::Ready(Some(output)),
-                Poll::Pending => self.in_flight.push_back(fut),
+                Poll::Pending => {
+                    // Registered our waker; stamp and rotate to the back.
+                    entry.seen_epoch = epoch;
+                    self.in_flight.push_back(entry);
+                }
             }
         }
-        if len > BUFFERED_POLL_BUDGET {
+        // Self-wake only while unscanned entries remain (buffer larger than the
+        // per-poll budget). Once every future has been polled under the current
+        // waker, a bare Pending is safe — the futures themselves will wake us.
+        // A blanket `len > BUFFERED_POLL_BUDGET` self-wake busy-loops forever on
+        // an all-pending oversized buffer (br fresh-eyes: buffered-busy-poll).
+        if self.in_flight.iter().any(|e| e.seen_epoch != epoch) {
             budget_exhausted = true;
         }
 

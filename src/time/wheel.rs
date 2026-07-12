@@ -596,24 +596,29 @@ impl TimerWheel {
             return min_deadline;
         }
 
+        // Take the minimum across ALL levels. Early-returning after the first
+        // level (or first occupied slot) that yields a candidate is unsound:
+        // levels are not deadline-ordered near cursor-wrap boundaries. A
+        // level-1 slot that has not cascaded yet can hold an entry whose
+        // deadline is EARLIER than a wrapped-around level-0 entry (e.g. at
+        // tick 200: level 1 slot 1 holds deadline-tick 300 awaiting the
+        // tick-256 cascade, while level 0 holds a wrapped entry at tick 400).
+        // Reporting the level-0 minimum would make the driver oversleep and
+        // fire the level-1 timer late. The occupied bitmap keeps this scan
+        // cheap: only set bits are visited.
         for level in &self.levels {
-            let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
-            let level_tick = now_nanos / level.resolution_ns;
-            let current_slot = (level_tick % (SLOTS_PER_LEVEL as u64)) as usize;
-
-            for i in 0..SLOTS_PER_LEVEL {
-                let slot = (current_slot + i) % SLOTS_PER_LEVEL;
-                if level.is_occupied(slot) {
+            for (word_idx, &word) in level.occupied.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let bit = word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    let slot = word_idx * 64 + bit;
                     for entry in &level.slots[slot] {
                         if !self.is_live(entry) {
                             continue;
                         }
                         min_deadline =
                             Some(min_deadline.map_or(entry.deadline, |c| c.min(entry.deadline)));
-                    }
-
-                    if min_deadline.is_some() {
-                        return min_deadline;
                     }
                 }
             }
@@ -1435,6 +1440,47 @@ mod tests {
             next
         );
         crate::test_complete!("next_deadline_ready_same_tick_returns_actual_deadline");
+    }
+
+    #[test]
+    fn next_deadline_sees_earlier_uncascaded_higher_level_entry() {
+        init_test("next_deadline_sees_earlier_uncascaded_higher_level_entry");
+        let mut wheel = TimerWheel::new();
+
+        // Timer A at 300ms while now=0: delta >= 256ms places it in level 1
+        // (slot 1), where it stays until the tick-256 cascade.
+        wheel.register(
+            Time::from_millis(300),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+
+        // Advance to 200ms — before the tick-256 cascade, so A is still in
+        // level 1 even though its deadline is now only 100ms away.
+        let wakers = wheel.collect_expired(Time::from_millis(200));
+        crate::assert_with_log!(wakers.is_empty(), "nothing due at 200ms", 0, wakers.len());
+
+        // Timer B at 400ms: delta = 200ms < 256ms places it in level 0 via a
+        // wrapped slot (tick 400 % 256 = slot 144, behind the cursor at 200).
+        wheel.register(
+            Time::from_millis(400),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+
+        // The true next deadline is A at 300ms (level 1), not B at 400ms
+        // (level 0). A level-0-first early return would report 400ms and the
+        // driver would oversleep, firing A ~100ms late.
+        let next = wheel.next_deadline();
+        crate::assert_with_log!(
+            next == Some(Time::from_millis(300)),
+            "uncascaded level-1 entry earlier than wrapped level-0 entry",
+            Some(Time::from_millis(300)),
+            next
+        );
+
+        // And the wheel really fires A at 300ms.
+        let wakers = wheel.collect_expired(Time::from_millis(300));
+        crate::assert_with_log!(wakers.len() == 1, "A fires at 300ms", 1, wakers.len());
+        crate::test_complete!("next_deadline_sees_earlier_uncascaded_higher_level_entry");
     }
 
     #[test]

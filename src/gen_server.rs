@@ -1676,6 +1676,15 @@ async fn run_gen_server_loop<S: GenServer>(
 
     cell.state.store(ActorState::Stopping);
 
+    // Determine abort status BEFORE masking. The mask below defers
+    // cancellation so on_stop can run deterministically, but that means
+    // `cx.checkpoint()` inside the mask always returns Ok — reading abort
+    // status after entering the mask would make `is_aborted` permanently
+    // false and run user `handle_cast`/`handle_info` for every queued message
+    // even on an aborted server. `actor.rs` computes this before masking for
+    // exactly this reason; keep the two in sync.
+    let is_aborted = cx.checkpoint().is_err();
+
     // Phase 3+4: Drain + stop hook.
     //
     // Drain+on_stop are cleanup phases. We:
@@ -1687,8 +1696,6 @@ async fn run_gen_server_loop<S: GenServer>(
     // Phase 3: Drain remaining messages.
     // Calls during drain: reply with error (caller should not depend on drain).
     // Casts during drain: process normally if gracefully stopped, skip if aborted.
-    let is_aborted = cx.checkpoint().is_err();
-
     cell.mailbox.close();
 
     let mut drained: u64 = 0;

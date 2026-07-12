@@ -347,7 +347,10 @@ pub struct CertificateVerdict {
     /// ```
     ///
     /// where `Vₜ` is the predictable quadratic variation and `b` is the
-    /// max step size. Always `≤ azuma_bound`.
+    /// max step size. Strictly tighter than `azuma_bound` when the empirical
+    /// variance is below `c²`; in the worst case (`Vₜ = t·c²`) it is slightly
+    /// looser than Azuma because of the additive `bλ/3` Bernstein term, so it
+    /// is not universally `≤ azuma_bound`.
     pub freedman_bound: f64,
 
     /// Current drain phase classification.
@@ -576,13 +579,24 @@ impl ProgressCertificate {
 
     /// Computes the Azuma–Hoeffding tail bound.
     ///
-    /// Given `t` steps with mean progress `mu` per step and max step
-    /// size `c`, the probability that the potential exceeds
+    /// Given `t` steps whose martingale differences are bounded by
+    /// `|Δᵢ| ≤ c` (`step_bound` is that two-sided max), with mean progress
+    /// `mu` per step, the probability that the potential exceeds
     /// `V₀ - t·mu + lambda` is bounded by:
     ///
     /// ```text
-    /// P(excess ≥ lambda) ≤ exp(-2·lambda² / (t·c²))
+    /// P(excess ≥ lambda) ≤ exp(-lambda² / (2·t·c²))
     /// ```
+    ///
+    /// This is the standard Azuma–Hoeffding form for bounded differences:
+    /// with `Σ cᵢ² = t·c²`, `P(Sₜ ≥ λ) ≤ exp(-λ² / (2·Σ cᵢ²))`. Equivalently,
+    /// via Hoeffding on a per-step range of `2c`,
+    /// `exp(-2λ² / (t·(2c)²)) = exp(-λ² / (2·t·c²))`.
+    ///
+    /// The earlier `exp(-2λ² / (t·c²))` was a factor-of-4 error in the
+    /// exponent (it reported the fourth power of the true bound), which
+    /// understated the non-quiescence probability and overstated convergence
+    /// confidence — an anti-conservative certificate.
     ///
     /// We compute this with `lambda` chosen such that `V₀ - t·mu + lambda = 0`
     /// (the critical threshold for quiescence), giving the probability that
@@ -606,8 +620,8 @@ impl ProgressCertificate {
         let expected_remaining = t_f.mul_add(-mean_credit, initial);
         let lambda = (-expected_remaining).max(0.0);
 
-        // Azuma–Hoeffding: P(Sₜ ≥ lambda) ≤ exp(-2·lambda² / (t·c²))
-        let exponent = -2.0 * lambda * lambda / (t_f * step_bound * step_bound);
+        // Azuma–Hoeffding: P(Sₜ ≥ lambda) ≤ exp(-lambda² / (2·t·c²))
+        let exponent = -lambda * lambda / (2.0 * t_f * step_bound * step_bound);
 
         // Protect against numerical underflow: if exponent is extremely negative,
         // saturate to 0.0 rather than relying on IEEE underflow behavior
@@ -1713,6 +1727,34 @@ mod tests {
             verdict.azuma_bound < 0.01,
             "azuma bound should be small with accumulated credit > initial potential, got {:.6}",
             verdict.azuma_bound,
+        );
+    }
+
+    #[test]
+    fn azuma_bound_matches_standard_hoeffding_formula() {
+        // Pins the corrected Azuma exponent exp(-λ²/(2·t·c²)). Regression
+        // guard against reintroducing the factor-of-4 (fourth-power) error.
+        let config = ProgressConfig {
+            max_step_bound: 10.0,
+            min_observations: 3,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        // initial = 100; then 200 net-down oscillations of ±10.
+        // total_deltas t = 400, mean_credit = 5, λ = t·mean − V₀ = 1900,
+        // c = 10 → exponent = −1900² / (2·400·100) = −45.125.
+        cert.observe(100.0);
+        for _ in 0..200 {
+            cert.observe(110.0);
+            cert.observe(100.0);
+        }
+        let verdict = cert.verdict();
+        let expected = (-1900.0_f64 * 1900.0 / (2.0 * 400.0 * 100.0)).exp();
+        assert!(
+            (verdict.azuma_bound - expected).abs() <= 1e-12 * expected.max(1e-300),
+            "azuma_bound {} should equal standard Hoeffding {expected}",
+            verdict.azuma_bound
         );
     }
 

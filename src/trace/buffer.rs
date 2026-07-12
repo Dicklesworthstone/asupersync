@@ -11,9 +11,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// A ring buffer for storing trace events.
 ///
 /// When the buffer is full, old events are overwritten.
+///
+/// The backing storage grows lazily: `events` is empty on construction and
+/// only grows (by appending) up to `capacity` as events are actually pushed.
+/// Once it reaches `capacity` the ring wraps in place. This avoids eagerly
+/// allocating and zero-initializing `capacity` slots for a buffer that may
+/// never record anything — a real cost at the default 4096-slot capacity,
+/// since every `RuntimeState` (including the thousands built by lab-runtime
+/// tests) constructs one whether or not tracing is enabled. `capacity` is the
+/// invariant modulus for all ring arithmetic; `events.len()` is only the
+/// current physical high-water mark during the growth phase, during which
+/// `head == 0` and `len == events.len()` always hold.
 #[derive(Debug)]
 pub struct TraceBuffer {
     events: Vec<Option<TraceEvent>>,
+    capacity: usize,
     head: usize,
     len: usize,
 }
@@ -24,7 +36,8 @@ impl TraceBuffer {
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         Self {
-            events: (0..capacity).map(|_| None).collect(),
+            events: Vec::new(),
+            capacity,
             head: 0,
             len: 0,
         }
@@ -33,7 +46,7 @@ impl TraceBuffer {
     /// Returns the capacity of the buffer.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.events.len()
+        self.capacity
     }
 
     /// Returns the number of events in the buffer.
@@ -51,37 +64,47 @@ impl TraceBuffer {
     /// Returns true if the buffer is full.
     #[must_use]
     pub fn is_full(&self) -> bool {
-        self.len == self.events.len()
+        self.len == self.capacity
     }
 
     /// Pushes an event into the buffer.
     ///
     /// If the buffer is full, the oldest event is overwritten.
     pub fn push(&mut self, event: TraceEvent) {
-        let idx = (self.head + self.len) % self.events.len();
+        if self.events.len() < self.capacity {
+            // Growth phase: the physical ring has not yet reached `capacity`,
+            // so it has never wrapped. `head` is therefore still 0 and the
+            // next logical slot is exactly the back of the Vec — append it
+            // instead of pre-reserving all `capacity` slots up front.
+            debug_assert_eq!(self.head, 0);
+            debug_assert_eq!(self.len, self.events.len());
+            self.events.push(Some(event));
+            self.len += 1;
+            return;
+        }
+
+        let idx = (self.head + self.len) % self.capacity;
         self.events[idx] = Some(event);
 
-        if self.len < self.events.len() {
+        if self.len < self.capacity {
             self.len += 1;
         } else {
             // Buffer is full, advance head
-            self.head = (self.head + 1) % self.events.len();
+            self.head = (self.head + 1) % self.capacity;
         }
     }
 
     /// Returns an iterator over events in order (oldest to newest).
     pub fn iter(&self) -> impl Iterator<Item = &TraceEvent> {
         (0..self.len).filter_map(move |i| {
-            let idx = (self.head + i) % self.events.len();
+            let idx = (self.head + i) % self.capacity;
             self.events[idx].as_ref()
         })
     }
 
     /// Clears all events from the buffer.
     pub fn clear(&mut self) {
-        for event in &mut self.events {
-            *event = None;
-        }
+        self.events.clear();
         self.head = 0;
         self.len = 0;
     }
@@ -92,7 +115,7 @@ impl TraceBuffer {
         if self.len == 0 {
             None
         } else {
-            let idx = (self.head + self.len - 1) % self.events.len();
+            let idx = (self.head + self.len - 1) % self.capacity;
             self.events[idx].as_ref()
         }
     }
@@ -306,6 +329,36 @@ mod tests {
     fn trace_buffer_last_empty() {
         let buf = TraceBuffer::new(4);
         assert!(buf.last().is_none());
+    }
+
+    #[test]
+    fn trace_buffer_regrows_and_wraps_after_clear() {
+        // Exercises the lazy-growth re-use path: fill to capacity (physical
+        // Vec fully grown + wrapped), clear (Vec::clear resets physical len
+        // but keeps allocation), then push past capacity again so the ring
+        // must re-grow from empty and wrap a second time.
+        let mut buf = TraceBuffer::new(3);
+        for seq in 1..=5 {
+            buf.push(make_event(seq)); // ends holding 3,4,5
+        }
+        assert_eq!(buf.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4, 5]);
+        assert!(buf.is_full());
+
+        buf.clear();
+        assert_eq!(buf.len(), 0);
+        assert!(!buf.is_full());
+        assert_eq!(buf.capacity(), 3);
+
+        // Re-grow from empty and wrap again.
+        for seq in 10..=14 {
+            buf.push(make_event(seq)); // ends holding 12,13,14
+        }
+        assert_eq!(
+            buf.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![12, 13, 14]
+        );
+        assert_eq!(buf.last().unwrap().seq, 14);
+        assert!(buf.is_full());
     }
 
     #[test]

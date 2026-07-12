@@ -1764,10 +1764,19 @@ fn split_conformal_lower_next(values: &[f64], alpha: f64) -> Option<f64> {
     }
     residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let m = residuals.len();
-    let rank = (((m as f64 + 1.0) * (1.0 - alpha)).ceil() as usize)
-        .saturating_sub(1)
-        .min(m - 1);
-    let q = residuals[rank];
+    // Split-conformal quantile rank is the 1-indexed order statistic
+    // `ceil((m + 1)(1 - alpha))`. When that exceeds `m` (which happens for
+    // every small window, e.g. m in 4..=9 at alpha = 0.1), NO finite residual
+    // achieves (1 - alpha) coverage — the correct conformal quantile is +∞, so
+    // there is no valid finite lower bound. Clamping to the max residual
+    // (`.min(m - 1)`) instead SILENTLY UNDERSTATES the quantile, producing a
+    // too-tight lower bound that claims (1 - alpha) coverage while attaining at
+    // most m/(m + 1). Return None in that regime, matching `lab/conformal.rs`.
+    let rank_1_indexed = ((m as f64 + 1.0) * (1.0 - alpha)).ceil() as usize;
+    if rank_1_indexed > m {
+        return None;
+    }
+    let q = residuals[rank_1_indexed - 1];
     Some(values[values.len() - 1] - q)
 }
 

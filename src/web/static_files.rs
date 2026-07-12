@@ -54,13 +54,33 @@ enum RangeError {
     NotSatisfiable,
 }
 
+/// Maximum number of comma-separated range specs accepted in one `Range`
+/// header. Without a cap, `Range: bytes=0-,0-,0-,…` (thousands of whole-file
+/// prefix ranges packed into a header) forces `num_specs × file_size` bytes to
+/// be buffered into one multipart body — the classic multi-range
+/// memory-amplification DoS (CVE-2011-3192, "Apache Killer"). Real clients ask
+/// for a handful of ranges; a request exceeding this cap is rejected.
+const MAX_RANGE_SPECS: usize = 64;
+
 /// Parse Range header and return satisfiable byte ranges.
 /// RFC 9110 §14.1.2 Range specification.
+///
+/// Overlapping or adjacent satisfiable ranges are coalesced (RFC 9110 §14.1.2
+/// permits, and §14.2 recommends, coalescing to bound the response), which
+/// guarantees the total emitted bytes never exceed `file_size` regardless of
+/// how many duplicate/overlapping specs the client sends.
 fn parse_ranges(range_header: &str, file_size: u64) -> Result<Vec<ByteRange>, RangeError> {
     let range_header = range_header.trim();
     let Some(ranges_str) = range_header.strip_prefix("bytes=") else {
         return Err(RangeError::InvalidSyntax);
     };
+
+    // Bound parse work and the eventual multipart part count before doing any
+    // per-spec work. `bytes=` followed by N commas is N+1 specs.
+    if ranges_str.bytes().filter(|&b| b == b',').count() >= MAX_RANGE_SPECS {
+        return Err(RangeError::NotSatisfiable);
+    }
+
     let mut ranges = Vec::new();
 
     for range_spec in ranges_str.split(',') {
@@ -125,10 +145,27 @@ fn parse_ranges(range_header: &str, file_size: u64) -> Result<Vec<ByteRange>, Ra
     }
 
     if ranges.is_empty() {
-        Err(RangeError::NotSatisfiable)
-    } else {
-        Ok(ranges)
+        return Err(RangeError::NotSatisfiable);
     }
+
+    // Coalesce overlapping/adjacent ranges so the emitted body is bounded by
+    // `file_size`. Sorting by start makes a single linear merge sufficient.
+    // This defeats amplification via duplicated/overlapping specs (e.g. many
+    // `0-`) which would otherwise each re-emit the whole file.
+    ranges.sort_by_key(|r| (r.start, r.end));
+    let mut coalesced: Vec<ByteRange> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match coalesced.last_mut() {
+            // Overlapping or directly adjacent (`prev.end + 1 == range.start`)
+            // ranges merge into one contiguous slice.
+            Some(prev) if range.start <= prev.end.saturating_add(1) => {
+                prev.end = prev.end.max(range.end);
+            }
+            _ => coalesced.push(range),
+        }
+    }
+
+    Ok(coalesced)
 }
 
 // ─── StaticFiles ────────────────────────────────────────────────────────────
@@ -359,6 +396,12 @@ impl StaticFiles {
         if file.read_to_end(&mut file_content).is_err() {
             return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
         }
+        // Range math and the reported total MUST use the number of bytes we
+        // actually read, not the earlier `metadata.len()`. If the file was
+        // truncated between fstat and read (concurrent redeploy/truncate), the
+        // stale `file_size` would make `end = file_size - 1` index past
+        // `file_content`, panicking the connection task on the range slice.
+        let file_size = file_content.len() as u64;
         let etag = generate_etag(&file_content);
 
         if let Some(client_etag) = if_none_match {
@@ -775,6 +818,48 @@ mod tests {
         fs::write(dir.path().join("sub/page.html"), "<h1>Sub</h1>").unwrap();
         fs::write(dir.path().join("sub/index.html"), "<h1>Index</h1>").unwrap();
         dir
+    }
+
+    // ================================================================
+    // Range parsing — amplification defense (CVE-2011-3192 class)
+    // ================================================================
+
+    #[test]
+    fn parse_ranges_rejects_excessive_specs() {
+        // ~thousands of `0-` specs would buffer num_specs × file_size bytes.
+        let header = format!("bytes={}", "0-,".repeat(5000));
+        let result = parse_ranges(&header, 1_000_000);
+        assert!(
+            matches!(result, Err(RangeError::NotSatisfiable)),
+            "excessive range specs must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn parse_ranges_coalesces_overlapping_specs() {
+        // Many whole-file prefix ranges must collapse to a single range so the
+        // emitted body is bounded by file_size, not num_specs × file_size.
+        let header = format!("bytes={}", "0-,".repeat(50));
+        let ranges = parse_ranges(&header, 1000).expect("under the spec cap");
+        assert_eq!(ranges.len(), 1, "overlapping ranges coalesce to one");
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(ranges[0].end, 999);
+    }
+
+    #[test]
+    fn parse_ranges_merges_adjacent_but_keeps_disjoint() {
+        // 0-9 and 10-19 are adjacent → merge; 100-109 is disjoint → separate.
+        let ranges = parse_ranges("bytes=0-9,10-19,100-109", 1000).expect("valid ranges");
+        assert_eq!(ranges.len(), 2, "adjacent merge, disjoint preserved");
+        assert_eq!((ranges[0].start, ranges[0].end), (0, 19));
+        assert_eq!((ranges[1].start, ranges[1].end), (100, 109));
+    }
+
+    #[test]
+    fn parse_ranges_single_range_unchanged() {
+        let ranges = parse_ranges("bytes=0-499", 1000).expect("valid range");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!((ranges[0].start, ranges[0].end), (0, 499));
     }
 
     // ================================================================

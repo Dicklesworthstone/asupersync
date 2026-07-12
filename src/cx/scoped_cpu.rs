@@ -245,7 +245,21 @@ impl<Caps: Send + Sync + 'static> Cx<Caps> {
                 spawned: Arc::clone(&spawned),
                 cap: worker_cap,
             };
-            f(&surface)
+            // If the orchestrator closure itself panics, raise the latch
+            // BEFORE the implicit `std::thread::scope` join. Otherwise a child
+            // still looping until its next `CpuCx::checkpoint()` (the
+            // documented worker pattern) never observes cancellation, so the
+            // join — and therefore this thread — blocks forever. Children's own
+            // panics already raise the latch in `spawn()`; this closes the
+            // remaining orchestrator-panic hang. The payload is re-raised so
+            // the caller still sees the orchestrator's panic unchanged.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&surface))) {
+                Ok(value) => value,
+                Err(payload) => {
+                    latch.store(true, Ordering::Release);
+                    std::panic::resume_unwind(payload);
+                }
+            }
             // std::thread::scope joins every child HERE, before
             // returning — the drain guarantee.
         });
@@ -393,5 +407,42 @@ mod tests {
             .expect_err("zero poll quota refuses at entry");
         assert!(matches!(err, ScopedCpuError::Cancelled(_)));
         assert_eq!(spawned.load(Ordering::SeqCst), 0, "no work started");
+    }
+
+    /// A panic in the orchestrator closure must raise the scope latch so a
+    /// child looping until its next checkpoint drains instead of blocking the
+    /// implicit `std::thread::scope` join forever. Without the latch-on-panic,
+    /// this test would hang (and be caught as a CI timeout).
+    #[test]
+    fn orchestrator_panic_drains_looping_child_and_propagates() {
+        let cx = Cx::for_testing();
+        let child_saw_cancel = Arc::new(AtomicBool::new(false));
+        let child_saw_cancel_for_closure = Arc::clone(&child_saw_cancel);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cx.scoped_cpu(2, |scope| {
+                let flag = Arc::clone(&child_saw_cancel_for_closure);
+                scope
+                    .spawn(move |child| {
+                        // Documented worker pattern: loop until checkpoint errs.
+                        while child.checkpoint().is_ok() {
+                            std::hint::spin_loop();
+                        }
+                        flag.store(true, Ordering::SeqCst);
+                    })
+                    .expect("first child fits under cap");
+                // Orchestrator panics after spawning the looping child.
+                panic!("orchestrator boom");
+            });
+        }));
+
+        assert!(
+            outcome.is_err(),
+            "orchestrator panic must propagate to the caller"
+        );
+        assert!(
+            child_saw_cancel.load(Ordering::SeqCst),
+            "looping child must observe the latch and drain (no hang)"
+        );
     }
 }
