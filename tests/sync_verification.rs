@@ -11,7 +11,9 @@ use asupersync::lab::{
     SeedPlan, TerminalOutcome, assert_dual_run_passes, capture_region_close, run_live_adapter,
 };
 use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
-use asupersync::sync::{AcquireError, GenericPool, Mutex, Pool, PoolConfig, Semaphore};
+use asupersync::sync::{
+    AcquireError, GenericPool, Mutex, OwnedMutexGuard, Pool, PoolConfig, Semaphore,
+};
 use asupersync::types::Budget;
 use std::future::Future;
 use std::pin::Pin;
@@ -212,7 +214,7 @@ fn live_mutex_observation() -> MutexObservation {
     runtime.block_on(runtime.handle().spawn(async {
         let handle = Runtime::current_handle().expect("runtime handle inside live mutex pilot");
         let mutex = Arc::new(Mutex::new(0usize));
-        let initial_guard = mutex.try_lock().expect("seeded mutex lock");
+        let initial_guard = mutex.try_lock_owned().expect("seeded mutex lock");
         let lock_acquisitions = Arc::new(AtomicUsize::new(0));
         let tasks_completed = Arc::new(AtomicUsize::new(0));
         let inflight = Arc::new(AtomicUsize::new(0));
@@ -227,7 +229,9 @@ fn live_mutex_observation() -> MutexObservation {
             let max_inflight = Arc::clone(&max_inflight);
             joins.push(handle.spawn(async move {
                 let cx = Cx::for_testing();
-                let mut guard = mutex.lock(&cx).await.expect("mutex waiter acquires lock");
+                let mut guard = OwnedMutexGuard::lock(mutex, &cx)
+                    .await
+                    .expect("mutex waiter acquires lock");
                 let current = inflight.fetch_add(1, Ordering::SeqCst) + 1;
                 max_inflight.fetch_max(current, Ordering::SeqCst);
                 *guard += 1;
@@ -285,7 +289,9 @@ fn lab_mutex_observation(seed: u64) -> MutexObservation {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx = Cx::for_testing();
-                let mut guard = mutex.lock(&cx).await.expect("mutex waiter acquires lock");
+                let mut guard = OwnedMutexGuard::lock(mutex, &cx)
+                    .await
+                    .expect("mutex waiter acquires lock");
                 let current = inflight.fetch_add(1, Ordering::SeqCst) + 1;
                 max_inflight.fetch_max(current, Ordering::SeqCst);
                 *guard += 1;

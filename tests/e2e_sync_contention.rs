@@ -11,7 +11,7 @@ mod common;
 
 use asupersync::cx::Cx;
 use asupersync::runtime::yield_now;
-use asupersync::sync::{Mutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
+use asupersync::sync::{Mutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 use common::e2e_harness::E2eLabHarness;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -147,7 +147,7 @@ fn e2e_sync_cancel_mid_lock() {
         let done = completed_holder.clone();
         h.spawn(root, async move {
             let Some(cx) = Cx::current() else { return };
-            let mut guard = m.lock(&cx).await.expect("holder lock");
+            let mut guard = OwnedMutexGuard::lock(m, &cx).await.expect("holder lock");
             *guard += 1;
             // Hold for several yields
             for _ in 0..5 {

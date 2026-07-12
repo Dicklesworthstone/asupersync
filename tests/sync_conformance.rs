@@ -5,7 +5,7 @@
 
 use asupersync::{
     cx::Cx,
-    sync::{AcquireError, Barrier, BarrierWaitError, LockError, Mutex, Semaphore},
+    sync::{AcquireError, Barrier, BarrierWaitError, LockError, Mutex, OwnedMutexGuard, Semaphore},
     types::{Budget, CancelKind, RegionId, TaskId, Time},
     util::ArenaIndex,
 };
@@ -121,7 +121,7 @@ mod conformance_tests {
         let barrier_clone = barrier.clone();
         tokio::spawn(async move {
             let cx = test_cx();
-            let _guard = mutex_clone.lock(&cx).await.unwrap();
+            let _guard = OwnedMutexGuard::lock(mutex_clone, &cx).await.unwrap();
 
             // Signal that lock is held
             let _ = barrier_clone.wait(&cx).await;
@@ -161,7 +161,7 @@ mod conformance_tests {
         let barrier_clone = barrier.clone();
         tokio::spawn(async move {
             let cx = test_cx();
-            let _guard = mutex_clone.lock(&cx).await.unwrap();
+            let _guard = OwnedMutexGuard::lock(mutex_clone, &cx).await.unwrap();
             let _ = barrier_clone.wait(&cx).await;
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         });

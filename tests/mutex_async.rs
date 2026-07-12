@@ -4,7 +4,7 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::sync::Mutex;
+use asupersync::sync::{Mutex, OwnedMutexGuard};
 use asupersync::types::Budget;
 use common::*;
 use std::future::Future;
@@ -60,7 +60,7 @@ fn test_mutex_contention_async() {
         .create_task(region, Budget::INFINITE, async move {
             // Now using await!
             let cx: asupersync::Cx = asupersync::Cx::for_testing();
-            let _guard = m1.lock(&cx).await.unwrap();
+            let _guard = OwnedMutexGuard::lock(m1, &cx).await.unwrap();
             // Hold lock and yield
             yield_now().await;
             // _guard dropped here

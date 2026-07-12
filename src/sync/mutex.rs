@@ -1538,6 +1538,7 @@ mod tests {
         let mut runtime = LabRuntimeTarget::create_runtime(config);
         let mutex = Arc::new(Mutex::new(0u32));
         let checkpoints = Arc::new(StdMutex::new(Vec::<Value>::new()));
+        let waiter_pending = Arc::new(AtomicBool::new(false));
 
         let (holder_value, waiter_value, final_value, checkpoints) =
             LabRuntimeTarget::block_on(&mut runtime, async move {
@@ -1548,10 +1549,13 @@ mod tests {
                 let holder_mutex = Arc::clone(&mutex);
                 let holder_checkpoints = Arc::clone(&checkpoints);
                 let holder_task_cx = holder_spawn_cx.clone();
+                let holder_waiter_pending = Arc::clone(&waiter_pending);
                 let holder =
                     LabRuntimeTarget::spawn(&holder_spawn_cx, Budget::INFINITE, async move {
-                        let mut guard = holder_mutex
-                            .lock(&holder_task_cx)
+                        // This task intentionally holds the lock across yields. Use
+                        // the owned guard: the borrowed guard is !Send because its
+                        // drop path maintains OS-thread-local lock-order state.
+                        let mut guard = OwnedMutexGuard::lock(holder_mutex, &holder_task_cx)
                             .await
                             .expect("holder lock should succeed");
                         *guard = 1;
@@ -1562,8 +1566,11 @@ mod tests {
                         tracing::info!(event = %acquired, "mutex_lab_checkpoint");
                         holder_checkpoints.lock().unwrap().push(acquired);
 
-                        yield_now().await;
-                        yield_now().await;
+                        // Wait until the waiter has actually polled the lock to
+                        // Pending. The step bound supplies deterministic liveness.
+                        while !holder_waiter_pending.load(Ordering::Acquire) {
+                            yield_now().await;
+                        }
 
                         let released = serde_json::json!({
                             "phase": "holder_releasing",
@@ -1579,6 +1586,7 @@ mod tests {
                 let waiter_mutex = Arc::clone(&mutex);
                 let waiter_checkpoints = Arc::clone(&checkpoints);
                 let waiter_task_cx = waiter_spawn_cx.clone();
+                let waiter_pending = Arc::clone(&waiter_pending);
                 let waiter =
                     LabRuntimeTarget::spawn(&waiter_spawn_cx, Budget::INFINITE, async move {
                         let waiting = serde_json::json!({
@@ -1587,8 +1595,15 @@ mod tests {
                         tracing::info!(event = %waiting, "mutex_lab_checkpoint");
                         waiter_checkpoints.lock().unwrap().push(waiting);
 
-                        let mut guard = waiter_mutex
-                            .lock(&waiter_task_cx)
+                        let mut lock = std::pin::pin!(waiter_mutex.lock(&waiter_task_cx));
+                        let mut guard =
+                            std::future::poll_fn(|context| match lock.as_mut().poll(context) {
+                                Poll::Ready(result) => Poll::Ready(result),
+                                Poll::Pending => {
+                                    waiter_pending.store(true, Ordering::Release);
+                                    Poll::Pending
+                                }
+                            })
                             .await
                             .expect("waiter lock should succeed");
                         let observed = *guard;

@@ -21,7 +21,7 @@ mod common;
 use asupersync::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::sync::{
-    Barrier, LockError, Mutex, Notify, OnceCell, RwLock, RwLockError, Semaphore,
+    Barrier, LockError, Mutex, Notify, OnceCell, OwnedMutexGuard, RwLock, RwLockError, Semaphore,
 };
 use asupersync::types::{Budget, CancelReason};
 use common::*;
@@ -119,7 +119,9 @@ fn e2e_sync_001_mutex_fair_queuing() {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx: Cx = Cx::for_testing();
-                let mut guard = m.lock(&cx).await.expect("lock should succeed");
+                let mut guard = OwnedMutexGuard::lock(m, &cx)
+                    .await
+                    .expect("lock should succeed");
                 guard.push(i);
                 // Yield while holding lock to allow others to queue
                 yield_now().await;
@@ -919,7 +921,9 @@ fn e2e_sync_100_stress_mixed_primitives() {
                     let _permit = s.acquire(&cx, 1).await.expect("acquire should succeed");
 
                     // Acquire mutex
-                    let mut guard = m.lock(&cx).await.expect("lock should succeed");
+                    let mut guard = OwnedMutexGuard::lock(Arc::clone(&m), &cx)
+                        .await
+                        .expect("lock should succeed");
                     *guard += 1;
 
                     yield_now().await;
@@ -1072,7 +1076,9 @@ fn e2e_sync_300_no_deadlock_proper_ordering() {
                 let cx: Cx = Cx::for_testing();
 
                 // Always acquire A first, then B
-                let _guard_a = ma.lock(&cx).await.expect("lock A should succeed");
+                let _guard_a = OwnedMutexGuard::lock(ma, &cx)
+                    .await
+                    .expect("lock A should succeed");
                 yield_now().await;
                 let _guard_b = mb.lock(&cx).await.expect("lock B should succeed");
 

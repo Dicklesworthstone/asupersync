@@ -5,7 +5,7 @@
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
-use asupersync::sync::{Mutex, RwLock, TryLockError};
+use asupersync::sync::{Mutex, OwnedMutexGuard, RwLock, TryLockError};
 use asupersync::types::Budget;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -29,7 +29,9 @@ fn mutex_handoff_order(seed: u64, try_lock_noise: usize) -> Vec<usize> {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let cx = Cx::for_testing();
-                let mut guard = mutex.lock(&cx).await.expect("mutex waiter acquires");
+                let mut guard = OwnedMutexGuard::lock(mutex, &cx)
+                    .await
+                    .expect("mutex waiter acquires");
                 acquisition_order
                     .lock()
                     .expect("order lock")
