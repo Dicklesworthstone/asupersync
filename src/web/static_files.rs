@@ -93,6 +93,14 @@ fn parse_ranges(range_header: &str, file_size: u64) -> Result<Vec<ByteRange>, Ra
     for range_spec in ranges_str.split(',') {
         let range_spec = range_spec.trim();
 
+        // Skip empty elements (from `,,` or a leading/trailing comma) rather
+        // than rejecting the whole header — RFC 7230 §7's legacy list rule says
+        // empty list elements do not contribute and must be ignored. A lenient
+        // client sending `bytes=0-100,` should still get its range.
+        if range_spec.is_empty() {
+            continue;
+        }
+
         if let Some((start_str, end_str)) = range_spec.split_once('-') {
             if start_str.is_empty() && end_str.is_empty() {
                 return Err(RangeError::InvalidSyntax);
@@ -876,6 +884,15 @@ mod tests {
         let ranges = parse_ranges("bytes=0-499", 1000).expect("valid range");
         assert_eq!(ranges.len(), 1);
         assert_eq!((ranges[0].start, ranges[0].end), (0, 499));
+    }
+
+    #[test]
+    fn parse_ranges_tolerates_empty_specs() {
+        // Trailing / doubled commas produce empty elements which RFC 7230 §7
+        // says to ignore, not reject.
+        let ranges = parse_ranges("bytes=0-99,,100-199,", 1000).expect("empty specs ignored");
+        assert_eq!(ranges.len(), 1, "adjacent ranges coalesce; empties ignored");
+        assert_eq!((ranges[0].start, ranges[0].end), (0, 199));
     }
 
     // ================================================================

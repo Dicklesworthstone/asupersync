@@ -65,7 +65,7 @@ expression: certificate_snapshot(&cert)
     "estimated_remaining_steps": "0.000000",
     "confidence_bound": "1.000000",
     "stall_detected": false,
-    "azuma_bound": "0.991011",
+    "azuma_bound": "0.997745",
     "total_steps": 8,
     "current_potential": "0.000000",
     "initial_potential": "150.000000",
@@ -96,16 +96,16 @@ expression: certificate_snapshot(&cert)
       {
         "step": 7,
         "potential": "0.000000",
-        "bound": "0.991011",
-        "description": "total progress 150.0000 over 7 steps, mean credit 22.5714/step, Azuma tail P ≤ 0.991011"
+        "bound": "0.997745",
+        "description": "total progress 150.0000 over 7 steps, mean credit 22.5714/step, Azuma tail P ≤ 0.997745"
       },
       {
         "step": 7,
         "potential": "0.000000",
         "bound": "0.982886",
-        "description": "Freedman bound P ≤ 0.982886 (0.8% tighter than Azuma)"
+        "description": "Freedman bound P ≤ 0.982886 (1.5% tighter than Azuma)"
       }
     ]
   },
-  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              8\nV(Σ₀):              150.0000\nV(Σₜ):              0.0000\nMean credit/step:   22.5714\nMax |Δ|:            40.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        0.991011\nFreedman bound:     0.982886\nDelta variance:     247.673469\nEst. remaining:     0.0 steps\nEvidence (5 entries):\n  step=7: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=7: V=0.0000, bound=0.142857 — 1 monotonicity violations out of 7 steps (rate: 0.1429)\n  step=7: V=0.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=7: V=0.0000, bound=0.991011 — total progress 150.0000 over 7 steps, mean credit 22.5714/step, Azuma tail P ≤ 0.991011\n  step=7: V=0.0000, bound=0.982886 — Freedman bound P ≤ 0.982886 (0.8% tighter than Azuma)\n"
+  "verdict_display": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              8\nV(Σ₀):              150.0000\nV(Σₜ):              0.0000\nMean credit/step:   22.5714\nMax |Δ|:            40.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        0.997745\nFreedman bound:     0.982886\nDelta variance:     247.673469\nEst. remaining:     0.0 steps\nEvidence (5 entries):\n  step=7: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=7: V=0.0000, bound=0.142857 — 1 monotonicity violations out of 7 steps (rate: 0.1429)\n  step=7: V=0.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=7: V=0.0000, bound=0.997745 — total progress 150.0000 over 7 steps, mean credit 22.5714/step, Azuma tail P ≤ 0.997745\n  step=7: V=0.0000, bound=0.982886 — Freedman bound P ≤ 0.982886 (1.5% tighter than Azuma)\n"
 }
