@@ -3475,6 +3475,18 @@ impl RedisPubSub {
         let items = match value {
             RespValue::Array(Some(items)) => items,
             RespValue::Push(items) => items,
+            // RESP3 replies to PING on a subscribed connection with a top-level
+            // simple string `+PONG` (argument-less) or a bulk string echoing
+            // the argument — NOT the RESP2 `["pong", payload]` array. Accept
+            // both here: otherwise a liveness `ping()` hits the error arm and
+            // `PubSubControlGuard::drop` poisons and shuts down the very
+            // connection it was checking (the client always negotiates HELLO 3).
+            RespValue::SimpleString(ref s) if s.eq_ignore_ascii_case("pong") => {
+                return Ok(PubSubEvent::Pong(None));
+            }
+            RespValue::BulkString(Some(payload)) => {
+                return Ok(PubSubEvent::Pong(Some(payload)));
+            }
             other => {
                 return Err(RedisError::Protocol(format!(
                     "pubsub expected array or push event, got {other:?}"
@@ -8318,6 +8330,25 @@ mod tests {
         ])))
         .expect("pong event should parse");
 
+        assert_eq!(event, PubSubEvent::Pong(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn pubsub_parse_resp3_simple_pong_event() {
+        // RESP3 replies to argument-less PING with `+PONG`, not the RESP2
+        // `["pong"]` array. Must not hit the error arm (which poisons the conn).
+        let event = RedisPubSub::parse_event(RespValue::SimpleString("PONG".to_string()))
+            .expect("RESP3 +PONG should parse as a pong event");
+        assert_eq!(event, PubSubEvent::Pong(None));
+    }
+
+    #[test]
+    fn pubsub_parse_resp3_bulk_pong_payload_event() {
+        // RESP3 replies to `PING payload` on a subscribed connection with a
+        // top-level bulk string echoing the payload.
+        let event =
+            RedisPubSub::parse_event(RespValue::BulkString(Some(b"hello".to_vec())))
+                .expect("RESP3 bulk pong payload should parse");
         assert_eq!(event, PubSubEvent::Pong(Some(b"hello".to_vec())));
     }
 

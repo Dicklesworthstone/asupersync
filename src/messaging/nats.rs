@@ -675,10 +675,17 @@ fn load_user_nkey(seed: &str) -> Result<KeyPair, NatsError> {
 /// - Base64 character set validation to ensure well-formed nonces
 /// - No obviously predictable patterns
 fn validate_nonce_quality(nonce: &str) -> Result<(), NatsError> {
-    // Minimum length: 16 characters (96 bits base64) for reasonable entropy
-    if nonce.len() < 16 {
+    // Sanity floor only — reject empty/obviously-truncated nonces. A stock
+    // nats-server nonce is 11 random bytes base64url-encoded to 15 chars, so a
+    // `< 16` minimum rejected EVERY real server nonce and broke all nkey/JWT
+    // auth. The client cannot police server-side nonce entropy anyway: a MITM
+    // is free to forge a nonce of any length, so a length floor provides no
+    // security, only interop breakage. Keep a small floor to catch a truncated
+    // or empty handshake.
+    const NONCE_MIN_LEN: usize = 8;
+    if nonce.len() < NONCE_MIN_LEN {
         return Err(NatsError::InvalidAuth(format!(
-            "server nonce too short: {} chars (minimum 16 for security)",
+            "server nonce too short: {} chars (minimum {NONCE_MIN_LEN})",
             nonce.len()
         )));
     }
@@ -3394,6 +3401,22 @@ mod tests {
             .expect("deterministic user seed")
             .seed()
             .expect("seed encoding")
+    }
+
+    #[test]
+    fn validate_nonce_accepts_real_stock_server_nonce_length() {
+        // A stock nats-server nonce is 11 random bytes base64url-encoded to 15
+        // chars. The prior `< 16` floor rejected this and broke all real auth.
+        let fifteen_char_nonce = "AbCd012EfGh345_"; // 15 base64url chars
+        assert_eq!(fifteen_char_nonce.len(), 15);
+        validate_nonce_quality(fifteen_char_nonce)
+            .expect("a realistic 15-char server nonce must validate");
+    }
+
+    #[test]
+    fn validate_nonce_rejects_truncated_handshake() {
+        assert!(validate_nonce_quality("").is_err());
+        assert!(validate_nonce_quality("abc").is_err());
     }
 
     fn deterministic_cluster_seed(byte: u8) -> String {

@@ -62,6 +62,13 @@ enum RangeError {
 /// for a handful of ranges; a request exceeding this cap is rejected.
 const MAX_RANGE_SPECS: usize = 64;
 
+/// Returns true if a path component is a hidden (dot-prefixed) name that must
+/// not be served. `.well-known` is exempted (RFC 8615 / ACME discovery). Empty
+/// components (from `//` or leading/trailing `/`) are not hidden.
+fn is_denied_hidden_component(component: &str) -> bool {
+    component.starts_with('.') && component != ".well-known"
+}
+
 /// Parse Range header and return satisfiable byte ranges.
 /// RFC 9110 §14.1.2 Range specification.
 ///
@@ -259,6 +266,15 @@ impl StaticFiles {
         // Reject path traversal, including sequences that would become
         // traversal only if an upstream/downstream hop decodes once more.
         if has_traversal(&decoded) || has_traversal_after_additional_decoding(&decoded) {
+            return None;
+        }
+
+        // Deny hidden files/directories (any path component starting with `.`),
+        // which otherwise leak `.env`, `.git/config`, `.htpasswd`, etc. `.well-known`
+        // is exempted so ACME / RFC 8615 discovery still works — the same safe
+        // default Caddy and hardened nginx configs ship. The traversal check
+        // above already blocks `.` and `..` components.
+        if decoded.split('/').any(is_denied_hidden_component) {
             return None;
         }
 
@@ -860,6 +876,47 @@ mod tests {
         let ranges = parse_ranges("bytes=0-499", 1000).expect("valid range");
         assert_eq!(ranges.len(), 1);
         assert_eq!((ranges[0].start, ranges[0].end), (0, 499));
+    }
+
+    // ================================================================
+    // Hidden-file (dotfile) serving defense
+    // ================================================================
+
+    #[test]
+    fn is_denied_hidden_component_logic() {
+        assert!(is_denied_hidden_component(".env"));
+        assert!(is_denied_hidden_component(".git"));
+        assert!(is_denied_hidden_component(".htpasswd"));
+        assert!(!is_denied_hidden_component(".well-known"));
+        assert!(!is_denied_hidden_component("index.html"));
+        assert!(!is_denied_hidden_component("assets"));
+        assert!(!is_denied_hidden_component("")); // empty component (from //)
+    }
+
+    #[test]
+    fn resolve_path_denies_dotfiles_but_allows_well_known() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+        fs::create_dir(dir.path().join(".well-known")).unwrap();
+        fs::write(dir.path().join(".well-known/acme.txt"), "challenge").unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]").unwrap();
+        fs::write(dir.path().join("index.html"), "<h1>hi</h1>").unwrap();
+        let sf = StaticFiles::new(dir.path());
+
+        assert!(sf.resolve_path("/.env").is_none(), ".env must be denied");
+        assert!(
+            sf.resolve_path("/.git/config").is_none(),
+            ".git/config must be denied"
+        );
+        assert!(
+            sf.resolve_path("/.well-known/acme.txt").is_some(),
+            ".well-known must be served"
+        );
+        assert!(
+            sf.resolve_path("/index.html").is_some(),
+            "normal files still served"
+        );
     }
 
     // ================================================================
