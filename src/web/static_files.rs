@@ -271,18 +271,15 @@ impl StaticFiles {
         let cleaned = request_path.trim_start_matches('/');
         let decoded = percent_decode(cleaned);
 
-        // Reject path traversal, including sequences that would become
-        // traversal only if an upstream/downstream hop decodes once more.
-        if has_traversal(&decoded) || has_traversal_after_additional_decoding(&decoded) {
-            return None;
-        }
-
-        // Deny hidden files/directories (any path component starting with `.`),
-        // which otherwise leak `.env`, `.git/config`, `.htpasswd`, etc. `.well-known`
-        // is exempted so ACME / RFC 8615 discovery still works — the same safe
-        // default Caddy and hardened nginx configs ship. The traversal check
-        // above already blocks `.` and `..` components.
-        if decoded.split('/').any(is_denied_hidden_component) {
+        // Reject traversal, ambiguous Windows separators, and hidden files.
+        // Repeat the same policy after bounded additional decoding so a proxy
+        // or downstream hop cannot turn a latent escape into a separator or
+        // dotfile. URL paths use `/`; accepting `\` would make path meaning
+        // platform-dependent. `.well-known` remains exempt only in canonical
+        // slash-separated form for ACME / RFC 8615 discovery.
+        if has_denied_static_path(&decoded)
+            || has_denied_static_path_after_additional_decoding(&decoded)
+        {
             return None;
         }
 
@@ -699,6 +696,11 @@ fn guess_mime(path: &Path) -> &'static str {
 
 // ─── Path Security ──────────────────────────────────────────────────────────
 
+/// Check all lexical path policies before constructing a platform-native path.
+fn has_denied_static_path(path: &str) -> bool {
+    path.contains('\\') || has_traversal(path) || path.split('/').any(is_denied_hidden_component)
+}
+
 /// Check for path traversal sequences.
 fn has_traversal(path: &str) -> bool {
     // Block ".." components.
@@ -720,14 +722,14 @@ fn has_traversal(path: &str) -> bool {
     false
 }
 
-fn has_traversal_after_additional_decoding(path: &str) -> bool {
+fn has_denied_static_path_after_additional_decoding(path: &str) -> bool {
     let mut current = path.to_string();
     for _ in 0..4 {
         let decoded = percent_decode(&current);
         if decoded == current {
             return false;
         }
-        if has_traversal(&decoded) {
+        if has_denied_static_path(&decoded) {
             return true;
         }
         current = decoded;
@@ -911,6 +913,32 @@ mod tests {
     }
 
     #[test]
+    fn denied_static_path_rejects_backslashes_and_preserves_well_known() {
+        assert!(has_denied_static_path(r"public\.env"));
+        assert!(has_denied_static_path(r"public\app.js"));
+        assert!(has_denied_static_path(r".well-known\acme"));
+        assert!(has_denied_static_path("public/.env"));
+        assert!(!has_denied_static_path(".well-known/acme-challenge/token"));
+        assert!(!has_denied_static_path("public/app.js"));
+    }
+
+    #[test]
+    fn denied_static_path_rejects_deferred_encoded_components() {
+        assert!(has_denied_static_path_after_additional_decoding(
+            "public%5c.env"
+        ));
+        assert!(has_denied_static_path_after_additional_decoding(
+            "public%255c%252eenv"
+        ));
+        assert!(has_denied_static_path_after_additional_decoding(
+            "public/%2eenv"
+        ));
+        assert!(!has_denied_static_path_after_additional_decoding(
+            ".well-known%2facme-challenge%2ftoken"
+        ));
+    }
+
+    #[test]
     fn resolve_path_denies_dotfiles_but_allows_well_known() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
@@ -931,9 +959,30 @@ mod tests {
             ".well-known must be served"
         );
         assert!(
+            sf.resolve_path(r"/.well-known\acme.txt").is_none(),
+            "backslash spelling of .well-known must be denied"
+        );
+        assert!(
+            sf.resolve_path("/.well-known%5cacme.txt").is_none(),
+            "encoded-backslash spelling of .well-known must be denied"
+        );
+        assert!(
             sf.resolve_path("/index.html").is_some(),
             "normal files still served"
         );
+    }
+
+    #[test]
+    fn resolve_path_rejects_backslash_and_deferred_encodings() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("public")).unwrap();
+        fs::write(dir.path().join(r"public\.env"), "SECRET=1").unwrap();
+        fs::write(dir.path().join("public%5c.env"), "SECRET=2").unwrap();
+        let sf = StaticFiles::new(dir.path());
+
+        assert!(sf.resolve_path(r"/public\.env").is_none());
+        assert!(sf.resolve_path("/public%5c.env").is_none());
+        assert!(sf.resolve_path("/public%255c.env").is_none());
     }
 
     // ================================================================
@@ -1029,20 +1078,22 @@ mod tests {
 
     #[test]
     fn traversal_deferred_percent_decoding() {
-        assert!(has_traversal_after_additional_decoding("%2e%2e/etc/passwd"));
-        assert!(has_traversal_after_additional_decoding(
+        assert!(has_denied_static_path_after_additional_decoding(
+            "%2e%2e/etc/passwd"
+        ));
+        assert!(has_denied_static_path_after_additional_decoding(
             "safe/%2e%2e/secret.txt"
         ));
-        assert!(has_traversal_after_additional_decoding(
+        assert!(has_denied_static_path_after_additional_decoding(
             "safe%2f..%2fsecret.txt"
         ));
-        assert!(has_traversal_after_additional_decoding(
+        assert!(has_denied_static_path_after_additional_decoding(
             "safe%5c..%5csecret.txt"
         ));
-        assert!(has_traversal_after_additional_decoding(
+        assert!(has_denied_static_path_after_additional_decoding(
             "%252e%252e/etc/passwd"
         ));
-        assert!(!has_traversal_after_additional_decoding(
+        assert!(!has_denied_static_path_after_additional_decoding(
             "version%2e1/file.txt"
         ));
     }
