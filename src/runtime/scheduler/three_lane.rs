@@ -6251,7 +6251,7 @@ impl ThreeLaneWorker {
                 if !self.completed && std::thread::panicking() {
                     // 1. Mark task as Panicked (using hot-path task table if available)
                     self.worker.with_task_table(|tt| {
-                        if let Some(record) = tt.task_mut(self.task_id) {
+                        let _ = tt.update_task(self.task_id, |record| {
                             if !record.state.is_terminal() {
                                 record.complete(crate::types::Outcome::Panicked(
                                     crate::types::outcome::PanicPayload::new(
@@ -6259,7 +6259,7 @@ impl ThreeLaneWorker {
                                     ),
                                 ));
                             }
-                        }
+                        });
                     });
 
                     // 2. Wake waiters and process finalizers (requires full RuntimeState lock)

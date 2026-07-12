@@ -329,7 +329,7 @@ impl Worker {
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Some(record) = state.task_mut(self.task_id) {
+                    let _ = state.update_task(self.task_id, |record| {
                         if !record.state.is_terminal() {
                             record.complete(crate::types::Outcome::Panicked(
                                 crate::types::outcome::PanicPayload::new(
@@ -337,7 +337,7 @@ impl Worker {
                                 ),
                             ));
                         }
-                    }
+                    });
 
                     let waiters = state.task_completed(self.task_id);
                     let finalizers = state.drain_ready_async_finalizers();
@@ -538,7 +538,7 @@ impl Worker {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                if let Some(record) = state.task_mut(task_id) {
+                let _ = state.update_task(task_id, |record| {
                     if !record.state.is_terminal() {
                         let mut completed_via_cancel = false;
                         if matches!(task_outcome, crate::types::Outcome::Ok(())) {
@@ -582,7 +582,7 @@ impl Worker {
                             record.complete(task_outcome);
                         }
                     }
-                }
+                });
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
@@ -699,11 +699,11 @@ impl Worker {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                if let Some(record) = state.task_mut(task_id) {
+                let _ = state.update_task(task_id, |record| {
                     if !record.state.is_terminal() {
                         record.complete(panic_outcome);
                     }
-                }
+                });
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
@@ -1601,7 +1601,7 @@ mod tests {
         use crate::runtime::RuntimeState;
         use crate::runtime::stored_task::StoredTask;
         use crate::sync::ContendedMutex;
-        use crate::types::{Budget, RegionId};
+        use crate::types::{Budget, RegionId, Time};
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let global = Arc::new(GlobalQueue::new());
@@ -1609,6 +1609,8 @@ mod tests {
 
         let panicking_task = TaskId::new_for_test(0, 0);
         let waiter_task = TaskId::new_for_test(1, 0);
+        let panicking_deadline = Time::from_nanos(1_000);
+        let waiter_deadline = Time::from_nanos(2_000);
 
         {
             let mut guard = state
@@ -1617,12 +1619,20 @@ mod tests {
             let panicking_record = TaskRecord::new(
                 panicking_task,
                 RegionId::new_for_test(0, 1),
-                Budget::INFINITE,
+                Budget::INFINITE.with_deadline(panicking_deadline),
             );
-            let waiter_record =
-                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 1), Budget::INFINITE);
+            let waiter_record = TaskRecord::new(
+                waiter_task,
+                RegionId::new_for_test(0, 1),
+                Budget::INFINITE.with_deadline(waiter_deadline),
+            );
             let _panicking_idx = guard.insert_task(panicking_record);
             let _waiter_idx = guard.insert_task(waiter_record);
+            assert_eq!(guard.tasks.tasks_with_deadline_count(), 2);
+            assert_eq!(
+                guard.tasks.deadline_sum_ns(),
+                u128::from(panicking_deadline.as_nanos()) + u128::from(waiter_deadline.as_nanos())
+            );
 
             guard
                 .task_mut(panicking_task)
@@ -1665,6 +1675,16 @@ mod tests {
             assert!(
                 guard.task(panicking_task).is_none(),
                 "panicking task should be completed and removed from runtime state"
+            );
+            assert!(
+                guard.task(waiter_task).is_some(),
+                "waiter should remain live"
+            );
+            assert_eq!(guard.tasks.tasks_with_deadline_count(), 1);
+            assert_eq!(
+                guard.tasks.deadline_sum_ns(),
+                u128::from(waiter_deadline.as_nanos()),
+                "panic completion must retain only the live waiter's deadline"
             );
             drop(guard);
         }
@@ -1768,7 +1788,7 @@ mod tests {
         use crate::runtime::RuntimeState;
         use crate::runtime::stored_task::StoredTask;
         use crate::sync::ContendedMutex;
-        use crate::types::{Budget, Outcome, RegionId};
+        use crate::types::{Budget, Outcome, RegionId, Time};
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let global = Arc::new(GlobalQueue::new());
@@ -1776,6 +1796,8 @@ mod tests {
 
         let completing_task = TaskId::new_for_test(0, 0);
         let waiter_task = TaskId::new_for_test(1, 0);
+        let completing_deadline = Time::from_nanos(1_000);
+        let waiter_deadline = Time::from_nanos(2_000);
 
         {
             let mut guard = state
@@ -1784,13 +1806,21 @@ mod tests {
             let completing_record = TaskRecord::new(
                 completing_task,
                 RegionId::new_for_test(0, 1),
-                Budget::INFINITE,
+                Budget::INFINITE.with_deadline(completing_deadline),
             );
-            let mut waiter_record =
-                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 1), Budget::INFINITE);
+            let mut waiter_record = TaskRecord::new(
+                waiter_task,
+                RegionId::new_for_test(0, 1),
+                Budget::INFINITE.with_deadline(waiter_deadline),
+            );
             waiter_record.pin_to_worker(1);
             let _completing_idx = guard.insert_task(completing_record);
             let _waiter_idx = guard.insert_task(waiter_record);
+            assert_eq!(guard.tasks.tasks_with_deadline_count(), 2);
+            assert_eq!(
+                guard.tasks.deadline_sum_ns(),
+                u128::from(completing_deadline.as_nanos()) + u128::from(waiter_deadline.as_nanos())
+            );
 
             guard
                 .task_mut(completing_task)
@@ -1831,6 +1861,12 @@ mod tests {
             assert!(
                 !waiter_record.wake_state.is_notified(),
                 "foreign waiter wake state should be cleared when routing is skipped"
+            );
+            assert_eq!(guard.tasks.tasks_with_deadline_count(), 1);
+            assert_eq!(
+                guard.tasks.deadline_sum_ns(),
+                u128::from(waiter_deadline.as_nanos()),
+                "ready completion must retain only the live waiter's deadline"
             );
             drop(guard);
         }
