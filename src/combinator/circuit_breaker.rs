@@ -383,6 +383,11 @@ pub struct CircuitBreaker {
     // Atomic state representation
     state_bits: AtomicU64,
 
+    // Monotonic source for HalfOpen epochs. Failed Open CAS attempts may
+    // consume generations, but the counter is never reset so stale permits
+    // cannot re-enter a later recovery episode before the packed 24-bit wrap.
+    open_generation: AtomicU64,
+
     // Metrics (needs lock for complex updates like state changes)
     // Hot counters are shadowed in atomics below.
     metrics: RwLock<CircuitBreakerMetrics>,
@@ -425,6 +430,7 @@ impl CircuitBreaker {
         Self {
             policy,
             state_bits: AtomicU64::new(State::default().to_bits()),
+            open_generation: AtomicU64::new(0),
             metrics: RwLock::new(CircuitBreakerMetrics::default()),
             sliding_window,
             total_success: AtomicU64::new(0),
@@ -492,7 +498,8 @@ impl CircuitBreaker {
                     let elapsed = Duration::from_millis(now_millis.saturating_sub(since_millis));
                     if elapsed >= self.policy.open_duration {
                         // Transition to half-open
-                        let epoch = (self.times_opened.load(Ordering::Relaxed) & 0xFF_FFFF) as u32;
+                        let epoch =
+                            (self.open_generation.load(Ordering::Relaxed) & 0xFF_FFFF) as u32;
                         let new_state = State::HalfOpen {
                             epoch,
                             probes_active: 1,
@@ -713,6 +720,55 @@ impl CircuitBreaker {
         m.times_closed = self.times_closed.load(Ordering::Relaxed);
     }
 
+    /// Attempt one transition to `Open` and apply its side effects exactly once.
+    ///
+    /// The private generation reservation precedes the Release CAS. A caller
+    /// that observes the published `Open` with Acquire may therefore load that
+    /// generation (or a newer losing reservation) before minting a HalfOpen
+    /// permit. Losing CAS attempts may skip private generations, but cannot
+    /// change metrics, window contents, or callbacks.
+    fn try_transition_to_open(&self, expected_bits: u64, now_millis: u64) -> Result<(), u64> {
+        let from = State::from_bits(expected_bits);
+        let new_state = State::Open {
+            since_millis: now_millis,
+        };
+
+        // Hold the window guard across publication so an immediate zero-delay
+        // HalfOpen recovery cannot record into the old window before reset.
+        let mut window = self.sliding_window.as_ref().map(|window| window.write());
+        self.open_generation.fetch_add(1, Ordering::Relaxed);
+
+        self.state_bits.compare_exchange(
+            expected_bits,
+            new_state.to_bits(),
+            Ordering::Release,
+            Ordering::Acquire,
+        )?;
+
+        if let Some(window) = window.as_mut() {
+            window.reset();
+        }
+        drop(window);
+
+        self.times_opened.fetch_add(1, Ordering::Relaxed);
+        let callback_metrics = {
+            let mut metrics = self.metrics.write();
+            metrics.current_state = new_state;
+            if self.policy.on_state_change.is_some() {
+                self.populate_metrics_snapshot(&mut metrics);
+                Some(metrics.clone())
+            } else {
+                None
+            }
+        };
+
+        if let (Some(callback), Some(metrics)) = (&self.policy.on_state_change, callback_metrics) {
+            callback(from, new_state, &metrics);
+        }
+
+        Ok(())
+    }
+
     fn check_sliding_window_success(&self, now_millis: u64) {
         let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
             let mut w = window.write();
@@ -726,7 +782,6 @@ impl CircuitBreaker {
     }
 
     fn trigger_open_from_window(&self, now_millis: u64) {
-        let mut event = None;
         let mut current_bits = self.state_bits.load(Ordering::Acquire);
         loop {
             let state = State::from_bits(current_bits);
@@ -736,36 +791,9 @@ impl CircuitBreaker {
                 break;
             }
 
-            let new_state = State::Open {
-                since_millis: now_millis,
-            };
-            match self.state_bits.compare_exchange_weak(
-                current_bits,
-                new_state.to_bits(),
-                Ordering::Release,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    self.times_opened.fetch_add(1, Ordering::Relaxed);
-                    let mut m = self.metrics.write();
-                    m.current_state = new_state;
-                    if let Some(ref w) = self.sliding_window {
-                        w.write().reset();
-                    }
-                    if self.policy.on_state_change.is_some() {
-                        self.populate_metrics_snapshot(&mut m);
-                        event = Some((state, new_state, m.clone()));
-                    }
-                    drop(m);
-                    break;
-                }
+            match self.try_transition_to_open(current_bits, now_millis) {
+                Ok(()) => break,
                 Err(actual) => current_bits = actual,
-            }
-        }
-
-        if let Some((from, to, m)) = event {
-            if let Some(ref cb) = self.policy.on_state_change {
-                cb(from, to, &m);
             }
         }
     }
@@ -888,8 +916,6 @@ impl CircuitBreaker {
             w.should_open()
         });
 
-        let mut event = None;
-
         match permit {
             Permit::Normal => {
                 let mut current_bits = self.state_bits.load(Ordering::Acquire);
@@ -900,28 +926,8 @@ impl CircuitBreaker {
                             let new_failures = failures.saturating_add(1);
 
                             if new_failures >= self.policy.failure_threshold || window_triggered {
-                                let new_state = State::Open {
-                                    since_millis: now_millis,
-                                };
-                                match self.state_bits.compare_exchange_weak(
-                                    current_bits,
-                                    new_state.to_bits(),
-                                    Ordering::Release,
-                                    Ordering::Acquire,
-                                ) {
-                                    Ok(_) => {
-                                        self.times_opened.fetch_add(1, Ordering::Relaxed);
-                                        let mut m = self.metrics.write();
-                                        m.current_state = new_state;
-                                        if let Some(ref w) = self.sliding_window {
-                                            w.write().reset();
-                                        }
-                                        if self.policy.on_state_change.is_some() {
-                                            self.populate_metrics_snapshot(&mut m);
-                                            event = Some((state, new_state, m.clone()));
-                                        }
-                                        break;
-                                    }
+                                match self.try_transition_to_open(current_bits, now_millis) {
+                                    Ok(()) => break,
                                     Err(actual) => current_bits = actual,
                                 }
                             } else {
@@ -949,59 +955,19 @@ impl CircuitBreaker {
                 epoch: permit_epoch,
             } => {
                 let mut current_bits = self.state_bits.load(Ordering::Acquire);
-                // Reserve the next epoch BEFORE publishing the reopened `Open`.
-                // The HalfOpen epoch is derived from `times_opened` (see
-                // should_allow), so if the counter were bumped only AFTER the
-                // CAS, a concurrent should_allow that observes the new `Open`
-                // (with `open_duration ≈ 0`, elapsed is ~0 so the cooldown does
-                // not block it) would mint a HalfOpen with the SAME epoch as
-                // this now-stale episode, letting a stale in-flight probe from
-                // the old episode match and mutate the new generation. Bumping
-                // first makes any observed reopen carry a strictly newer epoch.
-                // The flag keeps this to exactly one bump across CAS retries.
-                let mut epoch_reserved = false;
                 loop {
                     let state = State::from_bits(current_bits);
                     match state {
                         State::HalfOpen { epoch, .. } if epoch == permit_epoch => {
-                            if !epoch_reserved {
-                                self.times_opened.fetch_add(1, Ordering::Relaxed);
-                                epoch_reserved = true;
-                            }
                             // Probe failed -> Reopen
-                            let new_state = State::Open {
-                                since_millis: now_millis,
-                            };
-                            match self.state_bits.compare_exchange_weak(
-                                current_bits,
-                                new_state.to_bits(),
-                                Ordering::Release,
-                                Ordering::Acquire,
-                            ) {
-                                Ok(_) => {
-                                    let mut m = self.metrics.write();
-                                    m.current_state = new_state;
-                                    if let Some(ref w) = self.sliding_window {
-                                        w.write().reset();
-                                    }
-                                    if self.policy.on_state_change.is_some() {
-                                        self.populate_metrics_snapshot(&mut m);
-                                        event = Some((state, new_state, m.clone()));
-                                    }
-                                    break;
-                                }
+                            match self.try_transition_to_open(current_bits, now_millis) {
+                                Ok(()) => break,
                                 Err(actual) => current_bits = actual,
                             }
                         }
                         _ => break,
                     }
                 }
-            }
-        }
-
-        if let Some((from, to, m)) = event {
-            if let Some(ref cb) = self.policy.on_state_change {
-                cb(from, to, &m);
             }
         }
     }
@@ -1091,6 +1057,8 @@ impl CircuitBreaker {
             }
         }
 
+        // Deliberately keep `open_generation` monotonic: a permit from before
+        // manual reset must not match a later HalfOpen recovery episode.
         if let Some(ref window) = self.sliding_window {
             window.write().reset();
         }
@@ -1149,7 +1117,7 @@ pub enum Permit {
     Normal,
     /// Probe call in half-open state.
     Probe {
-        /// Epoch counter (times_opened) to prevent stale probe poisoning.
+        /// Private Open-generation counter preventing stale probe poisoning.
         epoch: u32,
     },
 }
@@ -1453,6 +1421,7 @@ mod tests {
         }
 
         assert!(matches!(cb.state(), State::Open { .. }));
+        assert_eq!(cb.metrics().times_opened, 1);
     }
 
     #[test]
@@ -1597,6 +1566,87 @@ mod tests {
 
         // Should be open again
         assert!(matches!(cb.state(), State::Open { .. }));
+        assert_eq!(cb.metrics().times_opened, 2);
+    }
+
+    #[test]
+    fn half_open_epoch_is_independent_of_times_opened() {
+        let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+            open_duration: Duration::ZERO,
+            ..Default::default()
+        });
+        cb.times_opened.store(7, Ordering::Relaxed);
+        cb.open_generation.store(42, Ordering::Relaxed);
+        cb.state_bits
+            .store(State::Open { since_millis: 0 }.to_bits(), Ordering::Release);
+
+        let permit = cb
+            .should_allow(Time::ZERO)
+            .expect("expired Open state should admit a probe");
+        assert_eq!(permit, Permit::Probe { epoch: 42 });
+
+        let before = cb.state();
+        cb.record_failure(Permit::Probe { epoch: 7 }, "stale", Time::ZERO);
+        assert_eq!(
+            cb.state(),
+            before,
+            "metric-derived stale permit must not mutate the new HalfOpen episode"
+        );
+        assert_eq!(cb.metrics().times_opened, 7);
+    }
+
+    #[test]
+    fn failed_open_cas_has_no_observable_side_effects() {
+        let callback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_callbacks = Arc::clone(&callback_count);
+        let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+            sliding_window: Some(SlidingWindowConfig {
+                window_duration: Duration::from_secs(10),
+                minimum_calls: 2,
+                failure_rate_threshold: 0.5,
+            }),
+            on_state_change: Some(Arc::new(move |_, _, _| {
+                observed_callbacks.fetch_add(1, Ordering::SeqCst);
+            })),
+            ..Default::default()
+        });
+
+        let window = cb
+            .sliding_window
+            .as_ref()
+            .expect("test policy should install a sliding window");
+        {
+            let mut window = window.write();
+            window.record_success(1);
+            window.record_failure(2);
+        }
+        let window_before = {
+            let window = window.read();
+            (
+                window.entries.clone(),
+                window.success_count,
+                window.failure_count,
+            )
+        };
+
+        let stale_bits = State::Closed { failures: 0 }.to_bits();
+        let actual_state = State::Closed { failures: 1 };
+        cb.state_bits
+            .store(actual_state.to_bits(), Ordering::Release);
+
+        assert_eq!(
+            cb.try_transition_to_open(stale_bits, 3),
+            Err(actual_state.to_bits())
+        );
+        assert_eq!(cb.state(), actual_state);
+        assert_eq!(cb.open_generation.load(Ordering::Relaxed), 1);
+        assert_eq!(cb.metrics().times_opened, 0);
+        assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+
+        let window_after = window.read();
+        assert_eq!(window_after.entries, window_before.0);
+        assert_eq!(window_after.success_count, window_before.1);
+        assert_eq!(window_after.failure_count, window_before.2);
     }
 
     // =========================================================================
@@ -1683,6 +1733,7 @@ mod tests {
 
         // Should be open due to 60% > 50% threshold
         assert!(matches!(cb.state(), State::Open { .. }));
+        assert_eq!(cb.metrics().times_opened, 1);
     }
 
     #[test]
@@ -1982,12 +2033,19 @@ mod tests {
         let permit = cb.should_allow(now).unwrap();
         cb.record_failure(permit, "fail", now);
         assert!(matches!(cb.state(), State::Open { .. }));
+        let generation = cb.open_generation.load(Ordering::Relaxed);
+        assert_eq!(generation, 1);
 
         // Reset
         cb.reset();
 
         assert_eq!(cb.state(), State::Closed { failures: 0 });
         assert_eq!(cb.metrics().current_failure_streak, 0);
+        assert_eq!(
+            cb.open_generation.load(Ordering::Relaxed),
+            generation,
+            "manual reset must not recycle stale HalfOpen epochs"
+        );
     }
 
     // =========================================================================
