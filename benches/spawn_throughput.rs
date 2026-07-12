@@ -11,6 +11,10 @@
 //! The join-completion group measures the caller-visible cost of collecting
 //! completed [`TaskHandle`](asupersync::runtime::TaskHandle) values in the same
 //! deterministic batch shape.
+//! The spawn-throughput groups stop when every task body has executed. Runtime
+//! task-record teardown may trail a body counter: repeated iterations amortize
+//! most cleanup into later samples, while the final cleanup tail can fall
+//! outside the measurement.
 //!
 //! Deterministic inputs; throughput in spawned tasks per second.
 
@@ -18,13 +22,78 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
+use std::time::Duration;
 
 use asupersync::runtime::builder::{Runtime, RuntimeBuilder};
 use asupersync::runtime::config::SpawnAdmissionMode;
 
 const SPAWNS_PER_ITER: usize = 1_000;
+
+struct CompletionLatch {
+    completed: AtomicUsize,
+    wait_lock: Mutex<()>,
+    ready: Condvar,
+}
+
+impl CompletionLatch {
+    fn new() -> Self {
+        Self {
+            completed: AtomicUsize::new(0),
+            wait_lock: Mutex::new(()),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn reset(&self) {
+        self.completed.store(0, Ordering::SeqCst);
+    }
+
+    fn complete(&self, expected: usize) {
+        let completed = self.completed.fetch_add(1, Ordering::Release) + 1;
+        if completed == expected {
+            let _guard = self
+                .wait_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.ready.notify_one();
+        }
+    }
+
+    fn wait(&self, expected: usize) {
+        let guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_guard, timeout) = self
+            .ready
+            .wait_timeout_while(guard, Duration::from_secs(30), |_| {
+                self.completed.load(Ordering::Acquire) < expected
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let completed = self.completed.load(Ordering::Acquire);
+        assert_eq!(
+            completed,
+            expected,
+            "benchmark task-body completion mismatch (timed_out={})",
+            timeout.timed_out()
+        );
+    }
+}
+
+struct ProducerStopGuard<'a> {
+    stop: &'a AtomicBool,
+    start: &'a Barrier,
+}
+
+impl Drop for ProducerStopGuard<'_> {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.start.wait();
+    }
+}
 
 fn build_runtime(mode: SpawnAdmissionMode, workers: usize) -> Runtime {
     RuntimeBuilder::new()
@@ -37,43 +106,35 @@ fn build_runtime(mode: SpawnAdmissionMode, workers: usize) -> Runtime {
 /// Spawn `SPAWNS_PER_ITER` trivial tasks from one producer thread and wait
 /// for all of them to finish (completion observed via a shared counter so
 /// the measurement covers admission + execution, not just enqueue).
-fn spawn_burst_single(runtime: &Runtime, counter: &Arc<AtomicUsize>) {
+fn spawn_burst_single(runtime: &Runtime, completion: &Arc<CompletionLatch>) {
     let handle = runtime.handle();
-    counter.store(0, Ordering::SeqCst);
+    completion.reset();
     for _ in 0..SPAWNS_PER_ITER {
-        let counter = Arc::clone(counter);
+        let completion = Arc::clone(completion);
         drop(handle.spawn(async move {
-            counter.fetch_add(1, Ordering::Relaxed);
+            completion.complete(SPAWNS_PER_ITER);
         }));
     }
-    while counter.load(Ordering::SeqCst) < SPAWNS_PER_ITER {
-        std::hint::spin_loop();
-    }
+    completion.wait(SPAWNS_PER_ITER);
 }
 
-/// Spawn from `producers` OS threads concurrently (SPAWNS_PER_ITER total),
-/// then wait for completion. This is the lock-contention scenario.
-fn spawn_burst_contended(runtime: &Runtime, counter: &Arc<AtomicUsize>, producers: usize) {
-    let per_producer = SPAWNS_PER_ITER / producers;
-    counter.store(0, Ordering::SeqCst);
-    std::thread::scope(|scope| {
-        for _ in 0..producers {
-            let handle = runtime.handle();
-            let counter = Arc::clone(counter);
-            scope.spawn(move || {
-                for _ in 0..per_producer {
-                    let counter = Arc::clone(&counter);
-                    drop(handle.spawn(async move {
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    }));
-                }
-            });
-        }
-    });
-    let expected = per_producer * producers;
-    while counter.load(Ordering::SeqCst) < expected {
-        std::hint::spin_loop();
-    }
+/// Release persistent producer threads for one exact burst, wait until every
+/// spawn call has returned, then wait for every task body to execute.
+fn run_contended_iteration(
+    completion: &CompletionLatch,
+    start: &Barrier,
+    submitted: &Barrier,
+    producer_failed: &AtomicBool,
+    expected: usize,
+) {
+    completion.reset();
+    start.wait();
+    submitted.wait();
+    assert!(
+        !producer_failed.load(Ordering::Acquire),
+        "a persistent producer panicked while submitting its burst"
+    );
+    completion.wait(expected);
 }
 
 /// Spawn `SPAWNS_PER_ITER` trivial tasks and await every returned handle.
@@ -107,23 +168,86 @@ fn bench_spawn_throughput(c: &mut Criterion) {
         ("mailbox", SpawnAdmissionMode::Mailbox),
     ] {
         let runtime = build_runtime(mode, 4);
-        let counter = Arc::new(AtomicUsize::new(0));
-        group.bench_function(BenchmarkId::new("single_producer", label), |b| {
-            b.iter(|| spawn_burst_single(black_box(&runtime), &counter));
+        let completion = Arc::new(CompletionLatch::new());
+        group.bench_function(BenchmarkId::new("single_producer_latched", label), |b| {
+            b.iter(|| spawn_burst_single(black_box(&runtime), &completion));
         });
         drop(runtime);
 
         for producers in [4usize, 8] {
-            let runtime = build_runtime(mode, 4);
-            let counter = Arc::new(AtomicUsize::new(0));
-            group.bench_function(
-                BenchmarkId::new(format!("contended_{producers}_producers"), label),
-                |b| {
-                    b.iter(|| {
-                        spawn_burst_contended(black_box(&runtime), &counter, producers);
-                    });
-                },
+            assert_eq!(
+                SPAWNS_PER_ITER % producers,
+                0,
+                "the benchmark must divide work evenly across producers"
             );
+            let per_producer = SPAWNS_PER_ITER / producers;
+            let runtime = build_runtime(mode, 4);
+            let completion = Arc::new(CompletionLatch::new());
+            let ready = Arc::new(Barrier::new(producers + 1));
+            let start = Arc::new(Barrier::new(producers + 1));
+            let submitted = Arc::new(Barrier::new(producers + 1));
+            let stop = Arc::new(AtomicBool::new(false));
+            let producer_failed = Arc::new(AtomicBool::new(false));
+
+            std::thread::scope(|scope| {
+                for _ in 0..producers {
+                    let handle = runtime.handle();
+                    let completion = Arc::clone(&completion);
+                    let ready = Arc::clone(&ready);
+                    let start = Arc::clone(&start);
+                    let submitted = Arc::clone(&submitted);
+                    let stop = Arc::clone(&stop);
+                    let producer_failed = Arc::clone(&producer_failed);
+
+                    scope.spawn(move || {
+                        ready.wait();
+                        loop {
+                            start.wait();
+                            if stop.load(Ordering::Acquire) {
+                                break;
+                            }
+
+                            let submitted_without_panic = catch_unwind(AssertUnwindSafe(|| {
+                                for _ in 0..per_producer {
+                                    let completion = Arc::clone(&completion);
+                                    drop(handle.spawn(async move {
+                                        completion.complete(SPAWNS_PER_ITER);
+                                    }));
+                                }
+                            }))
+                            .is_ok();
+                            if !submitted_without_panic {
+                                producer_failed.store(true, Ordering::Release);
+                            }
+                            submitted.wait();
+                        }
+                    });
+                }
+
+                ready.wait();
+                let _stop_guard = ProducerStopGuard {
+                    stop: &stop,
+                    start: &start,
+                };
+
+                group.bench_function(
+                    BenchmarkId::new(
+                        format!("contended_persistent_latched_{producers}_producers"),
+                        label,
+                    ),
+                    |b| {
+                        b.iter(|| {
+                            run_contended_iteration(
+                                &completion,
+                                &start,
+                                &submitted,
+                                &producer_failed,
+                                SPAWNS_PER_ITER,
+                            );
+                        });
+                    },
+                );
+            });
             drop(runtime);
         }
     }
