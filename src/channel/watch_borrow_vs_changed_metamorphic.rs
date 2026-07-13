@@ -104,12 +104,11 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
         let mut rx = tx.subscribe();
         let signals_received = Arc::clone(&signals_received);
         let max_changed_value = Arc::clone(&max_changed_value);
-        let completed = Arc::clone(&completed);
         let cx_clone = cx.clone();
 
         let handle = thread::spawn(move || {
             let mut signal_count = 0;
-            while !completed.load(Ordering::Acquire) {
+            loop {
                 match block_on(rx.changed(&cx_clone)) {
                     Ok(()) => {
                         signal_count += 1;
@@ -164,6 +163,11 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
             }
             let value = *rx.borrow_and_update();
             max_borrow_value.fetch_max(value, Ordering::Relaxed);
+            let current_version = rx.seen_version();
+            if current_version != last_version {
+                update_count += 1;
+                borrow_updates_seen.fetch_add(1, Ordering::Relaxed);
+            }
             update_count
         });
         handles.push(handle);
@@ -192,8 +196,6 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
         thread::yield_now();
     }
 
-    // Give receivers time to process all signals
-    thread::sleep(std::time::Duration::from_millis(50));
     completed.store(true, Ordering::Release);
     drop(tx);
 
@@ -218,7 +220,7 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     );
     assert!(
         total_changed_signals > 0,
-        "at least one changed receiver should observe a wake"
+        "at least one changed receiver should observe a change"
     );
     assert!(
         total_borrow_updates > 0,
@@ -445,6 +447,19 @@ fn concrete_multiple_send_batches_single_receiver() {
         changed_receiver_count: 1,
         value_count: 6,
         with_delays: true,
+    };
+    verify_signal_completeness(&config);
+}
+
+// Regression for job499 seed `01b9a426e937e2ae66985f24c6958243c60e44f0fa52facb568f17ee42841173`.
+#[test]
+fn regression_job499_seed_01b9a426_signal_completeness() {
+    let config = OrderingTestConfig {
+        send_batch_count: 2,
+        borrow_receiver_count: 2,
+        changed_receiver_count: 1,
+        value_count: 4,
+        with_delays: false,
     };
     verify_signal_completeness(&config);
 }
