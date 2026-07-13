@@ -186,11 +186,12 @@ impl DiagnosticCounterHarness {
         if !self.state.complete_task(task_id, Outcome::Ok(())) {
             return;
         }
-        let waiters = self.state.task_completed(task_id);
+        let (waiters, completion_observer) = self.state.task_completed(task_id).into_parts();
         assert!(
             waiters.is_empty(),
             "diagnostic counter harness never installs task waiters"
         );
+        completion_observer.dispatch();
         self.tasks[index].live = false;
 
         for obligation in &mut self.obligations {

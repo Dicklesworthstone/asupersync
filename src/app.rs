@@ -1505,7 +1505,14 @@ impl CompiledApp {
                 .and_then(|task| task.cancel_reason().cloned())
                 .unwrap_or_else(CancelReason::shutdown);
             let _ = state.complete_task(task_id, crate::types::Outcome::Cancelled(reason));
-            let _ = state.task_completed(task_id);
+            // This helper receives only `&mut RuntimeState` and cannot know
+            // whether its caller owns an outer runtime-state mutex guard.
+            // Failed-start cleanup therefore suppresses direct completion
+            // observers rather than risking callback re-entry under that
+            // caller-owned lock. Waiters are unreachable before workers start.
+            let _waiters = state
+                .task_completed(task_id)
+                .into_waiters_without_observers();
             completed += 1;
         }
         completed
@@ -1529,7 +1536,11 @@ impl CompiledApp {
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
                 let _ = state.complete_task(task_id, task_outcome);
-                let _ = state.task_completed(task_id);
+                // As in force_complete_tree_tasks, this failed-start-only
+                // bootstrap path cannot release a caller-owned outer lock.
+                let _waiters = state
+                    .task_completed(task_id)
+                    .into_waiters_without_observers();
                 true
             }
             Poll::Pending => {
@@ -3043,7 +3054,10 @@ mod tests {
     #[test]
     fn app_start_spawn_failure_cleans_up_started_tasks() {
         init_test("app_start_spawn_failure_cleans_up_started_tasks");
-        let mut state = RuntimeState::new();
+        use crate::runtime::state::completion_observer_test_support::PanickingCompletionMetrics;
+
+        let metrics = PanickingCompletionMetrics::panic_persistently();
+        let mut state = RuntimeState::new_with_metrics(metrics.clone());
         let root = state.create_root_region(Budget::INFINITE);
         let cx = Cx::new(
             root,
@@ -3088,6 +3102,11 @@ mod tests {
                 .map(crate::record::RegionRecord::child_count),
             Some(0),
             "parent root should not retain leaked app descendants"
+        );
+        assert_eq!(
+            metrics.completion_attempts(),
+            0,
+            "failed-start cleanup must suppress direct completion observers"
         );
 
         crate::test_complete!("app_start_spawn_failure_cleans_up_started_tasks");

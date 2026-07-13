@@ -378,6 +378,165 @@ impl LoserDrainHistoryRecorder {
     }
 }
 
+/// Owned direct-observer effects produced by task completion.
+///
+/// The task cleanup and waiter extraction are complete before this value is
+/// returned. Callers must publish callback-free waiter/finalizer queue work,
+/// release any runtime-state lock, and commit any execution guard before
+/// dispatching the observer token. A legacy foreign-waker callback may run
+/// afterward as a separate, uncontained boundary. This abstraction defers only
+/// the `MetricsProvider::task_completed` callback and the completion
+/// debug/unknown trace emitted directly by [`RuntimeState::task_completed`]. It
+/// does not make transitive obligation cleanup, region advancement, finalizers,
+/// foreign wakers, waker drops, or other destructors callback-free.
+#[must_use = "task completion effects must wake waiters and dispatch observers"]
+pub struct TaskCompletionEffects {
+    waiters: SmallVec<[TaskId; 4]>,
+    observer: TaskCompletionObserver,
+}
+
+impl TaskCompletionEffects {
+    fn unknown(task_id: TaskId, panic_count: &Arc<AtomicU64>) -> Self {
+        Self {
+            waiters: SmallVec::new(),
+            observer: TaskCompletionObserver::unknown(task_id, panic_count),
+        }
+    }
+
+    /// Splits waiter work from the opaque one-shot observer token.
+    ///
+    /// Callback-free waiter/finalizer queue work must be published, any
+    /// runtime-state lock released, and any execution guard committed before
+    /// [`TaskCompletionObserver::dispatch`] is called. A legacy foreign-waker
+    /// callback may follow dispatch as a separate, uncontained boundary.
+    #[must_use]
+    pub fn into_parts(self) -> (SmallVec<[TaskId; 4]>, TaskCompletionObserver) {
+        (self.waiters, self.observer)
+    }
+
+    /// Extracts waiter ids while deliberately suppressing observer delivery.
+    ///
+    /// This is reserved for panic-unwind cleanup guards or failed-start paths
+    /// that cannot release a caller-owned outer lock: those contexts must never
+    /// invoke user metrics providers or tracing subscribers. Suppression emits
+    /// no direct completion metric or completion debug/unknown trace and does
+    /// not increment the observer-panic counter because dispatch was never
+    /// attempted.
+    pub(crate) fn into_waiters_without_observers(self) -> SmallVec<[TaskId; 4]> {
+        self.waiters
+    }
+}
+
+/// Opaque one-shot token for the direct task-completion observer callbacks.
+///
+/// Dispatch consumes the token, so a given completion observation cannot be
+/// attempted more than once through this API.
+#[must_use = "task completion observers must be dispatched after waiter publication"]
+pub struct TaskCompletionObserver {
+    payload: TaskCompletionObserverPayload,
+    panic_count: Arc<AtomicU64>,
+}
+
+enum TaskCompletionObserverPayload {
+    Completed {
+        metrics: Arc<dyn MetricsProvider>,
+        task_id: TaskId,
+        region_id: RegionId,
+        outcome_kind: OutcomeKind,
+        outcome_label: &'static str,
+        duration: Duration,
+        waiter_count: usize,
+    },
+    UnknownTask {
+        task_id: TaskId,
+    },
+}
+
+impl TaskCompletionObserver {
+    fn completed(
+        metrics: Arc<dyn MetricsProvider>,
+        task_id: TaskId,
+        region_id: RegionId,
+        outcome_kind: OutcomeKind,
+        outcome_label: &'static str,
+        duration: Duration,
+        waiter_count: usize,
+        panic_count: &Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            payload: TaskCompletionObserverPayload::Completed {
+                metrics,
+                task_id,
+                region_id,
+                outcome_kind,
+                outcome_label,
+                duration,
+                waiter_count,
+            },
+            panic_count: Arc::clone(panic_count),
+        }
+    }
+
+    fn unknown(task_id: TaskId, panic_count: &Arc<AtomicU64>) -> Self {
+        Self {
+            payload: TaskCompletionObserverPayload::UnknownTask { task_id },
+            panic_count: Arc::clone(panic_count),
+        }
+    }
+
+    /// Runs the entire observer dispatch behind one unwind boundary. If the
+    /// metrics callback panics, tracing is intentionally skipped rather than
+    /// retrying either callback and risking duplicate completion reports. A
+    /// caught panic increments this runtime's callback-free atomic failure
+    /// counter without invoking another observer.
+    pub fn dispatch(self) {
+        let Self {
+            payload,
+            panic_count,
+        } = self;
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || match payload {
+                TaskCompletionObserverPayload::Completed {
+                    metrics,
+                    task_id,
+                    region_id,
+                    outcome_kind,
+                    outcome_label,
+                    duration,
+                    waiter_count,
+                } => {
+                    metrics.task_completed(task_id, outcome_kind, duration);
+                    #[cfg(not(feature = "tracing-integration"))]
+                    let _ = (region_id, outcome_label, waiter_count);
+                    debug!(
+                        task_id = ?task_id,
+                        region_id = ?region_id,
+                        outcome_kind = outcome_label,
+                        waiter_count,
+                        "task cleanup from runtime state"
+                    );
+                }
+                TaskCompletionObserverPayload::UnknownTask { task_id } => {
+                    #[cfg(not(feature = "tracing-integration"))]
+                    let _ = task_id;
+                    trace!(
+                        task_id = ?task_id,
+                        "task_completed called for unknown task"
+                    );
+                }
+            }));
+        if let Err(payload) = result {
+            panic_count.fetch_add(1, Ordering::Relaxed);
+            // A panic payload is arbitrary user-owned data. Its destructor can
+            // panic too, so dropping it here would reopen the unwind boundary
+            // and could double-panic a worker. Leak exactly this one payload on
+            // the already-failed observer path; the atomic counter preserves
+            // visibility without invoking another callback.
+            std::mem::forget(payload);
+        }
+    }
+}
+
 /// Outcome of [`RuntimeState::admit_spawn_request`].
 ///
 /// Not `Debug`: the denied arm carries the request parts, whose erased
@@ -779,6 +938,9 @@ pub struct RuntimeState {
     pub trace: TraceBufferHandle,
     /// Metrics provider for runtime instrumentation.
     pub metrics: Arc<dyn MetricsProvider>,
+    /// Callback-free count of panics caught while dispatching the direct
+    /// task-completion metrics/trace observer token.
+    task_completion_observer_panics: Arc<AtomicU64>,
     /// I/O driver for reactor integration.
     ///
     /// When present, the runtime can wait on I/O events via the reactor.
@@ -901,6 +1063,10 @@ impl std::fmt::Debug for RuntimeState {
             .field("root_region", &self.root_region)
             .field("trace", &self.trace)
             .field("metrics", &"<dyn MetricsProvider>")
+            .field(
+                "task_completion_observer_panics",
+                &self.task_completion_observer_panics.load(Ordering::Relaxed),
+            )
             .field("io_driver", &self.io_driver)
             .field("timer_driver", &self.timer_driver)
             .field("logical_clock_mode", &self.logical_clock_mode)
@@ -979,6 +1145,7 @@ impl RuntimeState {
             root_region: None,
             trace: TraceBufferHandle::new(trace_capacity),
             metrics,
+            task_completion_observer_panics: Arc::new(AtomicU64::new(0)),
             io_driver: None,
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
@@ -1480,6 +1647,17 @@ impl RuntimeState {
     #[must_use]
     pub fn metrics_provider(&self) -> Arc<dyn MetricsProvider> {
         self.metrics.clone()
+    }
+
+    /// Returns the number of direct task-completion observer dispatches whose
+    /// metrics provider or tracing subscriber panicked.
+    ///
+    /// The counter is updated atomically without invoking another callback, so
+    /// it remains safe on the observer-panic path.
+    #[inline]
+    #[must_use]
+    pub fn task_completion_observer_panic_count(&self) -> u64 {
+        self.task_completion_observer_panics.load(Ordering::Relaxed)
     }
 
     /// Sets the metrics provider for this runtime.
@@ -2635,7 +2813,11 @@ impl RuntimeState {
         self.metrics.task_spawned(region, task_id);
     }
 
-    fn record_task_complete(&self, task: &TaskRecord) {
+    fn prepare_task_completion_observer(
+        &self,
+        task: &TaskRecord,
+        waiter_count: usize,
+    ) -> TaskCompletionObserver {
         let now = self.current_runtime_time();
         self.record_task_trace_event(task.id, |seq| {
             TraceEvent::complete(seq, now, task.id, task.owner)
@@ -2646,7 +2828,24 @@ impl RuntimeState {
             TaskState::Completed(outcome) => OutcomeKind::from(outcome),
             _ => OutcomeKind::Err,
         };
-        self.metrics.task_completed(task.id, outcome_kind, duration);
+        let outcome_label = match &task.state {
+            TaskState::Completed(Outcome::Ok(())) => "Ok",
+            TaskState::Completed(Outcome::Err(_)) => "Err",
+            TaskState::Completed(Outcome::Cancelled(_)) => "Cancelled",
+            TaskState::Completed(Outcome::Panicked(_)) => "Panicked",
+            _ => "Unknown",
+        };
+
+        TaskCompletionObserver::completed(
+            Arc::clone(&self.metrics),
+            task.id,
+            task.owner,
+            outcome_kind,
+            outcome_label,
+            duration,
+            waiter_count,
+            &self.task_completion_observer_panics,
+        )
     }
 
     fn capture_obligation_backtrace() -> Option<Arc<Backtrace>> {
@@ -3782,7 +3981,11 @@ impl RuntimeState {
     /// Notifies that a task has completed.
     ///
     /// This checks if the owning region can advance its state.
-    /// Returns the task's waiters that should be woken.
+    /// Returns owned waiter and observer effects. The caller must publish
+    /// callback-free waiter/finalizer queue work, release any runtime-state
+    /// lock, commit any execution guard, and only then dispatch the observer
+    /// payload. Legacy foreign-waker callbacks may follow as a separate,
+    /// uncontained boundary.
     ///
     /// br-asupersync-ndhjfj: the task's `waiters` are taken in a SINGLE
     /// `update_task` critical section as the very first operation. The
@@ -3793,30 +3996,33 @@ impl RuntimeState {
     /// against future refactors that might split `task_completed` into
     /// re-entrant paths. Taking the waiters atomically with the
     /// existence check forecloses that hazard. The remaining
-    /// validation, record_task_complete, and cleanup operations read
+    /// validation, completion tracing, and cleanup operations read
     /// task properties (id, owner, state, created_at) that are NOT
     /// mutated by the waiter-take, so the ordering change is
     /// behaviour-preserving.
-    pub fn task_completed(&mut self, task_id: TaskId) -> SmallVec<[TaskId; 4]> {
+    pub fn task_completed(&mut self, task_id: TaskId) -> TaskCompletionEffects {
         // br-asupersync-ndhjfj: atomic existence-check + waiter-take.
         // If the task was already removed (or never existed), return
         // an empty waiter set with the same early-return semantics
         // the prior implementation provided.
         let Some(waiters) = self.update_task(task_id, |task| std::mem::take(&mut task.waiters))
         else {
-            trace!(
-                task_id = ?task_id,
-                "task_completed called for unknown task"
-            );
-            return SmallVec::new();
+            return TaskCompletionEffects::unknown(task_id, &self.task_completion_observer_panics);
         };
 
-        let (owner, completion, outcome_kind, close_outcome) = {
+        let waiter_count = waiters.len();
+        let (owner, completion, close_outcome, observer) = {
             let Some(task) = self.task(task_id) else {
                 // Defensive: if the task vanished between the
                 // update_task above and here, return the waiters we
                 // already took rather than dropping them.
-                return waiters;
+                return TaskCompletionEffects {
+                    waiters,
+                    observer: TaskCompletionObserver::unknown(
+                        task_id,
+                        &self.task_completion_observer_panics,
+                    ),
+                };
             };
 
             let task_event = match &task.state {
@@ -3849,32 +4055,18 @@ impl RuntimeState {
                 };
             }
 
-            self.record_task_complete(task);
-
-            let outcome_kind = match &task.state {
-                crate::record::task::TaskState::Completed(outcome) => match outcome {
-                    Outcome::Ok(()) => "Ok",
-                    Outcome::Err(_) => "Err",
-                    Outcome::Cancelled(_) => "Cancelled",
-                    Outcome::Panicked(_) => "Panicked",
-                },
-                _ => "Unknown",
-            };
+            let observer = self.prepare_task_completion_observer(task, waiter_count);
             let close_outcome = match &task.state {
                 crate::record::task::TaskState::Completed(outcome) => Some(outcome.clone()),
                 _ => None,
             };
             let owner = task.owner;
             let completion = TaskCompletionKind::from_state(&task.state);
-            (owner, completion, outcome_kind, close_outcome)
+            (owner, completion, close_outcome, observer)
         };
         // br-asupersync-ndhjfj: `waiters` was already taken atomically
         // at the top of the function under `update_task`. The previous
         // separate `task_mut` re-acquisition has been removed.
-        let waiter_count = waiters.len();
-        #[cfg(not(feature = "tracing-integration"))]
-        let _ = (outcome_kind, waiter_count);
-
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks_for_holder(task_id);
             if !leaks.is_empty() {
@@ -3929,15 +4121,6 @@ impl RuntimeState {
             self.record_finalizer_run(finalizer_id);
         }
 
-        // Trace task completion
-        debug!(
-            task_id = ?task_id,
-            region_id = ?owner,
-            outcome_kind = outcome_kind,
-            waiter_count = waiter_count,
-            "task cleanup from runtime state"
-        );
-
         // Abort any pending obligations held by this task to prevent
         // orphaned obligations from blocking region close (deadlock).
         // Uses the holder secondary index for O(obligations_per_task) instead of O(arena_capacity).
@@ -3960,8 +4143,7 @@ impl RuntimeState {
         // Advance region state if possible (e.g. if this was the last task)
         self.advance_region_state(owner);
 
-        // Return the waiters for the completed task
-        waiters
+        TaskCompletionEffects { waiters, observer }
     }
 
     // =========================================================================
@@ -6200,6 +6382,178 @@ pub struct HeldObligationSnapshot {
 }
 
 #[cfg(test)]
+pub(crate) mod completion_observer_test_support {
+    use super::*;
+    use crate::sync::ContendedMutex;
+    use std::sync::{Mutex, Weak};
+
+    struct PanickingDropPayload(Arc<AtomicUsize>);
+
+    impl Drop for PanickingDropPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            panic!("adversarial panic-payload destructor");
+        }
+    }
+
+    /// Deterministic adversarial provider shared by completion-path tests.
+    pub struct PanickingCompletionMetrics {
+        state: Mutex<Option<Weak<ContendedMutex<RuntimeState>>>>,
+        completion_attempts: AtomicUsize,
+        reentry_successes: AtomicUsize,
+        completed_state_observed: AtomicUsize,
+        completion_panics_remaining: AtomicUsize,
+        panic_payload_drop_counter: Option<Arc<AtomicUsize>>,
+        panic_while_recording_task_panic: AtomicBool,
+    }
+
+    impl PanickingCompletionMetrics {
+        fn with_completion_panics(completion_panics_remaining: usize) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(None),
+                completion_attempts: AtomicUsize::new(0),
+                reentry_successes: AtomicUsize::new(0),
+                completed_state_observed: AtomicUsize::new(0),
+                completion_panics_remaining: AtomicUsize::new(completion_panics_remaining),
+                panic_payload_drop_counter: None,
+                panic_while_recording_task_panic: AtomicBool::new(false),
+            })
+        }
+
+        pub(crate) fn panic_once() -> Arc<Self> {
+            Self::with_completion_panics(1)
+        }
+
+        pub(crate) fn panic_persistently() -> Arc<Self> {
+            Self::with_completion_panics(usize::MAX)
+        }
+
+        pub(crate) fn panic_with_panicking_drop_payload(
+            drop_counter: Arc<AtomicUsize>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(None),
+                completion_attempts: AtomicUsize::new(0),
+                reentry_successes: AtomicUsize::new(0),
+                completed_state_observed: AtomicUsize::new(0),
+                completion_panics_remaining: AtomicUsize::new(1),
+                panic_payload_drop_counter: Some(drop_counter),
+                panic_while_recording_task_panic: AtomicBool::new(false),
+            })
+        }
+
+        pub(crate) fn panic_persistently_and_trigger_guard_drop() -> Arc<Self> {
+            let metrics = Self::panic_persistently();
+            metrics
+                .panic_while_recording_task_panic
+                .store(true, Ordering::Relaxed);
+            metrics
+        }
+
+        pub(crate) fn attach_state(&self, state: &Arc<ContendedMutex<RuntimeState>>) {
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(state));
+        }
+
+        pub(crate) fn completion_attempts(&self) -> usize {
+            self.completion_attempts.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn reentry_successes(&self) -> usize {
+            self.reentry_successes.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn completed_state_observed(&self) -> usize {
+            self.completed_state_observed.load(Ordering::Relaxed)
+        }
+
+        fn should_panic_on_completion(&self) -> bool {
+            self.completion_panics_remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    if remaining == 0 {
+                        None
+                    } else if remaining == usize::MAX {
+                        Some(usize::MAX)
+                    } else {
+                        Some(remaining - 1)
+                    }
+                })
+                .is_ok()
+        }
+    }
+
+    impl MetricsProvider for PanickingCompletionMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {}
+
+        fn task_completed(&self, task_id: TaskId, _: OutcomeKind, _: Duration) {
+            self.completion_attempts.fetch_add(1, Ordering::Relaxed);
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if let Some(state) = state
+                && let Ok(runtime) = state.try_lock()
+            {
+                self.reentry_successes.fetch_add(1, Ordering::Relaxed);
+                if runtime.task(task_id).is_none() {
+                    self.completed_state_observed
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if self.should_panic_on_completion() {
+                if let Some(drop_counter) = &self.panic_payload_drop_counter {
+                    std::panic::panic_any(PanickingDropPayload(Arc::clone(drop_counter)));
+                }
+                panic!("adversarial task-completion metrics callback");
+            }
+        }
+
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+
+        fn region_closed(&self, _: RegionId, _: Duration) {}
+
+        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+
+        fn deadline_exceeded(&self, _: RegionId) {}
+
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+
+        fn deadline_violation(&self, _: &str, _: Duration) {}
+
+        fn deadline_remaining(&self, _: &str, _: Duration) {}
+
+        fn checkpoint_interval(&self, _: &str, _: Duration) {}
+
+        fn task_stuck_detected(&self, _: &str) {}
+
+        fn obligation_created(&self, _: RegionId) {}
+
+        fn obligation_discharged(&self, _: RegionId) {}
+
+        fn obligation_leaked(&self, _: RegionId) {}
+
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+
+        fn record_panic(&self, _: &'static str) {
+            if self
+                .panic_while_recording_task_panic
+                .load(Ordering::Relaxed)
+            {
+                panic!("force TaskExecutionGuard unwind fallback");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 mod tests {
     use super::*;
@@ -6320,6 +6674,217 @@ mod tests {
         fn obligation_leaked(&self, _: RegionId) {}
 
         fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
+
+    #[test]
+    fn task_completion_observer_is_deferred_one_shot_and_reentrant() {
+        use super::completion_observer_test_support::PanickingCompletionMetrics;
+        use crate::sync::ContendedMutex;
+
+        let metrics = PanickingCompletionMetrics::panic_once();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let root = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .create_root_region(Budget::INFINITE);
+
+        for expected_attempts in 1..=2 {
+            let effects = {
+                let mut runtime = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (task_id, _handle) = runtime
+                    .create_task(root, Budget::INFINITE, async {})
+                    .expect("create task");
+                runtime
+                    .task_mut(task_id)
+                    .expect("task record")
+                    .complete(Outcome::Ok(()));
+                let effects = runtime.task_completed(task_id);
+
+                assert_eq!(
+                    metrics.completion_attempts(),
+                    expected_attempts - 1,
+                    "task_completed must not invoke the provider inline"
+                );
+                assert!(runtime.task(task_id).is_none(), "task must be recycled");
+                assert!(
+                    !runtime
+                        .region(root)
+                        .expect("root region")
+                        .task_ids()
+                        .contains(&task_id),
+                    "owner must be unlinked before observer delivery"
+                );
+                effects
+            };
+
+            let (waiters, observer) = effects.into_parts();
+            assert!(waiters.is_empty());
+            observer.dispatch();
+            assert_eq!(metrics.completion_attempts(), expected_attempts);
+            assert_eq!(metrics.reentry_successes(), expected_attempts);
+            assert_eq!(metrics.completed_state_observed(), expected_attempts);
+        }
+
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            runtime.task_completion_observer_panic_count(),
+            1,
+            "the one-shot panic must be contained and counted once"
+        );
+    }
+
+    #[test]
+    fn persistent_task_completion_observer_panics_are_contained_and_counted() {
+        use super::completion_observer_test_support::PanickingCompletionMetrics;
+        use crate::sync::ContendedMutex;
+
+        let metrics = PanickingCompletionMetrics::panic_persistently();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let root = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .create_root_region(Budget::INFINITE);
+
+        for _ in 0..2 {
+            let observer = {
+                let mut runtime = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (task_id, _handle) = runtime
+                    .create_task(root, Budget::INFINITE, async {})
+                    .expect("create task");
+                runtime
+                    .task_mut(task_id)
+                    .expect("task record")
+                    .complete(Outcome::Ok(()));
+                let (waiters, observer) = runtime.task_completed(task_id).into_parts();
+                assert!(waiters.is_empty());
+                observer
+            };
+            observer.dispatch();
+        }
+
+        assert_eq!(metrics.completion_attempts(), 2);
+        assert_eq!(metrics.reentry_successes(), 2);
+        assert_eq!(metrics.completed_state_observed(), 2);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task_completion_observer_panic_count(),
+            2,
+            "each persistent panic must be contained and counted"
+        );
+    }
+
+    #[test]
+    fn task_completion_observer_contains_panicking_payload_destructor() {
+        use super::completion_observer_test_support::PanickingCompletionMetrics;
+        use crate::sync::ContendedMutex;
+
+        let payload_drops = Arc::new(AtomicUsize::new(0));
+        let metrics = PanickingCompletionMetrics::panic_with_panicking_drop_payload(Arc::clone(
+            &payload_drops,
+        ));
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let observer = {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("create task");
+            runtime
+                .task_mut(task_id)
+                .expect("task record")
+                .complete(Outcome::Ok(()));
+            let (waiters, observer) = runtime.task_completed(task_id).into_parts();
+            assert!(waiters.is_empty());
+            observer
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            observer.dispatch();
+        }));
+        assert!(
+            result.is_ok(),
+            "caught payload destruction must not reopen the unwind boundary"
+        );
+        assert_eq!(metrics.completion_attempts(), 1);
+        assert_eq!(payload_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task_completion_observer_panic_count(),
+            1
+        );
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn task_completion_tracing_panic_is_contained_and_counted() {
+        use tracing_subscriber::prelude::*;
+
+        struct PanickingLayer {
+            attempts: Arc<AtomicUsize>,
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for PanickingLayer
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.attempts.fetch_add(1, Ordering::Relaxed);
+                panic!("adversarial completion tracing subscriber");
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        state
+            .task_mut(task_id)
+            .expect("task record")
+            .complete(Outcome::Ok(()));
+        let (waiters, observer) = state.task_completed(task_id).into_parts();
+        assert!(waiters.is_empty());
+        assert!(state.task(task_id).is_none());
+
+        let subscriber = tracing_subscriber::registry().with(PanickingLayer {
+            attempts: Arc::clone(&attempts),
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::subscriber::with_default(subscriber, || observer.dispatch());
+        }));
+
+        assert!(result.is_ok(), "subscriber panic must not escape dispatch");
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(state.task_completion_observer_panic_count(), 1);
     }
 
     struct TestWaker(AtomicBool);
@@ -6507,7 +7072,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         let events = state
             .trace
@@ -6615,7 +7180,9 @@ mod tests {
             .task_mut(task_id)
             .expect("task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task_id);
+        let _waiters = state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
 
         let stats = state.epoch_tracker.transition_statistics();
         crate::assert_with_log!(
@@ -6690,7 +7257,9 @@ mod tests {
                 .task_mut(task_id)
                 .expect("task")
                 .complete(Outcome::Ok(()));
-            let _ = state.task_completed(task_id);
+            let _waiters = state
+                .task_completed(task_id)
+                .into_waiters_without_observers();
 
             // Tell the canceller to stop and join.
             stop.store(true, Ordering::Relaxed);
@@ -6990,7 +7559,9 @@ mod tests {
             .expect("async finalizer task missing")
             .complete(Outcome::Ok(()));
         clock.advance(14);
-        let _ = state.task_completed(task_id);
+        let _waiters = state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
 
         crate::assert_with_log!(
             state.finalizer_history()
@@ -7277,7 +7848,8 @@ mod tests {
         if let Some(record) = state.task_mut(task_id) {
             record.complete(Outcome::Cancelled(CancelReason::timeout()));
         }
-        let _ = state.task_completed(task_id);
+        let (_waiters, observer) = state.task_completed(task_id).into_parts();
+        observer.dispatch();
 
         let saw_cancelled = metrics.completions.lock().contains(&OutcomeKind::Cancelled);
         crate::assert_with_log!(
@@ -7614,7 +8186,9 @@ mod tests {
             .expect("task")
             .complete(Outcome::Ok(()));
 
-        let waiters_first = state.task_completed(task_id);
+        let waiters_first = state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
         crate::assert_with_log!(
             !waiters_first.is_empty(),
             "first task_completed returns the registered waiter",
@@ -7630,7 +8204,9 @@ mod tests {
 
         // Second call on the same task_id: task is gone (removed by
         // first call), early-return with empty waiters.
-        let waiters_second = state.task_completed(task_id);
+        let waiters_second = state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
         crate::assert_with_log!(
             waiters_second.is_empty(),
             "second task_completed returns empty",
@@ -8785,7 +9361,9 @@ mod tests {
         task.complete(Outcome::Ok(()));
 
         state.now = Time::from_nanos(30);
-        let _ = state.task_completed(task_id);
+        let _waiters = state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
 
         crate::assert_with_log!(
             state.finalizer_history
@@ -8924,7 +9502,10 @@ mod tests {
             .complete(Outcome::Ok(()));
 
         runtime.state.now = Time::from_nanos(30);
-        let _ = runtime.state.task_completed(task_id);
+        let _waiters = runtime
+            .state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
 
         {
             let validator = runtime.state.cancel_protocol_validator().lock();
@@ -9060,7 +9641,9 @@ mod tests {
             .task_mut(task_id)
             .expect("async finalizer task missing")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task_id);
+        let _waiters = state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
         // Finalizer-history events are timestamped with the runtime's logical
         // clock, which `RuntimeState::new()` initializes to a non-zero default
         // (not `Time::ZERO`). Compare against that actual clock value.
@@ -9148,7 +9731,9 @@ mod tests {
             .task_mut(task_id)
             .expect("async finalizer task missing")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task_id);
+        let _waiters = state
+            .task_completed(task_id)
+            .into_waiters_without_observers();
 
         crate::assert_with_log!(
             sync_runs.load(std::sync::atomic::Ordering::SeqCst) == 1,
@@ -9268,7 +9853,7 @@ mod tests {
             .complete(Outcome::Ok(()));
 
         // Call task_completed to notify the runtime
-        let waiters = state.task_completed(task2);
+        let waiters = state.task_completed(task2).into_waiters_without_observers();
         crate::assert_with_log!(waiters.is_empty(), "no waiters", true, waiters.is_empty()); // No waiters registered
 
         // Verify task2 is removed from the region
@@ -9303,13 +9888,13 @@ mod tests {
             .task_mut(task1)
             .expect("task1")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task1);
+        let _waiters = state.task_completed(task1).into_waiters_without_observers();
 
         state
             .task_mut(task3)
             .expect("task3")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task3);
+        let _waiters = state.task_completed(task3).into_waiters_without_observers();
 
         // Verify all tasks removed from region
         let region_record = state.regions.get(region.arena_index()).expect("region");
@@ -10065,7 +10650,9 @@ mod tests {
             true,
             root_completed
         );
-        let _ = state.task_completed(root_task);
+        let _waiters = state
+            .task_completed(root_task)
+            .into_waiters_without_observers();
         let scheduled_finalizers = state.drain_ready_async_finalizers();
         crate::assert_with_log!(
             scheduled_finalizers.len() == 1,
@@ -10133,7 +10720,9 @@ mod tests {
             true,
             finalizer_completed
         );
-        let _ = state.task_completed(finalizer_task);
+        let _waiters = state
+            .task_completed(finalizer_task)
+            .into_waiters_without_observers();
         let outcome_before_post_close_reentry = format!("{:?}", state.region_close_outcome(root));
         let after_close_complete = observe(
             &state,
@@ -10316,7 +10905,8 @@ mod tests {
             .task_mut(task1)
             .expect("task1")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
-        let _ = state.task_completed(task1);
+        let (_waiters, observer) = state.task_completed(task1).into_parts();
+        observer.dispatch();
         let region_state = state
             .regions
             .get(root.arena_index())
@@ -10343,7 +10933,8 @@ mod tests {
             .task_mut(task2)
             .expect("task2")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
-        let _ = state.task_completed(task2);
+        let (_waiters, observer) = state.task_completed(task2).into_parts();
+        observer.dispatch();
 
         // Region should transition through Finalizing → Closed
         // (sync finalizers are run inline by advance_region_state)
@@ -10414,7 +11005,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Err(Error::new(ErrorKind::Internal)));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         crate::assert_with_log!(
             state.region_was_closed(region),
@@ -10527,7 +11118,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         crate::assert_with_log!(
             state.region_was_closed(region),
@@ -10632,7 +11223,9 @@ mod tests {
             .task_mut(child_task)
             .expect("child_task")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
-        let _ = state.task_completed(child_task);
+        let _waiters = state
+            .task_completed(child_task)
+            .into_waiters_without_observers();
 
         // Child region should close since it has no tasks and no children
         let child_state_removed = state.regions.get(child.arena_index()).is_none();
@@ -10666,7 +11259,9 @@ mod tests {
             .task_mut(root_task)
             .expect("root_task")
             .complete(Outcome::Cancelled(CancelReason::user("stop")));
-        let _ = state.task_completed(root_task);
+        let _waiters = state
+            .task_completed(root_task)
+            .into_waiters_without_observers();
 
         let root_state_removed = state.regions.get(root.arena_index()).is_none();
         crate::assert_with_log!(
@@ -10767,7 +11362,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // All obligations should be resolved (aborted by task_completed)
         for obl_id in [obl_send, obl_ack, obl_io] {
@@ -10832,7 +11427,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // Region should close cleanly (no leaks, obligation was already committed)
         let region_state_removed = state.regions.get(region.arena_index()).is_none();
@@ -10933,7 +11528,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::deadline()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // Verify full trace event sequence
         let events = state.trace.snapshot();
@@ -11034,7 +11629,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::shutdown()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // All obligations resolved
         crate::assert_with_log!(
@@ -11099,7 +11694,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // Both should now be closed (advance_region_state drives the cascade)
         let child_state_removed = state.regions.get(child.arena_index()).is_none();
@@ -11183,7 +11778,9 @@ mod tests {
             .task_mut(task_a)
             .expect("task_a")
             .complete(Outcome::Cancelled(CancelReason::deadline()));
-        let _ = state.task_completed(task_a);
+        let _waiters = state
+            .task_completed(task_a)
+            .into_waiters_without_observers();
 
         // Region still open: task_b still alive with obligations
         let region_state = state
@@ -11209,7 +11806,9 @@ mod tests {
             .task_mut(task_b)
             .expect("task_b")
             .complete(Outcome::Cancelled(CancelReason::deadline()));
-        let _ = state.task_completed(task_b);
+        let _waiters = state
+            .task_completed(task_b)
+            .into_waiters_without_observers();
 
         crate::assert_with_log!(
             state.pending_obligation_count() == 0,
@@ -11365,7 +11964,7 @@ mod tests {
         state.update_task(task, |record| {
             record.complete(Outcome::Ok(()));
         });
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
     }
 
     #[test]
@@ -11688,7 +12287,9 @@ mod tests {
             .task_mut(gc_task)
             .expect("gc_task")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
-        let _ = state.task_completed(gc_task);
+        let _waiters = state
+            .task_completed(gc_task)
+            .into_waiters_without_observers();
 
         // Grandchild region should close (no tasks, no children, no pending obligations)
         let gc_state_removed = state.regions.get(grandchild.arena_index()).is_none();
@@ -11721,7 +12322,9 @@ mod tests {
             .task_mut(child_task)
             .expect("child_task")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
-        let _ = state.task_completed(child_task);
+        let _waiters = state
+            .task_completed(child_task)
+            .into_waiters_without_observers();
 
         // Child region should close (no tasks, no children, obligation committed)
         let child_state_final_removed = state.regions.get(child.arena_index()).is_none();
@@ -11747,7 +12350,9 @@ mod tests {
             .task_mut(root_task)
             .expect("root_task")
             .complete(Outcome::Cancelled(CancelReason::user("shutdown")));
-        let _ = state.task_completed(root_task);
+        let _waiters = state
+            .task_completed(root_task)
+            .into_waiters_without_observers();
 
         // Root should close (all children closed, all tasks done, obligations resolved)
         let root_state_final_removed = state.regions.get(root.arena_index()).is_none();
@@ -11828,7 +12433,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // Region should advance through Finalizing → Closed
         let region_state_removed = state.regions.get(region.arena_index()).is_none();
@@ -12211,7 +12816,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // Region should still close because mark_obligation_leaked resolves
         // the obligation from the region's perspective.
@@ -12294,7 +12899,7 @@ mod tests {
             early_leak_events
         );
 
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         crate::assert_with_log!(
             state.pending_obligation_count() == 0,
@@ -12423,7 +13028,9 @@ mod tests {
             .task_mut(gc_task)
             .expect("gc_task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(gc_task);
+        let _waiters = state
+            .task_completed(gc_task)
+            .into_waiters_without_observers();
 
         let gc_state_removed = state.regions.get(grandchild.arena_index()).is_none();
         crate::assert_with_log!(
@@ -12452,7 +13059,9 @@ mod tests {
             .task_mut(child_task)
             .expect("child_task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(child_task);
+        let _waiters = state
+            .task_completed(child_task)
+            .into_waiters_without_observers();
 
         let child_state_final_removed = state.regions.get(child.arena_index()).is_none();
         crate::assert_with_log!(
@@ -12477,7 +13086,9 @@ mod tests {
             .task_mut(root_task)
             .expect("root_task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(root_task);
+        let _waiters = state
+            .task_completed(root_task)
+            .into_waiters_without_observers();
 
         let root_state_final_removed = state.regions.get(root.arena_index()).is_none();
         crate::assert_with_log!(
@@ -12529,7 +13140,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Err(Error::new(ErrorKind::Internal)));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         // In Recover mode, leaked obligations are aborted, so region should close
         let region_state_removed = state.regions.get(region.arena_index()).is_none();
@@ -12598,13 +13209,17 @@ mod tests {
             .task_mut(child_task1)
             .expect("child_task1")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
-        let _ = state.task_completed(child_task1);
+        let _waiters = state
+            .task_completed(child_task1)
+            .into_waiters_without_observers();
 
         state
             .task_mut(child_task2)
             .expect("child_task2")
             .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
-        let _ = state.task_completed(child_task2);
+        let _waiters = state
+            .task_completed(child_task2)
+            .into_waiters_without_observers();
 
         // Child should be closed
         let child_state_removed = state.regions.get(child.arena_index()).is_none();
@@ -12620,7 +13235,9 @@ mod tests {
             .task_mut(root_task)
             .expect("root_task")
             .complete(Outcome::Cancelled(CancelReason::user("test")));
-        let _ = state.task_completed(root_task);
+        let _waiters = state
+            .task_completed(root_task)
+            .into_waiters_without_observers();
 
         // Root should close (all children closed, tasks done, obligations resolved)
         let root_state_removed = state.regions.get(root.arena_index()).is_none();
@@ -12691,7 +13308,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         {
             let closed = metrics.closed.lock();
@@ -12740,7 +13357,7 @@ mod tests {
             .task_mut(task)
             .expect("task")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(task);
+        let _waiters = state.task_completed(task).into_waiters_without_observers();
 
         assert!(state.regions.get(root.arena_index()).is_none());
         assert!(matches!(
@@ -12896,7 +13513,9 @@ mod tests {
             .task_mut(child_task)
             .expect("child task missing")
             .complete(Outcome::Ok(()));
-        let _ = state.task_completed(child_task);
+        let _waiters = state
+            .task_completed(child_task)
+            .into_waiters_without_observers();
 
         crate::assert_with_log!(
             state.pending_obligation_count() == 0,

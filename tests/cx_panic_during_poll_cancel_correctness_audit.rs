@@ -73,9 +73,11 @@
 //!   4. **Waiters woken via `task_completed`** (three_lane.rs:
 //!      4941):
 //!      ```ignore
-//!      let waiters = state.task_completed(task_id);
+//!      let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
 //!      let finalizers = state.drain_ready_async_finalizers();
 //!      self.wake_dependents_locked(&state, waiters);
+//!      // after waiter publication, guard completion, and lock release:
+//!      completion_observer.dispatch();
 //!      ```
 //!      The parent's `JoinHandle::await` is scheduled. The
 //!      parent observes `Outcome::Panicked(...)` via the
@@ -260,9 +262,10 @@ fn worker_panic_path_wakes_dependents_so_parent_observes_panicked() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("let waiters = state.task_completed(task_id);"),
+        body.contains("let (waiters, completion_observer)")
+            && body.contains("state.task_completed(task_id).into_parts();"),
         "REGRESSION: panic Err arm no longer gathers waiters \
-         via task_completed. The parent's JoinHandle never \
+         and the owned completion observer via task_completed. The parent's JoinHandle never \
          resolves — silent task hang.",
     );
 

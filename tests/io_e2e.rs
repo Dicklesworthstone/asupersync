@@ -555,7 +555,8 @@ fn io_e2e_lab_region_close_waits_for_io_op() {
     assert_with_log!(cancel_ok, "cancel io op", true, cancel_ok);
 
     // Now clean up the task from the region, which triggers advance_region_state and allows the region to close.
-    runtime.state.task_completed(task_id);
+    let (_waiters, completion_observer) = runtime.state.task_completed(task_id).into_parts();
+    completion_observer.dispatch();
 
     // `advance_region_state` completes the close and removes the region from the arena.
     let region_state = runtime

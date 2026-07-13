@@ -2210,7 +2210,9 @@ mod tests {
                     if let Some(task_record) = state.task_mut(handle.task_id()) {
                         task_record.complete(task_outcome);
                     }
-                    let _ = state.task_completed(handle.task_id());
+                    let (_waiters, completion_observer) =
+                        state.task_completed(handle.task_id()).into_parts();
+                    completion_observer.dispatch();
                 }
 
                 std::future::ready(Outcome::Ok((child_id, parent_has, child_has)))
@@ -2711,7 +2713,9 @@ mod tests {
                             crate::error::Error::new(crate::error::ErrorKind::Internal)
                         }));
                     }
-                    let _ = state.task_completed(handle.task_id());
+                    let (_waiters, completion_observer) =
+                        state.task_completed(handle.task_id()).into_parts();
+                    completion_observer.dispatch();
                 }
 
                 std::future::ready(Outcome::Ok((
@@ -3061,7 +3065,8 @@ mod tests {
                 task_record.complete(task_outcome);
             }
         }
-        let _ = state.task_completed(grandchild_task_id);
+        let (_waiters, completion_observer) = state.task_completed(grandchild_task_id).into_parts();
+        completion_observer.dispatch();
         state.advance_region_state(grandchild);
 
         let mut grandchild_join_fut = std::pin::pin!(grandchild_handle.join(&cx));
@@ -3096,7 +3101,8 @@ mod tests {
                 task_record.complete(task_outcome);
             }
         }
-        let _ = state.task_completed(child_task_id);
+        let (_waiters, completion_observer) = state.task_completed(child_task_id).into_parts();
+        completion_observer.dispatch();
         state.advance_region_state(child);
 
         let mut child_join_fut = std::pin::pin!(child_handle.join(&cx));

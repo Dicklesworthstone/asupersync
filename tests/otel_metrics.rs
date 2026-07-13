@@ -390,7 +390,8 @@ fn obligation_leak_response_log_emits_metric_and_trace() {
     state.set_obligation_leak_response(ObligationLeakResponse::Log);
 
     let task_id = setup_leaked_obligation(&mut state);
-    let _ = state.task_completed(task_id);
+    let (_waiters, completion_observer) = state.task_completed(task_id).into_parts();
+    completion_observer.dispatch();
 
     assert_eq!(provider.obligations_leaked.load(Ordering::SeqCst), 1);
     assert!(trace_has_obligation_leak(&state));
@@ -404,7 +405,8 @@ fn obligation_leak_response_silent_still_records_trace_and_metric() {
     state.set_obligation_leak_response(ObligationLeakResponse::Silent);
 
     let task_id = setup_leaked_obligation(&mut state);
-    let _ = state.task_completed(task_id);
+    let (_waiters, completion_observer) = state.task_completed(task_id).into_parts();
+    completion_observer.dispatch();
 
     assert_eq!(provider.obligations_leaked.load(Ordering::SeqCst), 1);
     assert!(trace_has_obligation_leak(&state));
@@ -419,7 +421,8 @@ fn obligation_leak_response_panics() {
 
     let task_id = setup_leaked_obligation(&mut state);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = state.task_completed(task_id);
+        let (_waiters, completion_observer) = state.task_completed(task_id).into_parts();
+        completion_observer.dispatch();
     }));
 
     assert!(result.is_err(), "expected panic on obligation leak");

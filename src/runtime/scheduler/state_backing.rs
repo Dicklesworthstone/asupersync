@@ -25,7 +25,7 @@
 //!
 //! - `task(task_id) -> Option<&TaskRecord>`
 //! - `task_mut(task_id) -> Option<&mut TaskRecord>`
-//! - `task_completed(task_id) -> SmallVec<[TaskId; 4]>` (returns waiter ids)
+//! - `task_completed(task_id) -> TaskCompletionEffects`
 //! - `store_spawned_task(task_id, stored)`
 //! - `remove_stored_future(task_id) -> Option<StoredTask>`
 //! - `drain_ready_async_finalizers() -> SmallVec<[(TaskId, u8); 2]>`
@@ -58,6 +58,7 @@
 //!   br-asupersync-9kuias acceptance bar.
 
 use crate::record::task::TaskRecord;
+use crate::runtime::state::TaskCompletionEffects;
 use crate::runtime::{RuntimeState, StoredTask};
 use crate::types::{TaskId, Time};
 use smallvec::SmallVec;
@@ -77,7 +78,7 @@ pub trait RuntimeStateBacking {
     /// Looks up a task record by id (mutable).
     fn task_mut(&mut self, task_id: TaskId) -> Option<&mut TaskRecord>;
 
-    /// Marks a task complete and returns its waiter ids.
+    /// Marks a task complete and returns owned waiter/observer effects.
     ///
     /// Implementations must preserve cross-table atomicity: completion
     /// may transition the owning region's task count and trigger region
@@ -85,7 +86,7 @@ pub trait RuntimeStateBacking {
     /// for the duration. The future ShardedState impl must use
     /// `ShardGuard::for_task_completed` (or equivalent) to lock both
     /// the Tasks and Regions shards in the canonical B→A→C order.
-    fn task_completed(&mut self, task_id: TaskId) -> SmallVec<[TaskId; 4]>;
+    fn task_completed(&mut self, task_id: TaskId) -> TaskCompletionEffects;
 
     /// Stores a spawned task's future for later polling.
     fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask);
@@ -123,7 +124,7 @@ impl RuntimeStateBacking for RuntimeState {
     }
 
     #[inline]
-    fn task_completed(&mut self, task_id: TaskId) -> SmallVec<[TaskId; 4]> {
+    fn task_completed(&mut self, task_id: TaskId) -> TaskCompletionEffects {
         RuntimeState::task_completed(self, task_id)
     }
 

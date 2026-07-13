@@ -339,7 +339,9 @@ impl Worker {
                         }
                     });
 
-                    let waiters = state.task_completed(self.task_id);
+                    let waiters = state
+                        .task_completed(self.task_id)
+                        .into_waiters_without_observers();
                     let finalizers = state.drain_ready_async_finalizers();
                     let mut local_waiters = self.worker.scratch_local.take();
                     let mut global_waiters = self.worker.scratch_global.take();
@@ -584,7 +586,7 @@ impl Worker {
                     }
                 });
 
-                let waiters = state.task_completed(task_id);
+                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
                 let finalizers = state.drain_ready_async_finalizers();
                 let mut local_waiters = self.scratch_local.take();
                 let mut global_waiters = self.scratch_global.take();
@@ -621,22 +623,24 @@ impl Worker {
                 }
                 drop(state);
 
-                while let Some(waker) = foreign_wakers.pop() {
-                    waker.wake();
-                }
-
                 for waiter in &global_waiters {
                     self.global.push(*waiter);
                 }
                 self.local.push_many(&local_waiters);
-                self.scratch_local.set(local_waiters);
-                self.scratch_global.set(global_waiters);
-                self.scratch_foreign_wakers.set(foreign_wakers);
                 for (finalizer_task, _) in finalizers {
                     self.global.push(finalizer_task);
                 }
                 guard.completed = true;
                 wake_state.clear();
+                completion_observer.dispatch();
+
+                while let Some(waker) = foreign_wakers.pop() {
+                    waker.wake();
+                }
+
+                self.scratch_local.set(local_waiters);
+                self.scratch_global.set(global_waiters);
+                self.scratch_foreign_wakers.set(foreign_wakers);
             }
             PanicIsolationResult::Success(Poll::Pending) => {
                 let is_local = is_local_task;
@@ -705,7 +709,7 @@ impl Worker {
                     }
                 });
 
-                let waiters = state.task_completed(task_id);
+                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
                 let finalizers = state.drain_ready_async_finalizers();
                 let mut local_waiters = self.scratch_local.take();
                 let mut global_waiters = self.scratch_global.take();
@@ -738,22 +742,24 @@ impl Worker {
                 }
                 drop(state);
 
-                while let Some(waker) = foreign_wakers.pop() {
-                    waker.wake();
-                }
-
                 for waiter in &global_waiters {
                     self.global.push(*waiter);
                 }
                 self.local.push_many(&local_waiters);
-                self.scratch_local.set(local_waiters);
-                self.scratch_global.set(global_waiters);
-                self.scratch_foreign_wakers.set(foreign_wakers);
                 for (finalizer_task, _) in finalizers {
                     self.global.push(finalizer_task);
                 }
                 guard.completed = true;
                 wake_state.clear();
+                completion_observer.dispatch();
+
+                while let Some(waker) = foreign_wakers.pop() {
+                    waker.wake();
+                }
+
+                self.scratch_local.set(local_waiters);
+                self.scratch_global.set(global_waiters);
+                self.scratch_foreign_wakers.set(foreign_wakers);
             }
         }
         let _ = guard.completed;
@@ -1964,6 +1970,218 @@ mod tests {
             worker.local.pop().is_none(),
             "foreign local waiter must not be routed to current worker local queue"
         );
+    }
+
+    #[test]
+    fn completion_observer_one_shot_panic_does_not_kill_legacy_worker() {
+        use crate::record::task::TaskRecord;
+        use crate::runtime::RuntimeState;
+        use crate::runtime::state::completion_observer_test_support::PanickingCompletionMetrics;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, Outcome, RegionId};
+
+        let metrics = PanickingCompletionMetrics::panic_once();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let owner = RegionId::new_for_test(0, 1);
+        let ready_task = TaskId::new_for_test(0, 0);
+        let panicking_task = TaskId::new_for_test(1, 0);
+
+        {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ready_record = TaskRecord::new(ready_task, owner, Budget::INFINITE);
+            ready_record.add_waiter(panicking_task);
+            let _ = runtime.insert_task(ready_record);
+            let _ = runtime.insert_task(TaskRecord::new(panicking_task, owner, Budget::INFINITE));
+            runtime.store_spawned_task(
+                ready_task,
+                StoredTask::new_with_id(async move { Outcome::Ok(()) }, ready_task),
+            );
+            runtime.store_spawned_task(
+                panicking_task,
+                StoredTask::new_with_id(
+                    async move { unreachable!("legacy task panic regression") },
+                    panicking_task,
+                ),
+            );
+        }
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.execute(ready_task);
+            }))
+            .is_ok(),
+            "one-shot observer panic must be contained"
+        );
+        assert_eq!(global.pop(), Some(panicking_task), "waiter must be queued");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.execute(panicking_task);
+            }))
+            .is_ok(),
+            "the same worker must survive task and observer panics"
+        );
+
+        assert_eq!(metrics.completion_attempts(), 2);
+        assert_eq!(metrics.reentry_successes(), 2);
+        assert_eq!(metrics.completed_state_observed(), 2);
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(runtime.task(ready_task).is_none());
+        assert!(runtime.task(panicking_task).is_none());
+        assert_eq!(runtime.task_completion_observer_panic_count(), 1);
+    }
+
+    #[test]
+    fn legacy_guard_drop_suppresses_completion_observer_payload() {
+        use crate::record::task::TaskRecord;
+        use crate::runtime::RuntimeState;
+        use crate::runtime::state::completion_observer_test_support::PanickingCompletionMetrics;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, RegionId};
+
+        let metrics = PanickingCompletionMetrics::panic_persistently_and_trigger_guard_drop();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let owner = RegionId::new_for_test(0, 1);
+        let panicking_task = TaskId::new_for_test(0, 0);
+        let waiter_task = TaskId::new_for_test(1, 0);
+
+        {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut task_record = TaskRecord::new(panicking_task, owner, Budget::INFINITE);
+            task_record.add_waiter(waiter_task);
+            let _ = runtime.insert_task(task_record);
+            let _ = runtime.insert_task(TaskRecord::new(waiter_task, owner, Budget::INFINITE));
+            runtime.store_spawned_task(
+                panicking_task,
+                StoredTask::new_with_id(
+                    async move { unreachable!("force legacy execution guard fallback") },
+                    panicking_task,
+                ),
+            );
+        }
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.execute(panicking_task);
+        }));
+
+        assert!(
+            result.is_err(),
+            "test hook must reach the guard Drop fallback"
+        );
+        assert_eq!(metrics.completion_attempts(), 0);
+        assert_eq!(global.pop(), Some(waiter_task), "guard must retain waiters");
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(runtime.task(panicking_task).is_none());
+        assert_eq!(
+            runtime.task_completion_observer_panic_count(),
+            0,
+            "suppression is not a failed dispatch"
+        );
+    }
+
+    #[test]
+    fn legacy_completion_observer_precedes_panicking_foreign_waker() {
+        use crate::record::task::TaskRecord;
+        use crate::runtime::RuntimeState;
+        use crate::runtime::state::completion_observer_test_support::PanickingCompletionMetrics;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, Outcome, RegionId};
+        use std::task::Wake;
+
+        struct PanickingWake;
+
+        impl Wake for PanickingWake {
+            fn wake(self: Arc<Self>) {
+                panic!("adversarial foreign waiter waker");
+            }
+        }
+
+        let metrics = PanickingCompletionMetrics::panic_once();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let owner = RegionId::new_for_test(0, 1);
+        let completing_task = TaskId::new_for_test(0, 0);
+        let waiter_task = TaskId::new_for_test(1, 0);
+
+        {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut completing_record = TaskRecord::new(completing_task, owner, Budget::INFINITE);
+            completing_record.add_waiter(waiter_task);
+            let _ = runtime.insert_task(completing_record);
+            let mut waiter_record = TaskRecord::new(waiter_task, owner, Budget::INFINITE);
+            waiter_record.pin_to_worker(1);
+            waiter_record.cached_waker = Some((Waker::from(Arc::new(PanickingWake)), 0));
+            let _ = runtime.insert_task(waiter_record);
+            runtime.store_spawned_task(
+                completing_task,
+                StoredTask::new_with_id(async move { Outcome::Ok(()) }, completing_task),
+            );
+        }
+
+        let worker = Worker::new(0, Vec::new(), global, Arc::clone(&state), shutdown);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.execute(completing_task);
+        }));
+
+        assert!(
+            result.is_err(),
+            "foreign waker panic remains a separate boundary"
+        );
+        assert_eq!(
+            metrics.completion_attempts(),
+            1,
+            "completion observer must be attempted before the foreign callback"
+        );
+        assert_eq!(metrics.reentry_successes(), 1);
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(runtime.task(completing_task).is_none());
+        assert_eq!(runtime.task_completion_observer_panic_count(), 1);
     }
 
     // Deterministic RNG for scheduling fuzz in tests: no ambient time.

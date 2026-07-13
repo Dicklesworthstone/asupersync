@@ -46,8 +46,9 @@
 //!      panic-induced potential drops.
 //!
 //!   4. **Waiters woken so parent observes the panic**: the
-//!      worker calls `state.task_completed(task_id)` to gather
-//!      waiters, then `wake_dependents_locked(&state, waiters)`
+//!      worker splits `state.task_completed(task_id).into_parts()` to gather
+//!      waiters plus an owned completion observer, then calls
+//!      `wake_dependents_locked(&state, waiters)`
 //!      to schedule them. The parent region's `JoinHandle`
 //!      `await` consumes the Panicked outcome via the standard
 //!      completion handshake — no special-case unwind path.
@@ -230,9 +231,10 @@ fn catch_unwind_err_arm_wakes_dependents_so_parent_observes_panic() {
 
     // The waiters set is gathered via task_completed.
     assert!(
-        body.contains("let waiters = state.task_completed(task_id);"),
+        body.contains("let (waiters, completion_observer)")
+            && body.contains("state.task_completed(task_id).into_parts();"),
         "REGRESSION: panic-in-task Err arm no longer gathers \
-         waiters via task_completed. The wake_dependents call \
+         waiters and the owned completion observer via task_completed. The wake_dependents call \
          has nothing to wake — equivalent silent-swallow.",
     );
 }

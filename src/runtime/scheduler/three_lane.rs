@@ -6287,7 +6287,9 @@ impl ThreeLaneWorker {
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let waiters = state.task_completed(self.task_id);
+                    let waiters = state
+                        .task_completed(self.task_id)
+                        .into_waiters_without_observers();
                     let finalizers = state.drain_ready_async_finalizers();
 
                     self.worker.wake_dependents_locked(&state, waiters);
@@ -6581,7 +6583,7 @@ impl ThreeLaneWorker {
                     }
                 });
 
-                let waiters = state.task_completed(task_id);
+                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
                 let finalizers = state.drain_ready_async_finalizers();
 
                 self.wake_dependents_locked(&state, waiters);
@@ -6599,6 +6601,7 @@ impl ThreeLaneWorker {
                 drop(state);
                 guard.completed = true;
                 wake_state.clear();
+                completion_observer.dispatch();
             }
             Ok(Poll::Pending) => {
                 // Store task back: use task table for hot-path when sharded.
@@ -6727,7 +6730,7 @@ impl ThreeLaneWorker {
                     }
                 });
 
-                let waiters = state.task_completed(task_id);
+                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
                 let finalizers = state.drain_ready_async_finalizers();
 
                 self.wake_dependents_locked(&state, waiters);
@@ -6744,6 +6747,7 @@ impl ThreeLaneWorker {
                 drop(state);
                 guard.completed = true;
                 wake_state.clear();
+                completion_observer.dispatch();
             }
         }
         drop(guard);
@@ -15629,6 +15633,69 @@ mod tests {
             1,
             "metrics should resume on the first healthy dispatch after a panic"
         );
+    }
+
+    #[test]
+    fn persistent_completion_observer_panics_do_not_kill_three_lane_worker() {
+        use crate::runtime::state::completion_observer_test_support::PanickingCompletionMetrics;
+
+        let metrics = PanickingCompletionMetrics::panic_persistently();
+        let mut runtime = RuntimeState::new_with_metrics(metrics.clone());
+        let root = runtime.create_root_region(Budget::INFINITE);
+        let (ready_task, _ready_handle) = runtime
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("ready task create");
+        let (panicking_task, _panicking_handle) = runtime
+            .create_task(root, Budget::INFINITE, async {
+                panic!("native task panic regression");
+            })
+            .expect("panicking task create");
+        runtime
+            .task_mut(ready_task)
+            .expect("ready task record")
+            .add_waiter(panicking_task);
+        let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+        metrics.attach_state(&state);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = scheduler.workers.first_mut().expect("worker");
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.execute(ready_task);
+            }))
+            .is_ok(),
+            "persistent completion-observer panic must be contained"
+        );
+        assert_eq!(
+            worker.next_task(),
+            Some(panicking_task),
+            "normal completion must publish its waiter before observer delivery"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.execute(panicking_task);
+            }))
+            .is_ok(),
+            "the same worker must survive task and persistent observer panics"
+        );
+
+        assert_eq!(metrics.completion_attempts(), 2);
+        assert_eq!(metrics.reentry_successes(), 2);
+        assert_eq!(metrics.completed_state_observed(), 2);
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(runtime.task(ready_task).is_none());
+        assert!(runtime.task(panicking_task).is_none());
+        assert!(
+            runtime
+                .region(root)
+                .expect("root region")
+                .task_ids()
+                .is_empty(),
+            "both completed tasks must be unlinked"
+        );
+        assert_eq!(runtime.task_completion_observer_panic_count(), 2);
     }
 
     fn first_adaptive_epoch_metrics_after_optional_idle_probe(

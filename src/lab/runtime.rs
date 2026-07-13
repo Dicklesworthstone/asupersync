@@ -2016,7 +2016,8 @@ impl LabRuntime {
                 }
 
                 // Notify waiters
-                let waiters = self.state.task_completed(task_id);
+                let (waiters, completion_observer) =
+                    self.state.task_completed(task_id).into_parts();
 
                 // br-asupersync-iwqn3q: hoist priority lookup OUT of
                 // the scheduler-locked scope. cx_inner is an
@@ -2047,6 +2048,8 @@ impl LabRuntime {
                 for (waiter, prio) in scheduled {
                     sched.schedule(waiter, prio);
                 }
+                drop(sched);
+                completion_observer.dispatch();
             }
             Poll::Pending => {
                 // Task yielded. Waker will reschedule it when ready.
