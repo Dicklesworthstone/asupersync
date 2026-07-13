@@ -794,6 +794,20 @@ impl OwnedSemaphorePermit {
     /// Forgets the permit without releasing it back to the semaphore.
     #[inline]
     pub fn forget(mut self) {
+        // Release the lock-order rank if this permit recorded an acquire
+        // (count>0 permits do; count==0 fast paths skip record_acquire). We are
+        // about to zero `count`, after which Drop's `count > 0` gate would skip
+        // the release and leave a phantom held rank in the deadlock-detection
+        // tracker → false-positive "DEADLOCK PREVENTION" panic on the next
+        // lower-ranked acquire. Forgetting the permit means the thread no longer
+        // holds this lock for ordering purposes, even though the permit count is
+        // not returned to the semaphore. Mirrors the borrowed permit, whose
+        // `forget` leaves `release_lock_order_on_drop` set so its Drop releases.
+        if self.count > 0 {
+            if let Some(rank) = self.semaphore.rank {
+                lock_ordering::record_release(self.semaphore.name, rank);
+            }
+        }
         self.count = 0;
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.abort();

@@ -158,7 +158,10 @@ impl<T, E> MapReduceResult<T, E> {
     /// Returns the number of failed tasks.
     #[must_use]
     pub fn failure_count(&self) -> usize {
-        self.total_count - self.successes.len()
+        // Saturating: `total_count` is `>= successes.len()` by construction, but
+        // this is a public accessor and a caller-supplied result built through a
+        // public constructor could violate that — never panic/underflow here.
+        self.total_count.saturating_sub(self.successes.len())
     }
 
     /// Returns true if there's a reduced value available.
@@ -450,7 +453,7 @@ pub fn map_reduce_to_result<T, E>(result: MapReduceResult<T, E>) -> Result<T, Ma
             let first_error_index = (0..result.total_count)
                 .find(|i| !success_indices.contains(i))
                 .unwrap_or(0);
-            let total_failures = result.total_count - result.successes.len();
+            let total_failures = result.total_count.saturating_sub(result.successes.len());
             Err(MapReduceError::Error {
                 error: e,
                 index: first_error_index,

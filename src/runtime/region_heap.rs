@@ -433,9 +433,43 @@ impl RegionHeap {
         self.stats.live = 0;
         self.stats.bytes_live = 0;
 
+        // Set the live count to 0 before touching slots so a panicking element
+        // destructor cannot double-subtract in Drop.
+        self.len = 0;
+
+        // Fold every slot's generation forward rather than `slots.clear()`. A
+        // bare clear discards all per-slot generations, so the next `alloc`
+        // re-issues index 0 / generation 0 and a stale pre-reclaim `HeapIndex`
+        // of the same type would validate against the new allocation — an ABA
+        // reuse the generation counter exists to prevent, and which the module
+        // proof (item 4, "generation mismatch prevents access") explicitly
+        // relies on surviving reclamation. `clear()` retains the Vec capacity
+        // anyway, so preserving the slots as recycled Vacant entries costs no
+        // extra memory. Iterate FORWARD so each Occupied slot's payload is
+        // dropped in ascending index order — matching `slots.clear()`'s
+        // front-to-back drop, which the region-close drop-trace metamorphic
+        // tests pin.
         self.free_head = None;
-        self.len = 0; // Set to 0 before clear to prevent double-subtraction in Drop if a destructor panics.
-        self.slots.clear();
+        for i in 0..self.slots.len() {
+            // Occupied slots fold forward (matching `dealloc`); already-Vacant
+            // slots keep their generation. A slot at u32::MAX is permanently
+            // retired and stays off the free list.
+            let (generation, retired) = match &self.slots[i] {
+                HeapSlot::Occupied(entry) => match next_slot_generation(entry.generation) {
+                    Some(next) => (next, false),
+                    None => (u32::MAX, true),
+                },
+                HeapSlot::Vacant { generation, .. } => (*generation, *generation == u32::MAX),
+            };
+            let next_free = if retired { None } else { self.free_head };
+            self.slots[i] = HeapSlot::Vacant {
+                next_free,
+                generation,
+            };
+            if !retired {
+                self.free_head = Some(i as u32);
+            }
+        }
     }
 }
 
@@ -789,6 +823,31 @@ mod tests {
         assert!(heap.is_empty());
         assert_eq!(heap.stats().live, 0);
         assert_eq!(heap.stats().reclaimed, 3);
+    }
+
+    #[test]
+    fn reclaim_all_preserves_generation_aba_safety() {
+        // The module proof (item 4) relies on generation counters surviving
+        // reclamation. A bare slots.clear() would reset generations to 0, so a
+        // stale pre-reclaim handle would alias a reused slot's new allocation.
+        let mut heap = RegionHeap::new();
+        let stale = heap.alloc(42u32);
+        assert_eq!(heap.get::<u32>(stale).copied(), Some(42));
+
+        heap.reclaim_all();
+
+        // A fresh alloc reuses the same slot but with an advanced generation.
+        let fresh = heap.alloc(99u32);
+        assert_eq!(stale.index, fresh.index, "slot index is reused after reclaim");
+        assert_ne!(
+            stale.generation, fresh.generation,
+            "generation must advance across reclaim to keep stale handles closed"
+        );
+        assert!(
+            heap.get::<u32>(stale).is_none(),
+            "stale pre-reclaim handle must NOT resolve to the reused slot"
+        );
+        assert_eq!(heap.get::<u32>(fresh).copied(), Some(99));
     }
 
     #[test]

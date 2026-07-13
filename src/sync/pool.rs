@@ -995,12 +995,42 @@ where
         if !self.completed
             && let Some(id) = *self.waiter_id
         {
-            // Remove from main waiters queue
-            let mut state = self.pool.state.lock();
-            if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
-                state.waiters.remove(idx);
+            // Remove from the main waiters queue AND, if this cancelled waiter
+            // was eligible, wake the waiter that shifts into its eligible slot.
+            // This future (`wait_fut`) drops before the sibling `WaiterCleanup`,
+            // so we remove the waiter first — WaiterCleanup::drop then finds
+            // `pos == None` and its own marginal wake is dead. Without doing the
+            // marginal wake here, a cancellation shifts a later waiter into
+            // eligibility without waking it, stranding it (with an idle resource
+            // free) until `acquire_timeout`. Mirrors WaiterCleanup::drop. (br)
+            let marginal_waker: Option<std::task::Waker> = {
+                let mut state = self.pool.state.lock();
+                if let Some(p) = state.waiters.iter().position(|w| w.id == id) {
+                    state.waiters.remove(p);
+                    if state.closed {
+                        None
+                    } else {
+                        let total_including_creating =
+                            state.active + state.idle.len() + state.creating;
+                        let available = state.idle.len()
+                            + self
+                                .pool
+                                .config
+                                .max_size
+                                .saturating_sub(total_including_creating);
+                        if p < available && available > 0 && available - 1 < state.waiters.len() {
+                            Some(state.waiters[available - 1].waker.clone())
+                        } else {
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(w) = marginal_waker {
+                w.wake();
             }
-            drop(state);
 
             // Remove from return_wakers list. If we were the dispatcher (the
             // first entry, which `notify_return_wakers` wakes to drain the
