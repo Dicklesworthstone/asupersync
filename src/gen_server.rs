@@ -1830,6 +1830,21 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                     let _ = result_tx.send(&cx_for_send, Ok(server_final));
                 }
                 Err(payload) => {
+                    // The loop panicked before its graceful Phase-3 drain ran,
+                    // so the mailbox may still hold queued `Envelope::Call`
+                    // envelopes whose reply permits are armed obligations.
+                    // Dropping the receiver (when `cell` drops below) would drop
+                    // them un-aborted, tripping a secondary
+                    // `[ASUP-E101] OBLIGATION TOKEN LEAKED` panic inside the mpsc
+                    // Receiver's Drop during task teardown (a double-fault into
+                    // the executor drop path). Close and abort queued call
+                    // permits here, mirroring the graceful drain.
+                    cell.mailbox.close();
+                    while let Ok(envelope) = cell.mailbox.try_recv() {
+                        if let Envelope::Call { reply_permit, .. } = envelope {
+                            let _ = session::TrackedOneshotPermit::abort(reply_permit);
+                        }
+                    }
                     let msg = crate::cx::scope::payload_to_string(&payload);
                     let _ = result_tx.send(
                         &cx_for_send,

@@ -22,7 +22,7 @@ use crate::types::TaskId;
 // dependency affects *when* a violation fires, not the byte-stability
 // of the violation that did fire. Tracked as follow-up; the structural
 // switch to `crate::types::Time` is a separate refactor.
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -110,9 +110,19 @@ struct TaskInfo {
     /// Time when task started running (if applicable).
     pub start_time: Option<Instant>,
     /// Resources currently held by this task.
-    pub held_resources: HashSet<ResourceId>,
+    ///
+    /// `BTreeSet`, not `HashSet`: iteration order reaches the byte-stable
+    /// violation stream (release order on completion at `on_task_completed`),
+    /// and a per-process randomized hash seed would make the reported
+    /// `PriorityInversion` differ run-to-run. Mirrors the `br-asupersync-w9u6dn`
+    /// migration of the sibling maps to `BTreeMap`.
+    pub held_resources: BTreeSet<ResourceId>,
     /// Resources this task is waiting for.
-    pub waiting_for: HashSet<ResourceId>,
+    ///
+    /// `BTreeSet` for determinism: `detect_transitive_inversions` builds the
+    /// reported `blocking_chain` from `waiting_for.iter().next()`, so the first
+    /// element must be stable across runs (smallest `ResourceId`).
+    pub waiting_for: BTreeSet<ResourceId>,
 }
 
 /// Task priority levels.
@@ -282,8 +292,8 @@ impl PriorityInversionOracle {
             state: TaskState::Spawned,
             spawn_time: (self.time_source)(),
             start_time: None,
-            held_resources: HashSet::new(),
-            waiting_for: HashSet::new(),
+            held_resources: BTreeSet::new(),
+            waiting_for: BTreeSet::new(),
         };
 
         state.active_tasks.insert(task_id, task_info);
