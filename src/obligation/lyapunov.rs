@@ -318,11 +318,13 @@ impl StateSnapshot {
         #[allow(clippy::cast_possible_truncation)]
         let pending_acks: u32 = state.pending_obligation_count_for_kind(ObligationKind::Ack) as u32;
         #[allow(clippy::cast_possible_truncation)]
-        let pending_leases: u32 = (state
+        let pending_leases: u32 = state
             .pending_obligation_count_for_kind(ObligationKind::Lease)
             .saturating_add(
                 state.pending_obligation_count_for_kind(ObligationKind::SemaphorePermit),
-            )) as u32;
+            )
+            .saturating_add(state.pending_obligation_count_for_kind(ObligationKind::Transaction))
+            as u32;
         #[allow(clippy::cast_possible_truncation)]
         let pending_io_ops: u32 =
             state.pending_obligation_count_for_kind(ObligationKind::IoOp) as u32;
@@ -930,6 +932,61 @@ mod tests {
         );
 
         crate::test_complete!("snapshot_from_runtime_counts_tasks_obligations_and_regions");
+    }
+
+    #[test]
+    fn snapshot_from_runtime_buckets_transactions_with_leases() {
+        init_test("snapshot_from_runtime_buckets_transactions_with_leases");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        let (task_id, _handle) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create_task must succeed");
+
+        let _lease = state
+            .create_obligation(ObligationKind::Lease, task_id, root, None)
+            .expect("lease obligation must be created");
+        let _semaphore = state
+            .create_obligation(ObligationKind::SemaphorePermit, task_id, root, None)
+            .expect("semaphore obligation must be created");
+        let _transaction = state
+            .create_obligation(ObligationKind::Transaction, task_id, root, None)
+            .expect("transaction obligation must be created");
+
+        let snapshot = StateSnapshot::from_runtime_state(&state);
+        crate::assert_with_log!(
+            snapshot.pending_obligations == 3,
+            "pending_obligations",
+            3,
+            snapshot.pending_obligations
+        );
+        crate::assert_with_log!(
+            snapshot.pending_leases == 3,
+            "pending_leases",
+            3,
+            snapshot.pending_leases
+        );
+        crate::assert_with_log!(
+            snapshot.pending_send_permits == 0,
+            "pending_send_permits",
+            0,
+            snapshot.pending_send_permits
+        );
+        crate::assert_with_log!(
+            snapshot.pending_acks == 0,
+            "pending_acks",
+            0,
+            snapshot.pending_acks
+        );
+        crate::assert_with_log!(
+            snapshot.pending_io_ops == 0,
+            "pending_io_ops",
+            0,
+            snapshot.pending_io_ops
+        );
+
+        crate::test_complete!("snapshot_from_runtime_buckets_transactions_with_leases");
     }
 
     #[test]

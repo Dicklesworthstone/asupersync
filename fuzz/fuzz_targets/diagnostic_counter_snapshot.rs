@@ -62,6 +62,7 @@ enum ObligationKindChoice {
     Lease,
     IoOp,
     SemaphorePermit,
+    Transaction,
 }
 
 impl ObligationKindChoice {
@@ -72,6 +73,7 @@ impl ObligationKindChoice {
             Self::Lease => ObligationKind::Lease,
             Self::IoOp => ObligationKind::IoOp,
             Self::SemaphorePermit => ObligationKind::SemaphorePermit,
+            Self::Transaction => ObligationKind::Transaction,
         }
     }
 }
@@ -345,7 +347,9 @@ impl ExpectedSnapshot {
                 ObligationKind::Ack => {
                     expected.pending_acks = expected.pending_acks.saturating_add(1);
                 }
-                ObligationKind::Lease | ObligationKind::SemaphorePermit => {
+                ObligationKind::Lease
+                | ObligationKind::SemaphorePermit
+                | ObligationKind::Transaction => {
                     expected.pending_leases = expected.pending_leases.saturating_add(1);
                 }
                 ObligationKind::IoOp => {
