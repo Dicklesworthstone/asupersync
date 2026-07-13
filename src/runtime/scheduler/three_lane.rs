@@ -334,6 +334,19 @@ enum IoPhaseOutcome {
     NoProgress,
 }
 
+#[inline]
+fn select_io_poll_timeout(
+    idle_timeout: Option<Duration>,
+    fast_queue_empty: bool,
+    spawn_mailbox_has_work: bool,
+) -> Option<Duration> {
+    if fast_queue_empty && !spawn_mailbox_has_work {
+        idle_timeout
+    } else {
+        Some(Duration::ZERO)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackoffTimeoutDecision {
     ParkTimeout { nanos: u64 },
@@ -4393,12 +4406,17 @@ impl ThreeLaneWorker {
             })
             .or(Some(IDLE_IO_POLL_MAX_TIMEOUT));
 
-        // We only block in I/O if we have no fast_queue work.
-        let io_timeout = if self.fast_queue.is_empty() {
-            timeout
-        } else {
-            Some(Duration::ZERO)
-        };
+        // Do not block in I/O while spawn admission work remains. A denied
+        // request produces no runnable task; without this mailbox check, the
+        // next request could wait for the full idle I/O timeout before the
+        // scheduler loop revisits admission.
+        let io_timeout = select_io_poll_timeout(
+            timeout,
+            self.fast_queue.is_empty(),
+            self.spawn_mailbox
+                .as_ref()
+                .is_some_and(|mailbox| !mailbox.is_empty()),
+        );
 
         if self.shutdown.load(Ordering::Acquire) {
             return IoPhaseOutcome::NoProgress;
@@ -4856,7 +4874,7 @@ impl ThreeLaneWorker {
     /// Admitted tasks are injected into the global ready lane so any worker
     /// can pick them up.
     fn drain_spawn_admissions(&mut self) {
-        const SPAWN_ADMISSION_BATCH: usize = 16;
+        const SPAWN_ADMISSION_BATCH: usize = 1;
 
         let Some(mailbox) = self.spawn_mailbox.as_ref() else {
             return;
@@ -7547,6 +7565,32 @@ mod tests {
         assert_eq!(
             selected, local_deadline,
             "follower must ignore shared deadlines and honor only local deadline"
+        );
+    }
+
+    #[test]
+    fn pending_spawn_mailbox_forces_nonblocking_io_poll() {
+        let idle_timeout = Some(IDLE_IO_POLL_MAX_TIMEOUT);
+
+        assert_eq!(
+            select_io_poll_timeout(idle_timeout, true, true),
+            Some(Duration::ZERO),
+            "a denied head request must not leave the remaining mailbox backlog behind a blocking I/O poll"
+        );
+        assert_eq!(
+            select_io_poll_timeout(idle_timeout, false, false),
+            Some(Duration::ZERO),
+            "fast-queue work must continue to force a nonblocking I/O poll"
+        );
+        assert_eq!(
+            select_io_poll_timeout(idle_timeout, false, true),
+            Some(Duration::ZERO),
+            "concurrent fast-queue and mailbox work must keep the I/O poll nonblocking"
+        );
+        assert_eq!(
+            select_io_poll_timeout(idle_timeout, true, false),
+            idle_timeout,
+            "an actually idle worker should preserve the bounded I/O wait"
         );
     }
 
