@@ -1,0 +1,411 @@
+{
+  "schema_version": "spawn-admission-gauntlet-completion-v1",
+  "signoff_id": "spawn_admission_gauntlet_completion_v1",
+  "campaign_bead_id": "asupersync-spawn-admission-opt-gauntlet-p8zm1v",
+  "closeout_bead_id": "asupersync-spawn-admission-gauntlet-completion-081dxf",
+  "created_date": "2026-07-14",
+  "purpose": "Bind the ten strictly serial spawn-admission optimization decisions to durable Git evidence without promoting rejected candidates, external receipts, or a completed pass sequence into a fresh correctness, performance, workspace-health, release-readiness, or tracker-closure claim.",
+  "campaign_status": {
+    "sequence_status": "complete",
+    "proof_status": "blocked",
+    "combined_status": "sequence_complete_proof_blocked",
+    "expected_pass_count": 10,
+    "serial_execution_required": true,
+    "pass_11_authorized": false,
+    "completion_claim": "ten_serial_decisions_recorded",
+    "tracker_status_at_packet_creation": "in_progress",
+    "tracker_assignee_at_packet_creation": "MistyOsprey",
+    "tracker_status_drift": true,
+    "tracker_close_authorized": false,
+    "tracker_close_policy": "The campaign owner must acknowledge the completion packet before the parent bead is closed; this packet never mutates or supersedes owner authority."
+  },
+  "scope": {
+    "target": "non-ATP runtime spawn admission and completion path",
+    "certificate_class": "process_completion_only",
+    "formal_assurance_tier": "A",
+    "formal_assurance_boundary": "The contract checks committed ledger and retained-file bindings plus evidence-admissibility invariants. It is not a concurrency model check, protocol proof, fresh benchmark, or release certificate.",
+    "atp_paths_in_scope": false,
+    "runtime_default_promotion_claimed": false,
+    "fresh_pass_10_proof_claimed": false,
+    "canonical_proof_lane_registration_claimed": false
+  },
+  "ledger_binding": {
+    "path": ".skill-loop-progress.md",
+    "close_commit_full": "3e278859f36d279c95ec8d8cb623163ba98215fe",
+    "close_parent_full": "81279d2e654c7716148330635bc38065fc1f30a2",
+    "close_tree_full": "155f81d3f9564fd5dbc8bcf6efc5d51b718a79f8",
+    "sha256": "b9ffbd7db22ee6385af976e9eb7667f35a285d56263336a02362c884997fbcc6",
+    "required_status_marker": "## Status: COMPLETE — Pass 10 of 10 complete; campaign closed"
+  },
+  "passes": [
+    {
+      "ordinal": 1,
+      "title": "corrected same-worker baseline",
+      "verdict": "measurement_only",
+      "candidate_disposition": "no_candidate",
+      "record_commit_full": "726c7449c67d6d88d1b7be7c454372035aff7a76",
+      "ledger_snapshot_sha256": "0ca05f84002bc780538e582fe0475f622e3169f7621c05b143d7cbb208dd8adf",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "corrected_same_worker_baseline_decision_recorded"
+      ],
+      "no_claims": [
+        "no_durable_default_flip_evidence",
+        "no_cross_host_performance_claim"
+      ],
+      "external_receipts": [
+        {
+          "path": "/root/perf-baselines/asupersync-spawn-pass1-final-c70e89d0a-20260712T060643Z",
+          "location_class": "external_ephemeral",
+          "availability": "not_reverified",
+          "decision_role": "historical_context_only"
+        }
+      ]
+    },
+    {
+      "ordinal": 2,
+      "title": "sustained direct/mailbox CPU attribution",
+      "verdict": "measurement_only",
+      "candidate_disposition": "no_candidate",
+      "record_commit_full": "90949d62ffd6221873a047ea14c7b6bb0060849f",
+      "ledger_snapshot_sha256": "6490e1b4cb00075c2acbd0877854af6c280bad0ff38e9b0e05224571d1c08960",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "bounded_cpu_attribution_decision_recorded"
+      ],
+      "no_claims": [
+        "no_total_cycle_comparison",
+        "no_allocation_or_lock_wait_claim"
+      ],
+      "external_receipts": [
+        {
+          "path": "/root/perf-baselines/asupersync-spawn-pass2-c70e89d0a-20260712T061700Z",
+          "location_class": "external_ephemeral",
+          "availability": "not_reverified",
+          "decision_role": "historical_context_only"
+        }
+      ]
+    },
+    {
+      "ordinal": 3,
+      "title": "lower-load admission-mode A/B, rejected fail-closed",
+      "verdict": "rejected_fail_closed",
+      "candidate_disposition": "candidate_reverted",
+      "record_commit_full": "8bda2ae33d2a50ab1e6c4d1c45126a5183c670da",
+      "ledger_snapshot_sha256": "042bd3a2c310240d162687a56f6d7ca070625679885066aa4ee631b2d2c5552e",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "bounded_performance_gate_result_recorded",
+        "correctness_gate_failure_recorded"
+      ],
+      "no_claims": [
+        "no_default_mailbox_promotion",
+        "no_check_clippy_or_behavioral_equivalence_claim"
+      ],
+      "external_receipts": [
+        {
+          "path": "/data/tmp/asupersync-spawn-pass3-c70e89d0a-20260712TtIjVI2",
+          "location_class": "external_ephemeral",
+          "availability": "not_reverified",
+          "decision_role": "historical_context_only"
+        }
+      ]
+    },
+    {
+      "ordinal": 4,
+      "title": "mailbox-default correctness rerun, rejected on API semantics",
+      "verdict": "rejected_fail_closed",
+      "candidate_disposition": "candidate_reverted",
+      "record_commit_full": "c3b4dcd289b153aeb0d826b43c1649f69a27a816",
+      "ledger_snapshot_sha256": "b222cd89c222f39c1fb7a335ce6ba790d10170216f694281042d70b22ed7ff35",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "synchronous_typed_admission_error_blocker_recorded",
+        "governor_and_quota_semantic_blockers_recorded"
+      ],
+      "no_claims": [
+        "no_default_mailbox_promotion",
+        "no_broad_health_or_clippy_claim"
+      ],
+      "external_receipts": []
+    },
+    {
+      "ordinal": 5,
+      "title": "spawn-mailbox admission batch sensitivity, batch 1 retained",
+      "verdict": "retained_production_change",
+      "candidate_disposition": "candidate_retained",
+      "record_commit_full": "5dc09dc8ad364d213130dcab4f3a09a98f144314",
+      "ledger_snapshot_sha256": "ab740f0c99db22f3ab991c4f4eeca348e30b318e1f14df10e632413796ff7bbe",
+      "retained_runtime_change": true,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "batch_one_runtime_change_retained",
+        "mailbox_pending_nonblocking_io_guard_retained",
+        "bounded_admitted_workload_gain_recorded"
+      ],
+      "no_claims": [
+        "no_individual_request_latency_claim",
+        "no_scheduler_wide_or_drive_io_equivalence_claim"
+      ],
+      "external_receipts": [
+        {
+          "path": "/data/tmp/asupersync_pass5_spawn_batch_20260712/exact_final/FINAL_SOURCE_MANIFEST.md",
+          "location_class": "external_ephemeral",
+          "availability": "historical_binary_removed",
+          "decision_role": "historical_context_only",
+          "sha256": "564551732e41b48ea5112ee716a12f0374852c8e85bf634aabc7f6019209d7fc"
+        }
+      ]
+    },
+    {
+      "ordinal": 6,
+      "title": "state-lock / epoch-transition experiment, rejected before benchmark",
+      "verdict": "rejected_fail_closed",
+      "candidate_disposition": "candidate_reverted",
+      "record_commit_full": "8c4df2afd6df64182aeab6bb8c729acece37321b",
+      "ledger_snapshot_sha256": "f084c11363d9e807022df88af779380404df102f36d1bdfcd9c5872064e81fed",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "callback_panic_safety_blocker_recorded"
+      ],
+      "no_claims": [
+        "no_compile_test_benchmark_or_performance_claim",
+        "no_callback_free_commit_boundary_claim"
+      ],
+      "external_receipts": [
+        {
+          "path": "/data/tmp/asupersync_pass6_state_lock_20260713/REJECTED.md",
+          "location_class": "external_ephemeral",
+          "availability": "not_reverified",
+          "decision_role": "historical_context_only"
+        }
+      ]
+    },
+    {
+      "ordinal": 7,
+      "title": "finite-universe epoch extrema fold, rejected on direct p99",
+      "verdict": "rejected_performance_gate",
+      "candidate_disposition": "candidate_reverted",
+      "record_commit_full": "8c4df2afd6df64182aeab6bb8c729acece37321b",
+      "ledger_snapshot_sha256": "f084c11363d9e807022df88af779380404df102f36d1bdfcd9c5872064e81fed",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "direct_p99_gate_failure_recorded"
+      ],
+      "no_claims": [
+        "no_retained_epoch_fold",
+        "no_mean_win_override_of_tail_gate"
+      ],
+      "external_receipts": [
+        {
+          "path": "/data/tmp/asupersync_pass7_spawn_20260713",
+          "location_class": "external_ephemeral",
+          "availability": "not_reverified",
+          "decision_role": "historical_context_only"
+        }
+      ]
+    },
+    {
+      "ordinal": 8,
+      "title": "ready-publication locality, profiled no-change rejection",
+      "verdict": "measurement_only",
+      "candidate_disposition": "candidates_rejected_before_edit",
+      "record_commit_full": "2e5bd9c6da02358491075e812c13557b8d69cebd",
+      "ledger_snapshot_sha256": "23700dd36586c10b32858f9fb0f281ea1afc8ea05b607b6fc8c2dca6e5a586b4",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "bounded_ready_publication_profile_recorded",
+        "non_isomorphic_candidates_rejected"
+      ],
+      "no_claims": [
+        "no_ready_publication_speedup",
+        "no_cross_host_or_production_workload_claim"
+      ],
+      "external_receipts": [
+        {
+          "path": "/data/tmp/pass8_ready_publication_final_evidence_20260713T170300Z",
+          "location_class": "external_ephemeral",
+          "availability": "not_reverified",
+          "decision_role": "historical_context_only"
+        }
+      ]
+    },
+    {
+      "ordinal": 9,
+      "title": "adversarial spawn tails, harness landed; production candidate rejected",
+      "verdict": "retained_measurement_harness",
+      "candidate_disposition": "runtime_candidate_reverted_harness_retained",
+      "record_commit_full": "81279d2e654c7716148330635bc38065fc1f30a2",
+      "ledger_snapshot_sha256": "f1d4acb081ff9253eba9cce8a897fe944d1f53f1acd36cadcdee214fc3f9f2f3",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": true,
+      "admitted_claims": [
+        "adversarial_measurement_harness_retained",
+        "production_candidate_rejection_recorded"
+      ],
+      "no_claims": [
+        "no_retained_runtime_optimization",
+        "no_individual_request_p99_or_production_speedup_claim"
+      ],
+      "external_receipts": [
+        {
+          "path": "/data/tmp/pass9_adversarial_718b5378_evidence",
+          "location_class": "external_ephemeral",
+          "availability": "not_reverified",
+          "decision_role": "historical_context_only"
+        }
+      ]
+    },
+    {
+      "ordinal": 10,
+      "title": "convergence review, measured no-change under fail-closed proof admission",
+      "verdict": "measurement_only",
+      "candidate_disposition": "candidate_rejected_before_edit",
+      "record_commit_full": "3e278859f36d279c95ec8d8cb623163ba98215fe",
+      "ledger_snapshot_sha256": "b9ffbd7db22ee6385af976e9eb7667f35a285d56263336a02362c884997fbcc6",
+      "retained_runtime_change": false,
+      "retained_measurement_harness": false,
+      "admitted_claims": [
+        "ten_pass_sequence_completion_recorded",
+        "profile_gate_rejection_recorded",
+        "proof_admission_blocker_recorded"
+      ],
+      "no_claims": [
+        "no_fresh_reprofile_or_candidate_ab",
+        "no_fresh_check_clippy_format_or_broad_proof",
+        "no_performance_workspace_health_or_release_readiness_claim"
+      ],
+      "external_receipts": []
+    }
+  ],
+  "retained_change_bindings": [
+    {
+      "binding_id": "pass_5_runtime_change",
+      "pass_ordinal": 5,
+      "change_class": "production_runtime",
+      "commit_full": "5dc09dc8ad364d213130dcab4f3a09a98f144314",
+      "path": "src/runtime/scheduler/three_lane.rs",
+      "sha256_at_commit": "ccd30349b8b6ea554baff1610167650c5c6faedb00e0c5eb76e9249fc14bd579",
+      "required_source_markers": [
+        "const SPAWN_ADMISSION_BATCH: usize = 1;",
+        "fn select_io_poll_timeout(",
+        "pending_spawn_mailbox_forces_nonblocking_io_poll"
+      ],
+      "behavior_boundary": "Retains batch-one admission and the denied-backlog nonblocking I/O guard. It does not promote Mailbox to the runtime default."
+    },
+    {
+      "binding_id": "pass_9_measurement_harness",
+      "pass_ordinal": 9,
+      "change_class": "benchmark_only",
+      "commit_full": "718b5378b9f78ed8ffe1ec363c94ba80161d113d",
+      "path": "benches/spawn_throughput.rs",
+      "sha256_at_commit": "d9439fbc82c5c567497130a26cc1952d6e2e26d4fb25ddc91749610b004d7fd6",
+      "required_source_markers": [
+        "fn direct_quota_denial(",
+        "fn deferred_gateway_quota_denial(",
+        "fn cancel_storm(",
+        "fn bench_adversarial_tails("
+      ],
+      "behavior_boundary": "Retains adversarial measurement cells only; the Pass-9 production candidate was reverted."
+    }
+  ],
+  "correctness_interlocks_at_sequence_close": [
+    {
+      "bead_id": "asupersync-909482",
+      "boundary": "Only the direct completion-observer slice landed; broader transitive callbacks, destructors, panic hooks, and panic=abort remained outside that slice."
+    },
+    {
+      "bead_id": "asupersync-20t5x2",
+      "boundary": "Runnable publication before spawn observers and first-poll factory deferral remained separate correctness work."
+    },
+    {
+      "bead_id": "asupersync-ob2lqk",
+      "boundary": "Deferred bounded epoch telemetry remained separate correctness work."
+    },
+    {
+      "bead_id": "asupersync-5mty2b",
+      "boundary": "Destructor/finalizer callback separation remained separate correctness work."
+    }
+  ],
+  "external_receipt_policy": {
+    "durable_location_class": "git_object",
+    "external_location_class": "external_ephemeral",
+    "durable_completion_depends_on_external_receipt_availability": false,
+    "external_receipts_reverified_by_this_packet": false,
+    "external_receipts_may_authorize_new_performance_claims": false,
+    "missing_external_receipt_effect": "The committed ledger still proves that the serial decision was recorded, but raw evidence is unavailable for a fresh performance or correctness citation."
+  },
+  "proof_obligations": [
+    {
+      "obligation_id": "PO-SEQUENCE",
+      "assumptions": "The committed ledger is the authoritative serial-pass record.",
+      "statement": "Exactly ten ordered pass headings exist, the status marker closes Pass 10, and no Pass 11 is authorized.",
+      "verification_method": "Hash the close-commit ledger, verify every per-pass ledger snapshot, and compare the exact ordinal vector and heading order.",
+      "failure_conditions": "A missing, duplicated, reordered, renumbered, or rehashed pass fails closed.",
+      "rollback_or_mitigation": "Repair the durable ledger in a new reviewed commit; never infer missing passes from prose or tracker comments."
+    },
+    {
+      "obligation_id": "PO-EVIDENCE-ADMISSIBILITY",
+      "assumptions": "External absolute-path receipts may be absent or stale.",
+      "statement": "Only Git-object hashes bind completion; rejected, quarantined, stale-source, or external-only evidence cannot be elevated into a retained-change or fresh-proof claim.",
+      "verification_method": "Validate verdict taxonomy, retained flags, location classes, and decision roles for every pass.",
+      "failure_conditions": "Any rejected pass marked retained, absolute path marked durable, or external receipt marked decision-authoritative fails closed.",
+      "rollback_or_mitigation": "Restore the fail-closed classification and rerun the focused contract."
+    },
+    {
+      "obligation_id": "PO-RETAINED-BINDINGS",
+      "assumptions": "Git history containing the recorded commits is available to the focused contract.",
+      "statement": "Exactly Pass 5 binds one production-runtime file and Pass 9 binds one benchmark-only file at the recorded Git-object hashes.",
+      "verification_method": "Read each path with git show at its recorded commit, hash the bytes, and check current source markers without requiring current whole-file identity.",
+      "failure_conditions": "Missing commits, paths, source markers, or hash mismatches fail closed.",
+      "rollback_or_mitigation": "Correct the binding only after an independent history review; do not silently rebind to current HEAD."
+    },
+    {
+      "obligation_id": "PO-TRACKER-AUTHORITY",
+      "assumptions": "The parent campaign remains assigned to MistyOsprey at packet creation.",
+      "statement": "This child packet records status drift but cannot close, reassign, or supersede the parent campaign bead.",
+      "verification_method": "Require tracker_status_drift=true, tracker_close_authorized=false, and explicit owner-handoff policy.",
+      "failure_conditions": "Any self-authorization of parent closure fails closed.",
+      "rollback_or_mitigation": "Return tracker authority to the recorded owner and request an explicit handoff."
+    },
+    {
+      "obligation_id": "PO-NO-CLAIM-MONOTONICITY",
+      "assumptions": "A process-completion certificate is weaker than fresh performance, correctness, workspace-health, or release proof.",
+      "statement": "The aggregate packet preserves every required no-claim boundary and never derives a stronger claim from a weaker pass verdict.",
+      "verification_method": "Require the global boundary set and pass-specific no-claims, then mutate representative fields in negative tests.",
+      "failure_conditions": "Removing a required boundary or promoting sequence completion to release/performance proof fails closed.",
+      "rollback_or_mitigation": "Restore the boundary and obtain fresh scoped evidence through a separately registered proof lane if a stronger claim is needed."
+    }
+  ],
+  "focused_validation": {
+    "remote_required": true,
+    "no_local_fallback": true,
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_spawn_admission_gauntlet_completion\" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test spawn_admission_gauntlet_completion_contract -- --nocapture",
+    "expected_signal": "All completion-ledger, retained-binding, evidence-admissibility, tracker-authority, no-claim, and tamper tests pass.",
+    "manifest_registration": "not_registered",
+    "citation_policy": "This focused command is validation for the packet only. It is not a canonical proof-lane-manifest claim and does not prove live RCH fleet availability."
+  },
+  "no_claim_boundaries": [
+    "does_not_promote_mailbox_to_default",
+    "does_not_prove_individual_request_p99",
+    "does_not_prove_cross_host_performance",
+    "does_not_prove_production_workload_speedup",
+    "does_not_prove_scheduler_wide_performance",
+    "does_not_prove_runtime_correctness",
+    "does_not_prove_workspace_health",
+    "does_not_prove_release_readiness",
+    "does_not_prove_fresh_pass_10_rch_validation",
+    "does_not_prove_external_receipt_durability",
+    "does_not_authorize_local_cargo_fallback",
+    "does_not_authorize_parent_tracker_close",
+    "does_not_authorize_peer_process_cancellation",
+    "does_not_authorize_file_deletion"
+  ]
+}
