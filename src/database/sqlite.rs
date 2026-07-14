@@ -46,7 +46,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 use std::time::Duration;
@@ -137,6 +137,298 @@ enum TransactionState {
     InTransaction,
     NeedsRollback,
     RollingBack, // Intermediate state to prevent concurrent rollbacks
+}
+
+#[derive(Debug, Default)]
+struct BeginLifecycle {
+    abandoned: bool,
+    opened: bool,
+    generation: Option<u64>,
+}
+
+#[derive(Clone)]
+struct BeginAttempt {
+    lifecycle: Arc<Mutex<BeginLifecycle>>,
+    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_generation: Arc<AtomicU64>,
+}
+
+impl BeginAttempt {
+    fn new(
+        transaction_state: Arc<Mutex<TransactionState>>,
+        transaction_generation: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            lifecycle: Arc::new(Mutex::new(BeginLifecycle::default())),
+            transaction_state,
+            transaction_generation,
+        }
+    }
+
+    fn abandon(&self) {
+        // Keep the lifecycle lock through the mirror poison so the async
+        // consumer and blocking worker form one ordered handoff. If the worker
+        // already opened the transaction, this attempt owns the physical state
+        // and must poison even when an older operation left a stale mirror.
+        let mut lifecycle = self.lifecycle.lock();
+        lifecycle.abandoned = true;
+
+        let mut state = self.transaction_state.lock();
+        let owns_current_generation = lifecycle.generation.is_some_and(|generation| {
+            self.transaction_generation.load(Ordering::Acquire) == generation
+        });
+        if owns_current_generation || (!lifecycle.opened && *state == TransactionState::Autocommit)
+        {
+            *state = TransactionState::NeedsRollback;
+        }
+    }
+
+    fn finish_worker(
+        &self,
+        conn: &rusqlite::Connection,
+        result: Result<u64, SqliteError>,
+    ) -> Result<u64, SqliteError> {
+        if result.is_ok() {
+            let mut lifecycle = self.lifecycle.lock();
+            lifecycle.opened = true;
+            let Some(generation) =
+                advance_transaction_generation(self.transaction_generation.as_ref())
+            else {
+                drop(lifecycle);
+                rollback_abandoned_begin_mutex_guarded(
+                    conn,
+                    self.transaction_state.as_ref(),
+                    self.transaction_generation.as_ref(),
+                )?;
+                return Err(SqliteError::Sqlite(
+                    "managed SQLite transaction generation exhausted".to_string(),
+                ));
+            };
+            lifecycle.generation = Some(generation);
+            if lifecycle.abandoned {
+                drop(lifecycle);
+                rollback_abandoned_begin_mutex_guarded(
+                    conn,
+                    self.transaction_state.as_ref(),
+                    self.transaction_generation.as_ref(),
+                )?;
+            } else {
+                // Publish the mirror before releasing the lifecycle lock. A
+                // later hard drop then observes `opened` and cannot miss the
+                // need for cleanup.
+                *self.transaction_state.lock() = TransactionState::InTransaction;
+            }
+        }
+        result
+    }
+}
+
+enum TransactionWorkerEffect {
+    Begin(BeginAttempt),
+    Finish(TransactionFinishEffect),
+}
+
+impl TransactionWorkerEffect {
+    fn execute_worker(self, conn: &rusqlite::Connection, sql: &str) -> Result<u64, SqliteError> {
+        match self {
+            Self::Begin(attempt) => {
+                if attempt.transaction_generation.load(Ordering::Acquire) >= u64::MAX - 1 {
+                    return Err(SqliteError::Sqlite(
+                        "managed SQLite transaction generation exhausted".to_string(),
+                    ));
+                }
+                let result = conn
+                    .execute(sql, [])
+                    .map(|rows| rows as u64)
+                    .map_err(|error| SqliteError::Sqlite(error.to_string()));
+                attempt.finish_worker(conn, result)
+            }
+            Self::Finish(mut effect) => effect.execute_worker(conn, sql),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TransactionFinishKind {
+    Commit,
+    Rollback,
+}
+
+struct TransactionFinishEffect {
+    transaction_state: Arc<Mutex<TransactionState>>,
+    transaction_generation: Arc<AtomicU64>,
+    expected_generation: u64,
+    kind: TransactionFinishKind,
+    obligation: Option<ObligationToken<TransactionKind>>,
+}
+
+impl TransactionFinishEffect {
+    fn new(
+        transaction_state: Arc<Mutex<TransactionState>>,
+        transaction_generation: Arc<AtomicU64>,
+        expected_generation: u64,
+        kind: TransactionFinishKind,
+        obligation: Option<ObligationToken<TransactionKind>>,
+    ) -> Self {
+        Self {
+            transaction_state,
+            transaction_generation,
+            expected_generation,
+            kind,
+            obligation,
+        }
+    }
+
+    fn execute_worker(
+        &mut self,
+        conn: &rusqlite::Connection,
+        sql: &str,
+    ) -> Result<u64, SqliteError> {
+        if self.transaction_generation.load(Ordering::Acquire) != self.expected_generation {
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort();
+            }
+            return Err(SqliteError::TransactionFinished);
+        }
+        if conn.is_autocommit() {
+            let _ = advance_transaction_generation(self.transaction_generation.as_ref());
+            *self.transaction_state.lock() = TransactionState::Autocommit;
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort();
+            }
+            return Err(SqliteError::TransactionFinished);
+        }
+
+        let result = conn
+            .execute(sql, [])
+            .map(|rows| rows as u64)
+            .map_err(|error| SqliteError::Sqlite(error.to_string()));
+        if result.is_ok() {
+            let _ = advance_transaction_generation(self.transaction_generation.as_ref());
+            *self.transaction_state.lock() = TransactionState::Autocommit;
+            if let Some(token) = self.obligation.take() {
+                match self.kind {
+                    TransactionFinishKind::Commit => {
+                        let _ = token.commit();
+                    }
+                    TransactionFinishKind::Rollback => {
+                        let _ = token.abort();
+                    }
+                }
+            }
+        } else if let Some(token) = self.obligation.take() {
+            let _ = token.abort();
+        }
+        result
+    }
+}
+
+impl Drop for TransactionFinishEffect {
+    fn drop(&mut self) {
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort();
+        }
+    }
+}
+
+struct BeginDropGuard {
+    attempt: BeginAttempt,
+    armed: bool,
+}
+
+impl BeginDropGuard {
+    fn new(
+        transaction_state: Arc<Mutex<TransactionState>>,
+        transaction_generation: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            attempt: BeginAttempt::new(transaction_state, transaction_generation),
+            armed: true,
+        }
+    }
+
+    fn attempt(&self) -> BeginAttempt {
+        self.attempt.clone()
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn opened_generation(&self) -> Option<u64> {
+        self.attempt.lifecycle.lock().generation
+    }
+
+    fn abandon(&mut self) {
+        if std::mem::replace(&mut self.armed, false) {
+            self.attempt.abandon();
+        }
+    }
+}
+
+impl Drop for BeginDropGuard {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
+fn rollback_abandoned_begin_mutex_guarded(
+    conn: &rusqlite::Connection,
+    transaction_state: &Mutex<TransactionState>,
+    transaction_generation: &AtomicU64,
+) -> Result<(), SqliteError> {
+    // `run_connection_op` still owns the connection mutex here. Do not gate on
+    // the mirror: a cleanup or older transaction completion may have overtaken
+    // this worker. Holding the state lock across the forced rollback prevents a
+    // lagging completion from clearing the poison between publication and I/O.
+    let mut state = transaction_state.lock();
+    *state = TransactionState::RollingBack;
+
+    if conn.is_autocommit() {
+        let _ = advance_transaction_generation(transaction_generation);
+        *state = TransactionState::Autocommit;
+        return Ok(());
+    }
+
+    match conn.execute_batch("ROLLBACK") {
+        Ok(()) => {
+            let _ = advance_transaction_generation(transaction_generation);
+            *state = TransactionState::Autocommit;
+            Ok(())
+        }
+        Err(_) if conn.is_autocommit() => {
+            let _ = advance_transaction_generation(transaction_generation);
+            *state = TransactionState::Autocommit;
+            Ok(())
+        }
+        Err(error) => {
+            *state = TransactionState::NeedsRollback;
+            Err(SqliteError::Sqlite(error.to_string()))
+        }
+    }
+}
+
+fn advance_transaction_generation(transaction_generation: &AtomicU64) -> Option<u64> {
+    transaction_generation
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+            generation.checked_add(1)
+        })
+        .ok()
+        .and_then(|generation| generation.checked_add(1))
+}
+
+fn rollback_orphaned_transaction_generation_guarded(
+    conn: &rusqlite::Connection,
+    transaction_state: &Mutex<TransactionState>,
+    transaction_generation: &AtomicU64,
+) -> Result<(), SqliteError> {
+    if *transaction_state.lock() != TransactionState::NeedsRollback {
+        return Ok(());
+    }
+    rollback_orphaned_transaction_mutex_guarded(conn, transaction_state)?;
+    let _ = advance_transaction_generation(transaction_generation);
+    *transaction_state.lock() = TransactionState::Autocommit;
+    Ok(())
 }
 
 fn rollback_orphaned_transaction_mutex_guarded(
@@ -1165,6 +1457,10 @@ pub struct SqliteConnection {
     pool: BlockingPoolHandle,
     /// Mutex-guarded transaction state to prevent concurrency races.
     transaction_state: Arc<Mutex<TransactionState>>,
+    /// Generation of the physical transaction currently owned by a managed
+    /// [`SqliteTransaction`]. Blocking-pool workers validate this while they
+    /// own `inner` so a stale finish job cannot affect a newer transaction.
+    transaction_generation: Arc<AtomicU64>,
     /// br-asupersync-server-stack-hardening-eeexl1.1.2: SQLite interrupt
     /// handle captured at open. Lets the async side abort an in-flight
     /// blocking statement (`sqlite3_interrupt`) when the `Cx` is cancelled
@@ -1187,6 +1483,10 @@ impl fmt::Debug for SqliteConnection {
             .field("open", &self.inner.lock().conn.is_some())
             .field("pool", &self.pool)
             .field("transaction_state", &state)
+            .field(
+                "transaction_generation",
+                &self.transaction_generation.load(Ordering::Acquire),
+            )
             .finish()
     }
 }
@@ -1348,8 +1648,13 @@ impl SqliteConnection {
         }
 
         let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_generation = Arc::clone(&self.transaction_generation);
         self.run_connection_op(cx, "sqlite rollback cleanup", move |conn| {
-            rollback_orphaned_transaction_mutex_guarded(conn, transaction_state.as_ref())
+            rollback_orphaned_transaction_generation_guarded(
+                conn,
+                transaction_state.as_ref(),
+                transaction_generation.as_ref(),
+            )
         })
         .await
     }
@@ -1406,6 +1711,7 @@ impl SqliteConnection {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool_clone,
                     transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+                    transaction_generation: Arc::new(AtomicU64::new(0)),
                     interrupt,
                     statement_timeout_override: None,
                 })
@@ -1468,6 +1774,7 @@ impl SqliteConnection {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool_clone,
                     transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+                    transaction_generation: Arc::new(AtomicU64::new(0)),
                     interrupt,
                     statement_timeout_override: None,
                 })
@@ -1524,6 +1831,42 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
+        self.execute_unchecked_with(cx, sql, params, |conn, sql, params| {
+            let params_refs: Vec<&dyn rusqlite::ToSql> = params
+                .iter()
+                .map(|value| value as &dyn rusqlite::ToSql)
+                .collect();
+            conn.execute(sql, params_refs.as_slice())
+                .map(|rows| rows as u64)
+                .map_err(|error| SqliteError::Sqlite(error.to_string()))
+        })
+        .await
+    }
+
+    async fn execute_transaction_control(
+        &self,
+        cx: &Cx,
+        sql: &'static str,
+        effect: TransactionWorkerEffect,
+    ) -> Outcome<u64, SqliteError> {
+        self.execute_unchecked_with(cx, sql, &[], move |conn, sql, _params| {
+            effect.execute_worker(conn, sql)
+        })
+        .await
+    }
+
+    async fn execute_unchecked_with<F>(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        execute: F,
+    ) -> Outcome<u64, SqliteError>
+    where
+        F: FnOnce(&rusqlite::Connection, &str, &[SqliteValue]) -> Result<u64, SqliteError>
+            + Send
+            + 'static,
+    {
         if let Err(err) = ensure_unchecked_sql_surface(sql) {
             return Outcome::Err(err);
         }
@@ -1549,12 +1892,7 @@ impl SqliteConnection {
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
         self.run_connection_op(cx, "sqlite execute", move |conn| {
-            let params_refs: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-
-            conn.execute(&sql, params_refs.as_slice())
-                .map(|n| n as u64)
-                .map_err(|e| SqliteError::Sqlite(e.to_string()))
+            execute(conn, &sql, &params)
         })
         .await
     }
@@ -1966,46 +2304,63 @@ impl SqliteConnection {
         .await
     }
 
+    async fn begin_with_sql<'conn>(
+        &'conn self,
+        cx: &Cx,
+        sql: &'static str,
+        operation: &'static str,
+    ) -> Outcome<SqliteTransaction<'conn>, SqliteError> {
+        trace_database_transaction(cx, "sqlite", operation, "start");
+        let mut drop_guard = BeginDropGuard::new(
+            Arc::clone(&self.transaction_state),
+            Arc::clone(&self.transaction_generation),
+        );
+        let effect = TransactionWorkerEffect::Begin(drop_guard.attempt());
+
+        match self.execute_transaction_control(cx, sql, effect).await {
+            Outcome::Ok(_) => {
+                let Some(generation) = drop_guard.opened_generation() else {
+                    drop_guard.abandon();
+                    trace_database_transaction(cx, "sqlite", operation, "err");
+                    return Outcome::Err(SqliteError::Sqlite(
+                        "managed BEGIN completed without a transaction generation".to_string(),
+                    ));
+                };
+                let transaction = SqliteTransaction {
+                    conn: self,
+                    finished: false,
+                    obligation: reserve_transaction_obligation(cx),
+                    generation,
+                };
+                drop_guard.disarm();
+                trace_database_transaction(cx, "sqlite", operation, "ok");
+                Outcome::Ok(transaction)
+            }
+            Outcome::Err(e) => {
+                drop_guard.disarm();
+                trace_database_transaction(cx, "sqlite", operation, "err");
+                Outcome::Err(e)
+            }
+            Outcome::Cancelled(r) => {
+                drop_guard.abandon();
+                trace_database_transaction(cx, "sqlite", operation, "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                drop_guard.abandon();
+                trace_database_transaction(cx, "sqlite", operation, "panicked");
+                Outcome::Panicked(p)
+            }
+        }
+    }
+
     /// Begins a new transaction.
     ///
     /// # Cancellation
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
-        trace_database_transaction(cx, "sqlite", "begin", "start");
-        match self.execute_unchecked(cx, "BEGIN", &[]).await {
-            Outcome::Ok(_) => {
-                *self.transaction_state.lock() = TransactionState::InTransaction;
-                trace_database_transaction(cx, "sqlite", "begin", "ok");
-                Outcome::Ok(SqliteTransaction {
-                    conn: self,
-                    finished: false,
-                    obligation: reserve_transaction_obligation(cx),
-                })
-            }
-            Outcome::Err(e) => {
-                trace_database_transaction(cx, "sqlite", "begin", "err");
-                Outcome::Err(e)
-            }
-            Outcome::Cancelled(r) => {
-                // The cancel path interrupts BEGIN, but `sqlite3_interrupt`
-                // races a near-instant BEGIN: it may have already opened a
-                // transaction on the real connection while this mirror still
-                // reads Autocommit. Mark NeedsRollback so the next operation's
-                // `drain_orphaned_transaction` rolls back any leaked txn — a
-                // harmless no-op (gated on `is_autocommit()`) if BEGIN never
-                // actually opened one — preventing state desync / pool
-                // poisoning. The connection mutex serializes an abandoned BEGIN
-                // job ahead of that drain, so the rollback sees the final state.
-                *self.transaction_state.lock() = TransactionState::NeedsRollback;
-                trace_database_transaction(cx, "sqlite", "begin", "cancelled");
-                Outcome::Cancelled(r)
-            }
-            Outcome::Panicked(p) => {
-                trace_database_transaction(cx, "sqlite", "begin", "panicked");
-                Outcome::Panicked(p)
-            }
-        }
+        self.begin_with_sql(cx, "BEGIN", "begin").await
     }
 
     /// Begins an immediate transaction (acquires write lock immediately).
@@ -2014,33 +2369,8 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin_immediate(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
-        trace_database_transaction(cx, "sqlite", "begin_immediate", "start");
-        match self.execute_unchecked(cx, "BEGIN IMMEDIATE", &[]).await {
-            Outcome::Ok(_) => {
-                *self.transaction_state.lock() = TransactionState::InTransaction;
-                trace_database_transaction(cx, "sqlite", "begin_immediate", "ok");
-                Outcome::Ok(SqliteTransaction {
-                    conn: self,
-                    finished: false,
-                    obligation: reserve_transaction_obligation(cx),
-                })
-            }
-            Outcome::Err(e) => {
-                trace_database_transaction(cx, "sqlite", "begin_immediate", "err");
-                Outcome::Err(e)
-            }
-            Outcome::Cancelled(r) => {
-                // See `begin`: interrupt races the BEGIN; mark NeedsRollback so
-                // the next op's drain cleans up any leaked txn (no-op if none).
-                *self.transaction_state.lock() = TransactionState::NeedsRollback;
-                trace_database_transaction(cx, "sqlite", "begin_immediate", "cancelled");
-                Outcome::Cancelled(r)
-            }
-            Outcome::Panicked(p) => {
-                trace_database_transaction(cx, "sqlite", "begin_immediate", "panicked");
-                Outcome::Panicked(p)
-            }
-        }
+        self.begin_with_sql(cx, "BEGIN IMMEDIATE", "begin_immediate")
+            .await
     }
 
     /// Begins an exclusive transaction (acquires exclusive lock immediately).
@@ -2049,33 +2379,8 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin_exclusive(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
-        trace_database_transaction(cx, "sqlite", "begin_exclusive", "start");
-        match self.execute_unchecked(cx, "BEGIN EXCLUSIVE", &[]).await {
-            Outcome::Ok(_) => {
-                *self.transaction_state.lock() = TransactionState::InTransaction;
-                trace_database_transaction(cx, "sqlite", "begin_exclusive", "ok");
-                Outcome::Ok(SqliteTransaction {
-                    conn: self,
-                    finished: false,
-                    obligation: reserve_transaction_obligation(cx),
-                })
-            }
-            Outcome::Err(e) => {
-                trace_database_transaction(cx, "sqlite", "begin_exclusive", "err");
-                Outcome::Err(e)
-            }
-            Outcome::Cancelled(r) => {
-                // See `begin`: interrupt races the BEGIN; mark NeedsRollback so
-                // the next op's drain cleans up any leaked txn (no-op if none).
-                *self.transaction_state.lock() = TransactionState::NeedsRollback;
-                trace_database_transaction(cx, "sqlite", "begin_exclusive", "cancelled");
-                Outcome::Cancelled(r)
-            }
-            Outcome::Panicked(p) => {
-                trace_database_transaction(cx, "sqlite", "begin_exclusive", "panicked");
-                Outcome::Panicked(p)
-            }
-        }
+        self.begin_with_sql(cx, "BEGIN EXCLUSIVE", "begin_exclusive")
+            .await
     }
 
     /// Updates SQLite busy timeout for lock-contention retries.
@@ -2386,6 +2691,8 @@ pub struct SqliteTransaction<'a> {
     /// (obligations must be non-root, ASUP-E103) — still rolled back via
     /// poison-on-drop, just not obligation-tracked.
     obligation: Option<ObligationToken<TransactionKind>>,
+    /// Physical transaction generation assigned by the BEGIN worker.
+    generation: u64,
 }
 
 /// Reserve a transaction obligation scoped to the caller's current region.
@@ -2406,11 +2713,16 @@ fn reserve_transaction_obligation(cx: &Cx) -> Option<ObligationToken<Transaction
 impl SqliteTransaction<'_> {
     #[must_use]
     pub(crate) fn requires_rollback_before_commit(&self) -> bool {
-        *self.conn.transaction_state.lock() == TransactionState::NeedsRollback
+        let state = self.conn.transaction_state.lock();
+        self.conn.transaction_generation.load(Ordering::Acquire) == self.generation
+            && *state == TransactionState::NeedsRollback
     }
 
     pub(crate) fn poison_for_rollback(&self) {
-        *self.conn.transaction_state.lock() = TransactionState::NeedsRollback;
+        let mut state = self.conn.transaction_state.lock();
+        if self.conn.transaction_generation.load(Ordering::Acquire) == self.generation {
+            *state = TransactionState::NeedsRollback;
+        }
     }
 
     /// Commits the transaction.
@@ -2424,14 +2736,21 @@ impl SqliteTransaction<'_> {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
         trace_database_transaction(cx, "sqlite", "commit", "start");
-        match self.conn.execute_unchecked(cx, "COMMIT", &[]).await {
+        let finish_effect = TransactionFinishEffect::new(
+            Arc::clone(&self.conn.transaction_state),
+            Arc::clone(&self.conn.transaction_generation),
+            self.generation,
+            TransactionFinishKind::Commit,
+            self.obligation.take(),
+        );
+        let effect = TransactionWorkerEffect::Finish(finish_effect);
+        match self
+            .conn
+            .execute_transaction_control(cx, "COMMIT", effect)
+            .await
+        {
             Outcome::Ok(_) => {
-                *self.conn.transaction_state.lock() = TransactionState::Autocommit;
                 self.finished = true;
-                // The transaction truly committed: discharge the obligation.
-                if let Some(token) = self.obligation.take() {
-                    let _ = token.commit();
-                }
                 trace_database_transaction(cx, "sqlite", "commit", "ok");
                 Outcome::Ok(())
             }
@@ -2461,14 +2780,21 @@ impl SqliteTransaction<'_> {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
         trace_database_transaction(cx, "sqlite", "rollback", "start");
-        match self.conn.execute_unchecked(cx, "ROLLBACK", &[]).await {
+        let finish_effect = TransactionFinishEffect::new(
+            Arc::clone(&self.conn.transaction_state),
+            Arc::clone(&self.conn.transaction_generation),
+            self.generation,
+            TransactionFinishKind::Rollback,
+            self.obligation.take(),
+        );
+        let effect = TransactionWorkerEffect::Finish(finish_effect);
+        match self
+            .conn
+            .execute_transaction_control(cx, "ROLLBACK", effect)
+            .await
+        {
             Outcome::Ok(_) => {
-                *self.conn.transaction_state.lock() = TransactionState::Autocommit;
                 self.finished = true;
-                // Explicit rollback: abort the obligation.
-                if let Some(token) = self.obligation.take() {
-                    let _ = token.abort();
-                }
                 trace_database_transaction(cx, "sqlite", "rollback", "ok");
                 Outcome::Ok(())
             }
@@ -4600,6 +4926,324 @@ mod tests {
             };
             assert_eq!(rows[0].get_idx(0).unwrap().as_integer(), Some(0));
         });
+    }
+
+    #[test]
+    fn hard_dropped_begin_recovers_after_cleanup_overtakes_worker() {
+        let cx = create_test_cx();
+        let pool = BlockingPool::new(1, 1);
+        let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+        configure_connection_defaults(&raw, false).expect("configure test connection");
+        let interrupt = Arc::new(raw.get_interrupt_handle());
+        let conn = SqliteConnection {
+            inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
+            pool: pool.handle(),
+            transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+            transaction_generation: Arc::new(AtomicU64::new(0)),
+            interrupt,
+            statement_timeout_override: None,
+        };
+
+        macro_rules! assert_hard_drop_recovers {
+            ($begin:expr, $mode:literal) => {{
+                let inner = Arc::clone(&conn.inner);
+                let inner_guard = inner.lock();
+                let waker = std::task::Waker::noop();
+                let mut task_cx = std::task::Context::from_waker(waker);
+                let mut begin = Box::pin($begin);
+
+                assert!(
+                    std::future::Future::poll(begin.as_mut(), &mut task_cx).is_pending(),
+                    "{} waits behind the held connection mutex",
+                    $mode
+                );
+                drop(begin);
+                assert_eq!(
+                    *conn.transaction_state.lock(),
+                    TransactionState::NeedsRollback,
+                    "hard-dropping {} must poison the transaction mirror",
+                    $mode
+                );
+
+                // Deterministically impose the four-worker overtaking race: a
+                // cleanup reaches the real connection before the already-queued
+                // BEGIN and clears the first poison while SQLite is autocommit.
+                rollback_orphaned_transaction_mutex_guarded(
+                    inner_guard.get().expect("connection remains open"),
+                    conn.transaction_state.as_ref(),
+                )
+                .expect("overtaking cleanup succeeds");
+                assert_eq!(
+                    *conn.transaction_state.lock(),
+                    TransactionState::Autocommit,
+                    "overtaking cleanup clears the initial poison"
+                );
+                drop(inner_guard);
+
+                // The one-worker pool is FIFO: this fence completes only after
+                // the abandoned BEGIN worker has run its completion-side hook.
+                conn.pool.spawn(|| {}).wait();
+
+                let inner_guard = conn.inner.lock();
+                assert!(
+                    inner_guard
+                        .get()
+                        .expect("connection remains open")
+                        .is_autocommit(),
+                    "abandoned {} must not leave a physical transaction open",
+                    $mode
+                );
+                drop(inner_guard);
+                assert_eq!(
+                    *conn.transaction_state.lock(),
+                    TransactionState::Autocommit,
+                    "abandoned {} must restore the transaction mirror",
+                    $mode
+                );
+            }};
+        }
+
+        assert_hard_drop_recovers!(conn.begin(&cx), "BEGIN");
+        assert_hard_drop_recovers!(conn.begin_immediate(&cx), "BEGIN IMMEDIATE");
+        assert_hard_drop_recovers!(conn.begin_exclusive(&cx), "BEGIN EXCLUSIVE");
+    }
+
+    #[test]
+    fn hard_dropped_begin_after_worker_completion_survives_lagging_commit() {
+        let cx = create_test_cx();
+        let pool = BlockingPool::new(1, 1);
+        let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+        configure_connection_defaults(&raw, false).expect("configure test connection");
+        let interrupt = Arc::new(raw.get_interrupt_handle());
+        let conn = SqliteConnection {
+            inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
+            pool: pool.handle(),
+            transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+            transaction_generation: Arc::new(AtomicU64::new(0)),
+            interrupt,
+            statement_timeout_override: None,
+        };
+        let transaction = match block_on(conn.begin(&cx)) {
+            Outcome::Ok(transaction) => transaction,
+            other => panic!("initial BEGIN failed with {:?}", other.severity()),
+        };
+
+        let inner = Arc::clone(&conn.inner);
+        let inner_guard = inner.lock();
+        let waker = std::task::Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+        let mut commit = Box::pin(transaction.commit(&cx));
+        let mut begin = Box::pin(conn.begin(&cx));
+
+        assert!(
+            std::future::Future::poll(commit.as_mut(), &mut task_cx).is_pending(),
+            "COMMIT waits behind the held connection mutex"
+        );
+        assert!(
+            std::future::Future::poll(begin.as_mut(), &mut task_cx).is_pending(),
+            "BEGIN queues behind COMMIT"
+        );
+        drop(inner_guard);
+
+        // One worker preserves queue order. Both physical operations and their
+        // worker-side mirror publications finish, but neither async consumer
+        // has processed its result yet.
+        conn.pool.spawn(|| {}).wait();
+        assert_eq!(
+            *conn.transaction_state.lock(),
+            TransactionState::InTransaction,
+            "the second BEGIN is physically open before its consumer resumes"
+        );
+
+        // Drop the completed COMMIT future without consuming its result. Its
+        // terminal generation advance must suppress the stale
+        // SqliteTransaction::Drop writer while the newer BEGIN stays open.
+        drop(commit);
+        assert_eq!(
+            *conn.transaction_state.lock(),
+            TransactionState::InTransaction,
+            "completed COMMIT future drop must not poison the newer BEGIN"
+        );
+
+        // Then drop after the BEGIN worker's one chance to inspect abandonment.
+        // The opened lifecycle bit must poison the mirror synchronously.
+        drop(begin);
+        assert_eq!(
+            *conn.transaction_state.lock(),
+            TransactionState::NeedsRollback,
+            "late BEGIN drop must poison an already-opened transaction"
+        );
+
+        match block_on(conn.set_busy_timeout(&cx, Duration::ZERO)) {
+            Outcome::Ok(()) => {}
+            other => panic!("post-drop cleanup failed: {other:?}"),
+        }
+        let inner_guard = conn.inner.lock();
+        assert!(
+            inner_guard
+                .get()
+                .expect("connection remains open")
+                .is_autocommit(),
+            "the next operation must drain the late-dropped BEGIN"
+        );
+        drop(inner_guard);
+        assert_eq!(*conn.transaction_state.lock(), TransactionState::Autocommit);
+    }
+
+    #[test]
+    fn stale_finish_worker_skips_newer_transaction_after_cleanup_overtakes() {
+        struct BarrierReleaseGuard(Option<Arc<std::sync::Barrier>>);
+
+        impl BarrierReleaseGuard {
+            fn release(&mut self) {
+                if let Some(barrier) = self.0.take() {
+                    barrier.wait();
+                }
+            }
+        }
+
+        impl Drop for BarrierReleaseGuard {
+            fn drop(&mut self) {
+                self.release();
+            }
+        }
+
+        let cx = create_test_cx();
+        for (finish_sql, kind) in [
+            ("COMMIT", TransactionFinishKind::Commit),
+            ("ROLLBACK", TransactionFinishKind::Rollback),
+        ] {
+            let pool = BlockingPool::new(2, 2);
+            let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+            configure_connection_defaults(&raw, false).expect("configure test connection");
+            raw.execute_batch("CREATE TABLE replacement_rows (value INTEGER NOT NULL)")
+                .expect("create test table");
+            let interrupt = Arc::new(raw.get_interrupt_handle());
+            let conn = SqliteConnection {
+                inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
+                pool: pool.handle(),
+                transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+                transaction_generation: Arc::new(AtomicU64::new(0)),
+                interrupt,
+                statement_timeout_override: None,
+            };
+            let mut old_transaction = match block_on(conn.begin(&cx)) {
+                Outcome::Ok(transaction) => transaction,
+                other => panic!("initial BEGIN failed with {:?}", other.severity()),
+            };
+            let mut stale_finish = TransactionFinishEffect::new(
+                Arc::clone(&conn.transaction_state),
+                Arc::clone(&conn.transaction_generation),
+                old_transaction.generation,
+                kind,
+                old_transaction.obligation.take(),
+            );
+
+            // Dequeue the stale finish on one real blocking-pool worker, but
+            // pause it before `inner`. The second worker remains available to
+            // drain the hard-drop poison and open a replacement transaction.
+            let entered = Arc::new(std::sync::Barrier::new(2));
+            let release = Arc::new(std::sync::Barrier::new(2));
+            let worker_entered = Arc::clone(&entered);
+            let worker_release = Arc::clone(&release);
+            let stale_inner = Arc::clone(&conn.inner);
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let stale_handle = conn.pool.spawn(move || {
+                worker_entered.wait();
+                worker_release.wait();
+                let guard = stale_inner.lock();
+                let result = stale_finish
+                    .execute_worker(guard.get().expect("connection remains open"), finish_sql);
+                result_tx.send(result).expect("publish stale worker result");
+            });
+            entered.wait();
+            let mut release_on_unwind = BarrierReleaseGuard(Some(Arc::clone(&release)));
+            drop(old_transaction);
+
+            let replacement = match block_on(conn.begin(&cx)) {
+                Outcome::Ok(transaction) => transaction,
+                other => panic!("replacement BEGIN failed with {:?}", other.severity()),
+            };
+            match block_on(replacement.execute(
+                &cx,
+                "INSERT INTO replacement_rows (value) VALUES (1)",
+                &[],
+            )) {
+                Outcome::Ok(1) => {}
+                other => panic!("replacement INSERT failed: {other:?}"),
+            }
+
+            let replacement_generation = replacement.generation;
+            release_on_unwind.release();
+            stale_handle.wait();
+            let stale_result = result_rx.recv().expect("receive stale worker result");
+            assert!(matches!(
+                stale_result,
+                Err(SqliteError::TransactionFinished)
+            ));
+            assert_eq!(
+                conn.transaction_generation.load(Ordering::Acquire),
+                replacement_generation,
+                "stale {finish_sql} must not advance the replacement generation"
+            );
+            assert_eq!(
+                *conn.transaction_state.lock(),
+                TransactionState::InTransaction
+            );
+            {
+                let guard = conn.inner.lock();
+                assert!(
+                    !guard
+                        .get()
+                        .expect("connection remains open")
+                        .is_autocommit(),
+                    "stale {finish_sql} must leave the replacement transaction open"
+                );
+            }
+
+            let finish_outcome = match kind {
+                TransactionFinishKind::Commit => block_on(replacement.rollback(&cx)),
+                TransactionFinishKind::Rollback => block_on(replacement.commit(&cx)),
+            };
+            assert!(matches!(finish_outcome, Outcome::Ok(())));
+
+            let rows = match block_on(conn.query(
+                &cx,
+                "SELECT COUNT(*) AS count FROM replacement_rows",
+                &[],
+            )) {
+                Outcome::Ok(rows) => rows,
+                other => panic!("replacement row count failed: {other:?}"),
+            };
+            let expected_rows = match kind {
+                TransactionFinishKind::Commit => 0,
+                TransactionFinishKind::Rollback => 1,
+            };
+            assert_eq!(
+                rows[0].get_i64("count").expect("read replacement count"),
+                expected_rows,
+                "stale {finish_sql} must not finish the replacement transaction"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_begin_fails_closed_before_generation_exhaustion() {
+        let raw = rusqlite::Connection::open_in_memory().expect("open test connection");
+        configure_connection_defaults(&raw, false).expect("configure test connection");
+        let transaction_state = Arc::new(Mutex::new(TransactionState::Autocommit));
+        let transaction_generation = Arc::new(AtomicU64::new(u64::MAX - 1));
+        let begin = TransactionWorkerEffect::Begin(BeginAttempt::new(
+            Arc::clone(&transaction_state),
+            Arc::clone(&transaction_generation),
+        ));
+
+        let result = begin.execute_worker(&raw, "BEGIN");
+
+        assert!(matches!(result, Err(SqliteError::Sqlite(_))));
+        assert!(raw.is_autocommit(), "exhausted BEGIN must issue no SQL");
+        assert_eq!(transaction_generation.load(Ordering::Acquire), u64::MAX - 1);
+        assert_eq!(*transaction_state.lock(), TransactionState::Autocommit);
     }
 
     #[test]
