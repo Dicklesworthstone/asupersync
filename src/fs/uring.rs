@@ -213,42 +213,136 @@ fn missing_explicit_offset_error(operation: &str) -> io::Error {
     ))
 }
 
-impl Drop for IoUringFile {
-    fn drop(&mut self) {
-        // Best-effort safety: if any ops are in flight on this ring, make sure we
-        // drain completions before the `IoUring` mapping is dropped.
-        //
-        // We only do this on the last strong ref so intermediate clones don't
-        // introduce surprise blocking in Drop.
-        if Arc::strong_count(&self.inner) != 1 {
-            return;
+/// Drive a published SQE until its terminal completion has been observed.
+///
+/// Once an SQE is visible in the submission queue, a syscall error is not a
+/// lifetime boundary: the kernel may own the request already, or the SQE may
+/// remain queued for a later submission. Only a completion lets a caller
+/// release memory referenced by the SQE. A permanently broken ring can
+/// therefore block this loop indefinitely; that liveness loss is preferable
+/// to returning while the kernel may still dereference caller memory.
+fn wait_until_submitted_completion<T>(
+    mut wait_and_drain: impl FnMut() -> (io::Result<usize>, Option<T>),
+) -> T {
+    loop {
+        let (_wait_result, completion) = wait_and_drain();
+        if let Some(completion) = completion {
+            return completion;
         }
 
-        while any_ops_pending(&self.inner) {
-            let completions = {
-                let mut ring = self.inner.ring.lock();
+        // Retrying is intentionally fail-closed. Returning an error here
+        // could release a borrowed buffer while the kernel still references
+        // it. Yield whenever a cycle makes no terminal progress so an
+        // anomalous successful zero-result cannot become a hot loop either.
+        std::thread::yield_now();
+    }
+}
 
-                for user_data in tracked_pending_user_data(&self.inner) {
+fn drain_tracked_until_quiescent(
+    mut is_pending: impl FnMut() -> bool,
+    mut next_completions: impl FnMut() -> Vec<(u64, i32)>,
+    mut record_completion: impl FnMut(u64, i32),
+) {
+    while is_pending() {
+        for (user_data, result) in next_completions() {
+            record_completion(user_data, result);
+        }
+    }
+}
+
+/// Armed guard for a synchronous SQE that may reference caller-owned memory.
+///
+/// The guard is created immediately after publishing the SQE and is disarmed
+/// only after its matching CQE is consumed. Its destructor preserves the same
+/// invariant if stack unwinding crosses the post-submission wait loop.
+struct SubmittedOperationGuard<'a> {
+    file: &'a IoUringFile,
+    ring: &'a mut IoUring,
+    expected_user_data: u64,
+    completed: bool,
+}
+
+impl<'a> SubmittedOperationGuard<'a> {
+    fn new(file: &'a IoUringFile, ring: &'a mut IoUring, expected_user_data: u64) -> Self {
+        Self {
+            file,
+            ring,
+            expected_user_data,
+            completed: false,
+        }
+    }
+
+    fn drain_to_completion(&mut self) -> i32 {
+        wait_until_submitted_completion(|| {
+            if let Some(result) = self
+                .file
+                .drain_completions_locked(self.ring, Some(self.expected_user_data))
+            {
+                return (Ok(0), Some(result));
+            }
+
+            let wait_result = self.ring.submit_and_wait(1);
+            let completion = self
+                .file
+                .drain_completions_locked(self.ring, Some(self.expected_user_data));
+            (wait_result, completion)
+        })
+    }
+
+    fn wait(mut self) -> i32 {
+        let result = self.drain_to_completion();
+        self.completed = true;
+        result
+    }
+}
+
+impl Drop for SubmittedOperationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _terminal_result = self.drain_to_completion();
+            self.completed = true;
+        }
+    }
+}
+
+impl Drop for IoUringFileInner {
+    fn drop(&mut self) {
+        // Final teardown is a lifetime boundary for tracked test operations.
+        // Cancellation is only a request; the matching CQE is the proof that
+        // the kernel has released any referenced buffer.
+        drain_tracked_until_quiescent(
+            || any_ops_pending(self),
+            || {
+                let mut ring = self.ring.lock();
+
+                for user_data in tracked_pending_user_data(self) {
                     let _ = ring
                         .submitter()
                         .register_sync_cancel(None, types::CancelBuilder::user_data(user_data));
                 }
 
-                // Wait for at least one completion. If this fails, we can't reliably
-                // drain, so we bail out (best effort).
-                if ring.submit_and_wait(1).is_err() {
-                    return;
-                }
+                wait_until_submitted_completion(|| {
+                    let ready = ring
+                        .completion()
+                        .map(|cqe| (cqe.user_data(), cqe.result()))
+                        .collect::<Vec<_>>();
+                    if !ready.is_empty() {
+                        return (Ok(0), Some(ready));
+                    }
 
-                ring.completion()
-                    .map(|cqe| (cqe.user_data(), cqe.result()))
-                    .collect::<Vec<_>>()
-            };
-
-            for (user_data, result) in completions {
-                let _ = mark_tracked_op_complete(&self.inner, user_data, result);
-            }
-        }
+                    let wait_result = ring.submit_and_wait(1);
+                    let ready = ring
+                        .completion()
+                        .map(|cqe| (cqe.user_data(), cqe.result()))
+                        .collect::<Vec<_>>();
+                    let completion = (!ready.is_empty()).then_some(ready);
+                    (wait_result, completion)
+                })
+            },
+            |user_data, result| {
+                let _ = mark_tracked_op_complete(self, user_data, result);
+            },
+        );
     }
 }
 
@@ -550,13 +644,8 @@ impl IoUringFile {
         let _ = self.drain_completions_locked(&mut ring, None);
         self.push_entry_with_recovery(&mut ring, entry)?;
 
-        loop {
-            ring.submit_and_wait(1)?;
-            if let Some(result) = self.drain_completions_locked(&mut ring, Some(expected_user_data))
-            {
-                return Ok(result);
-            }
-        }
+        let submitted = SubmittedOperationGuard::new(self, &mut ring, expected_user_data);
+        Ok(submitted.wait())
     }
 
     /// Blocking read using io_uring (for poll-based async trait).
@@ -631,6 +720,29 @@ impl AsRawFd for IoUringFile {
     }
 }
 
+/// Test-only owner for a deliberately pending operation.
+///
+/// Field order is safety-relevant: final file teardown drains the tracked SQE
+/// before the owned buffer can be released. Forgetting this value leaks both
+/// together, so it cannot expose freed memory to the kernel.
+#[cfg(any(test, feature = "test-internals"))]
+struct PendingTestOperation {
+    file: Option<IoUringFile>,
+    buffer: Vec<u8>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl PendingTestOperation {
+    fn finish_buffer(mut self) -> Vec<u8> {
+        drop(self.file.take());
+        std::mem::take(&mut self.buffer)
+    }
+
+    fn drain(mut self) {
+        drop(self.file.take());
+    }
+}
+
 #[cfg(any(test, feature = "test-internals"))]
 impl IoUringFile {
     fn submit_unknown_nop_for_test(&self, user_data: u64) -> io::Result<()> {
@@ -646,7 +758,24 @@ impl IoUringFile {
         Ok(())
     }
 
-    fn submit_pending_read_for_test(&self, buf: &mut [u8], offset: u64) -> io::Result<u64> {
+    fn require_unique_test_owner(&self) -> io::Result<()> {
+        if Arc::strong_count(&self.inner) == 1 {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "pending io_uring test operation requires a unique file owner",
+            ))
+        }
+    }
+
+    /// Submit a tracked test read without awaiting it.
+    fn submit_pending_read_for_test(
+        self,
+        buffer_len: usize,
+        offset: u64,
+    ) -> io::Result<PendingTestOperation> {
+        self.require_unique_test_owner()?;
+        let mut buffer = vec![0; buffer_len];
         let user_data = self.allocate_user_data(OpKind::Read);
         {
             let mut state = self.inner.read_state.lock();
@@ -664,28 +793,42 @@ impl IoUringFile {
 
         let entry = opcode::Read::new(
             types::Fd(self.inner.fd.as_raw_fd()),
-            buf.as_mut_ptr(),
-            u32::try_from(buf.len()).unwrap_or(u32::MAX),
+            buffer.as_mut_ptr(),
+            u32::try_from(buffer.len()).unwrap_or(u32::MAX),
         )
         .offset(offset)
         .build()
         .user_data(user_data);
 
-        let submit_result = {
+        let push_result = {
             let mut ring = self.inner.ring.lock();
-            self.push_entry_with_recovery(&mut ring, &entry)?;
-            ring.submit()
+            let push_result = self.push_entry_with_recovery(&mut ring, &entry);
+            if push_result.is_ok() {
+                // Once published, retain Pending even if submission reports an
+                // error. Final inner teardown will submit/drain the request.
+                let _ = ring.submit();
+            }
+            push_result
         };
 
-        if let Err(err) = submit_result {
+        if let Err(err) = push_result {
             *self.inner.read_state.lock() = OpState::Idle;
             return Err(err);
         }
 
-        Ok(user_data)
+        Ok(PendingTestOperation {
+            file: Some(self),
+            buffer,
+        })
     }
 
-    fn submit_pending_write_for_test(&self, buf: &[u8], offset: u64) -> io::Result<u64> {
+    /// Submit a tracked test write without awaiting it.
+    fn submit_pending_write_for_test(
+        self,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> io::Result<PendingTestOperation> {
+        self.require_unique_test_owner()?;
         let user_data = self.allocate_user_data(OpKind::Write);
         {
             let mut state = self.inner.write_state.lock();
@@ -703,28 +846,35 @@ impl IoUringFile {
 
         let entry = opcode::Write::new(
             types::Fd(self.inner.fd.as_raw_fd()),
-            buf.as_ptr(),
-            u32::try_from(buf.len()).unwrap_or(u32::MAX),
+            buffer.as_ptr(),
+            u32::try_from(buffer.len()).unwrap_or(u32::MAX),
         )
         .offset(offset)
         .build()
         .user_data(user_data);
 
-        let submit_result = {
+        let push_result = {
             let mut ring = self.inner.ring.lock();
-            self.push_entry_with_recovery(&mut ring, &entry)
-                .and_then(|()| ring.submit())
+            let push_result = self.push_entry_with_recovery(&mut ring, &entry);
+            if push_result.is_ok() {
+                let _ = ring.submit();
+            }
+            push_result
         };
 
-        if let Err(err) = submit_result {
+        if let Err(err) = push_result {
             *self.inner.write_state.lock() = OpState::Idle;
             return Err(err);
         }
 
-        Ok(user_data)
+        Ok(PendingTestOperation {
+            file: Some(self),
+            buffer,
+        })
     }
 
-    fn submit_pending_sync_for_test(&self, datasync: bool) -> io::Result<u64> {
+    fn submit_pending_sync_for_test(self, datasync: bool) -> io::Result<PendingTestOperation> {
+        self.require_unique_test_owner()?;
         let kind = if datasync {
             OpKind::Fdatasync
         } else {
@@ -751,18 +901,24 @@ impl IoUringFile {
         }
         let entry = builder.build().user_data(user_data);
 
-        let submit_result = {
+        let push_result = {
             let mut ring = self.inner.ring.lock();
-            self.push_entry_with_recovery(&mut ring, &entry)
-                .and_then(|()| ring.submit())
+            let push_result = self.push_entry_with_recovery(&mut ring, &entry);
+            if push_result.is_ok() {
+                let _ = ring.submit();
+            }
+            push_result
         };
 
-        if let Err(err) = submit_result {
+        if let Err(err) = push_result {
             *self.inner.sync_state.lock() = OpState::Idle;
             return Err(err);
         }
 
-        Ok(user_data)
+        Ok(PendingTestOperation {
+            file: Some(self),
+            buffer: Vec::new(),
+        })
     }
 }
 
@@ -793,11 +949,8 @@ pub mod test_internals {
     pub fn drop_drains_pending_read(path: &Path, payload: &[u8]) -> io::Result<&'static str> {
         std::fs::write(path, payload)?;
         let file = IoUringFile::open(path)?;
-        let mut buf = vec![0_u8; payload.len()];
-
-        let _user_data = file.submit_pending_read_for_test(&mut buf, 0)?;
-
-        drop(file);
+        let pending = file.submit_pending_read_for_test(payload.len(), 0)?;
+        let buf = pending.finish_buffer();
 
         if buf != payload {
             if all_zero(&buf) {
@@ -815,9 +968,8 @@ pub mod test_internals {
             0o644,
         )?;
 
-        let _user_data = file.submit_pending_write_for_test(payload, 0)?;
-
-        drop(file);
+        let pending = file.submit_pending_write_for_test(payload.to_vec(), 0)?;
+        pending.drain();
 
         let contents = std::fs::read(path)?;
         if contents.as_slice() != payload {
@@ -833,9 +985,8 @@ pub mod test_internals {
         std::fs::write(path, payload)?;
         let file = IoUringFile::open_with_flags(path, libc::O_RDWR, 0)?;
 
-        let _user_data = file.submit_pending_sync_for_test(false)?;
-
-        drop(file);
+        let pending = file.submit_pending_sync_for_test(false)?;
+        pending.drain();
 
         let contents = std::fs::read(path)?;
         if contents.as_slice() != payload {
@@ -1147,6 +1298,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_submitted_completion_wait_retries_syscall_errors() {
+        init_test("test_submitted_completion_wait_retries_syscall_errors");
+        let mut attempts = 0;
+
+        let result = wait_until_submitted_completion(|| {
+            attempts += 1;
+            match attempts {
+                1 => (Err(io::Error::from(io::ErrorKind::Interrupted)), None),
+                2 => (Err(io::Error::from(io::ErrorKind::WouldBlock)), None),
+                3 => (Err(io::Error::from_raw_os_error(libc::EIO)), None),
+                4 => (Ok(1), Some(23)),
+                _ => panic!("completion driver retried after terminal CQE"),
+            }
+        });
+
+        crate::assert_with_log!(result == 23, "terminal CQE result", 23, result);
+        crate::assert_with_log!(attempts == 4, "wait attempts", 4, attempts);
+        crate::test_complete!("test_submitted_completion_wait_retries_syscall_errors");
+    }
+
+    #[test]
+    fn test_submitted_completion_is_observed_alongside_wait_error() {
+        init_test("test_submitted_completion_is_observed_alongside_wait_error");
+        let mut attempts = 0;
+
+        let result = wait_until_submitted_completion(|| {
+            attempts += 1;
+            (
+                Err(io::Error::from(io::ErrorKind::Interrupted)),
+                Some(-libc::ECANCELED),
+            )
+        });
+
+        crate::assert_with_log!(
+            result == -libc::ECANCELED,
+            "negative matching CQE is terminal",
+            -libc::ECANCELED,
+            result
+        );
+        crate::assert_with_log!(attempts == 1, "wait attempts", 1, attempts);
+        crate::test_complete!("test_submitted_completion_is_observed_alongside_wait_error");
+    }
+
+    #[test]
+    fn test_submitted_completion_tracked_drain_survives_unrelated_cqe() {
+        init_test("test_submitted_completion_tracked_drain_survives_unrelated_cqe");
+        let target = OpKind::Read.encode(41);
+        let state = Mutex::new(OpState::Pending {
+            user_data: target,
+            waker: None,
+        });
+        let mut script = std::collections::VecDeque::from([
+            (Err(io::Error::from_raw_os_error(libc::EIO)), Vec::new()),
+            (
+                Err(io::Error::from(io::ErrorKind::Interrupted)),
+                vec![(UNKNOWN_CQE_USER_DATA, 0)],
+            ),
+            (
+                Err(io::Error::from(io::ErrorKind::Interrupted)),
+                vec![(target, -libc::ECANCELED)],
+            ),
+        ]);
+        let mut wait_cycles = 0;
+        let mut completion_batches = 0;
+
+        drain_tracked_until_quiescent(
+            || state_pending_user_data(&state).is_some(),
+            || {
+                completion_batches += 1;
+                wait_until_submitted_completion(|| {
+                    wait_cycles += 1;
+                    let (wait_result, completions) = script
+                        .pop_front()
+                        .expect("tracked drain requested an unexpected wait cycle");
+                    let completion = (!completions.is_empty()).then_some(completions);
+                    (wait_result, completion)
+                })
+            },
+            |user_data, result| {
+                let _ = mark_op_complete(&state, user_data, result);
+            },
+        );
+
+        let terminal_result = match &*state.lock() {
+            OpState::Complete(result) => *result,
+            state => panic!("tracked state did not reach completion: {state:?}"),
+        };
+        crate::assert_with_log!(wait_cycles == 3, "wait cycles", 3, wait_cycles);
+        crate::assert_with_log!(
+            completion_batches == 2,
+            "completion batches",
+            2,
+            completion_batches
+        );
+        crate::assert_with_log!(
+            terminal_result == -libc::ECANCELED,
+            "matching cancellation CQE",
+            -libc::ECANCELED,
+            terminal_result
+        );
+        crate::test_complete!("test_submitted_completion_tracked_drain_survives_unrelated_cqe");
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_path_to_cstring_accepts_non_utf8_unix_paths() {
@@ -1217,13 +1472,11 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
 
         let file = IoUringFile::open(&path).unwrap();
-        let mut buf = vec![0u8; 5];
 
         // Submit a read without waiting for it in user code, then rely on Drop to
         // drain the CQE before tearing down the ring mapping.
-        let _user_data = file.submit_pending_read_for_test(&mut buf, 0).unwrap();
-
-        drop(file);
+        let pending = file.submit_pending_read_for_test(5, 0).unwrap();
+        let buf = pending.finish_buffer();
 
         let read_completed = buf == b"hello";
         let read_cancelled = buf.iter().all(|byte| *byte == 0);
@@ -1257,9 +1510,10 @@ mod tests {
         .unwrap();
         let payload = b"drop-drained-write";
 
-        let _user_data = file.submit_pending_write_for_test(payload, 0).unwrap();
-
-        drop(file);
+        let pending = file
+            .submit_pending_write_for_test(payload.to_vec(), 0)
+            .unwrap();
+        pending.drain();
 
         let contents = std::fs::read(&path).unwrap();
         let write_completed = contents.as_slice() == payload;
@@ -1282,9 +1536,8 @@ mod tests {
 
         let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
 
-        let _user_data = file.submit_pending_sync_for_test(false).unwrap();
-
-        drop(file);
+        let pending = file.submit_pending_sync_for_test(false).unwrap();
+        pending.drain();
 
         let contents = std::fs::read(&path).unwrap();
         crate::assert_with_log!(
