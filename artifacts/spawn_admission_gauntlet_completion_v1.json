@@ -387,8 +387,9 @@
   "focused_validation": {
     "remote_required": true,
     "no_local_fallback": true,
-    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_spawn_admission_gauntlet_completion\" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test spawn_admission_gauntlet_completion_contract -- --nocapture",
-    "expected_signal": "All completion-ledger, retained-binding, evidence-admissibility, tracker-authority, no-claim, and tamper tests pass.",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_spawn_admission_gauntlet_completion\" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test spawn_admission_gauntlet_completion_contract -- --include-ignored --nocapture",
+    "expected_signal": "All default and Git-history-gated completion-ledger, retained-binding, evidence-admissibility, tracker-authority, no-claim, and tamper tests pass.",
+    "git_history_prerequisite": "The focused command must run from a non-shallow Git checkout containing every recorded commit. History-dependent tests are ignored by ordinary cargo test and admitted only when this command supplies --include-ignored.",
     "manifest_registration": "not_registered",
     "citation_policy": "This focused command is validation for the packet only. It is not a canonical proof-lane-manifest claim and does not prove live RCH fleet availability."
   },

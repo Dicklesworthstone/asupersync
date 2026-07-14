@@ -7,11 +7,179 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PACKET_PATH: &str = "artifacts/spawn_admission_gauntlet_completion_v1.json";
-const LEDGER_PATH: &str = ".skill-loop-progress.md";
+const PACKET_SHA256: &str = "b0a66612b72c0dba9e2897033c5836830c363ab9eecf6a53067395fadfda9e2b";
 const SCHEMA_VERSION: &str = "spawn-admission-gauntlet-completion-v1";
+const LEDGER_PATH: &str = ".skill-loop-progress.md";
+const LEDGER_SHA256: &str = "b9ffbd7db22ee6385af976e9eb7667f35a285d56263336a02362c884997fbcc6";
+const LEDGER_STATUS_MARKER: &str = "## Status: COMPLETE — Pass 10 of 10 complete; campaign closed";
 const CLOSE_COMMIT: &str = "3e278859f36d279c95ec8d8cb623163ba98215fe";
 const CLOSE_PARENT: &str = "81279d2e654c7716148330635bc38065fc1f30a2";
 const CLOSE_TREE: &str = "155f81d3f9564fd5dbc8bcf6efc5d51b718a79f8";
+
+struct ExpectedPassBinding {
+    commit: &'static str,
+    ledger_sha256: &'static str,
+}
+
+const EXPECTED_PASS_BINDINGS: [ExpectedPassBinding; 10] = [
+    ExpectedPassBinding {
+        commit: "726c7449c67d6d88d1b7be7c454372035aff7a76",
+        ledger_sha256: "0ca05f84002bc780538e582fe0475f622e3169f7621c05b143d7cbb208dd8adf",
+    },
+    ExpectedPassBinding {
+        commit: "90949d62ffd6221873a047ea14c7b6bb0060849f",
+        ledger_sha256: "6490e1b4cb00075c2acbd0877854af6c280bad0ff38e9b0e05224571d1c08960",
+    },
+    ExpectedPassBinding {
+        commit: "8bda2ae33d2a50ab1e6c4d1c45126a5183c670da",
+        ledger_sha256: "042bd3a2c310240d162687a56f6d7ca070625679885066aa4ee631b2d2c5552e",
+    },
+    ExpectedPassBinding {
+        commit: "c3b4dcd289b153aeb0d826b43c1649f69a27a816",
+        ledger_sha256: "b222cd89c222f39c1fb7a335ce6ba790d10170216f694281042d70b22ed7ff35",
+    },
+    ExpectedPassBinding {
+        commit: "5dc09dc8ad364d213130dcab4f3a09a98f144314",
+        ledger_sha256: "ab740f0c99db22f3ab991c4f4eeca348e30b318e1f14df10e632413796ff7bbe",
+    },
+    ExpectedPassBinding {
+        commit: "8c4df2afd6df64182aeab6bb8c729acece37321b",
+        ledger_sha256: "f084c11363d9e807022df88af779380404df102f36d1bdfcd9c5872064e81fed",
+    },
+    ExpectedPassBinding {
+        commit: "8c4df2afd6df64182aeab6bb8c729acece37321b",
+        ledger_sha256: "f084c11363d9e807022df88af779380404df102f36d1bdfcd9c5872064e81fed",
+    },
+    ExpectedPassBinding {
+        commit: "2e5bd9c6da02358491075e812c13557b8d69cebd",
+        ledger_sha256: "23700dd36586c10b32858f9fb0f281ea1afc8ea05b607b6fc8c2dca6e5a586b4",
+    },
+    ExpectedPassBinding {
+        commit: "81279d2e654c7716148330635bc38065fc1f30a2",
+        ledger_sha256: "f1d4acb081ff9253eba9cce8a897fe944d1f53f1acd36cadcdee214fc3f9f2f3",
+    },
+    ExpectedPassBinding {
+        commit: CLOSE_COMMIT,
+        ledger_sha256: LEDGER_SHA256,
+    },
+];
+
+const EXPECTED_ADMITTED_CLAIMS: [&[&str]; 10] = [
+    &["corrected_same_worker_baseline_decision_recorded"],
+    &["bounded_cpu_attribution_decision_recorded"],
+    &[
+        "bounded_performance_gate_result_recorded",
+        "correctness_gate_failure_recorded",
+    ],
+    &[
+        "synchronous_typed_admission_error_blocker_recorded",
+        "governor_and_quota_semantic_blockers_recorded",
+    ],
+    &[
+        "batch_one_runtime_change_retained",
+        "mailbox_pending_nonblocking_io_guard_retained",
+        "bounded_admitted_workload_gain_recorded",
+    ],
+    &["callback_panic_safety_blocker_recorded"],
+    &["direct_p99_gate_failure_recorded"],
+    &[
+        "bounded_ready_publication_profile_recorded",
+        "non_isomorphic_candidates_rejected",
+    ],
+    &[
+        "adversarial_measurement_harness_retained",
+        "production_candidate_rejection_recorded",
+    ],
+    &[
+        "ten_pass_sequence_completion_recorded",
+        "profile_gate_rejection_recorded",
+        "proof_admission_blocker_recorded",
+    ],
+];
+
+const EXPECTED_NO_CLAIMS: [&[&str]; 10] = [
+    &[
+        "no_durable_default_flip_evidence",
+        "no_cross_host_performance_claim",
+    ],
+    &[
+        "no_total_cycle_comparison",
+        "no_allocation_or_lock_wait_claim",
+    ],
+    &[
+        "no_default_mailbox_promotion",
+        "no_check_clippy_or_behavioral_equivalence_claim",
+    ],
+    &[
+        "no_default_mailbox_promotion",
+        "no_broad_health_or_clippy_claim",
+    ],
+    &[
+        "no_individual_request_latency_claim",
+        "no_scheduler_wide_or_drive_io_equivalence_claim",
+    ],
+    &[
+        "no_compile_test_benchmark_or_performance_claim",
+        "no_callback_free_commit_boundary_claim",
+    ],
+    &[
+        "no_retained_epoch_fold",
+        "no_mean_win_override_of_tail_gate",
+    ],
+    &[
+        "no_ready_publication_speedup",
+        "no_cross_host_or_production_workload_claim",
+    ],
+    &[
+        "no_retained_runtime_optimization",
+        "no_individual_request_p99_or_production_speedup_claim",
+    ],
+    &[
+        "no_fresh_reprofile_or_candidate_ab",
+        "no_fresh_check_clippy_format_or_broad_proof",
+        "no_performance_workspace_health_or_release_readiness_claim",
+    ],
+];
+
+struct ExpectedRetainedBinding {
+    binding_id: &'static str,
+    pass_ordinal: u64,
+    change_class: &'static str,
+    commit: &'static str,
+    path: &'static str,
+    sha256: &'static str,
+    markers: &'static [&'static str],
+}
+
+const EXPECTED_RETAINED_BINDINGS: [ExpectedRetainedBinding; 2] = [
+    ExpectedRetainedBinding {
+        binding_id: "pass_5_runtime_change",
+        pass_ordinal: 5,
+        change_class: "production_runtime",
+        commit: "5dc09dc8ad364d213130dcab4f3a09a98f144314",
+        path: "src/runtime/scheduler/three_lane.rs",
+        sha256: "ccd30349b8b6ea554baff1610167650c5c6faedb00e0c5eb76e9249fc14bd579",
+        markers: &[
+            "const SPAWN_ADMISSION_BATCH: usize = 1;",
+            "fn select_io_poll_timeout(",
+            "pending_spawn_mailbox_forces_nonblocking_io_poll",
+        ],
+    },
+    ExpectedRetainedBinding {
+        binding_id: "pass_9_measurement_harness",
+        pass_ordinal: 9,
+        change_class: "benchmark_only",
+        commit: "718b5378b9f78ed8ffe1ec363c94ba80161d113d",
+        path: "benches/spawn_throughput.rs",
+        sha256: "d9439fbc82c5c567497130a26cc1952d6e2e26d4fb25ddc91749610b004d7fd6",
+        markers: &[
+            "fn direct_quota_denial(",
+            "fn deferred_gateway_quota_denial(",
+            "fn cancel_storm(",
+            "fn bench_adversarial_tails(",
+        ],
+    },
+];
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -101,6 +269,25 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn string_values<'a>(value: &'a Value, key: &str) -> Option<Vec<&'a str>> {
+    value
+        .get(key)?
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect()
+}
+
+fn assert_full_git_history_available() {
+    let shallow = String::from_utf8(git_output(&["rev-parse", "--is-shallow-repository"]).unwrap())
+        .expect("git shallow-repository result is UTF-8");
+    assert_eq!(
+        shallow.trim(),
+        "false",
+        "spawn-admission history contract requires a non-shallow checkout"
+    );
+}
+
 fn validate_structure(root: &Value) -> Vec<String> {
     let mut errors = Vec::new();
 
@@ -117,6 +304,12 @@ fn validate_structure(root: &Value) -> Vec<String> {
         errors.push("campaign_status missing".to_owned());
         return errors;
     };
+    if status.get("sequence_status").and_then(Value::as_str) != Some("complete") {
+        errors.push("sequence status must stay complete".to_owned());
+    }
+    if status.get("proof_status").and_then(Value::as_str) != Some("blocked") {
+        errors.push("proof status must stay blocked".to_owned());
+    }
     if status.get("combined_status").and_then(Value::as_str)
         != Some("sequence_complete_proof_blocked")
     {
@@ -135,6 +328,25 @@ fn validate_structure(root: &Value) -> Vec<String> {
     if status.get("pass_11_authorized").and_then(Value::as_bool) != Some(false) {
         errors.push("Pass 11 must remain unauthorized".to_owned());
     }
+    if status.get("completion_claim").and_then(Value::as_str)
+        != Some("ten_serial_decisions_recorded")
+    {
+        errors.push("completion claim exceeded ten recorded decisions".to_owned());
+    }
+    if status
+        .get("tracker_status_at_packet_creation")
+        .and_then(Value::as_str)
+        != Some("in_progress")
+    {
+        errors.push("tracker status at packet creation drifted".to_owned());
+    }
+    if status
+        .get("tracker_assignee_at_packet_creation")
+        .and_then(Value::as_str)
+        != Some("MistyOsprey")
+    {
+        errors.push("tracker authority owner drifted".to_owned());
+    }
     if status.get("tracker_status_drift").and_then(Value::as_bool) != Some(true) {
         errors.push("tracker status drift must stay visible".to_owned());
     }
@@ -144,6 +356,23 @@ fn validate_structure(root: &Value) -> Vec<String> {
         != Some(false)
     {
         errors.push("packet must not authorize parent tracker close".to_owned());
+    }
+
+    let Some(ledger) = root.get("ledger_binding") else {
+        errors.push("ledger_binding missing".to_owned());
+        return errors;
+    };
+    for (key, expected) in [
+        ("path", LEDGER_PATH),
+        ("close_commit_full", CLOSE_COMMIT),
+        ("close_parent_full", CLOSE_PARENT),
+        ("close_tree_full", CLOSE_TREE),
+        ("sha256", LEDGER_SHA256),
+        ("required_status_marker", LEDGER_STATUS_MARKER),
+    ] {
+        if ledger.get(key).and_then(Value::as_str) != Some(expected) {
+            errors.push(format!("ledger binding {key} mismatch"));
+        }
     }
 
     let expected_verdicts = [
@@ -195,33 +424,23 @@ fn validate_structure(root: &Value) -> Vec<String> {
         {
             errors.push(format!("pass {} candidate disposition mismatch", index + 1));
         }
-        if !pass
-            .get("record_commit_full")
-            .and_then(Value::as_str)
-            .is_some_and(|value| is_lower_hex(value, 40))
-        {
-            errors.push(format!("pass {} record commit is not full hex", index + 1));
+        if let Some(expected) = EXPECTED_PASS_BINDINGS.get(index) {
+            if pass.get("record_commit_full").and_then(Value::as_str) != Some(expected.commit) {
+                errors.push(format!("pass {} record commit was rebound", index + 1));
+            }
+            if pass.get("ledger_snapshot_sha256").and_then(Value::as_str)
+                != Some(expected.ledger_sha256)
+            {
+                errors.push(format!("pass {} ledger hash was rebound", index + 1));
+            }
         }
-        if !pass
-            .get("ledger_snapshot_sha256")
-            .and_then(Value::as_str)
-            .is_some_and(|value| is_lower_hex(value, 64))
+        if string_values(pass, "admitted_claims").as_deref()
+            != EXPECTED_ADMITTED_CLAIMS.get(index).copied()
         {
-            errors.push(format!("pass {} ledger hash is not SHA-256", index + 1));
+            errors.push(format!("pass {} admitted claims drifted", index + 1));
         }
-        if pass
-            .get("admitted_claims")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-        {
-            errors.push(format!("pass {} has no admitted claim", index + 1));
-        }
-        if pass
-            .get("no_claims")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-        {
-            errors.push(format!("pass {} has no explicit no-claim", index + 1));
+        if string_values(pass, "no_claims").as_deref() != EXPECTED_NO_CLAIMS.get(index).copied() {
+            errors.push(format!("pass {} no-claims drifted", index + 1));
         }
 
         let runtime_retained = pass
@@ -300,6 +519,13 @@ fn validate_structure(root: &Value) -> Vec<String> {
         errors.push("retained_change_bindings missing".to_owned());
         return errors;
     };
+    if bindings.len() != EXPECTED_RETAINED_BINDINGS.len() {
+        errors.push(format!(
+            "expected {} retained bindings, found {}",
+            EXPECTED_RETAINED_BINDINGS.len(),
+            bindings.len()
+        ));
+    }
     let bound_passes = bindings
         .iter()
         .filter_map(|binding| binding.get("pass_ordinal").and_then(Value::as_u64))
@@ -307,12 +533,32 @@ fn validate_structure(root: &Value) -> Vec<String> {
     if bound_passes != [5, 9] {
         errors.push(format!("retained bindings were {bound_passes:?}"));
     }
+    for (binding, expected) in bindings.iter().zip(&EXPECTED_RETAINED_BINDINGS) {
+        for (key, expected_value) in [
+            ("binding_id", expected.binding_id),
+            ("change_class", expected.change_class),
+            ("commit_full", expected.commit),
+            ("path", expected.path),
+            ("sha256_at_commit", expected.sha256),
+        ] {
+            if binding.get(key).and_then(Value::as_str) != Some(expected_value) {
+                errors.push(format!("{} {key} was rebound", expected.binding_id));
+            }
+        }
+        if binding.get("pass_ordinal").and_then(Value::as_u64) != Some(expected.pass_ordinal) {
+            errors.push(format!("{} pass ordinal was rebound", expected.binding_id));
+        }
+        if string_values(binding, "required_source_markers").as_deref() != Some(expected.markers) {
+            errors.push(format!("{} source markers drifted", expected.binding_id));
+        }
+    }
 
     let required_boundaries = BTreeSet::from([
         "does_not_promote_mailbox_to_default".to_owned(),
         "does_not_prove_individual_request_p99".to_owned(),
         "does_not_prove_cross_host_performance".to_owned(),
         "does_not_prove_production_workload_speedup".to_owned(),
+        "does_not_prove_scheduler_wide_performance".to_owned(),
         "does_not_prove_runtime_correctness".to_owned(),
         "does_not_prove_workspace_health".to_owned(),
         "does_not_prove_release_readiness".to_owned(),
@@ -334,8 +580,8 @@ fn validate_structure(root: &Value) -> Vec<String> {
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    if !required_boundaries.is_subset(&actual_boundaries) {
-        errors.push("required no-claim boundary missing".to_owned());
+    if actual_boundaries != required_boundaries {
+        errors.push("global no-claim boundary set drifted".to_owned());
     }
     if actual_boundaries
         .iter()
@@ -471,6 +717,7 @@ fn verify_retained_bindings(root: &Value) -> Vec<String> {
 
 #[test]
 fn packet_structure_is_fail_closed_and_scoped() {
+    assert_eq!(sha256(&read_repo_bytes(PACKET_PATH)), PACKET_SHA256);
     let root = packet();
     assert_eq!(validate_structure(&root), Vec::<String>::new());
 
@@ -495,11 +742,15 @@ fn packet_structure_is_fail_closed_and_scoped() {
     assert!(command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env "));
     assert!(command.contains("CARGO_TARGET_DIR="));
     assert!(command.contains("spawn_admission_gauntlet_completion_contract"));
+    assert!(command.contains("--include-ignored"));
+    assert!(string(focused, "git_history_prerequisite").contains("non-shallow Git checkout"));
     assert_eq!(string(focused, "manifest_registration"), "not_registered");
 }
 
 #[test]
+#[ignore = "requires full Git history; run the packet's focused command"]
 fn ledger_snapshots_are_git_bound_and_strictly_serial() {
+    assert_full_git_history_available();
     let root = packet();
     assert_eq!(verify_ledger_bindings(&root), Vec::<String>::new());
 
@@ -515,7 +766,9 @@ fn ledger_snapshots_are_git_bound_and_strictly_serial() {
 }
 
 #[test]
+#[ignore = "requires full Git history; run the packet's focused command"]
 fn retained_changes_match_historical_git_objects_and_current_markers() {
+    assert_full_git_history_available();
     let root = packet();
     assert_eq!(verify_retained_bindings(&root), Vec::<String>::new());
 
@@ -622,6 +875,47 @@ fn tampering_is_detected_before_any_completion_claim() {
         .unwrap()
         .retain(|boundary| boundary.as_str() != Some("does_not_prove_release_readiness"));
     assert!(!validate_structure(&boundary_removed).is_empty());
+
+    let mut proof_promoted = canonical.clone();
+    proof_promoted["campaign_status"]["proof_status"] = Value::String("complete".to_owned());
+    assert!(!validate_structure(&proof_promoted).is_empty());
+
+    let mut admitted_claim_promoted = canonical.clone();
+    admitted_claim_promoted["passes"][0]["admitted_claims"] =
+        serde_json::json!(["release_readiness_proved"]);
+    assert!(!validate_structure(&admitted_claim_promoted).is_empty());
+
+    let mut pass_coherently_rebound = canonical.clone();
+    pass_coherently_rebound["passes"][0]["record_commit_full"] =
+        Value::String(CLOSE_COMMIT.to_owned());
+    pass_coherently_rebound["passes"][0]["ledger_snapshot_sha256"] =
+        Value::String(LEDGER_SHA256.to_owned());
+    assert!(!validate_structure(&pass_coherently_rebound).is_empty());
+
+    let mut ledger_coherently_rebound = canonical.clone();
+    ledger_coherently_rebound["ledger_binding"]["close_commit_full"] =
+        Value::String(CLOSE_PARENT.to_owned());
+    ledger_coherently_rebound["ledger_binding"]["sha256"] =
+        Value::String(EXPECTED_PASS_BINDINGS[8].ledger_sha256.to_owned());
+    assert!(!validate_structure(&ledger_coherently_rebound).is_empty());
+
+    let mut retained_coherently_rebound = canonical;
+    retained_coherently_rebound["retained_change_bindings"][0]["commit_full"] =
+        Value::String(CLOSE_COMMIT.to_owned());
+    retained_coherently_rebound["retained_change_bindings"][0]["path"] =
+        Value::String(LEDGER_PATH.to_owned());
+    retained_coherently_rebound["retained_change_bindings"][0]["sha256_at_commit"] =
+        Value::String(LEDGER_SHA256.to_owned());
+    retained_coherently_rebound["retained_change_bindings"][0]["required_source_markers"] =
+        serde_json::json!([]);
+    assert!(!validate_structure(&retained_coherently_rebound).is_empty());
+}
+
+#[test]
+#[ignore = "requires full Git history; run the packet's focused command"]
+fn historical_binding_tampering_is_detected() {
+    assert_full_git_history_available();
+    let canonical = packet();
 
     let mut ledger_rebound = canonical.clone();
     ledger_rebound["ledger_binding"]["sha256"] = Value::String("0".repeat(64));
