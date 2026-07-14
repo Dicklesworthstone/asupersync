@@ -1810,7 +1810,6 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             record.set_cx(child_cx_full.clone());
         }
 
-        let cx_for_send = child_cx_full;
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let state_for_task = Arc::clone(&server_state);
 
@@ -1825,9 +1824,14 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 inner: Box::pin(run_gen_server_loop(server, child_cx, &mut cell)),
             }
             .await;
+            // Teardown result publication must not consult the child Cx: aborting
+            // the server cancels that context before the final state is returned.
+            // Publish Stopped before send_blocking wakes a waiting joiner.
             match result {
                 Ok(server_final) => {
-                    let _ = result_tx.send(&cx_for_send, Ok(server_final));
+                    state_for_task.store(ActorState::Stopped);
+                    let _ = result_tx.send_blocking(Ok(server_final));
+                    Outcome::Ok(())
                 }
                 Err(payload) => {
                     // The loop panicked before its graceful Phase-3 drain ran,
@@ -1846,14 +1850,13 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                         }
                     }
                     let msg = crate::cx::scope::payload_to_string(&payload);
-                    let _ = result_tx.send(
-                        &cx_for_send,
-                        Err(JoinError::Panicked(crate::types::PanicPayload::new(msg))),
-                    );
+                    let panic_payload = crate::types::PanicPayload::new(msg);
+                    state_for_task.store(ActorState::Stopped);
+                    let _ =
+                        result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                    Outcome::Panicked(panic_payload)
                 }
             }
-            state_for_task.store(ActorState::Stopped);
-            Outcome::Ok(())
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);
@@ -2272,7 +2275,8 @@ mod tests {
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -2285,6 +2289,36 @@ mod tests {
             TaskId::new_for_test(1, 0),
             Budget::INFINITE,
         )
+    }
+
+    fn terminal_state_waker(state: Arc<GenServerStateCell>, counter: Arc<AtomicUsize>) -> Waker {
+        struct TerminalStateWaker {
+            state: Arc<GenServerStateCell>,
+            counter: Arc<AtomicUsize>,
+        }
+
+        impl TerminalStateWaker {
+            fn record_wake(&self) {
+                assert_eq!(
+                    self.state.load(),
+                    ActorState::Stopped,
+                    "join receiver must not wake before gen_server state is terminal"
+                );
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        impl std::task::Wake for TerminalStateWaker {
+            fn wake(self: Arc<Self>) {
+                self.record_wake();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.record_wake();
+            }
+        }
+
+        Waker::from(Arc::new(TerminalStateWaker { state, counter }))
     }
 
     fn lab_spawn_cx(runtime: &crate::lab::LabRuntime, region: RegionId, budget: Budget) -> Cx {
@@ -3091,6 +3125,124 @@ mod tests {
         assert!(!server_ref.is_closed());
 
         crate::test_complete!("gen_server_handle_accessors");
+    }
+
+    #[test]
+    fn spawn_gen_server_wrapper_abort_delivers_final_state() {
+        init_test("spawn_gen_server_wrapper_abort_delivers_final_state");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (mut handle, mut stored) = scope
+            .spawn_gen_server(&mut state, &cx, Counter { count: 0 }, 8)
+            .expect("spawn gen_server");
+        let server_ref = handle.server_ref();
+        handle.abort();
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
+        let mut poll_cx = Context::from_waker(&waker);
+        let join = std::pin::pin!(handle.join(&cx));
+        let mut join = join;
+        assert!(matches!(join.as_mut().poll(&mut poll_cx), Poll::Pending));
+
+        assert!(
+            matches!(stored.poll(&mut poll_cx), Poll::Ready(Outcome::Ok(()))),
+            "aborted gen_server wrapper must complete cleanly after returning final state"
+        );
+        assert_eq!(
+            wake_count.load(Ordering::Relaxed),
+            1,
+            "final state publication should wake the joiner exactly once"
+        );
+        assert!(
+            !server_ref.is_alive(),
+            "join wake must observe the terminal gen_server state"
+        );
+
+        match join.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Ok(server_final)) => {
+                assert_eq!(server_final.count, 0, "abort preserves final server state");
+            }
+            other => panic!("abort must return the final server state, got {other:?}"),
+        }
+
+        crate::test_complete!("spawn_gen_server_wrapper_abort_delivers_final_state");
+    }
+
+    #[test]
+    fn spawn_gen_server_wrapper_cancelled_panic_surfaces_terminal_outcome() {
+        #[derive(Debug)]
+        struct PanicOnStop;
+
+        impl GenServer for PanicOnStop {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+
+            fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                panic!("gen_server wrapper boom");
+            }
+        }
+
+        init_test("spawn_gen_server_wrapper_cancelled_panic_surfaces_terminal_outcome");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (mut handle, mut stored) = scope
+            .spawn_gen_server(&mut state, &cx, PanicOnStop, 8)
+            .expect("spawn gen_server");
+        let server_ref = handle.server_ref();
+        handle.abort();
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
+        let mut poll_cx = Context::from_waker(&waker);
+        let join = std::pin::pin!(handle.join(&cx));
+        let mut join = join;
+        assert!(matches!(join.as_mut().poll(&mut poll_cx), Poll::Pending));
+
+        match stored.poll(&mut poll_cx) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                assert_eq!(payload.message(), "gen_server wrapper boom");
+            }
+            other => panic!("panicking gen_server task must return Outcome::Panicked: {other:?}"),
+        }
+        assert_eq!(
+            wake_count.load(Ordering::Relaxed),
+            1,
+            "panic result publication should wake the joiner exactly once"
+        );
+        assert!(
+            !server_ref.is_alive(),
+            "panic join wake must observe the terminal gen_server state"
+        );
+
+        match join.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(JoinError::Panicked(payload))) => {
+                assert_eq!(payload.message(), "gen_server wrapper boom");
+            }
+            other => panic!("join must preserve the gen_server panic, got {other:?}"),
+        }
+
+        crate::test_complete!("spawn_gen_server_wrapper_cancelled_panic_surfaces_terminal_outcome");
     }
 
     #[test]
