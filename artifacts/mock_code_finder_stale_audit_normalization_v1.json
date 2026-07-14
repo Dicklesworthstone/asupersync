@@ -16,7 +16,7 @@
         "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_integration cargo test -p asupersync --test grpc_server_deadline_propagation_audit --test grpc_compression_flag_audit --test kafka_offset_commit_retry_audit --features test-internals -- --nocapture",
         "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_contract cargo test -p asupersync --test mock_code_finder_stale_audit_normalization --features test-internals -- --nocapture"
       ],
-      "source_truth": "CallContext::from_metadata_at_with_max_deadline clamps peer grpc-timeout values when ServerConfig::max_request_deadline is configured."
+      "source_truth": "CallContext::from_metadata_at_with_max_deadline clamps parseable peer grpc-timeout values when ServerConfig::max_request_deadline is configured."
     },
     {
       "scenario_id": "grpc-compression-header-consistency",

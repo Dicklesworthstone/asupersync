@@ -326,13 +326,22 @@ fn metadata_ascii_value_is_visible(byte: u8) -> bool {
     (0x20..=0x7E).contains(&byte)
 }
 
-pub(crate) fn sanitize_metadata_ascii_value(value: &str) -> Cow<'_, str> {
-    if value
+fn metadata_ascii_value_is_valid(value: &str) -> bool {
+    value
         .as_bytes()
         .iter()
         .copied()
         .all(metadata_ascii_value_is_visible)
-    {
+}
+
+/// Defensively sanitize a raw ASCII metadata value at an encoding boundary.
+///
+/// Public [`Metadata`] insertion rejects invalid values instead of calling this
+/// helper. Keeping the lossy transform out of insertion is security-sensitive:
+/// stripping a control byte can turn a malformed protocol value into a valid
+/// value with different semantics.
+pub(crate) fn sanitize_metadata_ascii_value(value: &str) -> Cow<'_, str> {
+    if metadata_ascii_value_is_valid(value) {
         Cow::Borrowed(value)
     } else {
         Cow::Owned(
@@ -367,39 +376,51 @@ impl Metadata {
 
     /// Insert an ASCII value.
     ///
-    /// Returns `false` when the metadata key is invalid and the entry is
-    /// rejected. Invalid control and non-ASCII bytes are stripped from ASCII
-    /// values to keep encoded metadata within the visible ASCII range required
-    /// by gRPC over HTTP/2.
-    #[must_use = "check whether the metadata key was valid and the entry was stored"]
+    /// Returns `false` without modifying the metadata when the key is invalid
+    /// (including an ASCII key ending in the binary-only `-bin` suffix) or the
+    /// value contains bytes outside the printable ASCII range required by gRPC
+    /// over HTTP/2. Invalid values are rejected as a whole rather than stripped
+    /// because removal could transmute malformed protocol values.
+    #[must_use = "check whether the metadata key and value were valid and the entry was stored"]
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
         let key = key.into();
         let Some(key) = normalize_metadata_key(&key, false) else {
             return false;
         };
+        if key.ends_with("-bin") {
+            return false;
+        }
         let value = value.into();
-        let sanitized = sanitize_metadata_ascii_value(&value).into_owned();
-        self.entries.push((key, MetadataValue::Ascii(sanitized)));
+        if !metadata_ascii_value_is_valid(&value) {
+            return false;
+        }
+        self.entries.push((key, MetadataValue::Ascii(value)));
         true
     }
 
     /// Insert an ASCII value, replacing any existing entries for the same key.
     ///
-    /// Returns `false` when the metadata key is invalid and the entry is
-    /// rejected. Invalid control and non-ASCII bytes are stripped from ASCII
-    /// values to keep encoded metadata within the visible ASCII range required
-    /// by gRPC over HTTP/2.
-    #[must_use = "check whether the metadata key was valid and the entry was stored"]
+    /// Returns `false` without modifying the metadata when the key is invalid
+    /// (including an ASCII key ending in the binary-only `-bin` suffix) or the
+    /// value contains bytes outside the printable ASCII range required by gRPC
+    /// over HTTP/2. Validation happens before existing values are removed, so a
+    /// rejected replacement preserves the prior entry.
+    #[must_use = "check whether the metadata key and value were valid and the entry was stored"]
     pub fn insert_or_replace(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
         let key = key.into();
         let Some(key) = normalize_metadata_key(&key, false) else {
             return false;
         };
+        if key.ends_with("-bin") {
+            return false;
+        }
         let value = value.into();
-        let sanitized = sanitize_metadata_ascii_value(&value).into_owned();
+        if !metadata_ascii_value_is_valid(&value) {
+            return false;
+        }
         self.entries
             .retain(|(existing_key, _)| !existing_key.eq_ignore_ascii_case(&key));
-        self.entries.push((key, MetadataValue::Ascii(sanitized)));
+        self.entries.push((key, MetadataValue::Ascii(value)));
         true
     }
 
@@ -1889,47 +1910,77 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_insert_strips_ascii_crlf() {
-        init_test("test_metadata_insert_strips_ascii_crlf");
+    fn test_metadata_insert_rejects_ascii_crlf_without_mutation() {
+        init_test("test_metadata_insert_rejects_ascii_crlf_without_mutation");
         let mut metadata = Metadata::new();
 
         let inserted = metadata.insert("x-request-id", "line1\r\nline2");
-        crate::assert_with_log!(inserted, "valid key inserted", true, inserted);
-
-        match metadata.get("x-request-id") {
-            Some(MetadataValue::Ascii(value)) => {
-                crate::assert_with_log!(
-                    value == "line1line2",
-                    "ascii metadata CRLF sanitized",
-                    "line1line2",
-                    value
-                );
-            }
-            _ => panic!("expected sanitized ascii metadata value"),
-        }
-        crate::test_complete!("test_metadata_insert_strips_ascii_crlf");
+        crate::assert_with_log!(!inserted, "invalid value rejected", false, inserted);
+        crate::assert_with_log!(
+            metadata.is_empty(),
+            "rejected value leaves metadata unchanged",
+            true,
+            metadata.is_empty()
+        );
+        crate::test_complete!("test_metadata_insert_rejects_ascii_crlf_without_mutation");
     }
 
     #[test]
-    fn test_metadata_insert_strips_controls_and_non_ascii() {
-        init_test("test_metadata_insert_strips_controls_and_non_ascii");
-        let mut metadata = Metadata::new();
+    fn test_metadata_insert_rejects_controls_and_non_ascii() {
+        init_test("test_metadata_insert_rejects_controls_and_non_ascii");
 
-        let inserted = metadata.insert("x-request-id", "A\x00B\tC\x1FD\x7FEαF");
-        crate::assert_with_log!(inserted, "valid key inserted", true, inserted);
-
-        match metadata.get("x-request-id") {
-            Some(MetadataValue::Ascii(value)) => {
-                crate::assert_with_log!(
-                    value == "ABCDEF",
-                    "ascii metadata strips controls and non-ascii",
-                    "ABCDEF",
-                    value
-                );
-            }
-            _ => panic!("expected sanitized ascii metadata value"),
+        for value in ["A\x00B", "\t99999999H", "\x7f99999999H", "trace-Ω-id"] {
+            let mut metadata = Metadata::new();
+            let inserted = metadata.insert("x-request-id", value);
+            crate::assert_with_log!(!inserted, "invalid value rejected", false, inserted);
+            crate::assert_with_log!(
+                metadata.is_empty(),
+                "rejected value not stored",
+                true,
+                metadata.is_empty()
+            );
         }
-        crate::test_complete!("test_metadata_insert_strips_controls_and_non_ascii");
+        crate::test_complete!("test_metadata_insert_rejects_controls_and_non_ascii");
+    }
+
+    #[test]
+    fn test_metadata_insert_or_replace_rejection_preserves_existing_value() {
+        init_test("test_metadata_insert_or_replace_rejection_preserves_existing_value");
+        let mut metadata = Metadata::new();
+        assert!(metadata.insert("grpc-timeout", "5S"));
+
+        let replaced = metadata.insert_or_replace("grpc-timeout", "\t99999999H");
+        crate::assert_with_log!(!replaced, "invalid replacement rejected", false, replaced);
+        match metadata.get("grpc-timeout") {
+            Some(MetadataValue::Ascii(value)) => {
+                crate::assert_with_log!(value == "5S", "existing value preserved", "5S", value)
+            }
+            other => panic!("expected preserved ASCII timeout, got {other:?}"),
+        }
+        crate::test_complete!("test_metadata_insert_or_replace_rejection_preserves_existing_value");
+    }
+
+    #[test]
+    fn test_metadata_ascii_insert_rejects_binary_suffix_without_mutation() {
+        init_test("test_metadata_ascii_insert_rejects_binary_suffix_without_mutation");
+        let mut metadata = Metadata::new();
+        assert!(metadata.insert_bin("trace-bin", Bytes::from_static(b"binary")));
+
+        let inserted = metadata.insert("other-bin", "not-binary");
+        crate::assert_with_log!(!inserted, "ASCII -bin insert rejected", false, inserted);
+        let replaced = metadata.insert_or_replace("trace-bin", "not-binary");
+        crate::assert_with_log!(
+            !replaced,
+            "ASCII -bin replacement rejected",
+            false,
+            replaced
+        );
+        assert!(metadata.get("other-bin").is_none());
+        match metadata.get("trace-bin") {
+            Some(MetadataValue::Binary(value)) => assert_eq!(value.as_ref(), b"binary"),
+            other => panic!("expected preserved binary metadata, got {other:?}"),
+        }
+        crate::test_complete!("test_metadata_ascii_insert_rejects_binary_suffix_without_mutation");
     }
 
     // =========================================================================

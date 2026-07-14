@@ -80,11 +80,21 @@ fn grpc_timeout_units_round_trip_and_reject_malformed_values() {
         );
     }
 
-    for malformed in ["", "S", "100000000S", "1s", "1X", " 1S", "１S"] {
+    for malformed in [
+        "",
+        "S",
+        "100000000S",
+        "1s",
+        "1X",
+        " 1S",
+        "+1S",
+        "+0000000S",
+        "１S",
+    ] {
         assert_eq!(
             parse_grpc_timeout(malformed),
             None,
-            "malformed timeout must fail closed: {malformed:?}"
+            "parser must reject malformed timeout syntax: {malformed:?}"
         );
     }
 }
@@ -117,8 +127,8 @@ fn call_context_applies_explicit_default_and_invalid_timeout_contracts() {
     );
     assert_eq!(
         invalid.deadline(),
-        None,
-        "present but malformed grpc-timeout must not fall back to server default"
+        Some(now + Duration::from_secs(30)),
+        "present but malformed grpc-timeout must fall back to the server default"
     );
 }
 
@@ -162,8 +172,8 @@ fn call_context_clamps_peer_timeout_to_server_max_without_clamping_default() {
     );
     assert_eq!(
         malformed.deadline(),
-        None,
-        "malformed present grpc-timeout must fail closed instead of using default or cap"
+        Some(now + Duration::from_secs(120)),
+        "malformed grpc-timeout must use the operator default without applying the peer cap"
     );
 
     log_deadline_event(DeadlineLog {
@@ -222,12 +232,16 @@ fn parent_deadline_attenuates_outbound_child_timeout() {
 }
 
 #[test]
-fn expired_deadline_surfaces_zero_timeout_and_deadline_exceeded_status() {
+fn expired_deadline_exposes_zero_timeout_and_deadline_status_mapping() {
     let now = Instant::now();
     let call = CallContext::from_metadata_at(metadata_with_timeout("0n"), None, None, now);
     assert_eq!(call.deadline(), Some(now));
     assert!(call.is_expired_at(now));
-    assert_eq!(call.timeout_header_value_at(now), Some("0n".to_string()));
+    let metadata_out = call
+        .timeout_header_value_at(now)
+        .expect("expired deadline must expose a timeout value");
+    assert_eq!(metadata_out, "0n");
+    let metadata_out_log = format!("grpc-timeout:{metadata_out}");
 
     let response: Result<Response<&'static str>, Status> = if call.is_expired_at(now) {
         Err(Status::deadline_exceeded(
@@ -239,22 +253,22 @@ fn expired_deadline_surfaces_zero_timeout_and_deadline_exceeded_status() {
     let status = response.expect_err("zero timeout must fail fast");
     assert_eq!(status.code(), Code::DeadlineExceeded);
     log_deadline_event(DeadlineLog {
-        scenario_id: "zero-timeout-fails-fast",
+        scenario_id: "zero-timeout-status-mapping",
         metadata_in: "grpc-timeout:0n",
-        metadata_out: "grpc-timeout:0n",
+        metadata_out: metadata_out_log.as_str(),
         virtual_now: "0ns",
         deadline: "0ns",
         expected_status: Code::DeadlineExceeded,
         actual_status: status.code(),
         health_state: "not_applicable",
-        cancellation_observed: true,
+        cancellation_observed: false,
         verdict: "pass",
         first_failure: "",
     });
 }
 
 #[test]
-fn deadline_conformance_runner_logs_success_failure_and_propagation_matrix() {
+fn deadline_conformance_runner_logs_status_mapping_and_propagation_matrix() {
     let now = Instant::now();
 
     let success = CallContext::from_metadata_at(metadata_with_timeout("5S"), None, None, now);
@@ -304,16 +318,22 @@ fn deadline_conformance_runner_logs_success_failure_and_propagation_matrix() {
         .expect_err("handler past deadline must fail")
         .code();
     assert_eq!(expired_status, Code::DeadlineExceeded);
+    let mut expired_outbound = Metadata::new();
+    assert!(expired.propagate_timeout_to_at(&mut expired_outbound, handler_end));
+    let expired_metadata_out = ascii_metadata_value(&expired_outbound, "grpc-timeout")
+        .expect("expired parent must produce outbound timeout metadata");
+    assert_eq!(expired_metadata_out, "0n");
+    let expired_metadata_out_log = format!("grpc-timeout:{expired_metadata_out}");
     log_deadline_event(DeadlineLog {
-        scenario_id: "failure-deadline-exceeded-after-virtual-work",
+        scenario_id: "deadline-status-mapping-after-virtual-work",
         metadata_in: "grpc-timeout:1m",
-        metadata_out: "grpc-timeout:0n",
+        metadata_out: expired_metadata_out_log.as_str(),
         virtual_now: "2ms",
         deadline: "1ms",
         expected_status: Code::DeadlineExceeded,
         actual_status: expired_status,
         health_state: "not_applicable",
-        cancellation_observed: true,
+        cancellation_observed: false,
         verdict: "pass",
         first_failure: "",
     });

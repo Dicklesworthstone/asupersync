@@ -6,39 +6,37 @@
 //!
 //! Audit context — gRPC timeout sources, in priority order:
 //!
-//!   1. Client's `grpc-timeout` header — clamped to
-//!      `ServerConfig::max_request_deadline` if set
+//!   1. Parseable client `grpc-timeout` header — clamped to
+//!      `ServerConfig::max_request_deadline` if that cap is configured
 //!      (tick #139).
 //!   2. `ServerConfig::default_timeout` — applied when the
-//!      client did not send a grpc-timeout header.
-//!   3. No deadline — handler runs unbounded.
+//!      client omits grpc-timeout or sends a malformed value.
+//!   3. No deadline — possible only when neither source supplies
+//!      a usable bound.
 //!
-//! The handler is HANDLER-COOPERATIVE: it must check
-//! `cx.is_expired()` periodically OR the transport-adapter
-//! must wrap dispatch_unary with a timeout. dispatch_unary
-//! itself does NOT preempt — it inlines the handler future
-//! and awaits to completion.
+//! `dispatch_unary` races the handler future against the effective
+//! deadline. Yielding async work is dropped when the deadline wins;
+//! blocking work that never yields cannot be preempted. Handlers may
+//! also inspect `cx.is_expired()` between phases.
 //!
 //! Audit findings (extends ticks #138/#139/#166):
 //!
-//!   (a) **`default_timeout` field exists on ServerConfig**
-//!       (server.rs:231). Default value: None (no default
+//!   (a) **`default_timeout` field exists on ServerConfig.**
+//!       Default value: None (no default
 //!       deadline; calls run to client's grpc-timeout or
 //!       unbounded). Operators that want a server-side
 //!       baseline timeout set this explicitly.
 //!
 //!   (b) **`default_timeout` does NOT clamp client's
-//!       `grpc-timeout`.** When the client sends a
+//!       `grpc-timeout`.** When the client sends a parseable
 //!       grpc-timeout header, that value is used (subject to
-//!       max_request_deadline cap, tick #139). The
-//!       default_timeout is the ABSENT-HEADER fallback only.
-//!       Pinned at server.rs:241-244 doc — `default_timeout`
-//!       fallback is independent of `max_request_deadline`
-//!       clamp.
+//!       max_request_deadline cap, tick #139). Malformed or absent
+//!       values use default_timeout. That operator fallback is
+//!       independent of the `max_request_deadline` peer cap.
 //!
-//!   (c) **`max_request_deadline` is the slow-loris cap**
-//!       (tick #139, server.rs:245). When Some(cap), every
-//!       peer-supplied grpc-timeout is clamped to
+//!   (c) **`max_request_deadline` is the valid peer-timeout cap.**
+//!       When Some(cap), every
+//!       parseable peer-supplied grpc-timeout is clamped to
 //!       `min(peer_timeout, cap)`. Default None preserves
 //!       pre-fix behavior.
 //!
@@ -47,8 +45,8 @@
 //!       checks this between phases to short-circuit.
 //!
 //!   (e) **CallContext::remaining_at(now)** returns None for
-//!       expired deadlines — abort signal for handlers and
-//!       transport timeout-wrappers (tick #166).
+//!       expired or absent deadlines; `is_expired_at(now)` distinguishes
+//!       the expired case for handlers and transport wrappers.
 //!
 //!   (f) **`timeout_header_value_at` propagates `0n`** for
 //!       expired deadlines so downstream calls fail fast
@@ -75,9 +73,8 @@ fn default_server_config_default_timeout_is_none() {
 
 #[test]
 fn default_server_config_max_request_deadline_is_none() {
-    // Pin (c): default max_request_deadline is None — pre-fix
-    // pre-#139 behavior preserved. Operators opt in for
-    // slow-loris protection.
+    // Pin (c): default max_request_deadline is None. Operators opt in
+    // when they want to cap valid peer-supplied timeouts.
     let config = ServerConfig::default();
     assert!(
         config.max_request_deadline.is_none(),
@@ -87,15 +84,15 @@ fn default_server_config_max_request_deadline_is_none() {
 
 #[test]
 fn server_builder_default_timeout_setter_threads_through_config() {
-    // Pin (a): ServerBuilder::default_timeout stores the value.
-    // We use the public field accessor since ServerBuilder
-    // doesn't currently expose `default_timeout` on
-    // ServerBuilder — operators set ServerConfig directly OR
-    // via the builder if exposed. Pin via direct config
-    // construction since we know the field is pub.
-    let mut config = ServerConfig::default();
-    config.default_timeout = Some(Duration::from_secs(30));
-    assert_eq!(config.default_timeout, Some(Duration::from_secs(30)));
+    // Pin (a): ServerBuilder::default_timeout stores the value in the
+    // resulting server configuration.
+    let server = ServerBuilder::new()
+        .default_timeout(Duration::from_secs(30))
+        .build();
+    assert_eq!(
+        server.config().default_timeout,
+        Some(Duration::from_secs(30))
+    );
 }
 
 #[test]
@@ -138,31 +135,29 @@ fn default_timeout_applies_when_grpc_timeout_header_absent() {
 #[test]
 fn default_timeout_does_not_clamp_client_supplied_timeout() {
     // Pin (b): when the client sends a grpc-timeout header
-    // (e.g. 100ms), the client's value is used regardless of
-    // server's default_timeout (e.g. 10s). The
-    // default_timeout is the ABSENT-HEADER fallback only —
-    // not a ceiling.
+    // (e.g. 10s), the client's value is used even when it exceeds
+    // server's default_timeout (e.g. 100ms). The
+    // default_timeout is the absent-or-malformed fallback, not a ceiling
+    // on valid client timeouts.
     let now = Instant::now();
     let mut metadata = Metadata::new();
-    assert!(metadata.insert("grpc-timeout", "100m")); // 100 ms client
-    let default = Duration::from_secs(10); // 10 s server default
+    assert!(metadata.insert("grpc-timeout", "10S")); // 10 s client
+    let peer_timeout = Duration::from_secs(10);
+    let default = Duration::from_millis(100); // 100 ms server default
     let cx = CallContext::from_metadata_at(metadata, Some(default), None, now);
-    let deadline = cx.deadline().expect("client header parses");
-    let effective = deadline.saturating_duration_since(now);
-    assert!(
-        effective <= Duration::from_millis(110),
-        "client's 100 ms timeout takes precedence over server's 10 s \
-         default_timeout — default is fallback only, NOT a ceiling. \
-         got effective {effective:?}",
+    assert_eq!(
+        cx.deadline(),
+        now.checked_add(peer_timeout),
+        "client's 10 s timeout takes precedence over server's 100 ms default_timeout; default is fallback only, not a ceiling",
     );
 }
 
 #[test]
 fn max_request_deadline_does_not_clamp_default_timeout_fallback() {
-    // Pin (c) doc: `max_request_deadline` clamps PEER-supplied
-    // timeouts only, NOT the absent-header fallback to
-    // default_timeout. From server.rs:241-244 doc:
-    // "This cap does NOT affect the absent-header fallback
+    // Pin (c): `max_request_deadline` clamps parseable peer-supplied
+    // timeouts only, NOT the absent- or malformed-header fallback to
+    // default_timeout:
+    // "This cap does NOT affect the absent- or malformed-header fallback
     //  to default_timeout — that path still applies the
     //  configured default. Callers that want a tighter
     //  ceiling on the default should set default_timeout
@@ -181,7 +176,7 @@ fn max_request_deadline_does_not_clamp_default_timeout_fallback() {
     let deadline = cx.deadline().expect("default_timeout produces a deadline");
     let effective = deadline.saturating_duration_since(now);
     // The default_timeout (60s) is used; the cap (10s) does NOT
-    // clamp the absent-header fallback path.
+    // clamp the operator fallback path.
     assert!(
         effective >= Duration::from_secs(50),
         "default_timeout fallback NOT clamped by max_request_deadline; \
@@ -210,7 +205,7 @@ fn no_default_no_header_means_no_deadline() {
 fn server_default_timeout_can_be_short() {
     // Pin (a): operators can configure a SHORT default
     // (e.g. 100 ms) for fail-fast workloads. The 100 ms
-    // applies when no grpc-timeout header is present.
+    // applies when grpc-timeout is absent or malformed.
     let now = Instant::now();
     let metadata = Metadata::new();
     let short_default = Duration::from_millis(100);
@@ -225,11 +220,9 @@ fn server_default_timeout_can_be_short() {
 }
 
 #[test]
-fn handler_timeout_enforcement_is_handler_cooperative() {
-    // Pin (d)+(e): the dispatch_unary path does NOT preempt
-    // the handler — handler must check cx.is_expired() OR the
-    // transport adapter must wrap with a timeout. We pin
-    // is_expired_at behavior here.
+fn call_context_exposes_cooperative_deadline_checks() {
+    // Pin (d)+(e): handlers can inspect the deadline between phases even
+    // though dispatch_unary also races yielding handler futures against it.
     let now = Instant::now();
     let mut metadata = Metadata::new();
     assert!(metadata.insert("grpc-timeout", "1m")); // 1 ms

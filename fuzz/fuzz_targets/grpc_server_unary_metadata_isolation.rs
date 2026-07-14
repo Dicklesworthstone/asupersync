@@ -7,10 +7,10 @@
 //! concurrent unary calls, assert: each gets independent Cx, no
 //! metadata leak between calls." The Cx half requires an async
 //! runtime, which a libfuzzer-driven sync harness doesn't have.
-//! This target drives the metadata-leak half via the sync portions
-//! of the dispatch surface (enforce_metadata_size_limit + every
-//! Interceptor's sync intercept_request) — that's where the actual
-//! cross-call leak risk lives. A regression where, e.g., a
+//! This target drives sequential shared-instance metadata reuse through the
+//! sync portions of the dispatch surface (`enforce_metadata_size_limit` plus
+//! each interceptor's `intercept_request`). It does not exercise data races,
+//! concurrent scheduling, or independent `Cx` construction. A regression where, e.g., a
 //! TracingInterceptor accidentally cached the previous call's
 //! x-request-id in a non-atomic location and reused it on the
 //! next call would surface here.
@@ -88,6 +88,9 @@ fn expected_metadata_key(key: &str) -> Option<String> {
     if normalized.is_empty() {
         return None;
     }
+    if normalized.ends_with("-bin") {
+        return None;
+    }
 
     normalized
         .chars()
@@ -95,12 +98,8 @@ fn expected_metadata_key(key: &str) -> Option<String> {
         .then_some(normalized)
 }
 
-fn expected_ascii_value(value: &str) -> String {
-    value
-        .bytes()
-        .filter(|byte| (0x20..=0x7E).contains(byte))
-        .map(char::from)
-        .collect()
+fn expected_ascii_value_is_valid(value: &str) -> bool {
+    value.bytes().all(|byte| (0x20..=0x7E).contains(&byte))
 }
 
 fn assert_metadata_insert_observation(
@@ -120,8 +119,9 @@ fn assert_metadata_insert_observation(
             key.len(),
         );
         assert!(
-            expected_metadata_key(key).is_none(),
-            "Metadata::insert rejected a locally valid metadata key: raw_key={key:?}",
+            expected_metadata_key(key).is_none() || !expected_ascii_value_is_valid(value),
+            "Metadata::insert rejected a locally valid metadata entry: \
+             raw_key={key:?}, raw_value={value:?}",
         );
         return;
     }
@@ -134,7 +134,10 @@ fn assert_metadata_insert_observation(
         key.len(),
     );
     let expected_key = expected_metadata_key(key).expect("accepted metadata key must normalize");
-    let expected_value = expected_ascii_value(value);
+    assert!(
+        expected_ascii_value_is_valid(value),
+        "Metadata::insert accepted an invalid ASCII metadata value: {value:?}",
+    );
     let (stored_key, stored_value) = metadata
         .iter()
         .last()
@@ -145,8 +148,8 @@ fn assert_metadata_insert_observation(
     );
     match stored_value {
         MetadataValue::Ascii(stored) => assert_eq!(
-            stored, &expected_value,
-            "accepted metadata value was not sanitized as documented",
+            stored, value,
+            "accepted metadata value changed during insertion",
         ),
         MetadataValue::Binary(_) => panic!("Metadata::insert stored an ASCII value as binary"),
     }

@@ -16,15 +16,12 @@
 //!       slip past.
 //!
 //!   (b) **`remaining()` returns `None` for expired deadlines.**
-//!       This is the audit-critical signal: handlers and
-//!       transport adapters that drive call-scoped futures
-//!       observe a `None` to mean "no time left, abort." A
-//!       regression that returned `Some(Duration::ZERO)` would
-//!       let downstream timeout-wrappers spin briefly before
-//!       eventually noticing.
+//!       `None` also represents a call with no deadline, so callers that
+//!       need to distinguish those states inspect `deadline()` or
+//!       `is_expired_at()` as well.
 //!
 //!   (c) **`timeout_header_value` forwards `0n` for expired
-//!       deadlines** (server.rs:1309-1322). When propagating
+//!       deadlines.** When propagating
 //!       to a downstream call, an expired deadline yields the
 //!       string `"0n"` so the downstream observer fails fast
 //!       with `DeadlineExceeded` immediately rather than
@@ -34,16 +31,16 @@
 //!       parent-remaining and child-existing.** A child call
 //!       cannot extend the deadline by setting a larger
 //!       `grpc-timeout` in outbound metadata — the propagation
-//!       takes `min(parent_remaining, child_existing)`
-//!       (server.rs:1347-1353). This is the audit-critical
+//!       takes `min(parent_remaining, child_existing)`. This is the audit-critical
 //!       no-extension property.
 //!
-//!   (e) **`max_request_deadline` server cap clamps peer-
-//!       supplied timeouts** (tick #139, server.rs:1234-1239).
+//!   (e) **`max_request_deadline` server cap clamps parseable peer-
+//!       supplied timeouts.**
 //!       A peer requesting `grpc-timeout: 99999999H` ≈ 11,400
 //!       years is clamped to the operator-configured cap. This
-//!       is the ultimate slow-loris backstop; combined with
-//!       (b)+(c) the resource-leak class is bounded.
+//!       bounds valid peer-supplied timeouts. It does not clamp
+//!       the independent server default; operators choose that
+//!       ceiling via `default_timeout`.
 //!
 //!   (f) **No-resource-leak property:** when the dispatch
 //!       future is dropped (transport-adapter timeout wrapper
@@ -92,14 +89,19 @@ fn call_context_is_expired_at_exact_deadline() {
 
 #[test]
 fn call_context_remaining_returns_none_for_expired() {
-    // Pin (b): `remaining_at` returns None when now >=
-    // deadline. This is the abort signal.
+    // Pin (b): for a context that has a deadline, `remaining_at` returns
+    // None when now >= deadline. `is_expired_at` distinguishes this case
+    // from a context with no deadline.
     let now = Instant::now();
     let mut metadata = Metadata::new();
     assert!(metadata.insert("grpc-timeout", "10m"));
     let cx = CallContext::from_metadata_at(metadata, None, None, now);
 
     let deadline = cx.deadline().unwrap();
+    assert!(
+        cx.remaining_at(deadline).is_none(),
+        "remaining_at(deadline) must be None at the inclusive expiry boundary",
+    );
     // Past the deadline — remaining must be None.
     let past = deadline + Duration::from_secs(1);
     assert!(
@@ -200,8 +202,8 @@ fn propagate_timeout_to_keeps_child_when_already_tighter() {
 #[test]
 fn max_request_deadline_clamps_peer_huge_timeout() {
     // Pin (e): peer-supplied `grpc-timeout: 99999999H` is
-    // clamped to the operator's max_request_deadline cap
-    // (tick #139). This is the slow-loris ceiling.
+    // clamped to the operator's max_request_deadline cap. This bounds
+    // valid peer-supplied timeouts; the server default is independent.
     let now = Instant::now();
     let mut metadata = Metadata::new();
     assert!(metadata.insert("grpc-timeout", "99999999H")); // ~11,400 years

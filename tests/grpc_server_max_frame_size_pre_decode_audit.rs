@@ -1,46 +1,37 @@
-//! Audit + regression test for `src/grpc/server.rs` pre-decode
-//! frame-size enforcement (tick #193).
+//! Audit + regression test for `src/grpc/server.rs` materialized-metadata
+//! aggregate-size enforcement (tick #193).
 //!
-//! Operator's question: "verify MAX_FRAME_SIZE pre-decode
-//! enforcement."
+//! The historical filename and operator question used the term "pre-decode".
+//! This test does not exercise an HTTP/2 frame decoder or HPACK. It calls the
+//! dispatch-layer helper after metadata has already been materialized.
 //!
-//! Audit context — gRPC has TWO size caps relevant to
-//! pre-decode enforcement:
+//! Audit context — gRPC has two distinct size-cap surfaces:
 //!
-//!   * **HEADERS-frame total size cap** (`max_metadata_size`,
-//!     server.rs:272). Default 8 KiB. Enforced by
-//!     `enforce_metadata_size_limit` (server.rs:402-419) on
-//!     EVERY inbound HEADERS / TRAILERS frame BEFORE the
-//!     interceptor chain or handler runs. The gRPC equivalent
-//!     of HTTP 431 ("Request Header Fields Too Large") is
-//!     `Status::resource_exhausted`.
+//!   * **Materialized metadata aggregate cap** (`max_metadata_size`). Default
+//!     8 KiB. `enforce_metadata_size_limit` applies it before the interceptor
+//!     chain or handler runs once a `Metadata` container exists, and reports
+//!     `Status::resource_exhausted` when the aggregate exceeds the cap.
 //!   * **LPM message-body size cap** (`max_recv_message_size`,
-//!     `max_send_message_size`, server.rs:424-425). Default
-//!     4 MiB. Enforced by GrpcCodec::decode at codec.rs:135
-//!     BEFORE allocating body bytes (audited tick #163).
+//!     `max_send_message_size`). Default 4 MiB. This is a separate codec
+//!     concern and is not exercised by the tests below.
+//!
+//! No claim is made here about HPACK allocation, raw HEADERS/TRAILERS frame
+//! limits, or transport wiring before `Metadata` construction.
 //!
 //! Audit findings:
 //!
 //!   (a) **`max_metadata_size` enforced via
-//!       `enforce_metadata_size_limit`** (server.rs:402-419)
-//!       at the FIRST gate of `dispatch_unary` (server.rs:823).
-//!       Pre-decode in the sense that the cap fires BEFORE
-//!       the interceptor chain or user handler runs. A
-//!       hostile peer streaming arbitrarily long header lists
-//!       cannot exhaust HPACK decoder memory.
+//!       `enforce_metadata_size_limit`** at the first gate of
+//!       `dispatch_unary`. The cap fires before the interceptor chain or user
+//!       handler, but after metadata has been decoded/materialized.
 //!
 //!   (b) **Default cap is 8 KiB** (`DEFAULT_MAX_METADATA_SIZE
 //!       = 8 * 1024`, server.rs:285). Matches gRPC ecosystem
-//!       convention (grpc-go's `MaxHeaderListSize`) and the
-//!       per-RFC-9113 §6.5.2 `SETTINGS_MAX_HEADER_LIST_SIZE`
-//!       advisory cap.
+//!       default for this dispatch-layer helper.
 //!
 //!   (c) **Cap-exceeded surfaces `Status::resource_exhausted`**
 //!       (server.rs:412-416). Error message includes BOTH
-//!       actual and configured limit for SRE diagnostics.
-//!       A regression to `Status::invalid_argument` would
-//!       break the gRPC-spec mapping (RESOURCE_EXHAUSTED is
-//!       the canonical "request too large" code).
+//!       actual and configured limit for diagnostics.
 //!
 //!   (d) **`limit = 0` disables enforcement** (server.rs:407-
 //!       409). No-cap convention used elsewhere in the crate.
@@ -56,9 +47,10 @@
 //!       (server.rs:406). `validate_inbound_metadata`
 //!       enforces (i) reserved-prefix rejection
 //!       (audited tick #177), (ii) content-type allowlist
-//!       (audited tick #176), (iii) ASCII-control-char strip
-//!       (audited tick #152). The size cap is the last gate
-//!       in the inbound metadata validation pipeline.
+//!       (audited tick #176), and (iii) metadata structural validity. Public
+//!       ASCII insertion rejects an invalid value as a whole; it does not
+//!       strip control characters. The size cap is the last gate in this
+//!       materialized-metadata validation pipeline.
 //!
 //! Regression tests below pin (a)-(e). The (f) ordering is
 //! pinned by the function structure: `validate_inbound_metadata`
@@ -73,15 +65,11 @@ use asupersync::grpc::streaming::Metadata;
 
 #[test]
 fn default_max_metadata_size_is_8_kib() {
-    // Pin (b): the documented default. A regression that
-    // loosened the default would let hostile peers exhaust
-    // HPACK decoder memory by default.
+    // Pin (b): the documented dispatch-layer default.
     assert_eq!(
         DEFAULT_MAX_METADATA_SIZE,
         8 * 1024,
-        "DEFAULT_MAX_METADATA_SIZE must be 8 KiB — matches gRPC ecosystem \
-         convention (grpc-go MaxHeaderListSize, RFC-9113 §6.5.2 \
-         SETTINGS_MAX_HEADER_LIST_SIZE advisory)",
+        "DEFAULT_MAX_METADATA_SIZE must remain the documented 8 KiB default",
     );
 }
 
@@ -99,9 +87,8 @@ fn enforce_metadata_size_limit_accepts_under_cap() {
 
 #[test]
 fn enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted() {
-    // Pin (a)+(c): aggregate metadata exceeding the cap rejects
-    // with Status::resource_exhausted. The gRPC-equivalent of
-    // HTTP 431.
+    // Pin (a)+(c): aggregate materialized metadata exceeding the cap rejects
+    // with Status::resource_exhausted.
     let mut metadata = Metadata::new();
     // Keep each individual value under MAX_HEADER_VALUE_LEN so
     // this fixture isolates the aggregate max_metadata_size gate.
@@ -116,9 +103,7 @@ fn enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted() {
     assert_eq!(
         err.code(),
         Code::ResourceExhausted,
-        "cap-exceeded MUST surface as ResourceExhausted (gRPC equivalent \
-         of HTTP 431); a regression to InvalidArgument would break the \
-         spec-mandated code class. got: {:?}",
+        "cap-exceeded MUST surface as ResourceExhausted; got: {:?}",
         err.code(),
     );
     // Pin (c) message: includes both actual and limit for SRE

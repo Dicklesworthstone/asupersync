@@ -28,26 +28,30 @@
 //!       a request-scoped resource (e.g.
 //!       `RateLimitInterceptor` at interceptor.rs:840+
 //!       acquires a slot and stores a `RateLimitLease` in
-//!       `request.extensions`), the dispatch path GUARANTEES
-//!       that exactly one of these terminal hooks runs per
-//!       request:
+//!       `request.extensions`), ordinary interceptor short-circuit,
+//!       handler-result, and response-hook paths invoke one or both of
+//!       these terminal hooks as appropriate:
 //!         * `intercept_response_with_request` (success)
-//!         * `intercept_error_with_request` (any error path,
-//!           including handler-error and request-side-chain
-//!           short-circuit)
-//!       The reverse-walk cleanup contract at server.rs:
-//!       828-839 + 856-870 + 872-885 ensures every prior
-//!       interceptor sees a terminal hook on every exit path.
+//!         * `intercept_error_with_request` (handler error,
+//!           request-side-chain short-circuit, or response-hook error)
+//!       The reverse-walk cleanup contract ensures prior interceptors
+//!       see the applicable hook on those paths. Already-expired and
+//!       in-flight deadline returns, plus externally dropping the
+//!       dispatch future, can bypass terminal hooks; those paths rely on
+//!       request/lease `Drop` instead.
 //!       The `RateLimitLease::release` (interceptor.rs:778)
 //!       is idempotent — `released: AtomicBool` guards against
 //!       double-release.
 //!
-//!   (c) **Slow-loris + max-deadline backstops** (audited in
-//!       ticks #138/#139/#146): even if a peer holds the
-//!       call open without sending bytes, the connection's
-//!       `cleanup_idle_streams` (server.rs:83) and the
-//!       `max_request_deadline` cap force the dispatcher's
-//!       future to be dropped, triggering (a)+(b) cleanup.
+//!   (c) **Deadline backstops are conditional; idle cleanup is
+//!       accounting-only.** `cleanup_idle_streams` removes stale registry
+//!       entries when explicitly invoked; it does not close a transport
+//!       stream or cancel a handler. A parseable peer timeout is capped by
+//!       `max_request_deadline`; absent or malformed timeout metadata instead
+//!       uses `default_timeout`.
+//!       To give every request an effective deadline, configure both values
+//!       consistently; keeping the fallback at or below the peer cap gives
+//!       yielding handler futures a common deadline ceiling.
 //!
 //!   (d) **Fixed:** `RateLimitLease` also releases on `Drop`.
 //!       If the dispatcher's future is dropped MID-FLIGHT
@@ -57,7 +61,7 @@
 //!       release is safe because `released: AtomicBool` already
 //!       makes the call idempotent.
 //!
-//! Regression tests below pin (a)+(b)+(c) at the public API
+//! Regression tests below pin direct hook behavior at the public API
 //! surface and pin (d) so request-drop cancellation cannot
 //! regress into a slot leak.
 
@@ -177,7 +181,7 @@ fn rate_limit_slot_releases_when_request_drops_mid_flight() {
 
 #[test]
 fn rate_limit_under_layer_cleanup_walks_back_through_acquired_interceptors() {
-    // Pin (c) layered cleanup contract: when an outer
+    // Pin (b) layered cleanup contract: when an outer
     // interceptor in an `InterceptorLayer` errors, the layer
     // walks back through `interceptors[..=index]` in REVERSE
     // calling `intercept_error_with_request` so the rate-
@@ -285,10 +289,11 @@ fn rate_limit_full_state_rejects_subsequent_with_resource_exhausted() {
 }
 
 #[test]
-fn handler_owned_resources_drop_when_dispatch_future_dropped() {
-    // Pin (a): a handler that captures a Drop-bearing local
-    // releases that local when the dispatch future is dropped
-    // mid-await. We simulate by constructing a
+fn handler_owned_resources_drop_when_standalone_future_dropped() {
+    // Supporting evidence for (a): a future that captures a Drop-bearing local
+    // releases that local when the future is dropped mid-await. This test does
+    // not construct `dispatch_unary`; source inspection separately establishes
+    // that dispatch awaits the handler inline. Here we construct a
     // `Pin<Box<dyn Future>>`, polling it to a Pending state,
     // then dropping it. The drop-counter increments exactly
     // once.
@@ -341,6 +346,6 @@ fn handler_owned_resources_drop_when_dispatch_future_dropped() {
         "future-drop runs every captured Drop impl exactly once. The \
          pseudo-buffer Vec is also dropped (its allocator returns the \
          memory). This is the structural release mechanism for \
-         handler-owned buffers / file handles on cancel.",
+         handler-owned buffers / file handles when their future is dropped.",
     );
 }

@@ -9,22 +9,20 @@
 //!
 //!   (a) **CRLF / ASCII-control-char header injection: BLOCKED.**
 //!       Two-layer defense.
-//!         * `Metadata::insert` (streaming.rs:367-376) calls
-//!           `sanitize_metadata_ascii_value` which strips bytes
-//!           outside the visible-ASCII range (0x20-0x7E plus tab).
-//!           A client-supplied x-request-id of `"line1\r\nline2"`
-//!           is sanitized to `"line1line2"` BEFORE it can sit in
-//!           the metadata map.
+//!         * `Metadata::insert` rejects a value containing any byte
+//!           outside printable ASCII 0x20-0x7E. A client-supplied
+//!           x-request-id of `"line1\r\nline2"` is rejected as a
+//!           whole before it can sit in the metadata map.
 //!         * Server-side `enforce_metadata_size_limit` (referenced
 //!           at server.rs:2244-2261) rejects metadata containing
 //!           ASCII control bytes with `Status::invalid_argument`.
 //!       Either layer alone closes the CRLF-injection vector;
 //!       belt-and-braces.
 //!
-//!   (b) **Metadata frame size cap: ENFORCED.** Default is 8 KiB
-//!       per `ServerConfig::max_metadata_size`. A flood of long
-//!       x-request-id headers cannot exhaust server memory because
-//!       the cap fires at the metadata-decode boundary.
+//!   (b) **Post-decode metadata cap is enforced by dispatch.** Default is
+//!       8 KiB per `ServerConfig::max_metadata_size`; dispatch checks the
+//!       materialized metadata before interceptors and handlers. This does not
+//!       bound HPACK/header-block allocation or prove a pre-container wire cap.
 //!
 //!   (c) **Unsigned request-id tampering: BLOCKED BY DEFAULT.**
 //!       `TracingInterceptor` treats the default boundary as
@@ -52,32 +50,13 @@ use asupersync::grpc::streaming::{Metadata, MetadataValue, Request};
 use asupersync::grpc::{Interceptor, TracingInterceptor};
 
 #[test]
-fn metadata_insert_strips_crlf_in_x_request_id() {
-    // Pin (a) layer-1: `Metadata::insert` sanitization removes
-    // CRLF and other ASCII-control bytes from x-request-id values.
-    // A client-supplied "line1\r\nline2" cannot inject a header
-    // smuggling vector because the bytes never make it into the
-    // entries Vec.
+fn metadata_insert_rejects_crlf_in_x_request_id() {
+    // Pin (a) layer-1: reject the entire value rather than
+    // concatenating the fragments around CRLF.
     let mut metadata = Metadata::new();
     let inserted = metadata.insert("x-request-id", "line1\r\nline2");
-    assert!(
-        inserted,
-        "the key 'x-request-id' is a valid metadata key — insert must succeed",
-    );
-    match metadata.get("x-request-id") {
-        Some(MetadataValue::Ascii(value)) => {
-            assert!(
-                !value.contains('\r') && !value.contains('\n'),
-                "CRLF must be stripped at insert; got: {value:?}",
-            );
-            assert_eq!(
-                value, "line1line2",
-                "sanitization replaces CRLF with empty (concatenates), \
-                 yielding the visible-ASCII subsequence",
-            );
-        }
-        other => panic!("expected Ascii sanitized value, got {other:?}"),
-    }
+    assert!(!inserted, "x-request-id containing CRLF must be rejected");
+    assert!(metadata.get("x-request-id").is_none());
 }
 
 #[test]
@@ -198,32 +177,13 @@ fn tracing_interceptor_disabled_does_not_generate_id() {
 }
 
 #[test]
-fn metadata_insert_strips_non_ascii_bytes_from_request_id() {
-    // Pin (a) layer-1 extension: non-ASCII bytes (e.g. UTF-8
-    // multi-byte sequences) are stripped from x-request-id values
-    // because gRPC ASCII metadata is restricted to the
-    // visible-ASCII range. A client-supplied id of "trace-Ω" cannot
-    // smuggle non-ASCII bytes into log-correlation pipelines that
-    // assume ASCII.
+fn metadata_insert_rejects_non_ascii_bytes_from_request_id() {
+    // Pin (a) layer-1 extension: reject the entire request id when
+    // it contains non-ASCII bytes instead of silently changing it.
     let mut metadata = Metadata::new();
     let inserted = metadata.insert("x-request-id", "trace-Ω-id");
-    assert!(inserted);
-    match metadata.get("x-request-id") {
-        Some(MetadataValue::Ascii(value)) => {
-            assert!(
-                value.is_ascii(),
-                "ASCII metadata values must be ASCII after sanitization; \
-                 got {value:?}",
-            );
-            // The omega character (Ω, two UTF-8 bytes) is dropped;
-            // the rest is preserved.
-            assert_eq!(
-                value, "trace--id",
-                "non-ASCII bytes stripped, leaving the visible-ASCII subsequence",
-            );
-        }
-        other => panic!("expected Ascii value, got {other:?}"),
-    }
+    assert!(!inserted);
+    assert!(metadata.get("x-request-id").is_none());
 }
 
 #[test]

@@ -5,38 +5,23 @@
 //!
 //!   (a) **Peer grpc-timeout has an opt-in server cap — FIXED LIVE SEAM.**
 //!       `CallContext::from_metadata_at_with_max_deadline` clamps
-//!       peer-supplied `grpc-timeout` values to
+//!       parseable peer-supplied `grpc-timeout` values to
 //!       `ServerConfig::max_request_deadline` when operators configure one.
 //!       The legacy `from_metadata_at` constructor still passes `cap=None`
 //!       for compatibility, so this audit now pins both behaviors explicitly
 //!       instead of claiming there is no production cap.
 //!
-//!   (b) **No client-controlled extension via repeated headers —
-//!       VERIFIED CLEAN.** `Metadata::get` returns the most
-//!       recently inserted entry for a key (case-insensitive); a
-//!       peer that sends two `grpc-timeout` headers gets only one
-//!       parsed. They cannot SUM headers to extend a deadline.
+//!   (b) **Duplicate entries in the local Metadata model do not sum.**
+//!       `Metadata::get` returns the most recently inserted entry for a key
+//!       (case-insensitive). This pins the local container/CallContext seam;
+//!       it does not claim how an H2 adapter ingests repeated wire headers.
 //!
-//!   (c) **Invalid grpc-timeout fails closed — STRICTER than I
-//!       initially thought.** Per server.rs:1157-1162, the match
-//!       arm `Some(Ascii(s)) => parse_grpc_timeout(s)` evaluates
-//!       to `None` (not `Some(default)`) when parsing fails. So
-//!       `timeout = None` and the resulting deadline is also
-//!       `None`. The server's `default_timeout` is consulted ONLY
-//!       on the `None => default_timeout` branch — i.e. when the
-//!       header is absent. A peer-supplied malformed header gets
-//!       NO deadline, NOT the default.
-//!
-//!       This is actually MORE conservative than I expected and
-//!       matches the doc-comment intent ("must fail closed, not
-//!       impersonate absence"). It does mean a subtle UX trap: a
-//!       peer that flubs the timeout header gets an
-//!       infinite-deadline call, NOT a fast-failed call. Not a
-//!       security finding — the peer can already get
-//!       infinite-deadline by sending nothing — but operators
-//!       reading the doc comment may expect "fail closed" to
-//!       mean "reject the call with InvalidArgument", which it
-//!       does NOT.
+//!   (c) **Invalid grpc-timeout cannot bypass the server default.**
+//!       A parseable peer timeout is capped by
+//!       `max_request_deadline`; an absent or malformed value instead
+//!       uses `default_timeout`. The peer cap never shrinks that
+//!       operator-selected fallback. If no default is configured, an
+//!       absent or malformed value still yields no deadline.
 //!
 //! Regression tests below pin (a), (b), and (c) as live behavior.
 
@@ -50,7 +35,10 @@ fn now() -> Instant {
 
 fn meta_with_timeout(value: &str) -> Metadata {
     let mut metadata = Metadata::new();
-    let _ = metadata.insert("grpc-timeout", value);
+    assert!(
+        metadata.insert("grpc-timeout", value),
+        "test fixture must use a storable ASCII metadata value: {value:?}",
+    );
     metadata
 }
 
@@ -76,18 +64,35 @@ fn peer_grpc_timeout_is_clamped_when_max_request_deadline_is_configured() {
 }
 
 #[test]
+fn peer_grpc_timeout_shorter_than_cap_is_not_extended() {
+    let n = now();
+    let peer_timeout = Duration::from_millis(100);
+    let ctx = CallContext::from_metadata_at_with_max_deadline(
+        meta_with_timeout("100m"),
+        None,
+        Some(Duration::from_secs(10)),
+        None,
+        n,
+    );
+
+    assert_eq!(
+        ctx.deadline(),
+        n.checked_add(peer_timeout),
+        "max_request_deadline must apply min(peer, cap), not replace a shorter peer deadline",
+    );
+}
+
+#[test]
 fn legacy_constructor_keeps_no_cap_semantics_explicit() {
-    let metadata = meta_with_timeout("99999999H");
+    let metadata = meta_with_timeout("99999999S");
     let n = now();
     let ctx = CallContext::from_metadata_at(metadata, Some(Duration::from_secs(60)), None, n);
-    let remaining = ctx
-        .deadline()
-        .and_then(|deadline| deadline.checked_duration_since(n))
-        .expect("deadline must be set");
+    let requested = Duration::from_secs(99_999_999);
 
-    assert!(
-        remaining > Duration::from_secs(365 * 24 * 3600),
-        "from_metadata_at intentionally passes max_request_deadline=None; got {remaining:?}",
+    assert_eq!(
+        ctx.deadline(),
+        n.checked_add(requested),
+        "from_metadata_at intentionally passes max_request_deadline=None",
     );
 }
 
@@ -132,32 +137,83 @@ fn peer_omits_grpc_timeout_and_no_default_means_no_deadline() {
 }
 
 #[test]
-fn invalid_grpc_timeout_yields_none_deadline_not_default() {
-    // Audit (c) corrected: peer sends a malformed grpc-timeout.
-    // Per server.rs:1157-1162 the match arm
-    //   Some(Ascii(s)) => parse_grpc_timeout(s)
-    // evaluates to None when parsing fails. So `timeout = None`
-    // and `deadline = None` — the server's default_timeout is
-    // NOT consulted on the malformed-Ascii branch. Pinned so a
-    // future refactor that DOES fall through to default (which
-    // would silently apply a deadline a peer didn't explicitly
-    // ask for) is caught.
-    let metadata = meta_with_timeout("not-a-valid-timeout");
+fn max_request_deadline_alone_is_not_a_deadline_source() {
     let n = now();
-    let ctx = CallContext::from_metadata_at(metadata, Some(Duration::from_millis(250)), None, n);
+    let cap = Some(Duration::from_secs(10));
+    let absent =
+        CallContext::from_metadata_at_with_max_deadline(Metadata::new(), None, cap, None, n);
+    let malformed = CallContext::from_metadata_at_with_max_deadline(
+        meta_with_timeout("+1S"),
+        None,
+        cap,
+        None,
+        n,
+    );
+
     assert!(
-        ctx.deadline().is_none(),
-        "malformed peer grpc-timeout produces None deadline (NOT a fallback \
-         to default_timeout). The 'fail closed' doc comment in server.rs \
-         means 'no deadline applied', not 'reject the call'. Got {:?}",
-        ctx.deadline(),
+        absent.deadline().is_none(),
+        "max_request_deadline caps a peer value but does not create a deadline when metadata is absent",
+    );
+    assert!(
+        malformed.deadline().is_none(),
+        "max_request_deadline must not become a fallback for malformed metadata",
     );
 }
 
 #[test]
+fn invalid_grpc_timeout_uses_unclamped_default() {
+    // A malformed peer value must not disable or shrink the operator's
+    // configured fallback. The peer cap applies only to parseable peer
+    // timeouts, not to default_timeout.
+    let metadata = meta_with_timeout("not-a-valid-timeout");
+    let n = now();
+    let fallback = Duration::from_millis(250);
+    let ctx = CallContext::from_metadata_at_with_max_deadline(
+        metadata,
+        Some(fallback),
+        Some(Duration::from_millis(10)),
+        None,
+        n,
+    );
+    assert_eq!(
+        ctx.deadline(),
+        n.checked_add(fallback),
+        "malformed peer grpc-timeout must use the unclamped default_timeout",
+    );
+}
+
+#[test]
+fn control_prefixed_grpc_timeout_is_rejected_before_deadline_parsing() {
+    let fallback = Duration::from_millis(250);
+
+    for malformed in ["\t99999999H", "\x7f99999999H"] {
+        let mut metadata = Metadata::new();
+        assert!(
+            !metadata.insert("grpc-timeout", malformed),
+            "control-prefixed timeout must not be normalized into a valid huge timeout",
+        );
+        assert!(metadata.get("grpc-timeout").is_none());
+
+        let n = now();
+        let ctx = CallContext::from_metadata_at_with_max_deadline(
+            metadata,
+            Some(fallback),
+            None,
+            None,
+            n,
+        );
+        assert_eq!(
+            ctx.deadline(),
+            n.checked_add(fallback),
+            "rejected timeout must follow the absent-header default path",
+        );
+    }
+}
+
+#[test]
 fn binary_grpc_timeout_value_unreachable_via_normalize_key() {
-    // Edge: per server.rs:1160, a Binary-typed grpc-timeout falls
-    // through to `None` immediately. The Binary branch is
+    // Edge: a Binary-typed grpc-timeout falls through to `None`
+    // immediately. The CallContext Binary branch is
     // unreachable from the public Metadata API NOT because
     // insert_bin rejects the key, but because
     // `normalize_metadata_key` APPENDS '-bin' when binary=true
@@ -192,10 +248,9 @@ fn binary_grpc_timeout_value_unreachable_via_normalize_key() {
 }
 
 #[test]
-fn duplicate_grpc_timeout_uses_most_recent_no_summing() {
-    // Audit (b): a peer sending two grpc-timeout headers gets only
-    // ONE parsed via Metadata::get. They cannot sum two headers to
-    // extend a deadline beyond what either alone would allow.
+fn duplicate_metadata_entries_use_most_recent_without_summing() {
+    // Audit (b): two values inserted into the local Metadata container yield
+    // one value through Metadata::get. This is not an H2 ingestion test.
     let mut metadata = Metadata::new();
     let _ = metadata.insert("grpc-timeout", "100m"); // 100ms
     let _ = metadata.insert("grpc-timeout", "200m"); // 200ms
@@ -210,34 +265,25 @@ fn duplicate_grpc_timeout_uses_most_recent_no_summing() {
     // is shadowed, NOT summed.
     assert!(
         remaining > Duration::from_millis(150),
-        "duplicate-header deadline must be >150ms (most-recent=200m), got {remaining:?}",
+        "duplicate-entry deadline must be >150ms (most-recent=200m), got {remaining:?}",
     );
     assert!(
         remaining <= Duration::from_millis(200),
-        "duplicate-header deadline must be ≤200ms (most-recent), NOT 100m+200m=300ms, \
+        "duplicate-entry deadline must be ≤200ms (most-recent), NOT 100m+200m=300ms, \
          got {remaining:?}",
     );
 }
 
 #[test]
-fn deadline_is_now_plus_timeout_not_overflow() {
-    // Pin that the deadline computation uses checked_add and does
-    // NOT silently wrap on a huge timeout. A regression to
-    // saturating_add or wrapping_add would let a peer set
-    // grpc-timeout=99999999H AND have the deadline silently wrap
-    // around to a near-zero value (which would cause IMMEDIATE
-    // expiry — a different DoS class).
-    let metadata = meta_with_timeout("99999999H");
+fn duration_max_never_disables_deadline() {
+    // Duration::MAX must not wrap or become `None`. On platforms where the
+    // addition is unrepresentable, the infallible constructor fails closed at
+    // `now`; otherwise it preserves the representable future instant.
     let n = now();
-    let ctx = CallContext::from_metadata_at(metadata, None, None, n);
-    // Either Some(future) or None (overflow → None per
-    // checked_add). NEVER Some(past).
-    if let Some(deadline) = ctx.deadline() {
-        assert!(
-            deadline >= n,
-            "deadline must be >= now; checked_add must not silently wrap. \
-             deadline={deadline:?}, now={n:?}",
-        );
-    }
-    // Implicit: ctx.deadline() == None on overflow is also legal.
+    let ctx = CallContext::from_metadata_at(Metadata::new(), Some(Duration::MAX), None, n);
+    assert_eq!(
+        ctx.deadline(),
+        Some(n.checked_add(Duration::MAX).unwrap_or(n)),
+        "Duration::MAX must always produce a deadline",
+    );
 }

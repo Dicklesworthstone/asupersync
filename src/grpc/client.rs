@@ -2274,7 +2274,10 @@ mod tests {
         stream.push(Ok(7)).expect("data item should enqueue");
 
         let mut trailers = Metadata::new();
-        trailers.insert("grpc-status-details-bin", "ZXJyb3ItZGV0YWlscw==");
+        assert!(trailers.insert_bin(
+            "grpc-status-details-bin",
+            Bytes::from_static(b"error-details"),
+        ));
         trailers.insert("x-debug-trailer", "final-hop");
         stream.finish_with_metadata(Status::internal("stream failed"), trailers.clone());
 
@@ -2297,7 +2300,7 @@ mod tests {
         let stored = stream.terminal_metadata();
         assert!(matches!(
             stored.get("grpc-status-details-bin"),
-            Some(crate::grpc::MetadataValue::Ascii(value)) if value == "ZXJyb3ItZGV0YWlscw=="
+            Some(crate::grpc::MetadataValue::Binary(value)) if value.as_ref() == b"error-details"
         ));
         assert!(matches!(
             stored.get("x-debug-trailer"),
@@ -2316,7 +2319,7 @@ mod tests {
         stream.push(Ok(7)).expect("data item should enqueue");
 
         let mut trailers = Metadata::new();
-        trailers.insert("grpc-status-details-bin", "Y2FuY2VsbGVk");
+        assert!(trailers.insert_bin("grpc-status-details-bin", Bytes::from_static(b"cancelled"),));
         stream.cancel_with_metadata(Status::cancelled("client cancelled stream"), trailers);
 
         let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {

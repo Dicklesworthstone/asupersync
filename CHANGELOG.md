@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current Unreleased work through 2026-07-05, reconstructed from git history, beads, benchmark ledgers, and live repo artifacts; latest published GitHub Release/tag baseline is `v0.3.4`.
+Scope window: current Unreleased work through 2026-07-14, reconstructed from git history, beads, benchmark ledgers, and live repo artifacts; latest published GitHub Release/tag baseline is `v0.3.4`.
 
 ## Version Timeline
 
@@ -168,6 +168,20 @@ Scope window: current Unreleased work through 2026-07-05, reconstructed from git
   [`12c926ef8`](https://github.com/Dicklesworthstone/asupersync/commit/12c926ef8),
   [`326082b0f`](https://github.com/Dicklesworthstone/asupersync/commit/326082b0f),
   [`09868a489`](https://github.com/Dicklesworthstone/asupersync/commit/09868a489))
+- **gRPC deadline fallback hardening.** Malformed `grpc-timeout` values now
+  use the operator-configured `default_timeout` instead of disabling that
+  bound; signed non-grammar values such as `+1S` are rejected, valid peer values
+  remain subject to `max_request_deadline` when configured, and unrepresentable
+  deadlines expire immediately rather than becoming unbounded. ASCII metadata
+  insertion now rejects an invalid value as a whole instead of stripping bytes
+  that could transmute a malformed timeout into a valid one, rejects ASCII
+  values under the binary-only `-bin` suffix, and unary dispatch enforces the
+  inclusive deadline boundary before invoking or polling a handler. gRPC-Web
+  trailer decoding also rejects malformed lines and raw non-printable ASCII
+  trailer field values.
+- **gRPC request-body meter overflow hardening.** Configured aggregate-body
+  meters now fail closed when cumulative byte accounting overflows, including
+  at a `usize::MAX` cap; uncapped diagnostic accounting remains saturating.
 
 ### Runtime scheduler/timer CPU efficiency (`runtime-cpu-overhaul`)
 
@@ -907,7 +921,7 @@ The largest area of post-v0.2.8 development: a brokerless subject-oriented messa
 ### TLS and Security
 
 - Fail closed on missing close_notify per RFC 8446 ([`602571e`](https://github.com/Dicklesworthstone/asupersync/commit/602571e8))
-- Malformed grpc-timeout header fails closed instead of falling back to server default ([`e38a3b1`](https://github.com/Dicklesworthstone/asupersync/commit/e38a3b11))
+- Malformed grpc-timeout header was treated as no deadline instead of falling back to server default; this historical policy is superseded by the Unreleased fallback hardening above ([`e38a3b1`](https://github.com/Dicklesworthstone/asupersync/commit/e38a3b11))
 - Improve certificate directory scanning robustness ([`8780cbc`](https://github.com/Dicklesworthstone/asupersync/commit/8780cbc6))
 
 ### Runtime and Concurrency Fixes

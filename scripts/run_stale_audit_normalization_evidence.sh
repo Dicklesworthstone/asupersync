@@ -45,8 +45,8 @@ records = [
         "cargo_features": ["test-internals"],
         "rch_command_if_used": integration_rch,
         "proof_commands": [integration_rch, contract_rch],
-        "expected_behavior": "Peer grpc-timeout values are clamped when max_request_deadline is configured; legacy uncapped constructor remains explicit.",
-        "actual_behavior": "from_metadata_at_with_max_deadline clamps 99999999H to the configured cap and the audit file no longer claims no production cap exists.",
+        "expected_behavior": "Parseable peer grpc-timeout values are clamped when max_request_deadline is configured; the uncapped constructor remains explicit.",
+        "actual_behavior": "from_metadata_at_with_max_deadline clamps parseable 99999999H to the configured cap and the audit file no longer claims no production cap exists.",
     },
     {
         "scenario_id": "grpc-compression-header-consistency",

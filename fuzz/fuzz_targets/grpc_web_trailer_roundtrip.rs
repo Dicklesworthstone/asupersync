@@ -14,9 +14,11 @@
 //!   4. assert every ASCII metadata entry is present with the same value
 //!   5. assert every binary metadata entry is present with bytewise-equal value
 //!
-//! Keys and values are constrained to a conservative ASCII range so
-//! Metadata::insert cannot reject them up-front; CR/LF is explicitly NOT
-//! filtered so the percent-encoding path at web.rs:113 is exercised.
+//! Metadata keys and ASCII values are constrained to a conservative printable
+//! range so `Metadata::insert` cannot reject them up-front. The status message
+//! remains arbitrary Unicode, including control characters, and therefore
+//! exercises the `grpc-message` percent codec independently of metadata-value
+//! validation.
 
 #![no_main]
 
@@ -76,9 +78,8 @@ fn canonicalize_key(raw: &str, for_bin: bool) -> Option<String> {
     Some(key)
 }
 
-/// Restrict ASCII value chars to printable (visible) plus space — still
-/// permits CR/LF only when we deliberately inject them elsewhere, keeping
-/// the base oracle tractable.
+/// Restrict ASCII metadata values to printable bytes (including space).
+/// Status-message percent-codec coverage is supplied by `Case::message`.
 fn canonicalize_ascii_value(raw: &str) -> String {
     raw.chars()
         .filter(|c| matches!(*c, ' '..='~'))

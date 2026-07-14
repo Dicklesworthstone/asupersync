@@ -112,6 +112,79 @@ pub struct TrailerFrame {
     pub metadata: Metadata,
 }
 
+fn encode_grpc_message(message: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let bytes = message.as_bytes();
+    let mut encoded = String::with_capacity(bytes.len());
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        let internal_space = byte == b' ' && index > 0 && index + 1 < bytes.len();
+        let may_remain_literal = internal_space || matches!(byte, 0x21..=0x24 | 0x26..=0x7E);
+        if may_remain_literal {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        }
+    }
+
+    encoded
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_grpc_message(value: &str) -> Result<String, GrpcError> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let (Some(&high), Some(&low)) = (bytes.get(index + 1), bytes.get(index + 2)) else {
+                return Err(GrpcError::protocol(
+                    "incomplete percent escape in grpc-message trailer value",
+                ));
+            };
+            let Some(high) = decode_hex_nibble(high) else {
+                return Err(GrpcError::protocol(
+                    "invalid percent escape in grpc-message trailer value",
+                ));
+            };
+            let Some(low) = decode_hex_nibble(low) else {
+                return Err(GrpcError::protocol(
+                    "invalid percent escape in grpc-message trailer value",
+                ));
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+
+        if matches!(byte, 0x20..=0x24 | 0x26..=0x7E) {
+            decoded.push(byte);
+            index += 1;
+            continue;
+        }
+
+        return Err(GrpcError::protocol(format!(
+            "invalid non-printable grpc-message in trailer block (length {})",
+            value.len()
+        )));
+    }
+
+    String::from_utf8(decoded)
+        .map_err(|_| GrpcError::protocol("grpc-message percent escapes decode to invalid UTF-8"))
+}
+
 // ── Trailer Encoding ─────────────────────────────────────────────────
 
 /// Encode a [`Status`] and optional trailer metadata into a gRPC-Web
@@ -125,13 +198,7 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
 
     if !status.message().is_empty() {
         block.push_str("grpc-message: ");
-        // Percent-encode CR/LF per gRPC spec to prevent trailer injection.
-        let sanitized_msg = status
-            .message()
-            .replace('%', "%25")
-            .replace('\r', "%0D")
-            .replace('\n', "%0A");
-        block.push_str(&sanitized_msg);
+        block.push_str(&encode_grpc_message(status.message()));
         block.push_str("\r\n");
     }
 
@@ -189,10 +256,18 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
             continue;
         }
         let Some((key, value)) = line.split_once(':') else {
-            continue;
+            return Err(GrpcError::protocol(format!(
+                "malformed nonempty trailer line without colon (length {})",
+                line.len()
+            )));
         };
-        let key = key.trim().to_ascii_lowercase();
-        let value = value.trim();
+        // Header names do not permit surrounding whitespace. Preserve the
+        // exact key for validation instead of trimming an invalid name into a
+        // valid one. Only HTTP optional whitespace (SP / HTAB) is removed from
+        // the field-value edges; `str::trim` would also erase other Unicode
+        // whitespace and could transmute malformed input.
+        let key = key.to_ascii_lowercase();
+        let value = value.trim_matches(|ch| matches!(ch, ' ' | '\t'));
 
         match key.as_str() {
             "grpc-status" => {
@@ -224,18 +299,11 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
                     ));
                 }
                 seen_message = true;
-                // Reverse the percent-encoding applied by encode_trailers
-                // (grpc-message uses percent-encoded ASCII per gRPC spec).
-                status_message = value
-                    .replace("%0D", "\r")
-                    .replace("%0d", "\r")
-                    .replace("%0A", "\n")
-                    .replace("%0a", "\n")
-                    .replace("%25", "%");
+                status_message = decode_grpc_message(value)?;
             }
             _ => {
-                // br-asupersync-ngnnc3: surface invalid metadata keys and
-                // malformed base64 as GrpcError::protocol instead of
+                // br-asupersync-ngnnc3: surface invalid metadata keys/values
+                // and malformed base64 as GrpcError::protocol instead of
                 // silently dropping the entry. Matches the project's
                 // fail-closed defaults and the decode_trailers policy
                 // for duplicate grpc-status / grpc-message (which IS
@@ -264,8 +332,10 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
                     }
                 } else if !metadata.insert(&key, value) {
                     return Err(GrpcError::protocol(format!(
-                        "invalid metadata key in trailer block (length {})",
-                        key.len()
+                        "invalid ASCII metadata key or value in trailer block \
+                         (key length {}, value length {})",
+                        key.len(),
+                        value.len(),
                     )));
                 }
             }
@@ -1055,7 +1125,7 @@ mod tests {
     #[test]
     fn test_trailer_message_percent_encoding_roundtrip() {
         init_test("test_trailer_message_percent_encoding_roundtrip");
-        let original_msg = "error on line\r\n42: 100% failure";
+        let original_msg = " error on line\r\n42: 100% failure \0\x7fΩ ";
         let status = Status::new(Code::Internal, original_msg);
         let metadata = Metadata::new();
         let mut buf = BytesMut::new();
@@ -1848,6 +1918,58 @@ mod tests {
             }
             other => panic!("expected Protocol error for malformed status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn trailer_metadata_rejects_whitespace_normalized_key_and_control_value() {
+        init_test("trailer_metadata_rejects_whitespace_normalized_key_and_control_value");
+
+        for body in [
+            b"x-safe\t: value\r\ngrpc-status: 0\r\n".as_slice(),
+            b"x-safe: good\x7fbad\r\ngrpc-status: 0\r\n".as_slice(),
+        ] {
+            let err = decode_trailers(body)
+                .expect_err("malformed metadata key/value must reject the trailer block");
+            match err {
+                GrpcError::Protocol(message) => assert!(
+                    message.contains("invalid ASCII metadata key or value"),
+                    "unexpected protocol error: {message}",
+                ),
+                other => panic!("expected Protocol error, got {other:?}"),
+            }
+        }
+
+        crate::test_complete!(
+            "trailer_metadata_rejects_whitespace_normalized_key_and_control_value"
+        );
+    }
+
+    #[test]
+    fn trailer_block_rejects_control_in_grpc_message_and_colonless_line() {
+        init_test("trailer_block_rejects_control_in_grpc_message_and_colonless_line");
+
+        let message_err = decode_trailers(b"grpc-message: good\x7fbad\r\ngrpc-status: 0\r\n")
+            .expect_err("non-printable grpc-message must reject");
+        assert!(
+            matches!(message_err, GrpcError::Protocol(ref message) if message.contains("invalid non-printable grpc-message")),
+            "unexpected grpc-message error: {message_err:?}",
+        );
+
+        let escape_err = decode_trailers(b"grpc-message: bad%GG\r\ngrpc-status: 0\r\n")
+            .expect_err("malformed grpc-message percent escape must reject");
+        assert!(
+            matches!(escape_err, GrpcError::Protocol(ref message) if message.contains("invalid percent escape")),
+            "unexpected grpc-message escape error: {escape_err:?}",
+        );
+
+        let line_err = decode_trailers(b"colonless\r\ngrpc-status: 0\r\n")
+            .expect_err("nonempty colonless trailer line must reject");
+        assert!(
+            matches!(line_err, GrpcError::Protocol(ref message) if message.contains("without colon")),
+            "unexpected colonless-line error: {line_err:?}",
+        );
+
+        crate::test_complete!("trailer_block_rejects_control_in_grpc_message_and_colonless_line");
     }
 
     #[test]

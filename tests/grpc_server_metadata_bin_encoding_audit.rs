@@ -6,8 +6,8 @@
 //! gRPC Spec context (PROTOCOL-HTTP2.md, Custom-Metadata-Value):
 //!
 //!   * **ASCII keys** (NOT ending in `-bin`): values are
-//!     human-readable strings restricted to visible-ASCII bytes
-//!     (0x20-0x7E). CRLF and other control bytes are stripped.
+//!     human-readable strings restricted to printable ASCII bytes
+//!     (0x20-0x7E). Values containing other bytes are rejected.
 //!   * **Binary keys** (ending in `-bin`): values are arbitrary
 //!     bytes encoded as standard base64 (RFC 4648, padding
 //!     `=`-character permitted).
@@ -42,13 +42,16 @@
 //!       `-bin` key on the wire and decodes back to a Binary
 //!       MetadataValue — never silently demoted to ASCII.
 //!
-//!   (e) **ASCII keys carry visible-ASCII only** — the
-//!       sanitize_metadata_ascii_value (streaming.rs:321-338)
-//!       strips bytes outside 0x20-0x7E. A value containing
-//!       binary bytes that's mistakenly stored under an ASCII
-//!       key gets bytes stripped — pinned in tick #152 audit.
+//!   (e) **ASCII keys carry printable ASCII only** —
+//!       `Metadata::insert` rejects values containing bytes outside
+//!       0x20-0x7E. Rejecting the whole value avoids silently
+//!       transmuting malformed data by concatenating its fragments.
 //!
-//! Regression tests below pin (a)-(d) at the public API
+//!   (f) **`-bin` suffix and value type stay symmetric** — ASCII insertion
+//!       rejects a `-bin` key, while `insert_bin` stores arbitrary bytes under
+//!       that suffix. This prevents encode/decode type drift.
+//!
+//! Regression tests below pin (a)-(f) at the public API
 //! surface.
 
 use asupersync::bytes::{Bytes, BytesMut};
@@ -243,23 +246,24 @@ fn bin_suffix_routes_value_through_binary_path() {
 }
 
 #[test]
-fn ascii_value_with_high_bit_bytes_stripped_at_insert() {
-    // Pin (e): a peer that puts non-ASCII bytes into an
-    // ASCII (non-`-bin`) value gets the bytes stripped at
-    // insert. The bytes never travel on the wire as part
-    // of an ASCII trailer.
+fn ascii_value_with_high_bit_bytes_rejected_at_insert() {
+    // Pin (e): a peer that puts non-ASCII bytes into an ASCII
+    // (non-`-bin`) value has the entire value rejected.
     let mut metadata = Metadata::new();
     let value_with_high_bit: String = (32u8..255u8).map(char::from).collect();
-    assert!(metadata.insert("x-mixed", value_with_high_bit.as_str()));
+    assert!(!metadata.insert("x-mixed", value_with_high_bit));
+    assert!(metadata.get("x-mixed").is_none());
+}
 
-    match metadata.get("x-mixed") {
-        Some(MetadataValue::Ascii(s)) => {
-            // Only visible-ASCII bytes survive (0x20..=0x7E).
-            assert!(
-                s.bytes().all(|b| (0x20..=0x7E).contains(&b)),
-                "all stored bytes must be visible-ASCII; got {s:?}",
-            );
-        }
-        other => panic!("expected Ascii (sanitized), got {other:?}"),
-    }
+#[test]
+fn ascii_value_under_bin_suffix_is_rejected_without_replacing_binary_value() {
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert_bin("trace-bin", Bytes::from_static(b"binary")));
+    assert!(!metadata.insert("other-bin", "YmFzZTY0"));
+    assert!(!metadata.insert_or_replace("trace-bin", "YmFzZTY0"));
+    assert!(metadata.get("other-bin").is_none());
+    assert!(matches!(
+        metadata.get("trace-bin"),
+        Some(MetadataValue::Binary(value)) if value.as_ref() == b"binary"
+    ));
 }

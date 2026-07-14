@@ -23,7 +23,56 @@ fn wall_clock_instant_now() -> Instant {
     Instant::now()
 }
 
-/// Tracks the state of a single stream for idle timeout enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InclusiveDeadlineElapsed;
+
+/// Poll `future` only while `now()` is strictly before `deadline`.
+///
+/// The runtime's general timeout combinator deliberately lets ready work win
+/// at its exact boundary. gRPC uses the stricter `now >= deadline` contract,
+/// so dispatch wraps handlers with this per-poll guard instead of changing the
+/// crate-wide timeout policy.
+async fn poll_before_inclusive_deadline<F: Future>(
+    future: F,
+    deadline: crate::types::Time,
+    now: fn() -> crate::types::Time,
+) -> Result<F::Output, InclusiveDeadlineElapsed> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|task_cx| {
+        if now() >= deadline {
+            std::task::Poll::Ready(Err(InclusiveDeadlineElapsed))
+        } else {
+            future.as_mut().poll(task_cx).map(Ok)
+        }
+    })
+    .await
+}
+
+/// Lazily invoke `handler`, then enforce the inclusive deadline while polling
+/// its returned future.
+///
+/// Because this is an `async fn`, neither the handler closure nor its future is
+/// touched until the wrapper itself is polled. The first check therefore gates
+/// synchronous `FnOnce` setup; the nested guard checks again after setup and
+/// before every poll of the returned future.
+async fn invoke_and_poll_before_inclusive_deadline<H, A, F>(
+    handler: H,
+    argument: A,
+    deadline: crate::types::Time,
+    now: fn() -> crate::types::Time,
+) -> Result<F::Output, InclusiveDeadlineElapsed>
+where
+    H: FnOnce(A) -> F,
+    F: Future,
+{
+    if now() >= deadline {
+        return Err(InclusiveDeadlineElapsed);
+    }
+    let future = handler(argument);
+    poll_before_inclusive_deadline(future, deadline, now).await
+}
+
+/// Tracks a stream registration's last recorded activity timestamp.
 #[derive(Debug, Clone)]
 struct StreamState {
     /// Last activity timestamp (when the stream last sent data).
@@ -33,14 +82,18 @@ struct StreamState {
     registered_at: Instant,
 }
 
-/// br-asupersync-8vn9iu: Per-connection state tracking to enforce
-/// stream limits and idle timeouts, preventing connection hoarding attacks.
+/// br-asupersync-8vn9iu: Per-connection registration accounting.
+///
+/// The helper enforces an in-memory stream-count limit and can discard stale
+/// accounting entries when explicitly invoked. Discarding an entry does not
+/// itself cancel or close the corresponding transport stream or handler.
 ///
 /// br-asupersync-tnvxx3: Uses internal Mutex for thread-safe access to
 /// active_streams, allowing concurrent operations from ConnectionRegistry.
 #[derive(Debug)]
 pub struct ConnectionState {
-    /// Active streams on this connection, keyed by stream ID.
+    /// Stream-registration entries keyed by stream ID. The legacy field name
+    /// does not imply transport liveness; stale entries remain until purged.
     /// Protected by Mutex to allow thread-safe concurrent access.
     active_streams: Mutex<HashMap<u32, StreamState>>,
 }
@@ -55,7 +108,7 @@ impl ConnectionState {
 
     /// Register a new stream on this connection.
     ///
-    /// Returns `Err` if the connection already has too many active streams.
+    /// Returns `Err` if the connection already has too many registration entries.
     /// Returns the registration timestamp on success for race condition protection.
     /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
     pub fn add_stream(&self, stream_id: u32, max_concurrent: u32) -> Result<Instant, String> {
@@ -95,9 +148,11 @@ impl ConnectionState {
         active_streams.remove(&stream_id);
     }
 
-    /// Clean up idle streams that have exceeded the timeout.
+    /// Remove registration entries whose activity timestamp is older than the
+    /// supplied threshold.
     ///
-    /// Returns the list of stream IDs that were removed due to idle timeout.
+    /// Returns the stream IDs removed from this accounting map. This helper
+    /// does not signal or cancel the associated transport streams.
     /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
     pub fn cleanup_idle_streams(&self, idle_timeout: Duration) -> Vec<u32> {
         let now = wall_clock_instant_now();
@@ -117,7 +172,8 @@ impl ConnectionState {
         removed
     }
 
-    /// Get the number of active streams.
+    /// Get the number of registration entries currently in the map.
+    /// Entries remain until explicit removal or a later stale-entry purge.
     /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
     pub fn active_stream_count(&self) -> usize {
         let active_streams = self.active_streams.lock();
@@ -132,17 +188,18 @@ impl ConnectionState {
             if stream_state.registered_at == registered_at {
                 active_streams.remove(&stream_id);
             }
-            // If timestamps don't match, the stream was already cleaned up
-            // by timeout or replaced by a new registration - safe to ignore
+            // If timestamps don't match, the registration was already removed
+            // by a stale-entry sweep or replaced by a new registration.
         }
     }
 }
 
-/// Global registry for tracking connection states to enforce stream limits
-/// and idle timeouts across all connections.
+/// Global registry for connection/stream accounting helpers.
 ///
-/// br-asupersync-8vn9iu: This prevents connection hoarding attacks where
-/// clients open many connections with idle bidirectional streams.
+/// br-asupersync-8vn9iu: this type can limit registered streams within a
+/// registered connection and purge stale entries during explicit admission.
+/// It does not cap connection count, schedule idle sweeps, or close transport
+/// streams by itself.
 ///
 /// br-asupersync-tnvxx3: Uses RwLock instead of Mutex to allow concurrent
 /// reads and reduce lock contention under high load. Write locks only needed
@@ -176,11 +233,15 @@ impl ConnectionRegistry {
         connections.remove(connection_id);
     }
 
-    /// Enforce stream limits and idle timeouts for a specific connection.
+    /// Enforce the registration-count limit for a specific connection and,
+    /// when configured, purge stale accounting entries before admission.
     ///
     /// Returns the registration timestamp on success, or an error if the stream
-    /// cannot be added due to limits. The entire operation (cleanup + add) is
-    /// atomic under the connection registry lock to prevent race conditions.
+    /// cannot be added due to limits. The registry read lock stabilizes the
+    /// connection-map entry, while the stale-entry purge and add each lock the
+    /// per-connection map separately; they are not one atomic transaction. The
+    /// purge does not cancel live handlers/transport streams and runs only when
+    /// this method is called; it is not a timer-driven idle timeout.
     ///
     /// br-asupersync-tnvxx3: Uses read lock since we only modify connection state,
     /// not the HashMap structure. This allows concurrent stream operations on
@@ -197,17 +258,12 @@ impl ConnectionRegistry {
             .get(connection_id)
             .ok_or_else(|| format!("connection not registered: {}", connection_id))?;
 
-        // Clean up idle streams first (atomic with stream addition)
+        // Purge stale accounting entries before addition. Each helper locks
+        // the per-connection map separately; the pair is not one transaction.
+        // There is intentionally no stderr output from this library surface;
+        // callers that need observability can compare registry statistics.
         if let Some(timeout) = idle_timeout {
-            let removed_streams = connection.cleanup_idle_streams(timeout);
-            if !removed_streams.is_empty() {
-                eprintln!(
-                    "Cleaned up {} idle streams on connection {}: {:?}",
-                    removed_streams.len(),
-                    connection_id,
-                    removed_streams
-                );
-            }
+            connection.cleanup_idle_streams(timeout);
         }
 
         // Try to add the new stream (returns registration timestamp)
@@ -223,7 +279,7 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Remove a stream when it completes normally.
+    /// Remove a stream registration when its caller completes normally.
     /// br-asupersync-tnvxx3: Uses read lock since ConnectionState is internally synchronized.
     pub fn remove_stream(&self, connection_id: &str, stream_id: u32) {
         let connections = self.connections.read();
@@ -251,7 +307,7 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Get statistics for debugging/monitoring.
+    /// Get registration-accounting statistics for debugging/monitoring.
     /// br-asupersync-tnvxx3: Uses read lock for read-only operation, allowing
     /// concurrent stats collection without blocking stream operations.
     pub fn get_stats(&self) -> (usize, usize) {
@@ -270,20 +326,16 @@ impl ConnectionRegistry {
 ///
 /// `dispatch_unary_with_stream_enforcement` previously cleaned up the
 /// registered stream by calling `registry.remove_stream(...)` *after*
-/// awaiting the inner handler. If the awaiting future was dropped
-/// before the handler resolved — which is exactly what happens when
-/// the client RST_STREAMs the in-flight stream and the transport
-/// propagates the cancel by dropping the dispatch future — the cleanup
-/// line was never reached and the stream stayed in `active_streams`
-/// indefinitely. An attacker could open `max_concurrent_streams + 1`
-/// streams in rapid succession, RST each one mid-handler, and exhaust
-/// the connection's stream budget for the entire `idle_timeout`
-/// window. This guard removes the registration from its `Drop`, so
-/// cleanup runs whether the dispatch returns Ok, returns Err, panics,
-/// or is cancelled mid-await.
+/// awaiting the inner handler. If a caller dropped that wrapper before the
+/// handler resolved, the cleanup line was never reached and the registration
+/// stayed in `active_streams`. A transport adapter that maps a peer reset to
+/// dropping this future receives the same accounting cleanup, but this guard
+/// does not claim that transport wiring exists automatically. The guard
+/// removes the registration from its `Drop`, so cleanup runs whether the
+/// dispatch returns, panics, or is cancelled mid-await.
 ///
 /// SECURITY: The guard tracks registration timestamp to prevent
-/// double-removal race conditions where timeout cleanup and Drop
+/// double-removal races where a stale-entry purge and Drop
 /// could both attempt to remove the same stream ID.
 struct StreamRegistrationGuard {
     registry: Arc<ConnectionRegistry>,
@@ -309,9 +361,10 @@ impl Drop for StreamRegistrationGuard {
 pub struct ServerConfig {
     /// Maximum message size for receiving, in bytes.
     ///
-    /// Wired into the per-call codec via [`Server::framed_codec`]
-    /// (the canonical helper for transport adapters). Adapters
-    /// that construct their own codec MUST pass this value to
+    /// Supplied to codecs created through [`Server::framed_codec`]
+    /// (the canonical helper for transport adapters). The built-in server
+    /// transport does not currently call that helper automatically. Adapters
+    /// that construct their own codec must pass this value to
     /// [`super::codec::FramedCodec::with_message_size_limits`]
     /// or call the helper. The client-side analog at
     /// [`super::client::ChannelConfig::max_recv_message_size`]
@@ -322,87 +375,100 @@ pub struct ServerConfig {
     pub max_recv_message_size: usize,
     /// Maximum message size for sending, in bytes.
     ///
-    /// Wired into the per-call codec via [`Server::framed_codec`]
-    /// (see [`Self::max_recv_message_size`] for the contract).
+    /// Supplied to codecs created through [`Server::framed_codec`]
+    /// (see [`Self::max_recv_message_size`] for the integration boundary).
     pub max_send_message_size: usize,
-    /// Optional aggregate-bytes cap for the entire request body
-    /// of a single call (sum across all decoded messages on a
+    /// Optional aggregate-bytes limit supplied to a per-call
+    /// [`RequestBodyMeter`] (sum across decoded messages on a
     /// client-streaming or unary call).
     ///
-    /// `None` = no aggregate cap (preserves pre-fix behavior; the
+    /// `None` = no limit in a caller-created meter (preserves pre-fix behavior; the
     /// per-message [`Self::max_recv_message_size`] cap and the
-    /// `MAX_STREAM_BUFFERED` per-stream item count are the only
-    /// upload-direction bounds).
-    /// `Some(cap)` = transport adapters track the cumulative
-    /// decoded-bytes count via [`RequestBodyMeter`] and reject
-    /// the call with `Status::resource_exhausted` once the
-    /// total exceeds `cap`.
+    /// `MAX_STREAM_BUFFERED` per-stream item count remain the decoded-message
+    /// size/count bounds).
+    /// `Some(cap)` = [`RequestBodyMeter::from_config`] initializes a
+    /// meter with this limit. Transport adapters that instantiate the
+    /// meter and record every decoded message reject the call with
+    /// `Status::resource_exhausted` once the total exceeds `cap`.
+    /// The built-in unary dispatch and streaming transport do not yet
+    /// instantiate this helper automatically, so setting this field alone
+    /// is configuration, not a production enforcement guarantee.
     ///
-    /// Defaults to `None`. Operators that want a stricter
-    /// per-call upload ceiling beyond
-    /// `max_recv_message_size × MAX_STREAM_BUFFERED` set this
-    /// explicitly. The cap is independent of the per-message
+    /// Defaults to `None`. Transport integrators that want a per-call
+    /// decoded-byte ceiling set this explicitly and wire the meter at the
+    /// decode boundary. The limit is
+    /// independent of the per-message
     /// cap — a 256 KiB per-message cap with a 4 MiB aggregate
     /// cap means each message ≤ 256 KiB AND total bytes across
     /// all messages on the call ≤ 4 MiB.
     ///
-    /// Closes the P3 finding from tick #203 audit
-    /// (br-asupersync-woj18e).
+    /// The configuration and helper seam originated in the tick #203
+    /// follow-up (br-asupersync-woj18e); transport wiring remains a
+    /// separate requirement.
     pub max_request_body_bytes: Option<usize>,
-    /// Initial connection window size.
+    /// Initial connection-window value stored for a transport adapter.
+    /// The built-in server currently has no automatic H2 settings bridge for
+    /// this field.
     pub initial_connection_window_size: u32,
-    /// Initial stream window size.
+    /// Initial stream-window value stored for a transport adapter.
+    /// The built-in server currently has no automatic H2 settings bridge for
+    /// this field.
     pub initial_stream_window_size: u32,
-    /// Maximum concurrent streams per connection.
+    /// Per-connection stream limit supplied to
+    /// [`ConnectionRegistry::enforce_stream_limits`] by callers that use the
+    /// wrapped dispatch helper. This field is not automatic H2 enforcement.
     pub max_concurrent_streams: u32,
     /// Keep-alive interval.
     pub keepalive_interval_ms: Option<u64>,
     /// Keep-alive timeout.
     pub keepalive_timeout_ms: Option<u64>,
-    /// Default timeout applied to all calls when the client does not send
-    /// a `grpc-timeout` header.
+    /// Default timeout applied when the client omits `grpc-timeout` or sends
+    /// a malformed value.
     pub default_timeout: Option<Duration>,
     /// br-asupersync-9oxmqv-followup (tick #139): server-side maximum
-    /// request deadline. When `Some(cap)`, every peer-supplied
+    /// request deadline. When `Some(cap)`, every parseable peer-supplied
     /// `grpc-timeout` is clamped to `min(peer_timeout, cap)` so a
-    /// hostile peer cannot pin server resources by requesting
-    /// `grpc-timeout: 99999999H` (≈11,400 years). When `None`, the
-    /// peer's value is used verbatim subject only to the parser's
-    /// 8-digit cap — preserves the pre-fix behavior for operators
-    /// who haven't opted in.
+    /// hostile peer cannot choose an impractically distant representable
+    /// deadline such as `grpc-timeout: 99999999H` (≈11,400 years). When `None`, the
+    /// peer's value is used subject to the parser's 8-digit cap and
+    /// fail-closed `Instant` representability check.
     ///
-    /// This cap does NOT affect the absent-header fallback to
-    /// [`Self::default_timeout`] — that path still applies the
-    /// configured default. Callers that want a tighter ceiling on
-    /// the default should set `default_timeout` itself.
+    /// This cap does NOT affect the absent- or malformed-header fallback to
+    /// [`Self::default_timeout`] — that path still applies the configured
+    /// default. Callers that want a tighter ceiling on the default should set
+    /// `default_timeout` itself.
     pub max_request_deadline: Option<Duration>,
     /// Compression used for outbound response messages.
     pub send_compression: Option<CompressionEncoding>,
     /// Compression encodings accepted by this server.
     pub accept_compression: Vec<CompressionEncoding>,
-    /// Maximum aggregate size, in bytes, of all metadata entries
-    /// (request headers + trailers) accepted on a single inbound call.
+    /// Maximum aggregate size, in bytes, of the supplied [`Metadata`] block.
     /// Each entry contributes `key.len() + value.byte_len()` bytes.
     /// Defaults to 8 KiB — matches the gRPC ecosystem convention used
     /// by `grpc-go`'s `MaxHeaderListSize` and the per-RFC-9113 §6.5.2
     /// `SETTINGS_MAX_HEADER_LIST_SIZE` advisory cap.
     ///
-    /// Inbound metadata exceeding this limit is rejected with
-    /// `Status::resource_exhausted` via
-    /// [`enforce_metadata_size_limit`]. The gRPC wire protocol always
-    /// returns HTTP 200 with a `grpc-status` trailer; the equivalent
-    /// of HTTP 431 ("Request Header Fields Too Large") for gRPC is
-    /// the RESOURCE_EXHAUSTED status code.
+    /// [`Server::dispatch_unary`] applies this to the already-decoded request
+    /// metadata block and returns `Status::resource_exhausted` when it is too
+    /// large. Adapters may call [`enforce_metadata_size_limit`] for other
+    /// decoded blocks, but the built-in path does not currently demonstrate a
+    /// trailer-frame callsite or one combined header-plus-trailer aggregate.
+    ///
+    /// This is a post-decode dispatch/retention limit. It does not bound HPACK
+    /// decoder allocation; an H2 transport must enforce its wire/header-list
+    /// limit before constructing [`Metadata`].
     ///
     /// br-asupersync-i2bae8.
     pub max_metadata_size: usize,
-    /// Maximum idle time before a stream is considered stale and forcefully closed.
-    /// Streams that don't send any frames (requests, data, or control) for this
-    /// duration are terminated to prevent connection hoarding attacks.
-    /// Defaults to 60 seconds. Set to `None` to disable idle timeout enforcement.
+    /// Maximum idle time used by [`ConnectionRegistry::enforce_stream_limits`]
+    /// when that helper admits a stream and sweeps stale registrations.
+    /// The field does not schedule a periodic sweep by itself, and the built-in
+    /// transport does not currently demonstrate automatic integration of the
+    /// wrapped dispatch path. Defaults to 60 seconds; `None` disables cleanup
+    /// in callers that use the helper.
     ///
-    /// br-asupersync-8vn9iu: prevents bidirectional stream resource exhaustion
-    /// where attackers open many streams with valid metadata but never send data.
+    /// br-asupersync-8vn9iu: helper seam for limiting stale registration
+    /// residency when transport adapters wire the accounting path.
     pub stream_idle_timeout: Option<Duration>,
 }
 
@@ -413,8 +479,8 @@ pub const DEFAULT_MAX_METADATA_SIZE: usize = 8 * 1024;
 /// Compute the total byte size of a [`Metadata`] block.
 ///
 /// Sums `key.len() + value.byte_len()` over every entry. Used by
-/// [`enforce_metadata_size_limit`] to bound HPACK decoder memory at the
-/// request-reception boundary.
+/// [`enforce_metadata_size_limit`] to bound metadata accepted by dispatch after
+/// decoding and before longer-lived retention.
 #[must_use]
 pub fn metadata_byte_size(metadata: &super::streaming::Metadata) -> usize {
     let mut total = 0usize;
@@ -611,10 +677,10 @@ fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<()
 /// Reject inbound `metadata` when it violates the gRPC header-content rules or
 /// when its aggregate byte size exceeds `limit`.
 ///
-/// Transport adapters MUST call this on inbound HEADERS and TRAILERS frames
-/// before storing them in long-lived `CallContext`s, so a hostile peer cannot
-/// exhaust per-connection HPACK decoder memory by streaming arbitrarily long
-/// header lists.
+/// Call this after wire/header decoding and before dispatch or longer-lived
+/// `CallContext` retention. Because the [`Metadata`] values already exist, this
+/// helper cannot bound HPACK decoder allocation; an H2 adapter needs a separate
+/// pre-decode/header-list limit for that guarantee.
 ///
 /// `limit` is typically [`ServerConfig::max_metadata_size`]
 /// (default 8 KiB via [`DEFAULT_MAX_METADATA_SIZE`]). A `limit` of
@@ -649,22 +715,26 @@ pub fn enforce_metadata_size_limit(
 /// Per-call cumulative-bytes meter for the aggregate request-body
 /// upload cap (br-asupersync-woj18e).
 ///
-/// Transport adapters that decode a stream of LPM messages into a
-/// `StreamingRequest` MUST instantiate one `RequestBodyMeter` per
-/// call (configured from [`ServerConfig::max_request_body_bytes`])
-/// and call [`Self::record_message_bytes`] after EACH successful
-/// message decode. The first message that pushes the cumulative
-/// total past the configured cap returns
+/// To enforce the configured limit, a transport adapter that decodes a
+/// stream of LPM messages into a `StreamingRequest` must instantiate one
+/// `RequestBodyMeter` per call (configured from
+/// [`ServerConfig::max_request_body_bytes`]) and call
+/// [`Self::record_message_bytes`] after each successful message decode.
+/// The built-in dispatch/streaming paths do not currently perform this
+/// integration automatically. When an adapter does integrate the meter,
+/// the first message that pushes the cumulative total past the limit returns
 /// `Err(Status::resource_exhausted(...))` — the adapter then
 /// surfaces the rejection to the call.
 ///
-/// `None` cap = no enforcement (the meter records but never
-/// rejects). This is the default — operators must opt in via
-/// [`ServerBuilder::max_request_body_bytes`].
+/// `None` cap = no enforcement (the meter records but never rejects). This is
+/// the default. Integrators must both configure a limit via
+/// [`ServerBuilder::max_request_body_bytes`] and call the meter from their
+/// decode path.
 #[derive(Debug, Clone, Copy)]
 pub struct RequestBodyMeter {
     cap: Option<usize>,
     accumulated: usize,
+    overflowed: bool,
 }
 
 impl RequestBodyMeter {
@@ -677,6 +747,7 @@ impl RequestBodyMeter {
         Self {
             cap,
             accumulated: 0,
+            overflowed: false,
         }
     }
 
@@ -706,19 +777,41 @@ impl RequestBodyMeter {
     /// total exceeds the cap — the adapter MUST surface this
     /// rejection to the call.
     ///
-    /// The meter saturates on overflow — even a `bytes = usize::MAX`
-    /// argument cannot wrap the accumulator past the cap-check.
+    /// With a configured cap, arithmetic overflow fails closed with
+    /// `ResourceExhausted`; without a cap, accounting saturates at
+    /// `usize::MAX`. In neither mode can the counter wrap to a smaller value.
     pub fn record_message_bytes(&mut self, bytes: usize) -> Result<(), Status> {
-        self.accumulated = self.accumulated.saturating_add(bytes);
-        if let Some(cap) = self.cap
-            && self.accumulated > cap
-        {
+        let Some(cap) = self.cap else {
+            self.accumulated = self.accumulated.saturating_add(bytes);
+            return Ok(());
+        };
+
+        if self.overflowed {
+            return Err(Status::resource_exhausted(format!(
+                "request body exceeds max_request_body_bytes: a prior byte-total overflow \
+                 remains > {cap} bytes (aggregate of all decoded messages on this call; \
+                 see ServerConfig::max_request_body_bytes)"
+            )));
+        }
+
+        let previous = self.accumulated;
+        let Some(actual) = previous.checked_add(bytes) else {
+            self.accumulated = usize::MAX;
+            self.overflowed = true;
+            return Err(Status::resource_exhausted(format!(
+                "request body exceeds max_request_body_bytes: byte total overflow after \
+                 {previous} + {bytes}, which is > {cap} bytes \
+                 (aggregate of all decoded messages on this call; \
+                 see ServerConfig::max_request_body_bytes)"
+            )));
+        };
+
+        self.accumulated = actual;
+        if actual > cap {
             return Err(Status::resource_exhausted(format!(
                 "request body exceeds max_request_body_bytes: {actual} bytes > {cap} bytes \
                  (aggregate of all decoded messages on this call; \
-                 see ServerConfig::max_request_body_bytes)",
-                actual = self.accumulated,
-                cap = cap,
+                 see ServerConfig::max_request_body_bytes)"
             )));
         }
         Ok(())
@@ -730,11 +823,10 @@ impl Default for ServerConfig {
         Self {
             max_recv_message_size: 4 * 1024 * 1024, // 4 MB
             max_send_message_size: 4 * 1024 * 1024, // 4 MB
-            // Default None preserves pre-fix behavior. Operators
-            // who want a stricter per-call upload ceiling beyond
-            // the per-message × buffer-count product opt in via
-            // ServerBuilder::max_request_body_bytes
-            // (br-asupersync-woj18e).
+            // Default None preserves pre-fix behavior. Transport integrators
+            // who want a per-call decoded-byte ceiling configure this field via
+            // ServerBuilder::max_request_body_bytes and wire a RequestBodyMeter
+            // at the decode boundary (br-asupersync-woj18e).
             max_request_body_bytes: None,
             initial_connection_window_size: 1024 * 1024,
             initial_stream_window_size: 1024 * 1024,
@@ -748,11 +840,11 @@ impl Default for ServerConfig {
             send_compression: None,
             accept_compression: vec![CompressionEncoding::Identity],
             // 8 KiB matches the gRPC ecosystem convention (grpc-go
-            // MaxHeaderListSize default) and bounds per-connection
-            // HPACK decoder memory (br-asupersync-i2bae8).
+            // MaxHeaderListSize default) for post-decode metadata accepted by
+            // dispatch (br-asupersync-i2bae8). This is not an HPACK allocation cap.
             max_metadata_size: DEFAULT_MAX_METADATA_SIZE,
-            // 60 seconds prevents connection hoarding attacks while allowing
-            // reasonable bidirectional streaming patterns (br-asupersync-8vn9iu).
+            // Stored helper threshold for adapters that wire stream admission
+            // and idle cleanup (br-asupersync-8vn9iu).
             stream_idle_timeout: Some(Duration::from_secs(60)),
         }
     }
@@ -835,12 +927,12 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the maximum aggregate metadata size (request headers +
-    /// trailers) in bytes. Defaults to 8 KiB
-    /// ([`DEFAULT_MAX_METADATA_SIZE`]). Inbound metadata exceeding
-    /// this is rejected with `Status::resource_exhausted` by
-    /// [`enforce_metadata_size_limit`]. A value of `0` disables the
-    /// cap. (br-asupersync-i2bae8.)
+    /// Set the maximum aggregate size of the decoded request metadata block
+    /// checked by [`Server::dispatch_unary`]. Defaults to 8 KiB
+    /// ([`DEFAULT_MAX_METADATA_SIZE`]). Adapters can call
+    /// [`enforce_metadata_size_limit`] for additional decoded blocks; this
+    /// setter does not create a combined header-plus-trailer wire limit. A
+    /// value of `0` disables the dispatch check. (br-asupersync-i2bae8.)
     #[must_use]
     pub fn max_metadata_size(mut self, size: usize) -> Self {
         self.config.max_metadata_size = size;
@@ -849,8 +941,10 @@ impl ServerBuilder {
 
     /// Set the stream idle timeout.
     ///
-    /// Streams that don't send any frames for this duration are terminated
-    /// to prevent connection hoarding attacks. Set to `None` to disable.
+    /// Configures the threshold consumed by
+    /// [`ConnectionRegistry::enforce_stream_limits`]. This setter does not
+    /// schedule cleanup or wire the wrapped dispatch path into a transport.
+    /// Set to `None` to disable cleanup in callers that use the helper.
     /// (br-asupersync-8vn9iu.)
     #[must_use]
     pub fn stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
@@ -865,11 +959,13 @@ impl ServerBuilder {
         self
     }
 
-    /// Set an aggregate-bytes cap on the request body of a single
-    /// call (sum across all decoded messages).
+    /// Configure the aggregate-bytes limit used by a per-call
+    /// [`RequestBodyMeter`] (sum across decoded messages).
     ///
     /// See [`ServerConfig::max_request_body_bytes`] for the full
-    /// contract. `None` (the default) means no aggregate cap.
+    /// contract and current transport-integration boundary. `None` (the
+    /// default) means the helper has no limit. This setter does not by itself
+    /// wire the meter into built-in dispatch or streaming paths.
     /// (br-asupersync-woj18e)
     #[must_use]
     pub fn max_request_body_bytes(mut self, size: usize) -> Self {
@@ -877,21 +973,24 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the initial connection window size.
+    /// Store the initial connection-window value for a transport adapter.
+    /// This setter does not wire the value into H2 settings.
     #[must_use]
     pub fn initial_connection_window_size(mut self, size: u32) -> Self {
         self.config.initial_connection_window_size = size;
         self
     }
 
-    /// Set the initial stream window size.
+    /// Store the initial stream-window value for a transport adapter.
+    /// This setter does not wire the value into H2 settings.
     #[must_use]
     pub fn initial_stream_window_size(mut self, size: u32) -> Self {
         self.config.initial_stream_window_size = size;
         self
     }
 
-    /// Set the maximum concurrent streams.
+    /// Configure the limit consumed by the wrapped stream-enforcement helper.
+    /// This setter does not wire that helper into the built-in transport.
     #[must_use]
     pub fn max_concurrent_streams(mut self, max: u32) -> Self {
         self.config.max_concurrent_streams = max;
@@ -912,8 +1011,8 @@ impl ServerBuilder {
         self
     }
 
-    /// Set the default timeout for all calls when the client does not send
-    /// a `grpc-timeout` header.
+    /// Set the default timeout used when the client omits `grpc-timeout` or
+    /// sends a malformed value.
     #[must_use]
     pub fn default_timeout(mut self, timeout: Duration) -> Self {
         self.config.default_timeout = Some(timeout);
@@ -922,16 +1021,16 @@ impl ServerBuilder {
 
     /// tick #139: set the server-side maximum request deadline.
     ///
-    /// When set, every peer-supplied `grpc-timeout` is clamped to
-    /// `min(peer_timeout, cap)`. Without this cap a hostile peer can
-    /// set `grpc-timeout: 99999999H` (≈11,400 years) and pin server
-    /// resources on a long-running call indefinitely.
+    /// When set, every parseable peer-supplied `grpc-timeout` is clamped to
+    /// `min(peer_timeout, cap)`. Without this cap a hostile peer can request
+    /// an impractically distant representable deadline such as
+    /// `grpc-timeout: 99999999H` (≈11,400 years).
     ///
     /// Recommended value: the longest legitimate RPC the server is
     /// prepared to host (typically minutes to hours, NOT years).
-    /// Callsites that need a tighter ceiling on the absent-header
-    /// fallback should ALSO set [`Self::default_timeout`] — the cap
-    /// does NOT affect the fallback path.
+    /// Callsites that need a tighter ceiling on the absent- or
+    /// malformed-header fallback should ALSO set [`Self::default_timeout`] —
+    /// the cap does NOT affect the fallback path.
     #[must_use]
     pub fn max_request_deadline(mut self, max: Duration) -> Self {
         self.config.max_request_deadline = Some(max);
@@ -1063,8 +1162,8 @@ pub struct Server {
     /// br-asupersync-mfk14i: interceptor chain. See
     /// [`ServerBuilder::interceptor`] and [`Server::dispatch_unary`].
     interceptors: Vec<Arc<dyn Interceptor>>,
-    /// br-asupersync-8vn9iu: Connection registry for tracking stream limits
-    /// and idle timeouts to prevent connection hoarding attacks.
+    /// br-asupersync-8vn9iu: optional connection/stream registration
+    /// accounting used by the wrapped dispatch helper.
     connection_registry: Arc<ConnectionRegistry>,
 }
 
@@ -1093,12 +1192,11 @@ impl Server {
     /// Construct a per-call [`FramedCodec`] wired with the server's
     /// configured `max_send_message_size` and `max_recv_message_size`.
     ///
-    /// This is the canonical helper transport adapters MUST use when
-    /// constructing the codec for a dispatched call — it closes the
-    /// pre-fix wiring gap where adapters that built a `FramedCodec`
-    /// without reading the server config silently inherited the
-    /// codec's own `DEFAULT_MAX_MESSAGE_SIZE` (4 MiB) instead of the
-    /// operator's configured cap.
+    /// This helper provides the seam a transport adapter must call when
+    /// constructing the codec for a dispatched call. The built-in transport
+    /// does not currently invoke it automatically; an adapter that constructs
+    /// `FramedCodec` directly can still inherit the codec's own
+    /// `DEFAULT_MAX_MESSAGE_SIZE` (4 MiB) instead of these stored values.
     ///
     /// The compression hooks remain the adapter's responsibility:
     /// the adapter parses `grpc-encoding` from request metadata,
@@ -1122,16 +1220,17 @@ impl Server {
         &self.services
     }
 
-    /// Get the connection registry for stream limit enforcement.
+    /// Get the connection/stream registration-accounting helper.
     #[must_use]
     pub fn connection_registry(&self) -> &Arc<ConnectionRegistry> {
         &self.connection_registry
     }
 
-    /// Register a new connection for stream tracking.
+    /// Register a connection in the optional accounting helper.
     ///
-    /// Transport layers should call this when a new gRPC connection is established
-    /// to enable per-connection stream limit and idle timeout enforcement.
+    /// An adapter that uses the wrapped dispatch path calls this when a gRPC
+    /// connection is established. Registration alone does not impose a
+    /// connection-count limit, schedule cleanup, or close idle streams.
     /// (br-asupersync-8vn9iu.)
     pub fn register_connection(&self, connection_id: String) {
         self.connection_registry.add_connection(connection_id);
@@ -1145,14 +1244,14 @@ impl Server {
         self.connection_registry.remove_connection(connection_id);
     }
 
-    /// Clear sensitive authentication state from request extensions.
+    /// Clear the typed authentication context from request extensions.
     ///
-    /// asupersync-gqbtfc: AuthContext and other sensitive state stored in
-    /// request extensions must be explicitly cleared on error/timeout/cancel
-    /// paths to prevent state leakage across requests. This function removes
-    /// all typed extensions that could contain sensitive authentication data.
-    ///
-    /// Called automatically by error handling paths in dispatch_unary.
+    /// The dispatch error and timeout paths call this while they still retain a
+    /// request snapshot. It removes only [`super::interceptor::AuthContext`];
+    /// other extension types remain owned by the request and are released when
+    /// that request is dropped. External cancellation by dropping the dispatch
+    /// future does not invoke this helper, but dropping the owned request still
+    /// releases its extension map.
     fn clear_auth_context_from_request(request: &mut Request<Bytes>) {
         let _ = request
             .extensions_mut()
@@ -1203,9 +1302,10 @@ impl Server {
     ///
     /// # Errors
     ///
-    /// Returns the first interceptor or handler `Status::Err`
-    /// observed; subsequent interceptors are NOT invoked once an
-    /// error has been surfaced.
+    /// Returns the final error status after reverse-order error hooks run.
+    /// Forward request/response processing stops at its first error, but the
+    /// applicable `intercept_error_with_request` hooks are still invoked and
+    /// may replace that status.
     pub async fn dispatch_unary<H, F>(
         &self,
         mut request: Request<Bytes>,
@@ -1263,9 +1363,10 @@ impl Server {
         let mut request_snapshot = request.snapshot(Bytes::new());
 
         // ── Phase 2: invoke the user handler with deadline enforcement. ─
-        // Parse deadline from grpc-timeout header to enforce request cancellation.
-        // Per gRPC spec: server MUST cancel handler and return DEADLINE_EXCEEDED
-        // when client-specified deadline expires.
+        // Enforce the effective deadline derived from a parseable peer header or
+        // the server fallback. Parseable peer values are capped when configured.
+        // Per gRPC spec, an expired client deadline returns DEADLINE_EXCEEDED;
+        // the same enforcement path applies to the operator fallback.
         //
         // SECURITY NOTE: This enforcement only works for async operations that yield
         // control. Handlers that perform blocking operations (thread::sleep,
@@ -1273,32 +1374,35 @@ impl Server {
         // cancelled and will continue running past the deadline. Service
         // implementations should use async APIs and yield regularly to respect
         // client deadlines and prevent resource exhaustion.
-        let response_result = if let Some(std_deadline) = call_context.deadline() {
-            // Check if already expired before starting handler
-            if call_context.is_expired() {
+        let response_result = if call_context.deadline().is_some() {
+            // Sample the runtime clock before the wall clock so translating the
+            // wall deadline by its remaining duration cannot shift the runtime
+            // deadline later by the sampling overhead.
+            let time_now = crate::time::wall_now();
+            let now = wall_clock_instant_now();
+            let Some(remaining_duration) = call_context.remaining_at(now) else {
                 // asupersync-gqbtfc: Clear AuthContext on deadline expiry
                 Self::clear_auth_context_from_request(&mut request_snapshot);
                 return Err(Status::deadline_exceeded(
                     "Request deadline already expired",
                 ));
-            }
-
-            // Convert std::time::Instant to crate::types::Time through a
-            // remaining-duration offset, since the two instant domains are
-            // intentionally distinct.
-            let now = wall_clock_instant_now();
-            let remaining_duration = std_deadline.saturating_duration_since(now);
+            };
+            // Translate once into the runtime timer's domain and use this
+            // exact absolute deadline for both the outer TimeoutFuture and
+            // the inclusive inner poll gate. Mixing this virtual/Lab clock
+            // with std::Instant would let ready work win at a virtual exact
+            // boundary while real wall time was still before std_deadline.
+            let runtime_deadline = time_now + remaining_duration;
 
             // br-asupersync-server-stack-hardening-eeexl1.1.1: install a
-            // per-request Cx whose budget carries the (already cap-clamped)
-            // call deadline, so handlers observe the deadline through
+            // per-request Cx whose budget carries the effective call deadline,
+            // so handlers observe the deadline through
             // `Cx::current().budget()` and request-scoped children see the
             // cancel when the deadline fires. The h2/gRPC hop keeps its
             // existing timeout race and DEADLINE_EXCEEDED mapping.
-            let time_now = crate::time::wall_now();
             let base_budget =
                 Cx::current().map_or(crate::types::Budget::INFINITE, |ambient| ambient.budget());
-            let source = if request.metadata().get("grpc-timeout").is_some() {
+            let source = if grpc_timeout_from_metadata(request.metadata()).is_some() {
                 crate::web::request_region::RequestBudgetSource::HeaderClamped
             } else {
                 crate::web::request_region::RequestBudgetSource::ServerConfig
@@ -1308,16 +1412,21 @@ impl Server {
                 crate::web::request_region::ServerRequestRegion::mint("h2-grpc", budget, time_now);
 
             // Race handler vs deadline using the runtime timeout primitive.
-            let handler_future = handler(request);
+            let handler_future = invoke_and_poll_before_inclusive_deadline(
+                handler,
+                request,
+                runtime_deadline,
+                crate::time::wall_now,
+            );
             match region {
                 Some(region) => {
                     let scoped = region.instrumented(source, handler_future);
-                    match crate::time::timeout(time_now, remaining_duration, scoped).await {
-                        Ok(result) => {
+                    match crate::time::timeout_at(runtime_deadline, scoped).await {
+                        Ok(Ok(result)) => {
                             region.finish(if result.is_ok() { "ok" } else { "err" });
                             result
                         }
-                        Err(_timeout) => {
+                        Ok(Err(_)) | Err(_) => {
                             // Deadline exceeded during handler execution:
                             // cancel the request region (children observe it)
                             // before the drop backstop, then map to status.
@@ -1331,9 +1440,9 @@ impl Server {
                     }
                 }
                 None => {
-                    match crate::time::timeout(time_now, remaining_duration, handler_future).await {
-                        Ok(result) => result,
-                        Err(_timeout) => {
+                    match crate::time::timeout_at(runtime_deadline, handler_future).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_)) | Err(_) => {
                             // Deadline exceeded during handler execution
                             // asupersync-gqbtfc: Clear AuthContext on timeout to prevent state leakage
                             Self::clear_auth_context_from_request(&mut request_snapshot);
@@ -1349,8 +1458,8 @@ impl Server {
 
         // ── Phase 3: response-side chain (REVERSE order on success). ─
         // On handler error, the response-side chain is NOT invoked
-        // (no response object to transform). The handler error
-        // becomes the call's final status.
+        // (no response object to transform). The handler error seeds
+        // the reverse error-hook chain, which may replace the status.
         let mut response = match response_result {
             Ok(response) => response,
             Err(mut status) => {
@@ -1385,11 +1494,14 @@ impl Server {
         Ok(response)
     }
 
-    /// Dispatch a unary request with stream enforcement for connection hoarding protection.
+    /// Dispatch a unary request with stream-registration accounting.
     ///
-    /// This is the stream-aware version of `dispatch_unary` that enforces per-connection
-    /// stream limits and idle timeouts. Transport adapters should use this method instead
-    /// of `dispatch_unary` when stream tracking is needed. (br-asupersync-8vn9iu.)
+    /// This wrapper registers the stream, enforces the configured in-memory
+    /// registration count, and purges stale accounting entries during admission.
+    /// It does not close an idle transport stream or schedule a periodic sweep, and
+    /// the built-in transport does not currently invoke this wrapper automatically.
+    /// Adapters may call it when they need this accounting seam.
+    /// (br-asupersync-8vn9iu.)
     ///
     /// # Parameters
     /// - `connection_id`: Unique identifier for the connection (e.g., peer address + port)
@@ -1399,8 +1511,9 @@ impl Server {
     ///
     /// # Errors
     /// Returns `Status::resource_exhausted` if:
-    /// - The connection has too many active streams (exceeds `max_concurrent_streams`)
-    /// - Stream enforcement fails for any other reason
+    /// - The connection has too many registration entries (exceeds
+    ///   `max_concurrent_streams`)
+    /// - Stream registration accounting fails for any other reason
     pub async fn dispatch_unary_with_stream_enforcement<H, F>(
         &self,
         connection_id: String,
@@ -1412,9 +1525,9 @@ impl Server {
         H: FnOnce(Request<Bytes>) -> F,
         F: Future<Output = Result<Response<Bytes>, Status>>,
     {
-        // ── Phase 0: Stream enforcement (br-asupersync-8vn9iu). ─────────
-        // Enforce per-connection stream limits and idle timeouts BEFORE
-        // metadata validation and interceptor chain execution.
+        // ── Phase 0: stream registration (br-asupersync-8vn9iu). ─────────
+        // Enforce the in-memory registration count and purge stale accounting
+        // entries BEFORE metadata validation and interceptor execution.
         let registered_at = match self.connection_registry.enforce_stream_limits(
             &connection_id,
             stream_id,
@@ -1433,9 +1546,10 @@ impl Server {
         // br-asupersync-wix48k: cleanup runs on Drop, not after the
         // await. A pre-fix `registry.remove_stream(...)` placed AFTER
         // `dispatch_unary(...).await` was unreachable when the
-        // awaiting future was cancelled mid-handler (the RST_STREAM
-        // path), leaking the stream registration into active_streams
-        // until the next idle sweep — a connection-level DoS primitive.
+        // awaiting future was cancelled mid-handler, leaking the stream
+        // registration into active_streams
+        // until the next admission-triggered stale-entry purge — a registry
+        // exhaustion primitive.
         //
         // SECURITY FIX: The guard now tracks the registration timestamp
         // to prevent race conditions where multiple cleanup operations
@@ -1454,19 +1568,20 @@ impl Server {
         self.dispatch_unary(request, handler).await
     }
 
-    /// Update stream activity for idle timeout tracking.
+    /// Update a stream registration's activity timestamp.
     ///
-    /// Transport adapters should call this when they receive any frame
-    /// (data, headers, or control frames) on a stream to reset its idle timer.
+    /// Adapters using the accounting helper may call this when they receive a
+    /// frame. It updates state inspected by a later explicit stale-entry purge;
+    /// it does not reset a scheduled timer or cancel a transport stream.
     /// (br-asupersync-8vn9iu.)
     pub fn update_stream_activity(&self, connection_id: &str, stream_id: u32) {
         self.connection_registry
             .update_stream_activity(connection_id, stream_id);
     }
 
-    /// Get connection and stream statistics for monitoring.
+    /// Get connection/stream registration-accounting statistics.
     ///
-    /// Returns `(active_connections, total_active_streams)`.
+    /// Returns `(registered_connections, total_stream_registration_entries)`.
     pub fn get_connection_stats(&self) -> (usize, usize) {
         self.connection_registry.get_stats()
     }
@@ -1537,10 +1652,10 @@ pub fn parse_grpc_timeout(header: &str) -> Option<Duration> {
         return None;
     }
     let (digits, unit) = header.split_at(header.len() - 1);
-    // gRPC timeout literals are limited to at most 8 digits. Accepting longer
-    // values lets invalid peer input masquerade as a real timeout and can
-    // accidentally clear deadlines later when checked_add overflows.
-    if digits.is_empty() || digits.len() > 8 {
+    // gRPC TimeoutValue is 1..=8 ASCII DIGIT bytes. `u64::from_str` also
+    // accepts a leading `+`, so validate the grammar before parsing instead
+    // of treating `+1S` as a legitimate peer deadline.
+    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let value: u64 = digits.parse().ok()?;
@@ -1552,6 +1667,13 @@ pub fn parse_grpc_timeout(header: &str) -> Option<Duration> {
         "u" => Some(Duration::from_micros(value)),
         "n" => Some(Duration::from_nanos(value)),
         _ => None,
+    }
+}
+
+fn grpc_timeout_from_metadata(metadata: &Metadata) -> Option<Duration> {
+    match metadata.get("grpc-timeout") {
+        Some(super::streaming::MetadataValue::Ascii(value)) => parse_grpc_timeout(value),
+        Some(super::streaming::MetadataValue::Binary(_)) | None => None,
     }
 }
 
@@ -1641,10 +1763,10 @@ impl CallContext {
 
     /// Create a call context from incoming request metadata.
     ///
-    /// Parses the `grpc-timeout` header to derive the deadline. If no
-    /// timeout header is present and `default_timeout` is provided, the
-    /// default is used instead. Malformed timeout values do not fall back
-    /// to the default.
+    /// Parses the `grpc-timeout` header to derive the deadline. If a
+    /// timeout header is present and parseable, it determines the deadline.
+    /// Otherwise, `default_timeout` is used when provided. This prevents a
+    /// malformed peer value from disabling the server's configured bound.
     #[must_use]
     pub fn from_metadata(
         metadata: Metadata,
@@ -1709,15 +1831,18 @@ impl CallContext {
 
     /// tick #139: variant of [`Self::from_metadata_at`] that accepts a
     /// server-side maximum request deadline. When `max_request_deadline`
-    /// is `Some(cap)`, every peer-supplied `grpc-timeout` is clamped
-    /// via `min(peer_timeout, cap)` so a hostile peer cannot pin
-    /// server resources by requesting `grpc-timeout: 99999999H`
-    /// (≈11,400 years).
+    /// is `Some(cap)`, every parseable peer-supplied `grpc-timeout` is clamped
+    /// via `min(peer_timeout, cap)` so a hostile peer cannot choose an
+    /// impractically distant representable deadline such as
+    /// `grpc-timeout: 99999999H` (≈11,400 years).
     ///
-    /// The cap does NOT affect the absent-header fallback to
-    /// `default_timeout` — that path still applies the configured
-    /// default. Callers that want a tighter ceiling on the default
-    /// should set `default_timeout` itself.
+    /// The cap does NOT affect the absent- or malformed-header fallback to
+    /// `default_timeout` — that path still applies the configured default.
+    /// Callers that want a tighter ceiling on the default should set
+    /// `default_timeout` itself.
+    ///
+    /// A timeout that cannot be represented as `now + timeout` expires at
+    /// `now`; arithmetic overflow never disables deadline enforcement.
     ///
     /// Wired from [`ServerConfig::max_request_deadline`].
     #[must_use]
@@ -1728,23 +1853,16 @@ impl CallContext {
         peer_addr: Option<String>,
         now: Instant,
     ) -> Self {
-        let timeout = match metadata.get("grpc-timeout") {
-            Some(super::streaming::MetadataValue::Ascii(s)) => parse_grpc_timeout(s),
-            // A present but invalid grpc-timeout must fail closed, not impersonate absence.
-            Some(super::streaming::MetadataValue::Binary(_)) => None,
-            None => default_timeout,
-        };
-        // tick #139: clamp the peer-supplied timeout against the
-        // server's max_request_deadline cap. The default-fallback
-        // path is intentionally NOT clamped — operators who set
-        // default_timeout already chose that ceiling deliberately.
-        let timeout = match (timeout, max_request_deadline) {
-            (Some(peer), Some(cap)) if metadata.get("grpc-timeout").is_some() => {
-                Some(peer.min(cap))
-            }
-            (other, _) => other,
-        };
-        let deadline = timeout.and_then(|t| now.checked_add(t));
+        let peer_timeout = grpc_timeout_from_metadata(&metadata);
+        // Clamp only a valid peer timeout. Absent or malformed peer metadata
+        // falls back to the operator-selected default, which is deliberately
+        // independent of the peer-timeout cap.
+        let timeout = peer_timeout
+            .map(|peer| max_request_deadline.map_or(peer, |cap| peer.min(cap)))
+            .or(default_timeout);
+        // Treat an unrepresentable timeout as already expired. Falling back to
+        // `None` here would turn an oversized configured bound into no bound.
+        let deadline = timeout.map(|t| now.checked_add(t).unwrap_or(now));
         Self {
             metadata,
             deadline,
@@ -1808,7 +1926,11 @@ impl CallContext {
     /// Returns remaining time to deadline using an explicit clock sample.
     #[must_use]
     pub fn remaining_at(&self, now: Instant) -> Option<Duration> {
-        self.deadline.and_then(|d| d.checked_duration_since(now))
+        self.deadline.and_then(|deadline| {
+            deadline
+                .checked_duration_since(now)
+                .filter(|remaining| !remaining.is_zero())
+        })
     }
 
     /// Formats the remaining deadline as a `grpc-timeout` header value.
@@ -2497,6 +2619,102 @@ mod tests {
     }
 
     #[test]
+    fn test_inclusive_deadline_guard_rejects_ready_inner_at_boundary() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        static OFFSET_NS: AtomicU64 = AtomicU64::new(0);
+
+        fn test_now() -> crate::types::Time {
+            crate::types::Time::from_nanos(OFFSET_NS.load(Ordering::Relaxed))
+        }
+
+        init_test("test_inclusive_deadline_guard_rejects_ready_inner_at_boundary");
+        let deadline = crate::types::Time::from_nanos(1);
+
+        OFFSET_NS.store(1, Ordering::Relaxed);
+        let handler_invoked_at_boundary = Arc::new(AtomicBool::new(false));
+        let observed_handler = Arc::clone(&handler_invoked_at_boundary);
+        let polled_at_boundary = Arc::new(AtomicBool::new(false));
+        let observed_poll = Arc::clone(&polled_at_boundary);
+        let at_boundary =
+            futures_lite::future::block_on(invoke_and_poll_before_inclusive_deadline(
+                move |()| {
+                    observed_handler.store(true, Ordering::Relaxed);
+                    std::future::poll_fn(move |_task_cx| {
+                        observed_poll.store(true, Ordering::Relaxed);
+                        std::task::Poll::Ready(42)
+                    })
+                },
+                (),
+                deadline,
+                test_now,
+            ));
+        crate::assert_with_log!(
+            at_boundary == Err(InclusiveDeadlineElapsed),
+            "exact boundary rejects",
+            Err::<i32, _>(InclusiveDeadlineElapsed),
+            at_boundary
+        );
+        crate::assert_with_log!(
+            !handler_invoked_at_boundary.load(Ordering::Relaxed),
+            "handler closure not invoked at boundary",
+            false,
+            handler_invoked_at_boundary.load(Ordering::Relaxed)
+        );
+        crate::assert_with_log!(
+            !polled_at_boundary.load(Ordering::Relaxed),
+            "inner future not polled at boundary",
+            false,
+            polled_at_boundary.load(Ordering::Relaxed)
+        );
+
+        OFFSET_NS.store(0, Ordering::Relaxed);
+        let polled_after_slow_setup = Arc::new(AtomicBool::new(false));
+        let observed_poll = Arc::clone(&polled_after_slow_setup);
+        let expired_during_setup =
+            futures_lite::future::block_on(invoke_and_poll_before_inclusive_deadline(
+                move |()| {
+                    OFFSET_NS.store(1, Ordering::Relaxed);
+                    std::future::poll_fn(move |_task_cx| {
+                        observed_poll.store(true, Ordering::Relaxed);
+                        std::task::Poll::Ready(42)
+                    })
+                },
+                (),
+                deadline,
+                test_now,
+            ));
+        crate::assert_with_log!(
+            expired_during_setup == Err(InclusiveDeadlineElapsed),
+            "deadline rechecked after handler setup",
+            Err::<i32, _>(InclusiveDeadlineElapsed),
+            expired_during_setup
+        );
+        crate::assert_with_log!(
+            !polled_after_slow_setup.load(Ordering::Relaxed),
+            "inner future not polled after setup consumes deadline",
+            false,
+            polled_after_slow_setup.load(Ordering::Relaxed)
+        );
+
+        OFFSET_NS.store(0, Ordering::Relaxed);
+        let before_boundary =
+            futures_lite::future::block_on(invoke_and_poll_before_inclusive_deadline(
+                |()| std::future::ready(42),
+                (),
+                deadline,
+                test_now,
+            ));
+        crate::assert_with_log!(
+            before_boundary == Ok(42),
+            "ready inner wins strictly before boundary",
+            Ok::<_, InclusiveDeadlineElapsed>(42),
+            before_boundary
+        );
+        crate::test_complete!("test_inclusive_deadline_guard_rejects_ready_inner_at_boundary");
+    }
+
+    #[test]
     fn test_call_context_time_getter_controls_deadline_helpers_without_sleep() {
         use std::sync::OnceLock;
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -2566,22 +2784,28 @@ mod tests {
     }
 
     #[test]
-    fn test_call_context_malformed_timeout_does_not_use_default() {
-        init_test("test_call_context_malformed_timeout_does_not_use_default");
+    fn test_call_context_malformed_ascii_timeout_uses_unclamped_default() {
+        init_test("test_call_context_malformed_ascii_timeout_uses_unclamped_default");
         let now = std::time::Instant::now();
         let fallback = std::time::Duration::from_secs(3);
         let mut metadata = Metadata::new();
         metadata.insert("grpc-timeout", "bogus");
-        let ctx = CallContext::from_metadata_at(metadata, Some(fallback), None, now);
+        let ctx = CallContext::from_metadata_at_with_max_deadline(
+            metadata,
+            Some(fallback),
+            Some(std::time::Duration::from_secs(1)),
+            None,
+            now,
+        );
 
         let deadline = ctx.deadline();
         crate::assert_with_log!(
-            deadline.is_none(),
-            "malformed grpc-timeout does not use the default timeout",
-            true,
-            deadline.is_none()
+            deadline == now.checked_add(fallback),
+            "malformed ASCII grpc-timeout uses the unclamped default timeout",
+            now.checked_add(fallback),
+            deadline
         );
-        crate::test_complete!("test_call_context_malformed_timeout_does_not_use_default");
+        crate::test_complete!("test_call_context_malformed_ascii_timeout_uses_unclamped_default");
     }
 
     #[test]
@@ -2639,33 +2863,31 @@ mod tests {
         );
     }
 
-    /// br-asupersync-02f7vx: chaining .with_time_getter(...) after
-    /// from_metadata_at MUST install the replay-deterministic
-    /// closure — the canonical pattern for replay harnesses.
+    /// br-asupersync-02f7vx: chaining `.with_time_getter(...)` after
+    /// `from_metadata_at` must install the supplied function pointer. Replay
+    /// harnesses use this pattern with their deterministic clock getter.
     #[test]
     fn test_call_context_with_time_getter_chain_overrides_default() {
         init_test("test_call_context_with_time_getter_chain_overrides_default");
-        // Use a known fixed Instant so the test is deterministic.
+        // Only function-pointer replacement is under test; the returned wall
+        // clock value is deliberately not compared.
         let recorded = std::time::Instant::now();
-        fn fixed_time() -> std::time::Instant {
-            // Returns a constant that the test below pins by ptr equality.
-            // The actual instant value isn't compared — pointer identity
-            // proves the closure was installed.
+        fn custom_time_getter() -> std::time::Instant {
             std::time::Instant::now()
         }
         let ctx = CallContext::from_metadata_at(Metadata::new(), None, None, recorded)
-            .with_time_getter(fixed_time);
+            .with_time_getter(custom_time_getter);
         let getter = ctx.time_getter();
         assert!(
-            std::ptr::fn_addr_eq(getter, fixed_time as fn() -> std::time::Instant),
-            "with_time_getter must replace the default — fixed_time wasn't installed"
+            std::ptr::fn_addr_eq(getter, custom_time_getter as fn() -> std::time::Instant),
+            "with_time_getter must install the supplied function pointer"
         );
         crate::test_complete!("test_call_context_with_time_getter_chain_overrides_default");
     }
 
     #[test]
-    fn test_call_context_oversized_timeout_header_fails_closed() {
-        init_test("test_call_context_oversized_timeout_header_fails_closed");
+    fn test_call_context_oversized_timeout_header_uses_default() {
+        init_test("test_call_context_oversized_timeout_header_uses_default");
         let now = std::time::Instant::now();
         let fallback = std::time::Duration::from_secs(3);
         let mut metadata = Metadata::new();
@@ -2674,12 +2896,34 @@ mod tests {
 
         let deadline = ctx.deadline();
         crate::assert_with_log!(
-            deadline.is_none(),
-            "oversized timeout header must not be treated as an unbounded valid deadline",
-            true,
-            deadline.is_none()
+            deadline == now.checked_add(fallback),
+            "oversized timeout header must fall back to the configured default",
+            now.checked_add(fallback),
+            deadline
         );
-        crate::test_complete!("test_call_context_oversized_timeout_header_fails_closed");
+        crate::test_complete!("test_call_context_oversized_timeout_header_uses_default");
+    }
+
+    #[test]
+    fn test_call_context_duration_max_never_disables_deadline() {
+        init_test("test_call_context_duration_max_never_disables_deadline");
+        let now = std::time::Instant::now();
+        let ctx = CallContext::from_metadata_at(
+            Metadata::new(),
+            Some(std::time::Duration::MAX),
+            None,
+            now,
+        );
+
+        let deadline = ctx.deadline();
+        let expected = Some(now.checked_add(std::time::Duration::MAX).unwrap_or(now));
+        crate::assert_with_log!(
+            deadline == expected,
+            "Duration::MAX must produce a deadline; overflow expires immediately",
+            expected,
+            deadline
+        );
+        crate::test_complete!("test_call_context_duration_max_never_disables_deadline");
     }
 
     #[test]
@@ -2688,6 +2932,13 @@ mod tests {
         let now = std::time::Instant::now();
         let deadline = now + std::time::Duration::from_millis(250);
         let ctx = CallContext::with_deadline(deadline);
+
+        crate::assert_with_log!(
+            ctx.remaining_at(deadline).is_none(),
+            "remaining_at returns None at the inclusive expiry boundary",
+            true,
+            ctx.remaining_at(deadline).is_none()
+        );
 
         let header = ctx.timeout_header_value_at(now);
         crate::assert_with_log!(
@@ -3621,22 +3872,24 @@ mod tests {
         }
 
         /// GRPC-TIMEOUT-3 (MUST): Empty header value, no digits, or missing
-        /// unit must all be rejected. A present-but-malformed header cannot
-        /// silently impersonate "no timeout".
+        /// unit must all be rejected by the parser. Server fallback policy is
+        /// exercised separately by `CallContext` tests.
         #[test]
         fn grpc_timeout_3_reject_malformed() {
             let rejected = &[
-                "",     // empty
-                "S",    // no digits
-                "100",  // missing unit
-                " 10S", // leading whitespace
-                "10 S", // internal space
-                "10s",  // lowercase s is not a valid unit
-                "10x",  // unknown unit
-                "-1S",  // negative
-                "1.5S", // non-integer
-                "abc",  // non-numeric
-                "١٠S",  // non-ASCII digits (Arabic-Indic)
+                "",          // empty
+                "S",         // no digits
+                "100",       // missing unit
+                " 10S",      // leading whitespace
+                "10 S",      // internal space
+                "10s",       // lowercase s is not a valid unit
+                "10x",       // unknown unit
+                "-1S",       // negative
+                "+1S",       // signed integers are not TimeoutValue DIGITs
+                "+0000000S", // leading plus remains invalid at the 8-byte boundary
+                "1.5S",      // non-integer
+                "abc",       // non-numeric
+                "١٠S",       // non-ASCII digits (Arabic-Indic)
             ];
             for input in rejected {
                 assert_eq!(
@@ -3735,12 +3988,11 @@ mod tests {
             eprintln!("{{\"id\":\"GRPC-TIMEOUT-6\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
-        /// GRPC-TIMEOUT-7 (MUST): H/M/S/m/u/n arithmetic overflow must be
-        /// rejected rather than wrapping or panicking. `99999999H` is
-        /// within the 8-digit ceiling on digits but overflows u64 when
-        /// multiplied by 3600; the parser must return None.
+        /// GRPC-TIMEOUT-7 (MUST): the 8-digit grammar keeps every
+        /// H/M/S/m/u/n conversion within `u64`. Boundary values must parse
+        /// without wrapping or panicking.
         #[test]
-        fn grpc_timeout_7_overflow_rejected_not_wrapped() {
+        fn grpc_timeout_7_boundary_arithmetic_is_u64_safe() {
             // 99_999_999 hours in seconds = 359_999_996_400 — fits in u64
             // but if the multiplication were done on smaller types this
             // would be the overflow boundary. The parser uses checked_mul
@@ -3751,18 +4003,20 @@ mod tests {
                 "GRPC-TIMEOUT-7: 99_999_999H fits in u64 seconds and must parse",
             );
 
-            // Values that would overflow when multiplied — we have to
-            // reach them via the 8-digit ceiling. Since the ceiling
-            // already caps below overflow for all six units at u64, the
-            // remaining overflow path is through format → parse of
-            // Duration::MAX, which the spec's 8-digit cap prevents. The
-            // invariant here is "parser never panics on any ASCII input
-            // within 1..=8 digits". Exhaust the boundary.
+            // The grammar caps every unit below u64 overflow. Exhaust the
+            // maximum 8-digit value for all units to pin that invariant.
             for unit in &["H", "M", "S", "m", "u", "n"] {
                 let input = format!("99999999{unit}");
-                let _ = parse_grpc_timeout(&input);
+                assert!(
+                    parse_grpc_timeout(&input).is_some(),
+                    "GRPC-TIMEOUT-7: maximum 8-digit {unit} value must parse",
+                );
                 let input = format!("00000000{unit}");
-                let _ = parse_grpc_timeout(&input);
+                assert_eq!(
+                    parse_grpc_timeout(&input),
+                    Some(Duration::ZERO),
+                    "GRPC-TIMEOUT-7: zero-padded {unit} value must parse to ZERO",
+                );
                 let input = format!("0{unit}");
                 let parsed = parse_grpc_timeout(&input);
                 assert_eq!(
@@ -3774,12 +4028,12 @@ mod tests {
             eprintln!("{{\"id\":\"GRPC-TIMEOUT-7\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
 
-        /// GRPC-TIMEOUT-8 (MUST): The parser tolerates any byte sequence
-        /// without panicking. Non-ASCII, control chars, high-bit bytes,
-        /// and invalid UTF-8-ish ASCII substrings must all return None
-        /// (never panic, never unwrap).
+        /// GRPC-TIMEOUT-8 (MUST): The `&str` parser tolerates adversarial
+        /// valid-UTF-8 text without panicking. Non-ASCII and control-character
+        /// inputs must return None. Invalid UTF-8 cannot be represented by this
+        /// API and is outside this test's input domain.
         #[test]
-        fn grpc_timeout_8_no_panic_on_adversarial_input() {
+        fn grpc_timeout_8_rejects_adversarial_text_without_panic() {
             let adversarial: &[&str] = &[
                 "",
                 "\0",
@@ -3795,9 +4049,10 @@ mod tests {
                 "10😀",
             ];
             for input in adversarial {
-                // The parser must not panic; verdict (None vs Some) is
-                // secondary — what matters is the absence of a crash.
-                let _ = parse_grpc_timeout(input);
+                assert!(
+                    parse_grpc_timeout(input).is_none(),
+                    "GRPC-TIMEOUT-8: adversarial input must be rejected: {input:?}",
+                );
             }
             eprintln!("{{\"id\":\"GRPC-TIMEOUT-8\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
@@ -5458,7 +5713,7 @@ mod tests {
         );
     }
 
-    // br-asupersync-8vn9iu: Regression tests for connection hoarding protection
+    // br-asupersync-8vn9iu: regression tests for registration accounting.
     #[test]
     fn test_connection_registry_enforces_stream_limits() {
         init_test("test_connection_registry_enforces_stream_limits");
@@ -5497,9 +5752,9 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_registry_idle_timeout() {
+    fn test_connection_registry_purges_stale_entry_on_admission() {
         use std::thread;
-        init_test("test_connection_registry_idle_timeout");
+        init_test("test_connection_registry_purges_stale_entry_on_admission");
 
         let registry = ConnectionRegistry::new();
         let connection_id = "test-conn-idle".to_string();
@@ -5516,15 +5771,15 @@ mod tests {
         assert_eq!(connections, 1);
         assert_eq!(streams, 1);
 
-        // Test very short idle timeout (1ms) to force cleanup
+        // Use a short threshold so the next admission purges the stale entry.
         thread::sleep(std::time::Duration::from_millis(2));
         let short_timeout = std::time::Duration::from_millis(1);
 
-        // Try to add another stream with short idle timeout - should clean up the old one
+        // A later admission performs the stale-registration purge.
         let result = registry.enforce_stream_limits(&connection_id, 2, 10, Some(short_timeout));
         assert!(
             result.is_ok(),
-            "Should accept new stream after idle cleanup"
+            "Should accept new stream after stale-registration purge"
         );
 
         // Should now have 1 stream (the old one was cleaned up)
@@ -5533,17 +5788,17 @@ mod tests {
         assert_eq!(streams, 1);
 
         registry.remove_connection(&connection_id);
-        crate::test_complete!("test_connection_registry_idle_timeout");
+        crate::test_complete!("test_connection_registry_purges_stale_entry_on_admission");
     }
 
     #[test]
-    fn test_server_stream_enforcement_integration() {
+    fn test_server_stream_registration_wrapper() {
         use futures_lite::future::block_on;
         use std::future::Future;
         use std::pin::pin;
         use std::task::{Context, Poll, Waker};
 
-        init_test("test_server_stream_enforcement_integration");
+        init_test("test_server_stream_registration_wrapper");
 
         let server = Server::builder()
             .max_concurrent_streams(2) // Very low limit for testing
@@ -5588,7 +5843,7 @@ mod tests {
                 "two in-flight streams should consume both stream slots",
             );
 
-            // Third stream should be rejected due to the two active streams above.
+            // Third wrapper should be rejected due to the two registrations above.
             let request3 = Request::with_metadata(Bytes::from_static(b"test3"), Metadata::new());
             let result3 = block_on(server.dispatch_unary_with_stream_enforcement(
                 connection_id.clone(),
@@ -5610,18 +5865,14 @@ mod tests {
         );
 
         server.unregister_connection(&connection_id);
-        crate::test_complete!("test_server_stream_enforcement_integration");
+        crate::test_complete!("test_server_stream_registration_wrapper");
     }
 
-    /// br-asupersync-wix48k — RST_STREAM mid-handler must NOT leak the
-    /// stream's registration entry. Pre-fix, dropping the dispatch
-    /// future before its inner handler resolved skipped the
-    /// post-await `remove_stream(...)` line, leaving the stream
-    /// registered until the connection's idle sweep. An attacker who
-    /// could open `max_concurrent_streams + 1` short-lived RST'd
-    /// streams would lock the connection out of further work for
-    /// minutes. Post-fix the cleanup runs from the `Drop` impl of a
-    /// `StreamRegistrationGuard`.
+    /// br-asupersync-wix48k — dropping the wrapped dispatch mid-handler must
+    /// not leak its registration entry. Pre-fix, the post-await removal was
+    /// skipped. Post-fix, `StreamRegistrationGuard::drop` removes the entry.
+    /// An adapter that represents a peer reset by dropping this future gets
+    /// the same behavior; this unit test does not prove that transport wiring.
     ///
     /// Test shape: build a dispatch future whose handler is `Pending`
     /// forever, poll once with a no-op waker (this runs the
@@ -5629,26 +5880,24 @@ mod tests {
     /// await), then drop the future. Assert the connection's
     /// `active_stream_count` is back to zero.
     #[test]
-    fn test_dispatch_unary_drop_during_handler_releases_stream_registration() {
+    fn test_dropping_wrapped_dispatch_releases_stream_registration() {
         use std::future::Future;
         use std::pin::pin;
         use std::task::{Context, Poll, Waker};
 
-        init_test("test_dispatch_unary_drop_during_handler_releases_stream_registration");
+        init_test("test_dropping_wrapped_dispatch_releases_stream_registration");
 
         let server = Server::builder()
             .max_concurrent_streams(2)
             .stream_idle_timeout(Some(std::time::Duration::from_secs(60)))
             .build();
 
-        let connection_id = "rst-stream-leak-conn".to_string();
+        let connection_id = "drop-cleanup-conn".to_string();
         server.register_connection(connection_id.clone());
 
         // Drive the dispatch future to its first Pending and then drop
         // it. The handler `std::future::pending()` never resolves, so
-        // the await suspends on the very first poll — exactly the
-        // shape of a RST_STREAM cancellation that hits while the
-        // server is still inside the handler.
+        // the await suspends on the very first poll.
         {
             let request =
                 Request::with_metadata(Bytes::from_static(b"will-be-cancelled"), Metadata::new());
@@ -5675,38 +5924,33 @@ mod tests {
                 1,
                 "stream must be registered while the dispatch is in flight",
             );
-            // Drop the future without polling further — equivalent to
-            // the transport propagating a RST_STREAM by dropping the
-            // dispatch task.
+            // Drop the future without polling further.
         }
 
         // Post-Drop, the stream registration MUST be gone.
         let (_, total_streams) = server.connection_registry.get_stats();
         assert_eq!(
             total_streams, 0,
-            "RST_STREAM mid-handler must release the stream registration; \
-             pre-fix this leaked until the idle sweep ran",
+            "dropping the wrapper mid-handler must release the registration",
         );
 
         server.unregister_connection(&connection_id);
-        crate::test_complete!(
-            "test_dispatch_unary_drop_during_handler_releases_stream_registration"
-        );
+        crate::test_complete!("test_dropping_wrapped_dispatch_releases_stream_registration");
     }
 
     #[test]
-    fn test_connection_hoarding_attack_simulation() {
-        init_test("test_connection_hoarding_attack_simulation");
+    fn test_per_connection_registration_limit_model() {
+        init_test("test_per_connection_registration_limit_model");
 
-        // Simulate an attacker opening many connections with multiple streams each
+        // Model independent registration-count limits across connections.
         let server = Server::builder()
             .max_concurrent_streams(3)
             .stream_idle_timeout(Some(std::time::Duration::from_secs(60)))
             .build();
 
-        // Register multiple "attacker" connections
+        // Register multiple modeled connections.
         for conn_num in 1..=5 {
-            let connection_id = format!("attacker-conn-{}", conn_num);
+            let connection_id = format!("modeled-conn-{}", conn_num);
             server.register_connection(connection_id.clone());
 
             // Try to max out streams on each connection
@@ -5738,45 +5982,34 @@ mod tests {
             );
         }
 
-        // Verify connection stats show limits are being enforced
+        // Verify the in-memory accounting values.
         let (active_connections, total_streams) = server.get_connection_stats();
         assert_eq!(active_connections, 5, "Should track 5 connections");
         assert_eq!(
             total_streams, 15,
-            "Should track maxed-out attacker streams across all connections"
+            "Should track the modeled registrations across all connections"
         );
 
         // Clean up
         for conn_num in 1..=5 {
-            server.unregister_connection(&format!("attacker-conn-{}", conn_num));
+            server.unregister_connection(&format!("modeled-conn-{}", conn_num));
         }
 
-        crate::test_complete!("test_connection_hoarding_attack_simulation");
+        crate::test_complete!("test_per_connection_registration_limit_model");
     }
 
-    /// **AUDIT TEST: gRPC Message Size Limit Enforcement Compliance**
+    /// **AUDIT TEST: configured gRPC codec-helper size rejection**
     ///
-    /// Verifies that when a gRPC client sends a message exceeding the configured
-    /// `max_recv_message_size`, the server:
+    /// Verifies that a codec explicitly constructed through
+    /// [`Server::framed_codec`] rejects a declared message length exceeding the
+    /// stored `max_recv_message_size` before the full payload is present.
     ///
-    /// **(a) Rejects early with RESOURCE_EXHAUSTED before reading body** ✅ CORRECT
-    ///     - Prevents DoS by checking declared length in 5-byte header
-    ///     - Returns proper gRPC status code per spec
-    ///     - Does not consume memory for oversized payloads
-    ///
-    /// NOT:
-    /// (b) Read all then reject (memory waste) ❌
-    /// (c) Silently truncate (data corruption) ❌
-    ///
-    /// **gRPC Spec Compliance:** RFC 7540 + gRPC spec require RESOURCE_EXHAUSTED
-    /// for resource limit violations. Early rejection prevents remote DoS.
-    ///
-    /// **Implementation:** `GrpcCodec::decode()` checks declared length against
-    /// `max_decode_message_size` before allocating/reading message body.
-    /// Maps to `Status::resource_exhausted("message too large")`.
+    /// This is direct helper evidence only. The built-in transport does not
+    /// currently call `framed_codec` automatically, so this test makes no
+    /// client-path, H2 integration, allocation, or remote-DoS claim.
     #[test]
-    fn grpc_message_size_limit_enforcement_audit() {
-        init_test("grpc_message_size_limit_enforcement_audit");
+    fn grpc_message_size_limit_codec_helper_audit() {
+        init_test("grpc_message_size_limit_codec_helper_audit");
 
         // Set very small message size limit to easily test boundary
         let max_message_size = 64; // 64 bytes
@@ -5798,7 +6031,7 @@ mod tests {
         let mut codec = server.framed_codec(crate::grpc::IdentityCodec);
         let result = codec.decode_message(&mut frame_buf);
 
-        // AUDIT VERIFICATION: Must reject with MessageTooLarge
+        // Helper verification: declared length above the configured value rejects.
         let error = result.expect_err("Oversized message must be rejected");
         crate::assert_with_log!(
             matches!(error, crate::grpc::GrpcError::MessageTooLarge),
@@ -5807,7 +6040,7 @@ mod tests {
             matches!(error, crate::grpc::GrpcError::MessageTooLarge)
         );
 
-        // AUDIT VERIFICATION: Must map to RESOURCE_EXHAUSTED status
+        // The helper error maps to the expected gRPC status.
         let status = error.into_status();
         crate::assert_with_log!(
             status.code() == crate::grpc::Code::ResourceExhausted,
@@ -5816,7 +6049,7 @@ mod tests {
             status.code()
         );
 
-        // AUDIT VERIFICATION: Error message must be informative
+        // The helper error message must be informative.
         let message = status.message();
         crate::assert_with_log!(
             message.contains("message too large"),
@@ -5841,9 +6074,8 @@ mod tests {
             exact_result.is_ok()
         );
 
-        // EARLY REJECTION VERIFICATION: Codec rejects before reading full payload
-        // This verifies we're in case (a) not (b) - rejection happens after reading
-        // only the 5-byte header, not the full declared payload length
+        // The direct codec helper rejects from the declared prefix even though the
+        // synthetic buffer contains only a small payload fragment.
         let huge_declared_size = 1024 * 1024 * 1024; // 1GB declared
         let mut dos_frame_buf = BytesMut::new();
         dos_frame_buf.put_u8(0); // uncompressed
@@ -5860,17 +6092,14 @@ mod tests {
             matches!(dos_error, crate::grpc::GrpcError::MessageTooLarge)
         );
 
-        crate::test_complete!("grpc_message_size_limit_enforcement_audit");
+        crate::test_complete!("grpc_message_size_limit_codec_helper_audit");
     }
 
     /// AUDIT MODULE: gRPC server request deadline propagation and enforcement
     ///
-    /// AUDIT FINDING: DEFECT - Current implementation does NOT cancel handlers
-    /// when grpc-timeout deadline expires. Handlers run to completion even after
-    /// deadline, violating gRPC specification requirements.
-    ///
-    /// Per gRPC spec: when client sets grpc-timeout header, server MUST cancel
-    /// the handler and respond with DEADLINE_EXCEEDED status if deadline is exceeded.
+    /// AUDIT CONTRACT: `dispatch_unary` races yielding async handlers against the
+    /// effective deadline and returns `DEADLINE_EXCEEDED` when it wins. Blocking
+    /// work that never yields cannot be preempted by an async timeout race.
     mod grpc_deadline_enforcement_audit {
         use super::*;
         use crate::grpc::Code;
@@ -6063,8 +6292,8 @@ mod tests {
 
         /// AUDIT: Verify max_request_deadline clamping works correctly
         ///
-        /// This functionality is SOUND - the server correctly clamps peer-supplied
-        /// timeouts against the configured maximum.
+        /// This functionality is SOUND - the server correctly clamps parseable
+        /// peer-supplied timeouts against the configured maximum.
         #[test]
         fn audit_max_request_deadline_clamping_is_sound() {
             init_test("audit_max_request_deadline_clamping_is_sound");
@@ -6082,20 +6311,13 @@ mod tests {
             );
 
             let deadline = context.deadline().expect("deadline should be set");
-            let clamped_duration = deadline.duration_since(now);
+            let expected = now.checked_add(Duration::from_secs(60));
 
             crate::assert_with_log!(
-                clamped_duration <= Duration::from_secs(61), // Allow 1s tolerance
-                "peer timeout correctly clamped to server max_request_deadline",
-                true,
-                clamped_duration <= Duration::from_secs(61)
-            );
-
-            crate::assert_with_log!(
-                clamped_duration >= Duration::from_secs(59), // Allow 1s tolerance
-                "clamped deadline is approximately the max value",
-                true,
-                clamped_duration >= Duration::from_secs(59)
+                Some(deadline) == expected,
+                "peer timeout exactly clamped to server max_request_deadline",
+                expected,
+                Some(deadline)
             );
 
             crate::test_complete!("audit_max_request_deadline_clamping_is_sound");
@@ -6156,35 +6378,32 @@ mod tests {
 
         /// AUDIT: Test edge case behavior with malformed deadlines
         ///
-        /// Verify that malformed grpc-timeout headers fail safely and don't
-        /// bypass deadline enforcement. This behavior is SOUND.
+        /// Verify that malformed grpc-timeout headers fall back to the server
+        /// default and cannot bypass deadline enforcement.
         #[test]
-        fn audit_malformed_deadline_handling_is_sound() {
+        fn audit_malformed_deadline_uses_configured_default_in_dispatch() {
             use futures_lite::future::block_on;
-            init_test("audit_malformed_deadline_handling_is_sound");
+            init_test("audit_malformed_deadline_uses_configured_default_in_dispatch");
 
-            let server = Server::builder()
-                .default_timeout(Duration::from_secs(5))
-                .build();
-
-            // Test with malformed grpc-timeout header
+            let server = Server::builder().default_timeout(Duration::ZERO).build();
             let mut metadata = Metadata::new();
             metadata.insert("grpc-timeout", "invalid-format");
+            let handler_invoked = Arc::new(AtomicBool::new(false));
+            let handler_invoked_clone = Arc::clone(&handler_invoked);
             let request = Request::with_metadata(Bytes::from_static(b"test"), metadata);
-
-            let result = block_on(server.dispatch_unary(request, |req| async move {
-                // Verify no default timeout was applied to malformed header
-                Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
+            let result = block_on(server.dispatch_unary(request, move |_req| async move {
+                handler_invoked_clone.store(true, Ordering::Relaxed);
+                Ok::<Response<Bytes>, Status>(Response::new(Bytes::new()))
             }));
 
-            // Malformed headers should not use default_timeout fallback
-            // (only when header is completely absent)
+            let status = result.expect_err("malformed timeout must use expired default");
+            assert_eq!(status.code(), Code::DeadlineExceeded);
             assert!(
-                result.is_ok(),
-                "Malformed grpc-timeout should not prevent request processing"
+                !handler_invoked.load(Ordering::Relaxed),
+                "expired default must reject malformed ASCII before invoking the handler"
             );
 
-            crate::test_complete!("audit_malformed_deadline_handling_is_sound");
+            crate::test_complete!("audit_malformed_deadline_uses_configured_default_in_dispatch");
         }
 
         /// AUDIT: Test deadline propagation to downstream calls

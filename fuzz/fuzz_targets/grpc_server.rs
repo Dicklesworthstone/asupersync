@@ -418,9 +418,9 @@ fn test_deadline_propagation(
     _time_offset_ms: i64,
 ) {
     let mut metadata = Metadata::new();
-    if let Some(ref timeout) = timeout_header {
-        assert!(metadata.insert("grpc-timeout", timeout));
-    }
+    let timeout_stored = timeout_header
+        .as_ref()
+        .is_some_and(|timeout| metadata.insert("grpc-timeout", timeout));
 
     let default_duration = default_timeout.map(|ms| Duration::from_millis(ms as u64));
 
@@ -428,8 +428,8 @@ fn test_deadline_propagation(
     let call_context = CallContext::from_metadata(metadata, default_duration, None);
 
     // Verify deadline behavior
-    match (timeout_header.as_ref(), default_timeout) {
-        (Some(header), _) => {
+    match (timeout_stored, timeout_header.as_ref(), default_timeout) {
+        (true, Some(header), _) => {
             // If timeout header present, should parse it (or fail gracefully)
             let parsed = parse_grpc_timeout(header);
             if let Some(parsed_timeout) = parsed {
@@ -440,16 +440,23 @@ fn test_deadline_propagation(
                         "bounded grpc-timeout should set a deadline: {header}"
                     );
                 }
+            } else {
+                assert_eq!(
+                    call_context.deadline().is_some(),
+                    default_timeout.is_some(),
+                    "stored malformed timeout must follow the configured fallback",
+                );
             }
         }
-        (None, Some(_)) => {
-            // No header but default timeout - should use default
+        (false, _, Some(_)) => {
+            // No stored header but default timeout - should use default.
             assert!(call_context.deadline().is_some());
         }
-        (None, None) => {
-            // No timeout at all - no deadline
+        (false, _, None) => {
+            // No stored timeout and no default - no deadline.
             assert!(call_context.deadline().is_none());
         }
+        (true, None, _) => unreachable!("a timeout cannot be stored without an input value"),
     }
 
     // Test remaining time calculation doesn't panic

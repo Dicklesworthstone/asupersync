@@ -5,24 +5,24 @@
 //!
 //! `Server::dispatch_unary` invokes `enforce_metadata_size_limit` as
 //! its FIRST gate before any interceptor or handler runs
-//! (br-asupersync-7u4r72). That helper is the single sync surface that
-//! sees adversarial metadata bytes from the wire — every field name,
-//! field value, content-type, te header, and grpc-* reserved-prefix
-//! check flows through it. A panic here is reachable by any peer that
-//! gets a HEADERS frame to the server, which makes it a remote DoS.
+//! (br-asupersync-7u4r72). This target covers the public `Metadata`
+//! insertion boundary followed by that synchronous validation helper. It
+//! does not model HPACK/H2 ingestion or prove that every transport adapter
+//! routes through the helper.
 //!
 //! This target drives `enforce_metadata_size_limit` with
-//! `Arbitrary`-derived metadata entries (key + ASCII value | binary
-//! value) plus an arbitrary payload `Bytes`, and asserts:
+//! `Arbitrary`-derived metadata entries (key + ASCII value | binary value)
+//! plus an arbitrary payload `Bytes`. Invalid public insertions are rejected
+//! before the validation helper; accepted entries are then checked below.
 //!
-//!   1. **No panic on malformed metadata.** Every input must produce
-//!      either Ok(()) or one of the documented Status errors
-//!      (invalid_argument, resource_exhausted) — never unwind.
+//!   1. **No panic at the modeled boundaries.** Every insertion either
+//!      succeeds unchanged or rejects without mutation; validation returns
+//!      Ok(()) or a documented Status error, never unwinds.
 //!
 //!   2. **Documented validation rules are honored.** When the result
 //!      is Ok, the metadata satisfies the rules
 //!      `validate_inbound_metadata` enforces (no reserved grpc-*
-//!      keys outside the allowlist, sanitized ASCII values,
+//!      keys outside the allowlist, printable ASCII values,
 //!      well-formed content-type and te). When the result is Err,
 //!      the error code is one of the documented two.
 //!
@@ -39,9 +39,9 @@
 //!
 //! Why this target matters even with the unit tests in server.rs:
 //! the existing tests cover well-formed metadata. This fuzzer adds
-//! systematic adversarial-byte coverage on the wire-facing helper —
-//! the same kind of coverage the gRPC ecosystem expects from
-//! grpc-go's per-frame validation.
+//! systematic adversarial-byte coverage across the public metadata
+//! container and the synchronous validation helper. Wire-frame and
+//! HPACK ingestion remain outside this target.
 //!
 //! Out of scope (separate beads):
 //!   * Async dispatch_unary itself — needs a runtime; pinned by the
@@ -83,8 +83,9 @@ struct UnaryFuzzInput {
 struct MetadataEntry {
     /// Raw key bytes — adversarial unicode + control + reserved-prefix.
     key: String,
-    /// Either an ASCII string (subject to sanitize_metadata_ascii_value)
-    /// or a binary blob (must use a -bin suffixed key per gRPC spec).
+    /// Either an ASCII string (rejected by `Metadata::insert` if it contains
+    /// non-printable/non-ASCII bytes) or a binary blob (must use a `-bin`
+    /// suffixed key per gRPC spec).
     kind: ValueKind,
 }
 
@@ -117,6 +118,9 @@ fn expected_metadata_key(key: &str, binary: bool) -> Option<String> {
     if normalized.is_empty() {
         return None;
     }
+    if !binary && normalized.ends_with("-bin") {
+        return None;
+    }
 
     normalized
         .chars()
@@ -124,12 +128,8 @@ fn expected_metadata_key(key: &str, binary: bool) -> Option<String> {
         .then_some(normalized)
 }
 
-fn expected_ascii_value(value: &str) -> String {
-    value
-        .bytes()
-        .filter(|byte| (0x20..=0x7E).contains(byte))
-        .map(char::from)
-        .collect()
+fn expected_ascii_value_is_valid(value: &str) -> bool {
+    value.bytes().all(|byte| (0x20..=0x7E).contains(&byte))
 }
 
 fn assert_ascii_insert_observation(
@@ -149,8 +149,9 @@ fn assert_ascii_insert_observation(
             key.len(),
         );
         assert!(
-            expected_metadata_key(key, false).is_none(),
-            "Metadata::insert rejected a locally valid ASCII metadata key: raw_key={key:?}",
+            expected_metadata_key(key, false).is_none() || !expected_ascii_value_is_valid(value),
+            "Metadata::insert rejected a locally valid ASCII metadata entry: \
+             raw_key={key:?}, raw_value={value:?}",
         );
         return;
     }
@@ -164,7 +165,10 @@ fn assert_ascii_insert_observation(
     );
     let expected_key =
         expected_metadata_key(key, false).expect("accepted ASCII metadata key must normalize");
-    let expected_value = expected_ascii_value(value);
+    assert!(
+        expected_ascii_value_is_valid(value),
+        "Metadata::insert accepted an invalid ASCII metadata value: {value:?}",
+    );
     let (stored_key, stored_value) = metadata
         .iter()
         .last()
@@ -175,8 +179,8 @@ fn assert_ascii_insert_observation(
     );
     match stored_value {
         MetadataValue::Ascii(stored) => assert_eq!(
-            stored, &expected_value,
-            "accepted ASCII metadata value was not sanitized as documented",
+            stored, value,
+            "accepted ASCII metadata value changed during insertion",
         ),
         MetadataValue::Binary(_) => panic!("Metadata::insert stored an ASCII value as binary"),
     }

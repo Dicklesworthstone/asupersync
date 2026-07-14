@@ -48,11 +48,10 @@
 //!       `:scheme` all fail validation.
 //!
 //!   (f) **CRLF / control-char injection blocked at insert
-//!       boundary** — sanitize_metadata_ascii_value
-//!       (streaming.rs:321-338) strips bytes outside
-//!       0x20-0x7E ASCII visible range from VALUE. This was
-//!       audited in tick #152 — re-pinned here at the
-//!       request-line boundary.
+//!       boundary** — `Metadata::insert` rejects the entire
+//!       value when any byte falls outside printable ASCII
+//!       0x20-0x7E. It does not strip and concatenate fragments,
+//!       which could transmute malformed protocol values.
 //!
 //!   (g) **Reserved `grpc-*` prefix enforcement** — inbound
 //!       metadata validator (server.rs:310-315) rejects any
@@ -62,7 +61,7 @@
 //!
 //! Regression tests below pin (a)-(g).
 
-use asupersync::grpc::streaming::{Metadata, MetadataValue};
+use asupersync::grpc::streaming::Metadata;
 
 #[test]
 fn metadata_insert_rejects_disallowed_chars_in_key() {
@@ -157,22 +156,15 @@ fn metadata_insert_bin_keeps_existing_bin_suffix() {
 }
 
 #[test]
-fn metadata_insert_value_strips_crlf_and_non_visible_ascii() {
-    // Pin (f): ASCII control chars + non-ASCII bytes stripped
-    // from VALUE at insert. A peer cannot inject CRLF into a
-    // header value to smuggle additional headers (or forged
-    // grpc-status). Originally audited in tick #152; re-pinned
-    // at the request-line metadata-key boundary.
+fn metadata_insert_value_rejects_crlf_and_non_visible_ascii() {
+    // Pin (f): reject the whole value so a peer cannot inject CRLF
+    // or have invalid fragments concatenated into a different value.
     let mut metadata = Metadata::new();
-    assert!(metadata.insert("x-test", "ok\r\nx-evil: 1"));
-    let value = match metadata.get("x-test") {
-        Some(MetadataValue::Ascii(s)) => s.clone(),
-        other => panic!("expected Ascii, got {other:?}"),
-    };
     assert!(
-        !value.contains('\r') && !value.contains('\n'),
-        "CRLF stripped; got {value:?}",
+        !metadata.insert("x-test", "ok\r\nx-evil: 1"),
+        "metadata containing CRLF must be rejected",
     );
+    assert!(metadata.get("x-test").is_none());
 }
 
 #[test]
@@ -187,7 +179,6 @@ fn metadata_keys_with_valid_chars_are_accepted() {
         "user_agent",
         "app.name",
         "x-tenant-1",
-        "session-token-bin",
         "x123",
     ];
     for key in valid_keys {

@@ -730,21 +730,32 @@ fn build_metadata(auth: &AuthSetup) -> Metadata {
             // No auth metadata
         }
         AuthSetup::Valid(valid_token) => {
-            insert_authorization_metadata(&mut metadata, valid_token.as_metadata_value());
+            assert!(
+                metadata.insert("authorization", valid_token.as_metadata_value()),
+                "valid authorization metadata must be accepted"
+            );
         }
         AuthSetup::Invalid(invalid_token) => {
-            insert_authorization_metadata(&mut metadata, invalid_token.as_metadata_value());
+            let accepted = metadata.insert("authorization", invalid_token.as_metadata_value());
+            if matches!(invalid_token, InvalidAuthToken::Binary) {
+                assert!(
+                    !accepted,
+                    "authorization metadata with ASCII controls must reject as a whole"
+                );
+                assert!(
+                    metadata.get("authorization").is_none(),
+                    "rejected authorization metadata must not mutate the container"
+                );
+            } else {
+                assert!(
+                    accepted,
+                    "syntactically valid authorization metadata must reach auth validation"
+                );
+            }
         }
     }
 
     metadata
-}
-
-fn insert_authorization_metadata(metadata: &mut Metadata, value: String) {
-    assert!(
-        metadata.insert("authorization", value),
-        "static authorization metadata key must be accepted"
-    );
 }
 
 fn create_health_request(service: String, metadata: Metadata) -> Request<HealthCheckRequest> {

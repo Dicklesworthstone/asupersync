@@ -1,50 +1,55 @@
 //! Audit + regression test for `src/grpc/server.rs` aggregate
-//! request-body cap (tick #204, P3 fix from tick #203).
+//! request-body meter seam (tick #204, follow-up to tick #203).
 //!
 //! Operator's question: "verify aggregate request-body cap (P3
-//! fix)." Closes the no-aggregate-cap finding from tick #203.
+//! fix)." The configuration and helper exist, but source inspection
+//! shows that the built-in dispatch/streaming paths do not instantiate
+//! the meter. This audit therefore does not claim live enforcement.
 //!
-//! Audit context — pre-fix the only upload bounds were:
-//!   * Per-message LPM body cap (max_recv_message_size).
-//!   * In-flight item count cap (MAX_STREAM_BUFFERED = 1024).
-//!   * HTTP/2 stream window (1 MiB default).
-//!   * Wall-clock cap (max_request_deadline, opt-in).
+//! Audit context: the older audit multiplied the configured per-message
+//! value by the standalone queue capacity and described the 4 GiB product
+//! as a live per-stream bound. Current source inspection finds no common
+//! production transport path connecting those helpers, the stored H2 window
+//! value, and the stream queue. They are independent configuration/helper
+//! values; their arithmetic product is not transport proof.
 //!
-//! Theoretical max in-flight per stream was thus
-//! 1024 × max_recv_message_size = 4 GiB (default 4 MiB cap),
-//! and the spec doesn't bound aggregate bytes per stream.
+//! Helper seam: `ServerConfig::max_request_body_bytes: Option<usize>`
+//! plus `RequestBodyMeter`, which an integrating transport adapter can
+//! instantiate per call and increment after each message decode.
 //!
-//! Fix: add `ServerConfig::max_request_body_bytes: Option<usize>`
-//! and a `RequestBodyMeter` helper that transport adapters
-//! instantiate per-call and increment after each message decode.
+//! Audit findings:
 //!
-//! Audit findings, post-fix:
-//!
-//!   (a) **`max_request_body_bytes` defaults to None** — pre-fix
-//!       behavior preserved; opt-in for stricter ceiling.
-//!   (b) **`ServerBuilder::max_request_body_bytes(size)`** sets
-//!       the cap.
-//!   (c) **`RequestBodyMeter::from_config(&config)`** wires the
-//!       per-call meter from the server config.
+//!   (a) **`max_request_body_bytes` defaults to None** — pre-helper
+//!       behavior preserved; opt-in configuration.
+//!   (b) **`ServerBuilder::max_request_body_bytes(size)`** stores
+//!       the caller-created meter limit.
+//!   (c) **`RequestBodyMeter::from_config(&config)`** configures a
+//!       caller-created meter from the server config.
 //!   (d) **`record_message_bytes(n)`** accumulates and rejects
 //!       at `total > cap` with `Status::resource_exhausted`.
 //!   (e) **None-cap meter records but never rejects** — preserves
 //!       pre-fix behavior under default config.
-//!   (f) **Saturating accumulator** — `usize::MAX` argument
-//!       cannot wrap past the cap check.
+//!   (f) **Overflow fails closed under a cap** — checked addition
+//!       rejects mathematical totals above `usize::MAX`, including
+//!       when the configured cap itself is `usize::MAX`. With no
+//!       cap, diagnostic accounting saturates instead of wrapping.
 //!   (g) **Error message includes both actual and cap** for SRE
 //!       diagnostics.
-//!   (h) **Per-call instance** — operators that maintain a
+//!   (h) **Per-call instance** — adapters that maintain a
 //!       meter per stream don't accidentally share state.
+//!   (i) **Built-in enforcement remains unwired.** `dispatch_unary`
+//!       and the current streaming transport do not construct or call
+//!       `RequestBodyMeter`; setting the builder field alone therefore
+//!       does not impose a live aggregate body limit.
 //!
-//! Regression tests below pin (a)-(h).
+//! Regression tests below pin the configuration/helper behavior only.
 
 use asupersync::grpc::server::RequestBodyMeter;
 use asupersync::grpc::status::Code;
 use asupersync::grpc::{ServerBuilder, ServerConfig};
 
 #[test]
-fn default_server_config_has_no_aggregate_cap() {
+fn default_server_config_has_no_aggregate_meter_limit() {
     // Pin (a): default is None — pre-fix behavior preserved.
     let config = ServerConfig::default();
     assert!(
@@ -54,7 +59,7 @@ fn default_server_config_has_no_aggregate_cap() {
 }
 
 #[test]
-fn server_builder_max_request_body_bytes_sets_cap() {
+fn server_builder_max_request_body_bytes_sets_meter_limit() {
     // Pin (b): the builder method stores the value.
     let server = ServerBuilder::new()
         .max_request_body_bytes(2 * 1024 * 1024)
@@ -62,14 +67,14 @@ fn server_builder_max_request_body_bytes_sets_cap() {
     assert_eq!(
         server.config().max_request_body_bytes,
         Some(2 * 1024 * 1024),
-        "max_request_body_bytes builder stores the cap",
+        "max_request_body_bytes builder stores the meter limit",
     );
 }
 
 #[test]
 fn request_body_meter_from_config_inherits_cap() {
-    // Pin (c): from_config wires the per-call meter from the
-    // configured server cap.
+    // Pin (c): from_config initializes a caller-created meter from the
+    // configured limit. It does not prove transport integration.
     let server = ServerBuilder::new()
         .max_request_body_bytes(1024 * 1024)
         .build();
@@ -136,19 +141,25 @@ fn request_body_meter_with_none_cap_never_rejects() {
     meter
         .record_message_bytes(usize::MAX / 2)
         .expect("None cap accepts second huge");
-    // Saturating accumulator still doesn't reject under None.
-    assert!(meter.bytes_accumulated() > 0);
+    meter
+        .record_message_bytes(2)
+        .expect("None cap accepts the saturating addition");
+    assert_eq!(
+        meter.bytes_accumulated(),
+        usize::MAX,
+        "None-limit accumulation must saturate rather than wrap",
+    );
 }
 
 #[test]
 fn request_body_meter_saturates_on_usize_max_argument() {
     // Pin (f): a peer that somehow triggers a usize::MAX byte
     // count cannot wrap the accumulator past the cap-check.
-    // Saturating add caps at usize::MAX.
     let mut meter = RequestBodyMeter::new(Some(1024));
+    meter.record_message_bytes(1).expect("seed under cap");
     let err = meter
         .record_message_bytes(usize::MAX)
-        .expect_err("usize::MAX rejects");
+        .expect_err("1 + usize::MAX must saturate above the cap");
     assert_eq!(err.code(), Code::ResourceExhausted);
     // Accumulator saturated at usize::MAX (NOT wrapped to 0
     // or some smaller value).
@@ -156,9 +167,34 @@ fn request_body_meter_saturates_on_usize_max_argument() {
 }
 
 #[test]
+fn request_body_meter_rejects_overflow_when_cap_is_usize_max() {
+    // Exact-cap is allowed, but one more byte has a mathematical total
+    // larger than usize::MAX and must fail closed rather than appear equal.
+    let mut meter = RequestBodyMeter::new(Some(usize::MAX));
+    meter
+        .record_message_bytes(usize::MAX)
+        .expect("exact usize::MAX cap is allowed");
+    let err = meter
+        .record_message_bytes(1)
+        .expect_err("usize::MAX + 1 must reject even when cap is usize::MAX");
+    assert_eq!(err.code(), Code::ResourceExhausted);
+    assert!(
+        err.message().contains("overflow") && err.message().contains(&usize::MAX.to_string()),
+        "overflow diagnostic must name the fail-closed condition and cap; got {}",
+        err.message(),
+    );
+    assert_eq!(meter.bytes_accumulated(), usize::MAX);
+    let sticky = meter
+        .record_message_bytes(0)
+        .expect_err("an unrepresentable cumulative total must remain over cap");
+    assert_eq!(sticky.code(), Code::ResourceExhausted);
+    assert!(sticky.message().contains("prior byte-total overflow"));
+}
+
+#[test]
 fn request_body_meter_per_call_instance_independence() {
-    // Pin (h): two meters from the same config are
-    // independent — adapters that maintain one per stream
+    // Pin (h): two meters from the same config are independent — adapters
+    // that explicitly maintain one per stream
     // don't share state.
     let server = ServerBuilder::new().max_request_body_bytes(1024).build();
     let mut meter_a = RequestBodyMeter::from_config(server.config());
@@ -194,9 +230,7 @@ fn request_body_meter_first_message_can_alone_exceed_cap() {
 
 #[test]
 fn request_body_meter_zero_bytes_record_is_idempotent() {
-    // Pin (d) edge: recording 0 bytes is a no-op — useful
-    // for adapters that call record on every chunk including
-    // empty CONTINUATION frames.
+    // Pin (d) edge: recording a zero-length decoded message is a no-op.
     let mut meter = RequestBodyMeter::new(Some(1024));
     meter.record_message_bytes(0).expect("0 bytes OK");
     meter.record_message_bytes(0).expect("repeat 0 bytes OK");
@@ -213,12 +247,11 @@ fn server_config_max_request_body_bytes_is_documented_field() {
             .expect("read src/grpc/server.rs");
     assert!(
         server_rs.contains("br-asupersync-woj18e"),
-        "max_request_body_bytes field MUST reference the fix bead so \
-         operators can correlate the cap with the audit history",
+        "max_request_body_bytes field must reference the helper-seam bead so \
+         operators can correlate the limit with the audit history",
     );
     assert!(
         server_rs.contains("RequestBodyMeter"),
-        "RequestBodyMeter helper documented at the field's doc comment \
-         as the wiring path",
+        "RequestBodyMeter helper must be documented at the field's doc comment",
     );
 }

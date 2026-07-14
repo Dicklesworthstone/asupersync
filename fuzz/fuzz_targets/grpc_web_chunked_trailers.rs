@@ -177,10 +177,11 @@ fn sanitize_metadata_key(key: &str, for_binary: bool) -> Option<String> {
 }
 
 fn sanitize_ascii_value(value: &str) -> String {
-    // Allow printable ASCII + deliberately include CR/LF to exercise percent-encoding
+    // Metadata insertion is fail-closed: only printable ASCII is accepted.
+    // grpc-message percent-encoding has dedicated codec coverage elsewhere.
     value
         .chars()
-        .filter(|c| matches!(*c, ' '..='~' | '\r' | '\n'))
+        .filter(|c| matches!(*c, ' '..='~'))
         .take(MAX_VALUE_LEN)
         .collect()
 }
