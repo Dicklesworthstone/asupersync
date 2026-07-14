@@ -130,7 +130,7 @@ impl ActorStateCell {
     #[inline]
     fn compare_and_swap(&self, current: ActorState, new: ActorState) -> bool {
         self.state
-            .compare_exchange_weak(
+            .compare_exchange(
                 Self::encode(current),
                 Self::encode(new),
                 Ordering::AcqRel,
@@ -964,6 +964,11 @@ fn supervised_restart_timestamp(cx: &Cx) -> u64 {
     )
 }
 
+#[inline]
+fn try_commit_supervised_restart(state: &ActorStateCell) -> bool {
+    state.compare_and_swap(ActorState::Running, ActorState::Created)
+}
+
 async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Outcome<(), JoinError> {
     if cx.checkpoint().is_err() {
         return Outcome::err(actor_cancel_join_error(cx));
@@ -1083,7 +1088,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 inner: Box::pin(run_actor_loop(actor, child_cx, &mut cell)),
             }
             .await;
-            let outcome = match result {
+            state_for_task.store(ActorState::Stopped);
+            match result {
                 Ok(actor_final) => {
                     let _ = result_tx.send_blocking(Ok(actor_final));
                     Outcome::Ok(())
@@ -1095,9 +1101,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                         result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     Outcome::Panicked(panic_payload)
                 }
-            };
-            state_for_task.store(ActorState::Stopped);
-            outcome
+            }
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);
@@ -1189,19 +1193,27 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         };
 
         let wrapped = async move {
-            let result = run_supervised_loop(
-                actor,
-                &mut factory,
-                child_cx,
-                &mut cell,
-                Supervisor::new(strategy),
-                task_id,
-                region_id,
-            )
-            .await;
+            let result = match (crate::cx::scope::CatchUnwind {
+                inner: Box::pin(run_supervised_loop(
+                    actor,
+                    &mut factory,
+                    child_cx,
+                    &mut cell,
+                    Supervisor::new(strategy),
+                    task_id,
+                    region_id,
+                )),
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(payload) => Err(JoinError::Panicked(crate::types::PanicPayload::new(
+                    crate::cx::scope::payload_to_string(&payload),
+                ))),
+            };
+            state_for_task.store(ActorState::Stopped);
             let outcome = join_result_to_task_outcome(&result).map_err(|_| ());
             let _ = result_tx.send_blocking(result);
-            state_for_task.store(ActorState::Stopped);
             outcome
         };
 
@@ -1317,16 +1329,19 @@ where
                             }
                         }
 
-                        if cell.state.load() == ActorState::Stopping || cx.checkpoint().is_err() {
+                        if cx.checkpoint().is_err() {
                             cx.trace("supervised_actor::restart_suppressed");
                             return Err(JoinError::Panicked(panic_payload));
                         }
 
-                        // Reset actor state so the restarted actor enters
-                        // Running instead of staying in Stopping (which
-                        // would cause it to exit immediately on empty
-                        // mailbox).
-                        cell.state.store(ActorState::Created);
+                        // Commit the restart only while the actor is still
+                        // Running. A concurrent stop transitions it to
+                        // Stopping; the conditional swap must preserve that
+                        // shutdown request instead of resurrecting the actor.
+                        if !try_commit_supervised_restart(&cell.state) {
+                            cx.trace("supervised_actor::restart_suppressed");
+                            return Err(JoinError::Panicked(panic_payload));
+                        }
                         current_actor = factory();
                     }
                     SupervisionDecision::Stop { .. } => {
@@ -1401,6 +1416,39 @@ mod tests {
         }
 
         Waker::from(Arc::new(CountingWaker { counter }))
+    }
+
+    fn terminal_state_waker(
+        state: Arc<ActorStateCell>,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Waker {
+        struct TerminalStateWaker {
+            state: Arc<ActorStateCell>,
+            counter: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl TerminalStateWaker {
+            fn record_wake(&self) {
+                assert_eq!(
+                    self.state.load(),
+                    ActorState::Stopped,
+                    "join receiver must not wake before actor state is terminal"
+                );
+                self.counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        impl std::task::Wake for TerminalStateWaker {
+            fn wake(self: Arc<Self>) {
+                self.record_wake();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.record_wake();
+            }
+        }
+
+        Waker::from(Arc::new(TerminalStateWaker { state, counter }))
     }
 
     /// Simple counter actor for testing.
@@ -2432,17 +2480,21 @@ mod tests {
             .expect("spawn actor");
         handle.try_send(()).expect("queue panic message");
 
-        let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
         let mut poll_cx = Context::from_waker(&waker);
+        let join = std::pin::pin!(handle.join(&cx));
+        let mut join = join;
+        assert!(matches!(join.as_mut().poll(&mut poll_cx), Poll::Pending));
+
         match stored.poll(&mut poll_cx) {
             Poll::Ready(Outcome::Panicked(payload)) => {
                 assert_eq!(payload.message(), "actor boom", "panic payload preserved");
             }
             other => panic!("panicking actor task must return Outcome::Panicked: {other:?}"),
         }
+        assert_eq!(wake_count.load(Ordering::Relaxed), 1);
 
-        let join = std::pin::pin!(handle.join(&cx));
-        let mut join = join;
         match join.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Err(JoinError::Panicked(payload))) => {
                 assert_eq!(
@@ -2492,8 +2544,13 @@ mod tests {
             .expect("spawn supervised actor");
         handle.try_send(()).expect("queue panic message");
 
-        let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
         let mut poll_cx = Context::from_waker(&waker);
+        let join = std::pin::pin!(handle.join(&cx));
+        let mut join = join;
+        assert!(matches!(join.as_mut().poll(&mut poll_cx), Poll::Pending));
+
         match stored.poll(&mut poll_cx) {
             Poll::Ready(Outcome::Panicked(payload)) => {
                 assert_eq!(
@@ -2506,9 +2563,8 @@ mod tests {
                 panic!("panicking supervised actor task must return Outcome::Panicked: {other:?}")
             }
         }
+        assert_eq!(wake_count.load(Ordering::Relaxed), 1);
 
-        let join = std::pin::pin!(handle.join(&cx));
-        let mut join = join;
         match join.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Err(JoinError::Panicked(payload))) => {
                 assert_eq!(
@@ -2521,6 +2577,87 @@ mod tests {
         }
 
         crate::test_complete!("spawn_supervised_actor_panic_surfaces_as_task_outcome");
+    }
+
+    #[test]
+    fn supervised_restart_factory_panic_reaches_join_and_marks_stopped() {
+        use std::sync::atomic::AtomicU32;
+
+        init_test("supervised_restart_factory_panic_reaches_join_and_marks_stopped");
+
+        #[derive(Debug)]
+        struct PanicActor;
+
+        impl Actor for PanicActor {
+            type Message = ();
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                panic!("actor panic before restart factory");
+            }
+        }
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+        let factory_calls = Arc::new(AtomicU32::new(0));
+        let calls = Arc::clone(&factory_calls);
+
+        let (mut handle, mut stored) = scope
+            .spawn_supervised_actor(
+                &mut state,
+                &cx,
+                move || {
+                    let attempt = calls.fetch_add(1, Ordering::Relaxed);
+                    if attempt == 0 {
+                        PanicActor
+                    } else {
+                        panic!("restart factory boom");
+                    }
+                },
+                crate::supervision::SupervisionStrategy::Restart(
+                    crate::supervision::RestartConfig::new(1, Duration::from_secs(60))
+                        .with_backoff(crate::supervision::BackoffStrategy::None),
+                ),
+                8,
+            )
+            .expect("spawn supervised actor");
+        handle.try_send(()).expect("queue panic message");
+
+        let actor_ref = handle.sender();
+        let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = terminal_state_waker(Arc::clone(&handle.state), Arc::clone(&wake_count));
+        let mut poll_cx = Context::from_waker(&waker);
+        let join = std::pin::pin!(handle.join(&cx));
+        let mut join = join;
+        assert!(matches!(join.as_mut().poll(&mut poll_cx), Poll::Pending));
+
+        match stored.poll(&mut poll_cx) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                assert_eq!(payload.message(), "restart factory boom");
+            }
+            other => panic!("restart factory panic must terminate the task: {other:?}"),
+        }
+
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(wake_count.load(Ordering::Relaxed), 1);
+        assert!(
+            !actor_ref.is_alive(),
+            "restart factory panic must publish the terminal actor state"
+        );
+
+        match join.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(JoinError::Panicked(payload))) => {
+                assert_eq!(payload.message(), "restart factory boom");
+            }
+            other => panic!("join must preserve the restart factory panic: {other:?}"),
+        }
+
+        crate::test_complete!("supervised_restart_factory_panic_reaches_join_and_marks_stopped");
     }
 
     #[test]
@@ -3004,6 +3141,25 @@ mod tests {
 
         cell.store(ActorState::Stopped);
         assert_eq!(cell.load(), ActorState::Stopped);
+    }
+
+    #[test]
+    fn supervised_restart_commit_preserves_a_winning_stop() {
+        let restart_wins = ActorStateCell::new(ActorState::Running);
+        assert!(try_commit_supervised_restart(&restart_wins));
+        assert_eq!(restart_wins.load(), ActorState::Created);
+
+        let stop_wins = ActorStateCell::new(ActorState::Running);
+        stop_wins.store(ActorState::Stopping);
+        assert!(
+            !try_commit_supervised_restart(&stop_wins),
+            "restart commit must fail after a concurrent stop linearizes"
+        );
+        assert_eq!(
+            stop_wins.load(),
+            ActorState::Stopping,
+            "failed restart commit must not overwrite the stop request"
+        );
     }
 
     #[test]
