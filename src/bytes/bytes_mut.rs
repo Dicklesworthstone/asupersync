@@ -323,6 +323,44 @@ impl BytesMut {
         }
     }
 
+    /// Discards the first `cnt` bytes, advancing past them without copying.
+    ///
+    /// This is the discard-only counterpart to [`split_to`](Self::split_to):
+    /// it applies the *identical* mutation to `self` (bump the front offset,
+    /// reclaim the backing `Vec` once fully drained) but does **not** allocate
+    /// a head buffer or memcpy the consumed prefix. Use it when a caller only
+    /// needs to drop already-consumed bytes — e.g. a codec flush loop that has
+    /// written `cnt` bytes to the transport and would otherwise pay an
+    /// allocation + memcpy per write pass just to throw the copy away.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cnt > self.len()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::bytes::BytesMut;
+    ///
+    /// let mut buf = BytesMut::from(&b"hello world"[..]);
+    /// buf.advance(6);
+    /// assert_eq!(&buf[..], b"world");
+    /// ```
+    #[inline]
+    pub fn advance(&mut self, cnt: usize) {
+        assert!(
+            cnt <= self.len(),
+            "advance out of bounds: cnt={cnt}, len={}",
+            self.len()
+        );
+
+        self.start = self
+            .start
+            .checked_add(cnt)
+            .expect("BytesMut::advance offset overflow");
+        self.compact_front_if_empty();
+    }
+
     /// Truncate to `len` bytes.
     ///
     /// If `len` is greater than the current length, this has no effect.
@@ -810,6 +848,84 @@ mod tests {
             capacity_still_reused
         );
         crate::test_complete!("bytes_mut_split_to_all_reclaims_front_capacity_for_reuse");
+    }
+
+    #[test]
+    fn bytes_mut_advance_matches_split_to_remainder() {
+        init_test("bytes_mut_advance_matches_split_to_remainder");
+        // `advance(n)` must leave `self` in the exact state `split_to(n)` does,
+        // just without materializing the discarded head. Prove parity across
+        // partial, full, and repeated advances plus front-capacity reclaim.
+        for n in 0..=11usize {
+            let mut via_split = BytesMut::from(&b"hello world"[..]);
+            let _head = via_split.split_to(n);
+            let mut via_advance = BytesMut::from(&b"hello world"[..]);
+            via_advance.advance(n);
+            crate::assert_with_log!(
+                via_split[..] == via_advance[..],
+                "advance leaves same remainder as split_to",
+                &via_split[..],
+                &via_advance[..]
+            );
+            crate::assert_with_log!(
+                via_split.len() == via_advance.len(),
+                "advance leaves same len",
+                via_split.len(),
+                via_advance.len()
+            );
+        }
+
+        // Full drain reclaims the front so the backing Vec is reusable.
+        let mut b = BytesMut::with_capacity(16);
+        b.put_slice(b"abcd");
+        let cap = b.capacity();
+        b.advance(4);
+        crate::assert_with_log!(
+            b.is_empty(),
+            "fully advanced buffer is empty",
+            true,
+            b.is_empty()
+        );
+        crate::assert_with_log!(
+            b.capacity() >= cap,
+            "front capacity reclaimed",
+            true,
+            b.capacity() >= cap
+        );
+        b.put_slice(b"xyz");
+        crate::assert_with_log!(
+            &b[..] == b"xyz",
+            "reusable after full advance",
+            b"xyz",
+            &b[..]
+        );
+
+        // Incremental advances (the codec-flush pattern) drain in order.
+        let mut stream = BytesMut::from(&b"abcdefgh"[..]);
+        stream.advance(3);
+        crate::assert_with_log!(
+            &stream[..] == b"defgh",
+            "after advance(3)",
+            b"defgh",
+            &stream[..]
+        );
+        stream.advance(2);
+        crate::assert_with_log!(
+            &stream[..] == b"fgh",
+            "after advance(2)",
+            b"fgh",
+            &stream[..]
+        );
+        stream.advance(3);
+        crate::assert_with_log!(stream.is_empty(), "fully drained", true, stream.is_empty());
+        crate::test_complete!("bytes_mut_advance_matches_split_to_remainder");
+    }
+
+    #[test]
+    #[should_panic(expected = "advance out of bounds")]
+    fn bytes_mut_advance_past_len_panics() {
+        let mut b = BytesMut::from(&b"abc"[..]);
+        b.advance(4);
     }
 
     #[test]

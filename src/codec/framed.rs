@@ -306,7 +306,10 @@ where
                     "failed to write frame to transport",
                 )));
             }
-            let _ = self.write_buf.split_to(n);
+            // Discard the just-written bytes. `advance` bumps the front offset
+            // in place — no alloc + memcpy of a throwaway `split_to` head per
+            // write pass (up to MAX_WRITE_PASSES_PER_POLL passes per flush).
+            self.write_buf.advance(n);
             write_passes += 1;
         }
         Pin::new(&mut self.inner).poll_flush(cx)

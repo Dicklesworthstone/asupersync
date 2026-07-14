@@ -1041,3 +1041,86 @@ fn allocation_audit_structured_report() {
         json_bytes = json_report.len()
     );
 }
+
+/// A/B allocation measurement for the codec-flush optimization
+/// (br-asupersync-framed-flush-split-alloc). The `Framed`/`FramedWrite` flush
+/// loop discards already-written bytes on every write pass. The old
+/// `let _ = buf.split_to(n)` heap-allocated and memcpy'd a throwaway head each
+/// pass; `buf.advance(n)` bumps the front offset in place. This exercises the
+/// exact discard operation and proves `advance` is allocation-free and strictly
+/// cheaper than `split_to`.
+#[test]
+fn bytes_mut_advance_flush_discard_is_zero_alloc_vs_split_to() {
+    use asupersync::bytes::{BufMut, BytesMut};
+
+    let _guard = ALLOC_TEST_GUARD.lock();
+    init_test("bytes_mut_advance_flush_discard_is_zero_alloc_vs_split_to");
+
+    const FRAMES: usize = 64; // write passes per flush (MAX_WRITE_PASSES_PER_POLL-scale)
+    const FRAME: usize = 1024; // bytes discarded per pass
+
+    // Warm up so the measured sections are steady-state (no capacity growth).
+    {
+        let mut warm = BytesMut::with_capacity(FRAMES * FRAME);
+        for _ in 0..FRAMES {
+            warm.put_slice(&[0u8; FRAME]);
+        }
+        for _ in 0..FRAMES {
+            warm.advance(FRAME);
+        }
+    }
+
+    // A) Optimized path: fill (outside measurement), then drain via advance().
+    test_section!("measure-advance");
+    let mut buf_a = BytesMut::with_capacity(FRAMES * FRAME);
+    for _ in 0..FRAMES {
+        buf_a.put_slice(&[7u8; FRAME]);
+    }
+    let before_a = AllocSnapshot::take();
+    for _ in 0..FRAMES {
+        buf_a.advance(FRAME);
+    }
+    let advance_allocs = AllocSnapshot::take().allocs_since(&before_a);
+
+    // B) Old path: same fill, then drain via split_to() (head discarded).
+    test_section!("measure-split_to");
+    let mut buf_b = BytesMut::with_capacity(FRAMES * FRAME);
+    for _ in 0..FRAMES {
+        buf_b.put_slice(&[7u8; FRAME]);
+    }
+    let before_b = AllocSnapshot::take();
+    for _ in 0..FRAMES {
+        let _ = buf_b.split_to(FRAME);
+    }
+    let split_to_allocs = AllocSnapshot::take().allocs_since(&before_b);
+
+    tracing::info!(
+        advance_allocs,
+        split_to_allocs,
+        frames = FRAMES,
+        "flush-discard A/B allocations"
+    );
+
+    // The advance discard loop is allocation-free (bumps `start` only); small
+    // tolerance for parallel allocator-counter noise from tests that don't hold
+    // ALLOC_TEST_GUARD. split_to heap-allocs one head per call, so advance must
+    // allocate strictly fewer.
+    assert_with_log!(
+        advance_allocs <= 2,
+        "advance flush discard is ~zero-alloc",
+        "<=2",
+        advance_allocs
+    );
+    assert_with_log!(
+        advance_allocs < split_to_allocs,
+        "advance allocates strictly fewer than split_to",
+        format!("advance {advance_allocs} < split_to {split_to_allocs}"),
+        advance_allocs < split_to_allocs
+    );
+
+    test_complete!(
+        "bytes_mut_advance_flush_discard_is_zero_alloc_vs_split_to",
+        advance_allocs = advance_allocs,
+        split_to_allocs = split_to_allocs
+    );
+}

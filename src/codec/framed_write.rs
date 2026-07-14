@@ -128,7 +128,9 @@ where
                     "failed to write frame to transport",
                 )));
             }
-            let _ = self.buffer.split_to(n);
+            // Discard the just-written bytes without the alloc + memcpy of a
+            // throwaway `split_to` head; `advance` bumps the front offset.
+            self.buffer.advance(n);
             write_passes += 1;
         }
         Pin::new(&mut self.inner).poll_flush(cx)
