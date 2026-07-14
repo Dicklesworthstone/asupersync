@@ -152,7 +152,7 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -1453,14 +1453,6 @@ pub struct ThreeLaneScheduler {
     task_table: Option<Arc<ContendedMutex<TaskTable>>>,
     /// Maximum global ready queue depth (0 = unbounded).
     global_queue_limit: usize,
-    /// Scheduler-owned count of ready injections rejected by governor drain mode.
-    ///
-    /// Ready injection APIs take `&self`, so they cannot mutate worker-local
-    /// [`PreemptionMetrics`] directly. The counters are folded into worker
-    /// metrics when ownership is transferred via [`Self::take_workers`].
-    governor_throttled_spawns: CachePadded<AtomicU64>,
-    /// Scheduler-owned count of critical ready injections that bypassed drain mode.
-    governor_bypass_spawns: CachePadded<AtomicU64>,
     /// Optional shared collector for runtime scheduler evidence snapshots.
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
     /// Deterministic placement mode for cohort-aware stealing.
@@ -1798,8 +1790,6 @@ impl ThreeLaneScheduler {
             steal_batch_size,
             enable_parking,
             global_queue_limit: 0,
-            governor_throttled_spawns: CachePadded::new(AtomicU64::new(0)),
-            governor_bypass_spawns: CachePadded::new(AtomicU64::new(0)),
             scheduler_evidence,
             placement_mode: SchedulerPlacementMode::default(),
             worker_cohort_map: None,
@@ -2263,25 +2253,6 @@ impl ThreeLaneScheduler {
         self.global.clone()
     }
 
-    /// Checks if any worker's governor suggests throttling new spawns.
-    ///
-    /// Returns `true` if any worker has a cached governor suggestion of
-    /// `DrainObligations` or `DrainRegions`, indicating the system is in
-    /// a suspect state and new spawns should be throttled.
-    #[must_use]
-    pub fn should_throttle_spawns(&self) -> bool {
-        // Check the first worker's governor state as representative
-        // (all workers should reach similar conclusions on system state)
-        if let Some(worker) = self.workers.first() {
-            let suggestion = worker.cached_suggestion;
-            return matches!(
-                suggestion,
-                SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions
-            );
-        }
-        false
-    }
-
     /// Read-only task table access for inject/spawn methods.
     ///
     /// Uses the sharded task table when available, otherwise falls back to
@@ -2423,29 +2394,15 @@ impl ThreeLaneScheduler {
         }
     }
 
-    /// Injects a task into the ready lane with queue limit and governor checks.
+    /// Injects an admitted task into the ready lane with queue-limit diagnostics.
     ///
-    /// When the governor is in drain mode (DrainObligations/DrainRegions), this
-    /// method throttles new ready task injections to prevent queue growth during
-    /// suspected deadlock conditions. The task is still logged but not scheduled.
+    /// Admission policy belongs before task creation and must return an explicit
+    /// rejection or backpressure result. Once `wake_state.notify()` succeeds,
+    /// this path must publish the task: silently dropping it would strand its
+    /// join state and any obligations it owns.
     #[inline]
     fn inject_global_ready_checked(&self, task: TaskId, priority: u8) {
-        // Check if governor suggests throttling spawns due to suspect state
-        let governor_drain_mode = self.should_throttle_spawns();
-
-        if governor_drain_mode {
-            // Throttle spawn during suspected deadlock conditions
-            crate::tracing_compat::warn!(
-                ?task,
-                priority,
-                "inject_ready: throttled spawn due to governor drain suggestion (suspect deadlock)"
-            );
-            self.governor_throttled_spawns
-                .fetch_add(1, Ordering::Release);
-            return; // Task is throttled, not scheduled
-        }
-
-        // Original queue limit warning (but still schedules)
+        // The queue limit is diagnostic only; admission already succeeded.
         if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
             crate::tracing_compat::warn!(
                 ?task,
@@ -2523,80 +2480,6 @@ impl ThreeLaneScheduler {
             trace!(
                 ?task,
                 priority, "inject_ready: task NOT scheduled (should_schedule=false)"
-            );
-        }
-    }
-
-    /// Injects a critical system task that bypasses governor throttling.
-    ///
-    /// This should only be used for essential system tasks (e.g., finalizers,
-    /// cancel handlers) that must execute even during suspected deadlock conditions.
-    /// Regular application tasks should use `inject_ready()`.
-    pub fn inject_ready_bypass_governor(&self, task: TaskId, priority: u8) {
-        // Atomic check-and-inject: both the wake_state check and injection happen
-        // under the same task table lock to prevent TOCTOU races.
-        let (injected, is_local) = self.with_task_table_ref(|tt| {
-            match tt.task(task) {
-                Some(record) => {
-                    let is_local = record.is_local();
-                    if is_local {
-                        // Local tasks cannot be globally injected
-                        (false, true)
-                    } else if record.wake_state.notify() {
-                        // Task state allows scheduling, inject while holding lock
-                        self.global.inject_ready(task, priority);
-                        (true, false)
-                    } else {
-                        // Task already scheduled or completed, skip injection
-                        (false, false)
-                    }
-                }
-                None => {
-                    // Task record doesn't exist (e.g., in tests), allow injection
-                    self.global.inject_ready(task, priority);
-                    (true, false)
-                }
-            }
-        });
-
-        debug_assert!(
-            !is_local,
-            "Attempted to globally inject local task {task:?}. Local tasks must be scheduled on their owner thread."
-        );
-        if is_local {
-            error!(
-                ?task,
-                "inject_ready_bypass_governor: cannot globally inject local (!Send) task"
-            );
-            return;
-        }
-
-        if injected {
-            self.governor_bypass_spawns.fetch_add(1, Ordering::Release);
-
-            trace!(
-                ?task,
-                priority, "inject_ready: critical system task bypassing governor throttling"
-            );
-
-            // The task was injected inside the task-table critical section
-            // above. Keep post-injection accounting here without enqueueing it
-            // a second time.
-            if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
-                crate::tracing_compat::warn!(
-                    ?task,
-                    priority,
-                    limit = self.global_queue_limit,
-                    current = self.global.ready_count(),
-                    "inject_ready_bypass: global ready queue at capacity, scheduling anyway"
-                );
-            }
-            self.record_scheduler_evidence_enqueue(task);
-            self.wake_one();
-        } else {
-            trace!(
-                ?task,
-                priority, "inject_ready_bypass: task NOT scheduled (should_schedule=false)"
             );
         }
     }
@@ -2749,16 +2632,6 @@ impl ThreeLaneScheduler {
     }
 
     pub fn take_workers(&mut self) -> Vec<ThreeLaneWorker> {
-        if let Some(worker) = self.workers.first_mut() {
-            worker.preemption_metrics.governor_throttled_spawns = worker
-                .preemption_metrics
-                .governor_throttled_spawns
-                .saturating_add(self.governor_throttled_spawns.load(Ordering::Acquire));
-            worker.preemption_metrics.governor_bypass_spawns = worker
-                .preemption_metrics
-                .governor_bypass_spawns
-                .saturating_add(self.governor_bypass_spawns.load(Ordering::Acquire));
-        }
         std::mem::take(&mut self.workers).into_vec()
     }
 
@@ -3227,16 +3100,6 @@ pub struct PreemptionMetrics {
     /// Follower short-timeout (<= 5ms) parks intentionally skipped to avoid
     /// wake-timeout futex churn.
     pub follower_short_wait_skip_le_5ms: u64,
-    /// Total ready task injections throttled due to governor drain suggestions.
-    ///
-    /// When the Lyapunov governor suggests DrainObligations or DrainRegions,
-    /// new ready task spawns are throttled to prevent queue growth during
-    /// suspected deadlock conditions.
-    pub governor_throttled_spawns: u64,
-    /// Total ready task injections allowed despite governor drain state.
-    ///
-    /// Some critical tasks (e.g., system tasks) may bypass governor throttling.
-    pub governor_bypass_spawns: u64,
     /// Number of times a worker prefetched a bounded FIFO slice from the
     /// global ready queue.
     pub global_ready_batch_drains: u64,
@@ -14306,63 +14169,57 @@ mod tests {
         }
     }
 
-    /// REGRESSION: Governor spawn throttling during suspect states.
+    /// REGRESSION: Worker governor state must not become a post-admission gate.
     ///
-    /// Verifies that when the Lyapunov governor detects suspect state
-    /// (DrainObligations/DrainRegions), new ready task spawns are throttled
-    /// and observable in scheduler metrics.
+    /// Production construction uses [`ThreeLaneScheduler::take_workers`] to split
+    /// the worker fleet from the retained coordinator. This regression freezes
+    /// the scheduler side of that transfer contract: once a task record exists
+    /// and its wake notification succeeds, the coordinator must publish it
+    /// regardless of a moved worker's last scheduling suggestion. Admission
+    /// control belongs before task creation.
     #[test]
-    fn regression_governor_spawn_throttling_in_drain_mode() {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    fn regression_worker_transfer_preserves_ready_task_liveness() {
+        for suggestion in [
+            SchedulingSuggestion::DrainObligations,
+            SchedulingSuggestion::DrainRegions,
+        ] {
+            let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 2);
+            scheduler.workers[0].set_cached_suggestion(suggestion);
+            let workers = scheduler.take_workers();
 
-        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+            assert_eq!(workers.len(), 1, "the configured worker must transfer");
+            assert!(
+                scheduler.workers.is_empty(),
+                "the retained coordinator must not retain a shadow worker"
+            );
+            assert_eq!(
+                workers[0].cached_suggestion, suggestion,
+                "worker-local governor state must move with the worker"
+            );
 
-        // The governor decision logic has its own tests; this regression
-        // isolates the injection contract once drain mode has been cached.
-        scheduler.workers[0].set_cached_suggestion(SchedulingSuggestion::DrainObligations);
+            let first = TaskId::new_for_test(1, 0);
+            let second = TaskId::new_for_test(2, 0);
 
-        // Verify governor is in drain mode
-        assert!(
-            scheduler.should_throttle_spawns(),
-            "Scheduler should throttle spawns when governor suggests drain mode"
-        );
+            scheduler.inject_ready(first, 50);
+            scheduler.inject_ready(first, 99);
+            scheduler.inject_ready(second, 60);
 
-        // Attempt to inject regular ready tasks - should be throttled
-        let throttled_task_1 = TaskId::new_for_test(1001, 1);
-        let throttled_task_2 = TaskId::new_for_test(1002, 1);
-
-        let initial_ready_count = scheduler.global.ready_count();
-
-        scheduler.inject_ready(throttled_task_1, 50);
-        scheduler.inject_ready(throttled_task_2, 60);
-
-        // Verify tasks were NOT scheduled due to governor throttling
-        assert_eq!(
-            scheduler.global.ready_count(),
-            initial_ready_count,
-            "Ready queue should not grow when governor is throttling spawns"
-        );
-
-        // Inject bypass task - should succeed
-        let bypass_task = TaskId::new_for_test(1003, 1);
-        scheduler.inject_ready_bypass_governor(bypass_task, 70);
-
-        assert_eq!(
-            scheduler.global.ready_count(),
-            initial_ready_count + 1,
-            "Bypass injection should ignore governor throttling"
-        );
-
-        // Verify metrics tracked the throttling.
-        let workers = scheduler.take_workers();
-        let throttled_count = workers[0].preemption_metrics.governor_throttled_spawns;
-        let bypass_count = workers[0].preemption_metrics.governor_bypass_spawns;
-
-        assert_eq!(
-            throttled_count, 2,
-            "Should track 2 throttled spawns in metrics"
-        );
-        assert_eq!(bypass_count, 1, "Should track 1 bypass spawn in metrics");
+            for (expected_task, expected_priority) in [(first, 50), (second, 60)] {
+                let ready = scheduler
+                    .global
+                    .pop_ready()
+                    .expect("admitted task must remain runnable after worker transfer");
+                assert_eq!(
+                    ready.task, expected_task,
+                    "ready lane must preserve FIFO order"
+                );
+                assert_eq!(ready.priority, expected_priority);
+            }
+            assert!(
+                scheduler.global.pop_ready().is_none(),
+                "duplicate notification must not publish a second ready entry"
+            );
+        }
     }
 
     // === UCB1 Convergence Golden Tests ===
