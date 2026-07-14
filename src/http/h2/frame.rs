@@ -138,7 +138,7 @@ impl FrameHeader {
             | ((u32::from(src[7])) << 8)
             | u32::from(src[8]);
 
-        let _ = src.split_to(FRAME_HEADER_SIZE);
+        src.advance(FRAME_HEADER_SIZE);
 
         Ok(Self {
             length,

@@ -1028,7 +1028,7 @@ impl<T> ClientIncomingBody<T> {
                     let line = &self.buffer.as_ref()[..line_end];
                     let chunk_size = parse_chunk_size_line(line)?;
 
-                    let _ = self.buffer.split_to(line_end + 2);
+                    self.buffer.advance(line_end + 2);
 
                     if chunk_size == 0 {
                         *state = ChunkedReadState::Trailers;
@@ -1071,7 +1071,7 @@ impl<T> ClientIncomingBody<T> {
                     if self.buffer.as_ref()[0] != b'\r' || self.buffer.as_ref()[1] != b'\n' {
                         return Err(HttpError::BadChunkedEncoding);
                     }
-                    let _ = self.buffer.split_to(2);
+                    self.buffer.advance(2);
                     *state = ChunkedReadState::SizeLine;
                 }
 

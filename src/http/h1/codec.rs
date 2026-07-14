@@ -847,7 +847,7 @@ impl ChunkedBodyDecoder {
                     if src.as_ref()[0] != b'\r' || src.as_ref()[1] != b'\n' {
                         return Err(HttpError::BadChunkedEncoding);
                     }
-                    let _ = src.split_to(2);
+                    src.advance(2);
                     self.phase = ChunkPhase::SizeLine;
                 }
 
@@ -903,7 +903,7 @@ fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut
     }
 
     let line = src.split_to(line_end);
-    let _ = src.split_to(2); // CRLF
+    src.advance(2); // CRLF
     Ok(Some(line))
 }
 
@@ -1092,7 +1092,11 @@ fn decode_head(
         return Ok(None);
     };
 
-    let _ = src.split_to(end);
+    // Discard the parsed head. `advance` bumps the front offset in place;
+    // `split_to(end)` would heap-allocate + memcpy an `end`-byte head (up to
+    // max_headers_size for many-header requests) only to drop it. Profiled:
+    // http1/parse is allocation-bound and this is one of its allocations.
+    src.advance(end);
     Ok(Some((method, uri, version, headers, kind)))
 }
 

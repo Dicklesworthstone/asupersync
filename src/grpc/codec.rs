@@ -148,15 +148,15 @@ impl Decoder for GrpcCodec {
                 // grpc-go validates payload format after it has read the
                 // complete declared frame. Consume the invalid frame so
                 // callers do not get stuck re-parsing the same bytes forever.
-                let _ = src.split_to(MESSAGE_HEADER_SIZE + length);
+                src.advance(MESSAGE_HEADER_SIZE + length);
                 return Err(GrpcError::protocol(format!(
                     "invalid gRPC compression flag: {invalid}"
                 )));
             }
         };
 
-        // Consume header
-        let _ = src.split_to(MESSAGE_HEADER_SIZE);
+        // Consume header (advance the front offset; no throwaway alloc+copy)
+        src.advance(MESSAGE_HEADER_SIZE);
 
         // Extract message data
         let data = src.split_to(length).freeze();
