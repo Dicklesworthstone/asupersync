@@ -20,7 +20,7 @@ use std::marker::PhantomData;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{self, Shutdown};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
 #[cfg(target_arch = "wasm32")]
@@ -259,37 +259,174 @@ impl AsyncWrite for WriteHalf<'_> {
 // Combined waker for split halves
 // ---------------------------------------------------------------------------
 
-/// Waker that dispatches to per-direction wakers for owned split halves.
+/// Allocation-free generation snapshot for the two direction waiters.
+#[derive(Clone, Copy, Debug, Default)]
+struct WaiterTokens {
+    read: Option<u64>,
+    write: Option<u64>,
+}
+
+/// A direction waiter that is valid for exactly one registration epoch.
+struct DirectionWaiter {
+    token: u64,
+    waker: Waker,
+}
+
+type DirectionWakers = (Option<Waker>, Option<Waker>);
+
+/// Waker that atomically consumes matching per-direction waiters.
 ///
-/// When `OwnedReadHalf` and `OwnedWriteHalf` are polled from different tasks,
-/// each stores its own waker. The shared `IoRegistration` receives this
-/// combined waker so that both halves are notified on any I/O readiness event.
+/// The snapshot deliberately retains only numeric tokens and a weak state
+/// reference. It never retains task wakers, so replacing a waiter immediately
+/// releases the stale task even if the I/O driver still holds an older
+/// snapshot.
 struct CombinedWaker {
-    read: Option<Waker>,
-    write: Option<Waker>,
+    state: Weak<Mutex<SplitIoState>>,
+    tokens: WaiterTokens,
+}
+
+impl CombinedWaker {
+    fn dispatch(&self) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        let wakers = {
+            let mut guard = state.lock();
+            take_matching_waiters(&mut guard, self.tokens)
+        };
+        wake_waiters(wakers);
+    }
 }
 
 use std::task::Wake;
 impl Wake for CombinedWaker {
     fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
+        self.dispatch();
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        if let Some(w) = &self.read {
-            w.wake_by_ref();
-        }
-        if let Some(w) = &self.write {
-            w.wake_by_ref();
-        }
+        self.dispatch();
     }
 }
 
-fn combined_waker(read: Option<&Waker>, write: Option<&Waker>) -> Waker {
+fn combined_waker(state: &Arc<Mutex<SplitIoState>>, guard: &SplitIoState) -> Waker {
     Waker::from(Arc::new(CombinedWaker {
-        read: read.cloned(),
-        write: write.cloned(),
+        state: Arc::downgrade(state),
+        tokens: waiter_tokens(guard),
     }))
+}
+
+fn waiter_tokens(state: &SplitIoState) -> WaiterTokens {
+    WaiterTokens {
+        read: state.read_waiter.as_ref().map(|waiter| waiter.token),
+        write: state.write_waiter.as_ref().map(|waiter| waiter.token),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn next_waiter_token(state: &mut SplitIoState) -> io::Result<u64> {
+    let token = state.next_waiter_token;
+    if token == u64::MAX {
+        return Err(io::Error::other(
+            "owned TCP split waiter token space exhausted",
+        ));
+    }
+    state.next_waiter_token = token + 1;
+    Ok(token)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare_waiters(interest: Interest, waker: &Waker) -> DirectionWakers {
+    (
+        interest.is_readable().then(|| waker.clone()),
+        interest.is_writable().then(|| waker.clone()),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn install_waiters(
+    state: &mut SplitIoState,
+    interest: Interest,
+    prepared: &mut DirectionWakers,
+) -> io::Result<(WaiterTokens, DirectionWakers)> {
+    let read_token = if interest.is_readable() {
+        Some(next_waiter_token(state)?)
+    } else {
+        None
+    };
+    let write_token = if interest.is_writable() {
+        Some(next_waiter_token(state)?)
+    } else {
+        None
+    };
+
+    let replaced_read = read_token.and_then(|token| {
+        state
+            .read_waiter
+            .replace(DirectionWaiter {
+                token,
+                waker: prepared.0.take().expect("prepared readable waiter"),
+            })
+            .map(|waiter| waiter.waker)
+    });
+    let replaced_write = write_token.and_then(|token| {
+        state
+            .write_waiter
+            .replace(DirectionWaiter {
+                token,
+                waker: prepared.1.take().expect("prepared writable waiter"),
+            })
+            .map(|waiter| waiter.waker)
+    });
+
+    Ok((
+        WaiterTokens {
+            read: read_token,
+            write: write_token,
+        },
+        (replaced_read, replaced_write),
+    ))
+}
+
+fn take_matching_waiter(slot: &mut Option<DirectionWaiter>, token: Option<u64>) -> Option<Waker> {
+    let token = token?;
+    if slot.as_ref().is_some_and(|waiter| waiter.token == token) {
+        slot.take().map(|waiter| waiter.waker)
+    } else {
+        None
+    }
+}
+
+fn take_matching_waiters(state: &mut SplitIoState, tokens: WaiterTokens) -> DirectionWakers {
+    (
+        take_matching_waiter(&mut state.read_waiter, tokens.read),
+        take_matching_waiter(&mut state.write_waiter, tokens.write),
+    )
+}
+
+fn take_all_waiters(state: &mut SplitIoState) -> DirectionWakers {
+    (
+        state.read_waiter.take().map(|waiter| waiter.waker),
+        state.write_waiter.take().map(|waiter| waiter.waker),
+    )
+}
+
+fn wake_waiters((read, write): DirectionWakers) {
+    if let Some(waker) = read {
+        waker.wake();
+    }
+    if let Some(waker) = write {
+        waker.wake();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wake_other_waiters((read, write): DirectionWakers, current: &Waker) {
+    for waker in read.into_iter().chain(write) {
+        if !waker.will_wake(current) {
+            waker.wake();
+        }
+    }
 }
 
 #[inline]
@@ -315,17 +452,49 @@ fn registration_interest(read_waiter: bool, write_waiter: bool, fallback: Intere
 /// Per-direction waker state for owned split halves.
 struct SplitIoState {
     registration: Option<IoRegistration>,
-    read_waker: Option<Waker>,
-    write_waker: Option<Waker>,
-    combined_waker: Option<Waker>,
+    registration_transition: bool,
+    read_waiter: Option<DirectionWaiter>,
+    write_waiter: Option<DirectionWaiter>,
+    #[cfg(not(target_arch = "wasm32"))]
+    next_waiter_token: u64,
 }
 
 fn split_io_state(registration: Option<IoRegistration>) -> SplitIoState {
     SplitIoState {
         registration,
-        read_waker: None,
-        write_waker: None,
-        combined_waker: None,
+        registration_transition: false,
+        read_waiter: None,
+        write_waiter: None,
+        // Zero remains available for debugging/sentinel use. Tokens 1
+        // through MAX - 1 are issued; MAX is permanently reserved as
+        // exhaustion.
+        #[cfg(not(target_arch = "wasm32"))]
+        next_waiter_token: 1,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn adopt_inherited_registration(
+    state: &Arc<Mutex<SplitIoState>>,
+    registration: Option<IoRegistration>,
+) {
+    let Some(mut registration) = registration else {
+        return;
+    };
+
+    // Replace the unsplit task waker without holding the split-state mutex.
+    // Keeping the same interest preserves the live reactor registration; the
+    // first owned-half WouldBlock poll will install a direction generation and
+    // narrow/re-arm it normally. If the inherited slab slot is already gone or
+    // the reactor rejects the re-arm, dropping the invalid handle here is the
+    // fail-closed path.
+    let interest = registration.interest();
+    let waker = {
+        let guard = state.lock();
+        combined_waker(state, &guard)
+    };
+    if matches!(registration.rearm(interest, &waker), Ok(true)) {
+        state.lock().registration = Some(registration);
     }
 }
 
@@ -337,7 +506,7 @@ fn split_io_state(registration: Option<IoRegistration>) -> SplitIoState {
 /// when halves are polled from different tasks.
 pub(crate) struct TcpStreamInner {
     /// Per-direction wakers and shared reactor registration.
-    state: Mutex<SplitIoState>,
+    state: Arc<Mutex<SplitIoState>>,
     /// The underlying TCP stream.
     #[cfg(not(target_arch = "wasm32"))]
     stream: Arc<net::TcpStream>,
@@ -358,9 +527,88 @@ impl std::fmt::Debug for TcpStreamInner {
 }
 
 impl TcpStreamInner {
+    fn drain_registration_transition(&self) -> DirectionWakers {
+        let mut guard = self.state.lock();
+        debug_assert!(guard.registration_transition);
+        debug_assert!(guard.registration.is_none());
+        let waiters = take_all_waiters(&mut guard);
+        guard.registration_transition = false;
+        waiters
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_registration_transition(
+        &self,
+        cx: &Context<'_>,
+        interest: Interest,
+        installed: WaiterTokens,
+    ) -> io::Result<WaiterTokens> {
+        let mut guard = self.state.lock();
+        debug_assert!(guard.registration_transition);
+        debug_assert!(guard.registration.is_none());
+
+        if guard.read_waiter.is_none() && guard.write_waiter.is_none() {
+            guard.registration_transition = false;
+            return Ok(installed);
+        }
+
+        let waker = combined_waker(&self.state, &guard);
+        let desired_interest = registration_interest(
+            guard.read_waiter.is_some(),
+            guard.write_waiter.is_some(),
+            interest,
+        );
+        let Some(current) = Cx::current() else {
+            let waiters = take_all_waiters(&mut guard);
+            guard.registration_transition = false;
+            drop(guard);
+            wake_other_waiters(waiters, cx.waker());
+            crate::net::tcp::stream::fallback_rewake(cx);
+            return Ok(installed);
+        };
+        let Some(driver) = current.io_driver_handle() else {
+            let waiters = take_all_waiters(&mut guard);
+            guard.registration_transition = false;
+            drop(guard);
+            wake_other_waiters(waiters, cx.waker());
+            crate::net::tcp::stream::fallback_rewake(cx);
+            return Ok(installed);
+        };
+
+        match driver.register(&*self.stream, desired_interest, waker) {
+            Ok(registration) => {
+                guard.registration = Some(registration);
+                guard.registration_transition = false;
+                Ok(installed)
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
+                ) =>
+            {
+                let waiters = take_all_waiters(&mut guard);
+                guard.registration_transition = false;
+                drop(guard);
+                wake_other_waiters(waiters, cx.waker());
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Ok(installed)
+            }
+            Err(err) => {
+                let failed_waiters = take_matching_waiters(&mut guard, installed);
+                let surviving_waiters = take_all_waiters(&mut guard);
+                guard.registration_transition = false;
+                drop(guard);
+                drop(failed_waiters);
+                wake_waiters(surviving_waiters);
+                Err(err)
+            }
+        }
+    }
+
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<WaiterTokens> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (cx, interest);
@@ -369,209 +617,198 @@ impl TcpStreamInner {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // RawWaker::clone is arbitrary user code. Clone before taking the
+            // split-state lock so a custom waker cannot re-enter this state.
+            let mut prepared_waiters = prepare_waiters(interest, cx.waker());
             let mut guard = self.state.lock();
-
-            // Store this direction's waker for combined dispatch.
-            // Use independent checks (not else-if) so that callers passing
-            // combined interest (READABLE | WRITABLE) update both wakers.
-            let mut wakers_changed = false;
-            if interest.is_readable() {
-                if !guard
-                    .read_waker
-                    .as_ref()
-                    .is_some_and(|w| w.will_wake(cx.waker()))
-                {
-                    guard.read_waker = Some(cx.waker().clone());
-                    wakers_changed = true;
-                }
-            }
-            if interest.is_writable() {
-                if !guard
-                    .write_waker
-                    .as_ref()
-                    .is_some_and(|w| w.will_wake(cx.waker()))
-                {
-                    guard.write_waker = Some(cx.waker().clone());
-                    wakers_changed = true;
-                }
-            }
-
-            if wakers_changed || guard.combined_waker.is_none() {
-                guard.combined_waker = Some(combined_waker(
-                    guard.read_waker.as_ref(),
-                    guard.write_waker.as_ref(),
-                ));
-            }
-
-            let mut dropped_reg = None;
-            let mut early_return = None;
-            let mut wakers_to_wake = None;
-
-            // Destructure to enable independent field borrows through the MutexGuard.
-            {
-                let SplitIoState {
-                    registration,
-                    read_waker,
-                    write_waker,
-                    combined_waker: cached_combined_waker,
-                } = &mut *guard;
-                if let Some(reg) = registration.as_mut() {
-                    let combined_interest = registration_interest(
-                        read_waker.is_some(),
-                        write_waker.is_some(),
-                        interest,
-                    );
-                    let waker = cached_combined_waker
-                        .as_ref()
-                        .expect("combined waker initialized");
-                    // Single lock in io_driver: re-arm interest + refresh waker.
-                    match reg.rearm(combined_interest, waker) {
-                        Ok(true) => early_return = Some(Ok(())),
-                        Ok(false) => {
-                            dropped_reg = registration.take();
-                        }
-                        Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                            dropped_reg = registration.take();
-                            wakers_to_wake = Some((read_waker.clone(), write_waker.clone()));
-                            early_return = Some(Ok(()));
-                        }
-                        Err(err) => early_return = Some(Err(err)),
-                    }
-                }
-            }
-
-            if let Some(res) = early_return {
+            let (installed, replaced_waiters) =
+                install_waiters(&mut guard, interest, &mut prepared_waiters)?;
+            if guard.registration_transition {
                 drop(guard);
-                drop(dropped_reg);
-                if let Some((rw, ww)) = wakers_to_wake {
-                    if let Some(w) = rw {
-                        w.wake();
-                    }
-                    if let Some(w) = ww {
-                        w.wake();
-                    }
-                }
-                return res;
+                drop(replaced_waiters);
+                return Ok(installed);
             }
-
-            // Build combined waker while still holding the lock. We keep the lock
-            // held across `driver.register()` to prevent a race where both halves
-            // concurrently attempt to create a fresh registration for the same fd,
-            // causing one to fail with EEXIST from epoll_ctl(ADD).
-            let waker = guard
-                .combined_waker
-                .as_ref()
-                .expect("combined waker initialized")
-                .clone();
-            let register_interest = registration_interest(
-                guard.read_waker.is_some(),
-                guard.write_waker.is_some(),
+            let waker = combined_waker(&self.state, &guard);
+            let desired_interest = registration_interest(
+                guard.read_waiter.is_some(),
+                guard.write_waiter.is_some(),
                 interest,
             );
+            if let Some(rearm_result) = guard
+                .registration
+                .as_mut()
+                .map(|registration| registration.rearm(desired_interest, &waker))
+            {
+                match rearm_result {
+                    Ok(true) => {
+                        drop(guard);
+                        drop(replaced_waiters);
+                        return Ok(installed);
+                    }
+                    Ok(false) => {
+                        let dropped_reg = guard.registration.take();
+                        guard.registration_transition = true;
+                        drop(guard);
+                        drop(dropped_reg);
+                        drop(replaced_waiters);
+                        return self.finish_registration_transition(cx, interest, installed);
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                        let dropped_reg = guard.registration.take();
+                        guard.registration_transition = true;
+                        let waiters_to_wake = take_all_waiters(&mut guard);
+                        drop(guard);
+                        drop(dropped_reg);
+                        drop(replaced_waiters);
+                        let concurrent_waiters = self.drain_registration_transition();
+                        wake_waiters(waiters_to_wake);
+                        wake_waiters(concurrent_waiters);
+                        return Ok(installed);
+                    }
+                    Err(err) => {
+                        let failed_waiters = take_matching_waiters(&mut guard, installed);
+                        let dropped_reg = guard.registration.take();
+                        guard.registration_transition = true;
+                        let surviving_waiters = take_all_waiters(&mut guard);
+                        drop(guard);
+                        drop(dropped_reg);
+                        drop(replaced_waiters);
+                        drop(failed_waiters);
+                        let concurrent_waiters = self.drain_registration_transition();
+                        wake_waiters(surviving_waiters);
+                        wake_waiters(concurrent_waiters);
+                        return Err(err);
+                    }
+                }
+            }
 
             let Some(current) = Cx::current() else {
-                crate::net::tcp::stream::fallback_rewake(cx);
+                let fallback_waiters = take_all_waiters(&mut guard);
                 drop(guard);
-                drop(dropped_reg);
-                return Ok(());
+                drop(replaced_waiters);
+                wake_other_waiters(fallback_waiters, cx.waker());
+                crate::net::tcp::stream::fallback_rewake(cx);
+                return Ok(installed);
             };
             let Some(driver) = current.io_driver_handle() else {
-                crate::net::tcp::stream::fallback_rewake(cx);
+                let fallback_waiters = take_all_waiters(&mut guard);
                 drop(guard);
-                drop(dropped_reg);
-                return Ok(());
+                drop(replaced_waiters);
+                wake_other_waiters(fallback_waiters, cx.waker());
+                crate::net::tcp::stream::fallback_rewake(cx);
+                return Ok(installed);
             };
 
-            let result = match driver.register(&*self.stream, register_interest, waker) {
+            // Keep the state lock across fresh registration so concurrent
+            // halves cannot both issue reactor ADD for the same socket.
+            match driver.register(&*self.stream, desired_interest, waker) {
                 Ok(registration) => {
                     guard.registration = Some(registration);
-                    Ok(())
+                    drop(guard);
+                    drop(replaced_waiters);
+                    Ok(installed)
                 }
-                Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
+                    ) =>
+                {
+                    let fallback_waiters = take_all_waiters(&mut guard);
+                    drop(guard);
+                    drop(replaced_waiters);
+                    wake_other_waiters(fallback_waiters, cx.waker());
                     crate::net::tcp::stream::fallback_rewake(cx);
-                    Ok(())
+                    Ok(installed)
                 }
-                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                    crate::net::tcp::stream::fallback_rewake(cx);
-                    Ok(())
+                Err(err) => {
+                    let failed_waiters = take_matching_waiters(&mut guard, installed);
+                    let surviving_waiters = take_all_waiters(&mut guard);
+                    drop(guard);
+                    drop(replaced_waiters);
+                    drop(failed_waiters);
+                    wake_waiters(surviving_waiters);
+                    Err(err)
                 }
-                Err(err) => Err(err),
-            };
-            drop(guard);
-            drop(dropped_reg);
-            result
+            }
         }
     }
 
-    fn clear_waiter_on_drop(&self, interest: Interest) {
+    fn retire_waiter(&self, interest: Interest, token: Option<u64>) {
+        let Some(token) = token else {
+            return;
+        };
+
         let mut guard = self.state.lock();
-
-        let mut wakers_changed = interest.is_readable();
-        if wakers_changed {
-            guard.read_waker = None;
+        let installed = WaiterTokens {
+            read: interest.is_readable().then_some(token),
+            write: interest.is_writable().then_some(token),
+        };
+        let has_newer_waiter = (interest.is_readable()
+            && guard
+                .read_waiter
+                .as_ref()
+                .is_some_and(|waiter| waiter.token != token))
+            || (interest.is_writable()
+                && guard
+                    .write_waiter
+                    .as_ref()
+                    .is_some_and(|waiter| waiter.token != token));
+        if has_newer_waiter {
+            return;
         }
-        if interest.is_writable() {
-            guard.write_waker = None;
-            wakers_changed = true;
-        }
-
-        if wakers_changed || guard.combined_waker.is_none() {
-            guard.combined_waker = Some(combined_waker(
-                guard.read_waker.as_ref(),
-                guard.write_waker.as_ref(),
-            ));
+        let retired_waiters = take_matching_waiters(&mut guard, installed);
+        if guard.registration_transition {
+            // The transition owner will either register the surviving union
+            // after its old DEL completes or drain and wake it. This retire
+            // call only removes its exact generation.
+            drop(guard);
+            drop(retired_waiters);
+            return;
         }
 
         let desired_interest = registration_interest(
-            guard.read_waker.is_some(),
-            guard.write_waker.is_some(),
+            guard.read_waiter.is_some(),
+            guard.write_waiter.is_some(),
             Interest::empty(),
         );
-
-        let mut clear_registration = desired_interest.is_empty();
-        let mut wakers_to_wake = None;
-
-        if !clear_registration {
-            let combined = guard
-                .combined_waker
-                .as_ref()
-                .expect("combined waker initialized")
-                .clone();
-            let is_some = guard.registration.is_some();
-            let rearm_ok = guard
-                .registration
-                .as_mut()
-                .is_some_and(|reg| matches!(reg.rearm(desired_interest, &combined), Ok(true)));
-
-            if is_some {
-                if !rearm_ok {
-                    clear_registration = true;
-                    wakers_to_wake = Some((guard.read_waker.clone(), guard.write_waker.clone()));
-                }
-            } else {
-                // Surviving waiter but no registration: wake it so poll paths
-                // can attempt fresh registration or surface terminal errors.
-                wakers_to_wake = Some((guard.read_waker.clone(), guard.write_waker.clone()));
+        let mut surviving_waiters = (None, None);
+        let mut started_transition = false;
+        let dropped_reg = if desired_interest.is_empty() {
+            let registration = guard.registration.take();
+            if registration.is_some() {
+                guard.registration_transition = true;
+                started_transition = true;
             }
-        }
-
-        let dropped_reg = if clear_registration {
-            guard.registration.take()
+            registration
         } else {
-            None
+            let combined = combined_waker(&self.state, &guard);
+            let rearm_ok = guard.registration.as_mut().is_some_and(|registration| {
+                matches!(registration.rearm(desired_interest, &combined), Ok(true))
+            });
+            if rearm_ok {
+                None
+            } else {
+                surviving_waiters = take_all_waiters(&mut guard);
+                let registration = guard.registration.take();
+                if registration.is_some() {
+                    guard.registration_transition = true;
+                    started_transition = true;
+                }
+                registration
+            }
         };
 
         drop(guard);
         drop(dropped_reg);
-
-        if let Some((rw, ww)) = wakers_to_wake {
-            if let Some(w) = rw {
-                w.wake();
-            }
-            if let Some(w) = ww {
-                w.wake();
-            }
-        }
+        drop(retired_waiters);
+        let concurrent_waiters = if started_transition {
+            self.drain_registration_transition()
+        } else {
+            (None, None)
+        };
+        wake_waiters(surviving_waiters);
+        wake_waiters(concurrent_waiters);
     }
 }
 
@@ -583,6 +820,7 @@ impl TcpStreamInner {
 #[derive(Debug)]
 pub struct OwnedReadHalf {
     inner: Arc<TcpStreamInner>,
+    last_waiter: Option<u64>,
 }
 
 impl OwnedReadHalf {
@@ -592,17 +830,18 @@ impl OwnedReadHalf {
         stream: Arc<net::TcpStream>,
         registration: Option<IoRegistration>,
     ) -> (Self, OwnedWriteHalf) {
-        let inner = Arc::new(TcpStreamInner {
-            stream,
-            state: Mutex::new(split_io_state(registration)),
-        });
+        let state = Arc::new(Mutex::new(split_io_state(None)));
+        adopt_inherited_registration(&state, registration);
+        let inner = Arc::new(TcpStreamInner { state, stream });
         (
             Self {
                 inner: inner.clone(),
+                last_waiter: None,
             },
             OwnedWriteHalf {
                 inner,
                 shutdown_on_drop: true,
+                last_waiter: None,
             },
         )
     }
@@ -611,17 +850,37 @@ impl OwnedReadHalf {
     pub(crate) fn unsupported_pair() -> (Self, OwnedWriteHalf) {
         let inner = Arc::new(TcpStreamInner {
             unsupported: (),
-            state: Mutex::new(split_io_state(None)),
+            state: Arc::new(Mutex::new(split_io_state(None))),
         });
         (
             Self {
                 inner: inner.clone(),
+                last_waiter: None,
             },
             OwnedWriteHalf {
                 inner,
                 shutdown_on_drop: false,
+                last_waiter: None,
             },
         )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pending_on_interest<T>(&mut self, cx: &Context<'_>) -> Poll<io::Result<T>> {
+        match self.inner.register_interest(cx, Interest::READABLE) {
+            Ok(tokens) => {
+                self.last_waiter = tokens.read;
+                Poll::Pending
+            }
+            Err(err) => self.finish_poll(Err(err)),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_poll<T>(&mut self, result: io::Result<T>) -> Poll<io::Result<T>> {
+        self.inner
+            .retire_waiter(Interest::READABLE, self.last_waiter.take());
+        Poll::Ready(result)
     }
 
     /// Returns the local address of the stream.
@@ -652,7 +911,11 @@ impl OwnedReadHalf {
     ///
     /// Returns an error containing both halves if they don't belong to the
     /// same original stream.
-    pub fn reunite(self, write: OwnedWriteHalf) -> Result<super::stream::TcpStream, ReuniteError> {
+    #[allow(unused_mut)]
+    pub fn reunite(
+        mut self,
+        mut write: OwnedWriteHalf,
+    ) -> Result<super::stream::TcpStream, ReuniteError> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = Arc::ptr_eq(&self.inner, &write.inner);
@@ -661,12 +924,18 @@ impl OwnedReadHalf {
 
         #[cfg(not(target_arch = "wasm32"))]
         if Arc::ptr_eq(&self.inner, &write.inner) {
-            // Don't shutdown on drop since we're reuniting
-            let mut write = write;
+            // Do not retire or shut down either direction when the consumed
+            // halves are dropped at the end of this function.
+            self.last_waiter = None;
+            write.last_waiter = None;
             write.shutdown_on_drop = false;
 
-            // Take the registration back
-            let registration = self.inner.state.lock().registration.take();
+            let (registration, waiters) = {
+                let mut state = self.inner.state.lock();
+                let waiters = take_all_waiters(&mut state);
+                (state.registration.take(), waiters)
+            };
+            drop(waiters);
 
             Ok(super::stream::TcpStream::from_parts(
                 self.inner.stream.clone(),
@@ -685,22 +954,18 @@ impl AsyncRead for OwnedReadHalf {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
-        let inner: &net::TcpStream = &self.inner.stream;
-        match (&*inner).read(buf.unfilled()) {
+        let result = (&*this.inner.stream).read(buf.unfilled());
+        match result {
             Ok(n) => {
                 buf.advance(n);
-                Poll::Ready(Ok(()))
+                this.finish_poll(Ok(()))
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.inner.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => this.pending_on_interest(cx),
+            Err(err) => this.finish_poll(Err(err)),
         }
     }
 }
@@ -724,19 +989,15 @@ impl AsyncReadVectored for OwnedReadHalf {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
-        let inner: &net::TcpStream = &self.inner.stream;
-        match (&*inner).read_vectored(bufs) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.inner.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        let result = (&*this.inner.stream).read_vectored(bufs);
+        match result {
+            Ok(n) => this.finish_poll(Ok(n)),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => this.pending_on_interest(cx),
+            Err(err) => this.finish_poll(Err(err)),
         }
     }
 }
@@ -766,6 +1027,7 @@ impl AsyncReadVectored for OwnedReadHalf {
 pub struct OwnedWriteHalf {
     inner: Arc<TcpStreamInner>,
     shutdown_on_drop: bool,
+    last_waiter: Option<u64>,
 }
 
 impl OwnedWriteHalf {
@@ -797,6 +1059,24 @@ impl OwnedWriteHalf {
     pub fn set_shutdown_on_drop(&mut self, shutdown: bool) {
         self.shutdown_on_drop = shutdown;
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pending_on_interest<T>(&mut self, cx: &Context<'_>) -> Poll<io::Result<T>> {
+        match self.inner.register_interest(cx, Interest::WRITABLE) {
+            Ok(tokens) => {
+                self.last_waiter = tokens.write;
+                Poll::Pending
+            }
+            Err(err) => self.finish_poll(Err(err)),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_poll<T>(&mut self, result: io::Result<T>) -> Poll<io::Result<T>> {
+        self.inner
+            .retire_waiter(Interest::WRITABLE, self.last_waiter.take());
+        Poll::Ready(result)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -806,19 +1086,15 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
-        let inner: &net::TcpStream = &self.inner.stream;
-        match (&*inner).write(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.inner.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        let result = (&*this.inner.stream).write(buf);
+        match result {
+            Ok(n) => this.finish_poll(Ok(n)),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => this.pending_on_interest(cx),
+            Err(err) => this.finish_poll(Err(err)),
         }
     }
 
@@ -827,19 +1103,15 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
-        let inner: &net::TcpStream = &self.inner.stream;
-        match (&*inner).write_vectored(bufs) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.inner.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        let result = (&*this.inner.stream).write_vectored(bufs);
+        match result {
+            Ok(n) => this.finish_poll(Ok(n)),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => this.pending_on_interest(cx),
+            Err(err) => this.finish_poll(Err(err)),
         }
     }
 
@@ -848,30 +1120,27 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
-        let inner: &net::TcpStream = &self.inner.stream;
-        match (&*inner).flush() {
-            Ok(()) => Poll::Ready(Ok(())),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.inner.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        let result = (&*this.inner.stream).flush();
+        match result {
+            Ok(()) => this.finish_poll(Ok(())),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => this.pending_on_interest(cx),
+            Err(err) => this.finish_poll(Err(err)),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
         if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return this.finish_poll(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
-        match self.inner.stream.shutdown(Shutdown::Write) {
-            Ok(()) => Poll::Ready(Ok(())),
-            Err(e) if e.kind() == io::ErrorKind::NotConnected => Poll::Ready(Ok(())),
-            Err(e) => Poll::Ready(Err(e)),
+        match this.inner.stream.shutdown(Shutdown::Write) {
+            Ok(()) => this.finish_poll(Ok(())),
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => this.finish_poll(Ok(())),
+            Err(err) => this.finish_poll(Err(err)),
         }
     }
 }
@@ -900,7 +1169,8 @@ impl AsyncWrite for OwnedWriteHalf {
 
 impl Drop for OwnedWriteHalf {
     fn drop(&mut self) {
-        self.inner.clear_waiter_on_drop(Interest::WRITABLE);
+        self.inner
+            .retire_waiter(Interest::WRITABLE, self.last_waiter.take());
         #[cfg(not(target_arch = "wasm32"))]
         if self.shutdown_on_drop {
             let _ = self.inner.stream.shutdown(Shutdown::Write);
@@ -910,7 +1180,8 @@ impl Drop for OwnedWriteHalf {
 
 impl Drop for OwnedReadHalf {
     fn drop(&mut self) {
-        self.inner.clear_waiter_on_drop(Interest::READABLE);
+        self.inner
+            .retire_waiter(Interest::READABLE, self.last_waiter.take());
     }
 }
 
@@ -980,6 +1251,91 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct CountingWaker {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(unix)]
+    fn counting_waker() -> (Waker, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        (waker, hits)
+    }
+
+    #[cfg(unix)]
+    fn install_snapshot(
+        state: &Arc<Mutex<SplitIoState>>,
+        interest: Interest,
+        waker: &Waker,
+    ) -> (WaiterTokens, Waker) {
+        let mut prepared = prepare_waiters(interest, waker);
+        let mut guard = state.lock();
+        let (tokens, replaced) =
+            install_waiters(&mut guard, interest, &mut prepared).expect("install waiter");
+        let snapshot = combined_waker(state, &guard);
+        drop(guard);
+        drop(replaced);
+        (tokens, snapshot)
+    }
+
+    #[cfg(unix)]
+    struct LockProbeWaker {
+        state: Weak<Mutex<SplitIoState>>,
+        observed_unlocked: Arc<AtomicBool>,
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl Wake for LockProbeWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let unlocked = self
+                .state
+                .upgrade()
+                .is_some_and(|state| state.try_lock().is_some());
+            self.observed_unlocked.store(unlocked, Ordering::SeqCst);
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(unix)]
+    struct DropProbeWaker {
+        dropped: Arc<AtomicBool>,
+    }
+
+    // This must carry an Arc-backed drop probe; Waker::noop() cannot observe release.
+    #[cfg(unix)]
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for DropProbeWaker {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    #[cfg(unix)]
+    impl Drop for DropProbeWaker {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(unix)]
     #[derive(Default)]
     struct SourceExclusiveState {
         source_to_token: HashMap<i32, Token>,
@@ -995,6 +1351,7 @@ mod tests {
         fail_modify_on_call: AtomicUsize,
         fail_modify_not_connected: AtomicBool,
         slow_first_register: AtomicBool,
+        deregister_gate: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
     }
 
     #[cfg(unix)]
@@ -1007,6 +1364,7 @@ mod tests {
                 fail_modify_on_call: AtomicUsize::new(0),
                 fail_modify_not_connected: AtomicBool::new(false),
                 slow_first_register: AtomicBool::new(true),
+                deregister_gate: Mutex::new(None),
             }
         }
 
@@ -1025,6 +1383,13 @@ mod tests {
         fn fail_modify_with_not_connected(&self, enabled: bool) {
             self.fail_modify_not_connected
                 .store(enabled, Ordering::SeqCst);
+        }
+
+        fn block_next_deregister(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            *self.deregister_gate.lock() = Some((Arc::clone(&entered), Arc::clone(&release)));
+            (entered, release)
         }
     }
 
@@ -1087,6 +1452,10 @@ mod tests {
         }
 
         fn deregister(&self, token: Token) -> io::Result<()> {
+            if let Some((entered, release)) = self.deregister_gate.lock().take() {
+                entered.wait();
+                release.wait();
+            }
             let mut state = self.state.lock();
             let Some(fd) = state.token_to_source.remove(&token) else {
                 return Err(io::Error::new(
@@ -1526,6 +1895,450 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stale_combined_waker_does_not_consume_new_generation() {
+        let state = Arc::new(Mutex::new(split_io_state(None)));
+        let (old_waker, old_hits) = counting_waker();
+        let (new_waker, new_hits) = counting_waker();
+
+        let (old_tokens, old_snapshot) = install_snapshot(&state, Interest::READABLE, &old_waker);
+        let (new_tokens, new_snapshot) = install_snapshot(&state, Interest::READABLE, &new_waker);
+        assert_ne!(old_tokens.read, new_tokens.read);
+
+        old_snapshot.wake_by_ref();
+        assert_eq!(old_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(new_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state.lock().read_waiter.as_ref().map(|waiter| waiter.token),
+            new_tokens.read
+        );
+
+        new_snapshot.wake_by_ref();
+        new_snapshot.wake_by_ref();
+        assert_eq!(new_hits.load(Ordering::SeqCst), 1);
+        assert!(state.lock().read_waiter.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_combined_waker_does_not_retain_replaced_task_waker() {
+        let state = Arc::new(Mutex::new(split_io_state(None)));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let old_task_waker = Waker::from(Arc::new(DropProbeWaker {
+            dropped: Arc::clone(&dropped),
+        }));
+        let new_task_waker = noop_waker();
+
+        let (_, stale_snapshot) = install_snapshot(&state, Interest::READABLE, &old_task_waker);
+        let _ = install_snapshot(&state, Interest::READABLE, &new_task_waker);
+        drop(old_task_waker);
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "stale combined snapshot retained a replaced task waker"
+        );
+        stale_snapshot.wake_by_ref();
+        assert!(state.lock().read_waiter.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn combined_dispatch_wakes_after_state_unlock() {
+        let state = Arc::new(Mutex::new(split_io_state(None)));
+        let observed_unlocked = Arc::new(AtomicBool::new(false));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let task_waker = Waker::from(Arc::new(LockProbeWaker {
+            state: Arc::downgrade(&state),
+            observed_unlocked: Arc::clone(&observed_unlocked),
+            hits: Arc::clone(&hits),
+        }));
+        let (_, snapshot) = install_snapshot(&state, Interest::READABLE, &task_waker);
+
+        snapshot.wake_by_ref();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(observed_unlocked.load(Ordering::SeqCst));
+        assert!(state.lock().read_waiter.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_registration_is_adopted_in_place_across_reunite() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = Arc::new(std::net::TcpStream::connect(addr).expect("connect"));
+        let (mut server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let old_waker_dropped = Arc::new(AtomicBool::new(false));
+        let old_waker = Waker::from(Arc::new(DropProbeWaker {
+            dropped: Arc::clone(&old_waker_dropped),
+        }));
+        let mut registration = driver
+            .register(&*client, Interest::READABLE, old_waker.clone())
+            .expect("register unsplit stream");
+        assert!(
+            registration
+                .rearm(Interest::READABLE, &old_waker)
+                .expect("prime cached task waker")
+        );
+        let original_token = registration.token();
+        drop(old_waker);
+        assert!(!old_waker_dropped.load(Ordering::SeqCst));
+
+        let (read_half, write_half) =
+            OwnedReadHalf::new_pair(Arc::clone(&client), Some(registration));
+        assert!(old_waker_dropped.load(Ordering::SeqCst));
+        assert_eq!(reactor.register_calls(), 1);
+        assert_eq!(reactor.registration_count(), 1);
+        assert_eq!(
+            read_half
+                .inner
+                .state
+                .lock()
+                .registration
+                .as_ref()
+                .expect("adopted registration")
+                .token(),
+            original_token
+        );
+
+        let reunited = read_half.reunite(write_half).expect("reunite");
+        let (mut read_half, write_half) = reunited.into_split();
+        assert_eq!(reactor.register_calls(), 1);
+        assert_eq!(reactor.registration_count(), 1);
+        assert_eq!(
+            read_half
+                .inner
+                .state
+                .lock()
+                .registration
+                .as_ref()
+                .expect("re-adopted registration")
+                .token(),
+            original_token
+        );
+
+        server.write_all(b"x").expect("write byte");
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut bytes = [0_u8; 1];
+        let mut read_buf = ReadBuf::new(&mut bytes);
+        let ready = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled(), b"x");
+
+        drop(read_half);
+        drop(write_half);
+        assert_eq!(reactor.registration_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn combined_waker_consumes_each_direction_once() {
+        let state = Arc::new(Mutex::new(split_io_state(None)));
+        let (read_waker, read_hits) = counting_waker();
+        let (write_waker, write_hits) = counting_waker();
+
+        let _ = install_snapshot(&state, Interest::READABLE, &read_waker);
+        let (_, snapshot) = install_snapshot(&state, Interest::WRITABLE, &write_waker);
+
+        snapshot.wake_by_ref();
+        snapshot.wake_by_ref();
+        assert_eq!(read_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(write_hits.load(Ordering::SeqCst), 1);
+        let state = state.lock();
+        assert!(state.read_waiter.is_none());
+        assert!(state.write_waiter.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn waiter_token_exhaustion_is_permanent_and_nonwrapping() {
+        let mut state = split_io_state(None);
+        state.next_waiter_token = u64::MAX - 1;
+        let waker = noop_waker();
+
+        let mut prepared = prepare_waiters(Interest::READABLE, &waker);
+        let (tokens, replaced) = install_waiters(&mut state, Interest::READABLE, &mut prepared)
+            .expect("last waiter token should be issued");
+        drop(replaced);
+        assert_eq!(tokens.read, Some(u64::MAX - 1));
+        assert_eq!(state.next_waiter_token, u64::MAX);
+
+        for interest in [Interest::WRITABLE, Interest::READABLE] {
+            let mut prepared = prepare_waiters(interest, &waker);
+            let err = install_waiters(&mut state, interest, &mut prepared)
+                .expect_err("exhausted token space must remain fail-closed");
+            assert_eq!(err.kind(), io::ErrorKind::Other);
+            assert_eq!(state.next_waiter_token, u64::MAX);
+            assert_eq!(
+                state.read_waiter.as_ref().map(|waiter| waiter.token),
+                tokens.read
+            );
+            assert!(state.write_waiter.is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_wake_runs_after_state_unlock() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (read_half, _write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+
+        let observed_unlocked = Arc::new(AtomicBool::new(false));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(LockProbeWaker {
+            state: Arc::downgrade(&read_half.inner.state),
+            observed_unlocked: Arc::clone(&observed_unlocked),
+            hits: Arc::clone(&hits),
+        }));
+        let task_cx = Context::from_waker(&waker);
+        let _current = Cx::set_current(None);
+
+        let tokens = read_half
+            .inner
+            .register_interest(&task_cx, Interest::READABLE)
+            .expect("fallback registration");
+        assert!(tokens.read.is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(observed_unlocked.load(Ordering::SeqCst));
+        assert!(read_half.inner.state.lock().read_waiter.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_read_ready_retires_waiter_registration() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (mut server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (mut read_half, _write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut bytes = [0_u8; 1];
+        let mut read_buf = ReadBuf::new(&mut bytes);
+
+        let pending = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+        assert!(pending.is_pending());
+        {
+            let state = read_half.inner.state.lock();
+            assert!(state.read_waiter.is_some());
+            assert!(state.registration.is_some());
+        }
+
+        server.write_all(b"x").expect("write byte");
+        let ready = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled(), b"x");
+        assert!(read_half.last_waiter.is_none());
+        let state = read_half.inner.state.lock();
+        assert!(state.read_waiter.is_none());
+        assert!(state.registration.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_read_cancellation_retires_waiter_registration() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (mut read_half, _write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx.clone()));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut bytes = [0_u8; 1];
+        let mut read_buf = ReadBuf::new(&mut bytes);
+
+        let pending = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+        assert!(pending.is_pending());
+        cx.set_cancel_requested(true);
+        let cancelled = Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf);
+        assert!(matches!(
+            cancelled,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+        assert!(read_half.last_waiter.is_none());
+        let state = read_half.inner.state.lock();
+        assert!(state.read_waiter.is_none());
+        assert!(state.registration.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_driver_waker_deregisters_before_fresh_add() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+
+        let read_waker = noop_waker();
+        let read_cx = Context::from_waker(&read_waker);
+        read_half
+            .inner
+            .register_interest(&read_cx, Interest::READABLE)
+            .expect("initial register");
+        let old_token = read_half
+            .inner
+            .state
+            .lock()
+            .registration
+            .as_ref()
+            .expect("registration")
+            .token();
+
+        // Preserve the reactor mapping while removing only the slab waker.
+        // The next rearm must return Ok(false), physically DEL the old
+        // mapping, and only then issue a fresh ADD for this socket.
+        driver.lock().deregister_waker(old_token);
+        let write_waker = noop_waker();
+        let write_cx = Context::from_waker(&write_waker);
+        let write_tokens = write_half
+            .inner
+            .register_interest(&write_cx, Interest::WRITABLE)
+            .expect("fresh ADD after old DEL");
+
+        assert!(write_tokens.write.is_some());
+        assert_eq!(reactor.register_calls(), 2);
+        assert_eq!(reactor.registration_count(), 1);
+        let state = read_half.inner.state.lock();
+        assert!(!state.registration_transition);
+        assert_eq!(
+            state
+                .registration
+                .as_ref()
+                .expect("registration")
+                .interest(),
+            Interest::READABLE | Interest::WRITABLE
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retire_transition_queues_sibling_until_old_del_completes() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx.clone()));
+        let read_waker = noop_waker();
+        let read_cx = Context::from_waker(&read_waker);
+        let read_tokens = read_half
+            .inner
+            .register_interest(&read_cx, Interest::READABLE)
+            .expect("initial register");
+        let read_token = read_tokens.read.expect("read waiter token");
+
+        let (deregister_entered, release_deregister) = reactor.block_next_deregister();
+        let retire_inner = Arc::clone(&read_half.inner);
+        let retire_thread = thread::spawn(move || {
+            retire_inner.retire_waiter(Interest::READABLE, Some(read_token));
+        });
+        deregister_entered.wait();
+
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let register_inner = Arc::clone(&write_half.inner);
+        let register_thread = thread::spawn(move || {
+            let _current = Cx::set_current(Some(cx));
+            let waker = noop_waker();
+            let task_cx = Context::from_waker(&waker);
+            let result = register_inner.register_interest(&task_cx, Interest::WRITABLE);
+            result_tx.send(result).expect("send register result");
+        });
+
+        // A sibling polling during the physical DEL must publish its waiter
+        // and return without attempting ADD against the still-live mapping.
+        let early_result = result_rx.recv_timeout(Duration::from_secs(5));
+        let completed_before_del = early_result.is_ok();
+        let register_calls_before_del = reactor.register_calls();
+
+        release_deregister.wait();
+        retire_thread.join().expect("retire thread");
+        register_thread.join().expect("register thread");
+        let result = match early_result {
+            Ok(result) => result,
+            Err(_) => result_rx.recv().expect("late register result"),
+        };
+        let write_tokens = result.expect("queued sibling registration");
+        write_half
+            .inner
+            .retire_waiter(Interest::WRITABLE, write_tokens.write);
+
+        assert!(
+            completed_before_del,
+            "sibling registration blocked on driver ADD during old DEL"
+        );
+        assert_eq!(
+            register_calls_before_del, 1,
+            "fresh ADD must not occur before old DEL completes"
+        );
+        let state = read_half.inner.state.lock();
+        assert!(!state.registration_transition);
+        assert!(state.registration.is_none());
+        assert!(state.read_waiter.is_none());
+        assert!(state.write_waiter.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dropping_read_half_clears_waiter_and_registration_when_idle() {
         init_test("dropping_read_half_clears_waiter_and_registration_when_idle");
 
@@ -1535,7 +2348,7 @@ mod tests {
         let (_server, _) = listener.accept().expect("accept");
         client.set_nonblocking(true).expect("nonblocking");
 
-        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let (mut read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
         let reactor = Arc::new(SourceExclusiveReactor::new());
         let driver = IoDriverHandle::new(reactor);
         let cx = Cx::new_with_observability(
@@ -1550,16 +2363,17 @@ mod tests {
 
         let waker = noop_waker();
         let task_cx = Context::from_waker(&waker);
-        read_half
+        let tokens = read_half
             .inner
             .register_interest(&task_cx, Interest::READABLE)
             .expect("register readable");
+        read_half.last_waiter = tokens.read;
 
         drop(read_half);
 
         let state = write_half.inner.state.lock();
         assert!(
-            state.read_waker.is_none(),
+            state.read_waiter.is_none(),
             "read waiter must be cleared after read half drop"
         );
         assert!(
@@ -1580,7 +2394,7 @@ mod tests {
         let (_server, _) = listener.accept().expect("accept");
         client.set_nonblocking(true).expect("nonblocking");
 
-        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let (mut read_half, mut write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
         let reactor = Arc::new(SourceExclusiveReactor::new());
         let driver = IoDriverHandle::new(reactor);
         let cx = Cx::new_with_observability(
@@ -1595,20 +2409,22 @@ mod tests {
 
         let waker = noop_waker();
         let task_cx = Context::from_waker(&waker);
-        read_half
+        let read_tokens = read_half
             .inner
             .register_interest(&task_cx, Interest::READABLE)
             .expect("register readable");
-        write_half
+        read_half.last_waiter = read_tokens.read;
+        let write_tokens = write_half
             .inner
             .register_interest(&task_cx, Interest::WRITABLE)
             .expect("register writable");
+        write_half.last_waiter = write_tokens.write;
 
         drop(write_half);
 
         let state = read_half.inner.state.lock();
         assert!(
-            state.write_waker.is_none(),
+            state.write_waiter.is_none(),
             "write waiter must be cleared after write half drop"
         );
         assert!(
@@ -1630,19 +2446,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dropping_write_half_wakes_survivor_when_reregistration_fails() {
-        struct CountingWaker {
-            hits: Arc<AtomicUsize>,
-        }
-        impl Wake for CountingWaker {
-            fn wake(self: Arc<Self>) {
-                self.wake_by_ref();
-            }
-
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.hits.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
         init_test("dropping_write_half_wakes_survivor_when_reregistration_fails");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1651,7 +2454,7 @@ mod tests {
         let (_server, _) = listener.accept().expect("accept");
         client.set_nonblocking(true).expect("nonblocking");
 
-        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let (mut read_half, mut write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
         let reactor = Arc::new(SourceExclusiveReactor::new());
         // First modify call (adding WRITABLE) succeeds; second modify call
         // (drop-time narrowing to READABLE) fails.
@@ -1668,22 +2471,21 @@ mod tests {
         );
         let _guard = Cx::set_current(Some(cx));
 
-        let read_hits = Arc::new(AtomicUsize::new(0));
-        let read_waker = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&read_hits),
-        }));
+        let (read_waker, read_hits) = counting_waker();
         let read_task_cx = Context::from_waker(&read_waker);
-        read_half
+        let read_tokens = read_half
             .inner
             .register_interest(&read_task_cx, Interest::READABLE)
             .expect("register readable");
+        read_half.last_waiter = read_tokens.read;
 
         let write_waker = noop_waker();
         let write_task_cx = Context::from_waker(&write_waker);
-        write_half
+        let write_tokens = write_half
             .inner
             .register_interest(&write_task_cx, Interest::WRITABLE)
             .expect("register writable");
+        write_half.last_waiter = write_tokens.write;
 
         drop(write_half);
 
@@ -1695,28 +2497,59 @@ mod tests {
         drop(state);
 
         assert!(
-            read_hits.load(Ordering::SeqCst) >= 1,
+            read_hits.load(Ordering::SeqCst) == 1,
             "surviving waiter must be woken to retry registration after drop-time failure"
         );
     }
 
     #[cfg(unix)]
     #[test]
+    fn hard_modify_failure_drops_registration_and_wakes_only_survivor() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        reactor.fail_modify_on_call(1);
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+
+        let (read_waker, read_hits) = counting_waker();
+        let read_cx = Context::from_waker(&read_waker);
+        read_half
+            .inner
+            .register_interest(&read_cx, Interest::READABLE)
+            .expect("register readable");
+
+        let (write_waker, write_hits) = counting_waker();
+        let write_cx = Context::from_waker(&write_waker);
+        let err = write_half
+            .inner
+            .register_interest(&write_cx, Interest::WRITABLE)
+            .expect_err("injected hard modify failure");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(read_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(write_hits.load(Ordering::SeqCst), 0);
+        let state = read_half.inner.state.lock();
+        assert!(state.registration.is_none());
+        assert!(state.read_waiter.is_none());
+        assert!(state.write_waiter.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn not_connected_modify_wakes_both_split_waiters() {
-        struct CountingWaker {
-            hits: Arc<AtomicUsize>,
-        }
-
-        impl Wake for CountingWaker {
-            fn wake(self: Arc<Self>) {
-                self.wake_by_ref();
-            }
-
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.hits.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
         init_test("not_connected_modify_wakes_both_split_waiters");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1741,20 +2574,14 @@ mod tests {
         );
         let _guard = Cx::set_current(Some(cx));
 
-        let read_hits = Arc::new(AtomicUsize::new(0));
-        let read_waker = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&read_hits),
-        }));
+        let (read_waker, read_hits) = counting_waker();
         let read_task_cx = Context::from_waker(&read_waker);
         read_half
             .inner
             .register_interest(&read_task_cx, Interest::READABLE)
             .expect("register readable");
 
-        let write_hits = Arc::new(AtomicUsize::new(0));
-        let write_waker = Waker::from(Arc::new(CountingWaker {
-            hits: Arc::clone(&write_hits),
-        }));
+        let (write_waker, write_hits) = counting_waker();
         let write_task_cx = Context::from_waker(&write_waker);
         write_half
             .inner
@@ -1769,11 +2596,11 @@ mod tests {
         drop(state);
 
         assert!(
-            read_hits.load(Ordering::SeqCst) >= 1,
+            read_hits.load(Ordering::SeqCst) == 1,
             "read waiter must be woken when shared registration drops on not-connected"
         );
         assert!(
-            write_hits.load(Ordering::SeqCst) >= 1,
+            write_hits.load(Ordering::SeqCst) == 1,
             "write waiter must be woken when shared registration drops on not-connected"
         );
     }
