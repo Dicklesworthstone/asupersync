@@ -1313,6 +1313,14 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
 
 /// Check if we should spawn a new thread and do so if needed.
 fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
+    // Enqueue half of the Dekker pattern with idle retirement (see the matching
+    // fence in blocking_worker_loop): the caller has already STOREd
+    // pending_count++; this fence orders that store before the active_threads
+    // LOAD below in the global SeqCst order, so a retiree that decremented
+    // active_threads concurrently is guaranteed to observe our pending work (or
+    // we observe its decrement and spawn a replacement). Prevents a stranded
+    // task on a min_threads==0 pool on weak memory models (no-op on x86).
+    std::sync::atomic::fence(Ordering::SeqCst);
     let active = inner.active_threads.load(Ordering::Relaxed);
     let busy = inner.busy_threads.load(Ordering::Relaxed);
     let pending = inner.pending_count.load(Ordering::Relaxed);
@@ -1416,6 +1424,18 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
                     // We claimed the retirement slot, meaning active_threads was decremented.
                     // Re-check the queue to ensure we didn't miss a concurrent spawn that
                     // observed our pre-retirement active_threads count and decided not to spawn.
+                    //
+                    // This is the retiree half of a Dekker pattern: we STORE
+                    // active_threads-- (CAS above) then LOAD pending_count
+                    // below; the enqueuer STOREs pending_count++ then LOADs
+                    // active_threads (in maybe_spawn). Acquire/Release alone
+                    // permits both sides to read stale on weak memory models
+                    // (e.g. aarch64), stranding the last worker with a task
+                    // queued on a min_threads==0 pool. A SeqCst fence between
+                    // our store and load — paired with the matching fence on
+                    // the enqueue side — forces a total order so at least one
+                    // side observes the other's store. (No-op on x86.)
+                    std::sync::atomic::fence(Ordering::SeqCst);
                     if !blocking_pool_has_pending_work(inner) {
                         // Retire this thread; active_threads was already decremented atomically.
                         return true;

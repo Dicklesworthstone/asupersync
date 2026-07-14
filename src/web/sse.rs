@@ -518,6 +518,16 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         cx: &Cx,
         sender: &mut OutgoingBodySender,
     ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
+        // Do not write a heartbeat after the stream has completed. The event
+        // source finishing (or a prior cancellation) sets `closed` and finishes
+        // the body sender; writing into a finished channel surfaces
+        // `BodyChannelClosed`, which `send_h1_bytes` maps to
+        // `cancel_for_disconnect` and would wrongly cancel a cleanly-COMPLETED
+        // request `Cx` (poisoning connection-reuse / audit / disconnect
+        // accounting). Mirror `next_chunk`'s closed guard.
+        if self.closed {
+            return Ok(StreamingSseTransportStep::Complete);
+        }
         let chunk = self
             .heartbeat_chunk(cx)
             .map_err(StreamingSseTransportError::Stream)?;
@@ -561,6 +571,12 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     /// Returns the same cancellation and byte-limit errors as
     /// [`next_chunk`](Self::next_chunk).
     pub fn heartbeat_chunk(&mut self, cx: &Cx) -> Result<Vec<u8>, StreamingSseError> {
+        // A completed stream has no heartbeat to emit; return empty so callers
+        // never serialize a keep-alive into a finished channel (mirrors
+        // `next_chunk`'s closed guard, which returns `Ok(None)`).
+        if self.closed {
+            return Ok(Vec::new());
+        }
         self.checkpoint(cx)?;
         let heartbeat = SseEvent::default().comment(self.heartbeat_comment.clone());
         self.serialize_event(&heartbeat)
@@ -575,7 +591,12 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         Ok(())
     }
 
-    fn serialize_event(&mut self, event: &SseEvent) -> Result<Vec<u8>, StreamingSseError> {
+    /// Serializes an event and enforces the per-event size cap, without
+    /// touching the cumulative `max_total_bytes` budget. Used for
+    /// server-authored keep-alive heartbeats, which are transport framing, not
+    /// client-visible stream content, and so must not count toward (or be torn
+    /// down by) the total-bytes cap.
+    fn serialize_event_uncharged(&self, event: &SseEvent) -> Result<Vec<u8>, StreamingSseError> {
         let mut chunk = String::new();
         event.write_to(&mut chunk);
         let chunk_len = chunk.len();
@@ -585,6 +606,12 @@ impl<S: StreamingSseSource> StreamingSse<S> {
                 max: self.max_event_bytes,
             });
         }
+        Ok(chunk.into_bytes())
+    }
+
+    fn serialize_event(&mut self, event: &SseEvent) -> Result<Vec<u8>, StreamingSseError> {
+        let chunk = self.serialize_event_uncharged(event)?;
+        let chunk_len = chunk.len();
 
         let next_total = self.bytes_emitted.saturating_add(chunk_len);
         if next_total > self.max_total_bytes {
@@ -595,7 +622,7 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         }
 
         self.bytes_emitted = next_total;
-        Ok(chunk.into_bytes())
+        Ok(chunk)
     }
 
     async fn send_h1_bytes(

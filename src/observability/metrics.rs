@@ -126,6 +126,11 @@ impl Histogram {
     pub(crate) fn new(name: impl Into<String>, buckets: Vec<f64>) -> Self {
         let mut buckets = buckets;
         buckets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Deduplicate boundaries: after sorting, equal boundaries are adjacent.
+        // A duplicate boundary would emit two `_bucket{le="x"}` series with the
+        // same `le`, which Prometheus rejects (duplicate series), poisoning the
+        // whole scrape. (NaN boundaries are caller error and left as-is.)
+        buckets.dedup();
         let len = buckets.len();
         let mut counts = Vec::with_capacity(len + 1);
         for _ in 0..=len {
@@ -749,13 +754,20 @@ impl Metrics {
             let Some(name) = sanitize_prometheus_metric_name(name) else {
                 continue;
             };
+            // Read bucket counts, sum, and count from ONE coherent snapshot
+            // under the histogram's state lock. Reading `hist.counts` unlocked
+            // and then calling `sum()`/`count()` as separate lock acquisitions
+            // let a concurrent `observe()` land between them, producing a scrape
+            // where `+Inf` bucket != `_count` (or `_sum` includes an extra
+            // sample) — a Prometheus invariant violation that corrupts
+            // `histogram_quantile()`.
+            let snap = hist.snapshot();
             let _ = writeln!(output, "# TYPE {name} histogram");
             let mut cumulative = 0;
-            for (i, count) in hist.counts.iter().enumerate() {
-                let val = count.load(Ordering::Relaxed);
-                cumulative += val;
-                let le = if i < hist.buckets.len() {
-                    hist.buckets[i].to_string()
+            for (i, count) in snap.bucket_counts.iter().enumerate() {
+                cumulative += *count;
+                let le = if i < snap.bucket_boundaries.len() {
+                    snap.bucket_boundaries[i].to_string()
                 } else {
                     "+Inf".to_string()
                 };
@@ -767,8 +779,8 @@ impl Metrics {
                 let le = escape_prometheus_label_value(&le);
                 let _ = writeln!(output, "{name}_bucket{{le=\"{le}\"}} {cumulative}");
             }
-            let _ = writeln!(output, "{name}_sum {}", hist.sum());
-            let _ = writeln!(output, "{name}_count {}", hist.count());
+            let _ = writeln!(output, "{name}_sum {}", snap.sum);
+            let _ = writeln!(output, "{name}_count {}", snap.count);
         }
 
         for (name, summary) in &self.summaries {

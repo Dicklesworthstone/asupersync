@@ -760,7 +760,10 @@ impl ChaosStats {
     /// Records a delay injection.
     pub fn record_delay(&mut self, delay: Duration) {
         self.delays += 1;
-        self.total_delay += delay;
+        // saturating_add to match ChaosStats::merge and avoid a panic when a
+        // long campaign with near-`Duration::MAX` injections overflows the
+        // accumulator (stats bookkeeping must never crash the run).
+        self.total_delay = self.total_delay.saturating_add(delay);
         self.decision_points += 1;
     }
 

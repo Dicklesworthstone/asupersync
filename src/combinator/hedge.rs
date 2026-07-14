@@ -79,18 +79,29 @@ pub struct AdaptiveHedgePolicy {
     max_delay: Duration,
 }
 
+/// Split-conformal order-statistic rank for the `(1-alpha)` upper bound over
+/// `n` samples, or `None` when the finite-sample bound is `+inf`.
+///
+/// `ceil((n+1)(1-alpha)) > n` means no order statistic covers `1-alpha` at this
+/// sample size, so the distribution-free bound is `+inf` and the caller must
+/// fall back to its conservative maximum rather than clamp to the largest
+/// observed sample (which would under-cover).
 #[allow(
     clippy::cast_precision_loss, // quantile math is float-based by definition (alpha is f64)
     clippy::cast_sign_loss       // value is clamped into [0, n-1] before conversion
 )]
-fn conformal_rank(n: usize, alpha: f64) -> usize {
+fn conformal_rank(n: usize, alpha: f64) -> Option<usize> {
     let q = ((n as f64 + 1.0) * (1.0 - alpha)).ceil();
     if !q.is_finite() || q <= 1.0 {
-        0
-    } else if q >= n as f64 {
-        n.saturating_sub(1)
+        Some(0)
+    } else if q > n as f64 {
+        // Strictly greater than n: the ceil((n+1)(1-alpha))-th order statistic
+        // does not exist, so the split-conformal upper bound is +inf. Signal
+        // the caller to use its conservative maximum. (q == n is NOT +inf: the
+        // n-th order statistic is the max sample, a valid finite bound.)
+        None
     } else {
-        (q as usize).saturating_sub(1)
+        Some((q as usize).saturating_sub(1))
     }
 }
 
@@ -143,8 +154,16 @@ impl AdaptiveHedgePolicy {
             return self.max_delay;
         }
 
+        let Some(rank) = conformal_rank(n, self.alpha) else {
+            // ceil((n+1)(1-alpha)) > n: the finite-sample split-conformal upper
+            // bound is +inf (no valid order statistic covers 1-alpha at this n).
+            // Clamping to the max observed sample would UNDER-cover and hedge
+            // more often than the alpha target; the conservative bound is
+            // max_delay (matching the small-n fallback above).
+            return self.max_delay;
+        };
+
         let mut sorted = self.history[0..n].to_vec();
-        let rank = conformal_rank(n, self.alpha);
 
         // Select nth unstable is O(N) average case, faster than O(N log N) full sort.
         let (_, &mut bound_micros, _) = sorted.select_nth_unstable(rank);
@@ -1282,10 +1301,13 @@ mod tests {
         }
         assert_eq!(policy.next_hedge_delay(), max_delay);
 
-        // Record a 10th item
+        // Record a 10th item.
         policy.record(Duration::from_millis(20));
-        // Now it has 10 items all 20ms. The bound is 20ms.
-        assert_eq!(policy.next_hedge_delay(), Duration::from_millis(20));
+        // n=10, alpha=0.05: ceil((10+1)*0.95) = 11 > 10, so the split-conformal
+        // (1-alpha) upper bound is +inf (there is no 11th order statistic). The
+        // policy conservatively yields max_delay rather than clamping to the max
+        // observed sample (20ms), which would UNDER-cover and over-hedge.
+        assert_eq!(policy.next_hedge_delay(), max_delay);
 
         // Let's add varying latencies to test the alpha=0.05 (p95) logic
         // Reset policy for clear test

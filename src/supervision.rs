@@ -2428,7 +2428,7 @@ impl RestartIntensityWindow {
 }
 
 // ============================================================================
-// Anytime-valid restart storm detector (e-process)
+// CUSUM-style restart storm detector (advisory; not anytime-valid — see docs)
 // ============================================================================
 
 /// Configuration for the restart storm e-process monitor.
@@ -2463,12 +2463,32 @@ impl Default for StormMonitorConfig {
     }
 }
 
-/// Anytime-valid restart storm detector using e-processes.
+/// CUSUM-style restart storm detector (advisory).
 ///
-/// Monitors restart intensity and accumulates evidence against the null
+/// Monitors restart intensity and accumulates log-evidence against the null
 /// hypothesis ("restarts occur at the expected rate"). When the e-value
-/// exceeds 1/α, a storm is detected with guaranteed Type-I error ≤ α
-/// regardless of stopping time (Ville's inequality).
+/// exceeds 1/α, [`is_storm`](Self::is_storm) reports a storm.
+///
+/// # Guarantee scope (honest boundary)
+///
+/// This is **not** an anytime-valid e-process, and it does **not** provide a
+/// Ville-inequality Type-I error ≤ α bound regardless of stopping time. Two
+/// deliberate design choices break the supermartingale premise the Ville bound
+/// requires:
+///
+/// 1. **Wealth floor.** `log_e_value` is floored at `0` (wealth reset to 1)
+///    after each update so the detector reacts quickly to a storm even after a
+///    long quiet period. A floored process is not a supermartingale, so under
+///    H0 the false-alarm probability accumulates toward 1 over a long horizon
+///    (CUSUM/ARL semantics, not anytime validity).
+/// 2. **Overlapping-window intensities.** Successive intensities come from an
+///    overlapping [`RestartIntensityWindow`], so observations are serially
+///    correlated and the per-observation `E[LR] ≤ 1` premise holds only
+///    approximately.
+///
+/// Treat the output as a responsive, calibration-tunable storm heuristic, not a
+/// statistically guaranteed sequential test. The independent per-restart budget
+/// check in [`Supervisor`] remains the hard bound on restart intensity.
 ///
 /// # How it works
 ///
@@ -2480,8 +2500,8 @@ impl Default for StormMonitorConfig {
 /// LR = max(1, intensity / expected_rate) / tolerance
 /// ```
 ///
-/// The tolerance (normalizer) ensures the e-process is a non-negative supermartingale
-/// under H0, preserving Ville's inequality.
+/// The tolerance (normalizer) scales the ratio; it does not restore the Ville
+/// bound broken by the wealth floor above.
 ///
 /// # Usage
 ///
@@ -2571,8 +2591,10 @@ impl RestartStormMonitor {
     /// LR = max(1, intensity / expected_rate) / tolerance
     /// ```
     ///
-    /// The tolerance ensures E[LR] ≤ 1 under H0, making the e-process a
-    /// non-negative supermartingale.
+    /// The tolerance normalizes the ratio; note that the wealth floor applied
+    /// after this update (and overlapping-window intensities) mean the process
+    /// is NOT a supermartingale and does NOT carry a Ville anytime-valid bound —
+    /// see the type-level docs for the honest guarantee scope.
     pub fn observe_intensity(&mut self, intensity: f64) -> crate::obligation::eprocess::AlertState {
         let was_alert = self.is_alert();
         self.observations += 1;
@@ -2580,14 +2602,18 @@ impl RestartStormMonitor {
         let ratio = intensity / self.config.expected_rate;
 
         // Likelihood ratio: evidence grows when intensity exceeds expected.
-        // Normalizer (tolerance) ensures supermartingale property under H0.
+        // Normalizer (tolerance) scales the ratio (not a supermartingale
+        // guarantee — the wealth floor below breaks that; see type docs).
         let normalizer = self.config.tolerance;
         let lr = ratio.max(1.0) / normalizer;
 
         self.log_e_value += lr.ln();
-        // Prevent wealth depletion: reset evidence if it drops below initial state.
-        // This ensures the monitor reacts quickly to storms even after long periods
-        // of low intensity (CUSUM-style reset).
+        // CUSUM-style wealth floor: reset evidence to its initial state if it
+        // would drop below, so the monitor reacts quickly to storms even after
+        // long quiet periods. NOTE: this floor is exactly what makes the process
+        // NOT a supermartingale, so it forfeits the Ville anytime-valid Type-I
+        // bound in exchange for responsiveness (see the type-level docs). This
+        // is a deliberate ARL-oriented trade-off, not an oversight.
         if self.log_e_value < 0.0 {
             self.log_e_value = 0.0;
         }

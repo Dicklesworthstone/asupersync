@@ -211,6 +211,20 @@ impl<T> OnceCell<T> {
     /// waits until that attempt completes or cancels. A completed initializer
     /// causes `set` to return `Err(value)`; a cancelled initializer leaves the
     /// cell uninitialized, so `set` retries and can become the initializer.
+    ///
+    /// # Blocking — do not call from async context that shares a thread with the initializer
+    ///
+    /// This is a **synchronous, blocking** method: while another initialization
+    /// is in flight it parks the calling OS thread on a condvar until that
+    /// initializer finishes. If the in-flight initializer is an **async** task
+    /// (`get_or_init(async { ... }).await` suspended mid-`await`) running on the
+    /// **same** OS thread as this `set` call — always the case on a
+    /// current-thread runtime — the condvar wait blocks the only thread that
+    /// could ever resume that initializer, and **both deadlock permanently**.
+    ///
+    /// From async code, initialize with [`get_or_init`](Self::get_or_init)
+    /// (which yields rather than blocks) instead of `set`, or only call `set`
+    /// before any async initializer can be in flight.
     #[inline]
     pub fn set(&self, value: T) -> Result<(), T> {
         loop {
