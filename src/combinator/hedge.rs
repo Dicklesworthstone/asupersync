@@ -617,7 +617,16 @@ where
             if let Poll::Ready(outcome) = Pin::new(primary).poll(cx) {
                 // Primary finished.
                 this.completed = true;
-                return Poll::Ready(if this.backup.is_some() {
+                let backup_was_running = this.backup.is_some();
+                // Actually drop the loser now so the reported race-loser
+                // cancellation is truthful: the returned outcome claims the
+                // backup was cancelled, so the backup future (and its pending
+                // work/timer) must not outlive this poll if the completed
+                // `HedgeFuture` is retained by the caller.
+                this.backup = None;
+                this.backup_factory = None;
+                this.timer = None;
+                return Poll::Ready(if backup_was_running {
                     // Backup was running, so this was a race.
                     // Dropping backup cancels it; loser is represented as race-loser cancellation.
                     HedgeResult::primary_won(
@@ -649,8 +658,12 @@ where
         if let Some(backup) = &mut this.backup {
             if let Poll::Ready(outcome) = Pin::new(backup).poll(cx) {
                 // Backup finished first.
-                // Drop primary (cancel).
                 this.completed = true;
+                // Drop the primary loser now so the reported race-loser
+                // cancellation is truthful even if the completed future is
+                // retained by the caller.
+                this.primary = None;
+                this.timer = None;
                 return Poll::Ready(HedgeResult::backup_won(
                     outcome,
                     Outcome::Cancelled(CancelReason::race_loser()),

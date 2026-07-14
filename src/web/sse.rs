@@ -139,9 +139,18 @@ impl SseEvent {
         }
 
         // Event type (sanitize to prevent SSE field injection).
+        //
+        // br-asupersync-fek81o applies to every field, not just `data`: the
+        // WHATWG EventSource parser strips one leading U+0020 SPACE from the
+        // value. Prepend a padding space so an app-set leading space in the
+        // event name survives (otherwise `.event(" ping")` arrives as "ping").
         if let Some(ref event) = self.event {
             let event = event.replace(['\r', '\n'], "");
-            let _ = writeln!(buf, "event:{event}");
+            if event.starts_with(' ') {
+                let _ = writeln!(buf, "event: {event}");
+            } else {
+                let _ = writeln!(buf, "event:{event}");
+            }
         }
 
         // Data — each line gets its own `data:` prefix.
@@ -171,9 +180,17 @@ impl SseEvent {
         }
 
         // ID (sanitize to prevent SSE field injection).
+        //
+        // Same WHATWG leading-space compensation as `event`/`data`: a stripped
+        // leading space would corrupt Last-Event-ID reconnection matching
+        // (`.id(" 7")` must not become "7").
         if let Some(ref id) = self.id {
             let id = id.replace(['\r', '\n'], "");
-            let _ = writeln!(buf, "id:{id}");
+            if id.starts_with(' ') {
+                let _ = writeln!(buf, "id: {id}");
+            } else {
+                let _ = writeln!(buf, "id:{id}");
+            }
         }
 
         // Retry.

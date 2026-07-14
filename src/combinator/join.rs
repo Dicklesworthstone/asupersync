@@ -185,7 +185,10 @@ impl<T, E> JoinAllResult<T, E> {
     #[inline]
     #[must_use]
     pub fn failure_count(&self) -> usize {
-        self.total_count - self.successes.len()
+        // `saturating_sub`: `JoinAllResult` has a public constructor, so a
+        // caller-built value with `successes.len() > total_count` must not
+        // underflow-panic (mirrors the map_reduce hardening in 4013bade2).
+        self.total_count.saturating_sub(self.successes.len())
     }
 
     /// Extracts successful values in their original order.
@@ -513,7 +516,7 @@ pub fn join_all_to_result<T, E>(result: JoinAllResult<T, E>) -> Result<Vec<T>, J
                 }
             }
 
-            let total_failures = result.total_count - result.successes.len();
+            let total_failures = result.total_count.saturating_sub(result.successes.len());
             Err(JoinAllError::Error {
                 error: e,
                 index: first_error_index,

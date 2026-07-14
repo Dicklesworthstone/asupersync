@@ -441,9 +441,21 @@ impl RetryTokenBucket {
             return Duration::ZERO;
         }
 
-        let tokens_needed = cost as f64 - self.tokens;
-        let time_needed_secs = tokens_needed / self.refill_rate;
-        Duration::from_secs_f64(time_needed_secs)
+        // A non-positive (or non-finite) refill rate means tokens never
+        // accrue: the wait is effectively unbounded. Only the positive,
+        // finite-result branch computes a duration; everything else (rate
+        // <= 0, NaN, or a non-finite quotient) falls through to
+        // `Duration::MAX`. This avoids `Duration::from_secs_f64` panicking on
+        // `inf`/negative input, mirroring `RateLimiter::time_until_available`
+        // for `rate == 0`. (`NaN > 0.0` is `false`, so NaN falls through too.)
+        if self.refill_rate > 0.0 {
+            let tokens_needed = cost as f64 - self.tokens;
+            let time_needed_secs = tokens_needed / self.refill_rate;
+            if time_needed_secs.is_finite() {
+                return Duration::from_secs_f64(time_needed_secs);
+            }
+        }
+        Duration::MAX
     }
 
     /// Refills the bucket based on time elapsed.

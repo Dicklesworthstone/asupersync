@@ -633,7 +633,12 @@ impl Swim {
     /// Declares that the local node is voluntarily leaving the cluster. Bumps
     /// the local incarnation and floods a `Leave` rumor for dissemination.
     pub fn declare_leave(&mut self) {
-        self.incarnation += 1;
+        // Saturating, matching `maybe_refute`: a single unauthenticated gossip
+        // packet can drive the local incarnation to near `u64::MAX` (only the
+        // exact `u64::MAX` sentinel is reserved at ingress), so a plain `+= 1`
+        // here would panic in debug / wrap to 0 in release on a subsequent
+        // graceful leave.
+        self.incarnation = self.incarnation.saturating_add(1);
         self.gossip
             .queue(Rumor::leave(self.local.clone(), self.incarnation));
     }

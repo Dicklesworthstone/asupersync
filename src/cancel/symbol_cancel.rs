@@ -1800,9 +1800,9 @@ impl CleanupCoordinator {
                 // identifying the missing-handler condition, and
                 // restore the pending set so a later
                 // register_handler + retry can drive cleanup to
-                // completion. The completed-set entry inserted at
-                // line 1015 above is rolled back here too — a
-                // missing-handler outcome is NOT a completion.
+                // completion. No completion is recorded on this path
+                // (the `completed` set is only written on handler
+                // success above), so there is nothing to roll back.
                 result.completed = false;
                 result.handler_errors.push(format!(
                     "no cleanup handler registered for object {object_id:?}; \
@@ -1810,20 +1810,16 @@ impl CleanupCoordinator {
                      (br-asupersync-batcyw)"
                 ));
 
-                // Merge any buffered symbols back into the pending set
-                let mut cleanup_buffer = self.cleanup_buffer.write();
-                let mut restored_set = set;
-                if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
-                    for symbol in buffered_symbols {
-                        restored_set.total_bytes =
-                            restored_set.total_bytes.saturating_add(symbol.len());
-                        restored_set.symbols.push(symbol);
-                    }
-                }
-                drop(cleanup_buffer);
-
-                // Restore pending; don't mark completed (no handler to retry with).
-                self.pending.write().insert(object_id, restored_set);
+                // Restore the pending set through the shared helper. Unlike the
+                // previous inline insert, this holds `pending` -> `completed`
+                // and REFUSES to resurrect an object that a concurrent
+                // `clear_pending()` (successful decode) already marked
+                // completed. Re-inserting pending onto a completed object was a
+                // permanent leak: `register_pending()` rejects completed
+                // objects and, with no handler registered, no retry path can
+                // ever drain the resurrected set. The helper also drains any
+                // buffered late-arriving symbols back into the restored set.
+                self.restore_pending_only_state(object_id, set);
             }
         } else {
             // No pending symbols. Decide completion under the SAME lock

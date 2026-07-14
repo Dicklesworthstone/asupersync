@@ -163,6 +163,17 @@ struct WatchInner<T> {
     value: RwLock<(T, u64)>,
     // NOTE: Previously had version: AtomicU64 shadow counter, but this
     // created race conditions. Now we read version from value RwLock directly.
+    /// Serializes writers (`send` / `send_modify`) so a read-modify-write in
+    /// `send_modify` cannot be annihilated by a concurrent write (lost update).
+    ///
+    /// This is held across the whole clone -> closure -> writeback of
+    /// `send_modify` and across the atomic write of `send`, but the value
+    /// `RwLock` is deliberately NOT held while the user closure runs. That
+    /// keeps the no-reentrancy-deadlock / no-reader-stall contract
+    /// (`send_modify_deadlock_prevention`) intact while still making concurrent
+    /// writers mutually exclusive. Lock order is always `send_lock` -> `value`;
+    /// nothing takes `value` before `send_lock`, so no deadlock is introduced.
+    send_lock: Mutex<()>,
     /// Number of active receivers (excluding sender's implicit subscription).
     receiver_count: AtomicUsize,
     /// Whether the sender has been dropped.
@@ -179,6 +190,7 @@ impl<T> WatchInner<T> {
     fn new(initial: T) -> Self {
         Self {
             value: RwLock::new((initial, 0)),
+            send_lock: Mutex::new(()),
             receiver_count: AtomicUsize::new(1), // Counts the Receiver returned by channel()
             sender_dropped: AtomicBool::new(false),
             waiters: Mutex::new(SmallVec::new()),
@@ -441,7 +453,12 @@ impl<T> Sender<T> {
             return Err(SendError::Closed(value));
         }
 
+        // Serialize against any concurrent `send_modify` read-modify-write so a
+        // blind `send` cannot land inside another writer's RMW window and be
+        // silently annihilated (see `send_lock` docs). The value guard drops at
+        // the end of the block, then `send_lock`, then the old value.
         let _old_value = {
+            let _write_serialize = self.inner.send_lock.lock();
             let mut guard = self.inner.value.write();
             let old = std::mem::replace(&mut guard.0, value);
             guard.1 = guard.1.wrapping_add(1);
@@ -480,13 +497,20 @@ impl<T> Sender<T> {
             return Err(ModifyError);
         }
 
+        // Serialize the whole read-modify-write against other writers. Held
+        // across clone -> closure -> writeback so a concurrent `send` /
+        // `send_modify` cannot commit between our read and write and be lost
+        // (the closure still runs WITHOUT the value `RwLock` held, so the
+        // no-reentrancy-deadlock / no-reader-stall contract is preserved).
+        let _write_serialize = self.inner.send_lock.lock();
+
         // Clone current value while holding read lock to avoid calling user code under write lock
         let mut value = {
             let guard = self.inner.value.read();
             guard.0.clone()
         };
 
-        // Call user closure without holding any locks to prevent deadlocks
+        // Call user closure without holding the value lock to prevent deadlocks
         f(&mut value);
 
         // Write back under the value lock, but drop the PREVIOUS value only
@@ -3270,6 +3294,43 @@ mod tests {
         // If we reach this point without hanging, the deadlock was avoided
 
         crate::test_complete!("send_modify_deadlock_prevention");
+    }
+
+    /// Regression for br-asupersync-jb1hvz: concurrent writers must not lose
+    /// updates. Before the `send_lock` serialization, `send_modify`'s
+    /// clone -> closure -> writeback window let a concurrent `send_modify` (or
+    /// `send`) commit be silently annihilated, so the final counter came in
+    /// below `threads * iters`. With writers serialized the count is exact.
+    #[test]
+    fn send_modify_concurrent_writers_do_not_lose_updates() {
+        init_test("send_modify_concurrent_writers_do_not_lose_updates");
+
+        let (tx, rx) = channel(0u64);
+        const THREADS: u64 = 8;
+        const ITERS: u64 = 5_000;
+
+        // `Sender` is single-producer (not `Clone`) but `Sync`, so a shared
+        // `&tx` drives every writer thread through the same serialization lock.
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let tx = &tx;
+                scope.spawn(move || {
+                    for _ in 0..ITERS {
+                        tx.send_modify(|v| *v += 1).expect("send_modify");
+                    }
+                });
+            }
+        });
+
+        let final_value = *rx.borrow();
+        crate::assert_with_log!(
+            final_value == THREADS * ITERS,
+            "every concurrent send_modify increment is preserved",
+            THREADS * ITERS,
+            final_value
+        );
+
+        crate::test_complete!("send_modify_concurrent_writers_do_not_lose_updates");
     }
 
     /// Audit test for concurrent send + borrow_and_update behavior.

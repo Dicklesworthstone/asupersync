@@ -6,7 +6,7 @@
 use super::Stream;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 /// Cooperative budget for child-stream scans in a single poll.
 ///
@@ -21,6 +21,20 @@ pub struct Merge<S> {
     streams: VecDeque<S>,
     /// Round-robin cursor for fair polling without moving elements.
     next_index: usize,
+    /// Waker installed on the child streams during the current pending sweep.
+    ///
+    /// Used only to detect executor migration so the registration counter can
+    /// reset; child streams are polled with the live `cx` waker regardless.
+    waker: Option<Waker>,
+    /// Count of child streams that have returned `Pending` (and therefore
+    /// registered [`Self::waker`]) since the last progress or waker change.
+    ///
+    /// A cooperative-budget yield re-wakes the task to continue scanning only
+    /// while this is below the live child count. Once every remaining child has
+    /// registered the current waker, the combinator parks WITHOUT a self-wake:
+    /// a self-wake at that point would busy-loop at 100% CPU because no scan can
+    /// make progress until a child fires. Mirrors the `Buffered` epoch gate.
+    pending_registered: usize,
 }
 
 impl<S> Merge<S> {
@@ -30,6 +44,8 @@ impl<S> Merge<S> {
         Self {
             streams: streams.into_iter().collect(),
             next_index: 0,
+            waker: None,
+            pending_registered: 0,
         }
     }
 
@@ -83,6 +99,17 @@ where
             return Poll::Ready(None);
         }
 
+        // Reset the pending-registration counter if the executor changed the
+        // waker under us (task migrated); the children registered a now-stale
+        // waker, so we must re-sweep before we are allowed to park.
+        match &self.waker {
+            Some(w) if w.will_wake(cx.waker()) => {}
+            _ => {
+                self.waker = Some(cx.waker().clone());
+                self.pending_registered = 0;
+            }
+        }
+
         let start = self.next_index.min(initial_len.saturating_sub(1));
         // Track how many original streams we've visited (removals don't reduce the budget).
         let mut remaining = initial_len;
@@ -102,11 +129,16 @@ where
                 Poll::Ready(Some(item)) => {
                     let new_len = self.streams.len();
                     self.next_index = if i + 1 >= new_len { 0 } else { i + 1 };
+                    // Progress: a delivered item invalidates the pending-sweep
+                    // count so the next poll re-registers before it may park.
+                    self.pending_registered = 0;
                     return Poll::Ready(Some(item));
                 }
                 Poll::Ready(None) => {
-                    // Stream exhausted; remove it.
+                    // Stream exhausted; remove it. The active set changed, so the
+                    // pending-registration invariant no longer holds — reset.
                     self.streams.remove(i);
+                    self.pending_registered = 0;
                     remaining -= 1;
                     scanned_this_poll += 1;
                     if scanned_this_poll >= MERGE_COOPERATIVE_POLL_BUDGET && remaining > 0 {
@@ -115,13 +147,20 @@ where
                         } else {
                             i % self.streams.len()
                         };
+                        // Removals are progress (the set shrinks toward empty),
+                        // so continuing next tick terminates; this self-wake is
+                        // bounded and safe.
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
                     // i now points at the next element (shifted into this slot), don't advance.
                     continue;
                 }
-                Poll::Pending => {}
+                Poll::Pending => {
+                    // This child registered the current waker; record it so the
+                    // combinator can park once every live child has registered.
+                    self.pending_registered = self.pending_registered.saturating_add(1);
+                }
             }
             remaining -= 1;
             scanned_this_poll += 1;
@@ -131,7 +170,13 @@ where
                 } else {
                     (i + 1) % self.streams.len()
                 };
-                cx.waker().wake_by_ref();
+                // Only yield-and-rewake while there is still an unregistered
+                // child to scan. Once every live child has registered the
+                // current waker, a self-wake would busy-loop at 100% CPU with no
+                // possible progress, so park and rely on the children's wakers.
+                if self.pending_registered < self.streams.len() {
+                    cx.waker().wake_by_ref();
+                }
                 return Poll::Pending;
             }
             i += 1;
@@ -781,18 +826,23 @@ mod tests {
             stream.next_index
         );
 
+        // Second poll completes the sweep: every remaining child now registers
+        // the current waker, so the combinator must PARK (no self-wake) instead
+        // of spinning at 100% CPU. This is the fix for the all-pending busy-loop:
+        // once all live children have registered, a self-wake could never make
+        // progress until a child fires.
         woke.store(false, Ordering::SeqCst);
         let second = Pin::new(&mut stream).poll_next(&mut cx);
         crate::assert_with_log!(
             matches!(second, Poll::Pending),
-            "second poll also yields cooperatively",
+            "second poll parks pending",
             "Poll::Pending",
             second
         );
         crate::assert_with_log!(
-            woke.load(Ordering::SeqCst),
-            "second self-wake requested",
-            true,
+            !woke.load(Ordering::SeqCst),
+            "no self-wake once every child has registered (no busy-loop)",
+            false,
             woke.load(Ordering::SeqCst)
         );
         crate::assert_with_log!(
@@ -800,6 +850,16 @@ mod tests {
             "resume cursor keeps rotating across polls",
             (MERGE_COOPERATIVE_POLL_BUDGET * 2) % stream_count,
             stream.next_index
+        );
+
+        // Third poll must stay parked: no spurious self-wake accumulates.
+        woke.store(false, Ordering::SeqCst);
+        let third = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(third, Poll::Pending) && !woke.load(Ordering::SeqCst),
+            "combinator stays parked without spinning",
+            "Pending & no self-wake",
+            (third, woke.load(Ordering::SeqCst))
         );
         crate::test_complete!("merge_yields_cooperatively_when_scan_budget_is_exhausted");
     }
