@@ -1438,6 +1438,16 @@ fn expect_ok_response(resp: &RespValue, command: &str) -> Result<(), RedisError>
     }
 }
 
+fn classify_command_response(response: RespValue) -> Result<RespValue, RedisError> {
+    match response {
+        RespValue::Error(message) => Err(RedisError::Redis(message)),
+        RespValue::BlobError(message) => Err(RedisError::Redis(
+            String::from_utf8_lossy(&message).into_owned(),
+        )),
+        other => Ok(other),
+    }
+}
+
 const DEFAULT_MAX_RESP_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
 /// Default maximum nesting depth for RESP arrays.
@@ -2175,11 +2185,7 @@ impl RedisConnection {
 
     async fn exec_no_init(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
         self.write_command(cx, args).await?;
-        let value = self.read_response(cx).await?;
-        match value {
-            RespValue::Error(msg) => Err(RedisError::Redis(msg)),
-            other => Ok(other),
-        }
+        classify_command_response(self.read_response(cx).await?)
     }
 
     async fn exec(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
@@ -2924,10 +2930,10 @@ impl Drop for DiscardOnDropGuard {
 ///   `Result<Vec<Result<RespValue, RedisError>>, RedisError>`:
 ///   * The outer `Result` carries IO / protocol errors that invalidate the
 ///     entire pipeline (and force the connection to be discarded).
-///   * The inner `Result` is per-command: a RESP `-ERR ...` reply becomes
-///     `Err(RedisError::Redis(msg))`, every other reply (including nil)
-///     becomes `Ok(value)`. The connection stays healthy and is returned
-///     to the pool. (br-asupersync-pr32li)
+///   * The inner `Result` is per-command: a RESP2 `-ERR ...` or RESP3
+///     blob-error reply becomes `Err(RedisError::Redis(msg))`; every non-error
+///     reply (including nil) becomes `Ok(value)`. The connection stays healthy
+///     and is returned to the pool. (br-asupersync-pr32li)
 /// - If an I/O error occurs mid-pipeline (read/write fails, EOF, framing
 ///   error), the connection is discarded because its read/write state is
 ///   no longer reliable.
@@ -2958,11 +2964,11 @@ impl Pipeline<'_> {
     /// Execute the pipeline and return per-command results.
     ///
     /// Returns `Vec<Result<RespValue, RedisError>>` where each element
-    /// corresponds positionally to a queued command. A RESP `-ERR` reply
-    /// becomes `Err(RedisError::Redis(msg))` for that single command; the
-    /// loop continues to drain remaining responses so the wire-protocol
-    /// framing stays in sync. The connection is returned to the pool
-    /// regardless of how many per-command errors occurred.
+    /// corresponds positionally to a queued command. A RESP2 `-ERR` or RESP3
+    /// blob-error reply becomes `Err(RedisError::Redis(msg))` for that single
+    /// command; the loop continues to drain remaining responses so the
+    /// wire-protocol framing stays in sync. The connection is returned to the
+    /// pool regardless of how many per-command errors occurred.
     ///
     /// The outer `Err(...)` is reserved for IO / protocol failures
     /// (write, flush, framing read, EOF) which DO invalidate the
@@ -2995,21 +3001,18 @@ impl Pipeline<'_> {
         // IO error from `read_response` truly invalidates the connection
         // (it can't be reused without re-syncing the framer), so we
         // propagate via the outer Err and let the guard discard the
-        // connection. Application-level `-ERR` replies become per-command
-        // `Err`s in the inner Result so a failed command in a pipeline
-        // doesn't tear down the whole batch or the connection.
+        // connection. Application-level RESP2 and RESP3 error replies become
+        // per-command `Err`s in the inner Result so a failed command in a
+        // pipeline doesn't tear down the whole batch or the connection.
         let mut out = Vec::with_capacity(self.encoded.len());
         for _ in 0..self.encoded.len() {
             let resp = conn.read_response(cx).await?;
-            match resp {
-                RespValue::Error(msg) => out.push(Err(RedisError::Redis(msg))),
-                other => out.push(Ok(other)),
-            }
+            out.push(classify_command_response(resp));
         }
 
         // Protocol exchange complete — defuse the guard so the connection
-        // returns to the pool instead of being discarded. -ERR replies are
-        // application-level and do NOT invalidate the connection.
+        // returns to the pool instead of being discarded. Server error replies
+        // are application-level and do NOT invalidate the connection.
         conn.return_to_pool();
         Ok(out)
     }
@@ -3061,8 +3064,8 @@ impl Transaction {
     /// `self.finished` is **not** mutated until after both await points
     /// (`write_command`, `read_response`) complete. The previous
     /// implementation set `self.finished = true` eagerly at the top of
-    /// the function and only reset it to `false` on the success and
-    /// Redis-`-ERR` paths — so on a transient network failure mid-write
+    /// the function and only reset it to `false` on successful and
+    /// server-error reply paths — so on a transient network failure mid-write
     /// or a cancel mid-read, the transaction object was permanently
     /// bricked from the caller's perspective with no signal that it
     /// might be a recoverable retry candidate. The reorder below
@@ -3092,17 +3095,17 @@ impl Transaction {
         conn.write_command(cx, args).await?;
         let resp = conn.read_response(cx).await?;
 
-        match resp {
-            RespValue::SimpleString(s) if s == "QUEUED" => {
+        match classify_command_response(resp) {
+            Ok(RespValue::SimpleString(s)) if s == "QUEUED" => {
                 self.conn = Some(conn.defuse());
                 self.queued_commands = self.queued_commands.saturating_add(1);
                 Ok(())
             }
-            RespValue::Error(msg) => {
+            Err(error) => {
                 self.conn = Some(conn.defuse());
-                Err(RedisError::Redis(msg))
+                Err(error)
             }
-            other => {
+            Ok(other) => {
                 // Protocol violation: the connection responded with a
                 // shape Redis does not document as legal in MULTI mode.
                 // Mark the transaction terminated so subsequent calls
@@ -3128,6 +3131,8 @@ impl Transaction {
         self.finished = true;
         let mut conn = DiscardOnDropGuard::new(conn);
 
+        // `exec_no_init` classifies both RESP2 and RESP3 top-level server
+        // errors before this transaction-result shape match.
         let resp = conn.exec_no_init(cx, &[b"EXEC"]).await?;
 
         match resp {
@@ -3140,10 +3145,6 @@ impl Transaction {
                 Err(RedisError::Redis(
                     "EXEC returned null (WATCH condition failed)".to_string(),
                 ))
-            }
-            RespValue::Error(msg) => {
-                conn.return_to_pool();
-                Err(RedisError::Redis(msg))
             }
             other => Err(RedisError::Protocol(format!(
                 "EXEC expected array reply, got {other:?}"
@@ -8198,6 +8199,25 @@ mod tests {
     }
 
     #[test]
+    fn classify_command_response_rejects_resp2_and_resp3_errors() {
+        let resp2 = classify_command_response(RespValue::Error("ERR resp2".to_string()))
+            .expect_err("RESP2 error must not surface as a successful command reply");
+        assert!(matches!(resp2, RedisError::Redis(message) if message == "ERR resp2"));
+
+        let resp3 =
+            classify_command_response(RespValue::BlobError(vec![b'E', b'R', b'R', b' ', 0xff]))
+                .expect_err("RESP3 blob error must not surface as a successful command reply");
+        assert!(
+            matches!(resp3, RedisError::Redis(message) if message == "ERR \u{fffd}"),
+            "binary blob errors should use a deterministic lossy representation"
+        );
+
+        let success = classify_command_response(RespValue::Integer(7))
+            .expect("non-error replies must remain successful");
+        assert_eq!(success, RespValue::Integer(7));
+    }
+
+    #[test]
     fn pubsub_parse_message_event() {
         let event = RedisPubSub::parse_event(RespValue::Array(Some(vec![
             RespValue::BulkString(Some(b"message".to_vec())),
@@ -9832,10 +9852,85 @@ mod tests {
     }
 
     #[test]
+    fn hello3_unknown_command_falls_back_to_resp2() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept command client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set command read timeout");
+
+            let hello = read_resp_frame(&mut stream);
+            assert_resp_command(hello, &[b"HELLO", b"3"]);
+            stream
+                .write_all(b"-ERR unknown command 'HELLO'\r\n")
+                .expect("write HELLO fallback response");
+            stream.flush().expect("flush HELLO fallback response");
+
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING"]);
+            stream.write_all(b"+PONG\r\n").expect("write PING reply");
+            stream.flush().expect("flush PING reply");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+            client
+                .ping(&cx)
+                .await
+                .expect("legacy RESP2 fallback should remain usable");
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn get_resp3_blob_error_is_not_reported_as_missing_key() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept command client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set command read timeout");
+
+            write_hello3_ok(&mut stream);
+            let get = read_resp_frame(&mut stream);
+            assert_resp_command(get, &[b"GET", b"missing"]);
+            stream
+                .write_all(&RespValue::BlobError(b"ERR storage unavailable".to_vec()).encode())
+                .expect("write RESP3 blob error");
+            stream.flush().expect("flush RESP3 blob error");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+
+            let error = client
+                .get(&cx, "missing")
+                .await
+                .expect_err("RESP3 blob error must not look like a missing key");
+            assert!(
+                matches!(error, RedisError::Redis(ref message) if message == "ERR storage unavailable"),
+                "expected RedisError::Redis for blob error, got {error:?}"
+            );
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
     fn transaction_redis_error_response_keeps_transaction_alive_for_retry() {
-        // br-asupersync-4tb7kn: a `-ERR ...` reply from Redis to a
-        // queued cmd_bytes call is a *transient*, command-scoped
-        // rejection — not a transaction-terminating event. The
+        // br-asupersync-4tb7kn: RESP2 `-ERR ...` and RESP3 blob-error
+        // replies from Redis to a queued cmd_bytes call are *transient*,
+        // command-scoped rejections — not transaction-terminating events. The
         // transaction object must remain usable: a subsequent
         // cmd_bytes must succeed when the same command shape is
         // accepted, and EXEC must still execute. The pre-fix code
@@ -9867,6 +9962,15 @@ mod tests {
                 .write_all(b"-ERR unknown command 'BOGUS_COMMAND'\r\n")
                 .expect("write -ERR ack");
             stream.flush().expect("flush -ERR ack");
+
+            // Second queued command — RESP3 represents the same class of
+            // application error with a binary blob-error frame.
+            let second = read_resp_frame(&mut stream);
+            assert_resp_command(second, &[b"BOGUS_BLOB"]);
+            stream
+                .write_all(&RespValue::BlobError(b"ERR blob rejection".to_vec()).encode())
+                .expect("write blob-error ack");
+            stream.flush().expect("flush blob-error ack");
 
             // Retry with a valid command — server returns +QUEUED.
             let retry = read_resp_frame(&mut stream);
@@ -9900,10 +10004,24 @@ mod tests {
                 "expected RedisError::Redis(unknown command), got {first_err:?}"
             );
 
+            let second_err = tx
+                .cmd(&cx, &["BOGUS_BLOB"])
+                .await
+                .expect_err("RESP3 blob error should reject the queued command");
+            assert!(
+                matches!(second_err, RedisError::Redis(ref msg) if msg == "ERR blob rejection"),
+                "expected RedisError::Redis(blob rejection), got {second_err:?}"
+            );
+            assert_eq!(
+                tx.queued_commands(),
+                0,
+                "rejected commands must not increment the queued-command count"
+            );
+
             // Transaction is still alive: the next cmd_bytes succeeds.
             tx.cmd(&cx, &["SET", "k", "v"])
                 .await
-                .expect("retry after -ERR should still queue");
+                .expect("retry after RESP2 and RESP3 errors should still queue");
 
             // EXEC consumes the transaction and returns the queued
             // command's reply.
@@ -9918,28 +10036,97 @@ mod tests {
         server.join().expect("server join");
     }
 
+    #[test]
+    fn transaction_exec_resp3_blob_error_is_redis_error_and_discards_connection() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept transaction client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set transaction read timeout");
+
+            write_hello3_ok(&mut stream);
+            let multi = read_resp_frame(&mut stream);
+            assert_resp_command(multi, &[b"MULTI"]);
+            stream.write_all(b"+OK\r\n").expect("write MULTI ack");
+            stream.flush().expect("flush MULTI ack");
+
+            let exec = read_resp_frame(&mut stream);
+            assert_resp_command(exec, &[b"EXEC"]);
+            stream
+                .write_all(&RespValue::BlobError(b"ERR transaction aborted".to_vec()).encode())
+                .expect("write EXEC blob error");
+            stream.flush().expect("flush EXEC blob error");
+
+            let mut probe = [0u8; 1];
+            match stream.read(&mut probe) {
+                Ok(0) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::NotConnected
+                            | io::ErrorKind::UnexpectedEof
+                    ) => {}
+                Ok(count) => panic!(
+                    "top-level EXEC error should discard the connection, read {count} byte(s)"
+                ),
+                Err(error) => {
+                    panic!("top-level EXEC error should close the connection, got {error}")
+                }
+            }
+            closed_tx.send(()).expect("signal connection discarded");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+            let transaction = client.transaction(&cx).await.expect("start transaction");
+
+            let error = transaction
+                .exec(&cx)
+                .await
+                .expect_err("top-level EXEC blob error must reject the transaction");
+            assert!(
+                matches!(error, RedisError::Redis(ref message) if message == "ERR transaction aborted"),
+                "expected RedisError::Redis for EXEC blob error, got {error:?}"
+            );
+            closed_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("EXEC error should discard the connection while the client is still live");
+            drop(client);
+        });
+
+        server.join().expect("server join");
+    }
+
     /// br-asupersync-f3635k (follow-up to br-asupersync-pr32li).
-    /// Pipeline::exec must collect ALL responses even when one of them is a
-    /// RESP `-ERR` reply, classify the `-ERR` as `Err(RedisError::Redis(_))`
-    /// at the per-command position, return the connection to the pool, and
-    /// leave the connection healthy enough to serve the next command.
+    /// Pipeline::exec must collect ALL responses even when commands receive
+    /// RESP2 `-ERR` or RESP3 blob-error replies, classify each as
+    /// `Err(RedisError::Redis(_))` at its per-command position, return the
+    /// connection to the pool, and leave it healthy for the next command.
     ///
     /// Scripted server drives the wire exchange:
     ///   1. Client sends HELLO 3 (RESP3 negotiation in ensure_initialized).
-    ///      Server replies `-ERR unknown command 'HELLO'\r\n` so the client
-    ///      falls through to RESP2 (no AUTH because no password configured).
-    ///   2. Client writes the 3 pipelined commands as one combined buffer.
-    ///      Server reads three RESP frames in succession.
+    ///      Server returns the negotiated RESP3 map response.
+    ///   2. Client writes the 4 pipelined commands as one combined buffer.
+    ///      Server reads four RESP frames in succession.
     ///   3. Server writes back, in one buffer:
     ///      $5\r\nfirst\r\n
     ///      -ERR something went wrong\r\n
-    ///      $5\r\nthird\r\n
-    ///   4. Client receives Vec<Result<RespValue, RedisError>> with three
-    ///      entries; middle one is Err(RedisError::Redis(...)); first and
-    ///      third are Ok(BulkString(...)).
+    ///      !18\r\nERR blob rejection\r\n
+    ///      $6\r\nfourth\r\n
+    ///   4. Client receives Vec<Result<RespValue, RedisError>> with four
+    ///      entries; both error encodings become RedisError::Redis while the
+    ///      first and fourth entries remain successful bulk strings.
     ///   5. Client then runs a single PING via the same pool — reuses the
     ///      same RedisConnection (because the pipeline defused its discard
-    ///      guard on the -ERR path) and the server replies +PONG.
+    ///      guard on the application-error paths) and the server replies +PONG.
     #[test]
     fn pipeline_exec_collects_all_results_when_middle_command_errors() {
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
@@ -9951,16 +10138,11 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set read timeout");
 
-            // 1. HELLO 3 (RESP3 negotiation). Reply -ERR so client falls back
-            //    to RESP2 with no AUTH since the test config has no password.
-            let hello = read_resp_frame(&mut stream);
-            assert_resp_command(hello, &[b"HELLO", b"3"]);
-            stream
-                .write_all(b"-ERR unknown command 'HELLO'\r\n")
-                .expect("write HELLO -ERR");
-            stream.flush().expect("flush HELLO -ERR");
+            // 1. Negotiate RESP3 so both simple and blob error frames below
+            //    are legal server replies for this connection.
+            write_hello3_ok(&mut stream);
 
-            // 2. Three pipelined commands. Pipeline writes all three frames
+            // 2. Four pipelined commands. Pipeline writes all four frames
             //    in one combined buffer, so the scripted server must retain
             //    unread bytes between decode calls instead of dropping any
             //    frames that arrived in the first socket read.
@@ -9971,12 +10153,16 @@ mod tests {
             assert_resp_command(cmd2, &[b"GET", b"k2"]);
             let cmd3 = read_resp_frame_from_buffer(&mut stream, &mut command_buf);
             assert_resp_command(cmd3, &[b"GET", b"k3"]);
+            let cmd4 = read_resp_frame_from_buffer(&mut stream, &mut command_buf);
+            assert_resp_command(cmd4, &[b"GET", b"k4"]);
 
-            // 3. Three responses in one combined write: Ok, -ERR, Ok.
+            // 3. Four responses in one combined write: Ok, -ERR, !ERR, Ok.
             let mut response = Vec::new();
             response.extend_from_slice(b"$5\r\nfirst\r\n");
             response.extend_from_slice(b"-ERR something went wrong\r\n");
-            response.extend_from_slice(b"$5\r\nthird\r\n");
+            response
+                .extend_from_slice(&RespValue::BlobError(b"ERR blob rejection".to_vec()).encode());
+            response.extend_from_slice(b"$6\r\nfourth\r\n");
             stream.write_all(&response).expect("write pipeline replies");
             stream.flush().expect("flush pipeline replies");
 
@@ -10001,18 +10187,19 @@ mod tests {
             pipeline.cmd(&["GET", "k1"]);
             pipeline.cmd(&["GET", "k2"]);
             pipeline.cmd(&["GET", "k3"]);
+            pipeline.cmd(&["GET", "k4"]);
 
             let results = pipeline
                 .exec(&cx)
                 .await
-                .expect("pipeline exec must return Ok even when a per-cmd -ERR appears");
+                .expect("pipeline exec must return Ok despite per-command Redis errors");
 
-            // 4. All three results returned — the mid -ERR did NOT short-
-            //    circuit collection.
+            // 4. All four results returned — neither error encoding
+            //    short-circuited collection.
             assert_eq!(
                 results.len(),
-                3,
-                "pipeline must collect ALL three responses (br-pr32li); got {results:?}"
+                4,
+                "pipeline must collect ALL four responses (br-pr32li); got {results:?}"
             );
 
             // results[0] = Ok(BulkString(first))
@@ -10027,21 +10214,27 @@ mod tests {
                 other => panic!("results[1] expected Err(RedisError::Redis(...)), got {other:?}"),
             }
 
-            // results[2] = Ok(BulkString(third))
+            // results[2] = Err(RedisError::Redis("ERR blob rejection"))
             match &results[2] {
-                Ok(RespValue::BulkString(Some(bytes))) if bytes == b"third" => {}
-                other => panic!("results[2] expected Ok(BulkString(\"third\")), got {other:?}"),
+                Err(RedisError::Redis(msg)) if msg == "ERR blob rejection" => {}
+                other => panic!("results[2] expected RESP3 blob Redis error, got {other:?}"),
+            }
+
+            // results[3] = Ok(BulkString(fourth))
+            match &results[3] {
+                Ok(RespValue::BulkString(Some(bytes))) if bytes == b"fourth" => {}
+                other => panic!("results[3] expected Ok(BulkString(\"fourth\")), got {other:?}"),
             }
 
             // 5. Connection-healthy assertion — a follow-up command must
             //    reuse the pool and succeed. If pipeline had wrongly
-            //    discarded the connection on the -ERR, this PING would
+            //    discarded the connection on either server error, this PING would
             //    fail (or stall on a fresh accept the test server doesn't
             //    handle).
             client
                 .ping(&cx)
                 .await
-                .expect("connection should remain healthy after per-cmd -ERR");
+                .expect("connection should remain healthy after per-command Redis errors");
         });
 
         server.join().expect("server join");
