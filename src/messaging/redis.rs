@@ -8992,7 +8992,7 @@ mod tests {
     }
 
     #[test]
-    fn pubsub_ping_preserves_interleaved_messages() {
+    fn pubsub_resp3_ping_preserves_interleaved_messages_and_connection() {
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");
         let server = thread::spawn(move || {
@@ -9004,11 +9004,11 @@ mod tests {
             write_hello3_ok(&mut stream);
             let subscribe = read_resp_frame(&mut stream);
             assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
-            let subscribe_ack = RespValue::Array(Some(vec![
+            let subscribe_ack = RespValue::Push(vec![
                 RespValue::BulkString(Some(b"subscribe".to_vec())),
                 RespValue::BulkString(Some(b"chan".to_vec())),
                 RespValue::Integer(1),
-            ]))
+            ])
             .encode();
             stream
                 .write_all(&subscribe_ack)
@@ -9018,18 +9018,24 @@ mod tests {
             let ping = read_resp_frame(&mut stream);
             assert_resp_command(ping, &[b"PING"]);
             let mut outbound = Vec::new();
-            RespValue::Array(Some(vec![
+            RespValue::Push(vec![
                 RespValue::BulkString(Some(b"message".to_vec())),
                 RespValue::BulkString(Some(b"chan".to_vec())),
                 RespValue::BulkString(Some(b"payload".to_vec())),
-            ]))
+            ])
             .encode_into(&mut outbound);
-            RespValue::Array(Some(vec![RespValue::BulkString(Some(b"pong".to_vec()))]))
-                .encode_into(&mut outbound);
+            RespValue::SimpleString("PONG".to_string()).encode_into(&mut outbound);
             stream
                 .write_all(&outbound)
                 .expect("write interleaved message and pong");
             stream.flush().expect("flush interleaved message and pong");
+
+            let ping_with_payload = read_resp_frame(&mut stream);
+            assert_resp_command(ping_with_payload, &[b"PING", b"probe"]);
+            stream
+                .write_all(&RespValue::BulkString(Some(b"probe".to_vec())).encode())
+                .expect("write payload pong");
+            stream.flush().expect("flush payload pong");
         });
 
         run_test_with_cx(|cx| async move {
@@ -9048,7 +9054,7 @@ mod tests {
 
             assert_completes_within(
                 Duration::from_secs(2),
-                "redis pubsub ping preserves interleaved messages",
+                "redis RESP3 pubsub ping preserves interleaved messages and connection",
                 || {
                     Box::pin(async {
                         pubsub.ping(&cx, None).await.expect("ping should succeed");
@@ -9064,6 +9070,10 @@ mod tests {
                                 payload: b"payload".to_vec(),
                             })
                         );
+                        pubsub
+                            .ping(&cx, Some(b"probe"))
+                            .await
+                            .expect("same RESP3 connection should remain reusable");
                     })
                 },
             )
@@ -10384,7 +10394,7 @@ mod tests {
         Some(config)
     }
 
-    /// Test Redis pub/sub with real Redis server (replaces pubsub_ping_preserves_interleaved_messages)
+    /// Supplement the deterministic RESP3 ping regression with a real Redis server.
     #[test]
     fn test_real_redis_pubsub_ping_preserves_interleaved_messages() {
         let Some(config) = require_real_redis() else {
