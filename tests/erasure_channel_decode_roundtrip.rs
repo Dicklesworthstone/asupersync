@@ -8,7 +8,9 @@
 //! RaptorQ decoder — recovery up to the repair budget, fail-closed below it.
 #![allow(missing_docs)]
 
-use asupersync::channel::erasure::{EcConfig, MessageReassembler, SymbolFrame, decode_message};
+use asupersync::channel::erasure::{
+    EcConfig, EcError, MessageReassembler, SymbolFrame, decode_message,
+};
 
 fn config() -> EcConfig {
     EcConfig {
@@ -36,6 +38,47 @@ fn encode_decode_roundtrip_lossless() {
     assert_eq!(
         decoded, message,
         "lossless round-trip must be byte-identical"
+    );
+}
+
+#[test]
+fn unauthenticated_decode_scales_symbol_cap_at_and_past_8192() {
+    const SYMBOL_SIZE: u16 = 8;
+
+    for k in [8_192usize, 8_193] {
+        let message_size = k * usize::from(SYMBOL_SIZE);
+        let cfg = EcConfig {
+            symbol_size: SYMBOL_SIZE,
+            repair_overhead: 0,
+            max_message_size: message_size,
+        };
+        let message: Vec<u8> = (0..message_size).map(|i| i as u8).collect();
+
+        let encoded = cfg
+            .encode_message(u64::try_from(k).expect("K fits message id"), &message)
+            .expect("encode");
+        assert_eq!(usize::from(encoded.header.source_symbols), k);
+
+        let decoded = decode_message(&encoded.header, &encoded.frames)
+            .expect("a lossless block at or above the old fixed cap must decode");
+        assert_eq!(decoded, message, "K={k} round-trip");
+    }
+}
+
+#[test]
+fn unauthenticated_decode_surfaces_symbol_rejection() {
+    let cfg = config();
+    let message = vec![0x5a; 256];
+    let mut encoded = cfg.encode_message(78, &message).expect("encode");
+    encoded.frames[0].payload.pop();
+
+    let result = decode_message(&encoded.header, &encoded.frames);
+    assert!(
+        matches!(
+            result,
+            Err(EcError::Coding(ref detail)) if detail.contains("SymbolSizeMismatch")
+        ),
+        "malformed symbol rejection must be surfaced, got {result:?}"
     );
 }
 

@@ -52,7 +52,7 @@ use std::fmt;
 use crate::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::config::EncodingConfig;
 use crate::cx::Cx;
-use crate::decoding::{DecodingConfig, DecodingPipeline};
+use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
 use crate::encoding::EncodingPipeline;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
@@ -298,6 +298,11 @@ pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<
     let mut config = DecodingConfig::without_auth();
     config.symbol_size = header.symbol_size;
     config.max_block_size = usize::from(source_symbols) * usize::from(header.symbol_size);
+    // Let `set_object_params` size the per-block accept cap from K. Keeping
+    // `DecodingConfig`'s fixed 8192-symbol default here silently rejects every
+    // later source symbol for otherwise-valid larger blocks, so a lossless
+    // K=8193 message can never complete.
+    config.max_buffered_symbols = 0;
 
     let mut decoder = DecodingPipeline::new(config);
     decoder
@@ -310,7 +315,17 @@ pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<
         })
         .map_err(|e| EcError::Coding(e.to_string()))?;
 
+    let block_accept_cap = decoder.block_accept_cap();
+    if block_accept_cap != 0 && block_accept_cap < usize::from(source_symbols) {
+        return Err(EcError::Coding(format!(
+            "decoder block accept cap {block_accept_cap} is below source symbol count {source_symbols}"
+        )));
+    }
+
     for frame in frames {
+        if decoder.is_complete() {
+            break;
+        }
         let kind = if frame.esi < source_symbols {
             SymbolKind::Source
         } else {
@@ -321,9 +336,24 @@ pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<
             frame.payload.clone(),
             kind,
         );
-        decoder
+        let outcome = decoder
             .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
             .map_err(|e| EcError::Coding(e.to_string()))?;
+        match outcome {
+            // RaptorQ may need a later repair symbol to close an otherwise
+            // valid rank deficit, so this rejection is explicitly retryable.
+            SymbolAcceptResult::Rejected(RejectReason::InsufficientRank) => {}
+            // Defensive only: the completion check above normally prevents an
+            // already-decoded block from seeing another frame.
+            SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded) => break,
+            SymbolAcceptResult::Rejected(reason) => {
+                return Err(EcError::Coding(format!(
+                    "decoder rejected symbol {}: {reason:?}",
+                    frame.esi
+                )));
+            }
+            _ => {}
+        }
     }
 
     if !decoder.is_complete() {

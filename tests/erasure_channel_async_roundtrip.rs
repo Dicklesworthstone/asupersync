@@ -42,6 +42,25 @@ fn async_send_recv_roundtrip_is_byte_identical() {
 }
 
 #[test]
+fn async_send_recv_scales_symbol_cap_past_8192() {
+    const K: usize = 8_193;
+    const SYMBOL_SIZE: u16 = 8;
+    let message_size = K * usize::from(SYMBOL_SIZE);
+    let config = EcConfig {
+        symbol_size: SYMBOL_SIZE,
+        repair_overhead: 0,
+        max_message_size: message_size,
+    };
+    let (mut tx, mut rx) = channel(config);
+    let cx = Cx::for_testing();
+    let message: Vec<u8> = (0..message_size).map(|i| i as u8).collect();
+
+    tx.send(&cx, &message).expect("send K=8193 message");
+    let decoded = block_on(rx.recv(&cx)).expect("receive K=8193 message");
+    assert_eq!(decoded, message);
+}
+
+#[test]
 fn async_multiple_messages_arrive_in_fifo_order() {
     let (mut tx, mut rx) = channel(config());
     let cx = Cx::for_testing();
