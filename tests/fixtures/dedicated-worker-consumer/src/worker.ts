@@ -183,6 +183,17 @@ function errorReason(error: unknown): string | null {
   return typeof diagnostics?.reason === "string" ? diagnostics.reason : null;
 }
 
+async function rejectsWithTypeError(
+  operation: () => Promise<unknown>,
+): Promise<boolean> {
+  try {
+    await operation();
+    return false;
+  } catch (error) {
+    return error instanceof TypeError;
+  }
+}
+
 function awaitFixtureIndexedDbRequest<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -429,9 +440,118 @@ async function bootstrap(): Promise<void> {
       },
     });
 
+    let indexedDbAccessesDuringIllFormedValidation = 0;
+    const noIoGlobalObject = new Proxy(workerGlobalObject, {
+      get(target, property) {
+        if (property === "indexedDB") {
+          indexedDbAccessesDuringIllFormedValidation += 1;
+          throw new Error("ill-formed storage input must reject before IndexedDB access");
+        }
+        return Reflect.get(target, property, target);
+      },
+    });
+    const noIoStorage = createBrowserStorage({
+      backend: "indexeddb",
+      dbName: WORKER_STORAGE_DB_NAME,
+      storeName: WORKER_STORAGE_STORE_NAME,
+      globalObject: noIoGlobalObject,
+    });
+    const noIoArtifactStore = createBrowserArtifactStore({
+      backend: "indexeddb",
+      dbName: WORKER_STORAGE_DB_NAME,
+      storeName: WORKER_STORAGE_STORE_NAME,
+      namespace: `${WORKER_ARTIFACT_NAMESPACE}_no_io`,
+      globalObject: noIoGlobalObject,
+    });
+    const noIoIllFormedKey = String.fromCharCode(0xd800);
+    const noIoIllFormedNamespace = String.fromCharCode(0xdc00);
+    const noIoIllFormedArtifactId = String.fromCharCode(0xd801);
+    const illFormedKeyRejectedBeforeIo = await rejectsWithTypeError(() =>
+      noIoStorage.set("valid", noIoIllFormedKey, new Uint8Array([0x01])),
+    );
+    const illFormedNamespaceRejectedBeforeIo = await rejectsWithTypeError(() =>
+      noIoStorage.clearNamespace(noIoIllFormedNamespace),
+    );
+    const illFormedArtifactPersistRejectedBeforeIo = await rejectsWithTypeError(
+      () => noIoArtifactStore.persistEvidenceArtifact(new Uint8Array([0x02]), {
+        id: noIoIllFormedArtifactId,
+        format: "binary",
+      }),
+    );
+    const illFormedArtifactExportRejectedBeforeIo = await rejectsWithTypeError(
+      () => noIoArtifactStore.exportArtifact(noIoIllFormedArtifactId),
+    );
+    const illFormedArtifactDeleteRejectedBeforeIo = await rejectsWithTypeError(
+      () => noIoArtifactStore.deleteArtifact(noIoIllFormedArtifactId),
+    );
+    const illFormedValidationBeforeIndexedDbAccess = illFormedKeyRejectedBeforeIo
+      && illFormedNamespaceRejectedBeforeIo
+      && illFormedArtifactPersistRejectedBeforeIo
+      && illFormedArtifactExportRejectedBeforeIo
+      && illFormedArtifactDeleteRejectedBeforeIo
+      && indexedDbAccessesDuringIllFormedValidation === 0;
+    if (!illFormedValidationBeforeIndexedDbAccess) {
+      throw new Error(
+        `expected ill-formed storage input to reject before IndexedDB access, observed ${indexedDbAccessesDuringIllFormedValidation} accesses`,
+      );
+    }
+
     await storage.clearNamespace(WORKER_STORAGE_NAMESPACE);
     await artifactStore.clearArtifacts();
     await quotaStore.clearArtifacts();
+
+    const rawKeysBeforeIllFormedArtifactId = await fixtureIndexedDbKeys();
+    const illFormedArtifactId = `artifact-${String.fromCharCode(0xd801)}`;
+    const illFormedArtifactPersistRejected = await rejectsWithTypeError(
+      () => artifactStore.persistEvidenceArtifact(new Uint8Array([0xa6]), {
+        id: illFormedArtifactId,
+        format: "binary",
+      }),
+    );
+    const illFormedArtifactExportRejected = await rejectsWithTypeError(
+      () => artifactStore.exportArtifact(illFormedArtifactId),
+    );
+    const illFormedArtifactDeleteRejected = await rejectsWithTypeError(
+      () => artifactStore.deleteArtifact(illFormedArtifactId),
+    );
+    const rawKeysAfterIllFormedArtifactId = await fixtureIndexedDbKeys();
+    const rawKeysAfterIllFormedArtifactIdSet = new Set(
+      rawKeysAfterIllFormedArtifactId,
+    );
+    const illFormedArtifactIdRawKeysUnchanged = rawKeysBeforeIllFormedArtifactId.length
+      === rawKeysAfterIllFormedArtifactId.length
+      && rawKeysBeforeIllFormedArtifactId.every(
+        (key) => rawKeysAfterIllFormedArtifactIdSet.has(key),
+      );
+    const literalReplacementArtifactId = "artifact-\ufffd";
+    const literalReplacementArtifact = await artifactStore.persistEvidenceArtifact(
+      new Uint8Array([0xa7]),
+      {
+        id: literalReplacementArtifactId,
+        format: "binary",
+      },
+    );
+    const literalReplacementArtifactExport = await artifactStore.exportArtifact(
+      literalReplacementArtifactId,
+    );
+    const literalReplacementArtifactDeleted = await artifactStore.deleteArtifact(
+      literalReplacementArtifactId,
+    );
+    const literalReplacementArtifactAccepted = literalReplacementArtifact.artifact.id
+      === literalReplacementArtifactId
+      && hasExactCompactBytes(literalReplacementArtifactExport.bytes, [0xa7])
+      && literalReplacementArtifactDeleted;
+    if (
+      !illFormedArtifactPersistRejected
+      || !illFormedArtifactExportRejected
+      || !illFormedArtifactDeleteRejected
+      || !illFormedArtifactIdRawKeysUnchanged
+    ) {
+      throw new Error("expected ill-formed UTF-16 artifact ids to fail before storage I/O");
+    }
+    if (!literalReplacementArtifactAccepted) {
+      throw new Error("expected a literal U+FFFD artifact id to round-trip");
+    }
 
     await storage.set(
       WORKER_STORAGE_NAMESPACE,
@@ -445,6 +565,66 @@ async function bootstrap(): Promise<void> {
     }
     if (!listedKeys.includes("ready")) {
       throw new Error("expected dedicated-worker storage namespace to retain the ready key");
+    }
+
+    const replacementNamespace = `${WORKER_STORAGE_NAMESPACE}_unicode_\ufffd`;
+    const replacementKey = "sentinel-\ufffd";
+    await storage.clearNamespace(replacementNamespace);
+    await storage.set(
+      replacementNamespace,
+      replacementKey,
+      new Uint8Array([0xa5]),
+    );
+    const rawKeysBeforeIllFormedInput = await fixtureIndexedDbKeys();
+    const illFormedKeyRejected = await rejectsWithTypeError(() =>
+      storage.set(
+        replacementNamespace,
+        `sentinel-${String.fromCharCode(0xd800)}`,
+        new Uint8Array([0xb5]),
+      ),
+    );
+    const illFormedNamespaceRejected = await rejectsWithTypeError(() =>
+      storage.clearNamespace(
+        `${WORKER_STORAGE_NAMESPACE}_unicode_${String.fromCharCode(0xdc00)}`,
+      ),
+    );
+    const rawKeysAfterIllFormedInput = await fixtureIndexedDbKeys();
+    const illFormedInputRawCountUnchanged = rawKeysAfterIllFormedInput.length
+      === rawKeysBeforeIllFormedInput.length;
+    const literalReplacementValue = await storage.get(
+      replacementNamespace,
+      replacementKey,
+    );
+    const literalReplacementPreserved = hasExactCompactBytes(
+      literalReplacementValue,
+      [0xa5],
+    );
+    const validSurrogatePairKey = "emoji-\ud83d\ude00";
+    await storage.set(
+      replacementNamespace,
+      validSurrogatePairKey,
+      new Uint8Array([0xf1]),
+    );
+    const validSurrogatePairValue = await storage.get(
+      replacementNamespace,
+      validSurrogatePairKey,
+    );
+    const validSurrogatePairRoundtrip = hasExactCompactBytes(
+      validSurrogatePairValue,
+      [0xf1],
+    );
+    const validSurrogatePairListed = (
+      await storage.listKeys(replacementNamespace)
+    ).includes(validSurrogatePairKey);
+    await storage.clearNamespace(replacementNamespace);
+    if (!illFormedKeyRejected || !illFormedNamespaceRejected) {
+      throw new Error("expected ill-formed UTF-16 storage input to reject with TypeError");
+    }
+    if (!illFormedInputRawCountUnchanged || !literalReplacementPreserved) {
+      throw new Error("expected rejected UTF-16 aliases to preserve raw storage records");
+    }
+    if (!validSurrogatePairRoundtrip || !validSurrogatePairListed) {
+      throw new Error("expected a valid UTF-16 surrogate pair to round-trip");
     }
 
     const subviewBacking = new Uint8Array(1024 * 1024);
@@ -947,6 +1127,19 @@ async function bootstrap(): Promise<void> {
       support: storageSupport,
       listedKeys,
       storedValueLength: storedValue?.byteLength ?? null,
+      illFormedValidationBeforeIndexedDbAccess,
+      indexedDbAccessesDuringIllFormedValidation,
+      illFormedArtifactPersistRejected,
+      illFormedArtifactExportRejected,
+      illFormedArtifactDeleteRejected,
+      illFormedArtifactIdRawKeysUnchanged,
+      literalReplacementArtifactAccepted,
+      illFormedKeyRejected,
+      illFormedNamespaceRejected,
+      illFormedInputRawCountUnchanged,
+      literalReplacementPreserved,
+      validSurrogatePairRoundtrip,
+      validSurrogatePairListed,
       subviewWriteCompacted,
       subviewStoredBackingBytes,
       legacySubviewRawBackingObserved,

@@ -588,6 +588,167 @@ fn dedicated_worker_fixture_covers_indexeddb_namespace_range_boundaries() {
 }
 
 #[test]
+fn browser_storage_rejects_ill_formed_utf16_aliases() {
+    let browser = read_source("packages/browser/src/index.ts");
+    assert_eq!(
+        browser
+            .matches("assertWellFormedBrowserStorageString(")
+            .count(),
+        5,
+        "the UTF-16 guard must cover its definition, encoder backstop, namespace, key, and artifact id"
+    );
+    for marker in [
+        "index + 1 >= value.length",
+        "codeUnit >= 0xd800 && codeUnit <= 0xdbff",
+        "trailing < 0xdc00",
+        "trailing > 0xdfff",
+        "codeUnit >= 0xdc00 && codeUnit <= 0xdfff",
+        "assertWellFormedBrowserStorageString(value, \"segment\");",
+        "assertWellFormedBrowserStorageString(namespace, \"namespace\");",
+        "assertWellFormedBrowserStorageString(key, \"key\");",
+        "assertWellFormedBrowserStorageString(id, \"segment\");",
+        "const requestedId = request.id === undefined",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "BrowserStorage UTF-16 validation must preserve marker: {marker}"
+        );
+    }
+    let artifact_normalizer = browser
+        .find("function normalizeBrowserArtifactId(")
+        .expect("artifact id normalizer");
+    let artifact_normalizer = &browser[artifact_normalizer..];
+    assert!(
+        artifact_normalizer
+            .find("assertWellFormedBrowserStorageString(id, \"segment\");")
+            .expect("artifact id UTF-16 guard")
+            < artifact_normalizer
+                .find("const normalized = id.trim();")
+                .expect("artifact id trim"),
+        "artifact ids must reject ill-formed UTF-16 before normalization"
+    );
+    for (method, validation, io) in [
+        (
+            "async persistArtifact(",
+            "const requestedId = request.id === undefined",
+            "const index = await this.readIndex(\"persist\");",
+        ),
+        (
+            "async exportArtifact(id: string)",
+            "const normalizedId = normalizeBrowserArtifactId(id);",
+            "const index = await this.readIndex(\"export\");",
+        ),
+        (
+            "async deleteArtifact(id: string)",
+            "const normalizedId = normalizeBrowserArtifactId(id);",
+            "const index = await this.readIndex(\"delete\");",
+        ),
+    ] {
+        let method_start = browser.find(method).expect("artifact method");
+        let method_body = &browser[method_start..];
+        assert!(
+            method_body.find(validation).expect("artifact validation")
+                < method_body.find(io).expect("artifact storage I/O"),
+            "{method} must validate an explicit artifact id before storage I/O"
+        );
+    }
+    for (method, validation) in [
+        (
+            "async get(namespace: string, key: string)",
+            "const normalizedNamespace = normalizeBrowserStorageNamespace(namespace);",
+        ),
+        (
+            "async get(namespace: string, key: string)",
+            "const normalizedKey = normalizeBrowserStorageKey(key);",
+        ),
+        (
+            "async set(namespace: string, key: string",
+            "const normalizedNamespace = normalizeBrowserStorageNamespace(namespace);",
+        ),
+        (
+            "async set(namespace: string, key: string",
+            "const normalizedKey = normalizeBrowserStorageKey(key);",
+        ),
+        (
+            "async delete(namespace: string, key: string)",
+            "const normalizedNamespace = normalizeBrowserStorageNamespace(namespace);",
+        ),
+        (
+            "async delete(namespace: string, key: string)",
+            "const normalizedKey = normalizeBrowserStorageKey(key);",
+        ),
+        (
+            "async listKeys(namespace: string)",
+            "const normalizedNamespace = normalizeBrowserStorageNamespace(namespace);",
+        ),
+        (
+            "async clearNamespace(namespace: string)",
+            "const normalizedNamespace = normalizeBrowserStorageNamespace(namespace);",
+        ),
+    ] {
+        let method_start = browser.find(method).expect("BrowserStorage method");
+        let method_body = &browser[method_start..];
+        assert!(
+            method_body
+                .find(validation)
+                .expect("BrowserStorage validation")
+                < method_body
+                    .find("assertBrowserStorageSupport(this.diagnostics());")
+                    .expect("BrowserStorage support probe"),
+            "{method} must validate namespace and key input before storage capability access"
+        );
+    }
+
+    let worker = read_source("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
+    for marker in [
+        "String.fromCharCode(0xd800)",
+        "String.fromCharCode(0xdc00)",
+        "const replacementNamespace = `${WORKER_STORAGE_NAMESPACE}_unicode_\\ufffd`;",
+        "const replacementKey = \"sentinel-\\ufffd\";",
+        "const literalReplacementArtifactId = \"artifact-\\ufffd\";",
+        "const validSurrogatePairKey = \"emoji-\\ud83d\\ude00\";",
+        "new Uint8Array([0xa5])",
+        "new Uint8Array([0xb5])",
+        "illFormedValidationBeforeIndexedDbAccess",
+        "indexedDbAccessesDuringIllFormedValidation",
+        "illFormedArtifactIdRawKeysUnchanged",
+        "literalReplacementArtifactAccepted",
+        "illFormedInputRawCountUnchanged",
+        "literalReplacementPreserved",
+        "validSurrogatePairRoundtrip",
+        "validSurrogatePairListed",
+    ] {
+        assert!(
+            worker.contains(marker),
+            "dedicated-worker UTF-16 alias regression must preserve marker: {marker}"
+        );
+    }
+
+    let checker =
+        read_source("tests/fixtures/dedicated-worker-consumer/scripts/check-browser-run.mjs");
+    for marker in [
+        "illFormedValidationBeforeIndexedDbAccess === true",
+        "indexedDbAccessesDuringIllFormedValidation === 0",
+        "illFormedArtifactPersistRejected === true",
+        "illFormedArtifactExportRejected === true",
+        "illFormedArtifactDeleteRejected === true",
+        "illFormedArtifactIdRawKeysUnchanged === true",
+        "literalReplacementArtifactAccepted === true",
+        "illFormedKeyRejected === true",
+        "illFormedNamespaceRejected === true",
+        "illFormedInputRawCountUnchanged === true",
+        "literalReplacementPreserved === true",
+        "validSurrogatePairRoundtrip === true",
+        "validSurrogatePairListed === true",
+    ] {
+        assert!(
+            checker.contains(marker),
+            "dedicated-worker UTF-16 browser checker must preserve marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_src_index_exposes_capability_gated_webtransport_lane() {
     let content = read_source("packages/browser/src/index.ts");
     for marker in [

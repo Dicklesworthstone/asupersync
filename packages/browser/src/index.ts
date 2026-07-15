@@ -3750,10 +3750,37 @@ function browserAtob(globalObject: Record<string, unknown> | undefined): ((value
   return null;
 }
 
+function assertWellFormedBrowserStorageString(
+  value: string,
+  label: "key" | "namespace" | "segment",
+): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const trailing = value.charCodeAt(index + 1);
+      if (
+        index + 1 >= value.length
+        || trailing < 0xdc00
+        || trailing > 0xdfff
+      ) {
+        throw new TypeError(
+          `browser storage ${label} must contain well-formed UTF-16`,
+        );
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw new TypeError(
+        `browser storage ${label} must contain well-formed UTF-16`,
+      );
+    }
+  }
+}
+
 function encodeBrowserStorageSegment(
   value: string,
   globalObject: Record<string, unknown> | undefined,
 ): string {
+  assertWellFormedBrowserStorageString(value, "segment");
   return encodeBrowserStorageBytes(browserTextEncoder(globalObject).encode(value), globalObject);
 }
 
@@ -3820,6 +3847,7 @@ function decodeBrowserStorageBytes(
 }
 
 function normalizeBrowserStorageNamespace(namespace: string): string {
+  assertWellFormedBrowserStorageString(namespace, "namespace");
   const normalized = namespace.trim();
   if (!normalized) {
     throw new TypeError("browser storage namespace must not be empty");
@@ -3828,6 +3856,7 @@ function normalizeBrowserStorageNamespace(namespace: string): string {
 }
 
 function normalizeBrowserStorageKey(key: string): string {
+  assertWellFormedBrowserStorageString(key, "key");
   const normalized = key.trim();
   if (!normalized) {
     throw new TypeError("browser storage key must not be empty");
@@ -6507,6 +6536,7 @@ function normalizeBrowserArtifactRetentionPolicy(
 }
 
 function normalizeBrowserArtifactId(id: string): string {
+  assertWellFormedBrowserStorageString(id, "segment");
   const normalized = id.trim();
   if (!normalized) {
     throw new TypeError("browser artifact id must not be empty");
@@ -6932,6 +6962,9 @@ export class BrowserArtifactStore {
   async persistArtifact(
     request: BrowserArtifactPersistRequest,
   ): Promise<BrowserArtifactPersistResult> {
+    const requestedId = request.id === undefined
+      ? undefined
+      : normalizeBrowserArtifactId(request.id);
     const index = await this.readIndex("persist");
     const format = detectBrowserArtifactFormat(request.value, request.format);
     let bytes: Uint8Array;
@@ -6963,8 +6996,8 @@ export class BrowserArtifactStore {
     }
 
     const sequence = index.nextSequence + 1;
-    const id = normalizeBrowserArtifactId(
-      request.id ?? `${request.kind}-${sequence.toString().padStart(6, "0")}`,
+    const id = requestedId ?? normalizeBrowserArtifactId(
+      `${request.kind}-${sequence.toString().padStart(6, "0")}`,
     );
     const filename = normalizeBrowserArtifactFilename(
       request.kind,

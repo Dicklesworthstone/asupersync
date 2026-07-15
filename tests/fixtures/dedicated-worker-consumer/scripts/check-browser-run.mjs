@@ -446,6 +446,58 @@ try {
     `worker storage exercise must use indexeddb, got ${bootstrap.storageExercise?.backend ?? "missing"}`,
   );
   assert(
+    bootstrap.storageExercise?.illFormedValidationBeforeIndexedDbAccess === true,
+    "ill-formed storage keys, namespaces, and artifact ids must reject before IndexedDB access",
+  );
+  assert(
+    bootstrap.storageExercise?.indexedDbAccessesDuringIllFormedValidation === 0,
+    `ill-formed storage validation must perform zero IndexedDB accesses, got ${bootstrap.storageExercise?.indexedDbAccessesDuringIllFormedValidation ?? "missing"}`,
+  );
+  assert(
+    bootstrap.storageExercise?.illFormedArtifactPersistRejected === true,
+    "worker artifact persistence must reject an ill-formed UTF-16 id",
+  );
+  assert(
+    bootstrap.storageExercise?.illFormedArtifactExportRejected === true,
+    "worker artifact export must reject an ill-formed UTF-16 id",
+  );
+  assert(
+    bootstrap.storageExercise?.illFormedArtifactDeleteRejected === true,
+    "worker artifact deletion must reject an ill-formed UTF-16 id",
+  );
+  assert(
+    bootstrap.storageExercise?.illFormedArtifactIdRawKeysUnchanged === true,
+    "rejected ill-formed artifact ids must not change raw IndexedDB keys",
+  );
+  assert(
+    bootstrap.storageExercise?.literalReplacementArtifactAccepted === true,
+    "worker artifacts must preserve a literal U+FFFD id",
+  );
+  assert(
+    bootstrap.storageExercise?.illFormedKeyRejected === true,
+    "worker storage must reject an ill-formed UTF-16 key before IndexedDB I/O",
+  );
+  assert(
+    bootstrap.storageExercise?.illFormedNamespaceRejected === true,
+    "worker storage must reject an ill-formed UTF-16 namespace before IndexedDB I/O",
+  );
+  assert(
+    bootstrap.storageExercise?.illFormedInputRawCountUnchanged === true,
+    "rejected UTF-16 storage aliases must not change the raw IndexedDB key count",
+  );
+  assert(
+    bootstrap.storageExercise?.literalReplacementPreserved === true,
+    "rejected UTF-16 storage aliases must not overwrite or clear a literal U+FFFD record",
+  );
+  assert(
+    bootstrap.storageExercise?.validSurrogatePairRoundtrip === true,
+    "worker storage must preserve a valid UTF-16 surrogate-pair key",
+  );
+  assert(
+    bootstrap.storageExercise?.validSurrogatePairListed === true,
+    "worker storage listing must return a valid UTF-16 surrogate-pair key",
+  );
+  assert(
     bootstrap.storageExercise?.subviewWriteCompacted === true,
     "worker storage exercise must compact typed-array subviews before IndexedDB writes",
   );
