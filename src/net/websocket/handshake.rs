@@ -109,17 +109,31 @@ fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError
     )
 }
 
+#[inline]
+fn is_http_header_name_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
+            | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+    )
+}
+
 fn insert_unique_header(
     headers: &mut BTreeMap<String, String>,
     raw_name: &str,
     raw_value: &str,
 ) -> Result<(), HandshakeError> {
-    let name = raw_name.trim().to_ascii_lowercase();
-    if name.is_empty() {
+    if raw_name.is_empty() {
         return Err(HandshakeError::InvalidRequest(
             "empty HTTP header name".into(),
         ));
     }
+    if !raw_name.bytes().all(is_http_header_name_byte) {
+        return Err(HandshakeError::InvalidRequest(
+            "invalid HTTP header name".into(),
+        ));
+    }
+    let name = raw_name.to_ascii_lowercase();
 
     match headers.entry(name) {
         Entry::Vacant(entry) => {
@@ -1550,6 +1564,87 @@ mod tests {
     }
 
     #[test]
+    fn http_request_parse_rejects_whitespace_before_header_colon() {
+        let cases = [
+            (
+                "space before Upgrade colon",
+                concat!(
+                    "GET /chat HTTP/1.1\r\n",
+                    "Host: example.com\r\n",
+                    "Upgrade : websocket\r\n",
+                    "Connection: Upgrade\r\n",
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+                    "Sec-WebSocket-Version: 13\r\n",
+                    "\r\n",
+                ),
+            ),
+            (
+                "tab before Connection colon",
+                concat!(
+                    "GET /chat HTTP/1.1\r\n",
+                    "Host: example.com\r\n",
+                    "Upgrade: websocket\r\n",
+                    "Connection\t: Upgrade\r\n",
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+                    "Sec-WebSocket-Version: 13\r\n",
+                    "\r\n",
+                ),
+            ),
+            (
+                "space before Sec-WebSocket-Key colon",
+                concat!(
+                    "GET /chat HTTP/1.1\r\n",
+                    "Host: example.com\r\n",
+                    "Upgrade: websocket\r\n",
+                    "Connection: Upgrade\r\n",
+                    "Sec-WebSocket-Key : dGhlIHNhbXBsZSBub25jZQ==\r\n",
+                    "Sec-WebSocket-Version: 13\r\n",
+                    "\r\n",
+                ),
+            ),
+            (
+                "tab before Sec-WebSocket-Version colon",
+                concat!(
+                    "GET /chat HTTP/1.1\r\n",
+                    "Host: example.com\r\n",
+                    "Upgrade: websocket\r\n",
+                    "Connection: Upgrade\r\n",
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+                    "Sec-WebSocket-Version\t: 13\r\n",
+                    "\r\n",
+                ),
+            ),
+        ];
+
+        for (case, request) in cases {
+            let err = HttpRequest::parse(request.as_bytes()).expect_err(case);
+            assert!(
+                matches!(err, HandshakeError::InvalidRequest(ref msg) if msg == "invalid HTTP header name"),
+                "{case}: unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_accepts_no_whitespace_or_post_colon_ows() {
+        let request = HttpRequest::parse(
+            b"GET /chat HTTP/1.1\r\n\
+              Host:example.com\r\n\
+              Upgrade:websocket\r\n\
+              Connection:\tUpgrade\r\n\
+              Sec-WebSocket-Key:\tdGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              \r\n",
+        )
+        .expect("valid zero/post-colon OWS request must parse");
+
+        let accept = ServerHandshake::new()
+            .accept(&request)
+            .expect("valid zero/post-colon OWS request must upgrade");
+        assert_eq!(accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
     fn test_http_response_parse() {
         let response = HttpResponse::parse(
             b"HTTP/1.1 101 Switching Protocols\r\n\
@@ -1594,6 +1689,69 @@ mod tests {
         assert!(
             matches!(err, HandshakeError::InvalidRequest(ref msg) if msg.contains("duplicate HTTP header: sec-websocket-accept")),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn http_response_parse_rejects_whitespace_before_header_colon() {
+        let cases = [
+            (
+                "space before Upgrade colon",
+                concat!(
+                    "HTTP/1.1 101 Switching Protocols\r\n",
+                    "Upgrade : websocket\r\n",
+                    "Connection: Upgrade\r\n",
+                    "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n",
+                    "\r\n",
+                ),
+            ),
+            (
+                "tab before Connection colon",
+                concat!(
+                    "HTTP/1.1 101 Switching Protocols\r\n",
+                    "Upgrade: websocket\r\n",
+                    "Connection\t: Upgrade\r\n",
+                    "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n",
+                    "\r\n",
+                ),
+            ),
+            (
+                "space before Sec-WebSocket-Accept colon",
+                concat!(
+                    "HTTP/1.1 101 Switching Protocols\r\n",
+                    "Upgrade: websocket\r\n",
+                    "Connection: Upgrade\r\n",
+                    "Sec-WebSocket-Accept : s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n",
+                    "\r\n",
+                ),
+            ),
+        ];
+
+        for (case, response) in cases {
+            let err = HttpResponse::parse(response.as_bytes()).expect_err(case);
+            assert!(
+                matches!(err, HandshakeError::InvalidRequest(ref msg) if msg == "invalid HTTP header name"),
+                "{case}: unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_response_parse_accepts_no_whitespace_or_post_colon_ows() {
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade:websocket\r\n\
+              Connection:\tUpgrade\r\n\
+              Sec-WebSocket-Accept:\ts3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              \r\n",
+        )
+        .expect("valid zero/post-colon OWS response must parse");
+
+        assert_eq!(response.header("upgrade"), Some("websocket"));
+        assert_eq!(response.header("connection"), Some("Upgrade"));
+        assert_eq!(
+            response.header("sec-websocket-accept"),
+            Some("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
         );
     }
 
