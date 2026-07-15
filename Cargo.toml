@@ -65,6 +65,12 @@ include = [
     "!**/*.bak",
     "!**/*.bak_*",
     "!**/*.bak-*",
+    # Browser Edition JS/TS packages and their pnpm store are not part of the
+    # Rust library and only bloat the crates.io tarball (incl. native
+    # sharp-libvips binaries) — keep them out to stay under the 10 MiB cap.
+    "!node_modules/**",
+    "!**/node_modules/**",
+    "!packages/**",
 ]
 
 [features]
