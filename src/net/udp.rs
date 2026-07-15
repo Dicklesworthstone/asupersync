@@ -81,6 +81,9 @@ fn suppress_windows_udp_connection_reset(socket: &StdUdpSocket) -> io::Result<()
 }
 
 #[cfg(not(windows))]
+// The native socket-setup path calls this no-op stub; the wasm profile
+// never opens raw UDP sockets, matching this file's wasm precedent.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn suppress_windows_udp_connection_reset(_socket: &StdUdpSocket) -> io::Result<()> {
     Ok(())
 }

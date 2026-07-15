@@ -145,6 +145,9 @@ enum FeedDecodeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeedAuthPolicy {
     VerifyInPipeline,
+    // The pre-verified feed path has no wasm caller yet (browser feeds
+    // always verify in-pipeline); native transports construct it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     CallerVerified,
 }
 
@@ -206,7 +209,11 @@ pub(crate) struct BlockDecodeOutcome {
     sbn: u8,
     input_symbols: usize,
     retain_decoded_block: bool,
+    // Read only by the native audit/telemetry consumers; the browser
+    // profile records outcomes without re-reading these fields.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     kind: BlockDecodeKind,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     elapsed: Duration,
     resolution: BlockDecodeResolution,
 }
@@ -329,7 +336,11 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
 }
 
 impl BlockDecodeOutcome {
+    // The three accessors below serve native audit/staging consumers
+    // (the c54to7 cross-dump and transport telemetry); the browser
+    // profile has no caller yet, mirroring this file's wasm precedent.
     #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn elapsed(&self) -> Duration {
         self.elapsed
     }
@@ -337,11 +348,13 @@ impl BlockDecodeOutcome {
     /// Block this outcome belongs to (the `ATP_RQ_INCONSISTENT_AUDIT`
     /// staging cross-dump needs it at the reject site, c54to7).
     #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn sbn(&self) -> u8 {
         self.sbn
     }
 
     #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn kind(&self) -> BlockDecodeKind {
         self.kind
     }
@@ -527,6 +540,7 @@ impl DecodingPipeline {
     /// Configured symbol size — the `ATP_RQ_INCONSISTENT_AUDIT` staging
     /// cross-dump (c54to7) needs it to mirror seed-symbol zero-padding.
     #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn config_symbol_size(&self) -> u16 {
         self.config.symbol_size
     }
@@ -639,6 +653,7 @@ impl DecodingPipeline {
     /// [`Self::feed_streaming_block_deferred`], completed block data is retained
     /// in this pipeline so existing full-object commit paths can still call
     /// [`Self::into_data`] after joining the decode job.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn feed_deferred(
         &mut self,
         auth_symbol: AuthenticatedSymbol,
@@ -675,6 +690,7 @@ impl DecodingPipeline {
     /// trust domains, but transport-level batch verifiers can prove the tag once
     /// at the receiver boundary and then preserve decoder ordering without a
     /// second serial HMAC.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn feed_preverified_streaming_block_deferred(
         &mut self,
         auth_symbol: AuthenticatedSymbol,
@@ -1247,6 +1263,7 @@ impl DecodingPipeline {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn cancel_decode_job(&mut self, sbn: u8) {
         if self.completed_blocks.contains(&sbn) {
             return;
@@ -1258,6 +1275,7 @@ impl DecodingPipeline {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn restore_decode_job(&mut self, job: BlockDecodeJob) {
         let sbn = job.sbn;
         if self.completed_blocks.contains(&sbn) {
