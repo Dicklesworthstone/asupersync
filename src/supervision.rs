@@ -1513,8 +1513,17 @@ impl CompiledSupervisor {
     /// This is a pure function: no side effects, deterministic, replay-stable.
     #[must_use]
     pub fn compile_restart_ops(&self, plan: &SupervisorRestartPlan) -> CompiledRestartOps {
-        let child_by_name =
-            |name: &str| -> Option<&ChildSpec> { self.children.iter().find(|c| c.name == name) };
+        let child_index_by_name = self
+            .children
+            .iter()
+            .enumerate()
+            .map(|(idx, child)| (child.name.as_str(), idx))
+            .collect::<std::collections::HashMap<_, _>>();
+        let child_by_name = |name: &str| -> Option<&ChildSpec> {
+            child_index_by_name
+                .get(name)
+                .map(|&idx| &self.children[idx])
+        };
 
         let mut ops = Vec::with_capacity(plan.cancel_order.len() * 2 + plan.restart_order.len());
 
@@ -1551,12 +1560,41 @@ impl CompiledSupervisor {
         // remain unfiltered: under OneForAll / RestForOne, Stop-strategy
         // children still need to be cancelled+drained alongside their
         // siblings, just not restarted.
+        //
+        // br-asupersync-730rc1: the strategy filter must also cascade through
+        // dependencies within the affected slice. If an affected dependency
+        // is not scheduled (for example, its strategy is Stop), restarting a
+        // dependent behind it would revive a child whose dependency remains
+        // stopped. Dependencies outside cancel_order remain live and do not
+        // participate in this restart phase.
+        let mut affected_children = vec![false; self.children.len()];
+        for name in &plan.cancel_order {
+            if let Some(&child_idx) = child_index_by_name.get(name.as_str()) {
+                affected_children[child_idx] = true;
+            }
+        }
+
+        let mut scheduled_restart = vec![false; self.children.len()];
         for name in &plan.restart_order {
-            let restartable = child_by_name(name)
-                .is_some_and(|c| matches!(c.restart, SupervisionStrategy::Restart(_)));
-            if !restartable {
+            let Some(&child_idx) = child_index_by_name.get(name.as_str()) else {
+                continue;
+            };
+            let child = &self.children[child_idx];
+            if !matches!(child.restart, SupervisionStrategy::Restart(_)) {
                 continue;
             }
+
+            let dependencies_restartable = child.depends_on.iter().all(|dependency| {
+                let dep_idx = *child_index_by_name
+                    .get(dependency.as_str())
+                    .expect("compiled supervisor dependency index missing");
+                !affected_children[dep_idx] || scheduled_restart[dep_idx]
+            });
+            if !dependencies_restartable {
+                continue;
+            }
+
+            scheduled_restart[child_idx] = true;
             ops.push(RegionOp::RestartChild { name: name.clone() });
         }
 
@@ -5383,6 +5421,136 @@ mod tests {
         assert!(matches!(&ops.ops[7], RegionOp::RestartChild { name } if name == "c"));
 
         crate::test_complete!("compile_restart_ops_skips_restart_for_stop_strategy_children");
+    }
+
+    #[test]
+    fn compile_restart_ops_prunes_dependents_of_unscheduled_affected_children() {
+        init_test("compile_restart_ops_prunes_dependents_of_unscheduled_affected_children");
+
+        // a ──▶ b (Stop) ──▶ c ──▶ d
+        //  └────────────────────▶ e
+        //
+        // OneForAll affects every child. Once b is filtered from the restart
+        // phase, c and d must be pruned transitively, while the independent
+        // viable branch through e still restarts.
+        let mut child_b = make_restart_child("b", Budget::INFINITE);
+        child_b.restart = SupervisionStrategy::Stop;
+        child_b.depends_on = vec!["a".into()];
+        let mut child_c = make_restart_child("c", Budget::INFINITE);
+        child_c.depends_on = vec!["b".into()];
+        let mut child_d = make_restart_child("d", Budget::INFINITE);
+        child_d.depends_on = vec!["c".into()];
+        let mut child_e = make_restart_child("e", Budget::INFINITE);
+        child_e.depends_on = vec!["a".into()];
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(child_b)
+            .child(child_c)
+            .child(child_d)
+            .child(child_e)
+            .compile()
+            .unwrap();
+
+        // The generic planner intentionally leaves the strategy/dependency
+        // filtering to compile_restart_ops.
+        let plan = compiled.restart_plan_for("a").unwrap();
+        assert_eq!(plan.restart_order, vec!["a", "b", "c", "d", "e"]);
+
+        let ops = compiled.compile_restart_ops(&plan);
+        let replay = compiled.compile_restart_ops(&plan);
+        assert_eq!(ops, replay, "operation compilation must be replay-stable");
+
+        let cancel_names = ops
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RegionOp::CancelChild { name, .. } => Some(name.as_str()),
+                RegionOp::DrainChild { .. } | RegionOp::RestartChild { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let drain_names = ops
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RegionOp::DrainChild { name, .. } => Some(name.as_str()),
+                RegionOp::CancelChild { .. } | RegionOp::RestartChild { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let restart_names = ops
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RegionOp::RestartChild { name } => Some(name.as_str()),
+                RegionOp::CancelChild { .. } | RegionOp::DrainChild { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(cancel_names, vec!["e", "d", "c", "b", "a"]);
+        assert_eq!(drain_names, cancel_names);
+        assert_eq!(restart_names, vec!["a", "e"]);
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let failure_plan = compiled
+            .restart_plan_for_failure("a", &err)
+            .expect("restartable failure should produce a plan");
+        assert_eq!(
+            restart_names,
+            failure_plan
+                .restart_order
+                .iter()
+                .map(ChildName::as_str)
+                .collect::<Vec<_>>(),
+            "generic-plan compilation must match failure-aware dependency pruning"
+        );
+
+        crate::test_complete!(
+            "compile_restart_ops_prunes_dependents_of_unscheduled_affected_children"
+        );
+    }
+
+    #[test]
+    fn compile_restart_ops_preserves_dependencies_outside_affected_slice() {
+        init_test("compile_restart_ops_preserves_dependencies_outside_affected_slice");
+
+        // Under RestForOne, failing b affects only b and c. Dependency a stays
+        // live outside the suffix, so it must not block either restart.
+        let mut child_b = make_restart_child("b", Budget::INFINITE);
+        child_b.depends_on = vec!["a".into()];
+        let mut child_c = make_restart_child("c", Budget::INFINITE);
+        child_c.depends_on = vec!["b".into()];
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::RestForOne)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(child_b)
+            .child(child_c)
+            .compile()
+            .unwrap();
+
+        let plan = compiled.restart_plan_for("b").unwrap();
+        assert_eq!(plan.cancel_order, vec!["c", "b"]);
+        assert_eq!(plan.restart_order, vec!["b", "c"]);
+
+        let ops = compiled.compile_restart_ops(&plan);
+        let restart_names = ops
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RegionOp::RestartChild { name } => Some(name.as_str()),
+                RegionOp::CancelChild { .. } | RegionOp::DrainChild { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(restart_names, vec!["b", "c"]);
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let failure_plan = compiled
+            .restart_plan_for_failure("b", &err)
+            .expect("restartable failure should produce a plan");
+        assert_eq!(failure_plan.restart_order, vec!["b", "c"]);
+
+        crate::test_complete!("compile_restart_ops_preserves_dependencies_outside_affected_slice");
     }
 
     #[test]
