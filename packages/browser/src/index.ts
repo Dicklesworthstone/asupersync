@@ -1358,6 +1358,7 @@ type BrowserHandleLike = {
 };
 
 interface BrowserStorageGlobalLike {
+  IDBKeyRange?: typeof IDBKeyRange;
   TextDecoder?: typeof TextDecoder;
   TextEncoder?: typeof TextEncoder;
   atob?: (value: string) => string;
@@ -3694,6 +3695,19 @@ function browserIndexedDbFactory(
   }
 }
 
+function browserIndexedDbKeyRange(
+  globalObject: Record<string, unknown> | undefined,
+): typeof IDBKeyRange | null {
+  const candidate = browserStorageGlobals(globalObject)?.IDBKeyRange;
+  if (typeof candidate === "function") {
+    return candidate;
+  }
+  if (typeof IDBKeyRange === "function") {
+    return IDBKeyRange;
+  }
+  return null;
+}
+
 function browserLocalStorage(
   globalObject: Record<string, unknown> | undefined,
 ): Storage | null {
@@ -3768,6 +3782,26 @@ function decodeBrowserStorageSegment(
     return null;
   }
   return browserTextDecoder(globalObject).decode(decoded);
+}
+
+function decodeCanonicalIndexedDbStorageSegment(
+  value: string,
+  globalObject: Record<string, unknown> | undefined,
+): string | null {
+  try {
+    const decoded = decodeBrowserStorageBytes(value, globalObject);
+    if (decoded === null) {
+      return null;
+    }
+    const ctor = browserStorageGlobals(globalObject)?.TextDecoder ?? TextDecoder;
+    const logicalKey = new ctor("utf-8", { fatal: true }).decode(decoded);
+    return normalizeBrowserStorageKey(logicalKey) === logicalKey
+      && encodeBrowserStorageSegment(logicalKey, globalObject) === value
+      ? logicalKey
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function decodeBrowserStorageBytes(
@@ -3954,6 +3988,19 @@ function indexedDbNamespacePrefix(
   return `${INDEXEDDB_STORAGE_KEY_PREFIX}${encodeBrowserStorageSegment(namespace, globalObject)}:`;
 }
 
+function indexedDbNamespaceRange(
+  namespace: string,
+  globalObject: Record<string, unknown> | undefined,
+): IDBKeyRange {
+  const keyRange = browserIndexedDbKeyRange(globalObject);
+  if (!keyRange) {
+    throw new Error("IndexedDB namespace operations require IDBKeyRange");
+  }
+  const prefix = indexedDbNamespacePrefix(namespace, globalObject);
+  const upperBound = `${prefix.slice(0, -1)};`;
+  return keyRange.bound(prefix, upperBound, false, true);
+}
+
 function decodeIndexedDbStorageKey(
   encoded: string,
   namespace: string,
@@ -3963,7 +4010,10 @@ function decodeIndexedDbStorageKey(
   if (!encoded.startsWith(prefix)) {
     return null;
   }
-  return decodeBrowserStorageSegment(encoded.slice(prefix.length), globalObject);
+  return decodeCanonicalIndexedDbStorageSegment(
+    encoded.slice(prefix.length),
+    globalObject,
+  );
 }
 
 function encodeLocalStorageKey(
@@ -6189,7 +6239,11 @@ export class BrowserStorage {
             this.storeName,
             "readonly",
           );
-          const request = store.getAllKeys();
+          const namespaceRange = indexedDbNamespaceRange(
+            normalizedNamespace,
+            this.globalObject,
+          );
+          const request = store.getAllKeys(namespaceRange);
           const rawKeys = await awaitIndexedDbRequest(request);
           const keys = Array.from(rawKeys as ArrayLike<unknown>)
             .map((value) =>
@@ -6254,11 +6308,6 @@ export class BrowserStorage {
 
     try {
       if (this.backend === "indexeddb") {
-        const keys = await this.listKeys(normalizedNamespace);
-        if (keys.length === 0) {
-          return 0;
-        }
-
         const database = await openIndexedDbDatabase(
           this.globalObject,
           this.dbName,
@@ -6271,17 +6320,18 @@ export class BrowserStorage {
             this.storeName,
             "readwrite",
           );
-          for (const key of keys) {
-            store.delete(
-              encodeIndexedDbStorageKey(
-                normalizedNamespace,
-                key,
-                this.globalObject,
-              ),
-            );
-          }
-          await awaitIndexedDbTransaction(transaction);
-          return keys.length;
+          const namespaceRange = indexedDbNamespaceRange(
+            normalizedNamespace,
+            this.globalObject,
+          );
+          const transactionCompletion = awaitIndexedDbTransaction(transaction);
+          const countRequest = store.count(namespaceRange);
+          store.delete(namespaceRange);
+          const [rawCount] = await Promise.all([
+            awaitIndexedDbRequest(countRequest),
+            transactionCompletion,
+          ]);
+          return rawCount as number;
         } finally {
           database.close();
         }
@@ -7832,7 +7882,13 @@ export class BrowserServiceWorkerBrokerStore {
             this.storeName,
             "readonly",
           );
-          const rawKeys = await awaitIndexedDbRequest(store.getAllKeys());
+          const namespaceRange = indexedDbNamespaceRange(
+            this.namespace,
+            this.globalObject,
+          );
+          const rawKeys = await awaitIndexedDbRequest(
+            store.getAllKeys(namespaceRange),
+          );
           const keys = Array.from(rawKeys as ArrayLike<unknown>)
             .map((value) =>
               typeof value === "string"
@@ -7888,11 +7944,6 @@ export class BrowserServiceWorkerBrokerStore {
   private async clearNamespace(
     operation: BrowserServiceWorkerBrokerOperation,
   ): Promise<number> {
-    const keys = await this.listNamespaceKeys(operation);
-    if (keys.length === 0) {
-      return 0;
-    }
-
     if (this.backend === "indexeddb") {
       try {
         const database = await openIndexedDbDatabase(
@@ -7907,13 +7958,18 @@ export class BrowserServiceWorkerBrokerStore {
             this.storeName,
             "readwrite",
           );
-          for (const key of keys) {
-            store.delete(
-              encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
-            );
-          }
-          await awaitIndexedDbTransaction(transaction);
-          return keys.length;
+          const namespaceRange = indexedDbNamespaceRange(
+            this.namespace,
+            this.globalObject,
+          );
+          const transactionCompletion = awaitIndexedDbTransaction(transaction);
+          const countRequest = store.count(namespaceRange);
+          store.delete(namespaceRange);
+          const [rawCount] = await Promise.all([
+            awaitIndexedDbRequest(countRequest),
+            transactionCompletion,
+          ]);
+          return rawCount as number;
         } finally {
           database.close();
         }
@@ -7927,6 +7983,10 @@ export class BrowserServiceWorkerBrokerStore {
     }
 
     try {
+      const keys = await this.listNamespaceKeys(operation);
+      if (keys.length === 0) {
+        return 0;
+      }
       const storage = browserLocalStorage(this.globalObject);
       if (!storage) {
         throw new Error("localStorage is unavailable in this browser/runtime");

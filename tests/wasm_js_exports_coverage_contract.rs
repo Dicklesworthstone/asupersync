@@ -520,6 +520,74 @@ fn browser_src_index_exposes_browser_storage_lane() {
 }
 
 #[test]
+fn browser_indexeddb_namespace_operations_use_exact_key_ranges() {
+    let content = read_source("packages/browser/src/index.ts");
+    assert!(
+        !content.contains("store.getAllKeys()"),
+        "IndexedDB namespace listing must never materialize the shared object store"
+    );
+    assert_eq!(
+        content.matches("store.getAllKeys(namespaceRange)").count(),
+        2,
+        "both IndexedDB namespace listing paths must use an exact key range"
+    );
+    assert_eq!(
+        content.matches("store.count(namespaceRange)").count(),
+        2,
+        "both IndexedDB namespace clear paths must count inside their write transaction"
+    );
+    assert_eq!(
+        content.matches("store.delete(namespaceRange)").count(),
+        2,
+        "both IndexedDB namespace clear paths must delete the exact raw-key range"
+    );
+    for marker in [
+        "return keyRange.bound(prefix, upperBound, false, true);",
+        "new ctor(\"utf-8\", { fatal: true })",
+        "normalizeBrowserStorageKey(logicalKey) === logicalKey",
+        "encodeBrowserStorageSegment(logicalKey, globalObject) === value",
+    ] {
+        assert!(
+            content.contains(marker),
+            "IndexedDB namespace operations must preserve fail-closed marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn dedicated_worker_fixture_covers_indexeddb_namespace_range_boundaries() {
+    let worker = read_source("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
+    for marker in [
+        "const malformedRawKeys = [\n      namespaceRawPrefix,",
+        "`${namespaceRawPrefix}\\uffffx`",
+        "const upperBoundOutsiderRawKey = `${namespaceRawPrefix.slice(0, -1)};`;",
+        "const listReadersReady = new Promise<void>",
+        "await listReadersReady;",
+        "storage.listKeys = storageListKeys;",
+        "concurrentStorage.listKeys = concurrentStorageListKeys;",
+    ] {
+        assert!(
+            worker.contains(marker),
+            "dedicated-worker IndexedDB namespace regression must preserve marker: {marker}"
+        );
+    }
+
+    let checker =
+        read_source("tests/fixtures/dedicated-worker-consumer/scripts/check-browser-run.mjs");
+    for marker in [
+        "malformedRawKeysCleared === true",
+        "namespaceRawKeysCleared === true",
+        "upperBoundOutsiderPreserved === true",
+        "concurrentClearResults) === \"[0,2]\"",
+    ] {
+        assert!(
+            checker.contains(marker),
+            "dedicated-worker browser checker must preserve namespace regression marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_src_index_exposes_capability_gated_webtransport_lane() {
     let content = read_source("packages/browser/src/index.ts");
     for marker in [

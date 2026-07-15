@@ -255,6 +255,14 @@ async function writeFixtureIndexedDbValue(key: string, value: unknown): Promise<
   });
 }
 
+async function deleteFixtureIndexedDbKey(key: string): Promise<void> {
+  await withFixtureIndexedDb(async (database) => {
+    const transaction = database.transaction(WORKER_STORAGE_STORE_NAME, "readwrite");
+    transaction.objectStore(WORKER_STORAGE_STORE_NAME).delete(key);
+    await awaitFixtureIndexedDbTransaction(transaction);
+  });
+}
+
 function hasExactCompactBytes(value: unknown, expected: readonly number[]): boolean {
   return value instanceof Uint8Array
     && value.byteOffset === 0
@@ -784,14 +792,149 @@ async function bootstrap(): Promise<void> {
       throw new Error("expected quota_exceeded from the dedicated-worker quota guard");
     }
 
+    const namespaceDelimiter = rawSubviewKey.lastIndexOf(":");
+    if (namespaceDelimiter < 0) {
+      throw new Error("expected raw IndexedDB storage key to contain a namespace delimiter");
+    }
+    const namespaceRawPrefix = rawSubviewKey.slice(0, namespaceDelimiter + 1);
+    const listedKeysBeforeMalformed = await storage.listKeys(WORKER_STORAGE_NAMESPACE);
+    const malformedRawKeys = [
+      namespaceRawPrefix,
+      `${namespaceRawPrefix}_w`,
+      `${namespaceRawPrefix}YQ==`,
+      `${namespaceRawPrefix}!`,
+      `${namespaceRawPrefix}IA`,
+      `${namespaceRawPrefix}IGE`,
+      `${namespaceRawPrefix}YSA`,
+      `${namespaceRawPrefix}\uffffx`,
+    ];
+    for (const [index, rawKey] of malformedRawKeys.entries()) {
+      await writeFixtureIndexedDbValue(rawKey, new Uint8Array([0xd0 + index]));
+    }
+    const upperBoundOutsiderRawKey = `${namespaceRawPrefix.slice(0, -1)};`;
+    await writeFixtureIndexedDbValue(
+      upperBoundOutsiderRawKey,
+      new Uint8Array([0xef]),
+    );
+    const listedKeysAfterMalformed = await storage.listKeys(WORKER_STORAGE_NAMESPACE);
+    const malformedKeysRejected = listedKeysAfterMalformed.length
+      === listedKeysBeforeMalformed.length
+      && listedKeysAfterMalformed.every(
+        (key, index) => key === listedKeysBeforeMalformed[index],
+      );
+    if (!malformedKeysRejected) {
+      throw new Error("expected malformed and noncanonical IndexedDB keys to be excluded from listing");
+    }
+
+    const preservationNamespace = `${WORKER_STORAGE_NAMESPACE}_preserved`;
+    await storage.clearNamespace(preservationNamespace);
+    await storage.set(preservationNamespace, "sentinel", new Uint8Array([0xe1]));
+
+    const concurrentNamespace = `${WORKER_STORAGE_NAMESPACE}_concurrent`;
+    await storage.clearNamespace(concurrentNamespace);
+    await storage.set(concurrentNamespace, "first", new Uint8Array([0xc1]));
+    await storage.set(concurrentNamespace, "second", new Uint8Array([0xc2]));
+    const concurrentStorage = createBrowserStorage({
+      backend: "indexeddb",
+      dbName: WORKER_STORAGE_DB_NAME,
+      storeName: WORKER_STORAGE_STORE_NAME,
+      globalObject: workerGlobalObject,
+    });
+    const storageListKeys = storage.listKeys;
+    const concurrentStorageListKeys = concurrentStorage.listKeys;
+    let listReaders = 0;
+    let releaseListReaders = (): void => {};
+    const listReadersReady = new Promise<void>((resolve) => {
+      releaseListReaders = resolve;
+    });
+    const listKeysThroughBarrier = async (
+      receiver: typeof storage,
+      listKeys: typeof storage.listKeys,
+      namespace: string,
+    ): Promise<string[]> => {
+      const keys = await listKeys.call(receiver, namespace);
+      if (namespace === concurrentNamespace) {
+        listReaders += 1;
+        if (listReaders === 2) {
+          releaseListReaders();
+        }
+        await listReadersReady;
+      }
+      return keys;
+    };
+    storage.listKeys = (namespace) =>
+      listKeysThroughBarrier(storage, storageListKeys, namespace);
+    concurrentStorage.listKeys = (namespace) =>
+      listKeysThroughBarrier(
+        concurrentStorage,
+        concurrentStorageListKeys,
+        namespace,
+      );
+    let concurrentClearResults: number[];
+    try {
+      concurrentClearResults = await Promise.all([
+        storage.clearNamespace(concurrentNamespace),
+        concurrentStorage.clearNamespace(concurrentNamespace),
+      ]);
+    } finally {
+      storage.listKeys = storageListKeys;
+      concurrentStorage.listKeys = concurrentStorageListKeys;
+    }
+    concurrentClearResults.sort((left, right) => left - right);
+    const concurrentClearSerialized = concurrentClearResults[0] === 0
+      && concurrentClearResults[1] === 2;
+    if (!concurrentClearSerialized) {
+      throw new Error(
+        `expected concurrent IndexedDB namespace clears to return [0,2], got ${concurrentClearResults.join(",")}`,
+      );
+    }
+
+    const rawKeysBeforeClear = await fixtureIndexedDbKeys();
+    const rawNamespaceKeyCountBeforeClear = rawKeysBeforeClear.filter(
+      (key) => key.startsWith(namespaceRawPrefix),
+    ).length;
+
     const clearedArtifacts = await artifactStore.clearArtifacts();
     const clearedQuotaArtifacts = await quotaStore.clearArtifacts();
     const clearedKeys = await storage.clearNamespace(WORKER_STORAGE_NAMESPACE);
+    const rawKeysAfterClear = await fixtureIndexedDbKeys();
+    const malformedRawKeysCleared = malformedRawKeys.every(
+      (rawKey) => !rawKeysAfterClear.includes(rawKey),
+    );
+    const namespaceRawKeysCleared = !rawKeysAfterClear.some(
+      (rawKey) => rawKey.startsWith(namespaceRawPrefix),
+    );
+    const clearCountMatchesRawNamespace = clearedKeys === rawNamespaceKeyCountBeforeClear;
+    const preservedValue = await storage.get(preservationNamespace, "sentinel");
+    const otherNamespacePreserved = hasExactCompactBytes(preservedValue, [0xe1]);
+    const upperBoundOutsiderValue = await readFixtureIndexedDbValue(
+      upperBoundOutsiderRawKey,
+    );
+    const upperBoundOutsiderPreserved = hasExactCompactBytes(
+      upperBoundOutsiderValue,
+      [0xef],
+    );
+    await deleteFixtureIndexedDbKey(upperBoundOutsiderRawKey);
+    await storage.clearNamespace(preservationNamespace);
     if (clearedArtifacts < 1) {
       throw new Error("expected at least one dedicated-worker artifact to be cleared");
     }
     if (clearedQuotaArtifacts < 1) {
       throw new Error("expected at least one dedicated-worker quota artifact to be cleared");
+    }
+    if (!malformedRawKeysCleared || !namespaceRawKeysCleared) {
+      throw new Error("expected namespace clear to delete exact malformed and canonical raw keys");
+    }
+    if (!clearCountMatchesRawNamespace) {
+      throw new Error(
+        `expected namespace clear count ${rawNamespaceKeyCountBeforeClear}, got ${clearedKeys}`,
+      );
+    }
+    if (!otherNamespacePreserved) {
+      throw new Error("expected namespace clear to preserve records from another namespace");
+    }
+    if (!upperBoundOutsiderPreserved) {
+      throw new Error("expected namespace clear to exclude its exact upper-bound key");
     }
 
     storageExercise = {
@@ -816,6 +959,15 @@ async function bootstrap(): Promise<void> {
       dataViewWriteCompacted,
       spoofedDataViewWriteCompacted,
       emptySubviewWriteCompacted,
+      malformedKeysRejected,
+      malformedRawKeysCleared,
+      namespaceRawKeysCleared,
+      rawNamespaceKeyCountBeforeClear,
+      clearCountMatchesRawNamespace,
+      otherNamespacePreserved,
+      upperBoundOutsiderPreserved,
+      concurrentClearResults,
+      concurrentClearSerialized,
       clearedKeys,
     };
     artifactExercise = {

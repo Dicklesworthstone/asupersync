@@ -494,6 +494,38 @@ try {
     "worker storage exercise must compact empty subviews to empty backing",
   );
   assert(
+    bootstrap.storageExercise?.malformedKeysRejected === true,
+    "worker storage listing must reject malformed and noncanonical IndexedDB keys",
+  );
+  assert(
+    bootstrap.storageExercise?.malformedRawKeysCleared === true,
+    "worker storage clear must delete malformed raw IndexedDB keys without re-encoding",
+  );
+  assert(
+    bootstrap.storageExercise?.namespaceRawKeysCleared === true,
+    "worker storage clear must remove every raw key in the exact namespace range",
+  );
+  assert(
+    bootstrap.storageExercise?.clearCountMatchesRawNamespace === true,
+    `worker storage clear count must match the raw namespace cardinality, got ${bootstrap.storageExercise?.clearedKeys ?? "missing"}/${bootstrap.storageExercise?.rawNamespaceKeyCountBeforeClear ?? "missing"}`,
+  );
+  assert(
+    bootstrap.storageExercise?.otherNamespacePreserved === true,
+    "worker storage clear must preserve records from another namespace",
+  );
+  assert(
+    bootstrap.storageExercise?.upperBoundOutsiderPreserved === true,
+    "worker storage clear must exclude the exact upper-bound IndexedDB key",
+  );
+  assert(
+    JSON.stringify(bootstrap.storageExercise?.concurrentClearResults) === "[0,2]",
+    `concurrent worker storage clears must serialize to [0,2], got ${JSON.stringify(bootstrap.storageExercise?.concurrentClearResults ?? null)}`,
+  );
+  assert(
+    bootstrap.storageExercise?.concurrentClearSerialized === true,
+    "concurrent worker storage clears must report only the records removed by each transaction",
+  );
+  assert(
     bootstrap.artifactExercise?.artifactSubviewStoredCompacted === true,
     "worker artifact retention must store only logical typed-array subview bytes",
   );
