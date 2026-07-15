@@ -284,6 +284,12 @@ mod imp {
         state: Mutex<ReactorState>,
         wake_fd: OwnedFd,
         wake_pending: AtomicBool,
+        /// Set when a `rearm_wake_poll()` failed during a poll cycle that had
+        /// already dequeued (and had to deliver) other completions. The wake
+        /// eventfd poll is left unarmed in that case; the next poll cycle
+        /// retries the rearm so `Reactor::wake()` interruption is restored
+        /// without discarding the completions of the failing cycle.
+        wake_rearm_needed: AtomicBool,
         buffer_pool: Mutex<Option<RegisteredBufferPool>>,
     }
 
@@ -293,6 +299,10 @@ mod imp {
                 .field("state", &self.state)
                 .field("wake_fd", &self.wake_fd)
                 .field("wake_pending", &self.wake_pending.load(Ordering::Relaxed))
+                .field(
+                    "wake_rearm_needed",
+                    &self.wake_rearm_needed.load(Ordering::Relaxed),
+                )
                 .field("buffer_pool", &self.buffer_pool)
                 .finish_non_exhaustive()
         }
@@ -318,6 +328,7 @@ mod imp {
                 state: Mutex::new(ReactorState::new()),
                 wake_fd,
                 wake_pending: AtomicBool::new(false),
+                wake_rearm_needed: AtomicBool::new(false),
                 buffer_pool: Mutex::new(None),
             })
         }
@@ -686,6 +697,16 @@ mod imp {
         fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
             events.clear();
 
+            // A prior cycle may have deferred a failed wake-poll rearm so that
+            // it could still deliver the completions it had already dequeued.
+            // Retry it now, before taking the ring lock (rearm_wake_poll takes
+            // that lock itself), to restore Reactor::wake() interruption. A
+            // continued failure simply stays deferred for a later cycle; fd
+            // readiness polling remains fully functional meanwhile.
+            if self.wake_rearm_needed.load(Ordering::Acquire) && self.rearm_wake_poll().is_ok() {
+                self.wake_rearm_needed.store(false, Ordering::Release);
+            }
+
             let mut ring = self.ring.lock();
 
             match timeout {
@@ -717,6 +738,14 @@ mod imp {
 
             drop(ring);
 
+            // A wake-poll rearm failure must NOT short-circuit this batch: the
+            // completions already dequeued from the kernel CQ (above) would be
+            // lost forever — their poll_ops entries would leak, their
+            // active_poll_user_data would stay Some, and no Event would be
+            // emitted, permanently hanging the waiting tasks. Capture any rearm
+            // error and defer it until after the whole batch is processed and
+            // its events are emitted (see the wake_rearm_result handling below).
+            let mut wake_rearm_result: io::Result<()> = Ok(());
             let mut poll_completions = SmallVec::<[(u64, i32); 64]>::new();
             for (user_data, res) in completions {
                 if user_data == WAKE_USER_DATA {
@@ -725,7 +754,9 @@ mod imp {
                     // wakeup instead of being suppressed forever.
                     self.wake_pending.store(false, Ordering::Release);
                     self.drain_wake_fd();
-                    self.rearm_wake_poll()?;
+                    if let Err(err) = self.rearm_wake_poll() {
+                        wake_rearm_result = Err(err);
+                    }
                     // br-asupersync-zft20e: a concurrent wake() between
                     // store(false) and drain_wake_fd() succeeded (set
                     // wake_pending=true and wrote to eventfd), but its write
@@ -776,7 +807,27 @@ mod imp {
                 events.push(event);
             }
 
-            Ok(events.len())
+            match wake_rearm_result {
+                Ok(()) => Ok(events.len()),
+                Err(err) => {
+                    // The wake eventfd poll could not be re-armed this cycle.
+                    // Record it so the next poll retries the rearm and keeps
+                    // Reactor::wake() interruption working.
+                    self.wake_rearm_needed.store(true, Ordering::Release);
+                    if events.is_empty() {
+                        // Nothing to deliver, so surfacing the error loses no
+                        // completions.
+                        Err(err)
+                    } else {
+                        // Completions were already dequeued from the kernel CQ
+                        // and turned into events. Returning Err here would make
+                        // the io_driver skip waker dispatch and strand those
+                        // tasks (the very hang this fix prevents), so deliver
+                        // the events; the deferred rearm retries next cycle.
+                        Ok(events.len())
+                    }
+                }
+            }
         }
 
         fn wake(&self) -> io::Result<()> {
@@ -947,6 +998,11 @@ mod imp {
                 }
                 Some(errno) if is_poll_cancellation_errno(errno) => {}
                 Some(errno) if is_terminal_fd_errno(errno) => {
+                    // The fd was closed out from under an in-flight poll
+                    // (EBADF/ENODEV). Surface it as an error readiness event so
+                    // the waiting task wakes and observes the failure instead of
+                    // hanging forever on a registration that is silently gone.
+                    emitted_events.push(Event::errored(token));
                     deferred_poll_removes.extend(remove_registration_poll_ops(state, token));
                     state.registrations.remove(&token);
                 }
@@ -1021,8 +1077,24 @@ mod imp {
                 ],
                 &mut events,
             );
-            assert_eq!(count, 1, "only the readable CQE should emit an event");
-            assert_eq!(events.len(), 1, "one readable event should be surfaced");
+            assert_eq!(
+                count, 2,
+                "the readable CQE and the terminal-fd CQE should both emit events"
+            );
+            assert_eq!(events.len(), 2, "two events should be surfaced");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.token == readable_token && event.ready.is_readable()),
+                "readable completion should surface a readable event",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.token == terminal_token && event.ready.is_error()),
+                "terminal fd (EBADF) must surface an error event so the waiting task wakes \
+                 instead of hanging on a silently-removed registration",
+            );
 
             let state = reactor.state.lock();
             assert_eq!(
