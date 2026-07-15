@@ -187,13 +187,19 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                     // and bounded by the barrier's own size — no asymptotic
                     // cost for typical (parties <= 7) uses.
                     let _ = slot; // recorded slot is now an unused hint
-                    if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
-                        state.waiters.remove(idx);
-                    }
+                    let retired_waker = state
+                        .waiters
+                        .iter()
+                        .position(|w| w.0 == id)
+                        .map(|idx| state.waiters.remove(idx).1);
                     drop(state);
 
                     // Mark state as done so Drop doesn't decrement again.
                     self.state = WaitState::Done;
+                    // A safe `Wake` payload may run arbitrary destructor code
+                    // when its last `Waker` is released. Retire it only after
+                    // both the state transition and mutex release are complete.
+                    drop(retired_waker);
                     return Poll::Ready(Err(BarrierWaitError::Cancelled));
                 }
                 // Generation changed means barrier tripped just before cancel.
@@ -211,6 +217,11 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
             return Poll::Ready(Err(BarrierWaitError::Cancelled));
         }
 
+        // Clone before taking the barrier mutex. Besides keeping replacement
+        // destruction outside the critical section below, this ensures an
+        // allocation or custom RawWaker clone cannot unwind through a live
+        // BarrierState guard.
+        let mut incoming_waker = Some(cx.waker().clone());
         let mut state = self.barrier.state.lock();
 
         match self.state {
@@ -233,7 +244,9 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
                 } else {
                     // Not full yet. Arrive and wait.
-                    let waker = cx.waker().clone();
+                    let waker = incoming_waker
+                        .take()
+                        .expect("non-cancelled barrier poll must have a waker");
                     let generation = state.generation;
                     let id = state.next_waiter_id;
                     let slot = state.waiters.len();
@@ -264,33 +277,49 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                     // O(1) fast path: use the remembered slot index.
                     let waker = cx.waker();
                     if slot < state.waiters.len() && state.waiters[slot].0 == id {
-                        if !state.waiters[slot].1.will_wake(waker) {
-                            state.waiters[slot].1.clone_from(waker);
-                        }
+                        let retired_waker = if state.waiters[slot].1.will_wake(waker) {
+                            None
+                        } else {
+                            Some(std::mem::replace(
+                                &mut state.waiters[slot].1,
+                                incoming_waker
+                                    .take()
+                                    .expect("barrier waker replacement must be available"),
+                            ))
+                        };
+                        drop(state);
+                        drop(retired_waker);
                     } else {
                         // Slot invalidated by a concurrent cancellation's
                         // swap_remove.  Fall back to linear scan + push.
-                        let mut found = false;
+                        let mut found_slot = None;
+                        let mut retired_waker = None;
                         for (i, w) in state.waiters.iter_mut().enumerate() {
                             if w.0 == id {
                                 if !w.1.will_wake(waker) {
-                                    w.1.clone_from(waker);
+                                    retired_waker = Some(std::mem::replace(
+                                        &mut w.1,
+                                        incoming_waker
+                                            .take()
+                                            .expect("barrier waker replacement must be available"),
+                                    ));
                                 }
-                                // Update slot for next re-poll.
-                                self.state = WaitState::Waiting {
-                                    generation,
-                                    id,
-                                    slot: i,
-                                };
-                                found = true;
+                                found_slot = Some(i);
                                 break;
                             }
                         }
-                        if !found {
-                            unreachable!("waiter must be present if generation is unchanged");
-                        }
+                        let found_slot =
+                            found_slot.expect("waiter must be present if generation is unchanged");
+                        drop(state);
+                        // Update the slot before releasing the retired waker so
+                        // a panicking destructor cannot leave stale future state.
+                        self.state = WaitState::Waiting {
+                            generation,
+                            id,
+                            slot: found_slot,
+                        };
+                        drop(retired_waker);
                     }
-                    drop(state);
 
                     Poll::Pending
                 } else {
@@ -313,23 +342,32 @@ impl<Caps> Drop for BarrierWaitFuture<'_, Caps> {
             slot,
         } = self.state
         {
-            let mut state = self.barrier.state.lock();
+            let retired_waker = {
+                let mut state = self.barrier.state.lock();
 
-            // Only clean up if the generation hasn't changed (barrier hasn't tripped).
-            if state.generation == generation {
-                state.cancellation_count = state.cancellation_count.saturating_add(1);
-                if state.arrived > 0 {
-                    state.arrived -= 1;
+                // Only clean up if the generation hasn't changed (barrier hasn't tripped).
+                if state.generation == generation {
+                    state.cancellation_count = state.cancellation_count.saturating_add(1);
+                    if state.arrived > 0 {
+                        state.arrived -= 1;
+                    }
+                    // br-asupersync-abl9h6: remove BY waiter id (see paired
+                    // comment in poll's cancel path). The recorded slot is a
+                    // stale hint after any prior swap_remove in the same
+                    // generation; identity is the only safe key.
+                    let _ = slot;
+                    state
+                        .waiters
+                        .iter()
+                        .position(|w| w.0 == id)
+                        .map(|idx| state.waiters.swap_remove(idx).1)
+                } else {
+                    None
                 }
-                // br-asupersync-abl9h6: remove BY waiter id (see paired
-                // comment in poll's cancel path). The recorded slot is a
-                // stale hint after any prior swap_remove in the same
-                // generation; identity is the only safe key.
-                let _ = slot;
-                if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
-                    state.waiters.swap_remove(idx);
-                }
-            }
+            };
+            // Dropping a Waker can destroy a user-provided `Wake` payload.
+            // Keep that destructor outside the non-reentrant state mutex.
+            drop(retired_waker);
         }
     }
 }
@@ -365,14 +403,50 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use crate::types::Budget;
     use serde_json::Value;
-    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Weak};
     use std::time::Duration;
 
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct BarrierWakerDropProbe {
+        barrier: Weak<Barrier>,
+        drops: Arc<AtomicUsize>,
+        unlocked_drops: Arc<AtomicUsize>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for BarrierWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for BarrierWakerDropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(barrier) = self.barrier.upgrade()
+                && barrier.state.try_lock().is_some()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn barrier_waker_drop_probe(
+        barrier: &Arc<Barrier>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(BarrierWakerDropProbe {
+            barrier: Arc::downgrade(barrier),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -958,6 +1032,85 @@ mod tests {
             total_leaders
         );
         crate::test_complete!("barrier_cancel_after_poll_arrival_cleans_state");
+    }
+
+    #[test]
+    fn barrier_future_drop_retires_waker_after_unlock() {
+        init_test("barrier_future_drop_retires_waker_after_unlock");
+        let barrier = Arc::new(Barrier::new(2));
+        let cx: Cx = Cx::for_testing();
+        let (waker, drops, unlocked_drops) = barrier_waker_drop_probe(&barrier);
+        let mut fut = barrier.wait(&cx);
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut fut).poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        drop(fut);
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 0, 0));
+        crate::test_complete!("barrier_future_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn barrier_cancellation_retires_waker_after_unlock() {
+        init_test("barrier_cancellation_retires_waker_after_unlock");
+        let barrier = Arc::new(Barrier::new(2));
+        let cx: Cx = Cx::for_testing();
+        let (waker, drops, unlocked_drops) = barrier_waker_drop_probe(&barrier);
+        let mut fut = barrier.wait(&cx);
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut fut).poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        cx.set_cancel_requested(true);
+
+        let replacement_waker = Waker::noop();
+        let mut task_cx = Context::from_waker(replacement_waker);
+        let cancelled = Pin::new(&mut fut).poll(&mut task_cx);
+
+        assert!(matches!(
+            cancelled,
+            Poll::Ready(Err(BarrierWaitError::Cancelled))
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 0, 0));
+        crate::test_complete!("barrier_cancellation_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn barrier_waker_replacement_retires_old_waker_after_unlock() {
+        init_test("barrier_waker_replacement_retires_old_waker_after_unlock");
+        let barrier = Arc::new(Barrier::new(2));
+        let cx: Cx = Cx::for_testing();
+        let (waker, drops, unlocked_drops) = barrier_waker_drop_probe(&barrier);
+        let mut fut = barrier.wait(&cx);
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut fut).poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        let replacement_waker = Waker::noop();
+        let mut task_cx = Context::from_waker(replacement_waker);
+        assert!(Pin::new(&mut fut).poll(&mut task_cx).is_pending());
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(barrier.state_snapshot_for_test(), (1, 0, 1));
+
+        drop(fut);
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 0, 0));
+        crate::test_complete!("barrier_waker_replacement_retires_old_waker_after_unlock");
     }
 
     /// br-asupersync-abl9h6 regression: with N waiters registered in
