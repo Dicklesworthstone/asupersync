@@ -313,45 +313,82 @@ impl<T> WatchInner<T> {
     }
 
     fn register_waker(&self, waiter: WatchWaiter) {
-        let mut waiters = self.waiters.lock();
-        // Single pass: prune stale entries and update existing in one traversal.
-        let mut found = false;
-        waiters.retain_mut(|entry| {
-            if Arc::strong_count(&entry.queued) <= 1 {
-                return false;
-            }
-            if !found && Arc::ptr_eq(&entry.queued, &waiter.queued) {
-                if !entry.waker.will_wake(&waiter.waker) {
-                    entry.waker.clone_from(&waiter.waker);
+        let mut incoming = Some(waiter);
+        let mut retired = SmallVec::<[WatchWaiter; 4]>::new();
+        {
+            let mut waiters = self.waiters.lock();
+            // Single pass: prune stale entries and update an existing waiter.
+            // Removed and replaced Wakers are carried beyond the mutex before
+            // destruction because a safe Waker payload may re-enter this channel.
+            let mut found = false;
+            let mut index = 0;
+            while index < waiters.len() {
+                if Arc::strong_count(&waiters[index].queued) <= 1 {
+                    retired.push(waiters.remove(index));
+                    continue;
                 }
-                found = true;
+
+                let incoming = incoming
+                    .as_mut()
+                    .expect("incoming watch waiter remains available until registration");
+                let entry = &mut waiters[index];
+                if !found && Arc::ptr_eq(&entry.queued, &incoming.queued) {
+                    if !entry.waker.will_wake(&incoming.waker) {
+                        std::mem::swap(&mut entry.waker, &mut incoming.waker);
+                    }
+                    found = true;
+                }
+                index += 1;
             }
-            true
-        });
-        if !found {
-            waiters.push(waiter);
+            if !found {
+                waiters.push(
+                    incoming
+                        .take()
+                        .expect("unregistered watch waiter remains available"),
+                );
+            }
         }
+        drop(retired);
+        drop(incoming);
     }
 
-    /// Update the waker for an already-queued waiter without pre-cloning.
+    /// Update the waker for an already-queued waiter.
+    ///
+    /// `new_waker` is owned so its clone is completed before the waiter mutex is
+    /// acquired. Any replaced, stale, or unused Waker is destroyed only after
+    /// the mutex has been released.
     /// Returns `true` if the waiter was found and refreshed, `false` if not found
     /// (caller should fall back to `register_waker` with a new `WatchWaiter`).
-    fn refresh_waker(&self, queued: &Arc<AtomicBool>, new_waker: &Waker) -> bool {
-        let mut waiters = self.waiters.lock();
-        // Single pass: prune stale entries and refresh target in one traversal.
-        let mut found = false;
-        waiters.retain_mut(|entry| {
-            if Arc::strong_count(&entry.queued) <= 1 {
-                return false;
-            }
-            if !found && Arc::ptr_eq(&entry.queued, queued) {
-                if !entry.waker.will_wake(new_waker) {
-                    entry.waker.clone_from(new_waker);
+    fn refresh_waker(&self, queued: &Arc<AtomicBool>, new_waker: Waker) -> bool {
+        let mut incoming = Some(new_waker);
+        let mut retired = SmallVec::<[WatchWaiter; 4]>::new();
+        let found = {
+            let mut waiters = self.waiters.lock();
+            // Single pass: prune stale entries and refresh the target.
+            let mut found = false;
+            let mut index = 0;
+            while index < waiters.len() {
+                if Arc::strong_count(&waiters[index].queued) <= 1 {
+                    retired.push(waiters.remove(index));
+                    continue;
                 }
-                found = true;
+
+                let entry = &mut waiters[index];
+                if !found && Arc::ptr_eq(&entry.queued, queued) {
+                    let incoming = incoming
+                        .as_mut()
+                        .expect("incoming watch Waker remains available during refresh");
+                    if !entry.waker.will_wake(incoming) {
+                        std::mem::swap(&mut entry.waker, incoming);
+                    }
+                    found = true;
+                }
+                index += 1;
             }
-            true
-        });
+            found
+        };
+        drop(retired);
+        drop(incoming);
         found
     }
 }
@@ -695,7 +732,7 @@ impl<T> Receiver<T> {
                 });
             }
             Some(w) => {
-                if !self.inner.refresh_waker(w, context.waker()) {
+                if !self.inner.refresh_waker(w, context.waker().clone()) {
                     self.inner.register_waker(WatchWaiter {
                         waker: context.waker().clone(),
                         queued: Arc::clone(w),
@@ -875,22 +912,31 @@ impl<T, Caps> Future for ChangedFuture<'_, '_, T, Caps> {
 impl<T, Caps> Drop for ChangedFuture<'_, '_, T, Caps> {
     fn drop(&mut self) {
         let mut removed_pending_waiter = false;
+        let mut retired = SmallVec::<[WatchWaiter; 4]>::new();
         if let Some(waiter) = self.receiver.waiter.as_ref() {
             // The post-register fast paths can clear the queued flag before Drop runs
             // while the waiter entry is still linked from the shared waiter list.
             if waiter.load(Ordering::Acquire) || Arc::strong_count(waiter) > 1 {
                 waiter.store(false, Ordering::Release);
                 let mut waiters = self.receiver.inner.waiters.lock();
-                waiters.retain(|entry| {
-                    let remove = Arc::ptr_eq(&entry.queued, waiter);
+                let mut index = 0;
+                while index < waiters.len() {
+                    let remove = Arc::ptr_eq(&waiters[index].queued, waiter);
                     removed_pending_waiter |= remove;
-                    !remove && Arc::strong_count(&entry.queued) > 1
-                });
+                    if remove || Arc::strong_count(&waiters[index].queued) <= 1 {
+                        retired.push(waiters.remove(index));
+                    } else {
+                        index += 1;
+                    }
+                }
             }
         }
         if !self.completed && removed_pending_waiter {
+            // Commit cancellation accounting before running arbitrary Waker
+            // destructors so a hostile Drop cannot suppress the state change.
             self.receiver.inner.record_cancellation();
         }
+        drop(retired);
     }
 }
 
@@ -915,10 +961,20 @@ impl<T> Drop for Receiver<T> {
         // Eagerly remove this receiver's waiter entry so dropped receivers do not
         // leave stale wakers behind until a later send/re-registration.
         if let Some(waiter) = self.waiter.take() {
+            let mut retired = SmallVec::<[WatchWaiter; 4]>::new();
             let mut waiters = self.inner.waiters.lock();
-            waiters.retain(|entry| {
-                !Arc::ptr_eq(&entry.queued, &waiter) && Arc::strong_count(&entry.queued) > 1
-            });
+            let mut index = 0;
+            while index < waiters.len() {
+                if Arc::ptr_eq(&waiters[index].queued, &waiter)
+                    || Arc::strong_count(&waiters[index].queued) <= 1
+                {
+                    retired.push(waiters.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            drop(waiters);
+            drop(retired);
         }
     }
 }
@@ -1978,6 +2034,173 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.count.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    struct ReentrantWatchWakerDrop {
+        inner: std::sync::Weak<WatchInner<()>>,
+        drops: Arc<AtomicUsize>,
+        unlocked_drops: Arc<AtomicUsize>,
+    }
+
+    impl std::task::Wake for ReentrantWatchWakerDrop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ReentrantWatchWakerDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(inner) = self.inner.upgrade()
+                && inner.waiters.try_lock().is_some()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn reentrant_watch_waker_drop_probe(
+        inner: &Arc<WatchInner<()>>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(ReentrantWatchWakerDrop {
+            inner: Arc::downgrade(inner),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
+    }
+
+    fn assert_reentrant_waker_retired_after_unlock(
+        drops: &AtomicUsize,
+        unlocked_drops: &AtomicUsize,
+    ) {
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn changed_waker_replacement_retires_after_unlock() {
+        init_test("changed_waker_replacement_retires_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(());
+        let mut future = rx.changed(&cx);
+        let (first_waker, drops, unlocked_drops) = reentrant_watch_waker_drop_probe(&tx.inner);
+        {
+            let mut task_cx = Context::from_waker(&first_waker);
+            assert!(Pin::new(&mut future).poll(&mut task_cx).is_pending());
+        }
+        drop(first_waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let replacement = Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&replacement);
+        assert!(Pin::new(&mut future).poll(&mut task_cx).is_pending());
+        assert_reentrant_waker_retired_after_unlock(&drops, &unlocked_drops);
+
+        drop(future);
+        crate::test_complete!("changed_waker_replacement_retires_after_unlock");
+    }
+
+    #[test]
+    fn register_waker_replacement_retires_after_unlock() {
+        init_test("register_waker_replacement_retires_after_unlock");
+        let (tx, _rx) = channel(());
+        let queued = Arc::new(AtomicBool::new(true));
+        let (waker, drops, unlocked_drops) = reentrant_watch_waker_drop_probe(&tx.inner);
+        tx.inner.register_waker(WatchWaiter {
+            waker,
+            queued: Arc::clone(&queued),
+        });
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        tx.inner.register_waker(WatchWaiter {
+            waker: Waker::noop().clone(),
+            queued: Arc::clone(&queued),
+        });
+        assert_reentrant_waker_retired_after_unlock(&drops, &unlocked_drops);
+        assert_eq!(tx.inner.waiters.lock().len(), 1);
+        crate::test_complete!("register_waker_replacement_retires_after_unlock");
+    }
+
+    #[test]
+    fn changed_future_drop_retires_waker_after_unlock() {
+        init_test("changed_future_drop_retires_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(());
+        let mut future = rx.changed(&cx);
+        let (waker, drops, unlocked_drops) = reentrant_watch_waker_drop_probe(&tx.inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut future).poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        drop(future);
+        assert_reentrant_waker_retired_after_unlock(&drops, &unlocked_drops);
+        assert_eq!(tx.inner.cancellation_count.load(Ordering::SeqCst), 1);
+        crate::test_complete!("changed_future_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn receiver_drop_retires_waker_after_unlock() {
+        init_test("receiver_drop_retires_waker_after_unlock");
+        let (tx, mut rx) = channel(());
+        let queued = Arc::new(AtomicBool::new(true));
+        let (waker, drops, unlocked_drops) = reentrant_watch_waker_drop_probe(&tx.inner);
+        tx.inner.register_waker(WatchWaiter {
+            waker,
+            queued: Arc::clone(&queued),
+        });
+        rx.waiter = Some(queued);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        drop(rx);
+        assert_reentrant_waker_retired_after_unlock(&drops, &unlocked_drops);
+        crate::test_complete!("receiver_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn stale_waiter_pruning_retires_waker_after_unlock() {
+        init_test("stale_waiter_pruning_retires_waker_after_unlock");
+        let (tx, _rx) = channel(());
+        let stale = Arc::new(AtomicBool::new(true));
+        let (waker, drops, unlocked_drops) = reentrant_watch_waker_drop_probe(&tx.inner);
+        tx.inner.register_waker(WatchWaiter {
+            waker,
+            queued: Arc::clone(&stale),
+        });
+        drop(stale);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let live = Arc::new(AtomicBool::new(true));
+        tx.inner.register_waker(WatchWaiter {
+            waker: Waker::noop().clone(),
+            queued: Arc::clone(&live),
+        });
+        assert_reentrant_waker_retired_after_unlock(&drops, &unlocked_drops);
+        assert_eq!(tx.inner.waiters.lock().len(), 1);
+        crate::test_complete!("stale_waiter_pruning_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn stale_waiter_refresh_retires_waker_after_unlock() {
+        init_test("stale_waiter_refresh_retires_waker_after_unlock");
+        let (tx, _rx) = channel(());
+        let stale = Arc::new(AtomicBool::new(true));
+        let (waker, drops, unlocked_drops) = reentrant_watch_waker_drop_probe(&tx.inner);
+        tx.inner.register_waker(WatchWaiter {
+            waker,
+            queued: Arc::clone(&stale),
+        });
+        drop(stale);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let missing = Arc::new(AtomicBool::new(true));
+        assert!(!tx.inner.refresh_waker(&missing, Waker::noop().clone()));
+        assert_reentrant_waker_retired_after_unlock(&drops, &unlocked_drops);
+        assert!(tx.inner.waiters.lock().is_empty());
+        crate::test_complete!("stale_waiter_refresh_retires_waker_after_unlock");
     }
 
     #[test]
