@@ -46,7 +46,7 @@
 //! let value = rx.recv(&cx).await?;
 //! ```
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
@@ -217,13 +217,6 @@ impl<T> OneShotInner<T> {
         self.value.is_some()
     }
 
-    /// Clears the registered waker and its waiter identity.
-    #[inline]
-    fn clear_waker(&mut self) {
-        self.waker = None;
-        self.waker_id = None;
-    }
-
     /// Takes the registered waker and clears its waiter identity.
     #[inline]
     fn take_waker(&mut self) -> Option<Waker> {
@@ -274,6 +267,89 @@ impl<T> OneShotInner<T> {
             closed_reason: closed.then_some(self.closed_reason).flatten(),
         }
     }
+}
+
+#[inline]
+fn receive_waker_is_current<T>(
+    inner: &OneShotInner<T>,
+    waiter_id: Option<u64>,
+    task_waker: &Waker,
+) -> bool {
+    waiter_id.is_some_and(|waiter_id| {
+        inner.waker_id == Some(waiter_id)
+            && inner
+                .waker
+                .as_ref()
+                .is_some_and(|stored| stored.will_wake(task_waker))
+    })
+}
+
+/// Installs a receive Waker that was cloned before the caller acquired the
+/// channel mutex. Returns the displaced Waker for post-unlock retirement.
+#[inline]
+fn install_receive_waker<T>(
+    inner: &mut OneShotInner<T>,
+    waiter_id: &mut Option<u64>,
+    task_waker: &Waker,
+    incoming_waker: &mut Option<Waker>,
+) -> Option<Waker> {
+    if receive_waker_is_current(inner, *waiter_id, task_waker) {
+        return None;
+    }
+
+    let incoming_waker = incoming_waker
+        .take()
+        .expect("prepared receive Waker must be available");
+    if (*waiter_id).is_some_and(|waiter_id| inner.waker_id == Some(waiter_id)) {
+        return inner.waker.replace(incoming_waker);
+    }
+
+    let new_waiter_id = inner.next_waiter_id;
+    inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
+    let retired_waker = inner.waker.replace(incoming_waker);
+    inner.waker_id = Some(new_waiter_id);
+    *waiter_id = Some(new_waiter_id);
+    retired_waker
+}
+
+/// Retires a stored Waker after its channel mutex has been released.
+///
+/// Safe custom Waker payloads may run arbitrary destructor code, including
+/// channel re-entry or a panic. Contain each retirement independently so a
+/// stale registration cannot deadlock the channel or discard a value that has
+/// already committed to a terminal receive result.
+#[inline]
+fn retire_waker_after_unlock(waker: Option<Waker>) {
+    let Some(waker) = waker else {
+        return;
+    };
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker))) {
+        // Dropping an arbitrary panic payload can itself panic. The channel is
+        // already authoritative, so leak only that opaque payload and preserve
+        // progress for the caller.
+        std::mem::forget(payload);
+    }
+}
+
+/// Dispatches a stored Waker after its channel mutex has been released.
+///
+/// A custom wake callback can re-enter the channel or panic. Keep each
+/// callback independent so one hostile waiter cannot prevent another waiter
+/// from observing an already-committed state transition.
+#[inline]
+fn wake_waker_after_unlock(waker: Option<Waker>) {
+    let Some(waker) = waker else {
+        return;
+    };
+    // Keep the stored owner alive while the callback unwinds. For safe
+    // `Arc<impl Wake>` Wakers this prevents a callback panic and a final-owner
+    // destructor panic from combining into an abort inside one unwind.
+    if let Err(payload) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()))
+    {
+        std::mem::forget(payload);
+    }
+    retire_waker_after_unlock(Some(waker));
 }
 
 /// Creates a new oneshot channel, returning the sender and receiver halves.
@@ -350,12 +426,8 @@ impl<T> Sender<T> {
                 inner.closed_reason = Some("cancelled_reserve");
                 (inner.take_waker(), inner.receiver_closed_waker.take())
             };
-            if let Some(waker) = waker {
-                waker.wake();
-            }
-            if let Some(waker) = receiver_closed_waker {
-                waker.wake();
-            }
+            wake_waker_after_unlock(waker);
+            wake_waker_after_unlock(receiver_closed_waker);
             return Err(SendError::Cancelled(()));
         }
 
@@ -459,26 +531,51 @@ impl<T> Sender<T> {
     /// to send a value. Useful for detecting receiver cancellation.
     #[inline]
     pub fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        let mut inner = self.inner.lock();
+        let mut incoming_waker = None;
+        loop {
+            let mut inner = self.inner.lock();
 
-        if inner.receiver_dropped {
-            // Receiver already dropped, return Ready immediately
-            return std::task::Poll::Ready(());
+            if inner.receiver_dropped {
+                let retired_waker = inner.sender_waker.take();
+                drop(inner);
+                retire_waker_after_unlock(retired_waker);
+                retire_waker_after_unlock(incoming_waker);
+                return std::task::Poll::Ready(());
+            }
+            if inner
+                .sender_waker
+                .as_ref()
+                .is_some_and(|stored| stored.will_wake(cx.waker()))
+            {
+                drop(inner);
+                retire_waker_after_unlock(incoming_waker);
+                return std::task::Poll::Pending;
+            }
+            let Some(prepared) = incoming_waker.take() else {
+                drop(inner);
+                // RawWaker cloning may run arbitrary user code. Prepare the
+                // replacement without the channel mutex, then recheck state.
+                incoming_waker = Some(cx.waker().clone());
+                continue;
+            };
+
+            // Use a separate sender Waker so receiver waiter identity is
+            // unaffected by poll_closed registration.
+            let retired_waker = inner.sender_waker.replace(prepared);
+            drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            return std::task::Poll::Pending;
         }
-
-        // Receiver still alive, register sender waker for notification when it drops.
-        // Use separate sender_waker to avoid interfering with receiver's waker identity system.
-        inner.sender_waker = Some(cx.waker().clone());
-        std::task::Poll::Pending
     }
 }
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let (waker, receiver_closed_waker) = {
+        let (waker, receiver_closed_waker, retired_sender_waker) = {
             let mut inner = self.inner.lock();
+            let retired_sender_waker = inner.sender_waker.take();
             if inner.sender_consumed {
-                (None, None)
+                (None, None, retired_sender_waker)
             } else {
                 inner.sender_consumed = true;
                 inner.closed_reason = Some("sender_drop");
@@ -486,16 +583,13 @@ impl<T> Drop for Sender<T> {
                 // with inline-polling executors.
                 let waker = inner.take_waker();
                 let receiver_closed_waker = inner.receiver_closed_waker.take();
-                (waker, receiver_closed_waker)
+                (waker, receiver_closed_waker, retired_sender_waker)
             }
         };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-        // Wake receiver's poll_closed waiters
-        if let Some(waker) = receiver_closed_waker {
-            waker.wake();
-        }
+        retire_waker_after_unlock(retired_sender_waker);
+        wake_waker_after_unlock(waker);
+        // Wake receiver's poll_closed waiters independently.
+        wake_waker_after_unlock(receiver_closed_waker);
     }
 }
 
@@ -527,7 +621,7 @@ impl<T> SendPermit<T> {
     /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped.
     #[inline]
     pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
-        let (result, waker) = {
+        let (result, waker, retired_waker) = {
             let mut inner = self.inner.lock();
 
             if inner.receiver_dropped {
@@ -535,9 +629,8 @@ impl<T> SendPermit<T> {
                 // and release the lock as early as possible (mirrors the
                 // Ok path).
                 inner.permit_outstanding = false;
-                inner.clear_waker();
-                drop(inner);
-                (Err(value), None)
+                let retired_waker = inner.take_waker();
+                (Err(value), None, retired_waker)
             } else {
                 inner.value = Some(value);
                 inner.permit_outstanding = false;
@@ -545,16 +638,14 @@ impl<T> SendPermit<T> {
                 // Take waker under lock, wake outside to avoid deadlock
                 // with inline-polling executors.
                 let waker = inner.take_waker();
-                drop(inner);
-                (Ok(()), waker)
+                (Ok(()), waker, None)
             }
         };
 
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-
         self.sent = true;
+        retire_waker_after_unlock(retired_waker);
+        wake_waker_after_unlock(waker);
+
         result.map_err(SendError::Disconnected)
     }
 
@@ -573,12 +664,8 @@ impl<T> SendPermit<T> {
             (inner.take_waker(), inner.receiver_closed_waker.take())
         };
         self.sent = true; // Prevent drop from double-aborting
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-        if let Some(waker) = receiver_closed_waker {
-            waker.wake();
-        }
+        wake_waker_after_unlock(waker);
+        wake_waker_after_unlock(receiver_closed_waker);
     }
 
     /// Returns `true` if the receiver has been dropped.
@@ -607,12 +694,8 @@ impl<T> Drop for SendPermit<T> {
                 inner.closed_reason = Some("permit_drop");
                 (inner.take_waker(), inner.receiver_closed_waker.take())
             };
-            if let Some(waker) = waker {
-                waker.wake();
-            }
-            if let Some(waker) = receiver_closed_waker {
-                waker.wake();
-            }
+            wake_waker_after_unlock(waker);
+            wake_waker_after_unlock(receiver_closed_waker);
         }
     }
 }
@@ -643,89 +726,110 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             return Poll::Ready(Err(RecvError::PolledAfterCompletion));
         }
 
+        {
+            let mut inner = this.receiver.inner.lock();
+
+            if let Some(value) = inner.value.take() {
+                let retired_waker = inner.take_waker();
+                let retired_closed_waker = inner.receiver_closed_waker.take();
+                inner.closed_reason = Some("committed");
+                this.waiter_id = None;
+                this.completed = true;
+                drop(inner);
+                retire_waker_after_unlock(retired_waker);
+                retire_waker_after_unlock(retired_closed_waker);
+                return Poll::Ready(Ok(value));
+            }
+
+            if inner.is_closed() {
+                let retired_waker = inner.take_waker();
+                let retired_closed_waker = inner.receiver_closed_waker.take();
+                this.waiter_id = None;
+                this.completed = true;
+                drop(inner);
+                retire_waker_after_unlock(retired_waker);
+                retire_waker_after_unlock(retired_closed_waker);
+                return Poll::Ready(Err(RecvError::Closed));
+            }
+
+            if receive_waker_is_current(&inner, this.waiter_id, ctx.waker()) {
+                return Poll::Pending;
+            }
+        }
+
+        // RawWaker cloning may re-enter or panic. Prepare it without the
+        // channel mutex, then recheck terminal state and ownership.
+        let mut incoming_waker = Some(ctx.waker().clone());
         let mut inner = this.receiver.inner.lock();
 
         if let Some(value) = inner.value.take() {
-            inner.clear_waker();
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
             inner.closed_reason = Some("committed");
-
             this.waiter_id = None;
             this.completed = true;
-
             drop(inner);
-
+            retire_waker_after_unlock(retired_waker);
+            retire_waker_after_unlock(retired_closed_waker);
+            retire_waker_after_unlock(incoming_waker);
             return Poll::Ready(Ok(value));
         }
 
         if inner.is_closed() {
-            inner.clear_waker();
-
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
             this.waiter_id = None;
             this.completed = true;
-
             drop(inner);
-
+            retire_waker_after_unlock(retired_waker);
+            retire_waker_after_unlock(retired_closed_waker);
+            retire_waker_after_unlock(incoming_waker);
             return Poll::Ready(Err(RecvError::Closed));
         }
 
-        if let Some(my_id) = this.waiter_id {
-            if inner.waker_id == Some(my_id) {
-                if let Some(existing) = &inner.waker {
-                    if !existing.will_wake(ctx.waker()) {
-                        inner.waker = Some(ctx.waker().clone());
-                    }
-                } else {
-                    inner.waker = Some(ctx.waker().clone());
-                }
-            } else {
-                let waiter_id = inner.next_waiter_id;
-
-                inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
-
-                inner.waker = Some(ctx.waker().clone());
-
-                inner.waker_id = Some(waiter_id);
-
-                this.waiter_id = Some(waiter_id);
-            }
-        } else {
-            let waiter_id = inner.next_waiter_id;
-
-            inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
-
-            inner.waker = Some(ctx.waker().clone());
-
-            inner.waker_id = Some(waiter_id);
-
-            this.waiter_id = Some(waiter_id);
-        }
-
+        let retired_waker = install_receive_waker(
+            &mut inner,
+            &mut this.waiter_id,
+            ctx.waker(),
+            &mut incoming_waker,
+        );
         drop(inner);
-
+        retire_waker_after_unlock(retired_waker);
+        retire_waker_after_unlock(incoming_waker);
         Poll::Pending
     }
 }
 
 impl<T> Drop for RecvUninterruptibleFuture<'_, T> {
     fn drop(&mut self) {
-        {
+        let retired_waker = {
             let mut inner = self.receiver.inner.lock();
             if self
                 .waiter_id
                 .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
             {
-                inner.clear_waker();
+                inner.take_waker()
+            } else {
+                None
             }
-        }
+        };
+        retire_waker_after_unlock(retired_waker);
         self.waiter_id = None;
     }
 }
 
 /// Future returned by [`Receiver::recv`].
+#[derive(Debug)]
+struct RegisteredCancelWaker {
+    waker: Waker,
+    token: CancelWakerToken,
+}
+
 pub struct RecvFuture<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
     cx: &'a Cx<Caps>,
     waiter_id: Option<u64>,
+    cancel_waker: Option<RegisteredCancelWaker>,
     completed: bool,
 }
 
@@ -735,6 +839,96 @@ impl<T, Caps> RecvFuture<'_, T, Caps> {
     #[inline]
     pub(crate) fn receiver_finished(&self) -> bool {
         self.completed || self.receiver.is_ready() || self.receiver.is_closed()
+    }
+
+    /// Keep exactly one cancellation-Waker registration owned by this future.
+    fn refresh_cancel_waker(&mut self, waker: &Waker) {
+        let same_local_waker = self
+            .cancel_waker
+            .as_ref()
+            .is_some_and(|registered| registered.waker.will_wake(waker));
+        let incoming_waker = (!same_local_waker).then(|| waker.clone());
+        let previous_token = self
+            .cancel_waker
+            .as_ref()
+            .map(|registered| registered.token);
+        let token = self.cx.refresh_cancel_waker(previous_token, waker);
+        let retired_waker = if let Some(incoming_waker) = incoming_waker {
+            self.cancel_waker
+                .replace(RegisteredCancelWaker {
+                    waker: incoming_waker,
+                    token,
+                })
+                .map(|registered| registered.waker)
+        } else {
+            self.cancel_waker
+                .as_mut()
+                .expect("same local Waker requires an existing registration")
+                .token = token;
+            None
+        };
+        retire_waker_after_unlock(retired_waker);
+    }
+
+    /// Release this future's exact cancellation-Waker registration.
+    fn clear_cancel_waker(&mut self) {
+        let Some(registered) = self.cancel_waker.take() else {
+            return;
+        };
+        self.cx.clear_cancel_waker(registered.token);
+        retire_waker_after_unlock(Some(registered.waker));
+    }
+
+    /// Finish a cancelled poll after rechecking terminal channel state.
+    fn finish_cancelled(&mut self, incoming_waker: Option<Waker>) -> Poll<Result<T, RecvError>> {
+        let mut inner = self.receiver.inner.lock();
+
+        if let Some(value) = inner.value.take() {
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
+            inner.closed_reason = Some("committed");
+            self.waiter_id = None;
+            self.completed = true;
+            drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            retire_waker_after_unlock(retired_closed_waker);
+            retire_waker_after_unlock(incoming_waker);
+            self.clear_cancel_waker();
+            self.cx.trace("oneshot::recv received value");
+            return Poll::Ready(Ok(value));
+        }
+
+        if inner.is_closed() {
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
+            self.waiter_id = None;
+            self.completed = true;
+            drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            retire_waker_after_unlock(retired_closed_waker);
+            retire_waker_after_unlock(incoming_waker);
+            self.clear_cancel_waker();
+            self.cx.trace("oneshot::recv channel closed");
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        let retired_waker = if self
+            .waiter_id
+            .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
+        {
+            inner.take_waker()
+        } else {
+            None
+        };
+        inner.record_cancellation();
+        self.waiter_id = None;
+        self.completed = true;
+        drop(inner);
+        retire_waker_after_unlock(retired_waker);
+        retire_waker_after_unlock(incoming_waker);
+        self.clear_cancel_waker();
+        self.cx.trace("oneshot::recv cancelled while waiting");
+        Poll::Ready(Err(RecvError::Cancelled))
     }
 }
 
@@ -746,77 +940,106 @@ impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
         let this = &mut *self;
 
         if this.completed {
+            this.clear_cancel_waker();
             return Poll::Ready(Err(RecvError::PolledAfterCompletion));
+        }
+
+        let needs_waker = {
+            let mut inner = this.receiver.inner.lock();
+
+            // Value and closure retain precedence over cancellation.
+            if let Some(value) = inner.value.take() {
+                let retired_waker = inner.take_waker();
+                let retired_closed_waker = inner.receiver_closed_waker.take();
+                inner.closed_reason = Some("committed");
+                this.waiter_id = None;
+                this.completed = true;
+                drop(inner);
+                retire_waker_after_unlock(retired_waker);
+                retire_waker_after_unlock(retired_closed_waker);
+                this.clear_cancel_waker();
+                this.cx.trace("oneshot::recv received value");
+                return Poll::Ready(Ok(value));
+            }
+
+            if inner.is_closed() {
+                let retired_waker = inner.take_waker();
+                let retired_closed_waker = inner.receiver_closed_waker.take();
+                this.waiter_id = None;
+                this.completed = true;
+                drop(inner);
+                retire_waker_after_unlock(retired_waker);
+                retire_waker_after_unlock(retired_closed_waker);
+                this.clear_cancel_waker();
+                this.cx.trace("oneshot::recv channel closed");
+                return Poll::Ready(Err(RecvError::Closed));
+            }
+
+            !receive_waker_is_current(&inner, this.waiter_id, ctx.waker())
+        };
+
+        // Check before cloning so a pre-cancelled receive fails closed without
+        // invoking an arbitrary RawWaker clone callback. The channel mutex is
+        // not held because checkpoint evidence sinks may re-enter the channel.
+        if this.cx.checkpoint().is_err() {
+            return this.finish_cancelled(None);
+        }
+
+        // Prepare the channel registration outside its mutex, then establish
+        // an owned Cx cancellation registration. A second checkpoint closes
+        // the race across both clone callbacks and registration.
+        let mut incoming_waker = needs_waker.then(|| ctx.waker().clone());
+        this.refresh_cancel_waker(ctx.waker());
+        if this.cx.checkpoint().is_err() {
+            return this.finish_cancelled(incoming_waker);
         }
 
         let mut inner = this.receiver.inner.lock();
 
-        // 1. Check if value is ready
         if let Some(value) = inner.value.take() {
-            // Clear the stale waker so we don't retain executor state
-            // after the channel is done.
-            inner.clear_waker();
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
             inner.closed_reason = Some("committed");
             this.waiter_id = None;
             this.completed = true;
             drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            retire_waker_after_unlock(retired_closed_waker);
+            retire_waker_after_unlock(incoming_waker);
+            this.clear_cancel_waker();
             this.cx.trace("oneshot::recv received value");
             return Poll::Ready(Ok(value));
         }
 
-        // 2. Check if channel is closed
         if inner.is_closed() {
-            inner.clear_waker();
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
             this.waiter_id = None;
             this.completed = true;
             drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            retire_waker_after_unlock(retired_closed_waker);
+            retire_waker_after_unlock(incoming_waker);
+            this.clear_cancel_waker();
             this.cx.trace("oneshot::recv channel closed");
             return Poll::Ready(Err(RecvError::Closed));
         }
 
-        // 3. Check cancellation
-        if this.cx.checkpoint().is_err() {
-            // Clear stale waiter if this future registered it.
-            if this
-                .waiter_id
-                .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
-            {
-                inner.clear_waker();
-            }
-            inner.record_cancellation();
-            this.waiter_id = None;
-            this.completed = true;
+        if receive_waker_is_current(&inner, this.waiter_id, ctx.waker()) {
             drop(inner);
-            this.cx.trace("oneshot::recv cancelled while waiting");
-            return Poll::Ready(Err(RecvError::Cancelled));
+            retire_waker_after_unlock(incoming_waker);
+            return Poll::Pending;
         }
 
-        // 4. Register waker (skip clone if unchanged and still owned by this waiter)
-        if let Some(my_id) = this.waiter_id {
-            if inner.waker_id == Some(my_id) {
-                if let Some(existing) = &inner.waker {
-                    if !existing.will_wake(ctx.waker()) {
-                        inner.waker = Some(ctx.waker().clone());
-                    }
-                } else {
-                    inner.waker = Some(ctx.waker().clone());
-                }
-            } else {
-                // Someone else took the waker slot, we need a new ID
-                let waiter_id = inner.next_waiter_id;
-                inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
-                inner.waker = Some(ctx.waker().clone());
-                inner.waker_id = Some(waiter_id);
-                this.waiter_id = Some(waiter_id);
-            }
-        } else {
-            let waiter_id = inner.next_waiter_id;
-            inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
-            inner.waker = Some(ctx.waker().clone());
-            inner.waker_id = Some(waiter_id);
-            this.waiter_id = Some(waiter_id);
-        }
+        let retired_waker = install_receive_waker(
+            &mut inner,
+            &mut this.waiter_id,
+            ctx.waker(),
+            &mut incoming_waker,
+        );
         drop(inner);
+        retire_waker_after_unlock(retired_waker);
+        retire_waker_after_unlock(incoming_waker);
         Poll::Pending
     }
 }
@@ -825,17 +1048,21 @@ impl<T, Caps> Drop for RecvFuture<'_, T, Caps> {
     fn drop(&mut self) {
         // If dropped while Pending (e.g., select/race loser), clear
         // the registered waker to avoid retaining stale executor state.
-        {
+        let retired_waker = {
             let mut inner = self.receiver.inner.lock();
             // Clear only if this future still owns the registered waiter slot.
             if self
                 .waiter_id
                 .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
             {
-                inner.clear_waker();
+                inner.take_waker()
+            } else {
+                None
             }
-        }
+        };
+        retire_waker_after_unlock(retired_waker);
         self.waiter_id = None;
+        self.clear_cancel_waker();
     }
 }
 
@@ -874,6 +1101,7 @@ impl<T> Receiver<T> {
             receiver: self,
             cx,
             waiter_id: None,
+            cancel_waker: None,
             completed: false,
         }
     }
@@ -900,24 +1128,31 @@ impl<T> Receiver<T> {
     /// - `TryRecvError::Closed` if the sender was dropped without sending
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        let mut inner = self.inner.lock();
+        let (result, retired_waker, retired_closed_waker) = {
+            let mut inner = self.inner.lock();
 
-        if let Some(value) = inner.value.take() {
-            // Terminal success path: clear stale waiter registration.
-            inner.clear_waker();
-            inner.closed_reason = Some("committed");
-            drop(inner);
-            return Ok(value);
-        }
-
-        if inner.is_closed() {
-            // Terminal closed path: clear stale waiter registration.
-            inner.clear_waker();
-            drop(inner);
-            return Err(TryRecvError::Closed);
-        }
-
-        Err(TryRecvError::Empty)
+            if let Some(value) = inner.value.take() {
+                // Terminal success path: detach stale waiter registration.
+                let retired_waker = inner.take_waker();
+                let retired_closed_waker = inner.receiver_closed_waker.take();
+                inner.closed_reason = Some("committed");
+                (Ok(value), retired_waker, retired_closed_waker)
+            } else if inner.is_closed() {
+                // Terminal closed path: detach stale waiter registration.
+                let retired_waker = inner.take_waker();
+                let retired_closed_waker = inner.receiver_closed_waker.take();
+                (
+                    Err(TryRecvError::Closed),
+                    retired_waker,
+                    retired_closed_waker,
+                )
+            } else {
+                (Err(TryRecvError::Empty), None, None)
+            }
+        };
+        retire_waker_after_unlock(retired_waker);
+        retire_waker_after_unlock(retired_closed_waker);
+        result
     }
 
     /// Returns true if a value is ready to receive.
@@ -947,38 +1182,66 @@ impl<T> Receiver<T> {
     /// to receive a value. Useful for detecting sender dropout.
     #[inline]
     pub fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        let mut inner = self.inner.lock();
+        let mut incoming_waker = None;
+        loop {
+            let mut inner = self.inner.lock();
 
-        if inner.is_closed() {
-            // Already closed, return Ready immediately
-            return std::task::Poll::Ready(());
+            if inner.is_closed() {
+                let retired_waker = inner.receiver_closed_waker.take();
+                drop(inner);
+                retire_waker_after_unlock(retired_waker);
+                retire_waker_after_unlock(incoming_waker);
+                return std::task::Poll::Ready(());
+            }
+            if inner
+                .receiver_closed_waker
+                .as_ref()
+                .is_some_and(|stored| stored.will_wake(cx.waker()))
+            {
+                drop(inner);
+                retire_waker_after_unlock(incoming_waker);
+                return std::task::Poll::Pending;
+            }
+            let Some(prepared) = incoming_waker.take() else {
+                drop(inner);
+                incoming_waker = Some(cx.waker().clone());
+                continue;
+            };
+
+            // Keep closure notification separate from the main receiver
+            // waiter identity slot.
+            let retired_waker = inner.receiver_closed_waker.replace(prepared);
+            drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            return std::task::Poll::Pending;
         }
-
-        // Not closed yet, register receiver closed waker for notification when sender drops.
-        // Use separate receiver_closed_waker to avoid interfering with receiver's main waker identity system.
-        inner.receiver_closed_waker = Some(cx.waker().clone());
-        std::task::Poll::Pending
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let (sender_waker, _value) = {
+        let (sender_waker, retired_recv_waker, retired_closed_waker, _value) = {
             let mut inner = self.inner.lock();
             inner.receiver_dropped = true;
             inner.closed_reason = Some("receiver_drop");
             // Clear any pending recv waker so a dropped receiver does not
             // retain executor task state indefinitely.
-            inner.clear_waker();
+            let retired_recv_waker = inner.take_waker();
             // Take sender waker to notify poll_closed waiters
             let sender_waker = inner.sender_waker.take();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
             let value = inner.value.take();
-            (sender_waker, value)
+            (
+                sender_waker,
+                retired_recv_waker,
+                retired_closed_waker,
+                value,
+            )
         };
-        // Wake sender waker outside lock to avoid deadlock
-        if let Some(waker) = sender_waker {
-            waker.wake();
-        }
+        retire_waker_after_unlock(retired_recv_waker);
+        retire_waker_after_unlock(retired_closed_waker);
+        // Wake sender waker outside lock to avoid deadlock.
+        wake_waker_after_unlock(sender_waker);
     }
 }
 
@@ -998,8 +1261,8 @@ mod tests {
     use crate::{RegionId, TaskId};
     use proptest::prelude::*;
     use std::future::Future;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Weak};
     use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
@@ -1036,6 +1299,671 @@ mod tests {
 
     fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
         Waker::from(Arc::new(CountWaker(counter)))
+    }
+
+    #[derive(Debug)]
+    struct OneshotWakerDropProbe {
+        inner: Weak<Mutex<OneShotInner<()>>>,
+        drops: Arc<AtomicUsize>,
+        unlocked_drops: Arc<AtomicUsize>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for OneshotWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for OneshotWakerDropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(inner) = self.inner.upgrade()
+                && inner.try_lock().is_some()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn oneshot_waker_drop_probe(
+        inner: &Arc<Mutex<OneShotInner<()>>>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(OneshotWakerDropProbe {
+            inner: Arc::downgrade(inner),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
+    }
+
+    #[derive(Debug)]
+    struct PanicOnDropWaker(Arc<AtomicUsize>);
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for PanicOnDropWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for PanicOnDropWaker {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("hostile oneshot Waker destructor");
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicOnWakeWaker {
+        wakes: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl std::task::Wake for PanicOnWakeWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            panic!("hostile oneshot wake callback");
+        }
+    }
+
+    impl Drop for PanicOnWakeWaker {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            panic!("hostile oneshot wake payload destructor");
+        }
+    }
+
+    /// Test-only RawWaker whose clone callback checks the oneshot mutex and can
+    /// inject one deterministic state transition at that exact boundary.
+    mod raw_waker_probe {
+        use super::*;
+        use std::mem::ManuallyDrop;
+        use std::task::{RawWaker, RawWakerVTable};
+
+        pub(super) struct RawWakerProbe {
+            inner: Weak<Mutex<OneShotInner<()>>>,
+            clones: AtomicUsize,
+            clones_under_lock: AtomicUsize,
+            wakes: AtomicUsize,
+            clone_hook: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
+        }
+
+        impl RawWakerProbe {
+            pub(super) fn new(inner: &Arc<Mutex<OneShotInner<()>>>) -> Arc<Self> {
+                Arc::new(Self {
+                    inner: Arc::downgrade(inner),
+                    clones: AtomicUsize::new(0),
+                    clones_under_lock: AtomicUsize::new(0),
+                    wakes: AtomicUsize::new(0),
+                    clone_hook: Mutex::new(None),
+                })
+            }
+
+            #[allow(unsafe_code)]
+            pub(super) fn waker(self: &Arc<Self>) -> Waker {
+                let data = Arc::into_raw(Arc::clone(self)).cast();
+                let raw = RawWaker::new(data, &VTABLE);
+                // SAFETY: `data` owns exactly one strong `Arc<RawWakerProbe>`
+                // and every vtable operation preserves or consumes precisely
+                // the strong reference represented by its pointer.
+                unsafe { Waker::from_raw(raw) }
+            }
+
+            pub(super) fn set_clone_hook(&self, hook: impl FnOnce() + Send + 'static) {
+                let previous = self.clone_hook.lock().replace(Box::new(hook));
+                assert!(previous.is_none(), "only one clone hook may be armed");
+            }
+
+            pub(super) fn clones(&self) -> usize {
+                self.clones.load(Ordering::SeqCst)
+            }
+
+            pub(super) fn clones_under_lock(&self) -> usize {
+                self.clones_under_lock.load(Ordering::SeqCst)
+            }
+
+            pub(super) fn wakes(&self) -> usize {
+                self.wakes.load(Ordering::SeqCst)
+            }
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn clone_waker(data: *const ()) -> RawWaker {
+            // SAFETY: every pointer comes from `Arc::into_raw`. ManuallyDrop
+            // borrows that strong reference while `Arc::clone` creates the one
+            // newly owned reference returned in the RawWaker.
+            let probe = ManuallyDrop::new(unsafe {
+                Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>())
+            });
+            probe.clones.fetch_add(1, Ordering::SeqCst);
+
+            let channel_unlocked = probe.inner.upgrade().is_none_or(|inner| {
+                let guard = inner.try_lock();
+                let unlocked = guard.is_some();
+                drop(guard);
+                unlocked
+            });
+            if channel_unlocked {
+                let hook = probe.clone_hook.lock().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            } else {
+                probe.clones_under_lock.fetch_add(1, Ordering::SeqCst);
+            }
+
+            let cloned = Arc::clone(&*probe);
+            RawWaker::new(Arc::into_raw(cloned).cast(), &VTABLE)
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn wake(data: *const ()) {
+            // SAFETY: by-value wake consumes the one strong Arc represented by
+            // `data`.
+            let probe = unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) };
+            probe.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn wake_by_ref(data: *const ()) {
+            // SAFETY: wake-by-reference borrows the represented strong Arc;
+            // ManuallyDrop prevents it from being consumed.
+            let probe = ManuallyDrop::new(unsafe {
+                Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>())
+            });
+            probe.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn drop_waker(data: *const ()) {
+            // SAFETY: drop consumes exactly the strong Arc represented by
+            // `data`.
+            drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });
+        }
+
+        static VTABLE: RawWakerVTable =
+            RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker);
+    }
+
+    #[test]
+    fn recv_clone_callbacks_run_unlocked_and_recheck_state() {
+        init_test("recv_clone_callbacks_run_unlocked_and_recheck_state");
+
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>();
+        let probe = raw_waker_probe::RawWakerProbe::new(&rx.inner);
+        probe.set_clone_hook(move || {
+            tx.send_blocking(())
+                .expect("clone hook should commit into the live receiver");
+        });
+        let waker = probe.waker();
+        let received = {
+            let mut recv = Box::pin(rx.recv(&cx));
+            let mut task_cx = Context::from_waker(&waker);
+            recv.as_mut().poll(&mut task_cx)
+        };
+        assert!(matches!(received, Poll::Ready(Ok(()))));
+        assert!(probe.clones() >= 1);
+        assert_eq!(probe.clones_under_lock(), 0);
+
+        let cx = test_cx();
+        let cx_from_hook = cx.clone();
+        let (_tx, mut rx) = channel::<()>();
+        let probe = raw_waker_probe::RawWakerProbe::new(&rx.inner);
+        probe.set_clone_hook(move || cx_from_hook.set_cancel_requested(true));
+        let waker = probe.waker();
+        let cancelled = {
+            let mut recv = Box::pin(rx.recv(&cx));
+            let mut task_cx = Context::from_waker(&waker);
+            recv.as_mut().poll(&mut task_cx)
+        };
+        assert!(matches!(cancelled, Poll::Ready(Err(RecvError::Cancelled))));
+        assert!(probe.clones() >= 1);
+        assert_eq!(probe.clones_under_lock(), 0);
+
+        crate::test_complete!("recv_clone_callbacks_run_unlocked_and_recheck_state");
+    }
+
+    #[test]
+    fn poll_closed_clone_callbacks_run_unlocked_and_recheck_closure() {
+        init_test("poll_closed_clone_callbacks_run_unlocked_and_recheck_closure");
+
+        let (mut tx, rx) = channel::<()>();
+        let probe = raw_waker_probe::RawWakerProbe::new(&tx.inner);
+        probe.set_clone_hook(move || drop(rx));
+        let waker = probe.waker();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(tx.poll_closed(&mut task_cx).is_ready());
+        assert_eq!(probe.clones(), 1);
+        assert_eq!(probe.clones_under_lock(), 0);
+
+        let (tx, mut rx) = channel::<()>();
+        let probe = raw_waker_probe::RawWakerProbe::new(&rx.inner);
+        probe.set_clone_hook(move || drop(tx));
+        let waker = probe.waker();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(rx.poll_closed(&mut task_cx).is_ready());
+        assert_eq!(probe.clones(), 1);
+        assert_eq!(probe.clones_under_lock(), 0);
+
+        crate::test_complete!("poll_closed_clone_callbacks_run_unlocked_and_recheck_closure");
+    }
+
+    #[test]
+    fn pre_cancelled_recv_does_not_clone_task_waker() {
+        init_test("pre_cancelled_recv_does_not_clone_task_waker");
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        let (_tx, mut rx) = channel::<()>();
+        let probe = raw_waker_probe::RawWakerProbe::new(&rx.inner);
+        let waker = probe.waker();
+
+        let cancelled = {
+            let mut recv = Box::pin(rx.recv(&cx));
+            let mut task_cx = Context::from_waker(&waker);
+            recv.as_mut().poll(&mut task_cx)
+        };
+        assert!(matches!(cancelled, Poll::Ready(Err(RecvError::Cancelled))));
+        assert_eq!(probe.clones(), 0);
+        assert_eq!(probe.clones_under_lock(), 0);
+        assert_eq!(probe.wakes(), 0);
+        crate::test_complete!("pre_cancelled_recv_does_not_clone_task_waker");
+    }
+
+    #[test]
+    fn pending_recv_owns_exact_cancellation_waker() {
+        init_test("pending_recv_owns_exact_cancellation_waker");
+        let cx = test_cx();
+        let (_tx, mut rx) = channel::<()>();
+        let wakes_a = Arc::new(AtomicUsize::new(0));
+        let waker_a = counting_waker(Arc::clone(&wakes_a));
+        let mut recv = Box::pin(rx.recv(&cx));
+        let mut task_cx = Context::from_waker(&waker_a);
+
+        assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+        assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+
+        let wakes_b = Arc::new(AtomicUsize::new(0));
+        let waker_b = counting_waker(Arc::clone(&wakes_b));
+        let mut task_cx = Context::from_waker(&waker_b);
+        assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+
+        cx.set_cancel_requested(true);
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 0);
+        assert_eq!(wakes_b.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            recv.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(RecvError::Cancelled))
+        ));
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+
+        crate::test_complete!("pending_recv_owns_exact_cancellation_waker");
+    }
+
+    #[test]
+    fn recv_waker_replacement_retires_old_payload_after_unlock() {
+        init_test("recv_waker_replacement_retires_old_payload_after_unlock");
+        let cx = test_cx();
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        let mut recv = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        let replacement = Waker::noop().clone();
+        {
+            let mut task_cx = Context::from_waker(&replacement);
+            assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        }
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        drop(recv);
+        crate::test_complete!("recv_waker_replacement_retires_old_payload_after_unlock");
+    }
+
+    #[test]
+    fn recv_future_drop_and_cancel_retire_payloads_after_unlock() {
+        init_test("recv_future_drop_and_cancel_retire_payloads_after_unlock");
+
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        let mut recv = Box::pin(rx.recv_uninterruptible());
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(recv);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        let cx = test_cx();
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        let mut recv = Box::pin(rx.recv(&cx));
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        cx.set_cancel_requested(true);
+        let replacement = Waker::noop().clone();
+        let cancelled = {
+            let mut task_cx = Context::from_waker(&replacement);
+            recv.as_mut().poll(&mut task_cx)
+        };
+        assert!(matches!(cancelled, Poll::Ready(Err(RecvError::Cancelled))));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        crate::test_complete!("recv_future_drop_and_cancel_retire_payloads_after_unlock");
+    }
+
+    #[test]
+    fn terminal_recv_paths_retire_stale_wakers_after_unlock() {
+        init_test("terminal_recv_paths_retire_stale_wakers_after_unlock");
+
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut state = inner.lock();
+            state.value = Some(());
+            state.waker = Some(waker.clone());
+            state.waker_id = Some(11);
+        }
+        drop(waker);
+        let task_waker = Waker::noop().clone();
+        let value = {
+            let mut recv = Box::pin(rx.recv_uninterruptible());
+            let mut task_cx = Context::from_waker(&task_waker);
+            recv.as_mut().poll(&mut task_cx)
+        };
+        assert!(matches!(value, Poll::Ready(Ok(()))));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut state = inner.lock();
+            state.sender_consumed = true;
+            state.waker = Some(waker.clone());
+            state.waker_id = Some(12);
+        }
+        drop(waker);
+        let closed = {
+            let mut recv = Box::pin(rx.recv_uninterruptible());
+            let mut task_cx = Context::from_waker(&task_waker);
+            recv.as_mut().poll(&mut task_cx)
+        };
+        assert!(matches!(closed, Poll::Ready(Err(RecvError::Closed))));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        crate::test_complete!("terminal_recv_paths_retire_stale_wakers_after_unlock");
+    }
+
+    #[test]
+    fn try_recv_preserves_value_when_stale_waker_destructor_panics() {
+        init_test("try_recv_preserves_value_when_stale_waker_destructor_panics");
+        let (_tx, mut rx) = channel::<u8>();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(PanicOnDropWaker(Arc::clone(&drops))));
+        {
+            let mut state = rx.inner.lock();
+            state.value = Some(37);
+            state.waker = Some(waker.clone());
+            state.waker_id = Some(13);
+        }
+        drop(waker);
+
+        assert_eq!(rx.try_recv(), Ok(37));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        crate::test_complete!("try_recv_preserves_value_when_stale_waker_destructor_panics");
+    }
+
+    #[test]
+    fn poll_closed_replacements_retire_payloads_after_unlock() {
+        init_test("poll_closed_replacements_retire_payloads_after_unlock");
+
+        let (mut tx, _rx) = channel::<()>();
+        let inner = Arc::clone(&tx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(tx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        let replacement = Waker::noop().clone();
+        {
+            let mut task_cx = Context::from_waker(&replacement);
+            assert!(tx.poll_closed(&mut task_cx).is_pending());
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        {
+            let mut task_cx = Context::from_waker(&replacement);
+            assert!(rx.poll_closed(&mut task_cx).is_pending());
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        crate::test_complete!("poll_closed_replacements_retire_payloads_after_unlock");
+    }
+
+    #[test]
+    fn receiver_drop_retires_main_waker_after_unlock() {
+        init_test("receiver_drop_retires_main_waker_after_unlock");
+        let (_tx, rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut state = inner.lock();
+            state.waker = Some(waker.clone());
+            state.waker_id = Some(14);
+        }
+        drop(waker);
+
+        drop(rx);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        crate::test_complete!("receiver_drop_retires_main_waker_after_unlock");
+    }
+
+    #[test]
+    fn endpoint_owned_wakers_retire_after_unlock() {
+        init_test("endpoint_owned_wakers_retire_after_unlock");
+
+        let (mut tx, _rx) = channel::<()>();
+        let inner = Arc::clone(&tx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(tx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(tx);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        let cx = test_cx();
+        let (mut tx, _rx) = channel::<()>();
+        let inner = Arc::clone(&tx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(tx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        let permit = tx.reserve(&cx).expect("live channel should reserve");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        drop(permit);
+
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(rx);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        crate::test_complete!("endpoint_owned_wakers_retire_after_unlock");
+    }
+
+    #[test]
+    fn receiver_terminal_paths_retire_closed_waiters_after_unlock() {
+        init_test("receiver_terminal_paths_retire_closed_waiters_after_unlock");
+
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        tx.send_blocking(())
+            .expect("live receiver should accept value");
+        let task_waker = Waker::noop().clone();
+        let value = {
+            let mut recv = Box::pin(rx.recv(&cx));
+            let mut task_cx = Context::from_waker(&task_waker);
+            recv.as_mut().poll(&mut task_cx)
+        };
+        assert!(matches!(value, Poll::Ready(Ok(()))));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        let (tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        tx.send_blocking(())
+            .expect("live receiver should accept value");
+        assert_eq!(rx.try_recv(), Ok(()));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        let (_tx, mut rx) = channel::<()>();
+        let inner = Arc::clone(&rx.inner);
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        inner.lock().sender_consumed = true;
+        {
+            let mut task_cx = Context::from_waker(&task_waker);
+            assert!(rx.poll_closed(&mut task_cx).is_ready());
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        crate::test_complete!("receiver_terminal_paths_retire_closed_waiters_after_unlock");
+    }
+
+    #[test]
+    fn disconnected_send_retires_stale_waker_after_unlock() {
+        init_test("disconnected_send_retires_stale_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, rx) = channel::<()>();
+        let permit = tx.reserve(&cx).expect("live channel should reserve");
+        let inner = Arc::clone(&permit.inner);
+        drop(rx);
+
+        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+        {
+            let mut state = inner.lock();
+            state.waker = Some(waker.clone());
+            state.waker_id = Some(15);
+        }
+        drop(waker);
+
+        assert!(matches!(permit.send(()), Err(SendError::Disconnected(()))));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        crate::test_complete!("disconnected_send_retires_stale_waker_after_unlock");
+    }
+
+    #[test]
+    fn wake_panics_do_not_corrupt_commit_or_skip_other_waiters() {
+        init_test("wake_panics_do_not_corrupt_commit_or_skip_other_waiters");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u8>();
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        {
+            let mut state = rx.inner.lock();
+            state.waker = Some(Waker::from(Arc::new(PanicOnWakeWaker {
+                wakes: Arc::clone(&wake_count),
+                drops: Arc::clone(&drop_count),
+            })));
+            state.waker_id = Some(16);
+        }
+
+        assert_eq!(tx.send(&cx, 37), Ok(()));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+        {
+            let state = rx.inner.lock();
+            assert!(!state.permit_outstanding);
+            assert_eq!(state.cancellation_count, 0);
+            assert_eq!(state.closed_reason, None);
+        }
+        assert_eq!(rx.try_recv(), Ok(37));
+
+        let (tx, mut rx) = channel::<()>();
+        let panic_wakes = Arc::new(AtomicUsize::new(0));
+        let panic_drops = Arc::new(AtomicUsize::new(0));
+        let later_wakes = Arc::new(AtomicUsize::new(0));
+        {
+            let mut state = rx.inner.lock();
+            state.waker = Some(Waker::from(Arc::new(PanicOnWakeWaker {
+                wakes: Arc::clone(&panic_wakes),
+                drops: Arc::clone(&panic_drops),
+            })));
+            state.waker_id = Some(17);
+            state.receiver_closed_waker = Some(counting_waker(Arc::clone(&later_wakes)));
+        }
+        drop(tx);
+        assert_eq!(panic_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(panic_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(later_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Closed));
+
+        crate::test_complete!("wake_panics_do_not_corrupt_commit_or_skip_other_waiters");
     }
 
     #[derive(Debug, Clone, Copy)]

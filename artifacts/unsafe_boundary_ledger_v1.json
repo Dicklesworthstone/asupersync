@@ -330,19 +330,19 @@
     }
   },
   "summary": {
-    "boundary_rows": 96,
-    "operation_count": 844,
+    "boundary_rows": 97,
+    "operation_count": 858,
     "operation_kind_counts": {
-      "allow_unsafe_code": 95,
-      "unsafe_block": 631,
-      "unsafe_fn": 98,
+      "allow_unsafe_code": 100,
+      "unsafe_block": 636,
+      "unsafe_fn": 102,
       "unsafe_impl": 20,
       "unsafe_trait": 0
     },
     "category_counts": {
       "atp-platform-boundary": 2,
       "browser-boundary": 1,
-      "channel-test-boundary": 1,
+      "channel-test-boundary": 2,
       "compat-boundary": 2,
       "conformance-boundary": 2,
       "database-test-or-ffi-boundary": 2,
@@ -1791,6 +1791,92 @@
         {
           "kind": "unsafe_block",
           "line": 2798,
+          "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
+        }
+      ]
+    },
+    {
+      "site_id": "unsafe-src-channel-oneshot-rs-raw-waker-probe",
+      "path": "src/channel/oneshot.rs",
+      "category": "channel-test-boundary",
+      "scope": "item-boundary",
+      "feature_or_platform_gate": "cfg(test) private oneshot RawWaker clone-callback probe",
+      "why_safe_rust_is_insufficient": "Safe Arc<impl Wake> construction exposes wake callbacks but cannot observe or inject behavior into the RawWaker clone vtable. The oneshot regression must prove that arbitrary clone callbacks run outside the non-reentrant channel mutex, that pre-cancelled receives invoke no clone callback, and that clone-triggered terminal or cancellation changes are rechecked before returning Pending.",
+      "safety_invariant": "Each RawWaker data pointer represents exactly one Arc<RawWakerProbe> strong reference created by Arc::into_raw. clone_waker borrows that reference with ManuallyDrop and returns one new raw strong reference; wake and drop_waker consume exactly one reference; wake_by_ref borrows without consuming. The clone hook runs only after the probe observes the oneshot mutex available and remains private to cfg(test).",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; focused oneshot unit tests cover pre-cancelled no-clone behavior, clone-outside-lock observation, clone-triggered terminal and cancellation rechecks, and exact cancellation-Waker ownership, while the unsafe-boundary-ledger-contract lane checks exact source/ledger locator alignment.",
+      "explicit_no_claims": [
+        "This test-only fixture does not prove arbitrary executor RawWaker implementations are internally correct.",
+        "Focused oneshot evidence does not prove every channel implementation, broad runtime health, performance improvement, or release readiness."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1401,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1408,
+          "pattern": "unsafe { Waker::from_raw(raw) }"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1429,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 1430,
+          "pattern": "unsafe fn clone_waker(data: *const ()) -> RawWaker {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1434,
+          "pattern": "let probe = ManuallyDrop::new(unsafe {"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1458,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 1459,
+          "pattern": "unsafe fn wake(data: *const ()) {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1462,
+          "pattern": "let probe = unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) };"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1466,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 1467,
+          "pattern": "unsafe fn wake_by_ref(data: *const ()) {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1470,
+          "pattern": "let probe = ManuallyDrop::new(unsafe {"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1476,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 1477,
+          "pattern": "unsafe fn drop_waker(data: *const ()) {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1480,
           "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
         }
       ]

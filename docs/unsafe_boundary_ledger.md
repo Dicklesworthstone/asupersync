@@ -113,6 +113,20 @@ waker destruction occurs after unlock. This test-only evidence does not prove
 arbitrary executor waker correctness, every channel implementation, broad
 runtime health, performance, or release readiness.
 
+Oneshot RawWaker clone-probe note for `src/channel/oneshot.rs`: the private
+`cfg(test)` fixture exists because safe `Arc<impl Wake>` construction cannot
+observe an executor's RawWaker clone callback. Every fixture data pointer owns
+one `Arc<RawWakerProbe>` strong reference: clone borrows it with
+`ManuallyDrop` and returns one newly owned raw Arc, by-value wake and drop each
+consume one raw Arc, and wake-by-reference borrows without consuming. The
+focused oneshot tests must show that clone callbacks observe the channel mutex
+available, a pre-cancelled receive invokes no clone callback, clone-triggered
+terminal and cancellation changes are rechecked before `Pending`, and the
+future owns and clears exactly one cancellation-Waker registration. This
+test-only evidence does not prove arbitrary executor waker correctness, every
+channel implementation, broad runtime health, performance, or release
+readiness.
+
 Network FFI note for `src/net/unix/stream.rs`: the
 `unsafe-src-net-unix-stream-rs-recvmsg-ancillary` row covers the raw `recvmsg`
 control-buffer parser used to avoid leaking kernel-installed `SCM_RIGHTS` file
