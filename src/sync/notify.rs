@@ -275,6 +275,22 @@ impl Notify {
             state: NotifiedState::Init,
             waiter_index: None,
             initial_generation: self.generation.load(Ordering::Acquire),
+            generation_capture: GenerationCapture::OnFirstPoll,
+        }
+    }
+
+    /// Creates a waiter armed against a generation sampled before a caller's
+    /// condition check. Unlike [`Notify::notified`], this private path must
+    /// preserve the supplied generation through its first poll so a broadcast
+    /// between the condition check and registration cannot be lost.
+    #[inline]
+    fn notified_at_generation(&self, generation: u64) -> Notified<'_> {
+        Notified {
+            notify: self,
+            state: NotifiedState::Init,
+            waiter_index: None,
+            initial_generation: generation,
+            generation_capture: GenerationCapture::Armed(generation),
         }
     }
 
@@ -320,8 +336,12 @@ impl Notify {
     where
         F: FnMut() -> bool,
     {
-        while !predicate() {
-            self.notified().await;
+        loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            if predicate() {
+                return;
+            }
+            self.notified_at_generation(generation).await;
         }
     }
 
@@ -513,6 +533,15 @@ enum NotifiedState {
     Done,
 }
 
+/// Controls when a `Notified` future establishes its broadcast baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationCapture {
+    /// Public `notified()` futures start waiting only when first polled.
+    OnFirstPoll,
+    /// `wait_until` sampled this generation before evaluating its predicate.
+    Armed(u64),
+}
+
 /// Future returned by [`Notify::notified`].
 ///
 /// This future completes when the associated `Notify` is notified.
@@ -528,6 +557,7 @@ pub struct Notified<'a> {
     /// must NOT be touched.
     waiter_index: Option<(usize, u64)>,
     initial_generation: u64,
+    generation_capture: GenerationCapture,
 }
 
 impl Notified<'_> {
@@ -580,7 +610,10 @@ impl Notified<'_> {
         // notify_waiters() remains edge-triggered for already-polled waiters
         // instead of spuriously waking futures that were created earlier but
         // never polled.
-        let observed_generation = self.notify.generation.load(Ordering::Acquire);
+        let observed_generation = match self.generation_capture {
+            GenerationCapture::OnFirstPoll => self.notify.generation.load(Ordering::Acquire),
+            GenerationCapture::Armed(generation) => generation,
+        };
         self.initial_generation = observed_generation;
 
         // Lock-free fast path: consume a stored notify token.
@@ -1487,6 +1520,68 @@ mod tests {
             waiter_count
         );
         crate::test_complete!("wait_until_returns_immediately_when_predicate_is_already_true");
+    }
+
+    #[test]
+    fn wait_until_observes_broadcast_between_predicate_and_registration() {
+        init_test("wait_until_observes_broadcast_between_predicate_and_registration");
+        let notify = Notify::new();
+        let ready = AtomicBool::new(false);
+        let evaluations = AtomicUsize::new(0);
+        let (start_tx, start_rx) = mpsc::sync_channel::<()>(0);
+        let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
+
+        thread::scope(|scope| {
+            let notifier_ready = &ready;
+            let notifier_notify = &notify;
+            let notifier = scope.spawn(move || {
+                start_rx
+                    .recv()
+                    .expect("predicate must release notifier thread");
+                notifier_ready.store(true, Ordering::Release);
+                notifier_notify.notify_waiters();
+                done_tx
+                    .send(())
+                    .expect("predicate must wait for completed broadcast");
+            });
+
+            let mut future = Box::pin(notify.wait_until(|| {
+                let cached_ready = ready.load(Ordering::Acquire);
+                if evaluations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    start_tx
+                        .send(())
+                        .expect("notifier thread must wait for predicate");
+                    done_rx
+                        .recv()
+                        .expect("notifier thread must complete broadcast");
+                }
+                cached_ready
+            }));
+
+            let completed = poll_once(&mut future).is_ready();
+            crate::assert_with_log!(
+                completed,
+                "broadcast in check-to-register window completes wait_until",
+                true,
+                completed
+            );
+            crate::assert_with_log!(
+                evaluations.load(Ordering::SeqCst) == 2,
+                "predicate rechecked exactly once after armed broadcast",
+                2usize,
+                evaluations.load(Ordering::SeqCst)
+            );
+            crate::assert_with_log!(
+                notify.waiter_count() == 0,
+                "armed generation mismatch leaves no waiter",
+                0usize,
+                notify.waiter_count()
+            );
+
+            notifier.join().expect("notifier thread panicked");
+        });
+
+        crate::test_complete!("wait_until_observes_broadcast_between_predicate_and_registration");
     }
 
     #[test]
