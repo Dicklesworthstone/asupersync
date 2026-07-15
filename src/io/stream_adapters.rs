@@ -181,7 +181,6 @@ where
 
             if let Some(err) = this.pending_error.take() {
                 if buf.filled().len() == filled_before {
-                    this.done = true;
                     return Poll::Ready(Err(err));
                 }
                 this.pending_error = Some(err);
@@ -212,7 +211,6 @@ where
                 }
                 Poll::Ready(Some(Err(err))) => {
                     if buf.filled().len() == filled_before {
-                        this.done = true;
                         return Poll::Ready(Err(err));
                     }
                     this.pending_error = Some(err);
@@ -310,6 +308,7 @@ mod tests {
         let chunks = vec![
             Ok(vec![10_u8, 11]),
             Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream failed")),
+            Ok(vec![12]),
         ];
         let stream = stream::iter(chunks);
         let mut reader = StreamReader::new(stream);
@@ -324,7 +323,59 @@ mod tests {
         let read = poll_read(&mut reader, &mut second);
         let ok = matches!(read, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::BrokenPipe);
         crate::assert_with_log!(ok, "error surfaced on next read", true, ok);
+        crate::assert_with_log!(
+            !reader.done,
+            "deferred error is not eof",
+            false,
+            reader.done
+        );
+
+        let mut trailing = [0_u8; 8];
+        let read = poll_read(&mut reader, &mut trailing);
+        let ok = matches!(read, Poll::Ready(Ok(1)));
+        crate::assert_with_log!(ok, "data after deferred error", true, ok);
+        crate::assert_with_log!(trailing[0] == 12, "trailing content", 12, trailing[0]);
+        crate::assert_with_log!(reader.done, "true eof fuses reader", true, reader.done);
+
+        let mut eof = [0_u8; 1];
+        let read = poll_read(&mut reader, &mut eof);
+        let ok = matches!(read, Poll::Ready(Ok(0)));
+        crate::assert_with_log!(ok, "fused eof", true, ok);
         crate::test_complete!("stream_reader_defers_error_until_partial_data_consumed");
+    }
+
+    #[test]
+    fn stream_reader_continues_after_immediate_error() {
+        init_test("stream_reader_continues_after_immediate_error");
+        let chunks = vec![
+            Err(io::Error::new(io::ErrorKind::Interrupted, "retry read")),
+            Ok(vec![1_u8, 2]),
+        ];
+        let stream = stream::iter(chunks);
+        let mut reader = StreamReader::new(stream);
+
+        let mut first = [0_u8; 2];
+        let read = poll_read(&mut reader, &mut first);
+        let ok = matches!(read, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Interrupted);
+        crate::assert_with_log!(ok, "immediate error", true, ok);
+        crate::assert_with_log!(!reader.done, "error is not eof", false, reader.done);
+
+        let mut data = [0_u8; 2];
+        let read = poll_read(&mut reader, &mut data);
+        let ok = matches!(read, Poll::Ready(Ok(2)));
+        crate::assert_with_log!(ok, "data after error", true, ok);
+        crate::assert_with_log!(data == [1, 2], "data content", [1, 2], data);
+
+        let mut eof = [0_u8; 1];
+        let read = poll_read(&mut reader, &mut eof);
+        let ok = matches!(read, Poll::Ready(Ok(0)));
+        crate::assert_with_log!(ok, "true eof", true, ok);
+        crate::assert_with_log!(reader.done, "true eof fuses reader", true, reader.done);
+
+        let read = poll_read(&mut reader, &mut eof);
+        let ok = matches!(read, Poll::Ready(Ok(0)));
+        crate::assert_with_log!(ok, "repeated fused eof", true, ok);
+        crate::test_complete!("stream_reader_continues_after_immediate_error");
     }
 
     struct PendingThenDataStream {
