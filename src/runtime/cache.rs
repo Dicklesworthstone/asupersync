@@ -316,17 +316,25 @@ impl ArtifactCache {
     /// Store an artifact in the cache.
     /// Returns true if successfully cached, false if eviction failed to make space.
     pub fn put(&mut self, id: String, data: Vec<u8>) -> bool {
-        let current_time_nanos = self.current_time_nanos();
         let artifact_size = data.len() as u64;
+
+        // Reject impossible admissions before expiry cleanup or eviction so a
+        // failed put cannot destroy otherwise valid cached artifacts.
+        if artifact_size > self.config.max_cache_size_bytes {
+            return false;
+        }
+        let current_time_nanos = self.current_time_nanos();
+
+        // Reclaim expired entries and the prior value before calculating byte
+        // capacity. A replacement consumes only its net post-removal size; using
+        // the full incoming size while the old value is still resident can evict
+        // unrelated artifacts even when the replacement fits exactly.
+        self.invalidate_expired();
+        self.remove_internal(&id);
 
         // Check if we need to evict to make space
         if !self.ensure_capacity_for(artifact_size) {
             return false;
-        }
-
-        // Remove existing entry if present
-        if self.metadata.contains_key(&id) {
-            self.remove_internal(&id);
         }
 
         // Create metadata
@@ -459,9 +467,6 @@ impl ArtifactCache {
 
     /// Ensure there's capacity for a new artifact of the given size.
     fn ensure_capacity_for(&mut self, needed_bytes: u64) -> bool {
-        // First, clean up expired items
-        self.invalidate_expired();
-
         // Check if we have enough space now
         let available_bytes = self
             .config
@@ -604,6 +609,64 @@ mod tests {
         // Should have evicted some items to stay under capacity
         assert!(cache.current_size_bytes() <= 100);
         assert!(cache.len() <= 2); // At least one item should be evicted
+    }
+
+    #[test]
+    fn artifact_cache_replacement_at_capacity_preserves_peer() {
+        let config = ArtifactCacheConfig {
+            max_cache_size_bytes: 100,
+            eviction_threshold_ratio: 7500,
+            eviction_policy: EvictionPolicy::LargestFirst,
+            ..ArtifactCacheConfig::default()
+        };
+        let mut cache = ArtifactCache::new(config);
+
+        assert!(cache.put("replace".to_string(), vec![1; 50]));
+        assert!(cache.put("peer".to_string(), vec![2; 50]));
+        assert_eq!(cache.current_size_bytes(), 100);
+        assert!(cache.put("replace".to_string(), vec![3; 50]));
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.current_size_bytes(), 100);
+        assert_eq!(
+            cache.data.get("replace").map(Vec::as_slice),
+            Some(&[3; 50][..])
+        );
+        assert_eq!(
+            cache.data.get("peer").map(Vec::as_slice),
+            Some(&[2; 50][..])
+        );
+        assert_eq!(cache.statistics().total_evictions, 0);
+    }
+
+    #[test]
+    fn artifact_cache_oversized_put_preserves_existing_entries() {
+        let config = ArtifactCacheConfig {
+            max_cache_size_bytes: 100,
+            eviction_policy: EvictionPolicy::LargestFirst,
+            ..ArtifactCacheConfig::default()
+        };
+        let mut cache = ArtifactCache::new(config);
+
+        assert!(cache.put("replace".to_string(), vec![1; 40]));
+        assert!(cache.put("peer".to_string(), vec![2; 50]));
+
+        assert!(!cache.put("oversized".to_string(), vec![3; 101]));
+        assert!(!cache.put("replace".to_string(), vec![4; 101]));
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.current_size_bytes(), 90);
+        assert_eq!(
+            cache.data.get("replace").map(Vec::as_slice),
+            Some(&[1; 40][..])
+        );
+        assert_eq!(
+            cache.data.get("peer").map(Vec::as_slice),
+            Some(&[2; 50][..])
+        );
+        assert!(!cache.contains("oversized"));
+        assert_eq!(cache.statistics().total_evictions, 0);
+        assert_eq!(cache.statistics().total_stored, 2);
     }
 
     #[test]
