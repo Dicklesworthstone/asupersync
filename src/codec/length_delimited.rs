@@ -226,6 +226,24 @@ impl LengthDelimitedCodec {
     fn num_skip(&self, header_len: usize) -> usize {
         self.builder.num_skip.unwrap_or(header_len)
     }
+
+    /// Bytes remaining on the wire after the length field has been consumed.
+    ///
+    /// `num_skip` may extend past the length field through an application header;
+    /// recovery must drain that suffix before the adjusted frame body. Unknown or
+    /// unrepresentable geometry fails closed by keeping the decoder in Skip.
+    fn recovery_wire_suffix_len(&self, header_len: usize, adjusted_frame_len: Option<u64>) -> u64 {
+        let Some(adjusted_frame_len) = adjusted_frame_len else {
+            return u64::MAX;
+        };
+        let extra_prefix_len = self.num_skip(header_len).saturating_sub(header_len);
+        let Ok(extra_prefix_len) = u64::try_from(extra_prefix_len) else {
+            return u64::MAX;
+        };
+        extra_prefix_len
+            .checked_add(adjusted_frame_len)
+            .unwrap_or(u64::MAX)
+    }
 }
 
 impl Decoder for LengthDelimitedCodec {
@@ -262,6 +280,7 @@ impl Decoder for LengthDelimitedCodec {
                     }
 
                     let raw_len = self.decode_head(src)?;
+                    let num_skip = self.num_skip(header_len);
                     let frame_len = match self.adjusted_frame_len(raw_len) {
                         Ok(n) => n,
                         Err(e) => {
@@ -282,12 +301,11 @@ impl Decoder for LengthDelimitedCodec {
                             // across however many decode() calls it
                             // takes for the body to arrive on the wire.
                             //
-                            // The body skip-count must be the ADJUSTED body
-                            // length (`raw_len + length_adjustment`) — the
-                            // actual number of body bytes the peer wrote after
-                            // the header, exactly what the success path consumes
-                            // as `total_frame_len - header_len`. Using the RAW
-                            // (pre-adjustment) length here desynchronizes the
+                            // The skip-count must include any application-header
+                            // suffix between the length field and `num_skip`, plus
+                            // the ADJUSTED body length (`raw_len +
+                            // length_adjustment`). Using only the RAW
+                            // (pre-adjustment) body length here desynchronizes the
                             // stream whenever `length_adjustment != 0`: it
                             // under-drains for a positive adjustment (leaving
                             // body bytes that are then mis-parsed as the next
@@ -296,45 +314,51 @@ impl Decoder for LengthDelimitedCodec {
                             // draining everything (u64::MAX) only when the
                             // adjusted length is genuinely ill-defined
                             // (length/adjustment overflow, or negative).
-                            let body_skip = i64::try_from(self.builder.length_adjustment)
+                            let adjusted_frame_len = i64::try_from(self.builder.length_adjustment)
                                 .ok()
                                 .and_then(|adj| {
                                     i64::try_from(raw_len).ok().and_then(|l| l.checked_add(adj))
                                 })
                                 .filter(|&adjusted| adjusted >= 0)
-                                .and_then(|adjusted| u64::try_from(adjusted).ok())
-                                .unwrap_or(u64::MAX);
+                                .and_then(|adjusted| u64::try_from(adjusted).ok());
+                            let wire_suffix_skip =
+                                self.recovery_wire_suffix_len(header_len, adjusted_frame_len);
                             let _ = src.split_to(header_len);
-                            self.state = DecodeState::Skip(body_skip);
+                            self.state = DecodeState::Skip(wire_suffix_skip);
                             return Err(e);
                         }
                     };
                     // Both length-validation failures below must recover the
                     // framing exactly like the `adjusted_frame_len` branch
                     // above (br-asupersync-o7e5xu): consume the header and
-                    // enter Skip to drain this frame's body. Returning `Err`
+                    // enter Skip to drain this frame's wire suffix. Returning `Err`
                     // with `src` untouched leaves `state == Head`, so a direct
                     // decode-loop caller re-reads the same header and re-emits
-                    // the identical error forever — a livelock. `frame_len` is
-                    // the adjusted body length, exactly what Skip must drain to
-                    // resynchronize to the next frame boundary.
-                    let total_frame_len = match header_len.checked_add(frame_len) {
+                    // the identical error forever — a livelock. The wire prefix
+                    // extends through `num_skip` when callers place application
+                    // header bytes after the length field.
+                    let wire_prefix_len = header_len.max(num_skip);
+                    let adjusted_frame_len = u64::try_from(frame_len).ok();
+                    let total_frame_len = match wire_prefix_len.checked_add(frame_len) {
                         Some(n) => n,
                         None => {
                             let _ = src.split_to(header_len);
-                            self.state = DecodeState::Skip(frame_len as u64);
+                            self.state = DecodeState::Skip(
+                                self.recovery_wire_suffix_len(header_len, adjusted_frame_len),
+                            );
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "frame length overflow",
                             ));
                         }
                     };
-                    let num_skip = self.num_skip(header_len);
                     let retained_len = match total_frame_len.checked_sub(num_skip) {
                         Some(n) => n,
                         None => {
                             let _ = src.split_to(header_len);
-                            self.state = DecodeState::Skip(frame_len as u64);
+                            self.state = DecodeState::Skip(
+                                self.recovery_wire_suffix_len(header_len, adjusted_frame_len),
+                            );
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "num_skip exceeds total frame length",
@@ -1071,6 +1095,83 @@ mod tests {
 
         let frame = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(&frame[..], &[0, 3, b'h', b'e', b'y']);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn num_skip_past_field_end_waits_for_complete_payload() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_length(3)
+            .num_skip(4)
+            .new_codec();
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0, 0, 11]);
+        buf.put_u8(0xA5);
+        buf.put_slice(b"Hello worl");
+
+        let before = buf.clone();
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert_eq!(&buf[..], &before[..]);
+
+        buf.put_u8(b'd');
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&frame[..], b"Hello world");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn num_skip_past_field_end_preserves_two_frame_alignment() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_length(3)
+            .num_skip(4)
+            .new_codec();
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0, 0, 3, 0xA1]);
+        buf.put_slice(b"one");
+        buf.put_slice(&[0, 0, 3, 0xA2]);
+        buf.put_slice(b"two");
+
+        let first = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&first[..], b"one");
+        let second = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&second[..], b"two");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn ld_skip_001_returns_full_payload_after_trailing_header() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_length(4)
+            .num_skip(8)
+            .new_codec();
+        let mut buf = BytesMut::new();
+        buf.put_u32(5);
+        buf.put_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        buf.put_slice(b"hello");
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&frame[..], b"hello");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn oversized_recovery_skips_trailing_header_before_valid_frame() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_length(3)
+            .num_skip(4)
+            .max_frame_length(4)
+            .new_codec();
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0, 0, 5, 0xE1]);
+        buf.put_slice(b"hello");
+        buf.put_slice(&[0, 0, 2, 0xE2]);
+        buf.put_slice(b"OK");
+
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&frame[..], b"OK");
         assert!(buf.is_empty());
     }
 
