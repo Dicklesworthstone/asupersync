@@ -100,6 +100,19 @@ New unsafe code is acceptable only when all of these are true:
    conformance, compat, and platform-specific rows must say what they do not
    prove.
 
+MPSC RawWaker clone-probe note for `src/channel/mpsc.rs`: the private
+`cfg(test)` fixture exists because safe `Arc<impl Wake>` construction cannot
+observe an executor's RawWaker clone callback. Every fixture data pointer owns
+one `Arc<RawWakerProbe>` strong reference: clone borrows it with
+`ManuallyDrop` and returns one newly owned raw Arc, by-value wake and drop each
+consume one raw Arc, and wake-by-reference borrows without consuming. The
+focused MPSC tests must show that clone callbacks observe the channel mutex
+available, locked head/batch snapshots clone only `Arc<RegisteredWaker>`, a
+`wake_receiver()` edge raised from the clone callback is replayed, and final
+waker destruction occurs after unlock. This test-only evidence does not prove
+arbitrary executor waker correctness, every channel implementation, broad
+runtime health, performance, or release readiness.
+
 Network FFI note for `src/net/unix/stream.rs`: the
 `unsafe-src-net-unix-stream-rs-recvmsg-ancillary` row covers the raw `recvmsg`
 control-buffer parser used to avoid leaking kernel-installed `SCM_RIGHTS` file

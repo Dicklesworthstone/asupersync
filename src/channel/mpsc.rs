@@ -37,10 +37,10 @@
 //!
 //! 1. `queue: VecDeque<T>`              — the message buffer
 //! 2. `reserved: usize`                 — outstanding permits
-//! 3. `send_wakers: VecDeque<SendWaiter>` — FIFO waker pool with
-//!    **mid-queue removal on cancel** (a `Reserve` future dropped
-//!    during `.await` removes its own waiter)
-//! 4. `recv_waker: Option<Waker>`        — receiver waker
+//! 3. `send_wakers` + `waiter_queue` — generational O(1) waker storage
+//!    plus FIFO ordering with **mid-queue removal on cancel** (a `Reserve`
+//!    future dropped during `.await` removes its own waiter)
+//! 4. `recv_waker` — receiver registration
 //!
 //! The reserve/commit invariants require:
 //!
@@ -170,6 +170,43 @@ pub struct MpscTelemetrySnapshot {
     pub closed: bool,
 }
 
+/// Arc-owned executor waker registration used inside the channel mutex.
+#[derive(Debug)]
+struct RegisteredWaker {
+    waker: Waker,
+}
+
+impl RegisteredWaker {
+    /// Clones an executor-provided waker into an Arc-owned registration.
+    ///
+    /// Callers must invoke this without holding `ChannelShared::inner`: a
+    /// custom `RawWaker` clone callback may execute arbitrary code.
+    #[inline]
+    fn new(waker: &Waker) -> Arc<Self> {
+        Arc::new(Self {
+            waker: waker.clone(),
+        })
+    }
+
+    #[inline]
+    fn will_wake(&self, waker: &Waker) -> bool {
+        self.waker.will_wake(waker)
+    }
+
+    /// Delegates a wake while retaining the registration owner.
+    #[inline]
+    fn wake_by_ref(&self) {
+        self.waker.wake_by_ref();
+    }
+}
+
+/// Receiver registration prepared outside the channel mutex, paired with the
+/// out-of-band wake epoch observed immediately before that unlocked window.
+struct PreparedReceiverWaker {
+    registration: Arc<RegisteredWaker>,
+    wake_epoch: u64,
+}
+
 /// Internal channel state shared between senders and receivers.
 #[derive(Debug)]
 struct ChannelInner<T> {
@@ -177,12 +214,19 @@ struct ChannelInner<T> {
     queue: VecDeque<T>,
     /// Number of reserved slots (permits outstanding).
     reserved: usize,
-    /// Wakers for senders waiting for capacity (O(1) access by token).
-    send_wakers: TokenSlab,
+    /// Arc-owned wakers for senders waiting for capacity (O(1) access by token).
+    send_wakers: TokenSlab<Arc<RegisteredWaker>>,
     /// FIFO queue of waiter tokens to maintain fair ordering.
     waiter_queue: VecDeque<SlabToken>,
-    /// Waker for the receiver waiting for messages.
-    recv_waker: Option<Waker>,
+    /// Arc-owned waker for the receiver waiting for messages.
+    recv_waker: Option<Arc<RegisteredWaker>>,
+    /// Out-of-band receiver wake generation.
+    ///
+    /// `wake_receiver()` has no persistent queue/close state for a receiver
+    /// poll to observe after temporarily releasing the mutex to clone a new
+    /// executor waker. Advancing this epoch lets that poll replay an edge that
+    /// arrived during its unlocked preparation window.
+    recv_wake_epoch: u64,
     /// Number of cancellation/abort events observed by this channel.
     cancellation_count: u64,
 }
@@ -226,6 +270,7 @@ impl<T> ChannelInner<T> {
             send_wakers: TokenSlab::with_capacity(4),
             waiter_queue: VecDeque::with_capacity(4),
             recv_waker: None,
+            recv_wake_epoch: 0,
             cancellation_count: 0,
         }
     }
@@ -261,14 +306,17 @@ impl<T> ChannelInner<T> {
     }
 
     /// Returns the waker for the next waiting sender, if any.
-    /// The caller must invoke `waker.wake()` **after** releasing the channel
+    /// The caller must invoke the registered waker **after** releasing the channel
     /// lock to avoid wake-under-lock deadlocks.
     ///
     /// This does NOT remove the waiter from the queue. The waiter is responsible
     /// for removing itself upon successfully acquiring a permit.
     #[inline]
-    fn take_next_sender_waker(&mut self) -> Option<Waker> {
+    fn take_next_sender_waker(&mut self) -> Option<Arc<RegisteredWaker>> {
         self.prune_stale_waiter_front();
+        // `send_wakers` stores Arc-owned registrations, so this clone cannot
+        // invoke an executor-provided RawWaker callback while the channel is
+        // locked. The underlying waker is only invoked after lock release.
         self.waiter_queue
             .front()
             .and_then(|&token| self.send_wakers.get(token))
@@ -284,7 +332,7 @@ impl<T> ChannelInner<T> {
         &mut self,
         freed_slots: usize,
         capacity: usize,
-    ) -> SmallVec<[Waker; 4]> {
+    ) -> SmallVec<[Arc<RegisteredWaker>; 4]> {
         let wake_budget = freed_slots.min(capacity.saturating_sub(self.used_slots()));
         if wake_budget == 0 {
             return SmallVec::new();
@@ -297,7 +345,24 @@ impl<T> ChannelInner<T> {
                 break;
             }
             if let Some(waker) = self.send_wakers.get(token) {
-                wakers.push(waker.clone());
+                wakers.push(Arc::clone(waker));
+            }
+        }
+        wakers
+    }
+
+    /// Drains all sender registrations without running a Waker destructor.
+    ///
+    /// Capacity is reserved before the first state mutation. If allocation
+    /// panics, every registration therefore remains owned by the slab; after
+    /// reservation, moving the exact waiter count into this vector is
+    /// allocation-free. Callers must drop or wake the returned owners only
+    /// after releasing the channel mutex.
+    fn drain_sender_wakers(&mut self) -> SmallVec<[Arc<RegisteredWaker>; 4]> {
+        let mut wakers = SmallVec::with_capacity(self.waiter_queue.len());
+        while let Some(token) = self.waiter_queue.pop_front() {
+            if let Some(waker) = self.send_wakers.remove(token) {
+                wakers.push(waker);
             }
         }
         wakers
@@ -350,11 +415,13 @@ impl MpscWaiterCancelFixture {
     pub fn oldest(waiter_count: usize) -> Self {
         let waiter_count = waiter_count.max(1);
         let mut inner = ChannelInner::new(usize::MAX);
-        let waker = Waker::noop().clone();
+        let waker = Arc::new(RegisteredWaker {
+            waker: Waker::noop().clone(),
+        });
         let mut target = None;
 
         for index in 0..waiter_count {
-            let token = inner.send_wakers.insert(waker.clone());
+            let token = inner.send_wakers.insert(Arc::clone(&waker));
             if index == 0 {
                 target = Some(token);
             }
@@ -574,7 +641,7 @@ impl<T> Sender<T> {
             inner.recv_waker.take()
         };
         if let Some(waker) = recv_waker {
-            waker.wake();
+            waker.wake_by_ref();
         }
         Ok(())
     }
@@ -593,10 +660,11 @@ impl<T> Sender<T> {
     #[inline]
     pub fn wake_receiver(&self) {
         let mut inner = self.shared.inner.lock();
+        inner.recv_wake_epoch = inner.recv_wake_epoch.wrapping_add(1);
         let waker = inner.recv_waker.take();
         drop(inner);
         if let Some(waker) = waker {
-            waker.wake();
+            waker.wake_by_ref();
         }
     }
 
@@ -611,22 +679,18 @@ impl<T> Sender<T> {
             if self.shared.receiver_dropped.load(Ordering::Relaxed) {
                 return;
             }
+            let send_wakers = inner.drain_sender_wakers();
             self.shared.receiver_dropped.store(true, Ordering::Release);
-            let tokens: SmallVec<[SlabToken; 4]> = inner.waiter_queue.drain(..).collect();
-            let send_wakers: SmallVec<[Waker; 4]> = tokens
-                .into_iter()
-                .filter_map(|token| inner.send_wakers.remove(token))
-                .collect();
             let recv_waker = inner.recv_waker.take();
             drop(inner);
             (send_wakers, recv_waker)
         };
 
         for waker in send_wakers {
-            waker.wake();
+            waker.wake_by_ref();
         }
         if let Some(waker) = recv_waker {
-            waker.wake();
+            waker.wake_by_ref();
         }
     }
 
@@ -718,7 +782,7 @@ impl<T> Sender<T> {
 
         // Wake receiver if waiting. Drop the lock first to avoid contention/deadlocks.
         if let Some(waker) = waker {
-            waker.wake();
+            waker.wake_by_ref();
         }
 
         Ok(evicted)
@@ -744,32 +808,40 @@ pub struct Reserve<'a, T> {
 impl<T> Reserve<'_, T> {
     fn cleanup_waiter(&mut self) {
         if let Some(token) = self.waiter_token.take() {
-            let next_waker = {
+            let (next_waker, retired_waker) = {
                 let mut inner = self.sender.shared.inner.lock();
 
                 if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
-                    inner.send_wakers.remove(token);
-                    None
-                } else if inner.send_wakers.remove(token).is_some() {
-                    // We were still registered in the slab. Only pass the baton
-                    // if we also owned a FIFO position; a slab-only stale token
-                    // must not fabricate a capacity handoff.
-                    let removed_from_queue = inner.remove_waiter_token(token);
-                    if removed_from_queue && inner.has_capacity(self.sender.shared.capacity) {
-                        inner.take_next_sender_waker()
-                    } else {
-                        None
-                    }
+                    (None, inner.send_wakers.remove(token))
                 } else {
-                    // Stale waiter: the token is no longer registered, so this
-                    // future does not own a queue position to release. Waking the
-                    // next waiter here fabricates a capacity handoff and can
-                    // spuriously notify later senders.
-                    None
+                    let retired_waker = inner.send_wakers.remove(token);
+                    if retired_waker.is_none() {
+                        // Stale waiter: the token is no longer registered, so this
+                        // future does not own a queue position to release. Waking the
+                        // next waiter here fabricates a capacity handoff and can
+                        // spuriously notify later senders.
+                        (None, None)
+                    } else {
+                        // We were still registered in the slab. Only pass the baton
+                        // if we also owned a FIFO position; a slab-only stale token
+                        // must not fabricate a capacity handoff.
+                        let removed_from_queue = inner.remove_waiter_token(token);
+                        let next_waker = if removed_from_queue
+                            && inner.has_capacity(self.sender.shared.capacity)
+                        {
+                            inner.take_next_sender_waker()
+                        } else {
+                            None
+                        };
+                        (next_waker, retired_waker)
+                    }
                 }
             };
+            // A final Arc release can destroy the executor-provided Waker.
+            // Retire it only after releasing the non-reentrant channel mutex.
+            drop(retired_waker);
             if let Some(w) = next_waker {
-                w.wake();
+                w.wake_by_ref();
             }
         }
     }
@@ -779,81 +851,112 @@ impl<'a, T> Future for Reserve<'a, T> {
     type Output = Result<SendPermit<'a, T>, SendError<()>>;
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Check cancellation
-        if self.cx.checkpoint().is_err() {
-            self.cx.trace("mpsc::reserve cancelled");
-            self.sender.shared.inner.lock().record_cancellation();
-            self.cleanup_waiter();
-            return Poll::Ready(Err(SendError::<()>::Cancelled(())));
-        }
+        let mut prepared_waker = None;
 
-        let mut inner = self.sender.shared.inner.lock();
+        loop {
+            // Recheck cancellation after preparing a replacement waker: its
+            // arbitrary clone callback ran without the channel lock and may
+            // have changed cancellation or channel state.
+            if self.cx.checkpoint().is_err() {
+                self.cx.trace("mpsc::reserve cancelled");
+                self.sender.shared.inner.lock().record_cancellation();
+                self.cleanup_waiter();
+                drop(prepared_waker);
+                return Poll::Ready(Err(SendError::<()>::Cancelled(())));
+            }
 
-        if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
-            self.waiter_token = None; // Waiter is already cleared by Receiver::drop
-            return Poll::Ready(Err(SendError::<()>::Disconnected(())));
-        }
+            let mut inner = self.sender.shared.inner.lock();
 
-        let is_first = self.waiter_token.map_or_else(
-            || inner.waiter_queue.is_empty(),
-            |token| inner.waiter_queue.front().copied() == Some(token),
-        );
-
-        if is_first && inner.has_capacity(self.sender.shared.capacity) {
-            inner.reserved += 1;
-            // Remove self from queue
-            if let Some(token) = self.waiter_token {
-                // Remove from FIFO queue (should be at front)
-                if inner.waiter_queue.front().copied() == Some(token) {
-                    inner.waiter_queue.pop_front();
-                } else {
-                    inner.remove_waiter_token(token);
-                }
-
-                // Remove from slab
-                inner.send_wakers.remove(token);
-
-                // CASCADE: If there is still capacity, wake the *next* waiter.
-                // Extract waker now; wake after releasing the lock.
-                let cascade_waker = if inner.has_capacity(self.sender.shared.capacity) {
-                    inner.take_next_sender_waker()
-                } else {
-                    None
-                };
+            if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
+                // Receiver close/drop already drained the waiter slab and FIFO.
                 drop(inner);
-                if let Some(w) = cascade_waker {
-                    w.wake();
-                }
-
-                // Clear waiter_token so Drop doesn't uselessly lock and search the queue
                 self.waiter_token = None;
-            } else {
-                drop(inner);
+                drop(prepared_waker);
+                return Poll::Ready(Err(SendError::<()>::Disconnected(())));
             }
 
-            return Poll::Ready(Ok(SendPermit {
-                sender: self.sender,
-                sent: false,
-            }));
-        }
+            let is_first = self.waiter_token.map_or_else(
+                || inner.waiter_queue.is_empty(),
+                |token| inner.waiter_queue.front().copied() == Some(token),
+            );
 
-        // Register/update waiter (all access under outer lock — no inner Mutex needed)
-        if let Some(token) = self.waiter_token {
-            // Already queued. Update waker inline.
-            if let Some(waker) = inner.send_wakers.get_mut(token) {
-                if !waker.will_wake(ctx.waker()) {
-                    waker.clone_from(ctx.waker());
+            if is_first && inner.has_capacity(self.sender.shared.capacity) {
+                inner.reserved += 1;
+                let mut retired_waker = None;
+                let mut cascade_waker = None;
+
+                if let Some(token) = self.waiter_token {
+                    if inner.waiter_queue.front().copied() == Some(token) {
+                        inner.waiter_queue.pop_front();
+                    } else {
+                        inner.remove_waiter_token(token);
+                    }
+
+                    retired_waker = inner.send_wakers.remove(token);
+                    if inner.has_capacity(self.sender.shared.capacity) {
+                        cascade_waker = inner.take_next_sender_waker();
+                    }
                 }
-            }
-        } else {
-            // New waiter — insert into slab and add to FIFO queue.
-            let token = inner.send_wakers.insert(ctx.waker().clone());
-            inner.waiter_queue.push_back(token);
-            self.waiter_token = Some(token);
-        }
 
-        drop(inner);
-        Poll::Pending
+                drop(inner);
+                // Update future state before any user-owned Waker destructor or
+                // wake callback can reenter the channel.
+                self.waiter_token = None;
+                drop(retired_waker);
+                drop(prepared_waker);
+                if let Some(waker) = cascade_waker {
+                    waker.wake_by_ref();
+                }
+
+                return Poll::Ready(Ok(SendPermit {
+                    sender: self.sender,
+                    sent: false,
+                }));
+            }
+
+            let current_waker = self
+                .waiter_token
+                .and_then(|token| inner.send_wakers.get(token));
+            if current_waker.is_some_and(|waker| waker.will_wake(ctx.waker())) {
+                drop(inner);
+                drop(prepared_waker);
+                return Poll::Pending;
+            }
+
+            let Some(new_waker) = prepared_waker.as_ref() else {
+                // Keep an existing registration installed while the arbitrary
+                // RawWaker clone callback runs. The next loop iteration fully
+                // rechecks capacity, close, cancellation, FIFO, and identity.
+                drop(inner);
+                prepared_waker = Some(RegisteredWaker::new(ctx.waker()));
+                continue;
+            };
+
+            let (retired_waker, inserted_token) = if let Some(token) = self.waiter_token {
+                let retired_waker = inner
+                    .send_wakers
+                    .get_mut(token)
+                    .map(|slot| std::mem::replace(slot, Arc::clone(new_waker)));
+                (retired_waker, None)
+            } else {
+                // Keep `new_waker` alive outside the mutex so an allocation
+                // panic cannot final-drop its executor Waker under the guard.
+                let token = inner.send_wakers.insert(Arc::clone(new_waker));
+                inner.waiter_queue.push_back(token);
+                (None, Some(token))
+            };
+
+            drop(inner);
+            if let Some(token) = inserted_token {
+                self.waiter_token = Some(token);
+            }
+            let new_waker = prepared_waker
+                .take()
+                .expect("prepared sender waker remains owned until after unlock");
+            drop(retired_waker);
+            drop(new_waker);
+            return Poll::Pending;
+        }
     }
 }
 
@@ -886,7 +989,7 @@ impl<T> Drop for Sender<T> {
                 inner.recv_waker.take()
             };
             if let Some(waker) = recv_waker {
-                waker.wake();
+                waker.wake_by_ref();
             }
         }
     }
@@ -1100,7 +1203,7 @@ impl<T> SendPermit<'_, T> {
         let recv_waker = inner.recv_waker.take();
         drop(inner);
         if let Some(waker) = recv_waker {
-            waker.wake();
+            waker.wake_by_ref();
         }
         Ok(())
     }
@@ -1121,7 +1224,7 @@ impl<T> SendPermit<'_, T> {
         };
         // Wake outside the lock.
         if let Some(w) = next_waker {
-            w.wake();
+            w.wake_by_ref();
         }
     }
 
@@ -1148,7 +1251,7 @@ impl<T> Drop for SendPermit<'_, T> {
             };
             // Wake outside the lock.
             if let Some(w) = next_waker {
-                w.wake();
+                w.wake_by_ref();
             }
         }
     }
@@ -1169,7 +1272,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
 
 impl<T> Receiver<T> {
     pub(crate) fn clear_recv_waker(&mut self) {
-        self.shared.inner.lock().recv_waker = None;
+        let retired_waker = self.shared.inner.lock().recv_waker.take();
+        drop(retired_waker);
     }
 
     /// Closes the channel, preventing any further messages from being sent.
@@ -1182,17 +1286,13 @@ impl<T> Receiver<T> {
             if self.shared.receiver_dropped.load(Ordering::Relaxed) {
                 return;
             }
+            let wakers = inner.drain_sender_wakers();
             self.shared.receiver_dropped.store(true, Ordering::Release);
-            let tokens: SmallVec<[SlabToken; 4]> = inner.waiter_queue.drain(..).collect();
-            let wakers: SmallVec<[Waker; 4]> = tokens
-                .into_iter()
-                .filter_map(|token| inner.send_wakers.remove(token))
-                .collect();
             drop(inner);
             wakers
         };
         for waker in wakers {
-            waker.wake();
+            waker.wake_by_ref();
         }
     }
 
@@ -1257,39 +1357,82 @@ impl<T> Receiver<T> {
         cx: &Cx<Caps>,
         task_cx: &mut Context<'_>,
     ) -> Poll<Result<T, RecvError>> {
-        if cx.checkpoint().is_err() {
-            cx.trace("mpsc::recv cancelled");
-            let mut inner = self.shared.inner.lock();
-            inner.recv_waker = None;
-            inner.record_cancellation();
-            return Poll::Ready(Err(RecvError::Cancelled));
-        }
+        let mut prepared_waker: Option<PreparedReceiverWaker> = None;
 
-        let mut inner = self.shared.inner.lock();
-
-        if let Some(value) = inner.queue.pop_front() {
-            inner.recv_waker = None;
-            let next_waker = inner.take_next_sender_waker();
-            drop(inner);
-            if let Some(w) = next_waker {
-                w.wake();
+        loop {
+            if cx.checkpoint().is_err() {
+                cx.trace("mpsc::recv cancelled");
+                let retired_waker = {
+                    let mut inner = self.shared.inner.lock();
+                    let retired_waker = inner.recv_waker.take();
+                    inner.record_cancellation();
+                    retired_waker
+                };
+                drop(retired_waker);
+                drop(prepared_waker);
+                return Poll::Ready(Err(RecvError::Cancelled));
             }
-            return Poll::Ready(Ok(value));
-        }
 
-        if self.shared.sender_count.load(Ordering::Acquire) == 0
-            || self.shared.receiver_dropped.load(Ordering::Relaxed)
-        {
-            inner.recv_waker = None;
-            return Poll::Ready(Err(RecvError::Disconnected));
-        }
+            let mut inner = self.shared.inner.lock();
 
-        // Skip waker clone if unchanged — common on re-poll.
-        match &inner.recv_waker {
-            Some(existing) if existing.will_wake(task_cx.waker()) => {}
-            _ => inner.recv_waker = Some(task_cx.waker().clone()),
+            if let Some(value) = inner.queue.pop_front() {
+                let retired_waker = inner.recv_waker.take();
+                let next_waker = inner.take_next_sender_waker();
+                drop(inner);
+                drop(retired_waker);
+                drop(prepared_waker);
+                if let Some(waker) = next_waker {
+                    waker.wake_by_ref();
+                }
+                return Poll::Ready(Ok(value));
+            }
+
+            if self.shared.sender_count.load(Ordering::Acquire) == 0
+                || self.shared.receiver_dropped.load(Ordering::Relaxed)
+            {
+                let retired_waker = inner.recv_waker.take();
+                drop(inner);
+                drop(retired_waker);
+                drop(prepared_waker);
+                return Poll::Ready(Err(RecvError::Disconnected));
+            }
+
+            if inner
+                .recv_waker
+                .as_ref()
+                .is_some_and(|waker| waker.will_wake(task_cx.waker()))
+            {
+                drop(inner);
+                drop(prepared_waker);
+                return Poll::Pending;
+            }
+
+            let Some(prepared) = prepared_waker.as_ref() else {
+                // Clone only on the pending changed/absent slow path, without
+                // the channel lock. The next iteration rechecks persistent
+                // state and the wake epoch so no event during the gap is lost.
+                let wake_epoch = inner.recv_wake_epoch;
+                drop(inner);
+                prepared_waker = Some(PreparedReceiverWaker {
+                    registration: RegisteredWaker::new(task_cx.waker()),
+                    wake_epoch,
+                });
+                continue;
+            };
+
+            let replay_wake = inner.recv_wake_epoch != prepared.wake_epoch;
+            let retired_waker = inner.recv_waker.replace(Arc::clone(&prepared.registration));
+            drop(inner);
+            let prepared = prepared_waker
+                .take()
+                .expect("prepared receiver waker remains owned until after unlock");
+            drop(retired_waker);
+            if replay_wake {
+                prepared.registration.wake_by_ref();
+            }
+            drop(prepared);
+            return Poll::Pending;
         }
-        Poll::Pending
     }
 
     /// Polls a batch receive operation directly.
@@ -1307,40 +1450,82 @@ impl<T> Receiver<T> {
             return Poll::Ready(Ok(0));
         }
 
-        if cx.checkpoint().is_err() {
-            cx.trace("mpsc::recv_many cancelled");
-            let mut inner = self.shared.inner.lock();
-            inner.recv_waker = None;
-            inner.record_cancellation();
-            return Poll::Ready(Err(RecvError::Cancelled));
-        }
+        let mut prepared_waker: Option<PreparedReceiverWaker> = None;
 
-        let mut inner = self.shared.inner.lock();
-        let target = limit.min(inner.queue.len());
-
-        if target > 0 {
-            buffer.extend(inner.queue.drain(..target));
-            inner.recv_waker = None;
-            let sender_wakers = inner.sender_wakers_for_freed_slots(target, self.shared.capacity);
-            drop(inner);
-            for waker in sender_wakers {
-                waker.wake();
+        loop {
+            if cx.checkpoint().is_err() {
+                cx.trace("mpsc::recv_many cancelled");
+                let retired_waker = {
+                    let mut inner = self.shared.inner.lock();
+                    let retired_waker = inner.recv_waker.take();
+                    inner.record_cancellation();
+                    retired_waker
+                };
+                drop(retired_waker);
+                drop(prepared_waker);
+                return Poll::Ready(Err(RecvError::Cancelled));
             }
-            return Poll::Ready(Ok(target));
-        }
 
-        if self.shared.sender_count.load(Ordering::Acquire) == 0
-            || self.shared.receiver_dropped.load(Ordering::Relaxed)
-        {
-            inner.recv_waker = None;
-            return Poll::Ready(Ok(0));
-        }
+            let mut inner = self.shared.inner.lock();
+            let target = limit.min(inner.queue.len());
 
-        match &inner.recv_waker {
-            Some(existing) if existing.will_wake(task_cx.waker()) => {}
-            _ => inner.recv_waker = Some(task_cx.waker().clone()),
+            if target > 0 {
+                buffer.extend(inner.queue.drain(..target));
+                let sender_wakers =
+                    inner.sender_wakers_for_freed_slots(target, self.shared.capacity);
+                let retired_waker = inner.recv_waker.take();
+                drop(inner);
+                drop(retired_waker);
+                drop(prepared_waker);
+                for waker in sender_wakers {
+                    waker.wake_by_ref();
+                }
+                return Poll::Ready(Ok(target));
+            }
+
+            if self.shared.sender_count.load(Ordering::Acquire) == 0
+                || self.shared.receiver_dropped.load(Ordering::Relaxed)
+            {
+                let retired_waker = inner.recv_waker.take();
+                drop(inner);
+                drop(retired_waker);
+                drop(prepared_waker);
+                return Poll::Ready(Ok(0));
+            }
+
+            if inner
+                .recv_waker
+                .as_ref()
+                .is_some_and(|waker| waker.will_wake(task_cx.waker()))
+            {
+                drop(inner);
+                drop(prepared_waker);
+                return Poll::Pending;
+            }
+
+            let Some(prepared) = prepared_waker.as_ref() else {
+                let wake_epoch = inner.recv_wake_epoch;
+                drop(inner);
+                prepared_waker = Some(PreparedReceiverWaker {
+                    registration: RegisteredWaker::new(task_cx.waker()),
+                    wake_epoch,
+                });
+                continue;
+            };
+
+            let replay_wake = inner.recv_wake_epoch != prepared.wake_epoch;
+            let retired_waker = inner.recv_waker.replace(Arc::clone(&prepared.registration));
+            drop(inner);
+            let prepared = prepared_waker
+                .take()
+                .expect("prepared receiver waker remains owned until after unlock");
+            drop(retired_waker);
+            if replay_wake {
+                prepared.registration.wake_by_ref();
+            }
+            drop(prepared);
+            return Poll::Pending;
         }
-        Poll::Pending
     }
 
     /// Attempts to receive a value without blocking.
@@ -1348,20 +1533,24 @@ impl<T> Receiver<T> {
     pub fn try_recv(&mut self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
         if let Some(value) = inner.queue.pop_front() {
-            inner.recv_waker = None;
+            let retired_waker = inner.recv_waker.take();
             let next_waker = inner.take_next_sender_waker();
             drop(inner);
+            drop(retired_waker);
             if let Some(w) = next_waker {
-                w.wake();
+                w.wake_by_ref();
             }
             Ok(value)
         } else {
             let disconnected = self.shared.sender_count.load(Ordering::Acquire) == 0
                 || self.shared.receiver_dropped.load(Ordering::Relaxed);
-            if disconnected {
-                inner.recv_waker = None;
-            }
+            let retired_waker = if disconnected {
+                inner.recv_waker.take()
+            } else {
+                None
+            };
             drop(inner);
+            drop(retired_waker);
             if disconnected {
                 Err(RecvError::Disconnected)
             } else {
@@ -1438,8 +1627,8 @@ impl<T, Caps> Drop for Recv<'_, T, Caps> {
         // Only clear if this future was actually polled, so we don't clobber
         // wakers registered by previous direct `poll_recv` calls.
         if self.polled {
-            let mut inner = self.receiver.shared.inner.lock();
-            inner.recv_waker = None;
+            let retired_waker = self.receiver.shared.inner.lock().recv_waker.take();
+            drop(retired_waker);
         }
     }
 }
@@ -1468,36 +1657,36 @@ impl<T, Caps> Future for RecvMany<'_, T, Caps> {
 impl<T, Caps> Drop for RecvMany<'_, T, Caps> {
     fn drop(&mut self) {
         if self.polled {
-            let mut inner = self.receiver.shared.inner.lock();
-            inner.recv_waker = None;
+            let retired_waker = self.receiver.shared.inner.lock().recv_waker.take();
+            drop(retired_waker);
         }
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let (wakers, _items) = {
+        let (wakers, _items, recv_waker) = {
             let mut inner = self.shared.inner.lock();
+            // Drain before taking `recv_waker` or mutating close state. The
+            // helper reserves first, so an allocation panic cannot retire any
+            // executor Waker under `inner`.
+            let wakers = inner.drain_sender_wakers();
             self.shared.receiver_dropped.store(true, Ordering::Release);
             // Clear any pending recv waker so a dropped receiver does not
             // retain executor task state indefinitely.
-            inner.recv_waker = None;
+            let recv_waker = inner.recv_waker.take();
             // Drain queued items to prevent memory leaks when senders are
             // long-lived (they hold Arc refs that keep the queue alive).
             // We extract them using std::mem::take to drop them outside the lock,
             // preventing deadlocks if T::drop requires the same channel lock.
             let items = std::mem::take(&mut inner.queue);
-            let tokens: SmallVec<[SlabToken; 4]> = inner.waiter_queue.drain(..).collect();
-            let wakers: SmallVec<[Waker; 4]> = tokens
-                .into_iter()
-                .filter_map(|token| inner.send_wakers.remove(token))
-                .collect();
             drop(inner);
-            (wakers, items)
+            (wakers, items, recv_waker)
         };
+        drop(recv_waker);
         // Wake senders outside the lock to avoid wake-under-lock deadlocks.
         for waker in wakers {
-            waker.wake();
+            waker.wake_by_ref();
         }
     }
 }
@@ -1641,6 +1830,7 @@ mod tests {
     )]
     use super::*;
     use crate::types::CancelKind;
+    use std::sync::Weak;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
@@ -2496,6 +2686,392 @@ mod tests {
         Waker::from(std::sync::Arc::new(CountingWaker { counter }))
     }
 
+    /// Test-only RawWaker whose clone vtable records whether the channel mutex
+    /// is available and can inject one deterministic action into that exact
+    /// callback. Safe `Arc<impl Wake>` construction cannot observe RawWaker
+    /// clone callbacks, which is the boundary these regressions exercise.
+    mod raw_waker_probe {
+        use super::*;
+        use std::mem::ManuallyDrop;
+        use std::task::{RawWaker, RawWakerVTable};
+
+        pub(super) struct RawWakerProbe {
+            shared: Weak<ChannelShared<()>>,
+            clones: AtomicUsize,
+            clones_under_lock: AtomicUsize,
+            wakes: AtomicUsize,
+            clone_hook: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
+        }
+
+        impl RawWakerProbe {
+            pub(super) fn new(shared: &Arc<ChannelShared<()>>) -> Arc<Self> {
+                Arc::new(Self {
+                    shared: Arc::downgrade(shared),
+                    clones: AtomicUsize::new(0),
+                    clones_under_lock: AtomicUsize::new(0),
+                    wakes: AtomicUsize::new(0),
+                    clone_hook: Mutex::new(None),
+                })
+            }
+
+            #[allow(unsafe_code)]
+            pub(super) fn waker(self: &Arc<Self>) -> Waker {
+                let data = Arc::into_raw(Arc::clone(self)).cast();
+                let raw = RawWaker::new(data, &VTABLE);
+                // SAFETY: `data` owns exactly one strong `Arc<RawWakerProbe>`
+                // reference and every vtable operation below preserves or
+                // consumes that ownership exactly as RawWaker requires.
+                unsafe { Waker::from_raw(raw) }
+            }
+
+            pub(super) fn set_clone_hook(&self, hook: impl FnOnce() + Send + 'static) {
+                let previous = self.clone_hook.lock().replace(Box::new(hook));
+                assert!(previous.is_none(), "only one clone hook may be armed");
+            }
+
+            pub(super) fn clones(&self) -> usize {
+                self.clones.load(Ordering::SeqCst)
+            }
+
+            pub(super) fn clones_under_lock(&self) -> usize {
+                self.clones_under_lock.load(Ordering::SeqCst)
+            }
+
+            pub(super) fn wakes(&self) -> usize {
+                self.wakes.load(Ordering::SeqCst)
+            }
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn clone_waker(data: *const ()) -> RawWaker {
+            // SAFETY: every data pointer in this vtable comes from
+            // `Arc::into_raw`. ManuallyDrop borrows that owned reference so
+            // cloning creates one additional strong reference without
+            // consuming the reference represented by `data`.
+            let probe = ManuallyDrop::new(unsafe {
+                Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>())
+            });
+            probe.clones.fetch_add(1, Ordering::SeqCst);
+
+            let channel_unlocked = probe.shared.upgrade().is_none_or(|shared| {
+                let guard = shared.inner.try_lock();
+                let unlocked = guard.is_some();
+                drop(guard);
+                unlocked
+            });
+            if !channel_unlocked {
+                probe.clones_under_lock.fetch_add(1, Ordering::SeqCst);
+            } else {
+                let hook = probe.clone_hook.lock().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+
+            let cloned = Arc::clone(&*probe);
+            RawWaker::new(Arc::into_raw(cloned).cast(), &VTABLE)
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn wake(data: *const ()) {
+            // SAFETY: `wake` consumes the one strong Arc reference represented
+            // by `data`, matching RawWaker's by-value wake contract.
+            let probe = unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) };
+            probe.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn wake_by_ref(data: *const ()) {
+            // SAFETY: `wake_by_ref` must retain the reference represented by
+            // `data`; ManuallyDrop prevents the reconstructed Arc from
+            // consuming it.
+            let probe = ManuallyDrop::new(unsafe {
+                Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>())
+            });
+            probe.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        #[allow(unsafe_code)]
+        unsafe fn drop_waker(data: *const ()) {
+            // SAFETY: `drop_waker` consumes exactly the one strong Arc
+            // reference represented by `data`.
+            drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });
+        }
+
+        static VTABLE: RawWakerVTable =
+            RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker);
+    }
+
+    #[derive(Debug)]
+    struct MpscWakerDropProbe {
+        shared: Weak<ChannelShared<()>>,
+        drops: Arc<AtomicUsize>,
+        unlocked_drops: Arc<AtomicUsize>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for MpscWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for MpscWakerDropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(shared) = self.shared.upgrade()
+                && shared.inner.try_lock().is_some()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn mpsc_waker_drop_probe(
+        shared: &Arc<ChannelShared<()>>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(MpscWakerDropProbe {
+            shared: Arc::downgrade(shared),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
+    }
+
+    fn assert_waker_retired_after_unlock(
+        drops: &AtomicUsize,
+        unlocked_drops: &AtomicUsize,
+        case: &str,
+    ) {
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "{case}: drop count");
+        assert_eq!(
+            unlocked_drops.load(Ordering::SeqCst),
+            1,
+            "{case}: channel mutex must be free during final Waker drop"
+        );
+    }
+
+    #[test]
+    fn sender_waiter_drop_retires_waker_after_unlock() {
+        init_test("sender_waiter_drop_retires_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<()>(1);
+        tx.try_send(()).expect("fill channel");
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+        let mut reserve = Box::pin(tx.reserve(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        drop(reserve);
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "reserve drop");
+        crate::test_complete!("sender_waiter_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn sender_waiter_acquire_retires_waker_after_unlock() {
+        init_test("sender_waiter_acquire_retires_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        tx.try_send(()).expect("fill channel");
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+        let mut reserve = Box::pin(tx.reserve(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        rx.try_recv().expect("free channel capacity");
+
+        let replacement_waker = Waker::noop();
+        let mut task_cx = Context::from_waker(replacement_waker);
+        let permit = match reserve.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("head waiter must acquire freed capacity: {other:?}"),
+        };
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "reserve acquire");
+        permit.abort();
+        crate::test_complete!("sender_waiter_acquire_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn sender_waiter_replacement_retires_old_waker_after_unlock() {
+        init_test("sender_waiter_replacement_retires_old_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<()>(1);
+        tx.try_send(()).expect("fill channel");
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+        let mut reserve = Box::pin(tx.reserve(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        let replacement_waker = Waker::noop();
+        let mut task_cx = Context::from_waker(replacement_waker);
+        assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "sender replacement");
+        drop(reserve);
+        crate::test_complete!("sender_waiter_replacement_retires_old_waker_after_unlock");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SenderDrainAction {
+        ReceiverClose,
+        SenderClose,
+        ReceiverDrop,
+    }
+
+    impl SenderDrainAction {
+        const fn name(self) -> &'static str {
+            match self {
+                Self::ReceiverClose => "Receiver::close",
+                Self::SenderClose => "Sender::close_receiver",
+                Self::ReceiverDrop => "Receiver::drop",
+            }
+        }
+    }
+
+    #[test]
+    fn sender_waiter_drains_retire_wakers_after_unlock() {
+        init_test("sender_waiter_drains_retire_wakers_after_unlock");
+
+        for action in [
+            SenderDrainAction::ReceiverClose,
+            SenderDrainAction::SenderClose,
+            SenderDrainAction::ReceiverDrop,
+        ] {
+            let cx = test_cx();
+            let (tx, mut rx) = channel::<()>(1);
+            tx.try_send(()).expect("fill channel");
+            let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+            let mut reserve = Box::pin(tx.reserve(&cx));
+
+            {
+                let mut task_cx = Context::from_waker(&waker);
+                assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
+            }
+            drop(waker);
+
+            match action {
+                SenderDrainAction::ReceiverClose => rx.close(),
+                SenderDrainAction::SenderClose => tx.close_receiver(),
+                SenderDrainAction::ReceiverDrop => drop(rx),
+            }
+
+            assert_waker_retired_after_unlock(&drops, &unlocked_drops, action.name());
+            drop(reserve);
+        }
+
+        crate::test_complete!("sender_waiter_drains_retire_wakers_after_unlock");
+    }
+
+    #[test]
+    fn receiver_clear_retires_waker_after_unlock() {
+        init_test("receiver_clear_retires_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_recv(&cx, &mut task_cx).is_pending());
+        }
+        drop(waker);
+        rx.clear_recv_waker();
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "receiver clear");
+        crate::test_complete!("receiver_clear_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn receiver_replacement_retires_old_waker_after_unlock() {
+        init_test("receiver_replacement_retires_old_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_recv(&cx, &mut task_cx).is_pending());
+        }
+        drop(waker);
+
+        let replacement_waker = Waker::noop();
+        let mut task_cx = Context::from_waker(replacement_waker);
+        assert!(rx.poll_recv(&cx, &mut task_cx).is_pending());
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "receiver replacement");
+        crate::test_complete!("receiver_replacement_retires_old_waker_after_unlock");
+    }
+
+    #[test]
+    fn recv_future_drop_retires_waker_after_unlock() {
+        init_test("recv_future_drop_retires_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+        let mut recv = Box::pin(rx.recv(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(recv);
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "Recv::drop");
+        crate::test_complete!("recv_future_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn recv_many_future_drop_retires_waker_after_unlock() {
+        init_test("recv_many_future_drop_retires_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+        let mut buffer = Vec::new();
+        let mut recv = Box::pin(rx.recv_many(&cx, &mut buffer, 1));
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(recv.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(recv);
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "RecvMany::drop");
+        crate::test_complete!("recv_many_future_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn receiver_drop_retires_registered_waker_after_unlock() {
+        init_test("receiver_drop_retires_registered_waker_after_unlock");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let (waker, drops, unlocked_drops) = mpsc_waker_drop_probe(&tx.shared);
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(rx.poll_recv(&cx, &mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(rx);
+
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops, "Receiver::drop");
+        crate::test_complete!("receiver_drop_retires_registered_waker_after_unlock");
+    }
+
     #[test]
     fn reserve_cancelled_returns_error() {
         init_test("reserve_cancelled_returns_error");
@@ -3324,6 +3900,137 @@ mod tests {
     }
 
     #[test]
+    fn sender_head_snapshot_does_not_clone_underlying_raw_waker() {
+        init_test("sender_head_snapshot_does_not_clone_underlying_raw_waker");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        tx.try_send(()).expect("fill channel");
+
+        let probe = raw_waker_probe::RawWakerProbe::new(&tx.shared);
+        let waker = probe.waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut reserve = Box::pin(tx.reserve(&cx));
+        assert!(reserve.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(probe.clones(), 1, "initial registration clones once");
+        assert_eq!(
+            probe.clones_under_lock(),
+            0,
+            "RawWaker clone callback must observe an unlocked channel"
+        );
+
+        rx.try_recv()
+            .expect("free one slot and snapshot head waiter");
+        assert_eq!(
+            probe.clones(),
+            1,
+            "head wake snapshot must clone only Arc<RegisteredWaker>"
+        );
+        assert_eq!(probe.wakes(), 1, "head waiter is woken once");
+
+        let permit = match reserve.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("head waiter should acquire the freed slot"),
+        };
+        permit.abort();
+        crate::test_complete!("sender_head_snapshot_does_not_clone_underlying_raw_waker");
+    }
+
+    #[test]
+    fn sender_batch_snapshot_does_not_clone_underlying_raw_waker() {
+        init_test("sender_batch_snapshot_does_not_clone_underlying_raw_waker");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(2);
+        tx.try_send(()).expect("fill first slot");
+        tx.try_send(()).expect("fill second slot");
+
+        let probe = raw_waker_probe::RawWakerProbe::new(&tx.shared);
+        let waker = probe.waker();
+        let mut sender_cx = Context::from_waker(&waker);
+        let mut first = Box::pin(tx.reserve(&cx));
+        let mut second = Box::pin(tx.reserve(&cx));
+        assert!(first.as_mut().poll(&mut sender_cx).is_pending());
+        assert!(second.as_mut().poll(&mut sender_cx).is_pending());
+        assert_eq!(probe.clones(), 2, "each registration clones once");
+        assert_eq!(probe.clones_under_lock(), 0);
+
+        let receiver_waker = noop_waker();
+        let mut receiver_cx = Context::from_waker(&receiver_waker);
+        let mut buffer = Vec::new();
+        assert!(matches!(
+            rx.poll_recv_many(&cx, &mut buffer, 2, &mut receiver_cx),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(
+            probe.clones(),
+            2,
+            "batch wake snapshot must clone only Arc<RegisteredWaker>"
+        );
+        assert_eq!(probe.wakes(), 2, "both capacity waiters are woken");
+        drop(first);
+        drop(second);
+        crate::test_complete!("sender_batch_snapshot_does_not_clone_underlying_raw_waker");
+    }
+
+    #[test]
+    fn poll_recv_replays_wake_receiver_from_raw_clone_gap() {
+        init_test("poll_recv_replays_wake_receiver_from_raw_clone_gap");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let probe = raw_waker_probe::RawWakerProbe::new(&tx.shared);
+        let wake_tx = tx.clone();
+        probe.set_clone_hook(move || wake_tx.wake_receiver());
+        let waker = probe.waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(matches!(rx.poll_recv(&cx, &mut task_cx), Poll::Pending));
+        assert_eq!(probe.clones(), 1, "receiver registration clones once");
+        assert_eq!(
+            probe.clones_under_lock(),
+            0,
+            "receiver RawWaker clone callback must run outside the mutex"
+        );
+        assert_eq!(
+            probe.wakes(),
+            1,
+            "wake_receiver edge raised by the clone callback must be replayed"
+        );
+        assert!(tx.shared.inner.lock().recv_waker.is_some());
+        crate::test_complete!("poll_recv_replays_wake_receiver_from_raw_clone_gap");
+    }
+
+    #[test]
+    fn poll_recv_many_replays_wake_receiver_from_raw_clone_gap() {
+        init_test("poll_recv_many_replays_wake_receiver_from_raw_clone_gap");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<()>(1);
+        let probe = raw_waker_probe::RawWakerProbe::new(&tx.shared);
+        let wake_tx = tx.clone();
+        probe.set_clone_hook(move || wake_tx.wake_receiver());
+        let waker = probe.waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut buffer = Vec::new();
+
+        assert!(matches!(
+            rx.poll_recv_many(&cx, &mut buffer, 1, &mut task_cx),
+            Poll::Pending
+        ));
+        assert_eq!(probe.clones(), 1, "batch registration clones once");
+        assert_eq!(
+            probe.clones_under_lock(),
+            0,
+            "batch RawWaker clone callback must run outside the mutex"
+        );
+        assert_eq!(
+            probe.wakes(),
+            1,
+            "batch receiver must replay the clone-gap wake_receiver edge"
+        );
+        assert!(buffer.is_empty());
+        assert!(tx.shared.inner.lock().recv_waker.is_some());
+        crate::test_complete!("poll_recv_many_replays_wake_receiver_from_raw_clone_gap");
+    }
+
+    #[test]
     fn lost_wakeup_test() {
         let cx = test_cx();
         let (tx, mut rx) = channel::<i32>(1);
@@ -3389,18 +4096,20 @@ mod tests {
         let mut ctx_b = Context::from_waker(&reserve_waker_b);
         assert!(reserve_b.as_mut().poll(&mut ctx_b).is_pending());
 
-        {
+        let retired_waker = {
             let mut inner = tx.shared.inner.lock();
             let waiter_token_a = reserve_a.waiter_token.expect("waiter token for A");
             // Remove from slab
-            inner
+            let retired_waker = inner
                 .send_wakers
                 .remove(waiter_token_a)
                 .expect("A queued in slab");
             // Remove from FIFO queue
             inner.remove_waiter_token(waiter_token_a);
             inner.queue.clear();
-        }
+            retired_waker
+        };
+        drop(retired_waker);
 
         drop(reserve_a);
 
@@ -3435,11 +4144,12 @@ mod tests {
         let mut ctx_b = Context::from_waker(&waker_b);
         assert!(reserve_b.as_mut().poll(&mut ctx_b).is_pending());
 
-        {
+        let retired_waker = {
             let mut inner = tx.shared.inner.lock();
             let token_a = reserve_a.waiter_token.expect("waiter token for A");
-            inner.send_wakers.remove(token_a).expect("A queued in slab");
-        }
+            inner.send_wakers.remove(token_a).expect("A queued in slab")
+        };
+        drop(retired_waker);
 
         let value = rx.try_recv().expect("free capacity");
         crate::assert_with_log!(value == 1, "freed value", 1, value);

@@ -183,14 +183,14 @@ impl Default for SlabToken {
 
 /// Entry in the token slab.
 #[derive(Debug)]
-enum Entry {
-    /// Occupied slot with a waker.
-    Occupied { waker: Waker, generation: u32 },
+enum Entry<T> {
+    /// Occupied slot with a value.
+    Occupied { value: T, generation: u32 },
     /// Vacant slot pointing to the next free slot.
     Vacant { next_free: u32, generation: u32 },
 }
 
-impl Entry {
+impl<T> Entry<T> {
     /// Returns the generation of this entry.
     fn generation(&self) -> u32 {
         match self {
@@ -202,27 +202,29 @@ impl Entry {
 /// Sentinel value indicating end of free list.
 const FREE_LIST_END: u32 = u32::MAX;
 
-/// Slab allocator for waker tokens.
+/// Slab allocator for generational tokens.
 ///
-/// The slab provides O(1) insert, get, and remove operations. It maintains
-/// a free list of available slots and tracks generation counters to prevent
-/// ABA problems.
+/// The default payload is a [`Waker`], preserving the reactor-oriented API,
+/// while callers that need callback-free ownership snapshots can select a
+/// different payload type. The slab provides O(1) insert, get, and remove
+/// operations. It maintains a free list of available slots and tracks
+/// generation counters to prevent ABA problems.
 ///
 /// # Thread Safety
 ///
 /// `TokenSlab` is not thread-safe. For concurrent access, wrap it in a
 /// synchronization primitive like `Mutex` or use per-thread slabs.
 #[derive(Debug)]
-pub struct TokenSlab {
+pub struct TokenSlab<T = Waker> {
     /// Storage for entries.
-    entries: Vec<Entry>,
+    entries: Vec<Entry<T>>,
     /// Head of the free list (index of first free slot).
     free_head: u32,
     /// Number of occupied entries.
     len: usize,
 }
 
-impl TokenSlab {
+impl<T> TokenSlab<T> {
     /// Creates a new empty token slab.
     #[must_use]
     pub fn new() -> Self {
@@ -243,11 +245,11 @@ impl TokenSlab {
         }
     }
 
-    /// Inserts a waker into the slab and returns its token.
+    /// Inserts a value into the slab and returns its token.
     ///
     /// If there's a free slot, it will be reused. Otherwise, a new slot
     /// is allocated at the end.
-    pub fn insert(&mut self, waker: Waker) -> SlabToken {
+    pub fn insert(&mut self, value: T) -> SlabToken {
         if self.free_head == FREE_LIST_END {
             // Allocate a new slot.
             #[cfg(target_pointer_width = "32")]
@@ -263,7 +265,7 @@ impl TokenSlab {
             let index = self.entries.len() as u32;
             let generation = 0;
 
-            self.entries.push(Entry::Occupied { waker, generation });
+            self.entries.push(Entry::Occupied { value, generation });
             self.len += 1;
 
             SlabToken::new(index, generation)
@@ -285,7 +287,7 @@ impl TokenSlab {
             };
 
             // Convert to occupied entry (generation incremented on removal).
-            *entry = Entry::Occupied { waker, generation };
+            *entry = Entry::Occupied { value, generation };
             self.free_head = next_free;
             self.len += 1;
 
@@ -293,48 +295,48 @@ impl TokenSlab {
         }
     }
 
-    /// Returns a reference to the waker associated with the token.
+    /// Returns a reference to the value associated with the token.
     ///
     /// Returns `None` if the token is invalid, has been removed, or
     /// the generation doesn't match (stale token).
     #[must_use]
-    pub fn get(&self, token: SlabToken) -> Option<&Waker> {
+    pub fn get(&self, token: SlabToken) -> Option<&T> {
         let index = token.index as usize;
         if index >= self.entries.len() {
             return None;
         }
 
         match &self.entries[index] {
-            Entry::Occupied { waker, generation } if *generation == token.generation => Some(waker),
+            Entry::Occupied { value, generation } if *generation == token.generation => Some(value),
             _ => None,
         }
     }
 
-    /// Returns a mutable reference to the waker associated with the token.
+    /// Returns a mutable reference to the value associated with the token.
     ///
     /// Returns `None` if the token is invalid, has been removed, or
     /// the generation doesn't match (stale token).
     #[must_use]
-    pub fn get_mut(&mut self, token: SlabToken) -> Option<&mut Waker> {
+    pub fn get_mut(&mut self, token: SlabToken) -> Option<&mut T> {
         let index = token.index as usize;
         if index >= self.entries.len() {
             return None;
         }
 
         match &mut self.entries[index] {
-            Entry::Occupied { waker, generation } if *generation == token.generation => Some(waker),
+            Entry::Occupied { value, generation } if *generation == token.generation => Some(value),
             _ => None,
         }
     }
 
-    /// Removes the waker associated with the token and returns it.
+    /// Removes the value associated with the token and returns it.
     ///
     /// Returns `None` if the token is invalid, has been removed, or
     /// the generation doesn't match (stale token).
     ///
     /// The slot is added to the free list for reuse. The generation counter
     /// is incremented to invalidate any remaining references to this slot.
-    pub fn remove(&mut self, token: SlabToken) -> Option<Waker> {
+    pub fn remove(&mut self, token: SlabToken) -> Option<T> {
         let index = token.index as usize;
         let entry = self.entries.get_mut(index)?;
 
@@ -365,7 +367,7 @@ impl TokenSlab {
         self.len -= 1;
 
         match old_entry {
-            Entry::Occupied { waker, .. } => Some(waker),
+            Entry::Occupied { value, .. } => Some(value),
             Entry::Vacant { .. } => unreachable!(),
         }
     }
@@ -376,13 +378,13 @@ impl TokenSlab {
         self.get(token).is_some()
     }
 
-    /// Returns the number of wakers in the slab.
+    /// Returns the number of values in the slab.
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    /// Returns `true` if the slab contains no wakers.
+    /// Returns `true` if the slab contains no values.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -420,12 +422,12 @@ impl TokenSlab {
         self.len = 0;
     }
 
-    /// Retains only the wakers that satisfy the predicate.
+    /// Retains only the values that satisfy the predicate.
     ///
-    /// Wakers for which the predicate returns `false` are removed.
+    /// Values for which the predicate returns `false` are removed.
     pub fn retain<F>(&mut self, mut f: F)
     where
-        F: FnMut(SlabToken, &Waker) -> bool,
+        F: FnMut(SlabToken, &T) -> bool,
     {
         if self.len == 0 {
             return;
@@ -435,9 +437,9 @@ impl TokenSlab {
             let mut remove = false;
             let current_generation = self.entries[index].generation();
 
-            if let Entry::Occupied { waker, generation } = &self.entries[index] {
+            if let Entry::Occupied { value, generation } = &self.entries[index] {
                 let token = SlabToken::new(index as u32, *generation);
-                if !f(token, waker) {
+                if !f(token, value) {
                     remove = true;
                 }
             }
@@ -462,13 +464,13 @@ impl TokenSlab {
     }
 
     /// Iterates over all occupied entries.
-    pub fn iter(&self) -> impl Iterator<Item = (SlabToken, &Waker)> {
+    pub fn iter(&self) -> impl Iterator<Item = (SlabToken, &T)> {
         self.entries
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                if let Entry::Occupied { waker, generation } = entry {
-                    Some((SlabToken::new(index as u32, *generation), waker))
+                if let Entry::Occupied { value, generation } = entry {
+                    Some((SlabToken::new(index as u32, *generation), value))
                 } else {
                     None
                 }
@@ -476,7 +478,7 @@ impl TokenSlab {
     }
 }
 
-impl Default for TokenSlab {
+impl<T> Default for TokenSlab<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -707,7 +709,7 @@ mod tests {
     #[test]
     fn slab_get_invalid_index() {
         init_test("slab_get_invalid_index");
-        let slab = TokenSlab::new();
+        let slab: TokenSlab = TokenSlab::new();
         let token = SlabToken::new(999, 0);
 
         let contains = slab.contains(token);
@@ -876,7 +878,7 @@ mod tests {
     #[test]
     fn slab_with_capacity() {
         init_test("slab_with_capacity");
-        let slab = TokenSlab::with_capacity(100);
+        let slab: TokenSlab = TokenSlab::with_capacity(100);
         crate::assert_with_log!(
             slab.capacity() >= 100,
             "capacity at least requested",
@@ -885,6 +887,20 @@ mod tests {
         );
         crate::assert_with_log!(slab.is_empty(), "slab starts empty", true, slab.is_empty());
         crate::test_complete!("slab_with_capacity");
+    }
+
+    #[test]
+    fn slab_supports_non_waker_payloads() {
+        init_test("slab_supports_non_waker_payloads");
+        let mut slab = TokenSlab::<u64>::new();
+        let token = slab.insert(42);
+        let stored = slab.get(token).copied();
+        let removed = slab.remove(token);
+
+        crate::assert_with_log!(stored == Some(42), "generic get", Some(42), stored);
+        crate::assert_with_log!(removed == Some(42), "generic remove", Some(42), removed);
+        crate::assert_with_log!(slab.is_empty(), "generic slab empty", true, slab.is_empty());
+        crate::test_complete!("slab_supports_non_waker_payloads");
     }
 
     #[test]
