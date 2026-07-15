@@ -44,7 +44,7 @@ use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, error, trace, trace_span};
 use crate::types::policy::PolicyAction;
-use crate::types::task_context::{CxInner, MAX_MASK_DEPTH};
+use crate::types::task_context::{CancelWaker, CxInner, MAX_MASK_DEPTH};
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
     CapabilityBudgetRequirements, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
@@ -387,12 +387,14 @@ impl LoserDrainHistoryRecorder {
 /// afterward as a separate, uncontained boundary. This abstraction defers only
 /// the `MetricsProvider::task_completed` callback and the completion
 /// debug/unknown trace emitted directly by [`RuntimeState::task_completed`]. It
-/// does not make transitive obligation cleanup, region advancement, finalizers,
-/// foreign wakers, waker drops, or other destructors callback-free.
+/// also carries detached cancellation-Waker targets across the outer lock;
+/// it does not make transitive obligation cleanup, region advancement,
+/// finalizers, foreign wakers, or unrelated destructors callback-free.
 #[must_use = "task completion effects must wake waiters and dispatch observers"]
 pub struct TaskCompletionEffects {
     waiters: SmallVec<[TaskId; 4]>,
     observer: TaskCompletionObserver,
+    retired_cancel_wakers: TaskCompletionRetirements,
 }
 
 impl TaskCompletionEffects {
@@ -400,6 +402,7 @@ impl TaskCompletionEffects {
         Self {
             waiters: SmallVec::new(),
             observer: TaskCompletionObserver::unknown(task_id, panic_count),
+            retired_cancel_wakers: TaskCompletionRetirements::empty(),
         }
     }
 
@@ -411,7 +414,13 @@ impl TaskCompletionEffects {
     /// callback may follow dispatch as a separate, uncontained boundary.
     #[must_use]
     pub fn into_parts(self) -> (SmallVec<[TaskId; 4]>, TaskCompletionObserver) {
-        (self.waiters, self.observer)
+        let Self {
+            waiters,
+            mut observer,
+            retired_cancel_wakers,
+        } = self;
+        observer.retired_cancel_wakers = retired_cancel_wakers;
+        (waiters, observer)
     }
 
     /// Extracts waiter ids while deliberately suppressing observer delivery.
@@ -421,9 +430,84 @@ impl TaskCompletionEffects {
     /// invoke user metrics providers or tracing subscribers. Suppression emits
     /// no direct completion metric or completion debug/unknown trace and does
     /// not increment the observer-panic counter because dispatch was never
-    /// attempted.
+    /// attempted. Detached cancellation-Waker targets are deliberately leaked
+    /// on this exceptional path because the caller may still own an outer
+    /// runtime-state lock; normal paths use [`Self::into_parts`] or
+    /// [`Self::into_waiters_and_retirements_without_observers`].
     pub(crate) fn into_waiters_without_observers(self) -> SmallVec<[TaskId; 4]> {
-        self.waiters
+        let Self {
+            waiters,
+            observer: _,
+            retired_cancel_wakers,
+        } = self;
+        // This suppression path may still be running beneath a caller-owned
+        // runtime-state lock. Abandoning the token intentionally leaks only
+        // the detached wake targets rather than invoking RawWaker destructors.
+        drop(retired_cancel_wakers);
+        waiters
+    }
+
+    /// Splits callback-free waiters from cancellation-Waker retirement for a
+    /// panic/unwind path that still owns an outer runtime-state lock.
+    pub(crate) fn into_waiters_and_retirements_without_observers(
+        self,
+    ) -> (SmallVec<[TaskId; 4]>, TaskCompletionRetirements) {
+        let Self {
+            waiters,
+            observer: _,
+            retired_cancel_wakers,
+        } = self;
+        (waiters, retired_cancel_wakers)
+    }
+}
+
+/// Cancellation-Waker payloads detached during task completion.
+///
+/// Call [`Self::retire`] only after releasing every outer runtime-state lock.
+#[must_use = "cancellation Wakers must be retired after releasing runtime-state locks"]
+pub(crate) struct TaskCompletionRetirements {
+    targets: Option<SmallVec<[Arc<CancelWaker>; 4]>>,
+}
+
+impl TaskCompletionRetirements {
+    fn empty() -> Self {
+        Self {
+            targets: Some(SmallVec::new()),
+        }
+    }
+
+    fn new(targets: SmallVec<[Arc<CancelWaker>; 4]>) -> Self {
+        Self {
+            targets: Some(targets),
+        }
+    }
+
+    pub(crate) fn retire(mut self) {
+        let mut targets = self.targets.take().unwrap_or_default();
+        while let Some(target) = targets.pop() {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(target);
+            })) {
+                // This boundary is commonly reached during task-panic cleanup.
+                // Do not let a hostile RawWaker destructor trigger a double
+                // panic; leak only its already-failed panic payload.
+                std::mem::forget(payload);
+            }
+        }
+    }
+}
+
+impl Drop for TaskCompletionRetirements {
+    fn drop(&mut self) {
+        let Some(targets) = self.targets.take() else {
+            return;
+        };
+        // Abandonment can occur while an outer runtime-state lock is live or
+        // during panic unwind. Leaking these already-detached handles is the
+        // fail-closed alternative to arbitrary RawWaker destruction there.
+        for target in targets {
+            std::mem::forget(target);
+        }
     }
 }
 
@@ -435,6 +519,7 @@ impl TaskCompletionEffects {
 pub struct TaskCompletionObserver {
     payload: TaskCompletionObserverPayload,
     panic_count: Arc<AtomicU64>,
+    retired_cancel_wakers: TaskCompletionRetirements,
 }
 
 enum TaskCompletionObserverPayload {
@@ -474,6 +559,7 @@ impl TaskCompletionObserver {
                 waiter_count,
             },
             panic_count: Arc::clone(panic_count),
+            retired_cancel_wakers: TaskCompletionRetirements::empty(),
         }
     }
 
@@ -481,6 +567,7 @@ impl TaskCompletionObserver {
         Self {
             payload: TaskCompletionObserverPayload::UnknownTask { task_id },
             panic_count: Arc::clone(panic_count),
+            retired_cancel_wakers: TaskCompletionRetirements::empty(),
         }
     }
 
@@ -493,7 +580,11 @@ impl TaskCompletionObserver {
         let Self {
             payload,
             panic_count,
+            retired_cancel_wakers,
         } = self;
+        // The caller has released runtime-state locks before observer dispatch.
+        // Retire arbitrary RawWaker payloads at this callback boundary.
+        retired_cancel_wakers.retire();
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || match payload {
                 TaskCompletionObserverPayload::Completed {
@@ -2596,9 +2687,9 @@ impl RuntimeState {
             let requested = crate::runtime::spawn_mailbox::retire_pending_cancel_rendezvous(&slot);
             let reason = requested.as_ref().and_then(|cache| cache.read().clone());
             if let Some(reason) = reason {
-                if let Some(waker) =
-                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason)
-                {
+                let cancel_wakers =
+                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason);
+                for waker in cancel_wakers {
                     waker.wake_by_ref();
                 }
             }
@@ -2671,9 +2762,9 @@ impl RuntimeState {
             let requested = crate::runtime::spawn_mailbox::retire_pending_cancel_rendezvous(&slot);
             let reason = requested.as_ref().and_then(|cache| cache.read().clone());
             if let Some(reason) = reason {
-                if let Some(waker) =
-                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason)
-                {
+                let cancel_wakers =
+                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason);
+                for waker in cancel_wakers {
                     waker.wake_by_ref();
                 }
             }
@@ -4034,7 +4125,7 @@ impl RuntimeState {
         };
 
         let waiter_count = waiters.len();
-        let (owner, completion, close_outcome, observer) = {
+        let (owner, completion, close_outcome, observer, retired_cancel_wakers) = {
             let Some(task) = self.task(task_id) else {
                 // Defensive: if the task vanished between the
                 // update_task above and here, return the waiters we
@@ -4045,6 +4136,7 @@ impl RuntimeState {
                         task_id,
                         &self.task_completion_observer_panics,
                     ),
+                    retired_cancel_wakers: TaskCompletionRetirements::empty(),
                 };
             };
 
@@ -4060,7 +4152,7 @@ impl RuntimeState {
                 _ => TaskEvent::Complete,
             };
             self.validate_live_task_protocol_transition(task_id, task_event, "task completion");
-            if let Some(inner) = task.cx_inner.as_ref() {
+            let retired_cancel_wakers = if let Some(inner) = task.cx_inner.as_ref() {
                 // br-asupersync-xgujaf — single write-lock; the previous
                 // read-then-write split had a TOCTOU window where a concurrent
                 // canceller could install a fresh waker between the read drop
@@ -4070,13 +4162,13 @@ impl RuntimeState {
                 // hazard. `take()` is idempotent on None (no allocation, no
                 // wake) and keeps the cleared Waker alive only briefly inside
                 // the guard scope.
-                let _evicted = {
+                TaskCompletionRetirements::new({
                     let mut guard = inner.write();
-                    let evicted = guard.cancel_waker.take();
-                    guard.cancel_waker_registration_count = 0;
-                    evicted
-                };
-            }
+                    guard.take_cancel_wakers()
+                })
+            } else {
+                TaskCompletionRetirements::empty()
+            };
 
             let observer = self.prepare_task_completion_observer(task, waiter_count);
             let close_outcome = match &task.state {
@@ -4085,7 +4177,13 @@ impl RuntimeState {
             };
             let owner = task.owner;
             let completion = TaskCompletionKind::from_state(&task.state);
-            (owner, completion, close_outcome, observer)
+            (
+                owner,
+                completion,
+                close_outcome,
+                observer,
+                retired_cancel_wakers,
+            )
         };
         // br-asupersync-ndhjfj: `waiters` was already taken atomically
         // at the top of the function under `update_task`. The previous
@@ -4166,7 +4264,11 @@ impl RuntimeState {
         // Advance region state if possible (e.g. if this was the last task)
         self.advance_region_state(owner);
 
-        TaskCompletionEffects { waiters, observer }
+        TaskCompletionEffects {
+            waiters,
+            observer,
+            retired_cancel_wakers,
+        }
     }
 
     // =========================================================================
@@ -7263,9 +7365,11 @@ mod tests {
                 .expect("cx_inner")
                 .clone();
             {
+                let cancel_waker = std::sync::Arc::new(
+                    crate::types::task_context::CancelWaker::new(std::task::Waker::noop().clone()),
+                );
                 let mut guard = cx_inner.write();
-                guard.cancel_waker = Some(std::task::Waker::noop().clone());
-                guard.cancel_waker_registration_count = 1;
+                guard.cancel_waker = Some(cancel_waker);
             }
 
             let inner_for_thread = std::sync::Arc::clone(&cx_inner);
@@ -7275,10 +7379,19 @@ mod tests {
             // Concurrent canceller: hammer install/clear cycles.
             let canceller = std::thread::spawn(move || {
                 while !stop_for_thread.load(Ordering::Relaxed) {
-                    let mut g = inner_for_thread.write();
-                    g.cancel_waker = Some(std::task::Waker::noop().clone());
-                    g.cancel_waker_registration_count = 1;
-                    drop(g);
+                    let cancel_waker =
+                        std::sync::Arc::new(crate::types::task_context::CancelWaker::new(
+                            std::task::Waker::noop().clone(),
+                        ));
+                    let retired = {
+                        let mut g = inner_for_thread.write();
+                        if g.cancel_waker_registry_closed {
+                            None
+                        } else {
+                            std::mem::replace(&mut g.cancel_waker, Some(cancel_waker))
+                        }
+                    };
+                    drop(retired);
                     std::thread::yield_now();
                 }
             });
@@ -7295,34 +7408,144 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
             canceller.join().expect("canceller thread");
 
-            // After joining: any installs that beat task_completed are gone
-            // (cleared by task_completed); any installs after task_completed
-            // are present but no longer observable through state (task is
-            // terminal). Drain the final state and confirm task_completed
-            // itself didn't leak the pre-install or any racing install.
-            //
-            // We assert atomicity by re-reading: the only writes between
-            // task_completed's clear and the join are post-completion installs
-            // by the canceller. Whatever value we observe, it must be either
-            // None (canceller already stopped) or a Waker we just observed —
-            // never a half-initialized state. We only assert task_completed
-            // didn't panic and that the lock is reacquirable (no poisoning
-            // from a torn write).
+            // Completion permanently closes the registry. Installs that lost
+            // the race must remain rejected rather than resurrecting a wake
+            // target after the task record becomes terminal.
             let final_state = {
                 let mut guard = cx_inner.write();
-                let final_state = guard.cancel_waker.take();
-                guard.cancel_waker_registration_count = 0;
-                final_state
+                guard.take_cancel_wakers()
             };
             crate::assert_with_log!(
-                final_state.is_none() || final_state.is_some(),
-                "trial completes with well-formed Option (no torn write/poisoning)",
-                "well-formed",
-                format!("trial {trial}: {:?}", final_state.is_some())
+                final_state.is_empty(),
+                "closed completion registry rejects post-completion installs",
+                true,
+                format!("trial {trial}: {} targets", final_state.len())
             );
         }
 
         crate::test_complete!("task_completed_clears_cancel_waker_under_concurrent_install");
+    }
+
+    #[test]
+    fn task_completion_retires_cancel_waker_after_outer_state_unlock() {
+        struct DropProbe {
+            runtime: std::sync::Weak<Mutex<RuntimeState>>,
+            drops: Arc<AtomicUsize>,
+            unlocked_drops: Arc<AtomicUsize>,
+        }
+
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if let Some(runtime) = self.runtime.upgrade()
+                    && runtime.try_lock().is_some()
+                {
+                    self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        init_test("task_completion_retires_cancel_waker_after_outer_state_unlock");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let shared = Arc::new(Mutex::new(state));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(DropProbe {
+            runtime: Arc::downgrade(&shared),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+
+        {
+            let state = shared.lock();
+            let inner = state
+                .task(task_id)
+                .and_then(|task| task.cx_inner.clone())
+                .expect("task cancellation context");
+            drop(state);
+            inner.write().cancel_waker = Some(Arc::new(
+                crate::types::task_context::CancelWaker::new(waker.clone()),
+            ));
+        }
+        drop(waker);
+
+        let effects = {
+            let mut state = shared.lock();
+            state
+                .task_mut(task_id)
+                .expect("task")
+                .complete(Outcome::Ok(()));
+            state.task_completed(task_id)
+        };
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let (_waiters, observer) = effects.into_parts();
+        observer.dispatch();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        crate::test_complete!("task_completion_retires_cancel_waker_after_outer_state_unlock");
+    }
+
+    #[test]
+    fn abandoned_completion_effects_do_not_drop_waker_under_outer_lock() {
+        struct DropProbe {
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        init_test("abandoned_completion_effects_do_not_drop_waker_under_outer_lock");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(DropProbe {
+            drops: Arc::clone(&drops),
+        }));
+        let inner = state
+            .task(task_id)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("task cancellation context");
+        inner.write().cancel_waker = Some(Arc::new(crate::types::task_context::CancelWaker::new(
+            waker.clone(),
+        )));
+        drop(waker);
+
+        let shared = Arc::new(Mutex::new(state));
+        {
+            let mut state = shared.lock();
+            state
+                .task_mut(task_id)
+                .expect("task")
+                .complete(Outcome::Ok(()));
+            let effects = state.task_completed(task_id);
+            drop(effects);
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "abandonment must leak the detached target instead of invoking its destructor"
+        );
+        crate::test_complete!("abandoned_completion_effects_do_not_drop_waker_under_outer_lock");
     }
 
     #[test]

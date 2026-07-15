@@ -103,7 +103,7 @@ fn strengthen_cancelled_result<T>(
 pub(crate) fn apply_cancel_reason(
     inner: &RwLock<CxInner>,
     reason: &CancelReason,
-) -> Option<std::task::Waker> {
+) -> smallvec::SmallVec<[Arc<crate::types::task_context::CancelWaker>; 4]> {
     let mut lock = inner.write();
     lock.cancel_requested = true;
     lock.fast_cancel
@@ -113,7 +113,7 @@ pub(crate) fn apply_cancel_reason(
     } else {
         lock.cancel_reason = Some(reason.clone());
     }
-    lock.cancel_waker.clone()
+    lock.cancel_waker_snapshot()
 }
 
 impl<T> TaskHandle<T> {
@@ -330,8 +330,8 @@ impl<T> TaskHandle<T> {
     pub fn abort_with_reason(&self, reason: CancelReason) {
         strengthen_cancel_reason(&self.requested_cancel_reason, &reason);
         if let Some(inner) = self.live_inner() {
-            let cancel_waker = apply_cancel_reason(&inner, &reason);
-            if let Some(waker) = cancel_waker {
+            let cancel_wakers = apply_cancel_reason(&inner, &reason);
+            for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
         }
@@ -379,8 +379,8 @@ impl<T> JoinFuture<'_, T> {
     fn abort_with_reason(&self, reason: CancelReason) {
         strengthen_cancel_reason(self.requested_cancel_reason, &reason);
         if let Some(inner) = self.live_inner() {
-            let cancel_waker = apply_cancel_reason(&inner, &reason);
-            if let Some(waker) = cancel_waker {
+            let cancel_wakers = apply_cancel_reason(&inner, &reason);
+            for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
         }

@@ -158,7 +158,9 @@ fn request_cancel_with_budget_returns_false_when_task_already_terminal() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("if self.state.is_terminal() {") && body.contains("return false;"),
+        body.contains("request_cancel_with_budget_deferred(reason, cleanup_budget)")
+            && body.contains("if self.state.is_terminal() {")
+            && body.contains("return (false, SmallVec::new());"),
         "REGRESSION: request_cancel_with_budget no longer \
          early-returns on terminal state. Cancels on \
          completed tasks would mutate state — UB pathway \

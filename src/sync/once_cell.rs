@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex as StdMutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
+use crate::cx::CancelWakerToken;
+
 /// State values for OnceCell.
 const UNINIT: u8 = 0;
 const INITIALIZING: u8 = 1;
@@ -729,13 +731,55 @@ impl<T> Drop for WaitInit<'_, T> {
 }
 
 /// Cancel-aware future that waits for initialization to complete.
+#[derive(Debug)]
+struct OnceCellCancelWaker {
+    waker: Waker,
+    token: CancelWakerToken,
+}
+
 struct CancelAwareWaitInit<'a, T, Caps = crate::cx::cap::All> {
     cell: &'a OnceCell<T>,
     cx: &'a crate::cx::Cx<Caps>,
     /// Tracks registered waiter identity to prevent unbounded queue growth.
     waiter_id: Option<u64>,
     /// Tracks the task waker registered with the cancellation context.
-    cancel_waker: Option<Waker>,
+    cancel_waker: Option<OnceCellCancelWaker>,
+}
+
+impl<T, Caps> CancelAwareWaitInit<'_, T, Caps> {
+    fn refresh_cancel_waker(&mut self, waker: &Waker) {
+        let same_local_waker = self
+            .cancel_waker
+            .as_ref()
+            .is_some_and(|registered| registered.waker.will_wake(waker));
+        let incoming_waker = (!same_local_waker).then(|| waker.clone());
+        let previous_token = self
+            .cancel_waker
+            .as_ref()
+            .map(|registered| registered.token);
+        let token = self.cx.refresh_cancel_waker(previous_token, waker);
+        let retired_waker = if let Some(incoming_waker) = incoming_waker {
+            self.cancel_waker.replace(OnceCellCancelWaker {
+                waker: incoming_waker,
+                token,
+            })
+        } else {
+            self.cancel_waker
+                .as_mut()
+                .expect("same local Waker requires an existing registration")
+                .token = token;
+            None
+        };
+        drop(retired_waker);
+    }
+
+    fn clear_cancel_waker(&mut self) {
+        let Some(registered) = self.cancel_waker.take() else {
+            return;
+        };
+        self.cx.clear_cancel_waker(registered.token);
+        drop(registered);
+    }
 }
 
 impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
@@ -745,36 +789,27 @@ impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
         let this = self.get_mut();
 
         if this.cell.state.load(Ordering::Acquire) == INITIALIZED {
+            this.clear_cancel_waker();
             return Poll::Ready(Ok(()));
         }
 
         if this.cx.checkpoint().is_err() {
+            this.clear_cancel_waker();
             return Poll::Ready(Err(OnceCellError::Cancelled));
         }
 
-        let should_register_cancel_waker = match &mut this.cancel_waker {
-            Some(existing) if existing.will_wake(task_cx.waker()) => false,
-            Some(existing) => {
-                existing.clone_from(task_cx.waker());
-                true
-            }
-            None => {
-                this.cancel_waker = Some(task_cx.waker().clone());
-                true
-            }
-        };
-        if should_register_cancel_waker {
-            this.cx.register_cancel_waker(task_cx.waker());
-        }
+        this.refresh_cancel_waker(task_cx.waker());
 
         this.cell
             .register_waker(task_cx.waker(), &mut this.waiter_id);
 
         if this.cell.state.load(Ordering::Acquire) == INITIALIZED {
+            this.clear_cancel_waker();
             return Poll::Ready(Ok(()));
         }
 
         if this.cx.checkpoint().is_err() {
+            this.clear_cancel_waker();
             return Poll::Ready(Err(OnceCellError::Cancelled));
         }
 
@@ -788,9 +823,7 @@ impl<T, Caps> Drop for CancelAwareWaitInit<'_, T, Caps> {
             // Remove canceled waiter registrations immediately
             self.cell.remove_waiter_for_cancellation(waiter_id);
         }
-        if let Some(waker) = &self.cancel_waker {
-            self.cx.clear_cancel_waker_if_current(waker);
-        }
+        self.clear_cancel_waker();
     }
 }
 
@@ -1028,7 +1061,7 @@ mod tests {
             .cancel_waker
             .take()
             .expect("cancel-aware wait must register its task waker");
-        cx.clear_cancel_waker_if_current(&cancel_waker);
+        cx.clear_cancel_waker(cancel_waker.token);
         drop(cancel_waker);
         drop(waker);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -1181,6 +1214,93 @@ mod tests {
             queue_drained
         );
         crate::test_complete!("cancelled_wait_on_uninitialized_cell_removes_waiter");
+    }
+
+    #[test]
+    fn dropping_pending_cancel_aware_wait_clears_exact_cx_registration() {
+        init_test("dropping_pending_cancel_aware_wait_clears_exact_cx_registration");
+        let cell: OnceCell<u32> = OnceCell::new();
+        let cx = crate::cx::Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let waker_counts = Arc::new(CountWaker::default());
+        let waker = Waker::from(Arc::clone(&waker_counts));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut wait = Box::pin(cell.wait(&cx));
+
+        assert!(Future::poll(wait.as_mut(), &mut task_cx).is_pending());
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+        assert_eq!(
+            cell.waiters
+                .lock()
+                .expect("waiters lock should not be poisoned")
+                .waiters
+                .len(),
+            1
+        );
+
+        drop(wait);
+
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        assert!(
+            cell.waiters
+                .lock()
+                .expect("waiters lock should not be poisoned")
+                .waiters
+                .is_empty()
+        );
+        assert_eq!(waker_counts.count(), 0, "cleanup must not wake the task");
+        crate::test_complete!("dropping_pending_cancel_aware_wait_clears_exact_cx_registration");
+    }
+
+    #[test]
+    fn cancel_aware_wait_preserves_distinct_and_later_same_waker_owners() {
+        init_test("cancel_aware_wait_preserves_distinct_and_later_same_waker_owners");
+        let cell = OnceCell::new();
+        let cx = crate::cx::Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let wakes_a = Arc::new(CountWaker::default());
+        let wakes_b = Arc::new(CountWaker::default());
+        let waker_a = Waker::from(Arc::clone(&wakes_a));
+        let waker_b = Waker::from(Arc::clone(&wakes_b));
+        let mut wait = Box::pin(cell.wait(&cx));
+
+        {
+            let mut task_cx = Context::from_waker(&waker_a);
+            assert!(Future::poll(wait.as_mut(), &mut task_cx).is_pending());
+        }
+
+        // A distinct B owner must not displace the wait future's A entry.
+        let token_b = cx.refresh_cancel_waker(None, &waker_b);
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 2);
+        cx.clear_cancel_waker(token_b);
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+        {
+            let mut task_cx = Context::from_waker(&waker_a);
+            assert!(Future::poll(wait.as_mut(), &mut task_cx).is_pending());
+        }
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+
+        let later_a = cx.refresh_cancel_waker(None, &waker_a);
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 2);
+        cell.set(17)
+            .expect("set should wake the initialization waiter");
+        assert_eq!(wakes_a.count(), 1);
+
+        let completed = {
+            let mut task_cx = Context::from_waker(&waker_a);
+            Future::poll(wait.as_mut(), &mut task_cx)
+        };
+        assert!(matches!(completed, Poll::Ready(Ok(()))));
+        assert_eq!(
+            cx.inner.read().cancel_waker_registrations.len(),
+            1,
+            "terminal wait cleanup must preserve the later A owner"
+        );
+
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert_eq!(wakes_a.count(), 2);
+        assert_eq!(wakes_b.count(), 0);
+        cx.clear_cancel_waker(later_a);
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+        crate::test_complete!("cancel_aware_wait_preserves_distinct_and_later_same_waker_owners");
     }
 
     #[test]

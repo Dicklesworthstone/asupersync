@@ -187,9 +187,9 @@ fn task_handle_abort_with_reason_publishes_via_release_store() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("lock.cancel_requested = true;")
-            && body.contains("lock.fast_cancel\n                    .store(true, std::sync::atomic::Ordering::Release);")
-            || body.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        body.contains("apply_cancel_reason(&inner, &reason)")
+            && source.contains("lock.cancel_requested = true;")
+            && source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: abort_with_reason no longer publishes \
          via cancel_requested + fast_cancel.store(Release). \
          The task can't observe the abort — is_finished \
@@ -213,8 +213,7 @@ fn task_handle_abort_wakes_cancel_waker_for_parked_task_observability() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("if let Some(waker) = cancel_waker {")
-            && body.contains("waker.wake_by_ref();"),
+        body.contains("for waker in cancel_wakers {") && body.contains("waker.wake_by_ref();"),
         "REGRESSION: abort_with_reason no longer wakes the \
          cancel_waker. Parked tasks dont observe the abort \
          — is_finished perpetually false until something \
@@ -389,9 +388,10 @@ fn abort_publishes_cancel_reason_for_attribution_in_outcome() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("if let Some(existing) = &mut lock.cancel_reason {")
-            && body.contains("existing.strengthen(&reason);")
-            && body.contains("lock.cancel_reason = Some(reason);"),
+        body.contains("apply_cancel_reason(&inner, &reason)")
+            && source.contains("if let Some(existing) = &mut lock.cancel_reason {")
+            && source.contains("existing.strengthen(reason);")
+            && source.contains("lock.cancel_reason = Some(reason.clone());"),
         "REGRESSION: abort_with_reason no longer manages \
          cancel_reason via strengthen-or-set. Attribution \
          is lost — Outcome::Cancelled would carry no reason.",

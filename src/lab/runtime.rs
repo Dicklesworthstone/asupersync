@@ -1839,9 +1839,27 @@ impl LabRuntime {
         if let (Some(inner), Some((cancel_waker, _))) =
             (cx_inner.as_ref(), cancel_waker_for_cache.as_ref())
         {
-            let mut guard = inner.write();
-            guard.cancel_waker = Some(cancel_waker.clone());
-            guard.cancel_waker_registration_count = 1;
+            // Prepare and retire Wakers without a live CxInner guard: custom
+            // callbacks may reenter the same task context.
+            let mut incoming_waker = Some(Arc::new(crate::types::task_context::CancelWaker::new(
+                cancel_waker.clone(),
+            )));
+            let retired_waker = {
+                let mut guard = inner.write();
+                if guard.cancel_waker_registry_closed {
+                    None
+                } else if !guard
+                    .cancel_waker
+                    .as_ref()
+                    .is_some_and(|registered| registered.will_wake(cancel_waker))
+                {
+                    std::mem::replace(&mut guard.cancel_waker, incoming_waker.take())
+                } else {
+                    None
+                }
+            };
+            drop(retired_waker);
+            drop(incoming_waker);
         }
 
         let _cx_guard = crate::cx::Cx::set_current(current_cx);
@@ -2310,8 +2328,9 @@ impl LabRuntime {
             .update_task(task_id, |record| {
                 if !record.state.is_terminal() {
                     let old_state = record.state.clone();
-                    record.request_cancel_with_budget(reason, Budget::ZERO);
-                    Some((old_state, record.state.clone()))
+                    let (_, cancel_wakers) =
+                        record.request_cancel_with_budget_deferred(reason, Budget::ZERO);
+                    Some((old_state, record.state.clone(), cancel_wakers))
                 } else {
                     None
                 }
@@ -2319,7 +2338,10 @@ impl LabRuntime {
             .flatten();
 
         // Record the state transition in the oracle after mutation is complete.
-        if let Some((old_state, new_state)) = transition {
+        if let Some((old_state, new_state, cancel_wakers)) = transition {
+            for waker in cancel_wakers {
+                waker.wake_by_ref();
+            }
             if self.config.has_cancellation_oracle() {
                 self.oracles.cancellation_protocol.on_transition(
                     task_id,

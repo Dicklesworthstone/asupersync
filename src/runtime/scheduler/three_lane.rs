@@ -6150,9 +6150,9 @@ impl ThreeLaneWorker {
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let waiters = state
+                    let (waiters, cancel_waker_retirements) = state
                         .task_completed(self.task_id)
-                        .into_waiters_without_observers();
+                        .into_waiters_and_retirements_without_observers();
                     let finalizers = state.drain_ready_async_finalizers();
 
                     self.worker.wake_dependents_locked(&state, waiters);
@@ -6171,6 +6171,8 @@ impl ThreeLaneWorker {
                         }
                         self.worker.coordinator.wake_many(finalizer_wakes);
                     }
+                    drop(state);
+                    cancel_waker_retirements.retire();
                 }
             }
         }
@@ -6349,20 +6351,27 @@ impl ThreeLaneWorker {
                         scheduler_evidence: self.scheduler_evidence.clone(),
                     }))
                 };
-                // New waker: register in CxInner (single write lock).
-                {
+                // New waker: prepare and retire ownership outside CxInner's
+                // lock because custom Waker callbacks may reenter this task.
+                let mut incoming_waker = Some(Arc::new(
+                    crate::types::task_context::CancelWaker::new(w.clone()),
+                ));
+                let retired_waker = {
                     let mut guard = inner.write();
-                    let needs_update = !guard
+                    if guard.cancel_waker_registry_closed {
+                        None
+                    } else if !guard
                         .cancel_waker
                         .as_ref()
-                        .is_some_and(|existing| existing.will_wake(&w));
-                    if needs_update {
-                        guard.cancel_waker = Some(w.clone());
-                        guard.cancel_waker_registration_count = 1;
-                    } else if guard.cancel_waker_registration_count == 0 {
-                        guard.cancel_waker_registration_count = 1;
+                        .is_some_and(|existing| existing.will_wake(&w))
+                    {
+                        std::mem::replace(&mut guard.cancel_waker, incoming_waker.take())
+                    } else {
+                        None
                     }
-                }
+                };
+                drop(retired_waker);
+                drop(incoming_waker);
                 (w, priority)
             })
         };

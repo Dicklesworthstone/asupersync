@@ -87,6 +87,7 @@ use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace, warn};
+use crate::types::task_context::{CancelWaker, CancelWakerRegistration};
 use crate::types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, CxInner, RegionId, SystemPressure, TaskId, Time,
@@ -195,6 +196,18 @@ struct CxHandles {
     default_http_client: DefaultHttpClientSlot,
     #[cfg(feature = "messaging-fabric")]
     fabric_capabilities: Arc<FabricCapabilityRegistry>,
+}
+
+/// Opaque ownership token for one auxiliary cancellation-Waker registration.
+///
+/// Live IDs are checked-monotonic and never reused, so an old token cannot
+/// clear a later ABA-identical registration after its original owner has gone
+/// away. ID zero is the reusable closed-registry sentinel and never owns an
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "the token is required to refresh or clear this cancellation-Waker registration"]
+pub(crate) struct CancelWakerToken {
+    id: u64,
 }
 
 /// The capability context for a task.
@@ -3081,7 +3094,7 @@ impl<Caps> Cx<Caps> {
     /// This API is intended for testing only. In production, cancellation signals
     /// are propagated by the runtime through the task tree.
     pub fn set_cancel_requested(&self, value: bool) {
-        let waker = {
+        let wakers = {
             let mut inner = self.inner.write();
             inner.cancel_requested = value;
             inner
@@ -3089,46 +3102,148 @@ impl<Caps> Cx<Caps> {
                 .store(value, std::sync::atomic::Ordering::Release);
             if !value {
                 inner.cancel_reason = None;
-                None
+                smallvec::SmallVec::new()
             } else {
-                inner.cancel_waker.clone()
+                inner.cancel_waker_snapshot()
             }
         };
-        if let Some(waker) = waker {
-            waker.wake();
+        for waker in wakers {
+            waker.wake_by_ref();
         }
     }
 
-    /// Registers the current task waker to be woken when this context is cancelled.
-    pub(crate) fn register_cancel_waker(&self, waker: &Waker) {
-        let mut inner = self.inner.write();
-        match inner.cancel_waker.as_ref() {
-            Some(existing) if existing.will_wake(waker) => {
-                inner.cancel_waker_registration_count =
-                    inner.cancel_waker_registration_count.saturating_add(1);
-            }
-            _ => {
-                inner.cancel_waker = Some(waker.clone());
-                inner.cancel_waker_registration_count = 1;
-            }
-        }
-    }
-
-    /// Clears a previously registered cancellation waker if it still belongs to this task.
-    pub(crate) fn clear_cancel_waker_if_current(&self, waker: &Waker) {
-        let mut inner = self.inner.write();
-        if inner
-            .cancel_waker
-            .as_ref()
-            .is_some_and(|existing| existing.will_wake(waker))
+    /// Establishes or refreshes exactly one owned cancellation-Waker registration.
+    ///
+    /// Passing the token returned by the prior poll makes an unchanged, still
+    /// current registration a no-op. Each future gets its own registry entry,
+    /// so it cannot evict the runtime's cancellation-lane Waker or clear another
+    /// future's ABA-identical registration. Arbitrary Waker clone and retirement
+    /// callbacks run outside the Cx lock.
+    pub(crate) fn refresh_cancel_waker(
+        &self,
+        previous: Option<CancelWakerToken>,
+        waker: &Waker,
+    ) -> CancelWakerToken {
+        // The common repoll path requires neither allocation nor Waker clone.
         {
-            if inner.cancel_waker_registration_count > 1 {
-                inner.cancel_waker_registration_count -= 1;
-            } else {
-                inner.cancel_waker = None;
-                inner.cancel_waker_registration_count = 0;
+            let inner = self.inner.read();
+            if inner.cancel_waker_registry_closed {
+                return CancelWakerToken { id: 0 };
+            }
+            if let Some(token) = previous
+                && inner.cancel_waker_registrations.iter().any(|registration| {
+                    registration.token == token.id && registration.target.will_wake(waker)
+                })
+            {
+                return token;
             }
         }
+
+        // Clone without a live Cx guard: a custom RawWaker clone callback may
+        // reenter this same context.
+        let mut incoming = Some(Arc::new(CancelWaker::new(waker.clone())));
+        let (token, retired_waker) = {
+            let mut inner = self.inner.write();
+
+            // Recheck after cloning because an owner may have refreshed its
+            // entry while no lock was held.
+            if inner.cancel_waker_registry_closed {
+                (CancelWakerToken { id: 0 }, None)
+            } else if let Some(token) = previous
+                && let Some(registration) = inner
+                    .cancel_waker_registrations
+                    .iter_mut()
+                    .find(|registration| registration.token == token.id)
+            {
+                if registration.target.will_wake(waker) {
+                    (token, None)
+                } else {
+                    let retired = std::mem::replace(
+                        &mut registration.target,
+                        incoming
+                            .take()
+                            .expect("prepared cancellation Waker must be available"),
+                    );
+                    (token, Some(retired))
+                }
+            } else {
+                let id = inner
+                    .next_cancel_waker_token
+                    .checked_add(1)
+                    .expect("cancellation-Waker token space exhausted");
+                inner.next_cancel_waker_token = id;
+                // Establish capacity before moving the prepared final owner
+                // under the lock. An allocation unwind can then retire only
+                // the still-outside `incoming` value after the guard drops.
+                inner.cancel_waker_registrations.reserve(1);
+                inner
+                    .cancel_waker_registrations
+                    .push(CancelWakerRegistration {
+                        token: id,
+                        target: incoming
+                            .take()
+                            .expect("prepared cancellation Waker must be available"),
+                    });
+                (CancelWakerToken { id }, None)
+            }
+        };
+
+        // Both an unused prepared clone and the previous slot owner can invoke
+        // arbitrary destruction callbacks. Retire them only after unlock.
+        drop(retired_waker);
+        drop(incoming);
+        token
+    }
+
+    /// Idempotently registers one untracked current-task cancellation Waker.
+    ///
+    /// This compatibility slot never increments a refcount on repoll. Callers
+    /// that own a future across polls should use [`Self::refresh_cancel_waker`]
+    /// and retain its token instead.
+    pub(crate) fn register_cancel_waker(&self, waker: &Waker) {
+        {
+            let inner = self.inner.read();
+            if inner.cancel_waker_registry_closed
+                || inner
+                    .untracked_cancel_waker
+                    .as_ref()
+                    .is_some_and(|registered| registered.will_wake(waker))
+            {
+                return;
+            }
+        }
+
+        let mut incoming = Some(Arc::new(CancelWaker::new(waker.clone())));
+        let retired = {
+            let mut inner = self.inner.write();
+            if inner.cancel_waker_registry_closed
+                || inner
+                    .untracked_cancel_waker
+                    .as_ref()
+                    .is_some_and(|registered| registered.will_wake(waker))
+            {
+                None
+            } else {
+                std::mem::replace(&mut inner.untracked_cancel_waker, incoming.take())
+            }
+        };
+        drop(retired);
+        drop(incoming);
+    }
+
+    /// Clears exactly the cancellation-Waker registration identified by `token`.
+    pub(crate) fn clear_cancel_waker(&self, token: CancelWakerToken) {
+        let retired_waker = {
+            let mut inner = self.inner.write();
+            inner
+                .cancel_waker_registrations
+                .iter()
+                .position(|registration| registration.token == token.id)
+                .map(|index| inner.cancel_waker_registrations.swap_remove(index).target)
+        };
+        // A safe Wake payload can run arbitrary destructor code; retire the
+        // exact owner only after the Cx guard has been released.
+        drop(retired_waker);
     }
 
     // ========================================================================
@@ -3167,7 +3282,7 @@ impl<Caps> Cx<Caps> {
     /// This method only sets the local cancellation flag. In a real runtime,
     /// cancellation propagates through the region tree via `cancel_request()`.
     pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {
-        let (region, task, waker) = {
+        let (region, task, wakers) = {
             let mut inner = self.inner.write();
             let region = inner.region;
             let task = inner.task;
@@ -3182,13 +3297,13 @@ impl<Caps> Cx<Caps> {
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
-            let waker = inner.cancel_waker.clone();
+            let wakers = inner.cancel_waker_snapshot();
             drop(inner);
-            (region, task, waker)
+            (region, task, wakers)
         };
 
-        if let Some(w) = waker {
-            w.wake();
+        for waker in wakers {
+            waker.wake_by_ref();
         }
 
         debug!(
@@ -3227,7 +3342,7 @@ impl<Caps> Cx<Caps> {
     /// assert!(cx.is_cancel_requested());
     /// ```
     pub fn cancel_fast(&self, kind: CancelKind) {
-        let (region, waker) = {
+        let (region, wakers) = {
             let mut inner = self.inner.write();
             let region = inner.region;
 
@@ -3239,13 +3354,13 @@ impl<Caps> Cx<Caps> {
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
-            let waker = inner.cancel_waker.clone();
+            let wakers = inner.cancel_waker_snapshot();
             drop(inner);
-            (region, waker)
+            (region, wakers)
         };
 
-        if let Some(w) = waker {
-            w.wake();
+        for waker in wakers {
+            waker.wake_by_ref();
         }
 
         trace!(
@@ -3432,17 +3547,17 @@ impl<Caps> Cx<Caps> {
     /// assert_eq!(cx.cancel_reason().unwrap().kind, CancelKind::ParentCancelled);
     /// ```
     pub fn set_cancel_reason(&self, reason: CancelReason) {
-        let waker = {
+        let wakers = {
             let mut inner = self.inner.write();
             inner.cancel_requested = true;
             inner
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
-            inner.cancel_waker.clone()
+            inner.cancel_waker_snapshot()
         };
-        if let Some(w) = waker {
-            w.wake();
+        for waker in wakers {
+            waker.wake_by_ref();
         }
     }
 
@@ -5920,8 +6035,7 @@ mod tests {
 
         {
             let mut inner = cx.inner.write();
-            inner.cancel_waker = Some(waker);
-            inner.cancel_waker_registration_count = 1;
+            inner.cancel_waker = Some(Arc::new(CancelWaker::new(waker)));
         }
 
         cx.set_cancel_requested(true);
@@ -5942,7 +6056,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_waker_registration_count_preserves_same_waker_until_last_clear() {
+    fn tracked_cancel_wakers_have_exact_independent_ownership() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::task::Waker;
 
@@ -5963,34 +6077,193 @@ mod tests {
         let wakes = Arc::new(AtomicUsize::new(0));
         let waker = Waker::from(Arc::new(CountWaker(Arc::clone(&wakes))));
 
-        cx.register_cancel_waker(&waker);
-        cx.register_cancel_waker(&waker);
+        let first = cx.refresh_cancel_waker(None, &waker);
+        let second = cx.refresh_cancel_waker(None, &waker);
+        assert_ne!(first, second, "distinct owners need distinct tokens");
 
-        {
-            let inner = cx.inner.read();
-            assert!(inner.cancel_waker.is_some());
-            assert_eq!(inner.cancel_waker_registration_count, 2);
-        }
-
-        cx.clear_cancel_waker_if_current(&waker);
-        {
-            let inner = cx.inner.read();
-            assert!(inner.cancel_waker.is_some());
-            assert_eq!(inner.cancel_waker_registration_count, 1);
-        }
-
-        cx.clear_cancel_waker_if_current(&waker);
         {
             let inner = cx.inner.read();
             assert!(inner.cancel_waker.is_none());
-            assert_eq!(inner.cancel_waker_registration_count, 0);
+            assert_eq!(inner.cancel_waker_registrations.len(), 2);
+        }
+
+        cx.clear_cancel_waker(first);
+        {
+            let inner = cx.inner.read();
+            assert_eq!(inner.cancel_waker_registrations.len(), 1);
+        }
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "equivalent tracked owners must be deduplicated during fanout"
+        );
+
+        cx.clear_cancel_waker(second);
+        {
+            let inner = cx.inner.read();
+            assert!(inner.cancel_waker.is_none());
+            assert!(inner.cancel_waker_registrations.is_empty());
         }
 
         assert_eq!(
             wakes.load(Ordering::SeqCst),
-            0,
+            1,
             "registration cleanup must not wake the task"
         );
+    }
+
+    #[test]
+    fn cancel_waker_tokens_reject_stale_cleanup_after_aba_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct CountWaker(Arc<AtomicUsize>);
+
+        impl Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = test_cx();
+        let wakes_a = Arc::new(AtomicUsize::new(0));
+        let wakes_b = Arc::new(AtomicUsize::new(0));
+        let waker_a = Waker::from(Arc::new(CountWaker(Arc::clone(&wakes_a))));
+        let waker_b = Waker::from(Arc::new(CountWaker(Arc::clone(&wakes_b))));
+
+        let stale_a = cx.refresh_cancel_waker(None, &waker_a);
+        cx.clear_cancel_waker(stale_a);
+        let current_b = cx.refresh_cancel_waker(None, &waker_b);
+        let current_a = cx.refresh_cancel_waker(None, &waker_a);
+        assert_ne!(stale_a, current_a, "a cleared token must never be reused");
+
+        // A late cleanup from the old A owner must not remove either current
+        // registration, even though one has the ABA-identical Waker.
+        cx.clear_cancel_waker(stale_a);
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 2);
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes_b.load(Ordering::SeqCst), 1);
+
+        cx.clear_cancel_waker(current_a);
+        cx.clear_cancel_waker(current_b);
+        let inner = cx.inner.read();
+        assert!(inner.cancel_waker.is_none());
+        assert!(inner.cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn auxiliary_registration_preserves_runtime_primary_and_untracked_is_idempotent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct CountWaker(Arc<AtomicUsize>);
+
+        impl Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = test_cx();
+        let primary_wakes = Arc::new(AtomicUsize::new(0));
+        let auxiliary_wakes = Arc::new(AtomicUsize::new(0));
+        let untracked_wakes = Arc::new(AtomicUsize::new(0));
+        let primary = Waker::from(Arc::new(CountWaker(Arc::clone(&primary_wakes))));
+        let auxiliary = Waker::from(Arc::new(CountWaker(Arc::clone(&auxiliary_wakes))));
+        let untracked = Waker::from(Arc::new(CountWaker(Arc::clone(&untracked_wakes))));
+        cx.inner.write().cancel_waker = Some(Arc::new(CancelWaker::new(primary)));
+
+        let token = cx.refresh_cancel_waker(None, &auxiliary);
+        for _ in 0..4_096 {
+            cx.register_cancel_waker(&untracked);
+        }
+        assert!(cx.inner.read().cancel_waker.is_some());
+        assert_eq!(cx.inner.read().cancel_waker_registrations.len(), 1);
+
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(primary_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(auxiliary_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(untracked_wakes.load(Ordering::SeqCst), 1);
+
+        cx.clear_cancel_waker(token);
+        assert!(cx.inner.read().cancel_waker.is_some());
+        assert!(cx.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn completed_context_rejects_new_cancel_waker_registrations() {
+        let cx = test_cx();
+        let retired = cx.inner.write().take_cancel_wakers();
+        drop(retired);
+        let waker = Waker::noop().clone();
+
+        let token = cx.refresh_cancel_waker(None, &waker);
+        cx.register_cancel_waker(&waker);
+
+        let inner = cx.inner.read();
+        assert_eq!(token.id, 0);
+        assert!(inner.cancel_waker_registry_closed);
+        assert!(inner.cancel_waker.is_none());
+        assert!(inner.untracked_cancel_waker.is_none());
+        assert!(inner.cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn replacing_cancel_waker_retires_safe_payload_after_unlock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        struct DropProbe {
+            inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+            drops: Arc<AtomicUsize>,
+            unlocked_drops: Arc<AtomicUsize>,
+        }
+
+        #[allow(clippy::manual_noop_waker)]
+        impl Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if let Some(inner) = self.inner.upgrade()
+                    && inner.try_write().is_some()
+                {
+                    self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let cx = test_cx();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let first_waker = Waker::from(Arc::new(DropProbe {
+            inner: Arc::downgrade(&cx.inner),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        let first = cx.refresh_cancel_waker(None, &first_waker);
+        drop(first_waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let replacement = Waker::noop().clone();
+        let replacement_token = cx.refresh_cancel_waker(Some(first), &replacement);
+        assert_eq!(replacement_token, first);
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        cx.clear_cancel_waker(replacement_token);
     }
 
     #[test]

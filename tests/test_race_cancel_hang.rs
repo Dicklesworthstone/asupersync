@@ -56,7 +56,9 @@ fn test_race_empty_wakes_on_cancel() {
             .cx_inner
             .as_ref()
             .expect("spawned task should have a cancellation context");
-        inner.write().cancel_waker = Some(waker.clone());
+        inner.write().cancel_waker = Some(Arc::new(
+            asupersync::types::task_context::CancelWaker::new(waker.clone()),
+        ));
     }
 
     {

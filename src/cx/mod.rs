@@ -55,6 +55,7 @@ pub use capacity_ticket::{
     CapacityTicketRefusal, CapacityTicketRequest, CapacityTicketWorkKind, request_capacity_ticket,
     request_capacity_ticket_from_budget,
 };
+pub(crate) use cx::CancelWakerToken;
 pub use cx::{
     BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
     DeadlineBudgetStats, PollBudgetStats, SpanGuard,

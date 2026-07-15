@@ -339,9 +339,9 @@ impl Worker {
                         }
                     });
 
-                    let waiters = state
+                    let (waiters, cancel_waker_retirements) = state
                         .task_completed(self.task_id)
-                        .into_waiters_without_observers();
+                        .into_waiters_and_retirements_without_observers();
                     let finalizers = state.drain_ready_async_finalizers();
                     let mut local_waiters = self.worker.scratch_local.take();
                     let mut global_waiters = self.worker.scratch_global.take();
@@ -377,6 +377,7 @@ impl Worker {
                         }
                     }
                     drop(state);
+                    cancel_waker_retirements.retire();
 
                     while let Some(waker) = foreign_wakers.pop() {
                         waker.wake();

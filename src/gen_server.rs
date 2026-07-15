@@ -1186,7 +1186,7 @@ impl<S: GenServer> GenServerHandle<S> {
     pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
-            let cancel_waker = {
+            let cancel_wakers = {
                 let mut guard = inner.write();
                 guard.cancel_requested = true;
                 guard
@@ -1195,9 +1195,9 @@ impl<S: GenServer> GenServerHandle<S> {
                 if guard.cancel_reason.is_none() {
                     guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
                 }
-                guard.cancel_waker.clone()
+                guard.cancel_waker_snapshot()
             };
-            if let Some(waker) = cancel_waker {
+            for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
         }
@@ -1244,7 +1244,7 @@ impl<S: GenServer> GenServerJoinFuture<'_, S> {
     fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.cx_inner.upgrade() {
-            let cancel_waker = {
+            let cancel_wakers = {
                 let mut guard = inner.write();
                 guard.cancel_requested = true;
                 guard
@@ -1253,9 +1253,9 @@ impl<S: GenServer> GenServerJoinFuture<'_, S> {
                 if guard.cancel_reason.is_none() {
                     guard.cancel_reason = Some(crate::types::CancelReason::user("server aborted"));
                 }
-                guard.cancel_waker.clone()
+                guard.cancel_waker_snapshot()
             };
-            if let Some(waker) = cancel_waker {
+            for waker in cancel_wakers {
                 waker.wake_by_ref();
             }
         }

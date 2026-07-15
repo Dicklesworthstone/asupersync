@@ -16,7 +16,22 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
+
+#[cfg(test)]
+std::thread_local! {
+    static BEFORE_CANCEL_WAKER_REGISTRATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_before_cancel_waker_registration_hook() {
+    BEFORE_CANCEL_WAKER_REGISTRATION_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
 
 /// Error returned when waiting on a barrier fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +137,7 @@ impl Barrier {
             barrier: self,
             cx,
             state: WaitState::Init,
+            cancel_waker: None,
         }
     }
 }
@@ -139,12 +155,137 @@ enum WaitState {
     Done,
 }
 
+/// Cancellation-Waker registration owned by one barrier future.
+#[derive(Debug)]
+struct RegisteredCancelWaker {
+    waker: Waker,
+    token: CancelWakerToken,
+}
+
 /// Future returned by `Barrier::wait`.
 #[derive(Debug)]
 pub struct BarrierWaitFuture<'a, Caps = crate::cx::cap::All> {
     barrier: &'a Barrier,
     cx: &'a Cx<Caps>,
     state: WaitState,
+    /// Task Waker registered with `Cx` for prompt cancellation delivery.
+    cancel_waker: Option<RegisteredCancelWaker>,
+}
+
+impl<Caps> BarrierWaitFuture<'_, Caps> {
+    /// Keep exactly one cancellation-waker registration owned by this future.
+    ///
+    /// The future retains a clone so replacing or clearing the `Cx` slot can
+    /// never destroy the last user-provided waker payload while the `Cx` lock
+    /// is held.
+    fn refresh_cancel_waker(&mut self, waker: &Waker) {
+        let same_local_waker = self
+            .cancel_waker
+            .as_ref()
+            .is_some_and(|registered| registered.waker.will_wake(waker));
+
+        // Retain the current task Waker before entering the Cx so clearing its
+        // stored clone can never destroy a safe Wake payload under that lock.
+        let incoming_waker = if same_local_waker {
+            None
+        } else {
+            let incoming_waker = waker.clone();
+            #[cfg(test)]
+            run_before_cancel_waker_registration_hook();
+            Some(incoming_waker)
+        };
+        let previous_token = self
+            .cancel_waker
+            .as_ref()
+            .map(|registered| registered.token);
+        let token = self.cx.refresh_cancel_waker(previous_token, waker);
+        let retired_waker = if let Some(incoming_waker) = incoming_waker {
+            self.cancel_waker.replace(RegisteredCancelWaker {
+                waker: incoming_waker,
+                token,
+            })
+        } else {
+            self.cancel_waker
+                .as_mut()
+                .expect("same local Waker requires an existing registration")
+                .token = token;
+            None
+        };
+        // A safe Wake payload can run arbitrary destructor code. The Cx lock
+        // has been released before the future retires its previous clone.
+        drop(retired_waker);
+    }
+
+    /// Release this future's cancellation-waker registration, if still current.
+    fn clear_cancel_waker(&mut self) {
+        let Some(registered) = self.cancel_waker.take() else {
+            return;
+        };
+        self.cx.clear_cancel_waker(registered.token);
+        // Keep the payload alive until Cx cleanup releases the lock, then run
+        // any final destructor outside that lock.
+        drop(registered);
+    }
+
+    /// Finish a poll after a cancellation checkpoint reports cancellation.
+    fn finish_cancelled(&mut self) -> Poll<Result<BarrierWaitResult, BarrierWaitError>> {
+        // If we were waiting, unregister from the barrier generation first.
+        if let WaitState::Waiting {
+            generation,
+            id,
+            slot,
+        } = self.state
+        {
+            let mut state = self.barrier.state.lock();
+
+            // Only decrement if the generation hasn't changed (barrier hasn't tripped).
+            if state.generation == generation {
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
+                if state.arrived > 0 {
+                    state.arrived -= 1;
+                }
+                // br-asupersync-abl9h6: remove BY waiter id, not by
+                // slot index. Within this generation, prior cancellations
+                // may have done swap_remove and moved a different waiter
+                // into our `slot` position; the recorded slot is therefore
+                // a stale hint, not a guarantee. The waiter set is a
+                // SmallVec<[_; 7]>, so the identity scan is bounded by the
+                // barrier's own size.
+                let _ = slot;
+                let retired_waker = state
+                    .waiters
+                    .iter()
+                    .position(|w| w.0 == id)
+                    .map(|idx| state.waiters.remove(idx).1);
+                drop(state);
+
+                // Mark the future complete before releasing either waker so a
+                // panicking destructor cannot make Drop account twice.
+                self.state = WaitState::Done;
+                self.clear_cancel_waker();
+                // Retire the barrier's waker only after both mutexes have been
+                // released and the future state transition is committed.
+                drop(retired_waker);
+                return Poll::Ready(Err(BarrierWaitError::Cancelled));
+            }
+
+            // Generation advancement wins a cancellation race: the barrier
+            // already released this waiter successfully.
+            drop(state);
+            self.state = WaitState::Done;
+            self.clear_cancel_waker();
+            return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
+        }
+
+        // Cancelled before registering with the barrier itself.
+        {
+            let mut state = self.barrier.state.lock();
+            state.cancellation_count = state.cancellation_count.saturating_add(1);
+        }
+        self.state = WaitState::Done;
+        self.clear_cancel_waker();
+        Poll::Ready(Err(BarrierWaitError::Cancelled))
+    }
 }
 
 impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
@@ -153,68 +294,20 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
     #[allow(clippy::too_many_lines)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if matches!(self.state, WaitState::Done) {
+            self.clear_cancel_waker();
             return Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion));
         }
 
-        // 1. Check cancellation first.
+        // Check before registering so already-cancelled calls do not install a
+        // stale waker, then register and check again to close the race between
+        // the first checkpoint and registration.
         if let Err(_e) = self.cx.checkpoint() {
-            // If we were waiting, we need to unregister.
-            if let WaitState::Waiting {
-                generation,
-                id,
-                slot,
-            } = self.state
-            {
-                let mut state = self.barrier.state.lock();
+            return self.finish_cancelled();
+        }
 
-                // Only decrement if the generation hasn't changed (barrier hasn't tripped).
-                if state.generation == generation {
-                    state.cancellation_count = state.cancellation_count.saturating_add(1);
-                    if state.arrived > 0 {
-                        state.arrived -= 1;
-                    }
-                    // br-asupersync-abl9h6: remove BY waiter id, not by
-                    // slot index. Within this generation, prior cancellations
-                    // may have done swap_remove and moved a different waiter
-                    // into our `slot` position; the recorded slot is therefore
-                    // a stale hint, not a guarantee. The fast-path
-                    // `waiters[slot].0 == id` check did catch this in practice
-                    // (and would fall through to the position scan when it
-                    // missed), but eliminating the slot-based fast path
-                    // entirely makes the cancellation contract obvious by
-                    // construction: identity is the only key. The waiter set
-                    // is a SmallVec<[_; 7]> so the position scan is O(parties)
-                    // and bounded by the barrier's own size — no asymptotic
-                    // cost for typical (parties <= 7) uses.
-                    let _ = slot; // recorded slot is now an unused hint
-                    let retired_waker = state
-                        .waiters
-                        .iter()
-                        .position(|w| w.0 == id)
-                        .map(|idx| state.waiters.remove(idx).1);
-                    drop(state);
-
-                    // Mark state as done so Drop doesn't decrement again.
-                    self.state = WaitState::Done;
-                    // A safe `Wake` payload may run arbitrary destructor code
-                    // when its last `Waker` is released. Retire it only after
-                    // both the state transition and mutex release are complete.
-                    drop(retired_waker);
-                    return Poll::Ready(Err(BarrierWaitError::Cancelled));
-                }
-                // Generation changed means barrier tripped just before cancel.
-                // We treat this as success.
-                drop(state);
-                self.state = WaitState::Done;
-                return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
-            }
-            // Cancelled before even registering.
-            {
-                let mut state = self.barrier.state.lock();
-                state.cancellation_count = state.cancellation_count.saturating_add(1);
-            }
-            self.state = WaitState::Done;
-            return Poll::Ready(Err(BarrierWaitError::Cancelled));
+        self.refresh_cancel_waker(cx.waker());
+        if let Err(_e) = self.cx.checkpoint() {
+            return self.finish_cancelled();
         }
 
         // Clone before taking the barrier mutex. Besides keeping replacement
@@ -236,11 +329,13 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                     // avoid wake-under-lock contention.
                     let wakers: SmallVec<[(u64, Waker); 7]> = state.waiters.drain(..).collect();
                     drop(state);
+
+                    self.state = WaitState::Done;
+                    self.clear_cancel_waker();
                     for (_, waker) in wakers {
                         waker.wake();
                     }
 
-                    self.state = WaitState::Done;
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
                 } else {
                     // Not full yet. Arrive and wait.
@@ -326,23 +421,28 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                     // Generation advanced! We are done.
                     drop(state);
                     self.state = WaitState::Done;
+                    self.clear_cancel_waker();
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: false }))
                 }
             }
-            WaitState::Done => Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion)),
+            WaitState::Done => {
+                drop(state);
+                self.clear_cancel_waker();
+                Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion))
+            }
         }
     }
 }
 
 impl<Caps> Drop for BarrierWaitFuture<'_, Caps> {
     fn drop(&mut self) {
-        if let WaitState::Waiting {
+        let retired_waker = if let WaitState::Waiting {
             generation,
             id,
             slot,
         } = self.state
         {
-            let retired_waker = {
+            {
                 let mut state = self.barrier.state.lock();
 
                 // Only clean up if the generation hasn't changed (barrier hasn't tripped).
@@ -364,11 +464,17 @@ impl<Caps> Drop for BarrierWaitFuture<'_, Caps> {
                 } else {
                     None
                 }
-            };
-            // Dropping a Waker can destroy a user-provided `Wake` payload.
-            // Keep that destructor outside the non-reentrant state mutex.
-            drop(retired_waker);
-        }
+            }
+        } else {
+            None
+        };
+
+        // Clear the Cx registration first so the barrier queue's waker remains
+        // the final payload owner, then retire it outside both locks.
+        self.clear_cancel_waker();
+        // Dropping a Waker can destroy a user-provided `Wake` payload.
+        // Keep that destructor outside the non-reentrant state mutex.
+        drop(retired_waker);
     }
 }
 
@@ -401,7 +507,7 @@ mod tests {
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
     use crate::runtime::yield_now;
     use crate::test_utils::init_test_logging;
-    use crate::types::Budget;
+    use crate::types::{Budget, CancelKind};
     use serde_json::Value;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -447,6 +553,78 @@ mod tests {
             unlocked_drops: Arc::clone(&unlocked_drops),
         }));
         (waker, drops, unlocked_drops)
+    }
+
+    #[derive(Debug)]
+    struct CountingWake {
+        wakes: Arc<AtomicUsize>,
+    }
+
+    impl std::task::Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (Waker, Arc<AtomicUsize>) {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountingWake {
+            wakes: Arc::clone(&wakes),
+        }));
+        (waker, wakes)
+    }
+
+    fn assert_cancel_waker_registration<Caps>(
+        cx: &Cx<Caps>,
+        expected_waker: Option<&Waker>,
+        expected_count: usize,
+    ) {
+        let inner = cx.inner.read();
+        assert_eq!(
+            inner.cancel_waker_registrations.len(),
+            expected_count,
+            "unexpected cancellation-waker registration count"
+        );
+        match expected_waker {
+            Some(expected_waker) => assert!(
+                inner
+                    .cancel_waker_registrations
+                    .iter()
+                    .any(|registered| registered.target.will_wake(expected_waker)),
+                "Cx cancellation waker should match the task waker"
+            ),
+            None => assert!(
+                inner.cancel_waker_registrations.is_empty(),
+                "Cx tracked cancellation wakers should be cleared"
+            ),
+        }
+    }
+
+    struct CancelWakerRegistrationHookGuard;
+
+    impl Drop for CancelWakerRegistrationHookGuard {
+        fn drop(&mut self) {
+            BEFORE_CANCEL_WAKER_REGISTRATION_HOOK.with(|hook| {
+                let _ = hook.borrow_mut().take();
+            });
+        }
+    }
+
+    fn install_before_cancel_waker_registration_hook(
+        hook: impl FnOnce() + 'static,
+    ) -> CancelWakerRegistrationHookGuard {
+        BEFORE_CANCEL_WAKER_REGISTRATION_HOOK.with(|installed| {
+            let previous = installed.borrow_mut().replace(Box::new(hook));
+            assert!(
+                previous.is_none(),
+                "barrier cancellation-waker test hook must not already be installed"
+            );
+        });
+        CancelWakerRegistrationHookGuard
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,6 +770,273 @@ mod tests {
 
         crate::assert_with_log!(result.is_leader(), "leader", true, result.is_leader());
         crate::test_complete!("wait_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn detached_cancel_wakes_pending_barrier_waiter() {
+        init_test("detached_cancel_wakes_pending_barrier_waiter");
+        let barrier = Barrier::new(2);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (waker, wakes) = counting_waker();
+        let mut wait = barrier.wait(&cx);
+
+        let first_poll = {
+            let mut task_cx = Context::from_waker(&waker);
+            Pin::new(&mut wait).poll(&mut task_cx)
+        };
+        assert!(first_poll.is_pending());
+        assert_eq!(barrier.state_snapshot_for_test(), (1, 0, 1));
+        assert_eq!(barrier.telemetry_snapshot(0).cancellation_count, 0);
+        assert_cancel_waker_registration(&cx, Some(&waker), 1);
+
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "detached cancellation must wake the parked barrier task"
+        );
+
+        let cancelled = {
+            let mut task_cx = Context::from_waker(&waker);
+            Pin::new(&mut wait).poll(&mut task_cx)
+        };
+        assert!(matches!(
+            cancelled,
+            Poll::Ready(Err(BarrierWaitError::Cancelled))
+        ));
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 0, 0));
+        assert_eq!(barrier.telemetry_snapshot(0).cancellation_count, 1);
+        assert_cancel_waker_registration(&cx, None, 0);
+
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "completed wait must leave no stale cancellation waker"
+        );
+        crate::test_complete!("detached_cancel_wakes_pending_barrier_waiter");
+    }
+
+    #[test]
+    fn cancel_between_checkpoint_and_registration_is_observed() {
+        init_test("cancel_between_checkpoint_and_registration_is_observed");
+        let barrier = Barrier::new(2);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (waker, wakes) = counting_waker();
+        let hook_cx = cx.clone();
+        let _hook_guard = install_before_cancel_waker_registration_hook(move || {
+            hook_cx.cancel_fast(CancelKind::User);
+        });
+        let mut wait = barrier.wait(&cx);
+
+        let first_poll = {
+            let mut task_cx = Context::from_waker(&waker);
+            Pin::new(&mut wait).poll(&mut task_cx)
+        };
+
+        assert!(matches!(
+            first_poll,
+            Poll::Ready(Err(BarrierWaitError::Cancelled))
+        ));
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            0,
+            "cancellation injected before registration has no waker to wake"
+        );
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 0, 0));
+        assert_eq!(barrier.telemetry_snapshot(0).cancellation_count, 1);
+        assert_cancel_waker_registration(&cx, None, 0);
+        crate::test_complete!("cancel_between_checkpoint_and_registration_is_observed");
+    }
+
+    #[test]
+    fn changed_task_waker_keeps_one_balanced_registration() {
+        init_test("changed_task_waker_keeps_one_balanced_registration");
+        let barrier = Barrier::new(2);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (waker_a, wakes_a) = counting_waker();
+        let (waker_b, wakes_b) = counting_waker();
+        let mut wait = barrier.wait(&cx);
+
+        for waker in [&waker_a, &waker_a] {
+            let mut task_cx = Context::from_waker(waker);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+            assert_cancel_waker_registration(&cx, Some(&waker_a), 1);
+        }
+        for waker in [&waker_b, &waker_b] {
+            let mut task_cx = Context::from_waker(waker);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+            assert_cancel_waker_registration(&cx, Some(&waker_b), 1);
+        }
+
+        assert_eq!(barrier.state_snapshot_for_test(), (1, 0, 1));
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 0);
+        assert_eq!(wakes_b.load(Ordering::SeqCst), 0);
+
+        drop(wait);
+
+        assert_cancel_waker_registration(&cx, None, 0);
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 0, 0));
+        assert_eq!(barrier.telemetry_snapshot(0).cancellation_count, 1);
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 0);
+        assert_eq!(wakes_b.load(Ordering::SeqCst), 0);
+        crate::test_complete!("changed_task_waker_keeps_one_balanced_registration");
+    }
+
+    #[test]
+    fn distinct_registration_cleanup_preserves_later_same_waker_owner() {
+        init_test("distinct_registration_cleanup_preserves_later_same_waker_owner");
+        let barrier = Barrier::new(2);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let leader_cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (waker_a, wakes_a) = counting_waker();
+        let (waker_b, wakes_b) = counting_waker();
+        let mut wait = barrier.wait(&cx);
+
+        {
+            let mut task_cx = Context::from_waker(&waker_a);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+        }
+        assert_cancel_waker_registration(&cx, Some(&waker_a), 1);
+
+        // A distinct owner must neither displace nor clear this future's entry.
+        let token_b = cx.refresh_cancel_waker(None, &waker_b);
+        assert_cancel_waker_registration(&cx, Some(&waker_a), 2);
+        cx.clear_cancel_waker(token_b);
+        assert_cancel_waker_registration(&cx, Some(&waker_a), 1);
+        {
+            let mut task_cx = Context::from_waker(&waker_a);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+        }
+        assert_cancel_waker_registration(&cx, Some(&waker_a), 1);
+
+        // A second logical owner of the same current Waker must survive this
+        // barrier future's successful terminal cleanup.
+        let later_a = cx.refresh_cancel_waker(None, &waker_a);
+        assert_cancel_waker_registration(&cx, Some(&waker_a), 2);
+
+        let mut leader_wait = barrier.wait(&leader_cx);
+        let leader_poll = {
+            let leader_waker = Waker::noop();
+            let mut task_cx = Context::from_waker(leader_waker);
+            Pin::new(&mut leader_wait).poll(&mut task_cx)
+        };
+        assert!(matches!(leader_poll, Poll::Ready(Ok(result)) if result.is_leader()));
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 1);
+
+        let follower_poll = {
+            let mut task_cx = Context::from_waker(&waker_a);
+            Pin::new(&mut wait).poll(&mut task_cx)
+        };
+        assert!(matches!(follower_poll, Poll::Ready(Ok(result)) if !result.is_leader()));
+        assert_cancel_waker_registration(&cx, Some(&waker_a), 1);
+
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 2);
+        assert_eq!(wakes_b.load(Ordering::SeqCst), 0);
+        cx.clear_cancel_waker(later_a);
+        assert_cancel_waker_registration(&cx, None, 0);
+        crate::test_complete!("distinct_registration_cleanup_preserves_later_same_waker_owner");
+    }
+
+    #[test]
+    fn normal_trip_clears_both_cancel_registrations() {
+        init_test("normal_trip_clears_both_cancel_registrations");
+        let barrier = Barrier::new(2);
+        let cx_a = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let cx_b = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (waker_a, wakes_a) = counting_waker();
+        let (waker_b, wakes_b) = counting_waker();
+        let mut wait_a = barrier.wait(&cx_a);
+        let mut wait_b = barrier.wait(&cx_b);
+
+        {
+            let mut task_cx = Context::from_waker(&waker_a);
+            assert!(Pin::new(&mut wait_a).poll(&mut task_cx).is_pending());
+        }
+        assert_cancel_waker_registration(&cx_a, Some(&waker_a), 1);
+
+        let leader_poll = {
+            let mut task_cx = Context::from_waker(&waker_b);
+            Pin::new(&mut wait_b).poll(&mut task_cx)
+        };
+        let Poll::Ready(Ok(leader)) = leader_poll else {
+            panic!("last barrier arrival must complete as leader: {leader_poll:?}");
+        };
+        assert!(leader.is_leader());
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 1, 0));
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes_b.load(Ordering::SeqCst), 0);
+        assert_cancel_waker_registration(&cx_b, None, 0);
+
+        let follower_poll = {
+            let mut task_cx = Context::from_waker(&waker_a);
+            Pin::new(&mut wait_a).poll(&mut task_cx)
+        };
+        let Poll::Ready(Ok(follower)) = follower_poll else {
+            panic!("released barrier waiter must complete: {follower_poll:?}");
+        };
+        assert!(!follower.is_leader());
+        assert_cancel_waker_registration(&cx_a, None, 0);
+        assert_eq!(barrier.telemetry_snapshot(0).cancellation_count, 0);
+
+        cx_a.cancel_fast(CancelKind::User);
+        cx_b.cancel_fast(CancelKind::User);
+        assert_eq!(wakes_a.load(Ordering::SeqCst), 1);
+        assert_eq!(wakes_b.load(Ordering::SeqCst), 0);
+        crate::test_complete!("normal_trip_clears_both_cancel_registrations");
+    }
+
+    #[test]
+    fn ready_wait_clears_only_its_auxiliary_registration() {
+        init_test("ready_wait_clears_only_its_auxiliary_registration");
+        let barrier = Barrier::new(1);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (primary_waker, primary_wakes) = counting_waker();
+        let (task_waker, task_wakes) = counting_waker();
+        cx.inner.write().cancel_waker = Some(Arc::new(
+            crate::types::task_context::CancelWaker::new(primary_waker),
+        ));
+        let mut wait = barrier.wait(&cx);
+
+        let result = {
+            let mut task_cx = Context::from_waker(&task_waker);
+            Pin::new(&mut wait).poll(&mut task_cx)
+        };
+        assert!(matches!(result, Poll::Ready(Ok(leader)) if leader.is_leader()));
+        assert!(cx.inner.read().cancel_waker.is_some());
+        assert_cancel_waker_registration(&cx, None, 0);
+
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(primary_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(task_wakes.load(Ordering::SeqCst), 0);
+        crate::test_complete!("ready_wait_clears_only_its_auxiliary_registration");
+    }
+
+    #[test]
+    fn dropping_pending_wait_clears_cancel_registration() {
+        init_test("dropping_pending_wait_clears_cancel_registration");
+        let barrier = Barrier::new(2);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (waker, wakes) = counting_waker();
+        let mut wait = barrier.wait(&cx);
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+        }
+        assert_cancel_waker_registration(&cx, Some(&waker), 1);
+        assert_eq!(barrier.state_snapshot_for_test(), (1, 0, 1));
+
+        drop(wait);
+
+        assert_cancel_waker_registration(&cx, None, 0);
+        assert_eq!(barrier.state_snapshot_for_test(), (0, 0, 0));
+        assert_eq!(barrier.telemetry_snapshot(0).cancellation_count, 1);
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        crate::test_complete!("dropping_pending_wait_clears_cancel_registration");
     }
 
     #[test]

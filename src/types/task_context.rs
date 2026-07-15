@@ -20,7 +20,49 @@
 
 use crate::types::{Budget, CancelReason, CapabilityBudget, RegionId, TaskId, Time};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::task::Waker;
+
+/// A cancellation wake target whose reference-count operations never invoke
+/// user-provided `RawWaker` callbacks.
+///
+/// The contained `Waker` is cloned before this target is installed and is
+/// retired only after the owning `CxInner` lock has been released. Cancellation
+/// paths may therefore clone `Arc<CancelWaker>` while locked, then invoke the
+/// actual wake callback after unlocking.
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct CancelWaker {
+    waker: Waker,
+}
+
+impl CancelWaker {
+    /// Prepare a wake target. Callers must invoke this without a `CxInner` guard.
+    #[inline]
+    #[doc(hidden)]
+    pub fn new(waker: Waker) -> Self {
+        Self { waker }
+    }
+
+    /// Returns whether this target wakes the same task as `other`.
+    #[inline]
+    pub fn will_wake(&self, other: &Waker) -> bool {
+        self.waker.will_wake(other)
+    }
+
+    /// Invoke the user-provided wake callback.
+    #[inline]
+    pub fn wake_by_ref(&self) {
+        self.waker.wake_by_ref();
+    }
+}
+
+/// One exactly-owned auxiliary cancellation wake registration.
+#[derive(Debug)]
+pub(crate) struct CancelWakerRegistration {
+    pub(crate) token: u64,
+    pub(crate) target: Arc<CancelWaker>,
+}
 
 /// Maximum nesting depth for `Cx::masked()` sections.
 ///
@@ -246,10 +288,17 @@ pub struct CxInner {
     pub cancel_reason: Option<CancelReason>,
     /// Whether cancellation has been acknowledged at a checkpoint.
     pub cancel_acknowledged: bool,
-    /// Waker used to schedule cancellation promptly.
-    pub cancel_waker: Option<Waker>,
-    /// Number of live users that registered the current cancellation waker.
-    pub cancel_waker_registration_count: u32,
+    /// Runtime-owned Waker used to put this task on the cancellation lane.
+    pub cancel_waker: Option<Arc<CancelWaker>>,
+    /// Idempotent compatibility slot for callers that cannot retain a token.
+    pub(crate) untracked_cancel_waker: Option<Arc<CancelWaker>>,
+    /// Exactly-owned wake registrations for cancel-aware child futures.
+    pub(crate) cancel_waker_registrations: Vec<CancelWakerRegistration>,
+    /// Monotonic source for live registration tokens. Zero is reserved for the
+    /// closed-registry sentinel and is never stored in the registration table.
+    pub(crate) next_cancel_waker_token: u64,
+    /// Set when task completion detaches the registry permanently.
+    pub(crate) cancel_waker_registry_closed: bool,
     /// Current mask depth.
     pub mask_depth: u32,
     /// Progress checkpoint state.
@@ -284,13 +333,62 @@ impl CxInner {
             cancel_reason: None,
             cancel_acknowledged: false,
             cancel_waker: None,
-            cancel_waker_registration_count: 0,
+            untracked_cancel_waker: None,
+            cancel_waker_registrations: Vec::new(),
+            next_cancel_waker_token: 0,
+            cancel_waker_registry_closed: false,
             mask_depth: 0,
             checkpoint_state: CheckpointState::new(),
             fast_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fast_path_count: std::sync::atomic::AtomicU64::new(0),
             fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Snapshot every distinct cancellation wake target using only safe `Arc`
+    /// reference-count operations. Actual wake callbacks must run after unlock.
+    pub(crate) fn cancel_waker_snapshot(&self) -> smallvec::SmallVec<[Arc<CancelWaker>; 4]> {
+        let mut snapshot = smallvec::SmallVec::new();
+        let mut push_unique = |candidate: &Arc<CancelWaker>| {
+            if !snapshot
+                .iter()
+                .any(|existing: &Arc<CancelWaker>| existing.will_wake(&candidate.waker))
+            {
+                snapshot.push(Arc::clone(candidate));
+            }
+        };
+
+        if let Some(primary) = &self.cancel_waker {
+            push_unique(primary);
+        }
+        if let Some(untracked) = &self.untracked_cancel_waker {
+            push_unique(untracked);
+        }
+        for registration in &self.cancel_waker_registrations {
+            push_unique(&registration.target);
+        }
+        snapshot
+    }
+
+    /// Atomically detach every cancellation wake target for task completion.
+    /// The returned targets must be dropped after all relevant locks are gone.
+    pub(crate) fn take_cancel_wakers(&mut self) -> smallvec::SmallVec<[Arc<CancelWaker>; 4]> {
+        self.cancel_waker_registry_closed = true;
+        // Allocate before moving any final owner out of the registry. If
+        // allocation unwinds, every arbitrary RawWaker destructor remains
+        // protected by its slot rather than running beneath the Cx lock.
+        let target_count = usize::from(self.cancel_waker.is_some())
+            + usize::from(self.untracked_cancel_waker.is_some())
+            + self.cancel_waker_registrations.len();
+        let mut retired = smallvec::SmallVec::with_capacity(target_count);
+        retired.extend(self.cancel_waker.take());
+        retired.extend(self.untracked_cancel_waker.take());
+        retired.extend(
+            self.cancel_waker_registrations
+                .drain(..)
+                .map(|registration| registration.target),
+        );
+        retired
     }
 
     /// Drains pending fast-path checkpoint accounting into the authoritative

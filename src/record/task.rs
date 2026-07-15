@@ -525,8 +525,26 @@ impl TaskRecord {
         reason: CancelReason,
         cleanup_budget: Budget,
     ) -> bool {
+        let (newly_cancelled, cancel_wakers) =
+            self.request_cancel_with_budget_deferred(reason, cleanup_budget);
+        for waker in cancel_wakers {
+            waker.wake_by_ref();
+        }
+        newly_cancelled
+    }
+
+    /// Mutates cancellation state and returns wake callbacks for post-lock
+    /// dispatch by callers that own a task-table or runtime-state guard.
+    pub(crate) fn request_cancel_with_budget_deferred(
+        &mut self,
+        reason: CancelReason,
+        cleanup_budget: Budget,
+    ) -> (
+        bool,
+        SmallVec<[Arc<crate::types::task_context::CancelWaker>; 4]>,
+    ) {
         if self.state.is_terminal() {
-            return false;
+            return (false, SmallVec::new());
         }
 
         // Update shared state first
@@ -648,20 +666,15 @@ impl TaskRecord {
                 guard.cancel_reason = Some(reason);
             }
         }
-        if let Some(inner) = &self.cx_inner {
-            let waker = {
-                let guard = inner.read();
-                if guard.cancel_requested {
-                    guard.cancel_waker.clone()
-                } else {
-                    None
-                }
-            };
-            if let Some(waker) = waker {
-                waker.wake_by_ref();
+        let cancel_wakers = self.cx_inner.as_ref().map_or_else(SmallVec::new, |inner| {
+            let guard = inner.read();
+            if guard.cancel_requested {
+                guard.cancel_waker_snapshot()
+            } else {
+                SmallVec::new()
             }
-        }
-        result
+        });
+        (result, cancel_wakers)
     }
 
     /// Returns a cancellation witness for the current task state, if cancelled.
