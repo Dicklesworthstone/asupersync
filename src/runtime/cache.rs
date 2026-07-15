@@ -12,7 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::Instant;
+
+const ARTIFACT_HOT_WINDOW_NANOS: u64 = 5 * 60 * 1_000_000_000;
 
 /// Memory pressure snapshot for deterministic lab scenario replay.
 ///
@@ -211,16 +212,20 @@ impl ArtifactCache {
     }
 
     /// Take a memory pressure snapshot of the current cache state.
+    ///
+    /// `now_nanos` must use the same clock domain as timestamps supplied to
+    /// [`Self::put`], [`Self::get`], and [`Self::invalidate_expired`]. Keeping
+    /// the clock explicit makes lab replay deterministic and prevents Unix
+    /// timestamps from being compared with process-relative monotonic time.
     #[must_use]
-    pub fn memory_pressure_snapshot(&self) -> ArtifactMemoryPressureSnapshot {
+    pub fn memory_pressure_snapshot(&self, now_nanos: u64) -> ArtifactMemoryPressureSnapshot {
         // Calculate hot vs cold set sizes
-        let threshold_nanos =
-            (Instant::now().elapsed().as_nanos() as u64).saturating_sub(300_000_000_000); // 5 minutes ago
+        let threshold_nanos = now_nanos.saturating_sub(ARTIFACT_HOT_WINDOW_NANOS);
         let (hot_bytes, cold_bytes) = self.metadata.values().fold((0u64, 0u64), |acc, meta| {
-            if meta.last_accessed_nanos > threshold_nanos {
-                (acc.0 + meta.size_bytes, acc.1)
+            if meta.last_accessed_nanos >= threshold_nanos {
+                (acc.0.saturating_add(meta.size_bytes), acc.1)
             } else {
-                (acc.0, acc.1 + meta.size_bytes)
+                (acc.0, acc.1.saturating_add(meta.size_bytes))
             }
         });
 
@@ -246,7 +251,7 @@ impl ArtifactCache {
             pressure_bps,
             high_pressure,
             duplicate_bytes_avoided: 0, // Would need dedup tracking
-            artifact_count: self.metadata.len() as u32,
+            artifact_count: u32::try_from(self.metadata.len()).unwrap_or(u32::MAX),
         }
     }
 
@@ -286,16 +291,14 @@ impl ArtifactCache {
         self.current_size_bytes
     }
 
-    /// Retrieve a cached artifact by ID.
+    /// Retrieve a cached artifact by ID at `now_nanos` in the cache clock domain.
     /// Returns None if the artifact is not cached or has expired.
-    pub fn get(&mut self, id: &str) -> Option<&[u8]> {
-        let current_time_nanos = self.current_time_nanos();
-
+    pub fn get(&mut self, id: &str, now_nanos: u64) -> Option<&[u8]> {
         // Check if artifact exists and hasn't expired
         if let Some(meta) = self.metadata.get_mut(id) {
-            if meta.expires_at_nanos > current_time_nanos {
+            if meta.expires_at_nanos > now_nanos {
                 // Update access statistics
-                meta.last_accessed_nanos = current_time_nanos;
+                meta.last_accessed_nanos = now_nanos;
                 meta.access_count = meta.access_count.saturating_add(1);
                 self.statistics.total_hits = self.statistics.total_hits.saturating_add(1);
 
@@ -313,9 +316,9 @@ impl ArtifactCache {
         }
     }
 
-    /// Store an artifact in the cache.
+    /// Store an artifact at `now_nanos` in the cache clock domain.
     /// Returns true if successfully cached, false if eviction failed to make space.
-    pub fn put(&mut self, id: String, data: Vec<u8>) -> bool {
+    pub fn put(&mut self, id: String, data: Vec<u8>, now_nanos: u64) -> bool {
         let artifact_size = data.len() as u64;
 
         // Reject impossible admissions before expiry cleanup or eviction so a
@@ -323,13 +326,11 @@ impl ArtifactCache {
         if artifact_size > self.config.max_cache_size_bytes {
             return false;
         }
-        let current_time_nanos = self.current_time_nanos();
-
         // Reclaim expired entries and the prior value before calculating byte
         // capacity. A replacement consumes only its net post-removal size; using
         // the full incoming size while the old value is still resident can evict
         // unrelated artifacts even when the replacement fits exactly.
-        self.invalidate_expired();
+        self.invalidate_expired(now_nanos);
         self.remove_internal(&id);
 
         // Check if we need to evict to make space
@@ -341,10 +342,11 @@ impl ArtifactCache {
         let metadata = ArtifactMetadata {
             id: id.clone(),
             size_bytes: artifact_size,
-            cached_at_nanos: current_time_nanos,
-            last_accessed_nanos: current_time_nanos,
+            cached_at_nanos: now_nanos,
+            last_accessed_nanos: now_nanos,
             access_count: 0,
-            expires_at_nanos: current_time_nanos + (self.config.default_ttl_secs * 1_000_000_000),
+            expires_at_nanos: now_nanos
+                .saturating_add(self.config.default_ttl_secs.saturating_mul(1_000_000_000)),
             numa_node_hint: None, // Could be enhanced with NUMA detection
             priority: 128,        // Default priority
         };
@@ -416,8 +418,7 @@ impl ArtifactCache {
 
     /// Remove all expired artifacts from the cache.
     /// Returns the number of artifacts invalidated.
-    pub fn invalidate_expired(&mut self) -> u32 {
-        let current_time_nanos = self.current_time_nanos();
+    pub fn invalidate_expired(&mut self, now_nanos: u64) -> u32 {
         let mut invalidated_count = 0;
 
         // Collect expired artifact IDs
@@ -425,7 +426,7 @@ impl ArtifactCache {
             .metadata
             .iter()
             .filter_map(|(id, meta)| {
-                if meta.expires_at_nanos <= current_time_nanos {
+                if meta.expires_at_nanos <= now_nanos {
                     Some(id.clone())
                 } else {
                     None
@@ -498,20 +499,13 @@ impl ArtifactCache {
             .saturating_sub(self.current_size_bytes);
         final_available >= needed_bytes
     }
-
-    /// Get current time in nanoseconds for timestamps.
-    fn current_time_nanos(&self) -> u64 {
-        // In production, this would route through Cx capabilities
-        // For lab testing, use a simple implementation
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_NOW_NANOS: u64 = 1_000_000_000_000;
 
     #[test]
     fn artifact_memory_pressure_snapshot_default() {
@@ -554,13 +548,13 @@ mod tests {
         let test_id = "test-artifact-1".to_string();
 
         // Put artifact
-        assert!(cache.put(test_id.clone(), test_data.clone()));
+        assert!(cache.put(test_id.clone(), test_data.clone(), TEST_NOW_NANOS));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.current_size_bytes(), test_data.len() as u64);
         assert!(cache.contains(&test_id));
 
         // Get artifact
-        let retrieved = cache.get(&test_id);
+        let retrieved = cache.get(&test_id, TEST_NOW_NANOS);
         assert!(retrieved.is_some());
         assert_eq!(
             retrieved.expect("cache should contain stored artifact"),
@@ -581,7 +575,7 @@ mod tests {
         let test_id = "test-id".to_string();
 
         // Put and then remove
-        cache.put(test_id.clone(), test_data);
+        cache.put(test_id.clone(), test_data, TEST_NOW_NANOS);
         assert!(cache.contains(&test_id));
         assert!(cache.remove(&test_id));
         assert!(!cache.contains(&test_id));
@@ -602,9 +596,9 @@ mod tests {
         let mut cache = ArtifactCache::new(config);
 
         // Fill cache beyond capacity
-        cache.put("item1".to_string(), vec![0u8; 40]);
-        cache.put("item2".to_string(), vec![1u8; 40]);
-        cache.put("item3".to_string(), vec![2u8; 40]); // This should trigger eviction
+        cache.put("item1".to_string(), vec![0u8; 40], TEST_NOW_NANOS);
+        cache.put("item2".to_string(), vec![1u8; 40], TEST_NOW_NANOS);
+        cache.put("item3".to_string(), vec![2u8; 40], TEST_NOW_NANOS); // This should trigger eviction
 
         // Should have evicted some items to stay under capacity
         assert!(cache.current_size_bytes() <= 100);
@@ -621,10 +615,10 @@ mod tests {
         };
         let mut cache = ArtifactCache::new(config);
 
-        assert!(cache.put("replace".to_string(), vec![1; 50]));
-        assert!(cache.put("peer".to_string(), vec![2; 50]));
+        assert!(cache.put("replace".to_string(), vec![1; 50], TEST_NOW_NANOS));
+        assert!(cache.put("peer".to_string(), vec![2; 50], TEST_NOW_NANOS));
         assert_eq!(cache.current_size_bytes(), 100);
-        assert!(cache.put("replace".to_string(), vec![3; 50]));
+        assert!(cache.put("replace".to_string(), vec![3; 50], TEST_NOW_NANOS));
 
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.current_size_bytes(), 100);
@@ -648,11 +642,11 @@ mod tests {
         };
         let mut cache = ArtifactCache::new(config);
 
-        assert!(cache.put("replace".to_string(), vec![1; 40]));
-        assert!(cache.put("peer".to_string(), vec![2; 50]));
+        assert!(cache.put("replace".to_string(), vec![1; 40], TEST_NOW_NANOS));
+        assert!(cache.put("peer".to_string(), vec![2; 50], TEST_NOW_NANOS));
 
-        assert!(!cache.put("oversized".to_string(), vec![3; 101]));
-        assert!(!cache.put("replace".to_string(), vec![4; 101]));
+        assert!(!cache.put("oversized".to_string(), vec![3; 101], TEST_NOW_NANOS));
+        assert!(!cache.put("replace".to_string(), vec![4; 101], TEST_NOW_NANOS));
 
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.current_size_bytes(), 90);
@@ -674,8 +668,8 @@ mod tests {
         let mut cache = ArtifactCache::default_config();
 
         // Add some artifacts
-        cache.put("item1".to_string(), vec![0u8; 10]);
-        cache.put("item2".to_string(), vec![1u8; 20]);
+        cache.put("item1".to_string(), vec![0u8; 10], TEST_NOW_NANOS);
+        cache.put("item2".to_string(), vec![1u8; 20], TEST_NOW_NANOS);
 
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.current_size_bytes(), 30);
@@ -691,7 +685,7 @@ mod tests {
         let mut cache = ArtifactCache::default_config();
 
         // Get non-existent artifact
-        let result = cache.get("non-existent");
+        let result = cache.get("non-existent", TEST_NOW_NANOS);
         assert!(result.is_none());
 
         let stats = cache.statistics();
@@ -705,13 +699,80 @@ mod tests {
     #[test]
     fn artifact_cache_memory_pressure_snapshot() {
         let cache = ArtifactCache::default_config();
-        let snapshot = cache.memory_pressure_snapshot();
+        let snapshot = cache.memory_pressure_snapshot(TEST_NOW_NANOS);
 
         assert_eq!(snapshot.resident_bytes, 0);
         assert_eq!(snapshot.artifact_count, 0);
         assert_eq!(snapshot.pressure_bps, 0);
         assert_eq!(snapshot.hot_resident_bytes, 0);
         assert_eq!(snapshot.cold_resident_bytes, 0);
+    }
+
+    #[test]
+    fn artifact_cache_snapshot_classifies_hot_cold_and_spill_in_one_clock_domain() {
+        let config = ArtifactCacheConfig {
+            max_cache_size_bytes: 200,
+            ..ArtifactCacheConfig::default()
+        };
+        let mut cache = ArtifactCache::new(config);
+        let cold_time = TEST_NOW_NANOS - ARTIFACT_HOT_WINDOW_NANOS - 1;
+
+        assert!(cache.put("cold".to_string(), vec![0; 40], cold_time));
+        assert!(cache.put("hot".to_string(), vec![1; 60], TEST_NOW_NANOS));
+
+        let snapshot = cache.memory_pressure_snapshot(TEST_NOW_NANOS);
+        assert_eq!(snapshot.resident_bytes, 100);
+        assert_eq!(snapshot.hot_resident_bytes, 60);
+        assert_eq!(snapshot.cold_resident_bytes, 40);
+        assert_eq!(snapshot.spill_eligible_bytes, 40);
+        assert_eq!(snapshot.pressure_bps, 5_000);
+        assert_eq!(snapshot.artifact_count, 2);
+    }
+
+    #[test]
+    fn artifact_cache_snapshot_boundary_and_access_refresh_are_deterministic() {
+        let mut cache = ArtifactCache::default_config();
+        let boundary_time = TEST_NOW_NANOS - ARTIFACT_HOT_WINDOW_NANOS;
+
+        assert!(cache.put("boundary".to_string(), vec![0; 10], boundary_time));
+        assert!(cache.put("older".to_string(), vec![1; 20], boundary_time - 1));
+
+        let before = cache.memory_pressure_snapshot(TEST_NOW_NANOS);
+        assert_eq!(before.hot_resident_bytes, 10);
+        assert_eq!(before.cold_resident_bytes, 20);
+        assert_eq!(
+            cache.memory_pressure_snapshot(TEST_NOW_NANOS),
+            before,
+            "an unchanged explicit clock must produce an identical snapshot"
+        );
+
+        assert_eq!(cache.get("older", TEST_NOW_NANOS), Some(&[1; 20][..]));
+        let after = cache.memory_pressure_snapshot(TEST_NOW_NANOS);
+        assert_eq!(after.hot_resident_bytes, 30);
+        assert_eq!(after.cold_resident_bytes, 0);
+        assert_eq!(after.spill_eligible_bytes, 0);
+
+        let mut zero_clock_cache = ArtifactCache::default_config();
+        assert!(zero_clock_cache.put("zero".to_string(), vec![2; 7], 0));
+        let zero_snapshot = zero_clock_cache.memory_pressure_snapshot(0);
+        assert_eq!(zero_snapshot.hot_resident_bytes, 7);
+        assert_eq!(zero_snapshot.cold_resident_bytes, 0);
+    }
+
+    #[test]
+    fn artifact_cache_expiry_uses_the_explicit_clock_domain() {
+        let config = ArtifactCacheConfig {
+            default_ttl_secs: 1,
+            ..ArtifactCacheConfig::default()
+        };
+        let mut cache = ArtifactCache::new(config);
+        let inserted_at = 5;
+        let expires_at = inserted_at + 1_000_000_000;
+
+        assert!(cache.put("ttl".to_string(), vec![3; 4], inserted_at));
+        assert_eq!(cache.get("ttl", expires_at - 1), Some(&[3; 4][..]));
+        assert_eq!(cache.get("ttl", expires_at), None);
+        assert!(!cache.contains("ttl"));
     }
 
     #[test]
