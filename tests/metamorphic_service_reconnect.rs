@@ -100,11 +100,9 @@ fn delay_bounds_ms(
             (delay / 2, delay)
         }
         JitterStrategy::Decorrelated => {
-            let upper = last_delay_ms
-                .saturating_mul(3)
-                .min(max_delay)
-                .max(base_delay);
-            (base_delay.min(upper), upper)
+            let lower = base_delay.min(max_delay);
+            let upper = last_delay_ms.saturating_mul(3).min(max_delay).max(lower);
+            (lower, upper)
         }
     }
 }
@@ -377,7 +375,6 @@ fn mr_reconnect_attempts_converge_with_backoff() {
         max_retries in arb_retry_count(),
         jitter in arb_jitter_strategy(),
     )| {
-        prop_assume!(max_delay >= base_delay);
         prop_assume!(max_retries > 0);
         prop_assert!(property(base_delay, max_delay, max_retries, jitter));
     });
@@ -434,7 +431,6 @@ fn mr_jitter_bounds_respected() {
         jitter in arb_jitter_strategy(),
         entropy_seed in any::<u64>(),
     )| {
-        prop_assume!(max_delay >= base_delay);
         prop_assume!(max_retries > 0);
         prop_assert!(property(base_delay, max_delay, max_retries, jitter, entropy_seed));
     });

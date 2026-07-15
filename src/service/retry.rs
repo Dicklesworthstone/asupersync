@@ -31,6 +31,31 @@ const RETRY_REQUEST_DOMAIN: u64 = u64::from_le_bytes(*b"retry.rq");
 const RETRY_JITTER_DOMAIN: u64 = u64::from_le_bytes(*b"retry.jt");
 const RETRY_LINEAGE_STEP: u64 = 0x9e37_79b9_7f4a_7c15;
 
+/// Samples uniformly from the inclusive range without modulo bias.
+///
+/// Degenerate ranges deliberately consume no entropy, matching the historical
+/// retry-policy behavior. The full `u64` domain needs its own branch because
+/// its cardinality (`2^64`) is not representable as a `u64`.
+fn sample_inclusive(rng: &mut DetRng, lower: u64, upper: u64) -> u64 {
+    debug_assert!(lower <= upper);
+
+    if lower == upper {
+        return lower;
+    }
+    if lower == 0 && upper == u64::MAX {
+        return rng.next_u64();
+    }
+
+    let span = upper - lower + 1;
+    let reject_below = span.wrapping_neg() % span;
+    loop {
+        let word = rng.next_u64();
+        if word >= reject_below {
+            return lower + word % span;
+        }
+    }
+}
+
 fn derive_retry_lineage(parent: u64, domain: u64, ordinal: u64) -> u64 {
     let ordinal = DetEntropy::mix_seed(ordinal.wrapping_add(RETRY_LINEAGE_STEP));
     DetEntropy::mix_seed(DetEntropy::mix_seed(parent ^ domain) ^ ordinal)
@@ -786,11 +811,7 @@ impl<Request> ExponentialBackoff<Request> {
                             .unwrap_or(u64::MAX),
                     )
                     .min(self.max_delay_ms);
-                if max_delay == 0 {
-                    0
-                } else {
-                    self.jitter_rng.next_u64() % (max_delay + 1)
-                }
+                sample_inclusive(&mut self.jitter_rng, 0, max_delay)
             }
             JitterStrategy::Equal => {
                 // Equal jitter: base/2 + random(0, base/2) where base = base_delay * 2^attempt
@@ -803,23 +824,18 @@ impl<Request> ExponentialBackoff<Request> {
                     )
                     .min(self.max_delay_ms);
                 let half_delay = base_delay / 2;
-                let jitter = if half_delay == 0 {
-                    0
-                } else {
-                    self.jitter_rng.next_u64() % (half_delay + 1)
-                };
+                let jitter = sample_inclusive(&mut self.jitter_rng, 0, half_delay);
                 half_delay + jitter
             }
             JitterStrategy::Decorrelated => {
                 // Decorrelated jitter: random(base_delay, last_delay * 3)
-                let min_delay = self.base_delay_ms;
-                let max_delay = self.last_delay_ms.saturating_mul(3).min(self.max_delay_ms);
-                if max_delay <= min_delay {
-                    min_delay
-                } else {
-                    let range = max_delay - min_delay;
-                    min_delay + (self.jitter_rng.next_u64() % (range + 1))
-                }
+                let min_delay = self.base_delay_ms.min(self.max_delay_ms);
+                let max_delay = self
+                    .last_delay_ms
+                    .saturating_mul(3)
+                    .min(self.max_delay_ms)
+                    .max(min_delay);
+                sample_inclusive(&mut self.jitter_rng, min_delay, max_delay)
             }
         }
     }
@@ -1751,6 +1767,76 @@ mod tests {
             policy, stream_id,
         );
         jitter_sequence(policy, count)
+    }
+
+    #[test]
+    fn inclusive_jitter_sampling_handles_u64_boundaries_without_bias() {
+        init_test("inclusive_jitter_sampling_handles_u64_boundaries_without_bias");
+
+        // This seed's first entropy word is u64::MAX. The literal full
+        // domain accepts it directly, while [0, MAX - 1] maps MAX to zero;
+        // its rejection threshold excludes word zero so zero is not
+        // double-weighted.
+        let max_word_seed = 0x6a2b_5165_0bc9_9dc4;
+        let mut full_domain = DetRng::new(max_word_seed);
+        assert_eq!(sample_inclusive(&mut full_domain, 0, u64::MAX), u64::MAX);
+
+        let mut almost_full_domain = DetRng::new(max_word_seed);
+        assert_eq!(
+            sample_inclusive(&mut almost_full_domain, 0, u64::MAX - 1),
+            0
+        );
+
+        // Degenerate intervals preserve the historical no-consumption
+        // contract, so the following full-domain draw still sees MAX.
+        let mut degenerate = DetRng::new(max_word_seed);
+        assert_eq!(sample_inclusive(&mut degenerate, 17, 17), 17);
+        assert_eq!(sample_inclusive(&mut degenerate, 0, u64::MAX), u64::MAX);
+
+        // For [0, 2^63], seed 42's first word falls below the rejection
+        // threshold and its second word is accepted.
+        let upper = 1_u64 << 63;
+        let span = upper + 1;
+        let reject_below = span.wrapping_neg() % span;
+        let mut oracle = DetRng::new(42);
+        assert!(oracle.next_u64() < reject_below);
+        assert!(oracle.next_u64() >= reject_below);
+
+        let mut rejection = DetRng::new(42);
+        assert_eq!(
+            sample_inclusive(&mut rejection, 0, upper),
+            2_308_845_766_745_129_662
+        );
+
+        crate::test_complete!("inclusive_jitter_sampling_handles_u64_boundaries_without_bias");
+    }
+
+    #[test]
+    fn retry_jitter_respects_extreme_caps_and_equal_rounding() {
+        init_test("retry_jitter_respects_extreme_caps_and_equal_rounding");
+
+        let full = ExponentialBackoff::<i32>::new(1, u64::MAX, JitterStrategy::Full)
+            .with_max_delay(u64::MAX)
+            .with_jitter_seed(0x6a2b_5165_0bc9_9dc4);
+        assert_eq!(jitter_sequence(full, 1), vec![u64::MAX]);
+
+        for (base, cap, expected) in [(30_001, 30_000, 30_000), (1, 0, 0)] {
+            let decorrelated =
+                ExponentialBackoff::<i32>::new(3, base, JitterStrategy::Decorrelated)
+                    .with_max_delay(cap)
+                    .with_jitter_seed(0x71d3_0021_cafe_beef);
+            assert_eq!(jitter_sequence(decorrelated, 3), vec![expected; 3]);
+        }
+
+        // Equal jitter intentionally rounds an odd capped delay down before
+        // adding jitter from [0, half]; it never widens the range to the odd
+        // upper endpoint.
+        let equal = ExponentialBackoff::<i32>::new(5, 3, JitterStrategy::Equal)
+            .with_max_delay(3)
+            .with_jitter_seed(42);
+        assert_eq!(jitter_sequence(equal, 5), vec![1, 2, 1, 1, 1]);
+
+        crate::test_complete!("retry_jitter_respects_extreme_caps_and_equal_rounding");
     }
 
     #[test]
