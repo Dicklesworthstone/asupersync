@@ -490,6 +490,9 @@ impl Buf for BytesCursor {
             "buffer underflow: need {len} bytes, have {}",
             self.remaining()
         );
+        if len == 0 {
+            return Bytes::new();
+        }
         let out = self.inner.slice(self.pos..self.pos + len);
         self.pos += len;
         out
@@ -776,6 +779,73 @@ mod tests {
         assert_eq!(cursor.get_ref(), &b);
         let inner = cursor.into_inner();
         assert_eq!(&inner[..], b"hello");
+    }
+
+    struct DefaultCopyCursor(BytesCursor);
+
+    impl Buf for DefaultCopyCursor {
+        fn remaining(&self) -> usize {
+            self.0.remaining()
+        }
+
+        fn chunk(&self) -> &[u8] {
+            self.0.chunk()
+        }
+
+        fn advance(&mut self, cnt: usize) {
+            self.0.advance(cnt);
+        }
+    }
+
+    #[test]
+    fn bytes_cursor_zero_copy_empty_past_end_matches_default() {
+        let cases = [
+            ("static", Bytes::from_static(b"abc")),
+            ("shared", Bytes::copy_from_slice(b"abc")),
+            ("empty", Bytes::new()),
+        ];
+
+        for (backing, bytes) in cases {
+            let end = bytes.len();
+            for position in [end, end.saturating_add(1), usize::MAX] {
+                let mut optimized = BytesCursor::new(bytes.clone());
+                optimized.set_position(position);
+                let mut default = DefaultCopyCursor(BytesCursor::new(bytes.clone()));
+                default.0.set_position(position);
+
+                let expected = default.copy_to_bytes(0);
+                let actual = optimized.copy_to_bytes(0);
+
+                assert_eq!(actual, expected, "backing={backing}, position={position}");
+                assert!(actual.is_empty(), "backing={backing}, position={position}");
+                assert_eq!(
+                    optimized.position(),
+                    position,
+                    "backing={backing}, position={position}"
+                );
+                assert_eq!(
+                    default.0.position(),
+                    position,
+                    "default backing={backing}, position={position}"
+                );
+                assert_eq!(optimized.remaining(), 0);
+                assert!(optimized.chunk().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn bytes_cursor_zero_copy_positive_behavior_is_unchanged() {
+        let mut cursor = Bytes::copy_from_slice(b"abcd").reader();
+        cursor.set_position(1);
+        assert_eq!(&cursor.copy_to_bytes(2)[..], b"bc");
+        assert_eq!(cursor.position(), 3);
+
+        cursor.set_position(usize::MAX);
+        let underflow =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cursor.copy_to_bytes(1)));
+        assert!(underflow.is_err());
+        assert_eq!(cursor.position(), usize::MAX);
     }
 
     #[test]
