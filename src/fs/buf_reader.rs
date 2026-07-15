@@ -177,4 +177,34 @@ mod tests {
         crate::assert_with_log!(capacity == 32, "capacity", 32, capacity);
         crate::test_complete!("test_buf_reader_capacity_delegates");
     }
+
+    #[test]
+    fn test_oversized_consume_delegates_without_replay() {
+        init_test("test_oversized_consume_delegates_without_replay");
+        let data: &[u8] = b"abcdef";
+        let mut reader = BufReader::with_capacity(3, data);
+        let waker = std::task::Waker::noop().clone();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = match Pin::new(&mut reader).poll_fill_buf(&mut cx) {
+            Poll::Ready(Ok(bytes)) => bytes.to_vec(),
+            other => panic!("expected first buffer, got {other:?}"),
+        };
+        assert_eq!(first, b"abc");
+        Pin::new(&mut reader).consume(1);
+        assert_eq!(reader.buffer(), b"bc");
+
+        let consume = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Pin::new(&mut reader).consume(usize::MAX);
+        }));
+        assert!(consume.is_ok());
+        assert!(reader.buffer().is_empty());
+
+        let next = match Pin::new(&mut reader).poll_fill_buf(&mut cx) {
+            Poll::Ready(Ok(bytes)) => bytes.to_vec(),
+            other => panic!("expected next buffer, got {other:?}"),
+        };
+        assert_eq!(next, b"def");
+        crate::test_complete!("test_oversized_consume_delegates_without_replay");
+    }
 }

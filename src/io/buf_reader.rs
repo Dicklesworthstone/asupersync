@@ -174,7 +174,7 @@ impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
         let this = self.get_mut();
-        this.pos = std::cmp::min(this.pos + amt, this.cap);
+        this.pos = this.pos.saturating_add(amt).min(this.cap);
     }
 }
 
@@ -389,6 +389,36 @@ mod tests {
         let empty = reader.buffer().is_empty();
         crate::assert_with_log!(empty, "buffer empty", true, empty);
         crate::test_complete!("buf_reader_consume");
+    }
+
+    #[test]
+    fn oversized_consume_clamps_without_replaying_buffered_bytes() {
+        init_test("oversized_consume_clamps_without_replaying_buffered_bytes");
+        let data: &[u8] = b"abcdef";
+        let mut reader = BufReader::with_capacity(3, data);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = match Pin::new(&mut reader).poll_fill_buf(&mut cx) {
+            Poll::Ready(Ok(bytes)) => bytes.to_vec(),
+            other => panic!("expected first buffer, got {other:?}"),
+        };
+        assert_eq!(first, b"abc");
+        Pin::new(&mut reader).consume(1);
+        assert_eq!(reader.buffer(), b"bc");
+
+        let consume = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Pin::new(&mut reader).consume(usize::MAX);
+        }));
+        assert!(consume.is_ok());
+        assert!(reader.buffer().is_empty());
+
+        let next = match Pin::new(&mut reader).poll_fill_buf(&mut cx) {
+            Poll::Ready(Ok(bytes)) => bytes.to_vec(),
+            other => panic!("expected next buffer, got {other:?}"),
+        };
+        assert_eq!(next, b"def");
+        crate::test_complete!("oversized_consume_clamps_without_replaying_buffered_bytes");
     }
 
     #[test]
