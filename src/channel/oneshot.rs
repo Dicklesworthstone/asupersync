@@ -2006,6 +2006,7 @@ mod tests {
         let (tx, mut rx) = channel::<u8>();
         let wake_count = Arc::new(AtomicUsize::new(0));
         let drop_count = Arc::new(AtomicUsize::new(0));
+        let close_wakes = Arc::new(AtomicUsize::new(0));
         {
             let mut state = rx.inner.lock();
             state.waker = Some(Waker::from(Arc::new(PanicOnWakeWaker {
@@ -2013,11 +2014,15 @@ mod tests {
                 drops: Arc::clone(&drop_count),
             })));
             state.waker_id = Some(16);
+            state.receiver_closed_waker = Some(counting_waker(Arc::clone(&close_wakes)));
         }
 
-        assert_eq!(tx.send(&cx, 37), Ok(()));
+        let send_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tx.send(&cx, 37)));
+        assert!(matches!(send_result, Ok(Ok(()))));
         assert_eq!(wake_count.load(Ordering::SeqCst), 1);
         assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+        assert_eq!(close_wakes.load(Ordering::SeqCst), 0);
         {
             let state = rx.inner.lock();
             assert!(!state.permit_outstanding);
@@ -2025,6 +2030,7 @@ mod tests {
             assert_eq!(state.closed_reason, None);
         }
         assert_eq!(rx.try_recv(), Ok(37));
+        assert_eq!(close_wakes.load(Ordering::SeqCst), 0);
 
         let (tx, mut rx) = channel::<()>();
         let panic_wakes = Arc::new(AtomicUsize::new(0));
