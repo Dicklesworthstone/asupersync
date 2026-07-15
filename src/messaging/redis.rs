@@ -3236,6 +3236,14 @@ impl<'a> PubSubControlGuard<'a> {
         self.pubsub.read_next_event(cx).await
     }
 
+    async fn read_ping_event(
+        &mut self,
+        cx: &Cx,
+        expected_payload: Option<&[u8]>,
+    ) -> Result<PubSubEvent, RedisError> {
+        self.pubsub.read_ping_event(cx, expected_payload).await
+    }
+
     fn push_pending_event(&mut self, event: PubSubEvent) {
         self.pubsub.push_pending_event(event);
     }
@@ -3476,22 +3484,10 @@ impl RedisPubSub {
         let items = match value {
             RespValue::Array(Some(items)) => items,
             RespValue::Push(items) => items,
-            // RESP3 replies to PING on a subscribed connection with a top-level
-            // simple string `+PONG` (argument-less) or a bulk string echoing
-            // the argument — NOT the RESP2 `["pong", payload]` array. Accept
-            // both here: otherwise a liveness `ping()` hits the error arm and
-            // `PubSubControlGuard::drop` poisons and shuts down the very
-            // connection it was checking (the client always negotiates HELLO 3).
-            RespValue::SimpleString(ref s) if s.eq_ignore_ascii_case("pong") => {
-                return Ok(PubSubEvent::Pong(None));
-            }
-            RespValue::BulkString(Some(payload)) => {
-                return Ok(PubSubEvent::Pong(Some(payload)));
-            }
-            other => {
-                return Err(RedisError::Protocol(format!(
-                    "pubsub expected array or push event, got {other:?}"
-                )));
+            _ => {
+                return Err(RedisError::Protocol(
+                    "pubsub expected an array or push event".to_string(),
+                ));
             }
         };
 
@@ -3518,6 +3514,79 @@ impl RedisPubSub {
             Err(RedisError::Protocol(format!(
                 "unsupported pubsub event kind: {kind}"
             )))
+        }
+    }
+
+    fn parse_ping_event(
+        value: RespValue,
+        expected_payload: Option<&[u8]>,
+    ) -> Result<PubSubEvent, RedisError> {
+        match value {
+            RespValue::SimpleString(pong) if pong == "PONG" => {
+                if expected_payload.is_none() {
+                    Ok(PubSubEvent::Pong(None))
+                } else {
+                    Err(RedisError::Protocol(
+                        "pubsub PING response did not echo the requested payload".to_string(),
+                    ))
+                }
+            }
+            RespValue::BulkString(Some(actual)) => match expected_payload {
+                Some(expected) if actual == expected => Ok(PubSubEvent::Pong(Some(actual))),
+                _ => Err(RedisError::Protocol(
+                    "pubsub PING response payload did not match the request".to_string(),
+                )),
+            },
+            RespValue::Array(Some(items)) => {
+                if let [
+                    RespValue::BulkString(Some(kind)),
+                    RespValue::BulkString(Some(actual)),
+                ] = items.as_slice()
+                    && kind == b"pong"
+                {
+                    let matches_request = match expected_payload {
+                        None => actual.is_empty(),
+                        Some(expected) => actual == expected,
+                    };
+                    if matches_request {
+                        return Ok(PubSubEvent::Pong(Some(actual.clone())));
+                    }
+                    return Err(RedisError::Protocol(
+                        "pubsub PING response payload did not match the request".to_string(),
+                    ));
+                }
+
+                let event = Self::parse_event(RespValue::Array(Some(items))).map_err(|_| {
+                    RedisError::Protocol(
+                        "pubsub PING received a malformed aggregate response".to_string(),
+                    )
+                })?;
+                match event {
+                    PubSubEvent::Message(_) => Ok(event),
+                    PubSubEvent::Pong(_) => Err(RedisError::Protocol(
+                        "pubsub PING received a non-canonical aggregate response".to_string(),
+                    )),
+                    PubSubEvent::Subscription { .. } => Err(RedisError::Protocol(
+                        "pubsub PING received unexpected subscription control traffic".to_string(),
+                    )),
+                }
+            }
+            value @ RespValue::Push(_) => {
+                let event = Self::parse_event(value).map_err(|_| {
+                    RedisError::Protocol("pubsub PING received a malformed push event".to_string())
+                })?;
+                match event {
+                    PubSubEvent::Message(_) => Ok(event),
+                    PubSubEvent::Pong(_) | PubSubEvent::Subscription { .. } => {
+                        Err(RedisError::Protocol(
+                            "pubsub PING received unexpected control push traffic".to_string(),
+                        ))
+                    }
+                }
+            }
+            _ => Err(RedisError::Protocol(
+                "pubsub PING expected a PONG reply or interleaved event".to_string(),
+            )),
         }
     }
 
@@ -3548,6 +3617,15 @@ impl RedisPubSub {
     async fn read_next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
         let response = self.conn.read_pubsub_response(cx).await?;
         Self::parse_event(response)
+    }
+
+    async fn read_ping_event(
+        &mut self,
+        cx: &Cx,
+        expected_payload: Option<&[u8]>,
+    ) -> Result<PubSubEvent, RedisError> {
+        let response = self.conn.read_pubsub_response(cx).await?;
+        Self::parse_ping_event(response, expected_payload)
     }
 
     /// Subscribe to one or more channels.
@@ -3778,16 +3856,21 @@ impl RedisPubSub {
         // liveness check cannot silently drop real messages. Cap the buffer
         // to prevent unbounded growth under high publish throughput.
         loop {
-            match guard.read_next_event(cx).await? {
+            match guard.read_ping_event(cx, payload).await? {
                 PubSubEvent::Pong(_) => {
                     guard.commit();
                     return Ok(());
                 }
-                event @ (PubSubEvent::Message(_) | PubSubEvent::Subscription { .. }) => {
+                event @ PubSubEvent::Message(_) => {
                     guard.push_pending_event(event);
                     // Beyond the cap, interleaved messages are dropped to
                     // bound memory.  This is a defensive limit — in normal
                     // operation PONG arrives within a few round-trips.
+                }
+                PubSubEvent::Subscription { .. } => {
+                    return Err(RedisError::Protocol(
+                        "pubsub PING received unexpected subscription control traffic".to_string(),
+                    ));
                 }
             }
         }
@@ -3838,6 +3921,19 @@ impl RedisPubSub {
 /// Redis push/array event parser without widening the production API.
 pub fn parse_pubsub_event_for_fuzz(value: RespValue) -> Result<PubSubEvent, RedisError> {
     RedisPubSub::parse_event(value)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+/// Test-internals hook exposing request-contextual Pub/Sub PING parsing.
+///
+/// Intended for structure-aware fuzz targets that validate exact binary echo
+/// handling without widening the production API.
+pub fn parse_pubsub_ping_event_for_fuzz(
+    value: RespValue,
+    expected_payload: Option<&[u8]>,
+) -> Result<PubSubEvent, RedisError> {
+    RedisPubSub::parse_ping_event(value, expected_payload)
 }
 
 fn decode_tracking_invalidation_keys(value: RespValue) -> Result<Option<Vec<Vec<u8>>>, RedisError> {
@@ -8354,22 +8450,151 @@ mod tests {
     }
 
     #[test]
-    fn pubsub_parse_resp3_simple_pong_event() {
-        // RESP3 replies to argument-less PING with `+PONG`, not the RESP2
-        // `["pong"]` array. Must not hit the error arm (which poisons the conn).
-        let event = RedisPubSub::parse_event(RespValue::SimpleString("PONG".to_string()))
-            .expect("RESP3 +PONG should parse as a pong event");
-        assert_eq!(event, PubSubEvent::Pong(None));
+    fn pubsub_parse_event_rejects_contextless_scalar_pong() {
+        for value in [
+            RespValue::SimpleString("PONG".to_string()),
+            RespValue::BulkString(Some(b"echo".to_vec())),
+        ] {
+            assert!(
+                matches!(
+                    RedisPubSub::parse_event(value),
+                    Err(RedisError::Protocol(_))
+                ),
+                "scalar PONG replies require pending PING request context"
+            );
+        }
     }
 
     #[test]
-    fn pubsub_parse_resp3_bulk_pong_payload_event() {
-        // RESP3 replies to `PING payload` on a subscribed connection with a
-        // top-level bulk string echoing the payload.
-        let event =
-            RedisPubSub::parse_event(RespValue::BulkString(Some(b"hello".to_vec())))
-                .expect("RESP3 bulk pong payload should parse");
-        assert_eq!(event, PubSubEvent::Pong(Some(b"hello".to_vec())));
+    fn pubsub_parse_ping_resp3_binary_echo() {
+        let payload = [0x00, 0xff, b'\r', b'\n'];
+        let event = RedisPubSub::parse_ping_event(
+            RespValue::BulkString(Some(payload.to_vec())),
+            Some(&payload),
+        )
+        .expect("RESP3 should echo the exact binary PING payload");
+        assert_eq!(event, PubSubEvent::Pong(Some(payload.to_vec())));
+    }
+
+    #[test]
+    fn pubsub_parse_ping_empty_payload_shapes() {
+        let no_payload =
+            RedisPubSub::parse_ping_event(RespValue::SimpleString("PONG".to_string()), None)
+                .expect("argument-less RESP3 PING should accept +PONG");
+        assert_eq!(no_payload, PubSubEvent::Pong(None));
+
+        let explicit_empty =
+            RedisPubSub::parse_ping_event(RespValue::BulkString(Some(Vec::new())), Some(&[]))
+                .expect("explicit empty RESP3 PING payload should require an empty bulk echo");
+        assert_eq!(explicit_empty, PubSubEvent::Pong(Some(Vec::new())));
+
+        assert!(
+            RedisPubSub::parse_ping_event(RespValue::BulkString(Some(Vec::new())), None).is_err(),
+            "argument-less RESP3 PING must not accept a bulk response"
+        );
+        assert!(
+            RedisPubSub::parse_ping_event(RespValue::SimpleString("PONG".to_string()), Some(&[]),)
+                .is_err(),
+            "explicit empty RESP3 PING payload must not accept +PONG"
+        );
+    }
+
+    #[test]
+    fn pubsub_parse_ping_resp2_echo_shapes() {
+        let no_payload = RedisPubSub::parse_ping_event(
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"pong".to_vec())),
+                RespValue::BulkString(Some(Vec::new())),
+            ])),
+            None,
+        )
+        .expect("argument-less subscribed RESP2 PING should carry an empty echo");
+        assert_eq!(no_payload, PubSubEvent::Pong(Some(Vec::new())));
+
+        let payload = [0x00, 0xff, b'\r', b'\n'];
+        let binary = RedisPubSub::parse_ping_event(
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"pong".to_vec())),
+                RespValue::BulkString(Some(payload.to_vec())),
+            ])),
+            Some(&payload),
+        )
+        .expect("subscribed RESP2 PING should echo binary payloads exactly");
+        assert_eq!(binary, PubSubEvent::Pong(Some(payload.to_vec())));
+
+        assert!(
+            RedisPubSub::parse_ping_event(
+                RespValue::Array(Some(vec![RespValue::BulkString(Some(b"pong".to_vec()))])),
+                None,
+            )
+            .is_err(),
+            "subscribed RESP2 PING must include the canonical payload field"
+        );
+    }
+
+    #[test]
+    fn pubsub_parse_ping_rejects_echo_mismatch() {
+        let expected = b"sensitive-request-payload";
+        let responses = [
+            RespValue::BulkString(Some(b"sensitive-request-payloae".to_vec())),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"pong".to_vec())),
+                RespValue::BulkString(Some(b"sensitive-request-payloae".to_vec())),
+            ])),
+            RespValue::SimpleString("PONG".to_string()),
+            RespValue::SimpleString("pong".to_string()),
+            RespValue::BulkString(None),
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(expected.to_vec()))])),
+            RespValue::Array(Some(vec![
+                RespValue::SimpleString("pong".to_string()),
+                RespValue::SimpleString("sensitive-request-payload".to_string()),
+            ])),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"PONG".to_vec())),
+                RespValue::BulkString(Some(expected.to_vec())),
+            ])),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"pong".to_vec())),
+                RespValue::SimpleString("sensitive-request-payload".to_string()),
+            ])),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"pong".to_vec())),
+                RespValue::BulkString(Some(expected.to_vec())),
+                RespValue::BulkString(Some(b"trailing".to_vec())),
+            ])),
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"pong".to_vec())),
+                RespValue::BulkString(Some(expected.to_vec())),
+            ]),
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"channel".to_vec())),
+                RespValue::Integer(1),
+            ]),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"channel".to_vec())),
+                RespValue::Integer(1),
+            ])),
+            RespValue::Push(vec![RespValue::Array(Some(vec![RespValue::BulkString(
+                Some(expected.to_vec()),
+            )]))]),
+        ];
+        for response in responses {
+            let err = RedisPubSub::parse_ping_event(response, Some(expected))
+                .expect_err("mismatched PING echo must fail closed");
+            assert!(matches!(err, RedisError::Protocol(_)));
+            assert!(
+                !err.to_string().contains("sensitive-request"),
+                "PING validation diagnostics must not expose payload bytes"
+            );
+        }
+
+        assert!(
+            RedisPubSub::parse_ping_event(RespValue::BulkString(Some(expected.to_vec())), None,)
+                .is_err(),
+            "argument-less PING must reject an unsolicited bulk payload"
+        );
     }
 
     #[test]
@@ -8993,6 +9218,8 @@ mod tests {
 
     #[test]
     fn pubsub_resp3_ping_preserves_interleaved_messages_and_connection() {
+        const PING_PAYLOAD: &[u8] = b"\x00\xff\r\n";
+
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");
         let server = thread::spawn(move || {
@@ -9031,9 +9258,9 @@ mod tests {
             stream.flush().expect("flush interleaved message and pong");
 
             let ping_with_payload = read_resp_frame(&mut stream);
-            assert_resp_command(ping_with_payload, &[b"PING", b"probe"]);
+            assert_resp_command(ping_with_payload, &[b"PING", PING_PAYLOAD]);
             stream
-                .write_all(&RespValue::BulkString(Some(b"probe".to_vec())).encode())
+                .write_all(&RespValue::BulkString(Some(PING_PAYLOAD.to_vec())).encode())
                 .expect("write payload pong");
             stream.flush().expect("flush payload pong");
         });
@@ -9071,13 +9298,132 @@ mod tests {
                             })
                         );
                         pubsub
-                            .ping(&cx, Some(b"probe"))
+                            .ping(&cx, Some(PING_PAYLOAD))
                             .await
                             .expect("same RESP3 connection should remain reusable");
                     })
                 },
             )
             .await;
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn pubsub_resp3_ping_rejects_mismatched_echo_and_poisons_connection() {
+        const EXPECTED: &[u8] = b"\x00\xff\r\n";
+        const WRONG: &[u8] = b"\x00\xfe\r\n";
+
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            write_hello3_ok(&mut stream);
+            let subscribe = read_resp_frame(&mut stream);
+            assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
+            let subscribe_ack = RespValue::Push(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::Integer(1),
+            ])
+            .encode();
+            stream
+                .write_all(&subscribe_ack)
+                .expect("write subscribe ack");
+            stream.flush().expect("flush subscribe ack");
+
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING", EXPECTED]);
+            let mut outbound = Vec::new();
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"message".to_vec())),
+                RespValue::BulkString(Some(b"chan".to_vec())),
+                RespValue::BulkString(Some(b"must-be-cleared".to_vec())),
+            ])
+            .encode_into(&mut outbound);
+            RespValue::BulkString(Some(WRONG.to_vec())).encode_into(&mut outbound);
+            stream
+                .write_all(&outbound)
+                .expect("write interleaved message and wrong echo");
+            stream
+                .flush()
+                .expect("flush interleaved message and wrong echo");
+
+            let mut probe = [0u8; 1];
+            match stream.read(&mut probe) {
+                Ok(0) => closed_tx.send(()).expect("signal transport closed"),
+                Ok(n) => panic!("failed PING left socket usable; read {n} byte(s)"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::NotConnected
+                    ) =>
+                {
+                    closed_tx.send(()).expect("signal transport closed");
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("failed PING left the connection open");
+                }
+                Err(error) => panic!("probe failed PING transport: {error}"),
+            }
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut pubsub = RedisPubSub::connect(&cx, config)
+                .await
+                .expect("connect pubsub client");
+            pubsub
+                .subscribe(&cx, &["chan"])
+                .await
+                .expect("subscribe should succeed");
+
+            let channels_before = pubsub.channels().to_vec();
+            let patterns_before = pubsub.patterns().to_vec();
+            let err = assert_completes_within(
+                Duration::from_secs(2),
+                "redis RESP3 pubsub PING rejects mismatched echo",
+                || Box::pin(pubsub.ping(&cx, Some(EXPECTED))),
+            )
+            .await
+            .expect_err("wrong echo must fail closed");
+            assert!(matches!(err, RedisError::Protocol(_)));
+
+            assert_eq!(pubsub.channels(), channels_before.as_slice());
+            assert_eq!(pubsub.patterns(), patterns_before.as_slice());
+            assert!(pubsub.pending_events.is_empty());
+            assert!(pubsub.poisoned);
+
+            closed_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("server should observe guard shutdown before client drop");
+
+            let err = pubsub
+                .next_event(&cx)
+                .await
+                .expect_err("poisoned connection must reject event reads");
+            assert!(
+                matches!(err, RedisError::Protocol(ref message) if message.contains("invalidated")),
+                "unexpected poisoned connection error: {err:?}"
+            );
         });
 
         server.join().expect("server join");
@@ -9117,8 +9463,7 @@ mod tests {
                 RespValue::BulkString(Some(b"stale".to_vec())),
             ]))
             .encode_into(&mut outbound);
-            RespValue::Array(Some(vec![RespValue::BulkString(Some(b"pong".to_vec()))]))
-                .encode_into(&mut outbound);
+            RespValue::SimpleString("PONG".to_string()).encode_into(&mut outbound);
             first_stream
                 .write_all(&outbound)
                 .expect("write buffered stale message and pong");

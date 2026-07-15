@@ -28,8 +28,9 @@ use asupersync::messaging::redis::{
     RedisProtocolLimits, RedisResp3NonPubSubPush, RespValue, decode_resp_value_for_fuzz,
     parse_acl_for_fuzz, parse_client_kill_for_fuzz, parse_client_tracking_push_for_fuzz,
     parse_cluster_command_for_fuzz, parse_latency_for_fuzz, parse_pubsub_event_for_fuzz,
-    parse_resp3_non_pubsub_push_for_fuzz, parse_script_eval_for_fuzz, parse_slowlog_for_fuzz,
-    parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
+    parse_pubsub_ping_event_for_fuzz, parse_resp3_non_pubsub_push_for_fuzz,
+    parse_script_eval_for_fuzz, parse_slowlog_for_fuzz, parse_zadd_for_fuzz,
+    parse_zrangebyscore_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -473,6 +474,172 @@ fn exercise_structured_resp3_pushes(data: &[u8]) {
             );
         }
     }
+}
+
+fn exercise_pubsub_ping_echo_validation(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+
+    assert!(
+        parse_pubsub_event_for_fuzz(RespValue::SimpleString("PONG".to_string())).is_err(),
+        "generic pubsub parsing must reject scalar PONG without request context"
+    );
+    assert!(
+        parse_pubsub_event_for_fuzz(RespValue::BulkString(Some(payload.to_vec()))).is_err(),
+        "generic pubsub parsing must reject scalar bulk replies without request context"
+    );
+
+    let no_payload =
+        parse_pubsub_ping_event_for_fuzz(RespValue::SimpleString("PONG".to_string()), None)
+            .expect("argument-less RESP3 PING should accept +PONG");
+    assert_eq!(no_payload, PubSubEvent::Pong(None));
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(
+            RespValue::SimpleString("PONG".to_string()),
+            Some(payload),
+        )
+        .is_err(),
+        "payload PING must reject +PONG without an echo"
+    );
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(RespValue::SimpleString("pong".to_string()), None)
+            .is_err(),
+        "argument-less RESP3 PING must reject a non-canonical simple-string reply"
+    );
+
+    let exact = parse_pubsub_ping_event_for_fuzz(
+        RespValue::BulkString(Some(payload.to_vec())),
+        Some(payload),
+    )
+    .expect("RESP3 PING should accept an exact binary echo");
+    assert_eq!(exact, PubSubEvent::Pong(Some(payload.to_vec())));
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(RespValue::BulkString(Some(payload.to_vec())), None,)
+            .is_err(),
+        "argument-less RESP3 PING must reject a bulk response"
+    );
+
+    let mut mismatch = payload.to_vec();
+    if let Some(first) = mismatch.first_mut() {
+        *first ^= 1;
+    } else {
+        mismatch.push(0);
+    }
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(
+            RespValue::BulkString(Some(mismatch.clone())),
+            Some(payload),
+        )
+        .is_err(),
+        "RESP3 PING must reject a mismatched binary echo"
+    );
+
+    let binary_canary = [0x00, 0xff, b'\r', b'\n'];
+    let binary = parse_pubsub_ping_event_for_fuzz(
+        RespValue::BulkString(Some(binary_canary.to_vec())),
+        Some(&binary_canary),
+    )
+    .expect("RESP3 PING should preserve NUL, non-UTF8, and CRLF bytes");
+    assert_eq!(binary, PubSubEvent::Pong(Some(binary_canary.to_vec())));
+    let mut wrong_canary = binary_canary;
+    wrong_canary[1] ^= 1;
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(
+            RespValue::BulkString(Some(wrong_canary.to_vec())),
+            Some(&binary_canary),
+        )
+        .is_err(),
+        "RESP3 PING must reject a one-bit binary echo mismatch"
+    );
+
+    let explicit_empty =
+        parse_pubsub_ping_event_for_fuzz(RespValue::BulkString(Some(Vec::new())), Some(&[]))
+            .expect("explicit empty RESP3 payload should accept an empty bulk echo");
+    assert_eq!(explicit_empty, PubSubEvent::Pong(Some(Vec::new())));
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(RespValue::BulkString(None), Some(payload)).is_err(),
+        "PING must reject a null bulk echo"
+    );
+
+    let resp2_pong = |echo: Option<&[u8]>| {
+        let mut items = vec![RespValue::BulkString(Some(b"pong".to_vec()))];
+        if let Some(echo) = echo {
+            items.push(RespValue::BulkString(Some(echo.to_vec())));
+        }
+        RespValue::Array(Some(items))
+    };
+    let resp2_exact = parse_pubsub_ping_event_for_fuzz(resp2_pong(Some(payload)), Some(payload))
+        .expect("subscribed RESP2 PING should accept an exact binary echo");
+    assert_eq!(resp2_exact, PubSubEvent::Pong(Some(payload.to_vec())));
+    let resp2_no_payload = parse_pubsub_ping_event_for_fuzz(resp2_pong(Some(&[])), None)
+        .expect("argument-less subscribed RESP2 PING should accept an empty echo");
+    assert_eq!(resp2_no_payload, PubSubEvent::Pong(Some(Vec::new())));
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(resp2_pong(Some(&mismatch)), Some(payload)).is_err(),
+        "subscribed RESP2 PING must reject a mismatched echo"
+    );
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(resp2_pong(None), None).is_err(),
+        "subscribed RESP2 PING must reject a missing payload field"
+    );
+    for non_canonical in [
+        RespValue::Array(Some(vec![
+            RespValue::SimpleString("pong".to_string()),
+            RespValue::SimpleString(String::from_utf8_lossy(payload).into_owned()),
+        ])),
+        RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"PONG".to_vec())),
+            RespValue::BulkString(Some(payload.to_vec())),
+        ])),
+        RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"pong".to_vec())),
+            RespValue::SimpleString(String::from_utf8_lossy(payload).into_owned()),
+        ])),
+        RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"pong".to_vec())),
+            RespValue::BulkString(Some(payload.to_vec())),
+            RespValue::BulkString(Some(b"trailing".to_vec())),
+        ])),
+    ] {
+        assert!(
+            parse_pubsub_ping_event_for_fuzz(non_canonical, Some(payload)).is_err(),
+            "subscribed RESP2 PING must reject non-canonical element types, casing, or arity"
+        );
+    }
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"pong".to_vec())),
+                RespValue::BulkString(Some(payload.to_vec())),
+            ]),
+            Some(payload),
+        )
+        .is_err(),
+        "RESP3 PING must reject an invented push-shaped PONG reply"
+    );
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"channel".to_vec())),
+                RespValue::Integer(1),
+            ]),
+            Some(payload),
+        )
+        .is_err(),
+        "RESP3 PING must reject unexpected subscription control traffic"
+    );
+    assert!(
+        parse_pubsub_ping_event_for_fuzz(
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"subscribe".to_vec())),
+                RespValue::BulkString(Some(b"channel".to_vec())),
+                RespValue::Integer(1),
+            ])),
+            Some(payload),
+        )
+        .is_err(),
+        "RESP2 PING must reject unexpected subscription control traffic"
+    );
 }
 
 fn exercise_client_tracking_push_parser(data: &[u8]) {
@@ -1700,6 +1867,9 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 9: Structured RESP3 pubsub push notifications
     exercise_structured_resp3_pushes(data);
+
+    // Request-contextual companion to Test 9: exact Pub/Sub PING echoes
+    exercise_pubsub_ping_echo_validation(data);
 
     // Test 10: RESP3 streamed string/aggregate parser seam
     exercise_resp3_streamed_types(data);
