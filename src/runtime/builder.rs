@@ -274,7 +274,7 @@ impl BrowserHostServicesContract {
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct DeadlineMonitorHostService {
-    shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
+    shutdown: Option<std::sync::mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -285,6 +285,20 @@ impl DeadlineMonitorHostService {
             shutdown: None,
             thread: None,
         }
+    }
+}
+
+/// Wait for either the next deadline-monitor scan interval or shutdown.
+///
+/// Returns `true` only when the full interval elapsed and the caller should
+/// perform a scan. A shutdown signal or sender disconnect terminates the loop.
+fn wait_for_deadline_monitor_tick(
+    shutdown: &std::sync::mpsc::Receiver<()>,
+    check_interval: Duration,
+) -> bool {
+    match shutdown.recv_timeout(check_interval) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => true,
+        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => false,
     }
 }
 
@@ -372,15 +386,13 @@ impl NativeThreadHostServices {
         state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
     ) -> DeadlineMonitorHostService {
         use crate::runtime::deadline_monitor::DeadlineMonitor;
-        use std::sync::atomic::AtomicBool;
 
         let monitor_config = match config.deadline_monitor {
             Some(ref mc) if mc.enabled => mc,
             _ => return DeadlineMonitorHostService::disabled(),
         };
 
-        let dm_shutdown = Arc::new(AtomicBool::new(false));
-        let dm_shutdown_clone = Arc::clone(&dm_shutdown);
+        let (dm_shutdown, dm_shutdown_rx) = std::sync::mpsc::channel();
         let dm_state = Arc::clone(state);
         let check_interval = monitor_config.check_interval;
         let mut monitor = DeadlineMonitor::new(monitor_config.clone());
@@ -394,11 +406,7 @@ impl NativeThreadHostServices {
         let thread = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                while !dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(check_interval);
-                    if dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
+                while wait_for_deadline_monitor_tick(&dm_shutdown_rx, check_interval) {
                     let guard = dm_state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3154,6 +3162,9 @@ impl DeadlineMonitoringBuilder {
     }
 
     /// Set how often the monitor should scan for warnings.
+    ///
+    /// A zero interval is normalized to the default [`MonitorConfig`] interval
+    /// when the runtime is constructed, preventing an unbounded scan loop.
     #[must_use]
     pub fn check_interval(mut self, interval: Duration) -> Self {
         self.config.check_interval = interval;
@@ -3319,6 +3330,11 @@ impl Runtime {
         host_services: &dyn RuntimeHostServices,
     ) -> Result<Self, Error> {
         config.normalize();
+        if let Some(monitor) = config.deadline_monitor.as_mut()
+            && monitor.check_interval.is_zero()
+        {
+            monitor.check_interval = MonitorConfig::default().check_interval;
+        }
         if let Some(mapping) = config.worker_cohort_map.as_ref() {
             mapping
                 .validate_for_workers(config.worker_threads)
@@ -3856,8 +3872,8 @@ struct RuntimeInner {
     _spawn_liveness: Option<Arc<()>>,
     /// Blocking pool for synchronous operations.
     blocking_pool: Option<crate::runtime::blocking_pool::BlockingPool>,
-    /// Shutdown signal for the deadline monitor thread.
-    deadline_monitor_shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Shutdown sender for the deadline monitor thread.
+    deadline_monitor_shutdown: Option<std::sync::mpsc::Sender<()>>,
     /// Deadline monitor background thread handle.
     deadline_monitor_thread: Option<std::thread::JoinHandle<()>>,
     /// Per-runtime monotonic counter for request-scoped task IDs.
@@ -4264,7 +4280,7 @@ impl Drop for RuntimeInner {
 
         // Signal deadline monitor to stop, then join its thread.
         if let Some(shutdown) = self.deadline_monitor_shutdown.take() {
-            shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = shutdown.send(());
         }
         if let Some(thread) = self.deadline_monitor_thread.take() {
             let _ = thread.join();
@@ -4600,6 +4616,85 @@ mod tests {
         ) -> DeadlineMonitorHostService {
             self.deadline_monitor_calls.fetch_add(1, Ordering::Relaxed);
             NativeThreadHostServices::start_deadline_monitor(config, state)
+        }
+    }
+
+    struct CoordinatedDeadlineMonitorHostServices {
+        started: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        rescue_shutdown: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    }
+
+    impl CoordinatedDeadlineMonitorHostServices {
+        fn new() -> (Self, std::sync::mpsc::Receiver<()>) {
+            let (started, started_rx) = std::sync::mpsc::channel();
+            (
+                Self {
+                    started: std::sync::Mutex::new(Some(started)),
+                    rescue_shutdown: std::sync::Mutex::new(None),
+                },
+                started_rx,
+            )
+        }
+
+        fn rescue_shutdown(&self) {
+            if let Some(shutdown) = self
+                .rescue_shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = shutdown.send(());
+            }
+        }
+    }
+
+    impl RuntimeHostServices for CoordinatedDeadlineMonitorHostServices {
+        fn kind(&self) -> RuntimeHostServicesKind {
+            RuntimeHostServicesKind::NativeStdThread
+        }
+
+        fn spawn_workers(
+            &self,
+            _runtime: &Arc<RuntimeInner>,
+            _workers: Vec<ThreeLaneWorker>,
+        ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
+            Ok(Vec::new())
+        }
+
+        fn start_deadline_monitor(
+            &self,
+            config: &RuntimeConfig,
+            _state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        ) -> DeadlineMonitorHostService {
+            let monitor_config = match config.deadline_monitor {
+                Some(ref monitor) if monitor.enabled => monitor,
+                _ => return DeadlineMonitorHostService::disabled(),
+            };
+
+            let (shutdown, shutdown_rx) = std::sync::mpsc::channel();
+            *self
+                .rescue_shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shutdown.clone());
+            let started = self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("coordinated monitor should start exactly once");
+            let check_interval = monitor_config.check_interval;
+            let thread = std::thread::Builder::new()
+                .name("coordinated-deadline-monitor".to_string())
+                .spawn(move || {
+                    let _ = started.send(());
+                    let _ = wait_for_deadline_monitor_tick(&shutdown_rx, check_interval);
+                })
+                .expect("coordinated deadline monitor thread should start");
+
+            DeadlineMonitorHostService {
+                shutdown: Some(shutdown),
+                thread: Some(thread),
+            }
         }
     }
 
@@ -5460,6 +5555,91 @@ mod tests {
     }
 
     #[test]
+    fn runtime_builder_normalizes_zero_deadline_monitor_interval() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::current_thread()
+            .deadline_monitoring(|monitor| monitor.enabled(true).check_interval(Duration::ZERO))
+            .build()
+            .expect("runtime builder should normalize a zero monitor interval");
+
+        let monitor = runtime
+            .inner
+            .config
+            .deadline_monitor
+            .as_ref()
+            .expect("deadline monitoring should remain enabled");
+        assert_eq!(
+            monitor.check_interval,
+            MonitorConfig::default().check_interval,
+            "builder configuration should normalize zero to the safe default interval"
+        );
+    }
+
+    #[test]
+    fn runtime_with_config_normalizes_zero_deadline_monitor_interval() {
+        init_test_logging();
+
+        let mut config = RuntimeConfig::default();
+        config.worker_threads = 1;
+        config.deadline_monitor = Some(MonitorConfig {
+            check_interval: Duration::ZERO,
+            enabled: true,
+            ..MonitorConfig::default()
+        });
+
+        let runtime = Runtime::with_config(config)
+            .expect("direct runtime configuration should normalize a zero monitor interval");
+        let monitor = runtime
+            .inner
+            .config
+            .deadline_monitor
+            .as_ref()
+            .expect("deadline monitoring should remain enabled");
+        assert_eq!(
+            monitor.check_interval,
+            MonitorConfig::default().check_interval,
+            "direct configuration should normalize zero at the common constructor"
+        );
+    }
+
+    #[test]
+    fn runtime_drop_interrupts_deadline_monitor_wait() {
+        init_test_logging();
+
+        let (host_services, started) = CoordinatedDeadlineMonitorHostServices::new();
+        let mut config = RuntimeConfig::default();
+        config.worker_threads = 1;
+        config.deadline_monitor = Some(MonitorConfig {
+            check_interval: Duration::from_secs(60),
+            enabled: true,
+            ..MonitorConfig::default()
+        });
+
+        let runtime =
+            Runtime::with_config_and_platform(config, None, None, None, None, &host_services)
+                .expect("runtime should start with the coordinated monitor host");
+        started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("coordinated monitor should enter its long wait promptly");
+
+        let (drop_done_tx, drop_done_rx) = std::sync::mpsc::channel();
+        let drop_thread = std::thread::spawn(move || {
+            drop(runtime);
+            let _ = drop_done_tx.send(());
+        });
+
+        if let Err(error) = drop_done_rx.recv_timeout(Duration::from_secs(1)) {
+            host_services.rescue_shutdown();
+            let _ = drop_thread.join();
+            panic!("runtime drop did not interrupt the 60-second monitor wait: {error}");
+        }
+        drop_thread
+            .join()
+            .expect("runtime drop thread should exit cleanly");
+    }
+
+    #[test]
     fn native_deadline_monitor_releases_runtime_state_before_warning_callback() {
         init_test_logging();
 
@@ -5519,7 +5699,7 @@ mod tests {
             .expect("deadline warning callback should fire");
 
         if let Some(shutdown) = service.shutdown.as_ref() {
-            shutdown.store(true, Ordering::Relaxed);
+            let _ = shutdown.send(());
         }
         if let Some(thread) = service.thread {
             thread.join().expect("deadline monitor thread should stop");
