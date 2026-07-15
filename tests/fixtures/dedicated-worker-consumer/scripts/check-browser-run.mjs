@@ -446,12 +446,84 @@ try {
     `worker storage exercise must use indexeddb, got ${bootstrap.storageExercise?.backend ?? "missing"}`,
   );
   assert(
+    bootstrap.storageExercise?.subviewWriteCompacted === true,
+    "worker storage exercise must compact typed-array subviews before IndexedDB writes",
+  );
+  assert(
+    bootstrap.storageExercise?.subviewStoredBackingBytes === 2,
+    `worker storage subview backing must retain exactly 2 bytes, got ${bootstrap.storageExercise?.subviewStoredBackingBytes ?? "missing"}`,
+  );
+  assert(
+    bootstrap.storageExercise?.legacySubviewRawBackingObserved === true,
+    "worker storage exercise must inject and observe an oversized legacy DataView backing",
+  );
+  assert(
+    bootstrap.storageExercise?.legacySubviewReadCompacted === true,
+    "worker storage exercise must compact legacy typed-array subviews on IndexedDB reads",
+  );
+  assert(
+    bootstrap.storageExercise?.spoofedSubviewWriteCompacted === true,
+    "worker storage exercise must ignore typed-array subclass view accessors",
+  );
+  assert(
+    bootstrap.storageExercise?.shadowedSubviewWriteCompacted === true,
+    "worker storage exercise must ignore shadowed typed-array view properties",
+  );
+  assert(
+    bootstrap.storageExercise?.proxiedSubviewFailedClosed === true,
+    "worker storage exercise must reject proxied typed-array views without writing",
+  );
+  assert(
+    bootstrap.storageExercise?.fullArrayBufferStoredExactly === true,
+    "worker storage exercise must preserve full-span ArrayBuffer bytes",
+  );
+  assert(
+    bootstrap.storageExercise?.fullUint8ArrayStoredExactly === true,
+    "worker storage exercise must preserve full-span Uint8Array bytes",
+  );
+  assert(
+    bootstrap.storageExercise?.dataViewWriteCompacted === true,
+    "worker storage exercise must compact DataView backing bytes",
+  );
+  assert(
+    bootstrap.storageExercise?.spoofedDataViewWriteCompacted === true,
+    "worker storage exercise must ignore DataView subclass accessors",
+  );
+  assert(
+    bootstrap.storageExercise?.emptySubviewWriteCompacted === true,
+    "worker storage exercise must compact empty subviews to empty backing",
+  );
+  assert(
+    bootstrap.artifactExercise?.artifactSubviewStoredCompacted === true,
+    "worker artifact retention must store only logical typed-array subview bytes",
+  );
+  assert(
+    bootstrap.artifactExercise?.artifactSubviewStoredBackingBytes === 2,
+    `worker artifact subview backing must retain exactly 2 bytes, got ${bootstrap.artifactExercise?.artifactSubviewStoredBackingBytes ?? "missing"}`,
+  );
+  assert(
+    bootstrap.artifactExercise?.artifactSubviewExportCompacted === true,
+    "worker artifact export must not retain bytes outside persisted typed-array subviews",
+  );
+  assert(
     bootstrap.artifactExercise?.downloadFailureCode === "ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED",
     `unexpected worker artifact download failure code: ${bootstrap.artifactExercise?.downloadFailureCode ?? "missing"}`,
   );
   assert(
     bootstrap.artifactExercise?.quotaFailureReason === "quota_exceeded",
     `unexpected worker artifact quota failure reason: ${bootstrap.artifactExercise?.quotaFailureReason ?? "missing"}`,
+  );
+  assert(
+    bootstrap.artifactExercise?.quotaSubviewStoredCompacted === true,
+    "worker artifact quota accounting must match physical retained subview bytes",
+  );
+  assert(
+    bootstrap.artifactExercise?.quotaReportedLogicalBytes === true,
+    "worker artifact quota accounting must report exactly 600 logical bytes",
+  );
+  assert(
+    bootstrap.artifactExercise?.quotaSubviewStoredBackingBytes === 600,
+    `worker quota subview backing must retain exactly 600 bytes, got ${bootstrap.artifactExercise?.quotaSubviewStoredBackingBytes ?? "missing"}`,
   );
 
   const scenarioInventory = buildScenarioInventory(

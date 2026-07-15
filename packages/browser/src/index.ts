@@ -3804,7 +3804,139 @@ function normalizeBrowserStorageKey(key: string): string {
 function normalizeBrowserStorageValue(
   value: BrowserStorageValue,
 ): Uint8Array {
-  return normalizeWebTransportPayload(value);
+  if (ARRAY_BUFFER_IS_VIEW(value)) {
+    const { buffer, byteLength, byteOffset } = browserStorageViewParts(value);
+    return new Uint8Array(buffer, byteOffset, byteLength);
+  }
+
+  if (ARRAY_BUFFER_BYTE_LENGTH_GETTER) {
+    try {
+      Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER, value, []);
+      return new Uint8Array(value as ArrayBuffer);
+    } catch {
+      // Fall through to the explicit byte-array case.
+    }
+  }
+
+  if (
+    Array.isArray(value)
+    && value.every((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255)
+  ) {
+    return Uint8Array.from(value);
+  }
+
+  throw new TypeError(
+    "browser storage values must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[]",
+  );
+}
+
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "buffer",
+)?.get;
+const TYPED_ARRAY_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "byteOffset",
+)?.get;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  "byteLength",
+)?.get;
+const DATA_VIEW_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  "buffer",
+)?.get;
+const DATA_VIEW_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  "byteOffset",
+)?.get;
+const DATA_VIEW_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  "byteLength",
+)?.get;
+const ARRAY_BUFFER_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
+  ArrayBuffer.prototype,
+  "byteLength",
+)?.get;
+const ARRAY_BUFFER_IS_VIEW = ArrayBuffer.isView;
+const UINT8_ARRAY_SET = Uint8Array.prototype.set;
+
+function browserStorageViewParts(value: ArrayBufferView): {
+  buffer: ArrayBufferLike;
+  byteLength: number;
+  byteOffset: number;
+} {
+  if (
+    TYPED_ARRAY_BUFFER_GETTER
+    && TYPED_ARRAY_BYTE_OFFSET_GETTER
+    && TYPED_ARRAY_BYTE_LENGTH_GETTER
+  ) {
+    try {
+      return {
+        buffer: Reflect.apply(TYPED_ARRAY_BUFFER_GETTER, value, []) as ArrayBufferLike,
+        byteLength: Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []) as number,
+        byteOffset: Reflect.apply(TYPED_ARRAY_BYTE_OFFSET_GETTER, value, []) as number,
+      };
+    } catch {
+      // DataView is an ArrayBuffer view but not a TypedArray.
+    }
+  }
+
+  if (
+    DATA_VIEW_BUFFER_GETTER
+    && DATA_VIEW_BYTE_OFFSET_GETTER
+    && DATA_VIEW_BYTE_LENGTH_GETTER
+  ) {
+    try {
+      return {
+        buffer: Reflect.apply(DATA_VIEW_BUFFER_GETTER, value, []) as ArrayBufferLike,
+        byteLength: Reflect.apply(DATA_VIEW_BYTE_LENGTH_GETTER, value, []) as number,
+        byteOffset: Reflect.apply(DATA_VIEW_BYTE_OFFSET_GETTER, value, []) as number,
+      };
+    } catch {
+      // Fall through to the branded-view rejection below.
+    }
+  }
+
+  throw new TypeError("browser storage value has an unsupported ArrayBuffer view brand");
+}
+
+function compactIndexedDbBytes(value: Uint8Array): Uint8Array {
+  if (
+    !ARRAY_BUFFER_IS_VIEW(value)
+    || !TYPED_ARRAY_BUFFER_GETTER
+    || !TYPED_ARRAY_BYTE_OFFSET_GETTER
+    || !TYPED_ARRAY_BYTE_LENGTH_GETTER
+    || !ARRAY_BUFFER_BYTE_LENGTH_GETTER
+  ) {
+    throw new TypeError("IndexedDB byte value must be a genuine typed-array view");
+  }
+
+  const buffer = Reflect.apply(TYPED_ARRAY_BUFFER_GETTER, value, []) as ArrayBufferLike;
+  const byteOffset = Reflect.apply(TYPED_ARRAY_BYTE_OFFSET_GETTER, value, []) as number;
+  const byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []) as number;
+  let arrayBufferByteLength: number | null = null;
+  try {
+    arrayBufferByteLength = Reflect.apply(
+      ARRAY_BUFFER_BYTE_LENGTH_GETTER,
+      buffer,
+      [],
+    ) as number;
+  } catch {
+    // SharedArrayBuffer is not an IndexedDB-storage value. Copy its visible
+    // bytes into an ordinary ArrayBuffer rather than retaining shared backing.
+  }
+
+  if (byteOffset === 0 && byteLength === arrayBufferByteLength) {
+    return value;
+  }
+
+  // IndexedDB structured cloning retains a typed-array view's entire backing
+  // buffer. Copy subviews so bytes outside the logical value are never stored.
+  const compacted = new Uint8Array(byteLength);
+  Reflect.apply(UINT8_ARRAY_SET, compacted, [value]);
+  return compacted;
 }
 
 function encodeIndexedDbStorageKey(
@@ -5879,9 +6011,8 @@ export class BrowserStorage {
           if (result === undefined || result === null) {
             return null;
           }
-          return result instanceof Uint8Array
-            ? result
-            : new Uint8Array(result as ArrayBufferLike);
+          const bytes = normalizeBrowserStorageValue(result as BrowserStorageValue);
+          return compactIndexedDbBytes(bytes);
         } finally {
           database.close();
         }
@@ -5941,7 +6072,7 @@ export class BrowserStorage {
             "readwrite",
           );
           store.put(
-            normalizedValue,
+            compactIndexedDbBytes(normalizedValue),
             encodeIndexedDbStorageKey(
               normalizedNamespace,
               normalizedKey,
@@ -6005,7 +6136,7 @@ export class BrowserStorage {
             normalizedKey,
             this.globalObject,
           );
-          const existing = await awaitIndexedDbRequest(store.get(storageKey));
+          const existing = await awaitIndexedDbRequest(store.getKey(storageKey));
           store.delete(storageKey);
           await awaitIndexedDbTransaction(transaction);
           return existing !== undefined && existing !== null;
@@ -7542,9 +7673,8 @@ export class BrowserServiceWorkerBrokerStore {
           if (result === undefined || result === null) {
             return null;
           }
-          return result instanceof Uint8Array
-            ? result
-            : new Uint8Array(result as ArrayBufferLike);
+          const bytes = normalizeBrowserStorageValue(result as BrowserStorageValue);
+          return compactIndexedDbBytes(bytes);
         } finally {
           database.close();
         }
@@ -7598,7 +7728,7 @@ export class BrowserServiceWorkerBrokerStore {
             "readwrite",
           );
           store.put(
-            value,
+            compactIndexedDbBytes(value),
             encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
           );
           await awaitIndexedDbTransaction(transaction);
@@ -7652,7 +7782,7 @@ export class BrowserServiceWorkerBrokerStore {
             key,
             this.globalObject,
           );
-          const existing = await awaitIndexedDbRequest(store.get(storageKey));
+          const existing = await awaitIndexedDbRequest(store.getKey(storageKey));
           store.delete(storageKey);
           await awaitIndexedDbTransaction(transaction);
           return existing !== undefined && existing !== null;
