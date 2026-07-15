@@ -3,9 +3,9 @@
   "generated_by": "golden_output benchmark (bd-1e2if.2)",
   "checksums": {
     "budget/combine_chain": {
-      "output_hash": "5e1e3107921c7072b6d2492792e27a3292bf30a6b876173a1aca00fe556f7a6a",
-      "git_sha": "ecbc1813e7b00087e69c31689d0e56ad2a55174a",
-      "generated_at": "1772144546Z"
+      "output_hash": "dea7579c0a3114a21fb0eb6a3cc65bfac78cfb60cc5862257b70cf51c2f3fa4a",
+      "git_sha": "5512c3bcbc71538447e8a3c3254ce603d59947d7",
+      "generated_at": "1784075622Z"
     },
     "budget/deadline_check_matrix": {
       "output_hash": "304c3aa66be027d22bef5012a1510b97f2e83158424a03e9919a1317fe1310f4",
