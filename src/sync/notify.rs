@@ -105,6 +105,25 @@ impl WaiterSlab {
         }
     }
 
+    /// Ensures the next [`WaiterSlab::insert`] cannot allocate after its
+    /// caller moves a `Waker` into the new entry.
+    #[inline]
+    fn reserve_for_insert(&mut self) {
+        // Tail shrinking deliberately leaves stale free-slot records behind.
+        // Discard only records that insert() would also skip; any remaining
+        // record can be reused without growing entries.
+        while self
+            .free_slots
+            .last()
+            .is_some_and(|free| free.index > self.entries.len())
+        {
+            self.free_slots.pop();
+        }
+        if self.free_slots.is_empty() {
+            self.entries.reserve(1);
+        }
+    }
+
     /// Insert a waiter entry, reusing a free slot if available.
     ///
     /// Returns `(slot_index, slot_epoch)`. The caller (a `Notified`
@@ -155,13 +174,17 @@ impl WaiterSlab {
 
     /// Remove a waiter entry by index, returning its slot to the free list.
     #[inline]
-    fn remove(&mut self, index: usize) {
+    fn remove(&mut self, index: usize) -> Option<Waker> {
+        let mut retired_waker = None;
         if index < self.entries.len() {
+            // Reserve before taking the Waker so allocation unwind leaves its
+            // payload in the slab instead of destroying it under the mutex.
+            self.free_slots.reserve(1);
             let next_epoch = self.entries[index].slot_epoch.wrapping_add(1);
             if self.entries[index].waker.is_some() {
                 self.active -= 1;
             }
-            self.entries[index].waker = None;
+            retired_waker = self.entries[index].waker.take();
             self.entries[index].notified = false;
             self.free_slots.push(FreeSlot { index, next_epoch });
         }
@@ -178,6 +201,8 @@ impl WaiterSlab {
             // Stale `free_slots` indices (>= self.entries.len()) are harmlessly
             // ignored and discarded by `insert()` during its pop loop.
         }
+
+        retired_waker
     }
 
     /// Count active waiters (those with a waker set).  O(1) via maintained counter.
@@ -621,33 +646,48 @@ impl Notified<'_> {
             return self.mark_done();
         }
 
-        // Register as a waiter.
-        let mut waiters = self.notify.waiters.lock();
+        // A custom RawWaker clone may re-enter this Notify or panic. Prepare
+        // it before locking, then re-check every readiness condition below.
+        let mut incoming_waker = Some(cx.waker().clone());
+        let ready = {
+            let mut waiters = self.notify.waiters.lock();
 
-        // Re-check conditions under waiter lock to close races with concurrent notifiers.
-        let current_gen = self.notify.generation.load(Ordering::Acquire);
-        if current_gen != observed_generation {
-            drop(waiters);
-            return self.mark_done();
+            // Re-check conditions under waiter lock to close races with concurrent notifiers.
+            let current_gen = self.notify.generation.load(Ordering::Acquire);
+            if current_gen != observed_generation || self.try_consume_stored_notification() {
+                // Commit completion before an unused Waker payload is retired:
+                // its destructor is arbitrary user code and may panic.
+                self.state = NotifiedState::Done;
+                true
+            } else {
+                // Reserve before moving the Waker so allocation unwind cannot
+                // destroy its payload while the waiter mutex is held.
+                waiters.reserve_for_insert();
+                let (index, slot_epoch) = waiters.insert(WaiterEntry {
+                    waker: Some(
+                        incoming_waker
+                            .take()
+                            .expect("Notify registration waker must be available"),
+                    ),
+                    notified: false,
+                    generation: observed_generation,
+                    broadcast_covered_peer: false,
+                    slot_epoch: 0, // overwritten by insert()
+                });
+                self.waiter_index = Some((index, slot_epoch));
+                self.state = NotifiedState::Waiting;
+                false
+            }
+        };
+
+        // An unused clone can own arbitrary safe Drop state. Retire it only
+        // after the waiter mutex has been released and state is committed.
+        drop(incoming_waker);
+        if ready {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
         }
-
-        if self.try_consume_stored_notification() {
-            drop(waiters);
-            return self.mark_done();
-        }
-
-        let (index, slot_epoch) = waiters.insert(WaiterEntry {
-            waker: Some(cx.waker().clone()),
-            notified: false,
-            generation: observed_generation,
-            broadcast_covered_peer: false,
-            slot_epoch: 0, // overwritten by insert()
-        });
-        self.waiter_index = Some((index, slot_epoch));
-        self.state = NotifiedState::Waiting;
-        drop(waiters);
-
-        Poll::Pending
     }
 
     #[inline]
@@ -657,60 +697,71 @@ impl Notified<'_> {
         let gen_changed = current_gen != self.initial_generation;
 
         if let Some((index, slot_epoch)) = self.waiter_index {
-            let mut waiters = self.notify.waiters.lock();
+            // Avoid cloning on the already-observed generation-completion
+            // path. Otherwise clone before locking so custom RawWaker code
+            // cannot re-enter the waiter mutex.
+            let mut incoming_waker = (!gen_changed).then(|| cx.waker().clone());
+            let mut retired_waker = None;
+            let completed = {
+                let mut waiters = self.notify.waiters.lock();
 
-            // Re-check generation under lock if it wasn't already changed
-            let is_gen_changed = if gen_changed {
-                true
-            } else {
-                let new_gen = self.notify.generation.load(Ordering::Acquire);
-                new_gen != self.initial_generation
+                // Re-check generation under lock if it wasn't already changed.
+                let is_gen_changed = gen_changed
+                    || self.notify.generation.load(Ordering::Acquire) != self.initial_generation;
+
+                // br-asupersync-bu4r7l: verify the slot still belongs to us
+                // before reading or removing. If the slot was freed and
+                // reused by a different waiter, the epoch will not match
+                // and we must abandon our recorded index without touching
+                // the foreign entry. Such an abandonment is treated as
+                // "this future is done" — the caller will see no spurious
+                // wakeup and the new occupant is left intact.
+                let slot_owned_by_us = index < waiters.entries.len()
+                    && waiters.entries[index].slot_epoch == slot_epoch;
+
+                if slot_owned_by_us {
+                    let entry_notified = waiters.entries[index].notified;
+
+                    if is_gen_changed || entry_notified {
+                        retired_waker = waiters.remove(index);
+                        self.waiter_index = None;
+                        self.state = NotifiedState::Done;
+                        true
+                    } else {
+                        // Replace ownership under the lock, but defer destruction
+                        // of the prior or unused Waker until after unlocking.
+                        match &mut waiters.entries[index].waker {
+                            Some(existing) if existing.will_wake(cx.waker()) => {}
+                            Some(existing) => {
+                                retired_waker = Some(std::mem::replace(
+                                    existing,
+                                    incoming_waker
+                                        .take()
+                                        .expect("Notify replacement waker must be available"),
+                                ));
+                            }
+                            None => {
+                                unreachable!(
+                                    "waker is never None while notified is false for a live Notified future"
+                                );
+                            }
+                        }
+                        false
+                    }
+                } else {
+                    // Slot was reused by a different waiter — our entry is
+                    // gone. Treat as completed (we cannot prove our wakeup
+                    // didn't fire and were processed by some other path).
+                    self.waiter_index = None;
+                    self.state = NotifiedState::Done;
+                    true
+                }
             };
 
-            // br-asupersync-bu4r7l: verify the slot still belongs to us
-            // before reading or removing. If the slot was freed and
-            // reused by a different waiter, the epoch will not match
-            // and we must abandon our recorded index without touching
-            // the foreign entry. Such an abandonment is treated as
-            // "this future is done" — the caller will see no spurious
-            // wakeup and the new occupant is left intact.
-            let slot_owned_by_us =
-                index < waiters.entries.len() && waiters.entries[index].slot_epoch == slot_epoch;
-
-            if slot_owned_by_us {
-                let entry_notified = waiters.entries[index].notified;
-
-                if is_gen_changed {
-                    waiters.remove(index);
-                    self.waiter_index = None;
-                    drop(waiters);
-                    return self.mark_done();
-                }
-
-                if entry_notified {
-                    waiters.remove(index);
-                    drop(waiters);
-                    self.waiter_index = None;
-                    return self.mark_done();
-                }
-
-                // Update waker while we have the lock, but only if it changed.
-                match &mut waiters.entries[index].waker {
-                    Some(existing) if existing.will_wake(cx.waker()) => {}
-                    Some(existing) => existing.clone_from(cx.waker()),
-                    None => {
-                        unreachable!(
-                            "waker is never None while notified is false for a live Notified future"
-                        );
-                    }
-                }
-            } else {
-                // Slot was reused by a different waiter — our entry is
-                // gone. Treat as completed (we cannot prove our wakeup
-                // didn't fire and were processed by some other path).
-                self.waiter_index = None;
-                drop(waiters);
-                return self.mark_done();
+            drop(retired_waker);
+            drop(incoming_waker);
+            if completed {
+                return Poll::Ready(());
             }
         } else if gen_changed {
             return self.mark_done();
@@ -766,7 +817,7 @@ impl Drop for Notified<'_> {
                 let notified_generation = entry.generation;
                 let broadcast_covered_peer = entry.broadcast_covered_peer;
 
-                waiters.remove(index);
+                let retired_waker = waiters.remove(index);
 
                 if was_notified {
                     let was_broadcast_notify = notified_generation != self.initial_generation;
@@ -774,6 +825,8 @@ impl Drop for Notified<'_> {
                         // A broadcast already covered this waiter, even if an earlier
                         // notify_one had already taken its waker. Do not mint a
                         // replacement notify_one token on cancellation.
+                        drop(waiters);
+                        drop(retired_waker);
                         return;
                     }
 
@@ -788,6 +841,12 @@ impl Drop for Notified<'_> {
                     } else {
                         self.notify.pass_baton(waiters);
                     }
+                    // Baton state and any selected wake are committed before a
+                    // retired payload destructor is allowed to run or panic.
+                    drop(retired_waker);
+                } else {
+                    drop(waiters);
+                    drop(retired_waker);
                 }
             }
         }
@@ -808,9 +867,9 @@ mod tests {
     use crate::runtime::yield_now;
     use crate::test_utils::init_test_logging;
     use futures_lite::future::block_on;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use std::sync::{Arc, Weak};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -858,6 +917,172 @@ mod tests {
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct NotifyWakerDropProbe {
+        notify: Weak<Notify>,
+        drops: Arc<AtomicUsize>,
+        unlocked_drops: Arc<AtomicUsize>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for NotifyWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for NotifyWakerDropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(notify) = self.notify.upgrade()
+                && notify.waiters.try_lock().is_some()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn notify_waker_drop_probe(
+        notify: &Arc<Notify>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(NotifyWakerDropProbe {
+            notify: Arc::downgrade(notify),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
+    }
+
+    #[test]
+    fn notified_waker_replacement_retires_old_payload_after_unlock() {
+        init_test("notified_waker_replacement_retires_old_payload_after_unlock");
+        let notify = Arc::new(Notify::new());
+        let (waker, drops, unlocked_drops) = notify_waker_drop_probe(&notify);
+        let mut notified = notify.notified();
+
+        assert!(poll_with_waker(&mut notified, &waker).is_pending());
+        let (index, slot_epoch) = notified
+            .waiter_index
+            .expect("pending Notified must record its waiter slot");
+        {
+            let waiters = notify.waiters.lock();
+            assert_eq!(waiters.entries.len(), 1);
+            assert_eq!(waiters.active, 1);
+            assert_eq!(waiters.entries[index].slot_epoch, slot_epoch);
+        }
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        assert!(poll_with_waker(&mut notified, Waker::noop()).is_pending());
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(notified.waiter_index, Some((index, slot_epoch)));
+        {
+            let waiters = notify.waiters.lock();
+            assert_eq!(waiters.entries.len(), 1);
+            assert_eq!(waiters.active, 1);
+            assert_eq!(waiters.entries[index].slot_epoch, slot_epoch);
+            assert!(
+                waiters.entries[index]
+                    .waker
+                    .as_ref()
+                    .is_some_and(|queued| queued.will_wake(Waker::noop()))
+            );
+        }
+
+        drop(notified);
+        assert_eq!(notify.waiter_count(), 0);
+        assert!(notify.waiters.lock().entries.is_empty());
+        crate::test_complete!("notified_waker_replacement_retires_old_payload_after_unlock");
+    }
+
+    #[test]
+    fn notified_drop_retires_waker_payload_after_unlock() {
+        init_test("notified_drop_retires_waker_payload_after_unlock");
+        let notify = Arc::new(Notify::new());
+        let (waker, drops, unlocked_drops) = notify_waker_drop_probe(&notify);
+        let mut notified = notify.notified();
+
+        assert!(poll_with_waker(&mut notified, &waker).is_pending());
+        assert_eq!(notify.waiter_count(), 1);
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        drop(notified);
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(notify.waiter_count(), 0);
+        assert!(notify.waiters.lock().entries.is_empty());
+        crate::test_complete!("notified_drop_retires_waker_payload_after_unlock");
+    }
+
+    #[test]
+    fn notified_generation_completion_retires_waker_payload_after_unlock() {
+        init_test("notified_generation_completion_retires_waker_payload_after_unlock");
+        let notify = Arc::new(Notify::new());
+        let (waker, drops, unlocked_drops) = notify_waker_drop_probe(&notify);
+        let mut notified = notify.notified();
+
+        assert!(poll_with_waker(&mut notified, &waker).is_pending());
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        // Model the real notify_waiters interleaving where generation advances
+        // before the broadcaster obtains the waiter mutex.
+        notify.generation.fetch_add(1, Ordering::Release);
+        assert!(poll_with_waker(&mut notified, Waker::noop()).is_ready());
+
+        assert_eq!(notified.state, NotifiedState::Done);
+        assert_eq!(notified.waiter_index, None);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(notify.waiter_count(), 0);
+        assert!(notify.waiters.lock().entries.is_empty());
+        drop(notified);
+        crate::test_complete!("notified_generation_completion_retires_waker_payload_after_unlock");
+    }
+
+    #[test]
+    fn notified_reuses_full_inline_hole_without_spilling() {
+        init_test("notified_reuses_full_inline_hole_without_spilling");
+        let notify = Notify::new();
+        let mut notified: Vec<_> = (0..4).map(|_| notify.notified()).collect();
+        for future in &mut notified {
+            assert!(poll_once(future).is_pending());
+        }
+        {
+            let waiters = notify.waiters.lock();
+            assert_eq!(waiters.entries.len(), 4);
+            assert_eq!(waiters.active, 4);
+            assert!(!waiters.entries.spilled());
+        }
+
+        let (freed_index, freed_epoch) = notified[1]
+            .waiter_index
+            .expect("pending Notified must record its waiter slot");
+        drop(notified.remove(1));
+
+        let mut replacement = notify.notified();
+        assert!(poll_once(&mut replacement).is_pending());
+        assert_eq!(
+            replacement.waiter_index,
+            Some((freed_index, freed_epoch.wrapping_add(1)))
+        );
+        {
+            let waiters = notify.waiters.lock();
+            assert_eq!(waiters.entries.len(), 4);
+            assert_eq!(waiters.active, 4);
+            assert!(!waiters.entries.spilled());
+        }
+
+        drop(replacement);
+        drop(notified);
+        assert_eq!(notify.waiter_count(), 0);
+        crate::test_complete!("notified_reuses_full_inline_hole_without_spilling");
     }
 
     fn broadcast_with_middle_hole_signature(
