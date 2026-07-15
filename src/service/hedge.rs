@@ -220,13 +220,21 @@ impl HedgeStats {
                 current.checked_sub(1)
             })
             .is_ok();
-        // Wake one parked acquirer so the freed slot is actually re-contended.
-        // Waking exactly one (not all) avoids a thundering herd; a woken future
-        // that loses the slot to a racer re-registers and is woken by the next
-        // release. The decrement happens-before this pop, and a parked future's
-        // waker is pushed-before its failed acquire which observes the
-        // pre-decrement value, so the pop always sees that waker — no lost wakeup.
-        if released && let Some(waker) = self.slot_waiters.lock().pop() {
+        if !released {
+            return;
+        }
+
+        // Bare wakers are notifications, not slot grants. A registered future
+        // may complete before release, or a selected live future may be dropped
+        // before it re-polls and acquires. Detach every current waiter so those
+        // stale entries cannot strand a live peer behind an available slot.
+        // Wake only after releasing the mutex because a custom waker may
+        // synchronously re-enter and register again.
+        let waiters = {
+            let mut waiters = self.slot_waiters.lock();
+            std::mem::take(&mut *waiters)
+        };
+        for waker in waiters {
             waker.wake();
         }
     }
@@ -723,7 +731,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use std::task::{Context, Waker};
+    use std::task::{Context, Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -732,6 +740,27 @@ mod tests {
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
+    }
+
+    #[derive(Default)]
+    struct CountingWake {
+        wakes: AtomicUsize,
+    }
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (Arc<CountingWake>, Waker) {
+        let counter = Arc::new(CountingWake::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        (counter, waker)
     }
 
     std::thread_local! {
@@ -1126,6 +1155,139 @@ mod tests {
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(22))));
         assert_eq!(hedge.hedge_wins(), 1);
+    }
+
+    #[test]
+    fn hedge_slot_release_wakes_live_waiter_past_completed_stale_waiter() {
+        set_test_time(0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hedge = Hedge::new(
+            TimedService::new(
+                vec![
+                    TimedPlan::ok_at(u64::MAX, 11),
+                    TimedPlan::ok_at(u64::MAX, 12),
+                    TimedPlan::ok_at(20, 13),
+                    TimedPlan::ok_at(u64::MAX, 21),
+                    TimedPlan::ok_at(u64::MAX, 22),
+                ],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10))
+                .max_pending(1)
+                .with_time_getter(test_time),
+        );
+        let mut holder_service = hedge.clone();
+        let mut live_service = hedge.clone();
+        let mut stale_service = hedge.clone();
+
+        let holder_waker = noop_waker();
+        let (live_wakes, live_waker) = counting_waker();
+        let (stale_wakes, stale_waker) = counting_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+        let mut live_cx = Context::from_waker(&live_waker);
+        let mut stale_cx = Context::from_waker(&stale_waker);
+        assert!(matches!(
+            holder_service.poll_ready(&mut holder_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            live_service.poll_ready(&mut live_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            stale_service.poll_ready(&mut stale_cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        let mut holder = holder_service.call(1);
+        let mut live = live_service.call(2);
+        let mut stale = stale_service.call(3);
+
+        set_test_time(10);
+        assert!(Pin::new(&mut holder).poll(&mut holder_cx).is_pending());
+        assert!(Pin::new(&mut live).poll(&mut live_cx).is_pending());
+        assert!(Pin::new(&mut stale).poll(&mut stale_cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(hedge.stats.slot_waiters.lock().len(), 2);
+
+        set_test_time(20);
+        assert!(matches!(
+            Pin::new(&mut stale).poll(&mut stale_cx),
+            Poll::Ready(Ok(13))
+        ));
+        assert_eq!(hedge.stats.slot_waiters.lock().len(), 2);
+
+        drop(holder);
+        assert_eq!(live_wakes.wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(stale_wakes.wakes.load(Ordering::SeqCst), 1);
+        assert!(hedge.stats.slot_waiters.lock().is_empty());
+
+        assert!(Pin::new(&mut live).poll(&mut live_cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert_eq!(hedge.hedged_requests(), 2);
+    }
+
+    #[test]
+    fn hedge_selected_waiter_cancellation_does_not_strand_peer() {
+        set_test_time(0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hedge = Hedge::new(
+            TimedService::new(
+                vec![
+                    TimedPlan::ok_at(u64::MAX, 11),
+                    TimedPlan::ok_at(u64::MAX, 12),
+                    TimedPlan::ok_at(u64::MAX, 13),
+                    TimedPlan::ok_at(u64::MAX, 21),
+                    TimedPlan::ok_at(u64::MAX, 22),
+                ],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10))
+                .max_pending(1)
+                .with_time_getter(test_time),
+        );
+        let mut holder_service = hedge.clone();
+        let mut live_service = hedge.clone();
+        let mut selected_service = hedge.clone();
+
+        let holder_waker = noop_waker();
+        let (live_wakes, live_waker) = counting_waker();
+        let (selected_wakes, selected_waker) = counting_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+        let mut live_cx = Context::from_waker(&live_waker);
+        let mut selected_cx = Context::from_waker(&selected_waker);
+        assert!(matches!(
+            holder_service.poll_ready(&mut holder_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            live_service.poll_ready(&mut live_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            selected_service.poll_ready(&mut selected_cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        let mut holder = holder_service.call(1);
+        let mut live = live_service.call(2);
+        let mut selected = selected_service.call(3);
+
+        set_test_time(10);
+        assert!(Pin::new(&mut holder).poll(&mut holder_cx).is_pending());
+        assert!(Pin::new(&mut live).poll(&mut live_cx).is_pending());
+        assert!(Pin::new(&mut selected).poll(&mut selected_cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(hedge.stats.slot_waiters.lock().len(), 2);
+
+        drop(holder);
+        assert_eq!(live_wakes.wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(selected_wakes.wakes.load(Ordering::SeqCst), 1);
+        drop(selected);
+
+        assert!(Pin::new(&mut live).poll(&mut live_cx).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert_eq!(hedge.hedged_requests(), 2);
     }
 
     #[test]
