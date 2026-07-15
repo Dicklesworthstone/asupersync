@@ -437,7 +437,11 @@ fn parse_browser_transport_url(url: &str) -> Option<(String, String, String)> {
         return None;
     }
 
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    // WHATWG special-scheme URLs treat reverse solidus as a path separator.
+    // Keep the policy origin aligned with the browser destination: otherwise
+    // `wss://evil.example\\@allowed.example` is parsed here as the allowed
+    // host after userinfo stripping while the browser connects to evil.example.
+    let authority_end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
     if authority_end == 0 {
         return None;
     }
@@ -2665,6 +2669,98 @@ mod tests {
         let request =
             BrowserTransportRequest::new(BrowserTransportKind::WebSocket, "ws://localhost:8080");
         assert_eq!(cap.authorize(&request), Ok(()));
+    }
+
+    #[test]
+    fn transport_policy_uses_browser_backslash_authority_boundary() {
+        let cap = strict_transport_cap(BrowserTransportSupport::FULL, false);
+
+        for (kind, url) in [
+            (
+                BrowserTransportKind::WebSocket,
+                r"wss://chat.example.com\socket",
+            ),
+            (
+                BrowserTransportKind::WebTransport,
+                r"https://transport.example.com\session",
+            ),
+        ] {
+            let request = BrowserTransportRequest::new(kind, url);
+            assert_eq!(
+                cap.authorize(&request),
+                Ok(()),
+                "backslash path must keep the browser-visible allowed origin: {url}"
+            );
+        }
+
+        for url in [
+            r"wss://evil.example\@chat.example.com/socket",
+            r"wss://evil.example\\@chat.example.com/socket",
+        ] {
+            let request = BrowserTransportRequest::new(BrowserTransportKind::WebSocket, url);
+            assert_eq!(
+                cap.authorize(&request),
+                Err(BrowserTransportPolicyError::OriginDenied(
+                    "wss://evil.example".to_owned()
+                )),
+                "raw URL must be authorized against the host the browser will use: {url}"
+            );
+        }
+
+        for url in [
+            r"https://evil.example\@transport.example.com/session",
+            r"https://evil.example\\@transport.example.com/session",
+        ] {
+            let request = BrowserTransportRequest::new(BrowserTransportKind::WebTransport, url);
+            assert_eq!(
+                cap.authorize(&request),
+                Err(BrowserTransportPolicyError::OriginDenied(
+                    "https://evil.example".to_owned()
+                )),
+                "raw URL must be authorized against the host the browser will use: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_url_special_scheme_authority_parity_corpus() {
+        for (url, expected) in [
+            (
+                "wss://user:p%40ss@chat.example.com:8443/socket",
+                ("wss", "wss://chat.example.com:8443", "chat.example.com"),
+            ),
+            (
+                r"wss://[2001:db8::1]:8443\socket",
+                ("wss", "wss://[2001:db8::1]:8443", "2001:db8::1"),
+            ),
+            (
+                r"https://transport.example.com:9443\session?next=@evil.example#fragment",
+                (
+                    "https",
+                    "https://transport.example.com:9443",
+                    "transport.example.com",
+                ),
+            ),
+            (
+                r"wss://chat.example.com:8443?next=\@evil.example#fragment",
+                ("wss", "wss://chat.example.com:8443", "chat.example.com"),
+            ),
+            (
+                r"wss://chat.example.com:8443#fragment\@evil.example",
+                ("wss", "wss://chat.example.com:8443", "chat.example.com"),
+            ),
+        ] {
+            let parsed = parse_browser_transport_url(url).expect("browser URL corpus must parse");
+            assert_eq!(
+                parsed,
+                (
+                    expected.0.to_owned(),
+                    expected.1.to_owned(),
+                    expected.2.to_owned(),
+                ),
+                "policy tuple must match the browser-visible authority boundary: {url}"
+            );
+        }
     }
 
     #[test]
