@@ -1825,26 +1825,100 @@ fn scram_constant_time_eq_expected_len(expected: &[u8], actual: &[u8]) -> bool {
     black_box(diff) == 0
 }
 
+#[derive(Debug)]
+struct ScramServerFirst<'a> {
+    full_nonce: &'a str,
+    salt: Vec<u8>,
+    iterations: u32,
+}
+
+#[inline]
+fn is_scram_nonce_byte(byte: u8) -> bool {
+    matches!(byte, b'!'..=b'+' | b'-'..=b'~')
+}
+
+/// Precomputed HMAC-SHA-256 key schedule whose password-equivalent material is
+/// wiped on every exit path, including cancellation between PBKDF2 rounds.
+struct ScramHmacSha256Key {
+    inner_pad: zeroize::Zeroizing<[u8; SCRAM_HMAC_BLOCK_LEN]>,
+    outer_pad: zeroize::Zeroizing<[u8; SCRAM_HMAC_BLOCK_LEN]>,
+}
+
+// Keep the dependency feature that wipes transient SHA-256 compression and
+// buffer state as a compile-time part of this authentication contract.
+const _: fn() = {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<sha2::Sha256>
+};
+
+impl ScramHmacSha256Key {
+    fn new(key: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+
+        let mut key_block = zeroize::Zeroizing::new([0; SCRAM_HMAC_BLOCK_LEN]);
+        if key.len() > SCRAM_HMAC_BLOCK_LEN {
+            let digest: zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> =
+                zeroize::Zeroizing::new(Sha256::digest(key).into());
+            key_block[..SCRAM_SHA256_LEN].copy_from_slice(&digest[..]);
+        } else {
+            key_block[..key.len()].copy_from_slice(key);
+        }
+
+        let mut inner_pad = zeroize::Zeroizing::new([0x36; SCRAM_HMAC_BLOCK_LEN]);
+        let mut outer_pad = zeroize::Zeroizing::new([0x5c; SCRAM_HMAC_BLOCK_LEN]);
+        for ((inner, outer), key_byte) in inner_pad
+            .iter_mut()
+            .zip(outer_pad.iter_mut())
+            .zip(key_block.iter())
+        {
+            *inner ^= *key_byte;
+            *outer ^= *key_byte;
+        }
+
+        Self {
+            inner_pad,
+            outer_pad,
+        }
+    }
+
+    fn digest(&self, data: &[u8]) -> zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> {
+        self.digest_segments(&[data])
+    }
+
+    fn digest_segments(&self, segments: &[&[u8]]) -> zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> {
+        use sha2::{Digest, Sha256};
+
+        let mut inner = Sha256::new();
+        inner.update(&self.inner_pad[..]);
+        for segment in segments {
+            inner.update(*segment);
+        }
+        let inner_hash: zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> =
+            zeroize::Zeroizing::new(inner.finalize().into());
+
+        let mut outer = Sha256::new();
+        outer.update(&self.outer_pad[..]);
+        outer.update(&inner_hash[..]);
+        zeroize::Zeroizing::new(outer.finalize().into())
+    }
+}
+
 /// SCRAM-SHA-256 authentication state machine.
 ///
 /// br-asupersync-r2l1ze: `password` is held in a [`SecretString`] so the
 /// plaintext bytes are zeroized when the `ScramAuth` value is dropped
-/// (i.e. when the SCRAM exchange completes or is cancelled). Heap
-/// snapshots, core dumps, or attached debuggers reading stale memory
-/// after auth completes recover only zero bytes.
+/// (i.e. when the SCRAM exchange completes or is cancelled). A successful
+/// server-first exchange wipes it earlier, immediately after the only PBKDF2
+/// derivation. Heap snapshots, core dumps, or attached debuggers reading stale
+/// memory after auth completes recover only zero bytes.
 struct ScramAuth {
     /// Password — wiped on drop (br-asupersync-r2l1ze).
     password: SecretString,
     /// Client nonce.
     client_nonce: String,
-    /// Full nonce (client + server).
-    full_nonce: Option<String>,
-    /// Salt from server.
-    salt: Option<Vec<u8>>,
-    /// Iteration count.
-    iterations: Option<u32>,
-    /// Auth message for signature.
-    auth_message: Option<String>,
+    /// One-shot expected server verifier. All other derived state is discarded
+    /// after client-final construction.
+    expected_server_signature: Option<zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]>>,
     /// Client first message bare.
     client_first_bare: String,
     /// Channel-binding mode (br-asupersync-7n2xsi).
@@ -1866,10 +1940,7 @@ impl ScramAuth {
         Self {
             password: SecretString::new(password),
             client_nonce,
-            full_nonce: None,
-            salt: None,
-            iterations: None,
-            auth_message: None,
+            expected_server_signature: None,
             client_first_bare,
             cb,
         }
@@ -1884,12 +1955,21 @@ impl ScramAuth {
         format!("{}{}", self.cb.gs2_header(), self.client_first_bare).into_bytes()
     }
 
-    /// Process server-first message and generate client-final message.
-    fn process_server_first(&mut self, server_first: &str) -> Result<Vec<u8>, PgError> {
+    fn parse_server_first<'a>(
+        &self,
+        server_first: &'a str,
+    ) -> Result<ScramServerFirst<'a>, PgError> {
+        if server_first.len() > MAX_SCRAM_SERVER_FIRST_LEN {
+            return Err(PgError::AuthenticationFailed(format!(
+                "SCRAM server-first message is {} bytes; maximum is {MAX_SCRAM_SERVER_FIRST_LEN}",
+                server_first.len()
+            )));
+        }
+
         // Parse server-first-message: r=<nonce>,s=<salt>,i=<iterations>
-        let mut server_nonce = None;
+        let mut server_nonce: Option<&str> = None;
         let mut salt = None;
-        let mut iterations = None;
+        let mut iterations: Option<u32> = None;
 
         for part in server_first.split(',') {
             if part.starts_with("m=") {
@@ -1897,20 +1977,40 @@ impl ScramAuth {
                     "unsupported SCRAM mandatory extension".to_string(),
                 ));
             } else if let Some(value) = part.strip_prefix("r=") {
-                if server_nonce.replace(value.to_string()).is_some() {
+                if server_nonce.replace(value).is_some() {
                     return Err(PgError::AuthenticationFailed(
                         "duplicate server nonce".to_string(),
                     ));
                 }
             } else if let Some(value) = part.strip_prefix("s=") {
+                if value.len() > MAX_SCRAM_SALT_B64_LEN {
+                    return Err(PgError::AuthenticationFailed(format!(
+                        "SCRAM salt encoding is {} bytes; maximum is {MAX_SCRAM_SALT_B64_LEN}",
+                        value.len()
+                    )));
+                }
                 let decoded =
                     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
                         .map_err(|e| PgError::AuthenticationFailed(format!("invalid salt: {e}")))?;
+                if decoded.is_empty() || decoded.len() > MAX_SCRAM_SALT_LEN {
+                    return Err(PgError::AuthenticationFailed(format!(
+                        "SCRAM salt is {} bytes; expected 1..={MAX_SCRAM_SALT_LEN}",
+                        decoded.len()
+                    )));
+                }
                 if salt.replace(decoded).is_some() {
                     return Err(PgError::AuthenticationFailed("duplicate salt".to_string()));
                 }
             } else if let Some(value) = part.strip_prefix("i=") {
-                let parsed = value.parse().map_err(|e| {
+                if value.starts_with('0')
+                    || value.is_empty()
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(PgError::AuthenticationFailed(format!(
+                        "invalid iterations: {value}"
+                    )));
+                }
+                let parsed = value.parse::<u32>().map_err(|e| {
                     PgError::AuthenticationFailed(format!("invalid iterations: {e}"))
                 })?;
                 if iterations.replace(parsed).is_some() {
@@ -1918,6 +2018,10 @@ impl ScramAuth {
                         "duplicate iterations".to_string(),
                     ));
                 }
+            } else if !part.contains('=') {
+                return Err(PgError::AuthenticationFailed(
+                    "invalid SCRAM server-first attribute".to_string(),
+                ));
             }
         }
 
@@ -1926,33 +2030,59 @@ impl ScramAuth {
         let salt = salt.ok_or_else(|| PgError::AuthenticationFailed("missing salt".to_string()))?;
         let iterations = iterations
             .ok_or_else(|| PgError::AuthenticationFailed("missing iterations".to_string()))?;
-        // Reject unreasonable iteration counts. On the low end, a malicious (or
-        // MITM-downgraded) server can weaken the PBKDF2 stretch by advertising a
-        // tiny iteration count, making an offline dictionary attack on the
-        // password cheap. RFC 5802 / RFC 7677 and real PostgreSQL use 4096, so
-        // refuse anything below that floor. On the high end, counts above 600,000
-        // are suspicious and would cause multi-second PBKDF2 computation (DoS).
-        const MIN_PBKDF2_ITERATIONS: u32 = 4096;
-        const MAX_PBKDF2_ITERATIONS: u32 = 600_000;
-        if iterations < MIN_PBKDF2_ITERATIONS || iterations > MAX_PBKDF2_ITERATIONS {
+        if !(MIN_SCRAM_PBKDF2_ITERATIONS..=MAX_SCRAM_PBKDF2_ITERATIONS).contains(&iterations) {
             return Err(PgError::AuthenticationFailed(format!(
-                "SCRAM iteration count {iterations} outside safe range {MIN_PBKDF2_ITERATIONS}..={MAX_PBKDF2_ITERATIONS}"
+                "SCRAM iteration count {iterations} outside safe range {MIN_SCRAM_PBKDF2_ITERATIONS}..={MAX_SCRAM_PBKDF2_ITERATIONS}"
             )));
         }
 
-        // Verify server nonce starts with our client nonce
-        if !full_nonce.starts_with(&self.client_nonce) {
+        if full_nonce.len() > MAX_SCRAM_NONCE_LEN {
+            return Err(PgError::AuthenticationFailed(format!(
+                "SCRAM server nonce is {} bytes; maximum is {MAX_SCRAM_NONCE_LEN}",
+                full_nonce.len()
+            )));
+        }
+        if !full_nonce.bytes().all(is_scram_nonce_byte) {
             return Err(PgError::AuthenticationFailed(
-                "server nonce mismatch".to_string(),
+                "SCRAM server nonce contains an invalid byte".to_string(),
+            ));
+        }
+        // The server must preserve our nonce and contribute at least one byte
+        // of its own; equality provides no freshness contribution from it.
+        if !full_nonce.starts_with(&self.client_nonce)
+            || full_nonce.len() == self.client_nonce.len()
+        {
+            return Err(PgError::AuthenticationFailed(
+                "server nonce must extend the client nonce".to_string(),
             ));
         }
 
-        self.full_nonce = Some(full_nonce.clone());
-        self.salt = Some(salt.clone());
-        self.iterations = Some(iterations);
+        Ok(ScramServerFirst {
+            full_nonce,
+            salt,
+            iterations,
+        })
+    }
+
+    /// Process server-first message and generate client-final message.
+    async fn process_server_first(
+        &mut self,
+        cx: &Cx,
+        server_first: &str,
+    ) -> Result<Vec<u8>, PgError> {
+        let ScramServerFirst {
+            full_nonce,
+            salt,
+            iterations,
+        } = self.parse_server_first(server_first)?;
 
         // Compute salted password using PBKDF2-SHA256
-        let salted_password = self.pbkdf2_sha256(self.password.as_str(), &salt, iterations);
+        let salted_password_result =
+            Self::pbkdf2_sha256(cx, self.password.as_str(), &salt, iterations).await;
+        // No later SCRAM step needs the plaintext password. Wipe it on both the
+        // success and cancellation/error paths as soon as PBKDF2 releases it.
+        self.password.explicit_zeroize();
+        let salted_password = salted_password_result?;
 
         // Compute client key and stored key
         let client_key = Self::hmac_sha256(&salted_password, b"Client Key");
@@ -1975,17 +2105,23 @@ impl ScramAuth {
             "{},{},{}",
             self.client_first_bare, server_first, client_final_without_proof
         );
-        self.auth_message = Some(auth_message.clone());
 
         // Compute client signature and proof
         let client_signature = Self::hmac_sha256(&stored_key, auth_message.as_bytes());
-        let client_proof: Vec<u8> = client_key
-            .iter()
-            .zip(client_signature.iter())
-            .map(|(k, s)| k ^ s)
-            .collect();
-        let client_proof_b64 =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &client_proof);
+        let client_proof: zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> =
+            zeroize::Zeroizing::new(std::array::from_fn(|index| {
+                client_key[index] ^ client_signature[index]
+            }));
+        let client_proof_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &client_proof[..],
+        );
+
+        // Derive the verifier while the single salted-password result is live.
+        // Server-final then performs only bounded decoding and comparison.
+        let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
+        self.expected_server_signature =
+            Some(Self::hmac_sha256(&server_key, auth_message.as_bytes()));
 
         // Build client-final-message
         let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
@@ -1993,7 +2129,19 @@ impl ScramAuth {
     }
 
     /// Verify server-final message.
-    fn verify_server_final(&self, server_final: &str) -> Result<(), PgError> {
+    fn verify_server_final(&mut self, server_final: &str) -> Result<(), PgError> {
+        let expected_sig = self.expected_server_signature.take().ok_or_else(|| {
+            PgError::AuthenticationFailed(
+                "SCRAM state error: missing expected server signature".to_string(),
+            )
+        })?;
+        if server_final.len() > MAX_SCRAM_SERVER_FINAL_LEN {
+            return Err(PgError::AuthenticationFailed(format!(
+                "SCRAM server-final message is {} bytes; maximum is {MAX_SCRAM_SERVER_FINAL_LEN}",
+                server_final.len()
+            )));
+        }
+
         // Parse server-final-message: either v=<server-signature> or e=<server-error>
         let mut server_sig_b64 = None;
         let mut server_error = None;
@@ -2038,20 +2186,12 @@ impl ScramAuth {
                 .map_err(|e| {
                     PgError::AuthenticationFailed(format!("invalid server signature: {e}"))
                 })?;
-
-        // Compute expected server signature
-        let salt = self.salt.as_ref().ok_or_else(|| {
-            PgError::AuthenticationFailed("SCRAM state error: missing salt".to_string())
-        })?;
-        let iterations = self.iterations.ok_or_else(|| {
-            PgError::AuthenticationFailed("SCRAM state error: missing iterations".to_string())
-        })?;
-        let salted_password = self.pbkdf2_sha256(self.password.as_str(), salt, iterations); // ubs:ignore - dynamic password variable
-        let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
-        let auth_message = self.auth_message.as_ref().ok_or_else(|| {
-            PgError::AuthenticationFailed("SCRAM state error: missing auth_message".to_string())
-        })?;
-        let expected_sig = Self::hmac_sha256(&server_key, auth_message.as_bytes());
+        if server_sig.len() != SCRAM_SHA256_LEN {
+            return Err(PgError::AuthenticationFailed(format!(
+                "invalid SCRAM server signature length: expected {SCRAM_SHA256_LEN}, got {}",
+                server_sig.len()
+            )));
+        }
 
         if !scram_constant_time_eq_expected_len(&expected_sig, &server_sig) {
             return Err(PgError::AuthenticationFailed(
@@ -2063,71 +2203,61 @@ impl ScramAuth {
     }
 
     /// PBKDF2-SHA256 key derivation.
-    fn pbkdf2_sha256(&self, password: &str, salt: &[u8], iterations: u32) -> Vec<u8> {
-        let mut result = vec![0u8; 32]; // SHA-256 output size
+    async fn pbkdf2_sha256(
+        cx: &Cx,
+        password: &str,
+        salt: &[u8],
+        iterations: u32,
+    ) -> Result<zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]>, PgError> {
+        if iterations == 0 {
+            return Err(PgError::AuthenticationFailed(
+                "SCRAM PBKDF2 iteration count must be nonzero".to_string(),
+            ));
+        }
+        if cx.checkpoint().is_err() {
+            return Err(cancelled_error(cx));
+        }
 
-        // PBKDF2 with single block (dkLen <= hLen)
-        // U_1 = HMAC(password, salt || INT(1))
-        let mut salt_with_block = salt.to_vec();
-        salt_with_block.extend_from_slice(&1u32.to_be_bytes());
+        // Precompute zeroizing inner/outer pads once. This removes both the
+        // per-round heap allocation and repeated key-pad construction while
+        // ensuring all password-equivalent state live across a yield is wiped.
+        let keyed = ScramHmacSha256Key::new(password.as_bytes());
+        let block_index = 1u32.to_be_bytes();
+        let mut u = keyed.digest_segments(&[salt, &block_index]);
+        let mut result = zeroize::Zeroizing::new(*u);
 
-        let mut u = Self::hmac_sha256(password.as_bytes(), &salt_with_block);
-        result.copy_from_slice(&u);
+        for iteration in 1..iterations {
+            if iteration.is_multiple_of(SCRAM_PBKDF2_YIELD_INTERVAL) {
+                if cx.checkpoint().is_err() {
+                    return Err(cancelled_error(cx));
+                }
+                crate::runtime::yield_now().await;
+                if cx.checkpoint().is_err() {
+                    return Err(cancelled_error(cx));
+                }
+            }
 
-        // U_2 ... U_iterations
-        for _ in 1..iterations {
-            u = Self::hmac_sha256(password.as_bytes(), &u);
-            for (r, ui) in result.iter_mut().zip(u.iter()) {
-                *r ^= ui;
+            u = keyed.digest(&u);
+            for (accumulator, value) in result.iter_mut().zip(u.iter()) {
+                *accumulator ^= value;
             }
         }
 
-        result
+        if cx.checkpoint().is_err() {
+            return Err(cancelled_error(cx));
+        }
+        Ok(result)
     }
 
     /// HMAC-SHA256.
-    fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-        use sha2::{Digest, Sha256};
-
-        const BLOCK_SIZE: usize = 64; // SHA-256 block size
-
-        // Pad or hash key to block size
-        let mut key_block = [0u8; BLOCK_SIZE];
-        if key.len() > BLOCK_SIZE {
-            let hash = Sha256::digest(key);
-            key_block[..32].copy_from_slice(&hash);
-        } else {
-            key_block[..key.len()].copy_from_slice(key);
-        }
-
-        // Inner padding
-        let mut inner = [0x36u8; BLOCK_SIZE];
-        for (i, k) in key_block.iter().enumerate() {
-            inner[i] ^= k;
-        }
-
-        // Outer padding
-        let mut outer = [0x5cu8; BLOCK_SIZE];
-        for (i, k) in key_block.iter().enumerate() {
-            outer[i] ^= k;
-        }
-
-        // HMAC = H(outer || H(inner || data))
-        let mut hasher = Sha256::new();
-        hasher.update(inner);
-        hasher.update(data);
-        let inner_hash = hasher.finalize();
-
-        let mut hasher = Sha256::new();
-        hasher.update(outer);
-        hasher.update(inner_hash);
-        hasher.finalize().to_vec()
+    fn hmac_sha256(key: &[u8], data: &[u8]) -> zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> {
+        ScramHmacSha256Key::new(key).digest(data)
     }
 
     /// SHA-256 hash.
-    fn sha256(data: &[u8]) -> Vec<u8> {
+    fn sha256(data: &[u8]) -> zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> {
         use sha2::{Digest, Sha256};
-        Sha256::digest(data).to_vec()
+        zeroize::Zeroizing::new(Sha256::digest(data).into())
     }
 }
 
@@ -3071,6 +3201,24 @@ fn cancelled_error(cx: &Cx) -> PgError {
 
 const POSTGRES_PROTOCOL_VERSION_3_0: i32 = 196_608;
 const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
+// Authentication messages are control-plane traffic. Keeping their wire bodies
+// small prevents a peer from turning the generic 64 MiB data-frame allowance
+// into a pre-authentication allocation attack.
+const MAX_POSTGRES_AUTH_BODY_LEN: usize = 8 * 1024;
+// These are local defensive ceilings, not RFC-wide SCRAM maxima. Native
+// PostgreSQL emits challenges far below them (tens of bytes of nonce/salt).
+const MAX_SCRAM_SERVER_FIRST_LEN: usize = 4 * 1024;
+const MAX_SCRAM_SERVER_FINAL_LEN: usize = 2 * 1024;
+const MAX_SCRAM_NONCE_LEN: usize = 256;
+const MAX_SCRAM_SALT_LEN: usize = 64;
+const MAX_SCRAM_SALT_B64_LEN: usize = 4 * ((MAX_SCRAM_SALT_LEN + 2) / 3);
+const SCRAM_SHA256_LEN: usize = 32;
+const SCRAM_HMAC_BLOCK_LEN: usize = 64;
+// RFC 7677 and PostgreSQL use 4096 as the floor. Retain the existing
+// compatibility ceiling, but make its work allocation-free and cooperative.
+const MIN_SCRAM_PBKDF2_ITERATIONS: u32 = 4_096;
+const MAX_SCRAM_PBKDF2_ITERATIONS: u32 = 600_000;
+const SCRAM_PBKDF2_YIELD_INTERVAL: u32 = 1_024;
 const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
 const COPY_TERMINAL_MASKED_POLLS: u32 = 64;
@@ -3822,7 +3970,13 @@ impl PgConnection {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
             }
 
-            let (msg_type, data) = self.read_message(cx).await?;
+            let (msg_type, data) = self
+                .read_message_with_body_limit(
+                    cx,
+                    MAX_POSTGRES_AUTH_BODY_LEN,
+                    "PostgreSQL authentication",
+                )
+                .await?;
 
             match msg_type {
                 b'R' => {
@@ -4090,7 +4244,9 @@ impl PgConnection {
         }
 
         // Receive SASLContinue
-        let (msg_type, data) = self.read_message(cx).await?;
+        let (msg_type, data) = self
+            .read_message_with_body_limit(cx, MAX_SCRAM_SERVER_FIRST_LEN + 4, "SCRAM server-first")
+            .await?;
         if msg_type == b'E' {
             return Err(self.parse_error_response(&data)?);
         }
@@ -4112,7 +4268,7 @@ impl PgConnection {
             .map_err(|e| PgError::Protocol(format!("invalid server-first: {e}")))?;
 
         // Process server-first and send client-final
-        let client_final = scram.process_server_first(server_first)?;
+        let client_final = scram.process_server_first(cx, server_first).await?;
         let mut buf = MessageBuffer::new();
         buf.write_bytes(&client_final);
         let msg = buf.build_message(FrontendMessage::Password as u8)?;
@@ -4123,7 +4279,9 @@ impl PgConnection {
         }
 
         // Receive SASLFinal
-        let (msg_type, data) = self.read_message(cx).await?;
+        let (msg_type, data) = self
+            .read_message_with_body_limit(cx, MAX_SCRAM_SERVER_FINAL_LEN + 4, "SCRAM server-final")
+            .await?;
         if msg_type == b'E' {
             return Err(self.parse_error_response(&data)?);
         }
@@ -4152,7 +4310,13 @@ impl PgConnection {
         }
 
         // Wait for AuthenticationOk
-        let (msg_type, data) = self.read_message(cx).await?;
+        let (msg_type, data) = self
+            .read_message_with_body_limit(
+                cx,
+                MAX_POSTGRES_AUTH_BODY_LEN,
+                "PostgreSQL authentication",
+            )
+            .await?;
         if msg_type == b'E' {
             return Err(self.parse_error_response(&data)?);
         }
@@ -6346,6 +6510,19 @@ impl PgConnection {
 
     /// Read a complete message from the stream.
     async fn read_message(&mut self, cx: &Cx) -> Result<(u8, Vec<u8>), PgError> {
+        self.read_message_with_body_limit(cx, MAX_BACKEND_MESSAGE_LEN as usize - 4, "backend")
+            .await
+    }
+
+    /// Read one message while enforcing a context-specific body cap before
+    /// allocating or reading the body. Authentication uses much smaller caps
+    /// than data-bearing backend messages.
+    async fn read_message_with_body_limit(
+        &mut self,
+        cx: &Cx,
+        max_body_len: usize,
+        context: &str,
+    ) -> Result<(u8, Vec<u8>), PgError> {
         // Read message type (1 byte)
         let mut type_buf = [0u8; 1];
         self.read_exact(cx, &mut type_buf).await?;
@@ -6357,6 +6534,11 @@ impl PgConnection {
         let len_i32 = i32::from_be_bytes(len_buf);
 
         let body_len = backend_message_body_len(len_i32)?;
+        if body_len > max_body_len {
+            return Err(PgError::Protocol(format!(
+                "{context} message body is {body_len} bytes; maximum is {max_body_len}"
+            )));
+        }
 
         // Read message body
         let mut body = vec![0u8; body_len];
@@ -9404,16 +9586,196 @@ mod tests {
     #[test]
     fn test_scram_pbkdf2_matches_rfc8018_sha256_vector() {
         let cx = Cx::for_testing();
-        let auth = ScramAuth::new(&cx, "user", "password", ScramChannelBinding::None);
-        let derived = auth.pbkdf2_sha256("password", b"salt", 1);
+        let derived = run(ScramAuth::pbkdf2_sha256(&cx, "password", b"salt", 1))
+            .expect("PBKDF2 vector should derive");
         let expected =
             hex::decode("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
                 .expect("valid hex vector");
 
         assert_eq!(
-            derived, expected,
+            &derived[..],
+            expected.as_slice(),
             "PBKDF2-HMAC-SHA256 output should match the RFC 8018 reference vector"
         );
+    }
+
+    #[test]
+    fn scram_hmac_sha256_hashes_long_keys_before_padding() {
+        // RFC 4231 test case 6 covers HMAC's key > block-size branch.
+        let key = [0xAA; 131];
+        let actual = ScramAuth::hmac_sha256(
+            &key,
+            b"Test Using Larger Than Block-Size Key - Hash Key First",
+        );
+        let expected =
+            hex::decode("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
+                .expect("valid hex vector");
+
+        assert_eq!(&actual[..], expected.as_slice());
+    }
+
+    #[test]
+    fn scram_pbkdf2_yields_and_observes_midflight_cancellation() {
+        use std::future::Future;
+
+        let cx = Cx::for_testing();
+        let mut derivation = Box::pin(ScramAuth::pbkdf2_sha256(
+            &cx,
+            "password",
+            b"salt",
+            SCRAM_PBKDF2_YIELD_INTERVAL + 1,
+        ));
+        let waker = std::task::Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+
+        assert!(
+            matches!(derivation.as_mut().poll(&mut task_cx), Poll::Pending),
+            "the KDF must cooperatively yield after the bounded work interval"
+        );
+        cx.cancel_fast(CancelKind::User);
+
+        match derivation.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(PgError::Cancelled(reason))) => {
+                assert_eq!(reason.kind, CancelKind::User);
+            }
+            other => panic!("expected midflight SCRAM cancellation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scram_server_first_wipes_password_on_midflight_cancellation() {
+        use std::future::Future;
+
+        let cx = Cx::for_testing();
+        let mut auth = ScramAuth::new(&cx, "user", "password", ScramChannelBinding::None);
+        let server_first = format!("r={}N,s=Wg==,i=4096", auth.client_nonce);
+        let mut exchange = Box::pin(auth.process_server_first(&cx, &server_first));
+        let waker = std::task::Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+
+        assert!(matches!(
+            exchange.as_mut().poll(&mut task_cx),
+            Poll::Pending
+        ));
+        cx.cancel_fast(CancelKind::User);
+        assert!(matches!(
+            exchange.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(PgError::Cancelled(_)))
+        ));
+        drop(exchange);
+
+        assert!(
+            auth.password.is_empty(),
+            "cancelled SCRAM derivation must wipe the plaintext password"
+        );
+        assert!(auth.expected_server_signature.is_none());
+    }
+
+    #[test]
+    fn scram_server_first_parser_enforces_resource_boundaries() {
+        let cx = Cx::for_testing();
+        let mut auth = ScramAuth::new(&cx, "user", "password", ScramChannelBinding::None);
+        auth.client_nonce = "clientnonce".to_string();
+        auth.client_first_bare = "n=user,r=clientnonce".to_string();
+
+        let salt_64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x5Au8; MAX_SCRAM_SALT_LEN],
+        );
+        let max_nonce = format!(
+            "{}{}",
+            auth.client_nonce,
+            "N".repeat(MAX_SCRAM_NONCE_LEN - auth.client_nonce.len())
+        );
+        let valid = format!("r={max_nonce},s={salt_64},i={MAX_SCRAM_PBKDF2_ITERATIONS}");
+        let parsed = auth
+            .parse_server_first(&valid)
+            .expect("exact nonce, salt, and iteration maxima should parse");
+        assert_eq!(parsed.full_nonce.len(), MAX_SCRAM_NONCE_LEN);
+        assert_eq!(parsed.salt.len(), MAX_SCRAM_SALT_LEN);
+        assert_eq!(parsed.iterations, MAX_SCRAM_PBKDF2_ITERATIONS);
+
+        let extension_len = MAX_SCRAM_SERVER_FIRST_LEN - valid.len() - 3;
+        let exact_message_limit = format!("{valid},x={}", "a".repeat(extension_len));
+        assert_eq!(exact_message_limit.len(), MAX_SCRAM_SERVER_FIRST_LEN);
+        auth.parse_server_first(&exact_message_limit)
+            .expect("exact server-first message limit should parse");
+
+        let over_message_limit = format!("{exact_message_limit}a");
+        let over_nonce = format!("{max_nonce}N");
+        let salt_65 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0x5Au8; MAX_SCRAM_SALT_LEN + 1],
+        );
+        let invalid_cases = [
+            (over_message_limit, "server-first message"),
+            (format!("r={over_nonce},s=Wg==,i=4096"), "server nonce"),
+            (
+                "r=clientnonce,s=Wg==,i=4096".to_string(),
+                "extend the client nonce",
+            ),
+            (
+                "r=clientnonce bad,s=Wg==,i=4096".to_string(),
+                "invalid byte",
+            ),
+            ("r=clientnonceN,s=,i=4096".to_string(), "expected 1..=64"),
+            (
+                format!("r=clientnonceN,s={salt_65},i=4096"),
+                "expected 1..=64",
+            ),
+            ("r=clientnonceN,s=%%%,i=4096".to_string(), "invalid salt"),
+            (
+                "r=clientnonceN,s=Wg==,i=4095".to_string(),
+                "outside safe range",
+            ),
+            (
+                "r=clientnonceN,s=Wg==,i=600001".to_string(),
+                "outside safe range",
+            ),
+            (
+                "r=clientnonceN,s=Wg==,i=04096".to_string(),
+                "invalid iterations",
+            ),
+            (
+                "r=clientnonceN,s=Wg==,i=+4096".to_string(),
+                "invalid iterations",
+            ),
+        ];
+
+        for (server_first, expected) in invalid_cases {
+            match auth.parse_server_first(&server_first) {
+                Err(PgError::AuthenticationFailed(message)) => assert!(
+                    message.contains(expected),
+                    "expected {expected:?} for {server_first:?}, got {message:?}"
+                ),
+                other => panic!("expected bounded parser rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn scram_wire_body_limit_rejects_declared_length_before_reading_body() {
+        use std::io::Write;
+        use std::net::Shutdown;
+
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        let body_limit = MAX_SCRAM_SERVER_FIRST_LEN + 4;
+        let oversized_body_len = body_limit + 1;
+        let declared_len = i32::try_from(oversized_body_len + 4).expect("test length fits i32");
+
+        peer.write_all(&[b'R']).expect("write message type");
+        peer.write_all(&declared_len.to_be_bytes())
+            .expect("write declared length");
+        peer.shutdown(Shutdown::Write).expect("shutdown write half");
+
+        match run(conn.read_message_with_body_limit(&cx, body_limit, "SCRAM server-first")) {
+            Err(PgError::Protocol(message)) => {
+                assert!(message.contains("SCRAM server-first"), "got: {message}");
+                assert!(message.contains("maximum"), "got: {message}");
+            }
+            other => panic!("expected pre-allocation length rejection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -9459,9 +9821,12 @@ mod tests {
 
         // Test 2: Process server first message from RFC
         let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
-        let client_final = auth
-            .process_server_first(server_first)
+        let client_final = run(auth.process_server_first(&cx, server_first))
             .expect("Should process RFC server first message");
+        assert!(
+            auth.password.is_empty(),
+            "plaintext password should be wiped after the sole PBKDF2 derivation"
+        );
 
         // Test 3: Client final message should match RFC proof value
         let client_final_str =
@@ -9499,7 +9864,7 @@ mod tests {
         auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
 
         let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
-        auth.process_server_first(server_first)
+        run(auth.process_server_first(&cx, server_first))
             .expect("Should process RFC server first message");
 
         let full_sig = base64::Engine::decode(
@@ -9514,9 +9879,47 @@ mod tests {
 
         match auth.verify_server_final(&format!("v={truncated_sig}")) {
             Err(PgError::AuthenticationFailed(msg)) => {
-                assert!(msg.contains("server signature mismatch"), "got: {msg}");
+                assert!(msg.contains("server signature length"), "got: {msg}");
             }
             other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+        assert!(auth.expected_server_signature.is_none());
+    }
+
+    #[test]
+    fn scram_server_final_enforces_message_and_signature_bounds() {
+        let cx = Cx::for_testing();
+        let mut auth = ScramAuth::new(&cx, "user", "password", ScramChannelBinding::None);
+        let signature_31 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0u8; SCRAM_SHA256_LEN - 1],
+        );
+        let signature_33 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [0u8; SCRAM_SHA256_LEN + 1],
+        );
+        let cases = [
+            (format!("v={signature_31}"), "server signature length"),
+            (format!("v={signature_33}"), "server signature length"),
+            (
+                "x".repeat(MAX_SCRAM_SERVER_FINAL_LEN + 1),
+                "server-final message",
+            ),
+        ];
+
+        for (server_final, expected) in cases {
+            auth.expected_server_signature = Some(zeroize::Zeroizing::new([0u8; SCRAM_SHA256_LEN]));
+            match auth.verify_server_final(&server_final) {
+                Err(PgError::AuthenticationFailed(message)) => assert!(
+                    message.contains(expected),
+                    "expected {expected:?} for bounded server-final case, got {message:?}"
+                ),
+                other => panic!("expected bounded server-final rejection, got {other:?}"),
+            }
+            assert!(
+                auth.expected_server_signature.is_none(),
+                "server verifier state must be one-shot on every terminal outcome"
+            );
         }
     }
 
@@ -9528,7 +9931,7 @@ mod tests {
         auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
 
         let server_first = "m=cb-required,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
-        match auth.process_server_first(server_first) {
+        match run(auth.process_server_first(&cx, server_first)) {
             Err(PgError::AuthenticationFailed(msg)) => {
                 assert!(msg.contains("mandatory extension"), "got: {msg}");
             }
@@ -9544,7 +9947,7 @@ mod tests {
         auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
 
         let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,i=8192";
-        match auth.process_server_first(server_first) {
+        match run(auth.process_server_first(&cx, server_first)) {
             Err(PgError::AuthenticationFailed(msg)) => {
                 assert!(msg.contains("duplicate iterations"), "got: {msg}");
             }
@@ -9560,7 +9963,7 @@ mod tests {
         auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
 
         let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
-        auth.process_server_first(server_first)
+        run(auth.process_server_first(&cx, server_first))
             .expect("Should process RFC server first message");
 
         match auth.verify_server_final("e=invalid-proof") {

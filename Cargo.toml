@@ -412,8 +412,9 @@ serde_yaml = { version = "0.9", optional = true }
 rusqlite = { version = "0.40", features = ["bundled", "hooks"], optional = true }
 # SQL parser for secure SQL surface validation (asupersync-dn5hn8)
 sqlparser = { version = "0.62", optional = true }
-# SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM
-sha2 = "0.11"
+# SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM. Wipe
+# transient digest state so SCRAM HMAC midstates do not remain after use.
+sha2 = { version = "0.11", features = ["zeroize"] }
 # HMAC for Macaroon capability token verification (bd-2lqyk.2)
 hmac = "0.13"
 # Constant-time equality for authentication tags.
