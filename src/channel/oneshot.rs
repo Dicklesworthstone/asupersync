@@ -1795,31 +1795,57 @@ mod tests {
     fn endpoint_owned_wakers_retire_after_unlock() {
         init_test("endpoint_owned_wakers_retire_after_unlock");
 
-        let (mut tx, _rx) = channel::<()>();
-        let inner = Arc::clone(&tx.inner);
-        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
-        {
-            let mut task_cx = Context::from_waker(&waker);
-            assert!(tx.poll_closed(&mut task_cx).is_pending());
+        fn register_sender_probe(tx: &mut Sender<()>) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+            let inner = Arc::clone(&tx.inner);
+            let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
+            {
+                let mut task_cx = Context::from_waker(&waker);
+                assert!(tx.poll_closed(&mut task_cx).is_pending());
+            }
+            drop(waker);
+            (drops, unlocked_drops)
         }
-        drop(waker);
+
+        fn assert_sender_probe_retired(drops: &AtomicUsize, unlocked_drops: &AtomicUsize) {
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        }
+
+        let (mut tx, _rx) = channel::<()>();
+        let (drops, unlocked_drops) = register_sender_probe(&mut tx);
         drop(tx);
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_sender_probe_retired(&drops, &unlocked_drops);
 
         let cx = test_cx();
         let (mut tx, _rx) = channel::<()>();
-        let inner = Arc::clone(&tx.inner);
-        let (waker, drops, unlocked_drops) = oneshot_waker_drop_probe(&inner);
-        {
-            let mut task_cx = Context::from_waker(&waker);
-            assert!(tx.poll_closed(&mut task_cx).is_pending());
-        }
-        drop(waker);
+        let (drops, unlocked_drops) = register_sender_probe(&mut tx);
         let permit = tx.reserve(&cx).expect("live channel should reserve");
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        assert_sender_probe_retired(&drops, &unlocked_drops);
         drop(permit);
+
+        let (mut tx, mut rx) = channel::<()>();
+        let (drops, unlocked_drops) = register_sender_probe(&mut tx);
+        assert_eq!(tx.send(&cx, ()), Ok(()));
+        assert_sender_probe_retired(&drops, &unlocked_drops);
+        assert_eq!(rx.try_recv(), Ok(()));
+
+        let (mut tx, mut rx) = channel::<()>();
+        let (drops, unlocked_drops) = register_sender_probe(&mut tx);
+        assert_eq!(tx.send_blocking(()), Ok(()));
+        assert_sender_probe_retired(&drops, &unlocked_drops);
+        assert_eq!(rx.try_recv(), Ok(()));
+
+        let (mut tx, _rx) = channel::<()>();
+        let (drops, unlocked_drops) = register_sender_probe(&mut tx);
+        tx.reserve(&cx)
+            .expect("live channel should reserve")
+            .abort();
+        assert_sender_probe_retired(&drops, &unlocked_drops);
+
+        let (mut tx, _rx) = channel::<()>();
+        let (drops, unlocked_drops) = register_sender_probe(&mut tx);
+        drop(tx.reserve(&cx).expect("live channel should reserve"));
+        assert_sender_probe_retired(&drops, &unlocked_drops);
 
         let (_tx, mut rx) = channel::<()>();
         let inner = Arc::clone(&rx.inner);
@@ -1834,6 +1860,62 @@ mod tests {
         assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
 
         crate::test_complete!("endpoint_owned_wakers_retire_after_unlock");
+    }
+
+    #[test]
+    fn consumed_sender_breaks_waker_receiver_inner_cycle() {
+        init_test("consumed_sender_breaks_waker_receiver_inner_cycle");
+
+        struct ReceiverOwningWaker {
+            _receiver: Mutex<Option<Receiver<()>>>,
+            drops: Arc<AtomicUsize>,
+        }
+
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for ReceiverOwningWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for ReceiverOwningWaker {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = test_cx();
+        let (mut tx, rx) = channel::<()>();
+        let weak_inner = Arc::downgrade(&tx.inner);
+        let payload_drops = Arc::new(AtomicUsize::new(0));
+        let owner = Arc::new(ReceiverOwningWaker {
+            _receiver: Mutex::new(Some(rx)),
+            drops: Arc::clone(&payload_drops),
+        });
+        let waker = Waker::from(Arc::clone(&owner));
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(tx.poll_closed(&mut task_cx).is_pending());
+        }
+        drop(waker);
+        drop(owner);
+
+        assert_eq!(payload_drops.load(Ordering::SeqCst), 0);
+        assert!(tx.inner.lock().sender_waker.is_some());
+        assert!(weak_inner.upgrade().is_some(), "cycle should be live");
+        assert_eq!(
+            Arc::strong_count(&tx.inner),
+            2,
+            "Sender plus Receiver retained through sender_waker form the cycle"
+        );
+        let permit = tx.reserve(&cx).expect("live channel should reserve");
+        assert_eq!(payload_drops.load(Ordering::SeqCst), 1);
+        assert!(permit.inner.lock().receiver_dropped);
+        drop(permit);
+        assert!(
+            weak_inner.upgrade().is_none(),
+            "retiring sender_waker must break the channel cycle"
+        );
+
+        crate::test_complete!("consumed_sender_breaks_waker_receiver_inner_cycle");
     }
 
     #[test]
