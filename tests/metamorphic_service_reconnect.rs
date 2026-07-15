@@ -11,7 +11,7 @@
 //! 2. Jitter bounds respected (values within strategy-defined ranges)
 //! 3. Cancel-on-success frees reconnect state (successful reconnect clears pending state)
 //! 4. Concurrent reconnect serialized (no race conditions in reconnection)
-//! 5. LabRuntime determinism (consistent behavior under deterministic execution)
+//! 5. Seeded retry replay (identical seed and topology produce identical delays)
 
 use asupersync::cx::Cx;
 use asupersync::service::Service;
@@ -394,13 +394,15 @@ fn mr_jitter_bounds_respected() {
         max_delay: u64,
         max_retries: usize,
         jitter: JitterStrategy,
+        entropy_seed: u64,
     ) -> bool {
         if max_retries == 0 || max_retries > 10 {
             return true; // Skip invalid cases
         }
 
         let mut policy = ExponentialBackoff::<u32>::new(max_retries, base_delay, jitter)
-            .with_max_delay(max_delay);
+            .with_max_delay(max_delay)
+            .with_jitter_seed(entropy_seed);
         let error = TestError("jitter test error".to_string());
         let mut observed_delays = Vec::new();
         let mut last_delay_ms = base_delay;
@@ -430,10 +432,11 @@ fn mr_jitter_bounds_respected() {
         max_delay in arb_max_delay(),
         max_retries in arb_retry_count(),
         jitter in arb_jitter_strategy(),
+        entropy_seed in any::<u64>(),
     )| {
         prop_assume!(max_delay >= base_delay);
         prop_assume!(max_retries > 0);
-        prop_assert!(property(base_delay, max_delay, max_retries, jitter));
+        prop_assert!(property(base_delay, max_delay, max_retries, jitter, entropy_seed));
     });
 }
 
@@ -578,17 +581,17 @@ fn mr_concurrent_reconnect_serialized() {
     });
 }
 
-/// Metamorphic Relation 5: LabRuntime Determinism
+/// Metamorphic Relation 5: Seeded Retry Sequence Replay
 ///
 /// Under deterministic execution conditions (same inputs, same entropy seed),
 /// reconnection behavior should be identical across multiple runs.
 #[test]
-fn mr_lab_runtime_determinism() {
+fn mr_seeded_retry_sequence_replays() {
     fn property(
         base_delay: u64,
         max_retries: usize,
         jitter: JitterStrategy,
-        _entropy_seed: u64, // Currently unused, but part of the metamorphic property interface
+        entropy_seed: u64,
     ) -> bool {
         if max_retries == 0 || max_retries > 10 {
             return true; // Skip invalid cases
@@ -597,7 +600,8 @@ fn mr_lab_runtime_determinism() {
         // Since we're testing determinism, we need to ensure identical conditions.
         let run_backoff_sequence = || -> Vec<u64> {
             let mut policy = ExponentialBackoff::<u32>::new(max_retries, base_delay, jitter)
-                .with_max_delay(30_000);
+                .with_max_delay(30_000)
+                .with_jitter_seed(entropy_seed);
             let error = TestError("determinism test".to_string());
             let mut delays = Vec::new();
             let mut last_delay_ms = base_delay;

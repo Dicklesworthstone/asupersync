@@ -6,6 +6,8 @@
 use super::{Layer, Service};
 use crate::cx::Cx;
 use crate::time::{Sleep, wall_now};
+use crate::util::{DetEntropy, DetRng};
+use std::cell::Cell;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -20,6 +22,28 @@ use std::time::Duration;
 /// immediate retry policy can monopolize one executor turn while it burns
 /// through a long retry chain.
 const RETRY_COOPERATIVE_BUDGET: usize = 1024;
+
+const DEFAULT_RETRY_ROOT_ID: u64 = u64::from_le_bytes(*b"retry.v1");
+const RETRY_LAYER_CLONE_DOMAIN: u64 = u64::from_le_bytes(*b"retry.lc");
+const RETRY_LAYER_SERVICE_DOMAIN: u64 = u64::from_le_bytes(*b"retry.ls");
+const RETRY_SERVICE_CLONE_DOMAIN: u64 = u64::from_le_bytes(*b"retry.sc");
+const RETRY_REQUEST_DOMAIN: u64 = u64::from_le_bytes(*b"retry.rq");
+const RETRY_JITTER_DOMAIN: u64 = u64::from_le_bytes(*b"retry.jt");
+const RETRY_LINEAGE_STEP: u64 = 0x9e37_79b9_7f4a_7c15;
+
+fn derive_retry_lineage(parent: u64, domain: u64, ordinal: u64) -> u64 {
+    let ordinal = DetEntropy::mix_seed(ordinal.wrapping_add(RETRY_LINEAGE_STEP));
+    DetEntropy::mix_seed(DetEntropy::mix_seed(parent ^ domain) ^ ordinal)
+}
+
+fn allocate_retry_lineage(parent: u64, domain: u64, next_ordinal: &Cell<u64>) -> u64 {
+    let ordinal = next_ordinal.get();
+    let following_ordinal = ordinal
+        .checked_add(1)
+        .expect("retry lineage ordinal overflow");
+    next_ordinal.set(following_ordinal);
+    derive_retry_lineage(parent, domain, ordinal)
+}
 
 /// A policy that determines whether and how to retry a request.
 ///
@@ -44,9 +68,23 @@ pub trait Policy<Req, Res, E>: Clone {
     /// In this case, the retry will not be attempted even if [`Policy::retry`]
     /// returns `Some`.
     fn clone_request(&self, req: &Req) -> Option<Req>;
+
+    /// Forks this policy for one logical request stream.
+    ///
+    /// The default preserves existing policy behavior. Policies with
+    /// deterministic entropy should override this hook so sibling requests do
+    /// not replay the same pseudo-random sequence.
+    fn fork_for_request(&self, _stream_id: u64) -> Self {
+        self.clone()
+    }
 }
 
 /// A layer that retries requests according to a policy.
+///
+/// Cloning forks a new deterministic lineage and advances the source layer's
+/// clone counter. The interior counter makes a layer `Send` when its policy is
+/// `Send`, but deliberately not `Sync`; share separately constructed layers or
+/// clones instead of cloning one layer concurrently.
 ///
 /// # Example
 ///
@@ -60,16 +98,24 @@ pub trait Policy<Req, Res, E>: Clone {
 ///     .layer(RetryLayer::new(policy))
 ///     .service(my_service);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RetryLayer<P> {
     policy: P,
+    root_id: u64,
+    next_clone_ordinal: Cell<u64>,
+    next_service_ordinal: Cell<u64>,
 }
 
 impl<P> RetryLayer<P> {
     /// Creates a new retry layer with the given policy.
     #[must_use]
     pub const fn new(policy: P) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            root_id: DEFAULT_RETRY_ROOT_ID,
+            next_clone_ordinal: Cell::new(0),
+            next_service_ordinal: Cell::new(0),
+        }
     }
 
     /// Returns a reference to the policy.
@@ -77,13 +123,47 @@ impl<P> RetryLayer<P> {
     pub const fn policy(&self) -> &P {
         &self.policy
     }
+
+    /// Sets the deterministic lineage root for this layer.
+    ///
+    /// Independently constructed retry trees should use distinct roots. Reuse
+    /// the same root only when deterministic replay of the same construction
+    /// and call topology is desired.
+    #[must_use]
+    pub fn with_root_id(mut self, root_id: u64) -> Self {
+        self.root_id = root_id;
+        self.next_clone_ordinal.set(0);
+        self.next_service_ordinal.set(0);
+        self
+    }
+}
+
+impl<P: Clone> Clone for RetryLayer<P> {
+    fn clone(&self) -> Self {
+        let root_id = allocate_retry_lineage(
+            self.root_id,
+            RETRY_LAYER_CLONE_DOMAIN,
+            &self.next_clone_ordinal,
+        );
+        Self {
+            policy: self.policy.clone(),
+            root_id,
+            next_clone_ordinal: Cell::new(0),
+            next_service_ordinal: Cell::new(0),
+        }
+    }
 }
 
 impl<S, P: Clone> Layer<S> for RetryLayer<P> {
     type Service = Retry<P, S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        Retry::new(inner, self.policy.clone())
+        let root_id = allocate_retry_lineage(
+            self.root_id,
+            RETRY_LAYER_SERVICE_DOMAIN,
+            &self.next_service_ordinal,
+        );
+        Retry::new(inner, self.policy.clone()).with_root_id(root_id)
     }
 }
 
@@ -115,17 +195,31 @@ impl<E: std::error::Error + 'static> std::error::Error for RetryError<E> {
 }
 
 /// A service that retries requests according to a policy.
-#[derive(Debug, Clone)]
+///
+/// Cloning forks a new deterministic lineage and advances the source service's
+/// clone counter. The interior counter makes a retry service `Send` when its
+/// fields are `Send`, but deliberately not `Sync`; each clone owns independent
+/// request and descendant-clone counters.
+#[derive(Debug)]
 pub struct Retry<P, S> {
     policy: P,
     inner: S,
+    root_id: u64,
+    next_clone_ordinal: Cell<u64>,
+    next_request_ordinal: Cell<u64>,
 }
 
 impl<P, S> Retry<P, S> {
     /// Creates a new retry service.
     #[must_use]
     pub const fn new(inner: S, policy: P) -> Self {
-        Self { policy, inner }
+        Self {
+            policy,
+            inner,
+            root_id: DEFAULT_RETRY_ROOT_ID,
+            next_clone_ordinal: Cell::new(0),
+            next_request_ordinal: Cell::new(0),
+        }
     }
 
     /// Returns a reference to the policy.
@@ -145,10 +239,40 @@ impl<P, S> Retry<P, S> {
         &mut self.inner
     }
 
+    /// Sets the deterministic lineage root for this retry service.
+    ///
+    /// Independently constructed retry services should use distinct roots.
+    /// Reusing a root reproduces streams only when clone and call topology is
+    /// also reproduced.
+    #[must_use]
+    pub fn with_root_id(mut self, root_id: u64) -> Self {
+        self.root_id = root_id;
+        self.next_clone_ordinal.set(0);
+        self.next_request_ordinal.set(0);
+        self
+    }
+
     /// Consumes the retry service, returning the inner service.
     #[must_use]
     pub fn into_inner(self) -> S {
         self.inner
+    }
+}
+
+impl<P: Clone, S: Clone> Clone for Retry<P, S> {
+    fn clone(&self) -> Self {
+        let root_id = allocate_retry_lineage(
+            self.root_id,
+            RETRY_SERVICE_CLONE_DOMAIN,
+            &self.next_clone_ordinal,
+        );
+        Self {
+            policy: self.policy.clone(),
+            inner: self.inner.clone(),
+            root_id,
+            next_clone_ordinal: Cell::new(0),
+            next_request_ordinal: Cell::new(0),
+        }
     }
 }
 
@@ -175,7 +299,16 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        RetryFuture::new(self.inner.clone(), self.policy.clone(), req)
+        let stream_id = allocate_retry_lineage(
+            self.root_id,
+            RETRY_REQUEST_DOMAIN,
+            &self.next_request_ordinal,
+        );
+        RetryFuture::new(
+            self.inner.clone(),
+            self.policy.fork_for_request(stream_id),
+            req,
+        )
     }
 }
 
@@ -533,7 +666,6 @@ pub enum JitterStrategy {
 ///
 /// This policy retries on error with exponential backoff and jitter to avoid thundering herd.
 /// The backoff delay follows the formula based on the chosen jitter strategy.
-#[derive(Debug, Clone)]
 pub struct ExponentialBackoff<Request> {
     max_retries: usize,
     current_attempt: usize,
@@ -541,7 +673,40 @@ pub struct ExponentialBackoff<Request> {
     max_delay_ms: u64,
     jitter: JitterStrategy,
     last_delay_ms: u64,
+    jitter_seed: u64,
+    jitter_rng: DetRng,
     _marker: PhantomData<fn(Request) -> Request>,
+}
+
+impl<Request> Clone for ExponentialBackoff<Request> {
+    fn clone(&self) -> Self {
+        Self {
+            max_retries: self.max_retries,
+            current_attempt: self.current_attempt,
+            base_delay_ms: self.base_delay_ms,
+            max_delay_ms: self.max_delay_ms,
+            jitter: self.jitter,
+            last_delay_ms: self.last_delay_ms,
+            jitter_seed: self.jitter_seed,
+            jitter_rng: self.jitter_rng.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Request> fmt::Debug for ExponentialBackoff<Request> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExponentialBackoff")
+            .field("max_retries", &self.max_retries)
+            .field("current_attempt", &self.current_attempt)
+            .field("base_delay_ms", &self.base_delay_ms)
+            .field("max_delay_ms", &self.max_delay_ms)
+            .field("jitter", &self.jitter)
+            .field("last_delay_ms", &self.last_delay_ms)
+            .field("jitter_seed", &"<redacted>")
+            .field("jitter_rng", &"<redacted>")
+            .finish()
+    }
 }
 
 impl<Request> ExponentialBackoff<Request> {
@@ -555,6 +720,8 @@ impl<Request> ExponentialBackoff<Request> {
             max_delay_ms: 30_000, // 30 seconds default max
             jitter,
             last_delay_ms: base_delay_ms,
+            jitter_seed: 42,
+            jitter_rng: DetRng::new(42),
             _marker: PhantomData,
         }
     }
@@ -563,6 +730,14 @@ impl<Request> ExponentialBackoff<Request> {
     #[must_use]
     pub fn with_max_delay(mut self, max_delay_ms: u64) -> Self {
         self.max_delay_ms = max_delay_ms;
+        self
+    }
+
+    /// Sets the deterministic seed used to derive per-request jitter streams.
+    #[must_use]
+    pub fn with_jitter_seed(mut self, jitter_seed: u64) -> Self {
+        self.jitter_seed = jitter_seed;
+        self.jitter_rng = DetRng::new(jitter_seed);
         self
     }
 
@@ -591,11 +766,7 @@ impl<Request> ExponentialBackoff<Request> {
     }
 
     /// Calculates the next delay based on the jitter strategy.
-    fn calculate_delay(&self) -> u64 {
-        use crate::util::DetEntropy;
-
-        let entropy = DetEntropy::new(42); // Deterministic seed
-
+    fn calculate_delay(&mut self) -> u64 {
         match self.jitter {
             JitterStrategy::None => self
                 .base_delay_ms
@@ -618,7 +789,7 @@ impl<Request> ExponentialBackoff<Request> {
                 if max_delay == 0 {
                     0
                 } else {
-                    crate::util::entropy::EntropySource::next_u64(&entropy) % (max_delay + 1)
+                    self.jitter_rng.next_u64() % (max_delay + 1)
                 }
             }
             JitterStrategy::Equal => {
@@ -635,7 +806,7 @@ impl<Request> ExponentialBackoff<Request> {
                 let jitter = if half_delay == 0 {
                     0
                 } else {
-                    crate::util::entropy::EntropySource::next_u64(&entropy) % (half_delay + 1)
+                    self.jitter_rng.next_u64() % (half_delay + 1)
                 };
                 half_delay + jitter
             }
@@ -647,11 +818,21 @@ impl<Request> ExponentialBackoff<Request> {
                     min_delay
                 } else {
                     let range = max_delay - min_delay;
-                    min_delay
-                        + (crate::util::entropy::EntropySource::next_u64(&entropy) % (range + 1))
+                    min_delay + (self.jitter_rng.next_u64() % (range + 1))
                 }
             }
         }
+    }
+
+    fn advance_for_retry(&self) -> (u64, Self) {
+        // Advance entropy only in the returned policy. Calling retry() remains
+        // observationally pure; dropped retry futures cannot perturb the
+        // source policy's request-local stream.
+        let mut next_policy = self.clone();
+        let delay_ms = next_policy.calculate_delay();
+        next_policy.current_attempt += 1;
+        next_policy.last_delay_ms = delay_ms.max(1); // Ensure non-zero for decorrelated
+        (delay_ms, next_policy)
     }
 }
 
@@ -725,18 +906,7 @@ impl<Request: Clone + 'static, Res, E> Policy<Request, Res, E> for ExponentialBa
             return None;
         }
 
-        // Calculate delay for this retry
-        let delay_ms = self.calculate_delay();
-
-        let new_policy = Self {
-            max_retries: self.max_retries,
-            current_attempt: self.current_attempt + 1,
-            base_delay_ms: self.base_delay_ms,
-            max_delay_ms: self.max_delay_ms,
-            jitter: self.jitter,
-            last_delay_ms: delay_ms.max(1), // Ensure non-zero for decorrelated
-            _marker: PhantomData,
-        };
+        let (delay_ms, new_policy) = self.advance_for_retry();
 
         if delay_ms == 0 {
             // No delay - return immediately
@@ -751,6 +921,14 @@ impl<Request: Clone + 'static, Res, E> Policy<Request, Res, E> for ExponentialBa
 
     fn clone_request(&self, req: &Request) -> Option<Request> {
         Some(req.clone())
+    }
+
+    fn fork_for_request(&self, stream_id: u64) -> Self {
+        let jitter_seed = derive_retry_lineage(self.jitter_seed, RETRY_JITTER_DOMAIN, stream_id);
+        let mut policy = self.clone();
+        policy.jitter_seed = jitter_seed;
+        policy.jitter_rng = DetRng::new(jitter_seed);
+        policy
     }
 }
 
@@ -767,10 +945,27 @@ pub enum RequestClassification {
 ///
 /// Idempotent requests (GET, HEAD) can be retried on any error.
 /// Non-idempotent requests (POST, PUT) are only retried on network/infrastructure errors.
-#[derive(Debug, Clone)]
 pub struct SmartRetry<Request> {
     backoff: ExponentialBackoff<Request>,
     classification: RequestClassification,
+}
+
+impl<Request> fmt::Debug for SmartRetry<Request> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SmartRetry")
+            .field("backoff", &self.backoff)
+            .field("classification", &self.classification)
+            .finish()
+    }
+}
+
+impl<Request> Clone for SmartRetry<Request> {
+    fn clone(&self) -> Self {
+        Self {
+            backoff: self.backoff.clone(),
+            classification: self.classification,
+        }
+    }
 }
 
 impl<Request> SmartRetry<Request> {
@@ -798,6 +993,13 @@ impl<Request> SmartRetry<Request> {
     #[must_use]
     pub const fn backoff(&self) -> &ExponentialBackoff<Request> {
         &self.backoff
+    }
+
+    /// Sets the deterministic seed used for per-request jitter streams.
+    #[must_use]
+    pub fn with_jitter_seed(mut self, jitter_seed: u64) -> Self {
+        self.backoff = self.backoff.with_jitter_seed(jitter_seed);
+        self
     }
 
     /// Determines if the error is retryable based on request classification.
@@ -847,6 +1049,16 @@ impl<Request: Clone + 'static, Res, E> Policy<Request, Res, E> for SmartRetry<Re
 
     fn clone_request(&self, req: &Request) -> Option<Request> {
         Some(req.clone())
+    }
+
+    fn fork_for_request(&self, stream_id: u64) -> Self {
+        Self {
+            backoff: <ExponentialBackoff<Request> as Policy<Request, Res, E>>::fork_for_request(
+                &self.backoff,
+                stream_id,
+            ),
+            classification: self.classification,
+        }
     }
 }
 
@@ -1202,9 +1414,13 @@ mod tests {
 
     #[test]
     fn retry_layer_clone() {
-        let layer = RetryLayer::new(LimitedRetry::<i32>::new(3));
-        let cloned = layer;
+        let layer = RetryLayer::new(LimitedRetry::<i32>::new(3)).with_root_id(17);
+        let cloned = layer.clone();
         assert_eq!(cloned.policy().max_retries(), 3);
+        assert_ne!(layer.root_id, cloned.root_id);
+        assert_eq!(layer.next_clone_ordinal.get(), 1);
+        assert_eq!(cloned.next_clone_ordinal.get(), 0);
+        assert_eq!(cloned.next_service_ordinal.get(), 0);
     }
 
     #[test]
@@ -1216,11 +1432,43 @@ mod tests {
 
     #[test]
     fn retry_service_debug_clone() {
-        let svc = Retry::new(42_i32, LimitedRetry::<i32>::new(3));
+        let svc = Retry::new(42_i32, LimitedRetry::<i32>::new(3)).with_root_id(23);
         let dbg = format!("{svc:?}");
         assert!(dbg.contains("Retry"));
-        let cloned = svc;
+        let cloned = svc.clone();
         assert_eq!(*cloned.inner(), 42);
+        assert_ne!(svc.root_id, cloned.root_id);
+        assert_eq!(svc.next_clone_ordinal.get(), 1);
+        assert_eq!(svc.next_request_ordinal.get(), 0);
+        assert_eq!(cloned.next_clone_ordinal.get(), 0);
+        assert_eq!(cloned.next_request_ordinal.get(), 0);
+    }
+
+    #[test]
+    fn layer_clone_interleaving_does_not_perturb_source_services() {
+        fn roots(clone_first: bool) -> (u64, u64, u64) {
+            let layer = RetryLayer::new(LimitedRetry::<i32>::new(3)).with_root_id(31);
+            if clone_first {
+                let cloned = layer.clone();
+                let first = layer.layer(1_i32);
+                let second = layer.layer(2_i32);
+                let clone_service = cloned.layer(3_i32);
+                (first.root_id, second.root_id, clone_service.root_id)
+            } else {
+                let first = layer.layer(1_i32);
+                let cloned = layer.clone();
+                let second = layer.layer(2_i32);
+                let clone_service = cloned.layer(3_i32);
+                (first.root_id, second.root_id, clone_service.root_id)
+            }
+        }
+
+        let clone_before = roots(true);
+        let clone_between = roots(false);
+        assert_eq!(clone_before, clone_between);
+        assert_ne!(clone_before.0, clone_before.1);
+        assert_ne!(clone_before.0, clone_before.2);
+        assert_ne!(clone_before.1, clone_before.2);
     }
 
     #[test]
@@ -1481,148 +1729,293 @@ mod tests {
     }
 
     // =========================================================================
-    // Conformance: Jitter Algorithm Golden Tests
+    // Conformance: deterministic request-local jitter streams
     // =========================================================================
 
-    /// Golden test for full jitter distribution
-    #[test]
-    fn golden_full_jitter_distribution() {
-        init_test("golden_full_jitter_distribution");
-
-        // Use deterministic entropy to ensure reproducible results
-        let mut delays = Vec::new();
-
-        // Generate delays for first 5 attempts
-        for attempt in 0..5 {
-            let policy = ExponentialBackoff::<i32> {
-                max_retries: 10,
-                current_attempt: attempt,
-                base_delay_ms: 100,
-                max_delay_ms: 30_000,
-                jitter: JitterStrategy::Full,
-                last_delay_ms: 100,
-                _marker: PhantomData,
-            };
-
-            let delay = policy.calculate_delay();
-            delays.push((attempt, delay));
+    fn jitter_sequence(mut policy: ExponentialBackoff<i32>, count: usize) -> Vec<u64> {
+        let mut delays = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (delay, next_policy) = policy.advance_for_retry();
+            delays.push(delay);
+            policy = next_policy;
         }
-
-        // Golden values (deterministic due to DetEntropy::new(42))
-        let expected = vec![
-            (0, 94),   // random(0, 100)
-            (1, 163),  // random(0, 200)
-            (2, 44),   // random(0, 400)
-            (3, 502),  // random(0, 800)
-            (4, 1366), // random(0, 1600)
-        ];
-
-        for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
-            crate::assert_with_log!(
-                attempt == exp_attempt && delay == exp_delay,
-                format!("full jitter attempt {}", attempt),
-                *exp_delay,
-                *delay
-            );
-        }
-
-        crate::test_complete!("golden_full_jitter_distribution");
+        delays
     }
 
-    /// Golden test for equal jitter distribution
-    #[test]
-    fn golden_equal_jitter_distribution() {
-        init_test("golden_equal_jitter_distribution");
-
-        let mut delays = Vec::new();
-
-        for attempt in 0..5 {
-            let policy = ExponentialBackoff::<i32> {
-                max_retries: 10,
-                current_attempt: attempt,
-                base_delay_ms: 100,
-                max_delay_ms: 30_000,
-                jitter: JitterStrategy::Equal,
-                last_delay_ms: 100,
-                _marker: PhantomData,
-            };
-
-            let delay = policy.calculate_delay();
-            delays.push((attempt, delay));
-        }
-
-        // Golden values: base/2 + random(0, base/2) where base = 100 * 2^attempt
-        let expected = vec![
-            (0, 75),   // 50 + random(0, 50)
-            (1, 194),  // 100 + random(0, 100)
-            (2, 363),  // 200 + random(0, 200)
-            (3, 444),  // 400 + random(0, 400)
-            (4, 1302), // 800 + random(0, 800)
-        ];
-
-        for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
-            crate::assert_with_log!(
-                attempt == exp_attempt && delay == exp_delay,
-                format!("equal jitter attempt {}", attempt),
-                *exp_delay,
-                *delay
-            );
-        }
-
-        crate::test_complete!("golden_equal_jitter_distribution");
+    fn forked_jitter_sequence(
+        policy: &ExponentialBackoff<i32>,
+        stream_id: u64,
+        count: usize,
+    ) -> Vec<u64> {
+        let policy = <ExponentialBackoff<i32> as Policy<i32, (), &'static str>>::fork_for_request(
+            policy, stream_id,
+        );
+        jitter_sequence(policy, count)
     }
 
-    /// Golden test for decorrelated jitter distribution
     #[test]
-    fn golden_decorrelated_jitter_distribution() {
-        init_test("golden_decorrelated_jitter_distribution");
+    fn seeded_jitter_stream_consumes_successive_entropy_words() {
+        init_test("seeded_jitter_stream_consumes_successive_entropy_words");
+        let seed = 0x71d3_0021_cafe_beef;
 
-        let mut delays = Vec::new();
-        let mut policy = ExponentialBackoff::<i32> {
-            max_retries: 10,
-            current_attempt: 0,
-            base_delay_ms: 100,
-            max_delay_ms: 30_000,
-            jitter: JitterStrategy::Decorrelated,
-            last_delay_ms: 100,
-            _marker: PhantomData,
-        };
+        for strategy in [
+            JitterStrategy::Full,
+            JitterStrategy::Equal,
+            JitterStrategy::Decorrelated,
+        ] {
+            let mut oracle = DetRng::new(seed);
+            let mut policy =
+                ExponentialBackoff::<i32>::new(8, 100, strategy).with_jitter_seed(seed);
 
-        // Generate sequence where each delay affects the next
-        for attempt in 0..5 {
-            policy.current_attempt = attempt;
-            let delay = policy.calculate_delay();
-            delays.push((attempt, delay));
-            policy.last_delay_ms = delay.max(1); // Update for next iteration
+            for attempt in 0..5 {
+                let expected = match strategy {
+                    JitterStrategy::Full => {
+                        let bound = policy
+                            .base_delay_ms
+                            .saturating_mul(1_u64 << attempt)
+                            .min(policy.max_delay_ms);
+                        oracle.next_u64() % (bound + 1)
+                    }
+                    JitterStrategy::Equal => {
+                        let bound = policy
+                            .base_delay_ms
+                            .saturating_mul(1_u64 << attempt)
+                            .min(policy.max_delay_ms);
+                        let half = bound / 2;
+                        half + (oracle.next_u64() % (half + 1))
+                    }
+                    JitterStrategy::Decorrelated => {
+                        let upper = policy
+                            .last_delay_ms
+                            .saturating_mul(3)
+                            .min(policy.max_delay_ms);
+                        policy.base_delay_ms
+                            + (oracle.next_u64() % (upper - policy.base_delay_ms + 1))
+                    }
+                    JitterStrategy::None => unreachable!(),
+                };
+
+                let (actual, next_policy) = policy.advance_for_retry();
+                assert_eq!(actual, expected, "{strategy:?} attempt {attempt}");
+                assert_eq!(next_policy.current_attempt, attempt + 1);
+                assert_eq!(next_policy.last_delay_ms, actual.max(1));
+                policy = next_policy;
+            }
         }
 
-        // Golden values: random(base_delay, last_delay * 3)
-        let expected = vec![
-            (0, 263),  // random(100, 300)
-            (1, 764),  // random(100, last_delay*3)
-            (2, 1349), // random(100, last_delay*3)
-            (3, 1274), // random(100, last_delay*3)
-            (4, 2573), // random(100, last_delay*3)
-        ];
-
-        for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
-            crate::assert_with_log!(
-                attempt == exp_attempt && delay == exp_delay,
-                format!("decorrelated jitter attempt {}", attempt),
-                *exp_delay,
-                *delay
-            );
-        }
-
-        crate::test_complete!("golden_decorrelated_jitter_distribution");
+        crate::test_complete!("seeded_jitter_stream_consumes_successive_entropy_words");
     }
 
-    /// Golden test verifying max_retries is enforced exactly
     #[test]
-    fn golden_max_retries_enforcement() {
-        init_test("golden_max_retries_enforcement");
+    fn seeded_jitter_golden_vectors_detect_output_drift() {
+        init_test("seeded_jitter_golden_vectors_detect_output_drift");
+        let seed = 0x71d3_0021_cafe_beef;
+        let cases = [
+            (JitterStrategy::Full, [0, 7, 18, 7, 39]),
+            (JitterStrategy::Equal, [5, 9, 26, 46, 82]),
+            (JitterStrategy::Decorrelated, [24, 26, 67, 76, 79]),
+        ];
 
-        let mut policy = ExponentialBackoff::<i32>::new(3, 100, JitterStrategy::Full);
+        for (strategy, expected) in cases {
+            let policy = ExponentialBackoff::<i32>::new(8, 8, strategy)
+                .with_max_delay(100)
+                .with_jitter_seed(seed);
+            let actual = jitter_sequence(policy, expected.len());
+            assert_eq!(actual.as_slice(), expected.as_slice());
+        }
+
+        crate::test_complete!("seeded_jitter_golden_vectors_detect_output_drift");
+    }
+
+    #[test]
+    fn exponential_backoff_request_forks_are_distinct_and_replayable() {
+        init_test("exponential_backoff_request_forks_are_distinct_and_replayable");
+        let policy = ExponentialBackoff::<i32>::new(8, 100, JitterStrategy::Full)
+            .with_jitter_seed(0x4f52_4947_494e_414c);
+
+        let first: Vec<_> = (0..16)
+            .map(|stream_id| forked_jitter_sequence(&policy, stream_id, 4))
+            .collect();
+        let replay: Vec<_> = (0..16)
+            .map(|stream_id| forked_jitter_sequence(&policy, stream_id, 4))
+            .collect();
+        let forked_seeds: std::collections::HashSet<_> = (0..16)
+            .map(|stream_id| {
+                <ExponentialBackoff<i32> as Policy<i32, (), &'static str>>::fork_for_request(
+                    &policy, stream_id,
+                )
+                .jitter_seed
+            })
+            .collect();
+        let distinct_sequences: std::collections::HashSet<_> = first.iter().cloned().collect();
+        let first_delays: std::collections::HashSet<_> =
+            first.iter().map(|sequence| sequence[0]).collect();
+
+        assert_eq!(first, replay);
+        assert_eq!(forked_seeds.len(), 16);
+        assert_eq!(distinct_sequences.len(), 16);
+        assert!(first_delays.len() > 1);
+        assert_eq!(policy.current_attempt(), 0);
+
+        crate::test_complete!("exponential_backoff_request_forks_are_distinct_and_replayable");
+    }
+
+    #[test]
+    #[should_panic(expected = "retry lineage ordinal overflow")]
+    fn retry_lineage_allocation_fails_closed_on_exhaustion() {
+        let next_ordinal = Cell::new(u64::MAX);
+        let _ = allocate_retry_lineage(1, RETRY_REQUEST_DOMAIN, &next_ordinal);
+    }
+
+    fn call_jitter_seed(service: &mut Retry<ExponentialBackoff<i32>, FailingService>) -> u64 {
+        let future = service.call(1);
+        match future.state {
+            RetryState::PollReady { policy, .. } => policy.jitter_seed,
+            _ => unreachable!("new retry futures start in PollReady"),
+        }
+    }
+
+    fn clone_call_world(reverse_interleaving: bool) -> ([u64; 2], [u64; 2]) {
+        let (inner, _) = FailingService::new(0);
+        let policy = ExponentialBackoff::new(4, 100, JitterStrategy::Full)
+            .with_jitter_seed(0x434c_4f4e_4557_4f52);
+        let source = Retry::new(inner, policy).with_root_id(41);
+        let mut first = source.clone();
+        let mut second = source.clone();
+
+        if reverse_interleaving {
+            let second_0 = call_jitter_seed(&mut second);
+            let first_0 = call_jitter_seed(&mut first);
+            let second_1 = call_jitter_seed(&mut second);
+            let first_1 = call_jitter_seed(&mut first);
+            ([first_0, first_1], [second_0, second_1])
+        } else {
+            let first_0 = call_jitter_seed(&mut first);
+            let second_0 = call_jitter_seed(&mut second);
+            let first_1 = call_jitter_seed(&mut first);
+            let second_1 = call_jitter_seed(&mut second);
+            ([first_0, first_1], [second_0, second_1])
+        }
+    }
+
+    fn source_call_world(clone_between_calls: bool) -> [u64; 2] {
+        let (inner, _) = FailingService::new(0);
+        let policy = ExponentialBackoff::new(4, 100, JitterStrategy::Full)
+            .with_jitter_seed(0x534f_5552_4345_434c);
+        let mut source = Retry::new(inner, policy).with_root_id(42);
+        let first = call_jitter_seed(&mut source);
+        if clone_between_calls {
+            let _sibling = source.clone();
+        }
+        let second = call_jitter_seed(&mut source);
+        [first, second]
+    }
+
+    #[test]
+    fn retry_clone_call_interleavings_preserve_lane_streams() {
+        init_test("retry_clone_call_interleavings_preserve_lane_streams");
+        let forward = clone_call_world(false);
+        let reverse = clone_call_world(true);
+        assert_eq!(forward, reverse);
+        assert_ne!(forward.0, forward.1);
+        assert_eq!(source_call_world(false), source_call_world(true));
+        crate::test_complete!("retry_clone_call_interleavings_preserve_lane_streams");
+    }
+
+    #[test]
+    fn unpolled_call_consumes_exactly_one_request_stream() {
+        init_test("unpolled_call_consumes_exactly_one_request_stream");
+
+        fn first_two(drop_first: bool) -> (u64, u64) {
+            let (inner, _) = FailingService::new(0);
+            let policy = ExponentialBackoff::new(4, 100, JitterStrategy::Full)
+                .with_jitter_seed(0x4452_4f50_4341_4c4c);
+            let mut service = Retry::new(inner, policy).with_root_id(43);
+            let first = call_jitter_seed(&mut service);
+            if !drop_first {
+                return (first, first);
+            }
+            let second = call_jitter_seed(&mut service);
+            (first, second)
+        }
+
+        let dropped = first_two(true);
+        let replay = first_two(true);
+        let undropped = first_two(false);
+        assert_eq!(dropped, replay);
+        assert_eq!(dropped.0, undropped.0);
+        assert_ne!(dropped.0, dropped.1);
+
+        crate::test_complete!("unpolled_call_consumes_exactly_one_request_stream");
+    }
+
+    #[test]
+    fn explicit_root_replays_topology_and_separates_independent_trees() {
+        init_test("explicit_root_replays_topology_and_separates_independent_trees");
+
+        fn first_seed(root_id: u64) -> u64 {
+            let (inner, _) = FailingService::new(0);
+            let policy = ExponentialBackoff::new(4, 100, JitterStrategy::Full)
+                .with_jitter_seed(0x524f_4f54_5245_504c);
+            let mut service = Retry::new(inner, policy).with_root_id(root_id);
+            call_jitter_seed(&mut service)
+        }
+
+        assert_eq!(first_seed(47), first_seed(47));
+        assert_ne!(first_seed(47), first_seed(53));
+        crate::test_complete!("explicit_root_replays_topology_and_separates_independent_trees");
+    }
+
+    #[test]
+    fn dropped_retry_delay_preserves_source_rng_state() {
+        init_test("dropped_retry_delay_preserves_source_rng_state");
+        let source = ExponentialBackoff::<i32>::new(4, 100, JitterStrategy::Equal)
+            .with_jitter_seed(0x4452_4f50_4445_4c59);
+        let pristine = source.clone();
+        let error: Result<&i32, &&str> = Err(&"error");
+        let mut future = source.retry(&1, error).expect("retry should be scheduled");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        drop(future);
+
+        assert_eq!(jitter_sequence(source, 4), jitter_sequence(pristine, 4));
+        crate::test_complete!("dropped_retry_delay_preserves_source_rng_state");
+    }
+
+    #[test]
+    fn retry_seeded_types_preserve_expected_auto_traits_and_redact_debug() {
+        struct NonCloneRequest;
+
+        fn assert_clone<T: Clone>() {}
+        fn assert_debug<T: fmt::Debug>() {}
+        fn assert_send<T: Send>() {}
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_clone::<ExponentialBackoff<NonCloneRequest>>();
+        assert_clone::<SmartRetry<NonCloneRequest>>();
+        assert_debug::<ExponentialBackoff<NonCloneRequest>>();
+        assert_debug::<SmartRetry<NonCloneRequest>>();
+        assert_send_sync::<ExponentialBackoff<i32>>();
+        assert_send_sync::<SmartRetry<i32>>();
+        assert_send::<RetryLayer<ExponentialBackoff<i32>>>();
+        assert_send::<Retry<ExponentialBackoff<i32>, FailingService>>();
+        assert_send::<RetryFuture<ExponentialBackoff<i32>, FailingService, i32>>();
+
+        let policy = ExponentialBackoff::<i32>::new(4, 100, JitterStrategy::Full)
+            .with_jitter_seed(0x0123_4567_89ab_cdef);
+        let debug = format!("{policy:?}");
+        assert!(debug.contains("jitter_seed: \"<redacted>\""));
+        assert!(debug.contains("jitter_rng: \"<redacted>\""));
+        assert!(!debug.contains("81985529216486895"));
+        assert!(!debug.contains("0123456789abcdef"));
+    }
+
+    #[test]
+    fn max_retries_enforcement() {
+        init_test("max_retries_enforcement");
+
+        let mut policy = ExponentialBackoff::<i32>::new(3, 100, JitterStrategy::None);
         let mut retry_results = Vec::new();
 
         // Simulate retry attempts
@@ -1660,26 +2053,27 @@ mod tests {
             );
         }
 
-        crate::test_complete!("golden_max_retries_enforcement");
+        crate::test_complete!("max_retries_enforcement");
     }
 
-    /// Golden test for idempotent vs non-idempotent request classification
     #[test]
-    fn golden_request_classification() {
-        init_test("golden_request_classification");
+    fn smart_retry_preserves_classification_and_delegates_request_fork() {
+        init_test("smart_retry_preserves_classification_and_delegates_request_fork");
 
         let idempotent_policy = SmartRetry::<i32>::new(
             3,
             100,
             JitterStrategy::Full,
             RequestClassification::Idempotent,
-        );
+        )
+        .with_jitter_seed(0x534d_4152_5452_4554);
         let non_idempotent_policy = SmartRetry::<i32>::new(
             3,
             100,
             JitterStrategy::Full,
             RequestClassification::NonIdempotent,
-        );
+        )
+        .with_jitter_seed(0x534d_4152_5452_4554);
 
         // Test classification properties
         let mut results = Vec::new();
@@ -1706,7 +2100,6 @@ mod tests {
             non_idempotent_policy.retry(&42, success_result).is_some(),
         ));
 
-        // Golden values
         let expected = vec![
             ("idempotent_error", true),        // Should retry on error
             ("idempotent_success", false),     // Should not retry on success
@@ -1723,79 +2116,26 @@ mod tests {
             );
         }
 
-        crate::test_complete!("golden_request_classification");
-    }
+        let mut smart_sequences = Vec::new();
+        let mut direct_sequences = Vec::new();
+        for stream_id in [7, 11] {
+            let smart = <SmartRetry<i32> as Policy<i32, (), &'static str>>::fork_for_request(
+                &idempotent_policy,
+                stream_id,
+            );
+            let direct =
+                <ExponentialBackoff<i32> as Policy<i32, (), &'static str>>::fork_for_request(
+                    idempotent_policy.backoff(),
+                    stream_id,
+                );
+            smart_sequences.push(jitter_sequence(smart.backoff.clone(), 4));
+            direct_sequences.push(jitter_sequence(direct, 4));
+            assert_eq!(smart.classification(), RequestClassification::Idempotent);
+        }
+        assert_eq!(smart_sequences, direct_sequences);
+        assert_ne!(smart_sequences[0], smart_sequences[1]);
 
-    /// Golden test for jitter strategy behavior differences
-    #[test]
-    fn golden_jitter_strategy_comparison() {
-        init_test("golden_jitter_strategy_comparison");
-
-        // Compare delay distributions for same attempt across strategies
-        let attempt = 3;
-        let base_delay = 100;
-
-        let full_policy = ExponentialBackoff::<i32> {
-            max_retries: 10,
-            current_attempt: attempt,
-            base_delay_ms: base_delay,
-            max_delay_ms: 30_000,
-            jitter: JitterStrategy::Full,
-            last_delay_ms: 800, // Previous delay for decorrelated
-            _marker: PhantomData,
-        };
-
-        let equal_policy = ExponentialBackoff::<i32> {
-            max_retries: 10,
-            current_attempt: attempt,
-            base_delay_ms: base_delay,
-            max_delay_ms: 30_000,
-            jitter: JitterStrategy::Equal,
-            last_delay_ms: 800,
-            _marker: PhantomData,
-        };
-
-        let decorrelated_policy = ExponentialBackoff::<i32> {
-            max_retries: 10,
-            current_attempt: attempt,
-            base_delay_ms: base_delay,
-            max_delay_ms: 30_000,
-            jitter: JitterStrategy::Decorrelated,
-            last_delay_ms: 800,
-            _marker: PhantomData,
-        };
-
-        let full_delay = full_policy.calculate_delay();
-        let equal_delay = equal_policy.calculate_delay();
-        let decorrelated_delay = decorrelated_policy.calculate_delay();
-
-        // Golden values for attempt 3 with base_delay 100
-        let expected_full = 502; // random(0, 800)
-        let expected_equal = 444; // 400 + random(0, 400)
-        let expected_decorrelated = 404; // random(100, 2400)
-
-        crate::assert_with_log!(
-            full_delay == expected_full,
-            "full jitter delay",
-            expected_full,
-            full_delay
-        );
-
-        crate::assert_with_log!(
-            equal_delay == expected_equal,
-            "equal jitter delay",
-            expected_equal,
-            equal_delay
-        );
-
-        crate::assert_with_log!(
-            decorrelated_delay == expected_decorrelated,
-            "decorrelated jitter delay",
-            expected_decorrelated,
-            decorrelated_delay
-        );
-
-        crate::test_complete!("golden_jitter_strategy_comparison");
+        crate::test_complete!("smart_retry_preserves_classification_and_delegates_request_fork");
     }
 
     #[test]
