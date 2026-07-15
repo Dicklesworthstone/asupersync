@@ -332,6 +332,20 @@ mod tests {
     }
 
     #[test]
+    fn test_lines_codec_reused_equal_length_buffer_restarts_scan() {
+        let mut codec = LinesCodec::new();
+        let mut buf = BytesMut::from("abc");
+
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+
+        buf.clear();
+        buf.put_slice(b"ok\n");
+
+        assert_eq!(codec.decode(&mut buf).unwrap(), Some("ok".to_string()));
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+    }
+
+    #[test]
     fn test_lines_codec_reused_shorter_buffer_clears_discarding_state() {
         let mut codec = LinesCodec::new_with_max_length(5);
         let mut buf = BytesMut::from("abc");

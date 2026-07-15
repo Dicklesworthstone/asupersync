@@ -1,6 +1,7 @@
 //! Full-duplex framed transport combining `AsyncRead` + `AsyncWrite` with a codec.
 
 use crate::bytes::BytesMut;
+use crate::codec::framed_read::ReadState;
 use crate::codec::{Decoder, Encoder};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::stream::Stream;
@@ -42,6 +43,7 @@ pub struct Framed<T, U> {
     read_buf: BytesMut,
     write_buf: BytesMut,
     eof: bool,
+    read_state: ReadState,
     /// Upper bound on the read buffer before a frame completes.
     ///
     /// Mirrors [`FramedRead`](crate::codec::FramedRead)'s cap (default
@@ -73,6 +75,7 @@ impl<T, U> Framed<T, U> {
             read_buf: BytesMut::with_capacity(capacity),
             write_buf: BytesMut::with_capacity(capacity),
             eof: false,
+            read_state: ReadState::NeedsDecode,
             max_buffer_len: crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN,
             poisoned: false,
         }
@@ -119,6 +122,7 @@ impl<T, U> Framed<T, U> {
 
     /// Returns a mutable reference to the codec.
     pub fn codec_mut(&mut self) -> &mut U {
+        self.read_state = ReadState::NeedsDecode;
         &mut self.codec
     }
 
@@ -189,11 +193,13 @@ where
         let mut should_yield = false;
 
         loop {
-            // Try to decode a frame from buffered data.
-            if !this.eof {
+            // Try to decode only when bytes or explicit codec mutation could
+            // have changed the previous result.
+            if !this.eof && this.read_state == ReadState::NeedsDecode {
                 match this.codec.decode(&mut this.read_buf) {
                     Ok(Some(item)) => return Poll::Ready(Some(Ok(item))),
                     Ok(None) => {
+                        this.read_state = ReadState::NeedsRead;
                         if should_yield {
                             cx.waker().wake_by_ref();
                             return Poll::Pending;
@@ -209,7 +215,13 @@ where
             // EOF: give decoder one last chance.
             if this.eof {
                 return match this.codec.decode_eof(&mut this.read_buf) {
-                    Ok(Some(item)) => Poll::Ready(Some(Ok(item))),
+                    Ok(Some(item)) => {
+                        // EOF decoders may drain multiple final frames across
+                        // polls. Keep decoding eligible until decode_eof says
+                        // the buffer is exhausted.
+                        this.read_state = ReadState::NeedsDecode;
+                        Poll::Ready(Some(Ok(item)))
+                    }
                     Ok(None) => Poll::Ready(None),
                     Err(e) => {
                         this.poisoned = true;
@@ -244,6 +256,7 @@ where
                     let filled = read_buf.filled();
                     if filled.is_empty() {
                         this.eof = true;
+                        this.read_state = ReadState::NeedsDecode;
                     } else {
                         // br-asupersync-bj427s: bound the partial-frame buffer
                         // BEFORE appending so a peer that never completes a
@@ -270,6 +283,7 @@ where
                             }
                         }
                         this.read_buf.put_slice(filled);
+                        this.read_state = ReadState::NeedsDecode;
                         read_passes += 1;
                         if read_passes >= MAX_READ_PASSES_PER_POLL {
                             should_yield = true;
@@ -292,6 +306,7 @@ impl<T, U> Framed<T, U> {
     where
         U: Encoder<I>,
     {
+        self.read_state = ReadState::NeedsDecode;
         self.codec.encode(item, &mut self.write_buf)
     }
 }
@@ -364,8 +379,8 @@ mod tests {
     use super::*;
     use crate::codec::{LengthDelimitedCodec, LinesCodec, LinesCodecError};
     use std::io;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::Waker;
 
     fn noop_waker() -> Waker {
@@ -387,6 +402,127 @@ mod tests {
 
     fn track_waker(flag: Arc<AtomicBool>) -> Waker {
         Waker::from(Arc::new(TrackWaker(flag)))
+    }
+
+    struct RecordingLinesCodec {
+        inner: LinesCodec,
+        decode_lengths: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl RecordingLinesCodec {
+        fn new() -> (Self, Arc<Mutex<Vec<usize>>>) {
+            let decode_lengths = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    inner: LinesCodec::new(),
+                    decode_lengths: Arc::clone(&decode_lengths),
+                },
+                decode_lengths,
+            )
+        }
+    }
+
+    impl Decoder for RecordingLinesCodec {
+        type Item = String;
+        type Error = LinesCodecError;
+
+        fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.decode_lengths
+                .lock()
+                .expect("decode-length recorder mutex poisoned")
+                .push(src.len());
+            self.inner.decode(src)
+        }
+
+        fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.inner.decode_eof(src)
+        }
+    }
+
+    struct OneByteDuplex {
+        data: Vec<u8>,
+        pos: usize,
+        pending_between_bytes: bool,
+        pending_next: bool,
+    }
+
+    impl OneByteDuplex {
+        fn new(data: &[u8], pending_between_bytes: bool) -> Self {
+            Self {
+                data: data.to_vec(),
+                pos: 0,
+                pending_between_bytes,
+                pending_next: false,
+            }
+        }
+    }
+
+    impl AsyncRead for OneByteDuplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.pending_between_bytes && this.pending_next {
+                this.pending_next = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if this.pos == this.data.len() {
+                return Poll::Ready(Ok(()));
+            }
+            buf.put_slice(&this.data[this.pos..=this.pos]);
+            this.pos += 1;
+            this.pending_next = this.pending_between_bytes;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for OneByteDuplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct GateCodec {
+        ready: bool,
+    }
+
+    impl Decoder for GateCodec {
+        type Item = usize;
+        type Error = io::Error;
+
+        fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            if self.ready && !src.is_empty() {
+                let len = src.len();
+                src.clear();
+                Ok(Some(len))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    impl Encoder<()> for GateCodec {
+        type Error = io::Error;
+
+        fn encode(&mut self, _item: (), _dst: &mut BytesMut) -> Result<(), Self::Error> {
+            self.ready = true;
+            Ok(())
+        }
     }
 
     /// Duplex transport backed by separate read and write buffers.
@@ -631,6 +767,74 @@ mod tests {
 
         let poll = Pin::new(&mut framed).poll_next(&mut cx);
         assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_does_not_decode_unchanged_fragmented_line() {
+        for pending_between_bytes in [true, false] {
+            let expected = "x".repeat(MAX_READ_PASSES_PER_POLL * 2 + 5);
+            let mut wire = expected.as_bytes().to_vec();
+            wire.push(b'\n');
+            let transport = OneByteDuplex::new(&wire, pending_between_bytes);
+            let (codec, decode_lengths) = RecordingLinesCodec::new();
+            let mut framed = Framed::new(transport, codec);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut decoded = None;
+
+            for _ in 0..wire.len().saturating_mul(3).saturating_add(10) {
+                match Pin::new(&mut framed).poll_next(&mut cx) {
+                    Poll::Pending => {}
+                    Poll::Ready(Some(Ok(line))) => {
+                        decoded = Some(line);
+                        break;
+                    }
+                    Poll::Ready(Some(Err(error))) => {
+                        panic!("fragmented line decode failed: {error}")
+                    }
+                    Poll::Ready(None) => panic!("fragmented line ended before delimiter"),
+                }
+            }
+
+            assert_eq!(decoded.as_deref(), Some(expected.as_str()));
+            let decode_lengths = decode_lengths
+                .lock()
+                .expect("decode-length recorder mutex poisoned");
+            assert_eq!(decode_lengths.len(), wire.len() + 1);
+            assert_eq!(decode_lengths.first(), Some(&0));
+            assert_eq!(decode_lengths.last(), Some(&wire.len()));
+            assert!(
+                decode_lengths.windows(2).all(|pair| pair[0] < pair[1]),
+                "unchanged buffer was decoded twice: {decode_lengths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn framed_codec_mut_and_send_reenable_buffered_decode() {
+        for mutate_via_send in [false, true] {
+            let transport = OneByteDuplex::new(b"xy", true);
+            let mut framed = Framed::new(transport, GateCodec { ready: false });
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+
+            assert!(matches!(
+                Pin::new(&mut framed).poll_next(&mut cx),
+                Poll::Pending
+            ));
+            assert_eq!(framed.read_buffer().len(), 1);
+
+            if mutate_via_send {
+                framed.send(()).unwrap();
+            } else {
+                framed.codec_mut().ready = true;
+            }
+
+            assert!(matches!(
+                Pin::new(&mut framed).poll_next(&mut cx),
+                Poll::Ready(Some(Ok(1)))
+            ));
+        }
     }
 
     #[test]
