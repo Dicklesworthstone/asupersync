@@ -326,13 +326,20 @@ pub trait AsyncWriteExt: AsyncWrite {
 
 impl<W: AsyncWrite + ?Sized> AsyncWriteExt for W {}
 
-fn checked_write_progress(n: usize, remaining: usize) -> io::Result<usize> {
-    if n > remaining {
+fn checked_write_count(n: usize, offered: usize) -> io::Result<usize> {
+    if n > offered {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("writer reported {n} bytes written for {remaining}-byte buffer"),
+            format!("writer reported {n} bytes written for {offered}-byte buffer"),
         ))
-    } else if n == 0 && remaining > 0 {
+    } else {
+        Ok(n)
+    }
+}
+
+fn checked_write_progress(n: usize, remaining: usize) -> io::Result<usize> {
+    let n = checked_write_count(n, remaining)?;
+    if n == 0 && remaining > 0 {
         Err(io::Error::from(io::ErrorKind::WriteZero))
     } else {
         Ok(n)
@@ -371,7 +378,7 @@ where
             }
             Poll::Ready(Ok(n)) => {
                 this.completed = true;
-                match checked_write_progress(n, this.buf.len()) {
+                match checked_write_count(n, this.buf.len()) {
                     Ok(n) => Poll::Ready(Ok(n)),
                     Err(err) => Poll::Ready(Err(err)),
                 }
@@ -665,7 +672,7 @@ where
                     .ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidInput, "vectored buffers too large")
                     });
-                match remaining.and_then(|remaining| checked_write_progress(n, remaining)) {
+                match remaining.and_then(|remaining| checked_write_count(n, remaining)) {
                     Ok(n) => Poll::Ready(Ok(n)),
                     Err(err) => Poll::Ready(Err(err)),
                 }
@@ -968,6 +975,26 @@ mod tests {
     }
 
     #[test]
+    fn write_preserves_exhausted_cursor_zero_progress() {
+        init_test("write_preserves_exhausted_cursor_zero_progress");
+        let mut storage = [0u8; 1];
+        let mut writer = std::io::Cursor::new(storage.as_mut_slice());
+        writer.set_position(1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let direct = AsyncWrite::poll_write(Pin::new(&mut writer), &mut cx, b"x");
+        let direct_zero = matches!(direct, Poll::Ready(Ok(0)));
+        crate::assert_with_log!(direct_zero, "direct write zero", true, direct_zero);
+
+        let mut fut = writer.write(b"x");
+        let mut fut = Pin::new(&mut fut);
+        let n = poll_ready(&mut fut).expect("single write must preserve zero progress");
+        crate::assert_with_log!(n == 0, "extension write zero", 0, n);
+        crate::test_complete!("write_preserves_exhausted_cursor_zero_progress");
+    }
+
+    #[test]
     fn write_rejects_overreported_writer_progress() {
         init_test("write_rejects_overreported_writer_progress");
         let mut output = OverreportingWriter::new();
@@ -1002,6 +1029,25 @@ mod tests {
         let result = poll_ready(&mut fut);
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::test_complete!("write_all_empty_returns_without_polling_writer");
+    }
+
+    #[test]
+    fn write_all_still_rejects_exhausted_cursor_zero_progress() {
+        init_test("write_all_still_rejects_exhausted_cursor_zero_progress");
+        let mut storage = [0u8; 1];
+        let mut writer = std::io::Cursor::new(storage.as_mut_slice());
+        writer.set_position(1);
+        let mut fut = writer.write_all(b"x");
+        let mut fut = Pin::new(&mut fut);
+
+        let err = poll_ready(&mut fut).expect_err("write_all must require forward progress");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::WriteZero,
+            "write_all error kind",
+            io::ErrorKind::WriteZero,
+            err.kind()
+        );
+        crate::test_complete!("write_all_still_rejects_exhausted_cursor_zero_progress");
     }
 
     #[test]
@@ -1323,6 +1369,27 @@ mod tests {
         crate::assert_with_log!(n == 0, "bytes written", 0, n);
         crate::assert_with_log!(output.is_empty(), "output empty", true, output.is_empty());
         crate::test_complete!("write_vectored_empty_returns_zero");
+    }
+
+    #[test]
+    fn write_vectored_preserves_exhausted_cursor_zero_progress() {
+        init_test("write_vectored_preserves_exhausted_cursor_zero_progress");
+        let mut storage = [0u8; 1];
+        let mut writer = std::io::Cursor::new(storage.as_mut_slice());
+        writer.set_position(1);
+        let bufs = [IoSlice::new(b"x"), IoSlice::new(b"y")];
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let direct = AsyncWrite::poll_write_vectored(Pin::new(&mut writer), &mut cx, &bufs);
+        let direct_zero = matches!(direct, Poll::Ready(Ok(0)));
+        crate::assert_with_log!(direct_zero, "direct vectored zero", true, direct_zero);
+
+        let mut fut = writer.write_vectored(&bufs);
+        let mut fut = Pin::new(&mut fut);
+        let n = poll_ready(&mut fut).expect("single vectored write must preserve zero progress");
+        crate::assert_with_log!(n == 0, "extension vectored zero", 0, n);
+        crate::test_complete!("write_vectored_preserves_exhausted_cursor_zero_progress");
     }
 
     #[test]
