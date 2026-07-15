@@ -12,7 +12,7 @@ fn cancelling_head_of_line_waiter_unblocks_next_queued_entry() {
     });
     let now = Time::from_millis(0);
 
-    let _blocking_permit = bh.try_acquire(7).unwrap();
+    let _blocking_permit = bh.try_acquire(7, now).unwrap();
 
     let a_id = bh.enqueue(5, now).unwrap();
     let b_id = bh.enqueue(2, now).unwrap();
