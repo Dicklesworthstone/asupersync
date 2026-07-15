@@ -553,49 +553,82 @@ impl<T> OnceCell<T> {
     /// Registers a waker for async waiting with waiter-id tracking to prevent
     /// unbounded queue growth.
     fn register_waker(&self, waker: &Waker, waiter_id: &mut Option<u64>) {
-        let mut guard = match self.waiters.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // A custom RawWaker clone may allocate or panic. Clone before locking so
+        // neither clone callbacks nor unwinding can run through the waiter mutex.
+        let mut incoming_waker = Some(waker.clone());
+        let retired_waker = {
+            let mut guard = match self.waiters.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut retired_waker = None;
 
-        if let Some(id) = *waiter_id {
-            // Still queued: refresh to the latest task waker.
-            if let Some(existing) = guard.waiters.iter_mut().find(|entry| entry.id == id) {
-                if !existing.waker.will_wake(waker) {
-                    existing.waker.clone_from(waker);
+            if let Some(id) = *waiter_id {
+                // Still queued: refresh to the latest task waker.
+                if let Some(existing) = guard.waiters.iter_mut().find(|entry| entry.id == id) {
+                    if !existing.waker.will_wake(waker) {
+                        retired_waker = Some(std::mem::replace(
+                            &mut existing.waker,
+                            incoming_waker
+                                .take()
+                                .expect("OnceCell replacement waker must be available"),
+                        ));
+                    }
+                } else {
+                    // Dequeued while still waiting; re-register. Reserve before
+                    // moving the Waker so allocation failure cannot destroy its
+                    // payload while the waiter mutex is held.
+                    guard.waiters.reserve(1);
+                    let new_id = guard.next_waiter_id;
+                    guard.waiters.push(InitWaiter {
+                        waker: incoming_waker
+                            .take()
+                            .expect("OnceCell registration waker must be available"),
+                        id: new_id,
+                    });
+                    guard.next_waiter_id = guard.next_waiter_id.wrapping_add(1);
+                    *waiter_id = Some(new_id);
                 }
             } else {
-                // Dequeued while still waiting; re-register.
-                let new_id = guard.next_waiter_id;
-                guard.next_waiter_id = guard.next_waiter_id.wrapping_add(1);
+                // First time: create new waiter id.
+                guard.waiters.reserve(1);
+                let id = guard.next_waiter_id;
                 guard.waiters.push(InitWaiter {
-                    waker: waker.clone(),
-                    id: new_id,
+                    waker: incoming_waker
+                        .take()
+                        .expect("OnceCell registration waker must be available"),
+                    id,
                 });
-                *waiter_id = Some(new_id);
+                guard.next_waiter_id = guard.next_waiter_id.wrapping_add(1);
+                *waiter_id = Some(id);
             }
-        } else {
-            // First time: create new waiter id.
-            let id = guard.next_waiter_id;
-            guard.next_waiter_id = guard.next_waiter_id.wrapping_add(1);
-            guard.waiters.push(InitWaiter {
-                waker: waker.clone(),
-                id,
-            });
-            *waiter_id = Some(id);
-        }
-        drop(guard);
+
+            retired_waker
+        };
+
+        // Safe Wake payload destructors may re-enter this OnceCell. Both the
+        // replaced Waker and an unused pre-clone must retire after unlocking.
+        drop(retired_waker);
+        drop(incoming_waker);
     }
 
     fn remove_waiter_for_cancellation(&self, waiter_id: u64) {
-        let mut guard = match self.waiters.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
-            guard.waiters.swap_remove(pos);
+        let retired_waiter = {
+            let mut guard = match self.waiters.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) else {
+                return;
+            };
+            let retired_waiter = guard.waiters.swap_remove(pos);
             guard.cancellation_count = guard.cancellation_count.saturating_add(1);
-        }
+            retired_waiter
+        };
+
+        // Dropping a Waker can destroy arbitrary user-provided Wake state.
+        // Complete queue accounting and release the mutex first.
+        drop(retired_waiter);
     }
 }
 
@@ -776,8 +809,8 @@ mod tests {
     use futures_lite::future::{block_on, pending};
     use proptest::prelude::*;
     use std::future::{Future, poll_fn};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{Arc, Weak};
     use std::task::{Context, Poll, Waker};
     use std::thread;
 
@@ -842,6 +875,185 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.wakes.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[derive(Debug)]
+    struct OnceCellWakerDropProbe {
+        cell: Weak<OnceCell<()>>,
+        drops: Arc<AtomicUsize>,
+        unlocked_drops: Arc<AtomicUsize>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for OnceCellWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for OnceCellWakerDropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(cell) = self.cell.upgrade()
+                && cell.waiters.try_lock().is_ok()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn once_cell_waker_drop_probe(
+        cell: &Arc<OnceCell<()>>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(OnceCellWakerDropProbe {
+            cell: Arc::downgrade(cell),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
+    }
+
+    #[test]
+    fn wait_init_waker_replacement_retires_old_payload_after_unlock() {
+        init_test("wait_init_waker_replacement_retires_old_payload_after_unlock");
+        let cell = Arc::new(OnceCell::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+        let (waker, drops, unlocked_drops) = once_cell_waker_drop_probe(&cell);
+        let mut wait = WaitInit {
+            cell: &cell,
+            waiter_id: None,
+        };
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+        }
+        let initial_id = wait.waiter_id.expect("wait must record its queue id");
+        {
+            let guard = cell.waiters.lock().expect("waiters lock");
+            assert_eq!(guard.waiters.len(), 1);
+            assert_eq!(guard.waiters[0].id, initial_id);
+            assert_eq!(guard.next_waiter_id, 1);
+            assert_eq!(guard.cancellation_count, 0);
+        }
+        assert!(!waker.will_wake(Waker::noop()));
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let mut replacement_cx = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut wait).poll(&mut replacement_cx).is_pending());
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        {
+            let guard = cell.waiters.lock().expect("waiters lock");
+            assert_eq!(guard.waiters.len(), 1);
+            assert_eq!(guard.waiters[0].id, initial_id);
+            assert_eq!(guard.next_waiter_id, 1);
+            assert_eq!(guard.cancellation_count, 0);
+        }
+
+        drop(wait);
+        let retired = cell.telemetry_snapshot(1);
+        assert_eq!(retired.waiter_count, 0);
+        assert_eq!(retired.cancellation_count, 1);
+        crate::test_complete!("wait_init_waker_replacement_retires_old_payload_after_unlock");
+    }
+
+    #[test]
+    fn wait_init_drop_retires_waker_payload_after_unlock() {
+        init_test("wait_init_drop_retires_waker_payload_after_unlock");
+        let cell = Arc::new(OnceCell::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+        let (waker, drops, unlocked_drops) = once_cell_waker_drop_probe(&cell);
+        let mut wait = WaitInit {
+            cell: &cell,
+            waiter_id: None,
+        };
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+        }
+        {
+            let guard = cell.waiters.lock().expect("waiters lock");
+            assert_eq!(guard.waiters.len(), 1);
+            assert_eq!(guard.next_waiter_id, 1);
+            assert_eq!(guard.cancellation_count, 0);
+        }
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        drop(wait);
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        let snapshot = cell.telemetry_snapshot(2);
+        assert_eq!(snapshot.waiter_count, 0);
+        assert_eq!(snapshot.cancellation_count, 1);
+        assert_eq!(cell.waiters.lock().expect("waiters lock").next_waiter_id, 1);
+        crate::test_complete!("wait_init_drop_retires_waker_payload_after_unlock");
+    }
+
+    #[test]
+    fn cancel_aware_wait_drop_retires_cell_waker_after_unlock() {
+        init_test("cancel_aware_wait_drop_retires_cell_waker_after_unlock");
+        let cell = Arc::new(OnceCell::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+        let cx = crate::cx::Cx::for_testing();
+        let (waker, drops, unlocked_drops) = once_cell_waker_drop_probe(&cell);
+        let mut wait = CancelAwareWaitInit {
+            cell: &cell,
+            cx: &cx,
+            waiter_id: None,
+            cancel_waker: None,
+        };
+
+        {
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+        }
+        assert!(wait.waiter_id.is_some());
+        assert!(wait.cancel_waker.is_some());
+        {
+            let guard = cell.waiters.lock().expect("waiters lock");
+            assert_eq!(guard.waiters.len(), 1);
+            assert_eq!(guard.next_waiter_id, 1);
+            assert_eq!(guard.cancellation_count, 0);
+        }
+
+        // Isolate the OnceCell registration as the final payload owner so the
+        // future's removal path is what triggers the destructor probe.
+        let cancel_waker = wait
+            .cancel_waker
+            .take()
+            .expect("cancel-aware wait must register its task waker");
+        cx.clear_cancel_waker_if_current(&cancel_waker);
+        drop(cancel_waker);
+        drop(waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        cx.cancel_fast(crate::types::CancelKind::User);
+        let mut cancelled_cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut wait).poll(&mut cancelled_cx),
+            Poll::Ready(Err(OnceCellError::Cancelled))
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        {
+            let guard = cell.waiters.lock().expect("waiters lock");
+            assert_eq!(guard.waiters.len(), 1);
+            assert_eq!(guard.cancellation_count, 0);
+        }
+
+        drop(wait);
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+        let snapshot = cell.telemetry_snapshot(3);
+        assert_eq!(snapshot.waiter_count, 0);
+        assert_eq!(snapshot.cancellation_count, 1);
+        crate::test_complete!("cancel_aware_wait_drop_retires_cell_waker_after_unlock");
     }
 
     #[test]
