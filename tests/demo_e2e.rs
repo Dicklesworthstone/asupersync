@@ -474,7 +474,15 @@ fn replay_scenario_for_trace(runtime: &mut LabRuntime, seed: u64) {
     resolve_obligations(runtime, &obligations);
 
     let reason = CancelReason::new(CancelKind::User);
-    let _ = runtime.state.cancel_request(cancel_target, &reason, None);
+    let cancel_effects = runtime.state.cancel_request(cancel_target, &reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+    wake_effects.dispatch();
 
     if rng.chance(30) {
         runtime.advance_time(u64::from(rng.next_u32(50_000)) + 1);

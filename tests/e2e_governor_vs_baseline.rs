@@ -165,13 +165,15 @@ fn run_cancel_fanout(
 
     // Initiate cancellation.
     let cancel_reason = CancelReason::shutdown();
-    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
     }
+    wake_effects.dispatch();
 
     // Record potential trajectory during drain.
     let mut governor = LyapunovGovernor::new(weights);
@@ -264,13 +266,15 @@ fn run_deadline_pressure(
     }
 
     let cancel_reason = CancelReason::shutdown();
-    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
     }
+    wake_effects.dispatch();
 
     let mut governor = LyapunovGovernor::new(weights);
     governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
@@ -366,13 +370,15 @@ fn run_obligation_debt(
 
     // Cancel + abort obligations (mimicking task bodies releasing on cancel).
     let cancel_reason = CancelReason::shutdown();
-    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
     }
+    wake_effects.dispatch();
     for obl_id in &obligation_ids {
         let _ = runtime
             .state

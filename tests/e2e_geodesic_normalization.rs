@@ -239,13 +239,24 @@ fn scenario_cancel_drain() -> ScenarioReport {
 
     // Cancel the first two tasks mid-flight
     for &tid in &task_ids[..2] {
-        if let Some(record) = runtime.state.task_mut(tid) {
-            if !record.state.is_terminal() {
-                record.request_cancel_with_budget(
+        let cancel_effects = match runtime.state.task_mut(tid) {
+            Some(record) if !record.state.is_terminal() => {
+                Some(record.request_cancel_with_budget(
                     CancelReason::user("e2e-cancel-drain"),
                     Budget::ZERO,
-                );
+                ))
             }
+            Some(_) | None => None,
+        };
+        if let Some(cancel_effects) = cancel_effects {
+            let (newly_cancelled, cancel_wakes) = cancel_effects.into_parts();
+            if newly_cancelled {
+                runtime
+                    .scheduler
+                    .lock()
+                    .schedule_cancel(tid, Budget::ZERO.priority);
+            }
+            cancel_wakes.dispatch();
         }
     }
 

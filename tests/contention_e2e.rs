@@ -312,14 +312,19 @@ fn run_cross_entity_locking_lab_workload(
 
         if region_idx % 2 == 0 {
             regions_cancelled += 1;
-            let to_schedule = runtime.state.cancel_request(
+            let cancel_effects = runtime.state.cancel_request(
                 region,
                 &CancelReason::user("cross-entity-locking"),
                 None,
             );
-            for (task_id, priority) in to_schedule {
-                runtime.scheduler.lock().schedule(task_id, priority);
+            let (to_schedule, wake_effects) = cancel_effects.into_parts();
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                for (task_id, priority) in to_schedule {
+                    scheduler.schedule_cancel(task_id, priority);
+                }
             }
+            wake_effects.dispatch();
         }
     }
 

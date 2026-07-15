@@ -198,6 +198,26 @@
       ]
     },
     {
+      "code": "ASUP-E008",
+      "name": "admission-slot-already-reserved",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "A spawn request attempted to reuse a one-shot canonical identity slot.",
+      "probable_causes": [
+        "Two spawn requests were constructed with the same AdmittedTaskSlot.",
+        "Caller code retained and reused a slot after its original request was admitted or denied."
+      ],
+      "remediation": [
+        "Create a fresh AdmittedTaskSlot alongside each TaskHandle.",
+        "Treat the slot and its spawn request as one indivisible, one-shot admission handshake."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E008.md",
+      "since": "0.3.5",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
       "code": "ASUP-E101",
       "name": "obligation-leaked",
       "area": "obligations",

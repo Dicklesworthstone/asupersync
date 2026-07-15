@@ -31,8 +31,11 @@
 //!        inner: fut });`
 //!     2. RegionRunner drives pinned_fut to Ready.
 //!     3. result is destructured; outcome is computed.
-//!     4. Cleanup match runs (cancel_request +
-//!        begin_close depending on outcome variant).
+//!     4. Cleanup match runs (cancel_request captures auxiliary
+//!        cancellation observer/Waker effects, queues them for
+//!        deferred post-lock dispatch, then begin_close runs
+//!        depending on outcome variant). This does not claim
+//!        unrelated close/finalizer callbacks are deferred.
 //!     5. RegionCloseFuture awaits region quiescence.
 //!     6. Function returns `Ok(outcome)`.
 //!     7. Local variables drop in REVERSE declaration order
@@ -343,8 +346,9 @@ fn catch_unwind_holds_inner_future_until_dropped() {
 fn region_runner_drop_cancels_child_when_dropped_pre_completion() {
     // Pin (link 2 cleanup-on-cancel): if RegionRunner is
     // dropped before await completes (e.g., parent panic
-    // above region), Drop fires cancel_request +
-    // begin_close. The user future is dropped as part of
+    // above region), Drop captures cancel_request effects,
+    // queues them for scheduler dispatch after RuntimeState is
+    // released, then begins close. The user future is dropped as part of
     // pinned_fut going out of scope — same drop-ordering
     // guarantee as the success path.
     let source = read("src/cx/scope.rs");
@@ -357,10 +361,15 @@ fn region_runner_drop_cancels_child_when_dropped_pre_completion() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("state.cancel_request(self.child_region, &reason, None);")
+        body.contains("let effects = state.cancel_request(self.child_region, &reason, None);")
+            && body.contains("state.defer_cancel_dispatch(effects);")
+            && !body.contains(".dispatch()")
+            && !body.contains("wake_by_ref(")
             && body.contains("region.begin_close(None);"),
-        "REGRESSION: RegionRunner::Drop no longer cleans up \
-         child region. Parent-panic-above-region scenario \
+        "REGRESSION: RegionRunner::Drop no longer captures and defers \
+         the child region's auxiliary cancellation observers/Wakers. \
+         This pin makes no claim about later region-close/finalizer callbacks. \
+         Parent-panic-above-region scenario \
          leaks the region — structured-concurrency \
          contract violated even before drop ordering.",
     );

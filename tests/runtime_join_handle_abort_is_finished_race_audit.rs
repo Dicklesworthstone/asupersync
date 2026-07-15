@@ -31,23 +31,17 @@
 //!          self.abort_with_reason(CancelReason::user("abort"));
 //!      }
 //!      pub fn abort_with_reason(&self, reason: CancelReason) {
-//!          if let Some(inner) = self.inner.upgrade() {
-//!              let cancel_waker = {
-//!                  let mut lock = inner.write();
-//!                  lock.cancel_requested = true;
-//!                  lock.fast_cancel.store(true, Release);
-//!                  ...
-//!              };
-//!              if let Some(waker) = cancel_waker {
-//!                  waker.wake_by_ref();
-//!              }
-//!          }
+//!          apply_or_defer_cancel_reason(/* ... */, &reason);
 //!      }
 //!      ```
-//!      Sets cancel_requested + fast_cancel + cancel_reason
-//!      and wakes the cancel-waker. The task is now
-//!      scheduled to run on the cancel lane. Its next poll
-//!      observes the cancel via checkpoint.
+//!      `apply_or_defer_cancel_reason` sets cancel_requested +
+//!      fast_cancel + cancel_reason, releases caller-side
+//!      locks, and enqueues a callback-free runtime command.
+//!      The runtime reconciles the TaskRecord (or accepts the
+//!      task's checkpoint-first materialization), publishes the
+//!      cancel lane, and only then dispatches panic-isolated
+//!      Waker effects. Its next poll observes cancellation via
+//!      checkpoint.
 //!
 //!   2. **`is_finished()` returns based on result-channel
 //!      state** (runtime/task_handle.rs:108-110):
@@ -76,16 +70,19 @@
 //!      alive). So is_finished() returns **false**.
 //!
 //!   4. **Eventually** (after the task's next checkpoint
-//!      observes the cancel, ?-propagates the Err, and the
-//!      wrapping fn sends Outcome::Cancelled through the
-//!      result_tx): receiver.is_ready() becomes true, and
+//!      observes the cancel and the wrapping fn sends its
+//!      terminal result through result_tx): receiver.is_ready()
+//!      becomes true, and
 //!      is_finished() returns **true**. The "could be
 //!      later" clause is bounded by the task's next
 //!      checkpoint frequency.
+//!      The payload is path-dependent: scope-managed futures may
+//!      preserve a returned payload even though TaskRecord/region
+//!      completion is authoritatively cancelled.
 //!
 //!   5. **For PARKED tasks** (sleeping on Sleep / channel
-//!      / etc.), the cancel-waker wake propagates the
-//!      cancel via CancelLaneWaker (per
+//!      / etc.), runtime-owned post-publication effects
+//!      dispatch propagates the cancel via the cancel Waker (per
 //!      tests/scheduler_cross_thread_cancel_propagation_audit.rs).
 //!      The task wakes, polls, observes cancel via
 //!      checkpoint, and eventually sends through result_tx.
@@ -124,9 +121,9 @@
 //!   - removed the receiver.is_closed() check (would miss
 //!     the sender-dropped case — perpetual false even after
 //!     task completion),
-//!   - changed abort() to NOT wake the cancel_waker (parked
-//!     tasks never observe cancel — is_finished stuck
-//!     false forever),
+//!   - removed the runtime gateway, cancel-lane publication,
+//!     or post-publication Waker dispatch (parked tasks never
+//!     observe cancel — is_finished stuck false forever),
 //!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
@@ -187,23 +184,31 @@ fn task_handle_abort_with_reason_publishes_via_release_store() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("apply_cancel_reason(&inner, &reason)")
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.contains("let mut cached = requested.write();")
+            && source.contains(".filter(|task| task.is_published())")
+            && source.contains("strengthen_cancel_reason_locked(&mut lock, &strongest_requested);")
             && source.contains("lock.cancel_requested = true;")
             && source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: abort_with_reason no longer publishes \
-         via cancel_requested + fast_cancel.store(Release). \
+         through the admission gate and cancel_requested + \
+         fast_cancel.store(Release). \
          The task can't observe the abort — is_finished \
          stuck false forever.",
     );
 }
 
 #[test]
-fn task_handle_abort_wakes_cancel_waker_for_parked_task_observability() {
-    // Pin (link 5): abort wakes the cancel_waker so a
-    // parked task observes the abort. Without this,
-    // parked tasks (sleeping on Sleep/channel) miss the
-    // signal — is_finished stuck false.
+fn task_handle_abort_defers_wakers_until_runtime_cancel_lane_publication() {
+    // Pin (link 5): abort itself runs no Waker. It releases the
+    // caller-side locks and enqueues plain data; the scheduler
+    // performs the TaskRecord transition, publishes the cancel
+    // lane, and only then dispatches panic-isolated Wakers.
     let source = read("src/runtime/task_handle.rs");
+    let mailbox = read("src/runtime/spawn_mailbox.rs");
+    let state = read("src/runtime/state.rs");
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
 
     let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
     let start = source.find(fn_marker).expect("abort_with_reason fn");
@@ -211,13 +216,37 @@ fn task_handle_abort_wakes_cancel_waker_for_parked_task_observability() {
         .find("\n    }\n")
         .expect("abort_with_reason close");
     let body = &source[start..start + body_end];
+    let gate_start = source
+        .find("fn apply_or_defer_cancel_reason(")
+        .expect("admission-aware abort helper");
+    let gate_end = source[gate_start..]
+        .find("\n}\n")
+        .expect("admission-aware abort helper close");
+    let gate_body = &source[gate_start..gate_start + gate_end];
 
     assert!(
-        body.contains("for waker in cancel_wakers {") && body.contains("waker.wake_by_ref();"),
-        "REGRESSION: abort_with_reason no longer wakes the \
-         cancel_waker. Parked tasks dont observe the abort \
-         — is_finished perpetually false until something \
-         else wakes them.",
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.matches("apply_or_defer_cancel_reason(").count() >= 3
+            && gate_body.contains("let mut cached = requested.write();")
+            && gate_body.contains(".filter(|task| task.is_published())")
+            && !gate_body.contains(".dispatch()")
+            && !gate_body.contains("cancel_waker_snapshot")
+            && gate_body.contains("drop(cached);")
+            && gate_body.contains("changed || lock.runnable_publication.is_delegated_cancel()")
+            && gate_body.contains("gateway.enqueue_handle_cancel(task_id, effective_reason)")
+            && mailbox.contains("pub(crate) fn enqueue_handle_cancel(")
+            && state.contains("pub(crate) fn cancel_task_for_handle(")
+            && state.contains("record.request_cancel_for_handle(reason)")
+            && scheduler.contains("record.publish_delegated_cancel_lane(")
+            && scheduler.contains("publication_wakes.retire_without_dispatch();")
+            && !scheduler.contains("mailbox.enqueue_handle_cancel(task_id, reason);")
+            && scheduler.contains("for wakes in wakes_to_dispatch")
+            && scheduler.contains("wakes.dispatch();"),
+        "REGRESSION: abort_with_reason no longer crosses the callback-free \
+         runtime boundary before TaskRecord transition, cancel-lane \
+         publication, and Waker dispatch. Parked tasks may miss abort or \
+         reentrant Waker code may run in the caller's lock stack.",
     );
 }
 
@@ -334,9 +363,10 @@ fn task_handle_abort_does_not_consume_terminal_directly() {
 fn join_future_completes_via_receiver_recv_uninterruptible_after_abort() {
     // Pin (link 4 propagation): JoinFuture awaits via
     // receiver.recv_uninterruptible. After abort, the task
-    // observes cancel via checkpoint, returns Err, the
-    // wrapping fn sends Outcome::Cancelled, the receiver
-    // sees the result. JoinFuture resolves.
+    // observes cancel via checkpoint and the wrapping fn
+    // sends its path-specific terminal result. JoinFuture
+    // resolves independently of whether that payload is a
+    // cancellation error or a scope-preserved return value.
     let source = read("src/runtime/task_handle.rs");
 
     let fn_marker = "pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> JoinFuture<'a, T> {";
@@ -375,9 +405,9 @@ fn fast_cancel_is_arc_atomic_bool_for_cross_thread_propagation() {
 #[test]
 fn abort_publishes_cancel_reason_for_attribution_in_outcome() {
     // Pin (link 1 attribution): abort sets cancel_reason
-    // via strengthen-or-set. The wrapping future will
-    // surface this via Outcome::Cancelled(reason); users
-    // can match on the reason.
+    // via strengthen-or-set. The authoritative TaskRecord
+    // and region completion surface this attribution even
+    // when a scope-specific join payload is preserved.
     let source = read("src/runtime/task_handle.rs");
 
     let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
@@ -388,9 +418,11 @@ fn abort_publishes_cancel_reason_for_attribution_in_outcome() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("apply_cancel_reason(&inner, &reason)")
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.contains("if let Some(existing) = cached.as_mut() {")
             && source.contains("if let Some(existing) = &mut lock.cancel_reason {")
-            && source.contains("existing.strengthen(reason);")
+            && source.contains("existing.strengthen(reason)")
             && source.contains("lock.cancel_reason = Some(reason.clone());"),
         "REGRESSION: abort_with_reason no longer manages \
          cancel_reason via strengthen-or-set. Attribution \

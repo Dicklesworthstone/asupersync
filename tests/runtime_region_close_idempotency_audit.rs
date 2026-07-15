@@ -39,7 +39,7 @@
 //!   2. **`begin_close` returns the transition outcome**
 //!      (region.rs:894):
 //!      ```ignore
-//!      pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {
+//!      fn begin_close_transition(&self, reason: Option<CancelReason>) -> bool {
 //!          let mut inner = self.inner.write();
 //!          if self.state.load() == RegionState::Closed {
 //!              return false;
@@ -54,6 +54,10 @@
 //!          let transitioned = self.state.transition(
 //!              RegionState::Open, RegionState::Closing);
 //!          drop(inner);
+//!          transitioned
+//!      }
+//!      pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {
+//!          let transitioned = self.begin_close_transition(reason);
 //!          if transitioned {
 //!              self.trace_state_change(RegionState::Closing);
 //!          }
@@ -88,7 +92,7 @@
 //!   5. **`cancel_request` first pass uses the strengthening
 //!      branch** (state.rs:2650-2652):
 //!      ```ignore
-//!      if region.begin_close(Some(region_reason.clone())) {
+//!      if region.begin_close_without_subscriber(Some(region_reason.clone())) {
 //!          // ... emit RegionCloseBegin trace
 //!      } else if region.state() != RegionState::Closed {
 //!          region.strengthen_cancel_reason(region_reason);
@@ -200,11 +204,11 @@ fn begin_close_returns_false_when_already_closed() {
     // again or attempt a no-op CAS.
     let source = read("src/record/region.rs");
 
-    let fn_marker = "pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {";
-    let start = source.find(fn_marker).expect("begin_close fn");
+    let fn_marker = "fn begin_close_transition(&self, reason: Option<CancelReason>) -> bool {";
+    let start = source.find(fn_marker).expect("begin_close transition fn");
     let body_end = source[start..]
         .find("\n    }\n")
-        .expect("begin_close close");
+        .expect("begin_close transition close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -225,11 +229,11 @@ fn begin_close_strengthens_existing_cancel_reason_not_overwrites() {
     // reason would overwrite the first — losing attribution.
     let source = read("src/record/region.rs");
 
-    let fn_marker = "pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {";
-    let start = source.find(fn_marker).expect("begin_close fn");
+    let fn_marker = "fn begin_close_transition(&self, reason: Option<CancelReason>) -> bool {";
+    let start = source.find(fn_marker).expect("begin_close transition fn");
     let body_end = source[start..]
         .find("\n    }\n")
-        .expect("begin_close close");
+        .expect("begin_close transition close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -257,11 +261,11 @@ fn begin_close_uses_atomic_transition_for_open_to_closing_flip() {
     // begin_close single-winner.
     let source = read("src/record/region.rs");
 
-    let fn_marker = "pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {";
-    let start = source.find(fn_marker).expect("begin_close fn");
+    let fn_marker = "fn begin_close_transition(&self, reason: Option<CancelReason>) -> bool {";
+    let start = source.find(fn_marker).expect("begin_close transition fn");
     let body_end = source[start..]
         .find("\n    }\n")
-        .expect("begin_close close");
+        .expect("begin_close transition close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -296,6 +300,41 @@ fn begin_close_emits_trace_only_on_winning_transition() {
          event on transitioned. Either the trace fires on \
          every call (duplicate trace events under concurrent \
          close) or it never fires (lost observability).",
+    );
+}
+
+#[test]
+fn runtime_cancel_close_transition_does_not_enter_tracing_subscriber() {
+    // RuntimeState::cancel_request commonly executes beneath the scheduler's
+    // outer state lock. Its RegionRecord transition must therefore share the
+    // same CAS/reason mutation as public begin_close without invoking the
+    // tracing subscriber. RuntimeState records RegionCloseBegin in its
+    // callback-free TraceBuffer instead.
+    let region_source = read("src/record/region.rs");
+    let marker = "pub(crate) fn begin_close_without_subscriber(";
+    let start = region_source
+        .find(marker)
+        .expect("subscriber-free begin_close variant");
+    let body_end = region_source[start..]
+        .find("\n    }\n")
+        .expect("subscriber-free begin_close close");
+    let body = &region_source[start..start + body_end];
+
+    assert!(
+        body.contains("self.begin_close_transition(reason)")
+            && !body.contains("trace_state_change(")
+            && !body.contains("debug!("),
+        "REGRESSION: RuntimeState's close transition can invoke the tracing \
+         subscriber beneath the outer state lock.",
+    );
+
+    let state_source = read("src/runtime/state.rs");
+    assert!(
+        state_source
+            .contains("if region.begin_close_without_subscriber(Some(region_reason.clone())) {")
+            && state_source.contains("TraceEventKind::RegionCloseBegin"),
+        "REGRESSION: cancel_request no longer couples its subscriber-free \
+         RegionRecord transition to the internal RegionCloseBegin trace event.",
     );
 }
 
@@ -345,14 +384,14 @@ fn cancel_request_falls_back_to_strengthen_when_begin_close_returns_false() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("if region.begin_close(Some(region_reason.clone())) {")
+        source.contains("if region.begin_close_without_subscriber(Some(region_reason.clone())) {")
             && source.contains(
                 "} else if region.state() != crate::record::region::RegionState::Closed {"
             )
             && source.contains("region.strengthen_cancel_reason(region_reason);"),
         "REGRESSION: cancel_request first pass no longer \
          falls back to strengthen_cancel_reason when \
-         begin_close returns false. Repeated cancels with \
+         the callback-free close transition returns false. Repeated cancels with \
          different reasons silently drop the second reason \
          when the region is already closing.",
     );

@@ -227,8 +227,10 @@ fn bench_runtime_state_operations(c: &mut Criterion) {
                 let reason = CancelReason::timeout();
 
                 let start = std::time::Instant::now();
-                let tasks = state.cancel_request(region, &reason, None);
+                let effects = state.cancel_request(region, &reason, None);
                 total += start.elapsed();
+                let (tasks, cancel_wakes) = effects.into_parts();
+                cancel_wakes.suppress();
                 black_box(tasks);
             }
             total

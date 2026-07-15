@@ -5,6 +5,11 @@
 
 use crate::cx::Cx;
 use crate::tracing_compat::trace;
+#[cfg(feature = "tracing-integration")]
+use crate::types::task_context::PendingTaskCancelTrace;
+use crate::types::task_context::{
+    CancelTaskTraceKind, CancelWakeEffects, CancellationEffects, RunnablePublication,
+};
 use crate::types::{
     Budget, CancelPhase, CancelReason, CancelWitness, CxInner, Outcome, RegionId, TaskId, Time,
 };
@@ -22,6 +27,49 @@ use std::task::Waker;
 
 /// The concrete outcome type stored in task records (Phase 0).
 pub type TaskOutcome = Outcome<(), crate::error::Error>;
+
+/// Receipt for a checkpoint acknowledgement consumed by the runtime owner.
+///
+/// A task-handle cancellation becomes visible in `CxInner` before its
+/// callback-free gateway command reaches the scheduler.  When a checkpoint
+/// observes that cancellation in the gap, the runtime must materialize the
+/// request in the authoritative [`TaskRecord`] before it completes or parks
+/// the task.  The receipt preserves the logical request/acknowledgement order
+/// for the protocol validator and deterministic lab oracle. Callback-capable
+/// Wakers travel separately in the opaque [`CancellationEffects`] envelope.
+#[derive(Debug)]
+pub(crate) struct CheckpointCancelAck {
+    pub(crate) effective_reason: CancelReason,
+    pub(crate) cleanup_priority: u8,
+    pub(crate) request_transition: Option<(TaskState, TaskState)>,
+    pub(crate) acknowledge_transition: Option<(TaskState, TaskState)>,
+    pub(crate) region_id: RegionId,
+    pub(crate) spawned_at: Time,
+}
+
+impl CheckpointCancelAck {
+    #[inline]
+    #[must_use]
+    pub(crate) const fn newly_materialized(&self) -> bool {
+        self.request_transition.is_some()
+    }
+}
+
+/// Scheduler routing chosen while applying a runtime-owned handle command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HandleCancelRoute {
+    pub(crate) priority: u8,
+    /// `true` when no lane existed at mutation time and the command consumer
+    /// owns the task's first physical cancel-lane publication.
+    pub(crate) delegated_initial: bool,
+}
+
+/// Callback-free result of reconciling one handle command into TaskRecord.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HandleCancelUpdate {
+    pub(crate) newly_cancelled: bool,
+    pub(crate) route: Option<HandleCancelRoute>,
+}
 
 // Incremental Lyapunov counters (br-asupersync-xxcss5)
 /// The state of a task in its lifecycle.
@@ -505,9 +553,10 @@ impl TaskRecord {
 
     /// Requests cancellation of this task.
     ///
-    /// Returns true if the request was new (not already pending).
-    /// This also updates the shared `CxInner` to notify the user code.
-    pub fn request_cancel(&mut self, reason: CancelReason) -> bool {
+    /// Returns whether the request was new together with the opaque Waker
+    /// effects that must be dispatched after releasing every caller-owned
+    /// task-table and runtime-state lock.
+    pub fn request_cancel(&mut self, reason: CancelReason) -> CancellationEffects<bool> {
         // Need to get current budget from somewhere.
         // If we removed `budget` field, we should get it from `CxInner` or use default?
         // `request_cancel_with_budget` takes explicit budget.
@@ -524,39 +573,52 @@ impl TaskRecord {
         &mut self,
         reason: CancelReason,
         cleanup_budget: Budget,
-    ) -> bool {
-        let (newly_cancelled, cancel_wakers) =
-            self.request_cancel_with_budget_deferred(reason, cleanup_budget);
-        for waker in cancel_wakers {
-            waker.wake_by_ref();
-        }
-        newly_cancelled
+    ) -> CancellationEffects<bool> {
+        let effects = self.request_cancel_with_budget_and_publication(reason, cleanup_budget);
+        let ((newly_cancelled, _changed, _publication), wakes) = effects.into_parts();
+        CancellationEffects::new(newly_cancelled, wakes)
     }
 
-    /// Mutates cancellation state and returns wake callbacks for post-lock
-    /// dispatch by callers that own a task-table or runtime-state guard.
-    pub(crate) fn request_cancel_with_budget_deferred(
+    /// Runtime-internal cancellation variant that snapshots the initial
+    /// runnable-publication gate in the same Cx critical section as the
+    /// cancellation mutation. This avoids a TOCTOU double-publication race
+    /// between admission and runtime cancellation schedulers.
+    pub(crate) fn request_cancel_with_budget_and_publication(
         &mut self,
-        reason: CancelReason,
-        cleanup_budget: Budget,
-    ) -> (
-        bool,
-        SmallVec<[Arc<crate::types::task_context::CancelWaker>; 4]>,
-    ) {
+        mut reason: CancelReason,
+        mut cleanup_budget: Budget,
+    ) -> CancellationEffects<(bool, bool, RunnablePublication)> {
         if self.state.is_terminal() {
-            return (false, SmallVec::new());
+            return CancellationEffects::ready((false, false, RunnablePublication::Published));
         }
 
-        // Update shared state first
-        if let Some(inner) = &self.cx_inner {
-            let mut guard = inner.write();
+        let previous_state = self.state_name();
+        // Keep the Cx cancellation mutation and first-publication decision in
+        // one critical section. Admission uses the same lock while publishing
+        // the initial runnable lane, so cancellation cannot expose a
+        // reasonless or half-published task.
+        let cx_inner = self.cx_inner.clone();
+        let mut inner_guard = cx_inner.as_ref().map(|inner| inner.write());
+        if let Some(guard) = inner_guard.as_mut() {
+            let newly_requested = !guard.cancel_requested;
+            if let Some(cx_reason) = guard.cancel_reason.as_ref() {
+                if reason.strengthen(cx_reason) {
+                    cleanup_budget = cleanup_budget.combine_untraced(cx_reason.cleanup_budget());
+                }
+            }
             guard.cancel_requested = true;
+            if newly_requested {
+                guard.cancel_wakers_pending = true;
+            }
             guard
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
             // Budget update is deferred to acknowledge_cancel to prevent
             // pre-empting the cancellation check with a budget exhaustion error.
         }
+        let cancel_kind = reason.kind;
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = (&previous_state, &cancel_kind);
 
         let mut updated_reason_for_inner = None;
 
@@ -566,115 +628,290 @@ impl TaskRecord {
                 cleanup_budget: existing_budget,
             } => {
                 self.phase.store(TaskPhase::CancelRequested);
-                trace!(
-                    task_id = ?self.id,
-                    region_id = ?self.owner,
-                    cancel_kind = ?reason.kind,
-                    "cancel reason strengthened (already CancelRequested)"
-                );
-                existing_reason.strengthen(&reason);
-                *existing_budget = existing_budget.combine(cleanup_budget);
+                let reason_changed = existing_reason.strengthen(&reason);
+                let combined_budget = existing_budget.combine_untraced(cleanup_budget);
+                let budget_changed = combined_budget != *existing_budget;
+                *existing_budget = combined_budget;
                 updated_reason_for_inner = Some(existing_reason.clone());
-                false
+                (
+                    false,
+                    reason_changed || budget_changed,
+                    CancelTaskTraceKind::StrengthenedRequested,
+                )
             }
             TaskState::Cancelling {
                 reason: existing_reason,
                 cleanup_budget: b,
             } => {
                 self.phase.store(TaskPhase::Cancelling);
-                trace!(
-                    task_id = ?self.id,
-                    region_id = ?self.owner,
-                    cancel_kind = ?reason.kind,
-                    "cancel reason strengthened (in cleanup)"
-                );
-                existing_reason.strengthen(&reason);
-                let new_budget = b.combine(cleanup_budget);
+                let reason_changed = existing_reason.strengthen(&reason);
+                let new_budget = b.combine_untraced(cleanup_budget);
+                let budget_changed = new_budget != *b;
                 *b = new_budget;
                 updated_reason_for_inner = Some(existing_reason.clone());
 
                 // Update shared state so user code sees tighter budget immediately
-                if let Some(inner) = &self.cx_inner {
-                    let mut guard = inner.write();
+                if let Some(guard) = inner_guard.as_mut() {
                     guard.budget = new_budget;
                     guard.budget_baseline = new_budget;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
 
-                false
+                (
+                    false,
+                    reason_changed || budget_changed,
+                    CancelTaskTraceKind::StrengthenedCleanup,
+                )
             }
             TaskState::Finalizing {
                 reason: existing_reason,
                 cleanup_budget: b,
             } => {
                 self.phase.store(TaskPhase::Finalizing);
-                trace!(
-                    task_id = ?self.id,
-                    region_id = ?self.owner,
-                    cancel_kind = ?reason.kind,
-                    "cancel reason strengthened (in cleanup)"
-                );
-                existing_reason.strengthen(&reason);
-                let new_budget = b.combine(cleanup_budget);
+                let reason_changed = existing_reason.strengthen(&reason);
+                let new_budget = b.combine_untraced(cleanup_budget);
+                let budget_changed = new_budget != *b;
                 *b = new_budget;
                 updated_reason_for_inner = Some(existing_reason.clone());
 
                 // Update shared state so user code sees tighter budget immediately
-                if let Some(inner) = &self.cx_inner {
-                    let mut guard = inner.write();
+                if let Some(guard) = inner_guard.as_mut() {
                     guard.budget = new_budget;
                     guard.budget_baseline = new_budget;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
 
-                false
+                (
+                    false,
+                    reason_changed || budget_changed,
+                    CancelTaskTraceKind::StrengthenedCleanup,
+                )
             }
             TaskState::Created | TaskState::Running => {
-                let prev_state = self.state_name();
-                #[cfg(not(feature = "tracing-integration"))]
-                let _ = prev_state;
                 let requested_reason = reason.clone();
                 if self.cancel_epoch == 0 {
                     self.cancel_epoch = 1;
                 } else {
                     self.cancel_epoch = self.cancel_epoch.saturating_add(1);
                 }
-                crate::tracing_compat::debug!(
-                    task_id = ?self.id,
-                    region_id = ?self.owner,
-                    old_state = prev_state,
-                    new_state = "CancelRequested",
-                    cancel_kind = ?reason.kind,
-                    cleanup_poll_quota = cleanup_budget.poll_quota,
-                    "task cancel requested"
-                );
                 self.state = TaskState::CancelRequested {
                     reason,
                     cleanup_budget,
                 };
                 self.phase.store(TaskPhase::CancelRequested);
                 updated_reason_for_inner = Some(requested_reason);
-                true
+                (true, true, CancelTaskTraceKind::Requested)
             }
-            TaskState::Completed(_) => false,
+            TaskState::Completed(_) => (false, false, CancelTaskTraceKind::StrengthenedCleanup),
         };
         if let Some(reason) = updated_reason_for_inner {
-            if let Some(inner) = &self.cx_inner {
-                let mut guard = inner.write();
-                guard.cancel_reason = Some(reason);
+            if let Some(guard) = inner_guard.as_mut() {
+                let reason_changed = if let Some(existing) = guard.cancel_reason.as_mut() {
+                    existing.strengthen(&reason)
+                } else {
+                    guard.cancel_reason = Some(reason);
+                    true
+                };
+                if reason_changed {
+                    guard.cancel_wakers_pending = true;
+                }
             }
         }
-        let cancel_wakers = self.cx_inner.as_ref().map_or_else(SmallVec::new, |inner| {
-            let guard = inner.read();
-            if guard.cancel_requested {
-                guard.cancel_waker_snapshot()
+        let runnable_publication = inner_guard
+            .as_ref()
+            .map_or(RunnablePublication::Published, |guard| {
+                guard.runnable_publication
+            });
+        let cancel_wakers = inner_guard.as_mut().map_or_else(SmallVec::new, |guard| {
+            if guard.cancel_requested
+                && guard.cancel_wakers_pending
+                && runnable_publication.is_published()
+            {
+                let wakers = guard.cancel_waker_snapshot();
+                guard.cancel_wakers_pending = false;
+                wakers
             } else {
                 SmallVec::new()
             }
         });
-        (result, cancel_wakers)
+        let wakes = CancelWakeEffects::new(cancel_wakers);
+        #[cfg(feature = "tracing-integration")]
+        let wakes = {
+            let mut wakes = wakes;
+            let trace = PendingTaskCancelTrace::new(
+                result.2,
+                self.id,
+                self.owner,
+                previous_state,
+                cancel_kind,
+                cleanup_budget.poll_quota,
+            );
+            if runnable_publication.is_published() {
+                trace.append_to(&mut wakes);
+            } else {
+                let pending = &mut inner_guard
+                    .as_mut()
+                    .expect("prepublication tasks retain their Cx admission gate")
+                    .pending_task_cancel_trace;
+                if pending.is_none() {
+                    *pending = Some(trace);
+                }
+            }
+            wakes
+        };
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = result.2;
+        drop(inner_guard);
+        CancellationEffects::new((result.0, result.1, runnable_publication), wakes)
+    }
+
+    /// Atomically publishes a managed handle abort's delegated first cancel lane.
+    ///
+    /// The authoritative task-table/RuntimeState owner must keep its record lock
+    /// across this call. `publish_lane` runs while the Cx publication gate is
+    /// write-locked and must only mutate scheduler queues: it must not wake a
+    /// worker, emit observability, or re-enter the task table. That ordering
+    /// prevents an already-awake worker from removing or polling the task before
+    /// the lane, strongest Cx reason, Wakers, and pending trace receipt agree.
+    /// If the closure rejects the route, Cx remains delegated and the returned
+    /// effects own only duplicate Waker snapshots; the caller must retire those
+    /// snapshots without dispatch after releasing the outer record lock.
+    pub(crate) fn publish_delegated_cancel_lane<T>(
+        &mut self,
+        publish_lane: impl FnOnce(u8, bool, Option<usize>) -> Option<T>,
+    ) -> CancellationEffects<Option<T>> {
+        if self.state.is_terminal() {
+            return CancellationEffects::ready(None);
+        }
+        let Some(cx_inner) = self.cx_inner.clone() else {
+            return CancellationEffects::ready(None);
+        };
+        let mut guard = cx_inner.write();
+        if !guard.runnable_publication.is_delegated_cancel() || !guard.cancel_requested {
+            return CancellationEffects::ready(None);
+        }
+
+        // A direct TaskHandle producer can strengthen Cx and enqueue a second
+        // command after the first command reconciles TaskRecord. Materialize
+        // that full reason and cleanup budget before exposing the first lane;
+        // merely promoting the queue priority would let an immediately-ready
+        // task retire with stale cancellation attribution.
+        let Some(priority) = self.materialize_delegated_cx_cancel(&mut guard) else {
+            return CancellationEffects::ready(None);
+        };
+        // Snapshot every fallible/allocating receipt before queue visibility.
+        // Keep ownership pending in Cx until insertion succeeds so a rejected
+        // route can retry without losing either Wakers or the trace receipt.
+        let cancel_wakers = if guard.cancel_wakers_pending {
+            guard.cancel_waker_snapshot()
+        } else {
+            SmallVec::new()
+        };
+        #[cfg(feature = "tracing-integration")]
+        let pending_trace = guard.pending_task_cancel_trace;
+        self.wake_state.notify();
+        let publication = publish_lane(priority, self.is_local, self.pinned_worker);
+        let Some(publication) = publication else {
+            drop(guard);
+            return CancellationEffects::new(None, CancelWakeEffects::new(cancel_wakers));
+        };
+        // The write gate was checked above and cannot change while held.
+        // Avoid any assertion/panic edge after physical queue visibility.
+        guard.runnable_publication.mark_published();
+
+        if guard.cancel_wakers_pending {
+            guard.cancel_wakers_pending = false;
+        }
+        #[cfg(feature = "tracing-integration")]
+        {
+            guard.pending_task_cancel_trace = None;
+        }
+        drop(guard);
+        let wakes = CancelWakeEffects::new(cancel_wakers);
+        #[cfg(feature = "tracing-integration")]
+        let wakes = {
+            let mut wakes = wakes;
+            if let Some(trace) = pending_trace {
+                trace.append_to(&mut wakes);
+            }
+            wakes
+        };
+        CancellationEffects::new(Some(publication), wakes)
+    }
+
+    /// Reconciles a Cx-only cancellation strengthening into the authoritative
+    /// record while the caller owns both the record and Cx publication gates.
+    /// This helper deliberately performs no tracing or other observer calls.
+    fn materialize_delegated_cx_cancel(&mut self, guard: &mut CxInner) -> Option<u8> {
+        let cx_reason = guard.cancel_reason.as_ref()?;
+        let cx_budget = cx_reason.cleanup_budget();
+        let mut active_cleanup_budget = None;
+
+        match &mut self.state {
+            TaskState::CancelRequested {
+                reason,
+                cleanup_budget,
+            } => {
+                reason.strengthen(cx_reason);
+                *cleanup_budget = cleanup_budget.combine_untraced(cx_budget);
+            }
+            TaskState::Cancelling {
+                reason,
+                cleanup_budget,
+            }
+            | TaskState::Finalizing {
+                reason,
+                cleanup_budget,
+            } => {
+                reason.strengthen(cx_reason);
+                *cleanup_budget = cleanup_budget.combine_untraced(cx_budget);
+                active_cleanup_budget = Some(*cleanup_budget);
+            }
+            TaskState::Created | TaskState::Running | TaskState::Completed(_) => return None,
+        }
+
+        if let Some(cleanup_budget) = active_cleanup_budget {
+            guard.budget = cleanup_budget;
+            guard.budget_baseline = cleanup_budget;
+            self.polls_remaining = self.polls_remaining.min(cleanup_budget.poll_quota);
+        }
+        self.cleanup_budget().map(|budget| budget.priority)
+    }
+
+    /// Reconciles a producer-side handle cancellation into authoritative task
+    /// state and selects the lane publication owned by its scheduler consumer.
+    pub(crate) fn request_cancel_for_handle(
+        &mut self,
+        reason: &CancelReason,
+    ) -> CancellationEffects<HandleCancelUpdate> {
+        let budget = reason.cleanup_budget();
+        let effects = self.request_cancel_with_budget_and_publication(reason.clone(), budget);
+        let cleanup_priority = self.cleanup_budget().map(|budget| budget.priority);
+        let ((newly_cancelled, changed, publication), wakes) = effects.into_parts();
+        let route = cleanup_priority.and_then(|priority| {
+            if publication.is_delegated_cancel() {
+                Some(HandleCancelRoute {
+                    priority,
+                    delegated_initial: true,
+                })
+            } else if changed && publication.is_published() {
+                Some(HandleCancelRoute {
+                    priority,
+                    delegated_initial: false,
+                })
+            } else {
+                None
+            }
+        });
+        CancellationEffects::new(
+            HandleCancelUpdate {
+                newly_cancelled,
+                route,
+            },
+            wakes,
+        )
     }
 
     /// Returns a cancellation witness for the current task state, if cancelled.
@@ -720,6 +957,154 @@ impl TaskRecord {
             }
             _ => false,
         }
+    }
+
+    /// Reconciles a cancellation already observed by the running task's Cx.
+    ///
+    /// A TaskHandle request makes the Cx flag visible before its callback-free
+    /// command can acquire the runtime/task-table owner. If the task reaches a
+    /// checkpoint in that interval, completion must first materialize the
+    /// acknowledged reason in the authoritative TaskRecord. This path is
+    /// intentionally Waker-free: the task is already executing the poll that
+    /// observed cancellation.
+    pub(crate) fn reconcile_checkpoint_cancel(&mut self, mut reason: CancelReason) -> bool {
+        if self.state.is_terminal() {
+            return false;
+        }
+        let cx_inner = self.cx_inner.clone();
+        let mut cleanup_budget = reason.cleanup_budget();
+        let changed = match &mut self.state {
+            TaskState::Created | TaskState::Running => {
+                if self.cancel_epoch == 0 {
+                    self.cancel_epoch = 1;
+                } else {
+                    self.cancel_epoch = self.cancel_epoch.saturating_add(1);
+                }
+                self.state = TaskState::CancelRequested {
+                    reason,
+                    cleanup_budget,
+                };
+                self.phase.store(TaskPhase::CancelRequested);
+                true
+            }
+            TaskState::CancelRequested {
+                reason: existing_reason,
+                cleanup_budget: existing_budget,
+            }
+            | TaskState::Cancelling {
+                reason: existing_reason,
+                cleanup_budget: existing_budget,
+            }
+            | TaskState::Finalizing {
+                reason: existing_reason,
+                cleanup_budget: existing_budget,
+            } => {
+                if reason.strengthen(existing_reason) {
+                    cleanup_budget =
+                        cleanup_budget.combine_untraced(existing_reason.cleanup_budget());
+                }
+                let reason_changed = existing_reason.strengthen(&reason);
+                let combined_budget = existing_budget.combine_untraced(cleanup_budget);
+                let budget_changed = combined_budget != *existing_budget;
+                *existing_budget = combined_budget;
+                reason_changed || budget_changed
+            }
+            TaskState::Completed(_) => false,
+        };
+        if matches!(
+            self.state,
+            TaskState::Cancelling { .. } | TaskState::Finalizing { .. }
+        ) && let Some(cleanup_budget) = self.cleanup_budget()
+        {
+            if let Some(inner) = cx_inner {
+                let mut guard = inner.write();
+                guard.budget = cleanup_budget;
+                guard.budget_baseline = cleanup_budget;
+            }
+            self.polls_remaining = self.polls_remaining.min(cleanup_budget.poll_quota);
+        }
+        changed
+    }
+
+    /// Consumes a cancellation acknowledgement already published by this
+    /// task's `Cx` and reconciles it into the authoritative task state.
+    ///
+    /// Callers that observe a receipt after `Poll::Pending` must publish a
+    /// cancel-lane entry before dispatching the returned Wakers or parking the
+    /// task. Callers completing the same poll dispatch only after terminal
+    /// state and dependent queue publication.
+    pub(crate) fn consume_checkpoint_cancel_ack(
+        &mut self,
+    ) -> CancellationEffects<Option<CheckpointCancelAck>> {
+        let Some(inner) = self.cx_inner.clone() else {
+            return CancellationEffects::ready(None);
+        };
+        let mut guard = inner.write();
+        if !guard.cancel_acknowledged {
+            return CancellationEffects::ready(None);
+        }
+        guard.cancel_acknowledged = false;
+        let observed_reason = guard.cancel_reason.clone().unwrap_or_else(|| {
+            CancelReason::with_origin(crate::types::CancelKind::User, self.owner, self.created_at)
+                .with_task(self.id)
+                .with_message("checkpoint acknowledged cancellation without a reason")
+        });
+        drop(guard);
+
+        let request_from = self.state.clone();
+        let was_unmaterialized = matches!(request_from, TaskState::Created | TaskState::Running);
+        let _ = self.reconcile_checkpoint_cancel(observed_reason.clone());
+        let request_transition = was_unmaterialized.then(|| (request_from, self.state.clone()));
+
+        let acknowledge_from = self.state.clone();
+        let acknowledge_transition = self
+            .acknowledge_cancel()
+            .map(|_| (acknowledge_from, self.state.clone()));
+        let mut effective_reason = self.cancel_reason().cloned().unwrap_or(observed_reason);
+        // A stronger handle abort can land after the first Cx snapshot but
+        // before this poll commits its checkpoint receipt. Re-read until the
+        // authoritative TaskRecord dominates the Cx reason, then use the final
+        // Cx critical section as the completion/cancellation linearization
+        // point. A still-later abort loses to this completing poll and leaves
+        // its Waker debt untouched for terminal retirement.
+        let cancel_wakers = loop {
+            let mut guard = inner.write();
+            if let Some(latest_reason) = guard.cancel_reason.clone() {
+                let mut merged_reason = effective_reason.clone();
+                if merged_reason.strengthen(&latest_reason) {
+                    drop(guard);
+                    let _ = self.reconcile_checkpoint_cancel(latest_reason);
+                    effective_reason = self.cancel_reason().cloned().unwrap_or(merged_reason);
+                    continue;
+                }
+            }
+            if guard.cancel_requested
+                && guard.cancel_wakers_pending
+                && guard.runnable_publication.is_published()
+            {
+                let wakers = guard.cancel_waker_snapshot();
+                guard.cancel_wakers_pending = false;
+                break wakers;
+            } else {
+                break SmallVec::new();
+            }
+        };
+        let cleanup_priority = self.cleanup_budget().map_or_else(
+            || effective_reason.cleanup_budget().priority,
+            |budget| budget.priority,
+        );
+
+        CancellationEffects::new(
+            Some(CheckpointCancelAck {
+                effective_reason,
+                cleanup_priority,
+                request_transition,
+                acknowledge_transition,
+                region_id: self.owner,
+                spawned_at: self.created_at,
+            }),
+            CancelWakeEffects::new(cancel_wakers),
+        )
     }
 
     /// Completes the task with the given outcome.
@@ -797,6 +1182,8 @@ impl TaskRecord {
     ///
     /// This is called when `checkpoint()` observes cancellation with mask_depth == 0.
     /// Returns the `CancelReason` if the transition occurred, `None` otherwise.
+    /// The transition is callback-free because scheduler callers commonly hold
+    /// an authoritative TaskTable or RuntimeState lock here.
     ///
     /// # State Transition
     /// ```text
@@ -810,17 +1197,6 @@ impl TaskRecord {
             } => {
                 let reason = reason.clone();
                 let budget = *cleanup_budget;
-
-                trace!(
-                    task_id = ?self.id,
-                    region_id = ?self.owner,
-                    old_state = "CancelRequested",
-                    new_state = "Cancelling",
-                    cancel_kind = ?reason.kind,
-                    cleanup_poll_quota = budget.poll_quota,
-                    cleanup_priority = budget.priority,
-                    "task acknowledged cancellation"
-                );
 
                 // Apply cleanup budget now that we are entering cleanup phase
                 if let Some(inner) = &self.cx_inner {
@@ -1132,7 +1508,7 @@ mod tests {
     use crate::error::{Error, ErrorKind};
     use crate::util::ArenaIndex;
     use serde_json::{Value, json};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1145,6 +1521,216 @@ mod tests {
 
     fn region() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(0, 1))
+    }
+
+    fn request_cancel(record: &mut TaskRecord, reason: CancelReason) -> bool {
+        let (newly_cancelled, wakes) = record.request_cancel(reason).into_parts();
+        wakes.dispatch();
+        newly_cancelled
+    }
+
+    fn request_cancel_with_budget(
+        record: &mut TaskRecord,
+        reason: CancelReason,
+        budget: Budget,
+    ) -> bool {
+        let (newly_cancelled, wakes) = record
+            .request_cancel_with_budget(reason, budget)
+            .into_parts();
+        wakes.dispatch();
+        newly_cancelled
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn cancellation_trace_reenters_only_after_outer_lock_and_contains_panic() {
+        use tracing_subscriber::prelude::*;
+
+        struct PanickingLayer {
+            attempts: Arc<AtomicUsize>,
+            reentries: Arc<AtomicUsize>,
+            outer_lock: Arc<parking_lot::Mutex<()>>,
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for PanickingLayer
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                if self.outer_lock.try_lock().is_some() {
+                    self.reentries.fetch_add(1, Ordering::SeqCst);
+                }
+                panic!("adversarial cancellation tracing subscriber");
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let reentries = Arc::new(AtomicUsize::new(0));
+        let outer_lock = Arc::new(parking_lot::Mutex::new(()));
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        let subscriber = tracing_subscriber::registry().with(PanickingLayer {
+            attempts: Arc::clone(&attempts),
+            reentries: Arc::clone(&reentries),
+            outer_lock: Arc::clone(&outer_lock),
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::subscriber::with_default(subscriber, || {
+                let effects = {
+                    let _outer_guard = outer_lock.lock();
+                    let effects = record
+                        .request_cancel_with_budget(CancelReason::shutdown(), Budget::INFINITE);
+                    assert_eq!(
+                        attempts.load(Ordering::SeqCst),
+                        0,
+                        "request_cancel must not enter the subscriber under the outer lock"
+                    );
+                    effects
+                };
+
+                let (newly_cancelled, observers_and_wakes) = effects.into_parts();
+                assert!(newly_cancelled);
+                observers_and_wakes.dispatch();
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+                assert_eq!(reentries.load(Ordering::SeqCst), 1);
+            });
+        }));
+
+        assert!(result.is_ok(), "subscriber panic must not escape dispatch");
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn unpublished_cancel_trace_waits_for_admission_publication_callback() {
+        use tracing_subscriber::prelude::*;
+
+        struct PanickingLayer {
+            attempts: Arc<AtomicUsize>,
+            early_attempts: Arc<AtomicUsize>,
+            lane_published: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for PanickingLayer
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                if !self.lane_published.load(Ordering::SeqCst) {
+                    self.early_attempts.fetch_add(1, Ordering::SeqCst);
+                }
+                panic!("adversarial pre-publication tracing subscriber");
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let early_attempts = Arc::new(AtomicUsize::new(0));
+        let lane_published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        inner.write().runnable_publication = RunnablePublication::Unpublished;
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+        let subscriber = tracing_subscriber::registry().with(PanickingLayer {
+            attempts: Arc::clone(&attempts),
+            early_attempts: Arc::clone(&early_attempts),
+            lane_published: Arc::clone(&lane_published),
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::subscriber::with_default(subscriber, || {
+                let effects = record.request_cancel_with_budget(
+                    CancelReason::user("prepublication"),
+                    Budget::INFINITE,
+                );
+                let (newly_cancelled, immediate_effects) = effects.into_parts();
+                assert!(newly_cancelled);
+                immediate_effects.dispatch();
+                assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+                let repeated =
+                    record.request_cancel_with_budget(CancelReason::shutdown(), Budget::INFINITE);
+                let (newly_cancelled, repeated_effects) = repeated.into_parts();
+                assert!(!newly_cancelled);
+                repeated_effects.dispatch();
+                assert_eq!(
+                    attempts.load(Ordering::SeqCst),
+                    0,
+                    "prepublication strengthening traces remain coalesced"
+                );
+                assert!(
+                    record
+                        .cancel_reason()
+                        .is_some_and(|reason| reason.is_kind(CancelKind::Shutdown)),
+                    "strongest prepublication reason remains authoritative"
+                );
+
+                let deferred = crate::runtime::task_handle::publish_admitted_cancel_state(
+                    &inner,
+                    None,
+                    |priority| {
+                        assert!(
+                            priority.is_some(),
+                            "cancelled admission selects cancel lane"
+                        );
+                        lane_published.store(true, Ordering::SeqCst);
+                    },
+                );
+                assert_eq!(attempts.load(Ordering::SeqCst), 0);
+                assert!(inner.read().runnable_publication.is_published());
+                deferred.dispatch();
+            });
+        }));
+
+        assert!(result.is_ok(), "subscriber panic must not escape dispatch");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(early_attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn terminal_retirement_suppresses_unpublished_cancel_trace() {
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        inner.write().runnable_publication = RunnablePublication::Unpublished;
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+
+        let (newly_cancelled, immediate_effects) = record
+            .request_cancel_with_budget(CancelReason::shutdown(), Budget::INFINITE)
+            .into_parts();
+        assert!(newly_cancelled);
+        immediate_effects.dispatch();
+        assert!(
+            inner.read().pending_task_cancel_trace.is_some(),
+            "unpublished cancellation retains one bounded trace receipt"
+        );
+
+        let retired_wakers = {
+            let mut guard = inner.write();
+            let retired_wakers = guard.take_cancel_wakers();
+            assert!(
+                guard.pending_task_cancel_trace.is_none(),
+                "terminal retirement suppresses a receipt with no physical lane"
+            );
+            retired_wakers
+        };
+        drop(retired_wakers);
     }
 
     fn scrub_task_record_ids(value: Value) -> Value {
@@ -1190,7 +1776,7 @@ mod tests {
             t.phase()
         );
 
-        let requested = t.request_cancel(CancelReason::timeout());
+        let requested = request_cancel(&mut t, CancelReason::timeout());
         crate::assert_with_log!(requested, "request_cancel", true, requested);
         crate::assert_with_log!(
             t.phase() == TaskPhase::CancelRequested,
@@ -1293,7 +1879,7 @@ mod tests {
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let created = matches!(t.state, TaskState::Created);
         crate::assert_with_log!(created, "created", true, created);
-        let requested = t.request_cancel(CancelReason::timeout());
+        let requested = request_cancel(&mut t, CancelReason::timeout());
         crate::assert_with_log!(requested, "request_cancel", true, requested);
         match &t.state {
             TaskState::CancelRequested {
@@ -1316,9 +1902,9 @@ mod tests {
     fn cancel_strengthens_idempotently_when_already_cancel_requested() {
         init_test("cancel_strengthens_idempotently_when_already_cancel_requested");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let first = t.request_cancel(CancelReason::timeout());
+        let first = request_cancel(&mut t, CancelReason::timeout());
         crate::assert_with_log!(first, "first cancel", true, first);
-        let second = t.request_cancel(CancelReason::shutdown());
+        let second = request_cancel(&mut t, CancelReason::shutdown());
         crate::assert_with_log!(!second, "second cancel false", false, second);
         match &t.state {
             TaskState::CancelRequested { reason, .. } => {
@@ -1340,7 +1926,7 @@ mod tests {
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         let completed = t.complete(Outcome::Ok(()));
         crate::assert_with_log!(completed, "complete ok", true, completed);
-        let requested = t.request_cancel(CancelReason::timeout());
+        let requested = request_cancel(&mut t, CancelReason::timeout());
         crate::assert_with_log!(!requested, "request_cancel false", false, requested);
         let terminal = t.state.is_terminal();
         crate::assert_with_log!(terminal, "terminal", true, terminal);
@@ -1366,7 +1952,7 @@ mod tests {
         crate::assert_with_log!(can_poll, "pollable", true, can_poll);
 
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let _ = t.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE);
+        let _ = request_cancel_with_budget(&mut t, CancelReason::timeout(), Budget::INFINITE);
         let can_poll = t.state.can_be_polled();
         crate::assert_with_log!(can_poll, "pollable after cancel", true, can_poll);
         crate::test_complete!("can_be_polled_matches_state");
@@ -1411,7 +1997,7 @@ mod tests {
     fn complete_ok_after_cancel_request_becomes_cancelled() {
         init_test("complete_ok_after_cancel_request_becomes_cancelled");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let requested = t.request_cancel(CancelReason::timeout());
+        let requested = request_cancel(&mut t, CancelReason::timeout());
         crate::assert_with_log!(requested, "request_cancel", true, requested);
 
         let completed = t.complete(Outcome::Ok(()));
@@ -1445,7 +2031,7 @@ mod tests {
     fn complete_err_after_cancel_request_becomes_cancelled() {
         init_test("complete_err_after_cancel_request_becomes_cancelled");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let requested = t.request_cancel(CancelReason::timeout());
+        let requested = request_cancel(&mut t, CancelReason::timeout());
         crate::assert_with_log!(requested, "request_cancel", true, requested);
 
         let err = Error::new(ErrorKind::User);
@@ -1480,7 +2066,7 @@ mod tests {
     fn complete_ok_during_cancellation_cleanup_becomes_cancelled() {
         init_test("complete_ok_during_cancellation_cleanup_becomes_cancelled");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         let _ = t.acknowledge_cancel();
 
         let completed = t.complete(Outcome::Ok(()));
@@ -1504,7 +2090,7 @@ mod tests {
     fn complete_cancelled_during_protocol_does_not_weaken_reason() {
         init_test("complete_cancelled_during_protocol_does_not_weaken_reason");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
 
         let completed = t.complete(Outcome::Cancelled(CancelReason::user("soft")));
         crate::assert_with_log!(completed, "complete cancelled", true, completed);
@@ -1536,7 +2122,7 @@ mod tests {
     fn complete_ok_during_finalization_becomes_cancelled() {
         init_test("complete_ok_during_finalization_becomes_cancelled");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         let _ = t.acknowledge_cancel();
         let _ = t.cleanup_done();
 
@@ -1561,7 +2147,7 @@ mod tests {
     fn acknowledge_cancel_transitions_to_cancelling() {
         init_test("acknowledge_cancel_transitions_to_cancelling");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
 
         let reason = t.acknowledge_cancel();
         let has_reason = reason.is_some();
@@ -1605,7 +2191,7 @@ mod tests {
     fn cleanup_done_transitions_to_finalizing() {
         init_test("cleanup_done_transitions_to_finalizing");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         let _ = t.acknowledge_cancel();
 
         let cancelling = matches!(t.state, TaskState::Cancelling { .. });
@@ -1624,7 +2210,7 @@ mod tests {
         let cleanup = t.cleanup_done();
         crate::assert_with_log!(!cleanup, "cleanup_done false", false, cleanup);
 
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         // Still in CancelRequested, not Cancelling
         let cleanup = t.cleanup_done();
         crate::assert_with_log!(!cleanup, "cleanup_done false", false, cleanup);
@@ -1635,7 +2221,7 @@ mod tests {
     fn finalize_done_transitions_to_completed_cancelled() {
         init_test("finalize_done_transitions_to_completed_cancelled");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         let _ = t.acknowledge_cancel();
         let _ = t.cleanup_done();
 
@@ -1668,7 +2254,7 @@ mod tests {
         crate::assert_with_log!(created, "created", true, created);
 
         // Step 1: Request cancellation
-        let requested = t.request_cancel(CancelReason::user("stop"));
+        let requested = request_cancel(&mut t, CancelReason::user("stop"));
         crate::assert_with_log!(requested, "request_cancel", true, requested);
         let requested_state = matches!(t.state, TaskState::CancelRequested { .. });
         crate::assert_with_log!(
@@ -1713,7 +2299,7 @@ mod tests {
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         t.start_running();
 
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         let w1 = t.cancel_witness().expect("requested witness");
 
         let _ = t.acknowledge_cancel();
@@ -1736,10 +2322,10 @@ mod tests {
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         t.start_running();
 
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         let w1 = t.cancel_witness().expect("first witness");
 
-        let _ = t.request_cancel(CancelReason::shutdown());
+        let _ = request_cancel(&mut t, CancelReason::shutdown());
         let w2 = t.cancel_witness().expect("second witness");
 
         crate::assert_with_log!(w1.epoch == w2.epoch, "epoch stable", w1.epoch, w2.epoch);
@@ -1753,7 +2339,7 @@ mod tests {
         init_test("cancellation_witness_rejects_out_of_order");
         let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
         t.start_running();
-        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
         let requested = t.cancel_witness().expect("requested witness");
         let _ = t.acknowledge_cancel();
         let _ = t.cleanup_done();
@@ -1801,7 +2387,8 @@ mod tests {
         let none = t.cleanup_budget().is_none();
         crate::assert_with_log!(none, "no budget", true, none);
 
-        let _ = t.request_cancel_with_budget(
+        let _ = request_cancel_with_budget(
+            &mut t,
             CancelReason::timeout(),
             Budget::new().with_poll_quota(500),
         );
@@ -1841,7 +2428,7 @@ mod tests {
             cancel_reason_none
         );
 
-        t.request_cancel(CancelReason::timeout());
+        let _ = request_cancel(&mut t, CancelReason::timeout());
 
         let cancel_requested = inner.read().cancel_requested;
         crate::assert_with_log!(
@@ -1868,6 +2455,226 @@ mod tests {
     }
 
     #[test]
+    fn direct_cx_wake_is_not_republished_by_checkpoint_materialization() {
+        init_test("direct_cx_wake_is_not_republished_by_checkpoint_materialization");
+
+        struct CountWake(Arc<AtomicUsize>);
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        let cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+        record.start_running();
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = std::task::Waker::from(Arc::new(CountWake(Arc::clone(&wake_count))));
+        inner.write().cancel_waker = Some(Arc::new(CancelWaker::new(waker)));
+
+        cx.cancel_fast(crate::types::CancelKind::RaceLost);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert!(!inner.read().cancel_wakers_pending);
+
+        assert!(cx.checkpoint().is_err());
+        let (receipt, wakes) = record.consume_checkpoint_cancel_ack().into_parts();
+        assert!(
+            receipt.is_some(),
+            "checkpoint must materialize TaskRecord cancellation"
+        );
+        assert!(
+            wakes.is_empty(),
+            "direct Cx producer already paid the wake debt"
+        );
+        wakes.dispatch();
+
+        assert!(matches!(record.state, TaskState::Cancelling { .. }));
+        assert_eq!(
+            wake_count.load(Ordering::SeqCst),
+            1,
+            "checkpoint reconciliation must not dispatch the same Waker twice"
+        );
+        crate::test_complete!("direct_cx_wake_is_not_republished_by_checkpoint_materialization");
+    }
+
+    #[test]
+    fn delegated_publication_promotes_stronger_cx_reason_before_wakers() {
+        init_test("delegated_publication_promotes_stronger_cx_reason_before_wakers");
+
+        struct CountWake(Arc<AtomicUsize>);
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        {
+            let mut guard = inner.write();
+            guard.runnable_publication = RunnablePublication::Unpublished;
+            guard.runnable_publication.delegate_cancel();
+        }
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+
+        let lower = CancelReason::user("delegated lower priority");
+        let lower_priority = lower.cleanup_budget().priority;
+        let (update, lower_wakes) = record.request_cancel_for_handle(&lower).into_parts();
+        assert_eq!(
+            update.route,
+            Some(HandleCancelRoute {
+                priority: lower_priority,
+                delegated_initial: true,
+            })
+        );
+        assert!(lower_wakes.is_empty());
+        lower_wakes.dispatch();
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = std::task::Waker::from(Arc::new(CountWake(Arc::clone(&wake_count))));
+        let stronger = CancelReason::shutdown();
+        let stronger_priority = stronger.cleanup_budget().priority;
+        {
+            let mut guard = inner.write();
+            guard
+                .cancel_reason
+                .as_mut()
+                .expect("lower reason installed")
+                .strengthen(&stronger);
+            guard.cancel_wakers_pending = true;
+            guard.cancel_waker = Some(Arc::new(CancelWaker::new(waker)));
+        }
+
+        let lane_published = AtomicBool::new(false);
+        let (published, wakes) = record
+            .publish_delegated_cancel_lane(|priority, is_local, pinned_worker| {
+                assert_eq!(priority, stronger_priority);
+                assert!(!is_local);
+                assert_eq!(pinned_worker, None);
+                lane_published.store(true, Ordering::SeqCst);
+                Some(priority)
+            })
+            .into_parts();
+        assert_eq!(published, Some(stronger_priority));
+        assert!(lane_published.load(Ordering::SeqCst));
+        assert!(!wakes.is_empty());
+        assert!(inner.read().runnable_publication.is_published());
+        assert!(!inner.read().cancel_wakers_pending);
+        assert!(matches!(
+            &record.state,
+            TaskState::CancelRequested {
+                reason,
+                cleanup_budget,
+            } if reason.is_kind(crate::types::cancel::CancelKind::Shutdown)
+                && cleanup_budget.priority == stronger_priority
+        ));
+        wakes.dispatch();
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+
+        let (repeat, repeat_wakes) = record
+            .publish_delegated_cancel_lane(|_, _, _| -> Option<u8> {
+                panic!("an already-published command must not insert another lane")
+            })
+            .into_parts();
+        assert_eq!(repeat, None);
+        assert!(repeat_wakes.is_empty());
+        repeat_wakes.dispatch();
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        crate::test_complete!("delegated_publication_promotes_stronger_cx_reason_before_wakers");
+    }
+
+    #[test]
+    fn failed_delegated_publication_retires_snapshot_after_outer_lock() {
+        struct DropProbe {
+            outer_lock: Arc<parking_lot::Mutex<()>>,
+            drops: Arc<AtomicUsize>,
+            drops_under_outer_lock: Arc<AtomicUsize>,
+        }
+
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if self.outer_lock.try_lock().is_none() {
+                    self.drops_under_outer_lock.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let outer_lock = Arc::new(parking_lot::Mutex::new(()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let drops_under_outer_lock = Arc::new(AtomicUsize::new(0));
+        let inner = Arc::new(RwLock::new(CxInner::new(
+            region(),
+            task(),
+            Budget::INFINITE,
+        )));
+        {
+            let mut guard = inner.write();
+            guard.runnable_publication = RunnablePublication::Unpublished;
+            guard.runnable_publication.delegate_cancel();
+            guard.cancel_waker = Some(Arc::new(CancelWaker::new(std::task::Waker::from(
+                Arc::new(DropProbe {
+                    outer_lock: Arc::clone(&outer_lock),
+                    drops: Arc::clone(&drops),
+                    drops_under_outer_lock: Arc::clone(&drops_under_outer_lock),
+                }),
+            ))));
+        }
+        let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
+        record.set_cx_inner(Arc::clone(&inner));
+        let (_, request_wakes) = record
+            .request_cancel_for_handle(&CancelReason::shutdown())
+            .into_parts();
+        request_wakes.dispatch();
+
+        let outer_guard = outer_lock.lock();
+        let (publication, retirement) = record
+            .publish_delegated_cancel_lane(|_, _, _| None::<u8>)
+            .into_parts();
+        assert_eq!(publication, None);
+        assert_eq!(retirement.len(), 1);
+        let registry_owner = inner.write().cancel_waker.take();
+        drop(registry_owner);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "the failed attempt must not retire its snapshot under the outer lock"
+        );
+
+        drop(outer_guard);
+        retirement.retire_without_dispatch();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            drops_under_outer_lock.load(Ordering::SeqCst),
+            0,
+            "the final RawWaker destructor runs only after the outer lock is gone"
+        );
+    }
+
+    #[test]
     fn task_record_cancel_witness_snapshot_scrubs_ids() {
         init_test("task_record_cancel_witness_snapshot_scrubs_ids");
         let mut record = TaskRecord::new(
@@ -1875,7 +2682,8 @@ mod tests {
             RegionId::new_for_test(8, 1),
             Budget::new().with_poll_quota(5),
         );
-        let requested = record.request_cancel(
+        let requested = request_cancel(
+            &mut record,
             CancelReason::linked_exit()
                 .with_region(RegionId::new_for_test(77, 6))
                 .with_task(TaskId::new_for_test(11, 5))
@@ -1947,7 +2755,8 @@ mod tests {
 
         // Phase 3: CancelRequested state with timeout reason
         let mut record_cancel_requested = TaskRecord::new(task_id, region_id, budget);
-        let requested = record_cancel_requested.request_cancel(
+        let requested = request_cancel(
+            &mut record_cancel_requested,
             CancelReason::timeout()
                 .with_timestamp(Time::from_nanos(123456789))
                 .with_message("operation timeout"),
@@ -1963,7 +2772,7 @@ mod tests {
 
         // Phase 4: Cancelling state
         let mut record_cancelling = TaskRecord::new(task_id, region_id, budget);
-        let _ = record_cancelling.request_cancel(CancelReason::user("abort"));
+        let _ = request_cancel(&mut record_cancelling, CancelReason::user("abort"));
         let ack = record_cancelling.acknowledge_cancel();
         crate::assert_with_log!(ack.is_some(), "acknowledge_cancel", true, ack.is_some());
         insta::assert_json_snapshot!(
@@ -1976,7 +2785,7 @@ mod tests {
 
         // Phase 5: Finalizing state
         let mut record_finalizing = TaskRecord::new(task_id, region_id, budget);
-        let _ = record_finalizing.request_cancel(CancelReason::shutdown());
+        let _ = request_cancel(&mut record_finalizing, CancelReason::shutdown());
         let _ = record_finalizing.acknowledge_cancel();
         let cleaned = record_finalizing.cleanup_done();
         crate::assert_with_log!(cleaned, "cleanup_done", true, cleaned);
@@ -2012,7 +2821,8 @@ mod tests {
 
         // Phase 8: Completed(Cancelled) state through full protocol
         let mut record_completed_cancelled = TaskRecord::new(task_id, region_id, budget);
-        let _ = record_completed_cancelled.request_cancel(
+        let _ = request_cancel(
+            &mut record_completed_cancelled,
             CancelReason::linked_exit()
                 .with_region(RegionId::new_for_test(5, 1))
                 .with_task(TaskId::new_for_test(7, 2)),
@@ -2055,7 +2865,7 @@ mod tests {
 
         for (i, reason) in cancel_reasons.into_iter().enumerate() {
             let mut record = TaskRecord::new(task_id, region_id, budget);
-            let _ = record.request_cancel(reason);
+            let _ = request_cancel(&mut record, reason);
 
             let snapshot_name = format!("task_record_cancel_reason_{}", i);
             insta::assert_json_snapshot!(
@@ -2119,7 +2929,10 @@ mod tests {
         sequence.push(("running", serde_json::to_value(&record).expect("serialize")));
 
         // Step 3: CancelRequested
-        let _ = record.request_cancel(CancelReason::shutdown().with_message("shutdown initiated"));
+        let _ = request_cancel(
+            &mut record,
+            CancelReason::shutdown().with_message("shutdown initiated"),
+        );
         sequence.push((
             "cancel_requested",
             serde_json::to_value(&record).expect("serialize"),

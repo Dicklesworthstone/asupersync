@@ -922,20 +922,25 @@ mod tests {
         });
         let task_id = TaskId::from_arena(idx);
 
-        let record = table.task_mut(task_id).expect("pooled task exists");
-        record.request_cancel(crate::types::CancelReason::timeout());
-        record
-            .waiters
-            .push(TaskId::from_arena(ArenaIndex::new(88, 0)));
-        record.cached_waker = Some((std::task::Waker::noop().clone(), 3));
-        record.cached_cancel_waker = Some((std::task::Waker::noop().clone(), 4));
-        record.pin_to_worker(7);
-        record.queue_tag = 9;
-        record.heap_index = Some(11);
-        record.sched_priority = 5;
-        record.sched_generation = 44;
-        record.total_polls = 12;
-        record.last_polled_step = 77;
+        let cancel_effects = {
+            let record = table.task_mut(task_id).expect("pooled task exists");
+            let cancel_effects = record.request_cancel(crate::types::CancelReason::timeout());
+            record
+                .waiters
+                .push(TaskId::from_arena(ArenaIndex::new(88, 0)));
+            record.cached_waker = Some((std::task::Waker::noop().clone(), 3));
+            record.cached_cancel_waker = Some((std::task::Waker::noop().clone(), 4));
+            record.pin_to_worker(7);
+            record.queue_tag = 9;
+            record.heap_index = Some(11);
+            record.sched_priority = 5;
+            record.sched_generation = 44;
+            record.total_polls = 12;
+            record.last_polled_step = 77;
+            cancel_effects
+        };
+        let (_newly_cancelled, cancel_wakes) = cancel_effects.into_parts();
+        cancel_wakes.dispatch();
 
         table.remove_and_recycle_task(task_id);
         assert_eq!(table.recycled_task_record_count(), 1);

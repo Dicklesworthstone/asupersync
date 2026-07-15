@@ -1877,13 +1877,15 @@ mod tests {
 
         // Initiate cancellation.
         let cancel_reason = CancelReason::shutdown();
-        let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+        let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+        let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
         {
             let mut scheduler = runtime.scheduler.lock();
             for (task_id, priority) in tasks_to_cancel {
                 scheduler.schedule_cancel(task_id, priority);
             }
         }
+        wake_effects.dispatch();
 
         // Record potential at each step during the drain phase.
         let mut governor = LyapunovGovernor::new(weights);
@@ -2162,13 +2164,15 @@ mod tests {
         governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
 
         let cancel_reason = CancelReason::shutdown();
-        let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+        let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+        let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
         {
             let mut scheduler = runtime.scheduler.lock();
             for (task_id, priority) in tasks_to_cancel {
                 scheduler.schedule_cancel(task_id, priority);
             }
         }
+        wake_effects.dispatch();
 
         // Abort obligations as part of cancellation, mimicking real code where
         // task bodies release obligations upon detecting cancel via checkpoint.
@@ -2880,11 +2884,15 @@ mod tests {
             }
             if cancel_regions > 0 {
                 for region_id in scenario_state.child_regions.iter().take(cancel_regions) {
-                    let _ = scenario_state.state.cancel_request(
+                    let cancel_effects = scenario_state.state.cancel_request(
                         *region_id,
                         &crate::types::CancelReason::shutdown(),
                         None,
                     );
+                    // This owned-state snapshot fixture has no scheduler and
+                    // installs no Wakers, so only explicit dispatch is needed.
+                    let (_tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+                    wake_effects.dispatch();
                 }
             }
             if commit_obligations > 0 {

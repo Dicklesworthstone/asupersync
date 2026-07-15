@@ -18,7 +18,8 @@
 //! - **Progress observability**: Tasks must demonstrate forward progress through checkpoints
 //! - **Resource accounting**: Budgets are tracked and enforced at the task level
 
-use crate::types::{Budget, CancelReason, CapabilityBudget, RegionId, TaskId, Time};
+use crate::observability::metrics::MetricsProvider;
+use crate::types::{Budget, CancelKind, CancelReason, CapabilityBudget, RegionId, TaskId, Time};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::task::Waker;
@@ -62,6 +63,512 @@ impl CancelWaker {
 pub(crate) struct CancelWakerRegistration {
     pub(crate) token: u64,
     pub(crate) target: Arc<CancelWaker>,
+}
+
+/// Closed task-cancellation trace events that can cross the post-lock effect
+/// boundary without retaining an arbitrary callback or destructor.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CancelTaskTraceKind {
+    StrengthenedRequested,
+    StrengthenedCleanup,
+    Requested,
+}
+
+/// Bounded closed trace receipt retained while an admitted task has no
+/// scheduler-visible lane. It owns only copyable data, never callbacks,
+/// providers, Wakers, or user-controlled destructors.
+#[cfg(feature = "tracing-integration")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingTaskCancelTrace {
+    trace_kind: CancelTaskTraceKind,
+    task_id: TaskId,
+    region_id: RegionId,
+    previous_state: &'static str,
+    cancel_kind: CancelKind,
+    cleanup_poll_quota: u32,
+}
+
+#[cfg(feature = "tracing-integration")]
+impl PendingTaskCancelTrace {
+    pub(crate) fn new(
+        trace_kind: CancelTaskTraceKind,
+        task_id: TaskId,
+        region_id: RegionId,
+        previous_state: &'static str,
+        cancel_kind: CancelKind,
+        cleanup_poll_quota: u32,
+    ) -> Self {
+        Self {
+            trace_kind,
+            task_id,
+            region_id,
+            previous_state,
+            cancel_kind,
+            cleanup_poll_quota,
+        }
+    }
+
+    pub(crate) fn append_to(self, effects: &mut CancelWakeEffects) {
+        effects.push_task_cancel_trace(
+            self.trace_kind,
+            self.task_id,
+            self.region_id,
+            self.previous_state,
+            self.cancel_kind,
+            self.cleanup_poll_quota,
+        );
+    }
+}
+
+enum CancelObserver {
+    #[cfg(feature = "tracing-integration")]
+    TaskCancelTrace {
+        trace_kind: CancelTaskTraceKind,
+        task_id: TaskId,
+        region_id: RegionId,
+        previous_state: &'static str,
+        cancel_kind: CancelKind,
+        cleanup_poll_quota: u32,
+    },
+    RegionCancellationMetric {
+        metrics: Option<Arc<dyn MetricsProvider>>,
+        region_id: RegionId,
+        cancel_kind: CancelKind,
+    },
+    CancelProtocolViolation {
+        operation: &'static str,
+        validation_result: String,
+    },
+}
+
+impl CancelObserver {
+    fn dispatch(mut self) {
+        match &mut self {
+            #[cfg(feature = "tracing-integration")]
+            Self::TaskCancelTrace {
+                trace_kind,
+                task_id,
+                region_id,
+                previous_state,
+                cancel_kind,
+                cleanup_poll_quota,
+            } => {
+                let trace_kind = *trace_kind;
+                let task_id = *task_id;
+                let region_id = *region_id;
+                let previous_state = *previous_state;
+                let cancel_kind = *cancel_kind;
+                let cleanup_poll_quota = *cleanup_poll_quota;
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match trace_kind {
+                        CancelTaskTraceKind::StrengthenedRequested => {
+                            crate::tracing_compat::trace!(
+                                task_id = ?task_id,
+                                region_id = ?region_id,
+                                cancel_kind = ?cancel_kind,
+                                "cancel reason strengthened (already CancelRequested)"
+                            );
+                        }
+                        CancelTaskTraceKind::StrengthenedCleanup => {
+                            crate::tracing_compat::trace!(
+                                task_id = ?task_id,
+                                region_id = ?region_id,
+                                cancel_kind = ?cancel_kind,
+                                "cancel reason strengthened (in cleanup)"
+                            );
+                        }
+                        CancelTaskTraceKind::Requested => {
+                            crate::tracing_compat::debug!(
+                                task_id = ?task_id,
+                                region_id = ?region_id,
+                                old_state = previous_state,
+                                new_state = "CancelRequested",
+                                cancel_kind = ?cancel_kind,
+                                cleanup_poll_quota,
+                                "task cancel requested"
+                            );
+                        }
+                    }))
+                {
+                    std::mem::forget(payload);
+                }
+            }
+            Self::RegionCancellationMetric {
+                metrics,
+                region_id,
+                cancel_kind,
+            } => {
+                let metrics = metrics
+                    .take()
+                    .expect("live cancellation metric observer retains its provider");
+                let region_id = *region_id;
+                let cancel_kind = *cancel_kind;
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    metrics.cancellation_requested(region_id, cancel_kind);
+                })) {
+                    std::mem::forget(payload);
+                }
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(metrics)))
+                {
+                    std::mem::forget(payload);
+                }
+            }
+            Self::CancelProtocolViolation {
+                operation,
+                validation_result,
+            } => {
+                let operation = *operation;
+                let validation_result = validation_result.as_str();
+                // The compatibility macro is a true no-op when tracing is
+                // disabled, so keep the closed fields visibly consumed in
+                // that feature configuration as well.
+                let _ = (operation, validation_result);
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::tracing_compat::error!(
+                        operation,
+                        validation_result = %validation_result,
+                        "cancel protocol violation"
+                    );
+                })) {
+                    std::mem::forget(payload);
+                }
+            }
+        }
+    }
+
+    fn suppress(mut self) {
+        match &mut self {
+            #[cfg(feature = "tracing-integration")]
+            Self::TaskCancelTrace { .. } => {}
+            Self::RegionCancellationMetric { metrics, .. } => {
+                if let Some(metrics) = metrics.take() {
+                    std::mem::forget(metrics);
+                }
+            }
+            Self::CancelProtocolViolation { .. } => {}
+        }
+    }
+}
+
+impl Drop for CancelObserver {
+    fn drop(&mut self) {
+        match self {
+            #[cfg(feature = "tracing-integration")]
+            Self::TaskCancelTrace { .. } => {}
+            Self::RegionCancellationMetric { metrics, .. } => {
+                if let Some(metrics) = metrics.take() {
+                    std::mem::forget(metrics);
+                }
+            }
+            Self::CancelProtocolViolation { .. } => {}
+        }
+    }
+}
+
+/// Opaque cancellation callbacks detached from a state mutation.
+///
+/// Callers must release every task-table, region, runtime-state, and
+/// application lock before calling [`Self::dispatch`]. Dropping an
+/// undispatched token leaks its retained wake handles and observer callbacks:
+/// that fail-closed behavior avoids invoking arbitrary `RawWaker` callbacks,
+/// observability hooks, or their destructors beneath an unknown caller-owned
+/// lock.
+#[doc(hidden)]
+#[must_use = "cancellation wake effects must be dispatched after releasing outer locks"]
+pub struct CancelWakeEffects {
+    targets: Option<smallvec::SmallVec<[Arc<CancelWaker>; 4]>>,
+    observers: Option<smallvec::SmallVec<[CancelObserver; 1]>>,
+}
+
+impl std::fmt::Debug for CancelWakeEffects {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelWakeEffects")
+            .field(
+                "target_count",
+                &self.targets.as_ref().map_or(0, |targets| targets.len()),
+            )
+            .field(
+                "observer_count",
+                &self
+                    .observers
+                    .as_ref()
+                    .map_or(0, |observers| observers.len()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for CancelWakeEffects {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl CancelWakeEffects {
+    /// Creates an empty callback token.
+    #[inline]
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            targets: Some(smallvec::SmallVec::new()),
+            observers: Some(smallvec::SmallVec::new()),
+        }
+    }
+
+    /// Wraps targets already snapshotted under their owning `Cx` lock.
+    #[inline]
+    pub(crate) fn new(targets: smallvec::SmallVec<[Arc<CancelWaker>; 4]>) -> Self {
+        Self {
+            targets: Some(targets),
+            observers: Some(smallvec::SmallVec::new()),
+        }
+    }
+
+    /// Adds a closed task-cancellation trace event for post-lock dispatch.
+    #[cfg(feature = "tracing-integration")]
+    pub(crate) fn push_task_cancel_trace(
+        &mut self,
+        trace_kind: CancelTaskTraceKind,
+        task_id: TaskId,
+        region_id: RegionId,
+        previous_state: &'static str,
+        cancel_kind: CancelKind,
+        cleanup_poll_quota: u32,
+    ) {
+        self.observers
+            .as_mut()
+            .expect("dispatched cancellation effects cannot be reused")
+            .push(CancelObserver::TaskCancelTrace {
+                trace_kind,
+                task_id,
+                region_id,
+                previous_state,
+                cancel_kind,
+                cleanup_poll_quota,
+            });
+    }
+
+    /// Adds a metrics event for post-lock dispatch. The concrete provider is
+    /// retired in its own unwind boundary after the callback returns or panics.
+    pub(crate) fn push_region_cancellation_metric(
+        &mut self,
+        metrics: Arc<dyn MetricsProvider>,
+        region_id: RegionId,
+        cancel_kind: CancelKind,
+    ) {
+        self.observers
+            .as_mut()
+            .expect("dispatched cancellation effects cannot be reused")
+            .push(CancelObserver::RegionCancellationMetric {
+                metrics: Some(metrics),
+                region_id,
+                cancel_kind,
+            });
+    }
+
+    /// Adds a closed protocol-violation diagnostic for post-lock dispatch.
+    /// Formatting the internal validator result before enqueueing avoids
+    /// retaining a generic callback or runtime-state reference.
+    pub(crate) fn push_cancel_protocol_violation(
+        &mut self,
+        operation: &'static str,
+        validation_result: String,
+    ) {
+        self.observers
+            .as_mut()
+            .expect("dispatched cancellation effects cannot be reused")
+            .push(CancelObserver::CancelProtocolViolation {
+                operation,
+                validation_result,
+            });
+    }
+
+    /// Returns the number of distinct wake callbacks retained by this token.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.targets.as_ref().map_or(0, |targets| targets.len())
+    }
+
+    /// Returns whether the token contains no wake callbacks.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Appends another token without running callbacks or final destructors.
+    ///
+    /// Capacity is established before ownership moves. If allocation unwinds,
+    /// both tokens still own their original handles and their fail-closed Drop
+    /// implementations leak them rather than invoking user code under the
+    /// caller's lock.
+    pub(crate) fn merge(&mut self, mut other: Self) {
+        let incoming_len = other.targets.as_ref().map_or(0, |targets| targets.len());
+        let incoming_observer_len = other
+            .observers
+            .as_ref()
+            .map_or(0, |observers| observers.len());
+        if incoming_len == 0 && incoming_observer_len == 0 {
+            return;
+        }
+        let targets = self
+            .targets
+            .as_mut()
+            .expect("dispatched cancellation wake effects cannot be reused");
+        targets.reserve(incoming_len);
+        let observers = self
+            .observers
+            .as_mut()
+            .expect("dispatched cancellation effects cannot be reused");
+        observers.reserve(incoming_observer_len);
+        let incoming = other
+            .targets
+            .take()
+            .expect("live cancellation wake effects retain their targets");
+        let incoming_observers = other
+            .observers
+            .take()
+            .expect("live cancellation effects retain their observers");
+        targets.extend(incoming);
+        observers.extend(incoming_observers);
+    }
+
+    /// Invokes every observer and wake callback, then retires every retained
+    /// target.
+    ///
+    /// Observer, wake, and final-drop panics are isolated per target so one
+    /// hostile callback cannot prevent later tasks or auxiliary waiters from
+    /// observing cancellation. Panic payloads are deliberately leaked after
+    /// capture: dropping an arbitrary payload can panic again at this boundary.
+    pub fn dispatch(mut self) {
+        let observers = self.observers.take().unwrap_or_default();
+        for observer in observers {
+            observer.dispatch();
+        }
+        let targets = self.targets.take().unwrap_or_default();
+        for target in targets {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                target.wake_by_ref();
+            })) {
+                std::mem::forget(payload);
+            }
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(target)))
+            {
+                std::mem::forget(payload);
+            }
+        }
+    }
+
+    /// Explicitly abandons callbacks when no post-lock dispatch boundary is
+    /// available (for example, panic-unwind Drop cleanup).
+    pub fn suppress(mut self) {
+        if let Some(observers) = self.observers.take() {
+            for observer in observers {
+                observer.suppress();
+            }
+        }
+        let Some(targets) = self.targets.take() else {
+            return;
+        };
+        for target in targets {
+            std::mem::forget(target);
+        }
+    }
+
+    /// Suppresses observer delivery and retires duplicate Waker snapshots
+    /// without invoking them. Call only after every outer runtime/task lock is
+    /// released. Each final RawWaker destructor is isolated so a failed route
+    /// cannot unwind through the cancellation consumer.
+    pub(crate) fn retire_without_dispatch(mut self) {
+        if let Some(observers) = self.observers.take() {
+            for observer in observers {
+                observer.suppress();
+            }
+        }
+        let Some(mut targets) = self.targets.take() else {
+            return;
+        };
+        while let Some(target) = targets.pop() {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(target)))
+            {
+                std::mem::forget(payload);
+            }
+        }
+    }
+}
+
+impl Drop for CancelWakeEffects {
+    fn drop(&mut self) {
+        if let Some(observers) = self.observers.take() {
+            std::mem::forget(observers);
+        }
+        let Some(targets) = self.targets.take() else {
+            return;
+        };
+        for target in targets {
+            std::mem::forget(target);
+        }
+    }
+}
+
+/// A state-mutation result paired with cancellation wake callbacks.
+///
+/// The value is available only by consuming the token through
+/// [`Self::into_parts`], making both the callback-free publication step and
+/// the post-lock callback boundary explicit at every `RuntimeState` call
+/// site.
+///
+/// Abandonment leaks both the callback-free value and the retained wake
+/// targets. This is deliberately conservative: an effect token may be dropped
+/// while a caller-owned lock is live, so even a future `T` destructor must not
+/// become a hidden callback boundary.
+#[derive(Debug)]
+#[doc(hidden)]
+#[must_use = "cancellation effects must be consumed after releasing outer locks"]
+pub struct CancellationEffects<T> {
+    value: Option<T>,
+    wakes: CancelWakeEffects,
+}
+
+impl<T> CancellationEffects<T> {
+    /// Couples a mutation result to its deferred callbacks.
+    #[inline]
+    pub(crate) fn new(value: T, wakes: CancelWakeEffects) -> Self {
+        Self {
+            value: Some(value),
+            wakes,
+        }
+    }
+
+    /// Couples a result to an empty callback token.
+    #[inline]
+    pub(crate) fn ready(value: T) -> Self {
+        Self::new(value, CancelWakeEffects::empty())
+    }
+
+    /// Splits the callback-free value from the token that must be dispatched
+    /// after the caller releases its outermost state lock.
+    #[inline]
+    pub fn into_parts(mut self) -> (T, CancelWakeEffects) {
+        let value = self
+            .value
+            .take()
+            .expect("live cancellation effects retain their value");
+        let wakes = std::mem::take(&mut self.wakes);
+        (value, wakes)
+    }
+}
+
+impl<T> Drop for CancellationEffects<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            std::mem::forget(value);
+        }
+    }
 }
 
 /// Maximum nesting depth for `Cx::masked()` sections.
@@ -263,6 +770,51 @@ fn truncate_checkpoint_history_message(message: &str) -> String {
     message[..end].to_owned()
 }
 
+/// State of a task's first scheduler-runnable publication boundary.
+///
+/// Mailbox admission starts at [`Self::Unpublished`]. A cached managed-handle
+/// abort moves to [`Self::DelegatedCancel`], reserving the first lane for the
+/// runtime-owned handle-command consumer without pretending that the lane is
+/// already visible. Only the code that has physically published a lane may
+/// transition to [`Self::Published`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunnablePublication {
+    /// No lane has been published or delegated yet.
+    Unpublished,
+    /// The handle-command consumer owns the initial cancel-lane publication.
+    DelegatedCancel,
+    /// At least one scheduler lane is physically visible for the task.
+    Published,
+}
+
+impl RunnablePublication {
+    #[inline]
+    pub(crate) const fn is_published(self) -> bool {
+        matches!(self, Self::Published)
+    }
+
+    #[inline]
+    pub(crate) const fn is_delegated_cancel(self) -> bool {
+        matches!(self, Self::DelegatedCancel)
+    }
+
+    #[inline]
+    pub(crate) fn delegate_cancel(&mut self) {
+        debug_assert!(
+            matches!(self, Self::Unpublished),
+            "only an unpublished admission can delegate its first cancel lane"
+        );
+        if matches!(self, Self::Unpublished) {
+            *self = Self::DelegatedCancel;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn mark_published(&mut self) {
+        *self = Self::Published;
+    }
+}
+
 /// Internal state for a capability context.
 ///
 /// This struct is shared between the user-facing `Cx` and the runtime's
@@ -288,6 +840,28 @@ pub struct CxInner {
     pub cancel_reason: Option<CancelReason>,
     /// Whether cancellation has been acknowledged at a checkpoint.
     pub cancel_acknowledged: bool,
+    /// Whether the current effective cancellation still owes one Waker
+    /// publication at a runtime-owned scheduler boundary.
+    ///
+    /// Direct `Cx` cancellation APIs snapshot and dispatch immediately and
+    /// leave this false. Task-handle and checkpoint-budget producers cannot
+    /// invoke callbacks at their mutation site, so they set it true and the
+    /// scheduler-side reconciliation clears it after snapshotting exactly
+    /// once.
+    pub(crate) cancel_wakers_pending: bool,
+    /// State of the task's first scheduler-runnable publication boundary.
+    /// The delegated state prevents a cached handle abort from being mistaken
+    /// for a lane that is already physically visible.
+    pub(crate) runnable_publication: RunnablePublication,
+    /// First closed task-cancellation trace produced before the task's initial
+    /// scheduler lane exists. Later prepublication strengthening traces are
+    /// intentionally coalesced into this bounded receipt.
+    #[cfg(feature = "tracing-integration")]
+    pub(crate) pending_task_cancel_trace: Option<PendingTaskCancelTrace>,
+    /// Runtime-owned command gateway used by task handles to enqueue
+    /// cancellation without invoking arbitrary Waker callbacks on the caller
+    /// or `Drop` stack.
+    pub(crate) cancel_gateway: Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
     /// Runtime-owned Waker used to put this task on the cancellation lane.
     pub cancel_waker: Option<Arc<CancelWaker>>,
     /// Idempotent compatibility slot for callers that cannot retain a token.
@@ -332,6 +906,11 @@ impl CxInner {
             cancel_requested: false,
             cancel_reason: None,
             cancel_acknowledged: false,
+            cancel_wakers_pending: false,
+            runnable_publication: RunnablePublication::Published,
+            #[cfg(feature = "tracing-integration")]
+            pending_task_cancel_trace: None,
+            cancel_gateway: None,
             cancel_waker: None,
             untracked_cancel_waker: None,
             cancel_waker_registrations: Vec::new(),
@@ -374,6 +953,14 @@ impl CxInner {
     /// The returned targets must be dropped after all relevant locks are gone.
     pub(crate) fn take_cancel_wakers(&mut self) -> smallvec::SmallVec<[Arc<CancelWaker>; 4]> {
         self.cancel_waker_registry_closed = true;
+        self.cancel_wakers_pending = false;
+        #[cfg(feature = "tracing-integration")]
+        {
+            // A task that retires without ever crossing admission has no lane
+            // after which its trace could be emitted. Suppress the bounded,
+            // copy-only receipt rather than reporting a fictitious publication.
+            self.pending_task_cancel_trace = None;
+        }
         // Allocate before moving any final owner out of the registry. If
         // allocation unwinds, every arbitrary RawWaker destructor remains
         // protected by its slot rather than running beneath the Cx lock.
@@ -448,10 +1035,471 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
+    struct PanickingPayload {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for PanickingPayload {
+        fn drop(&mut self) {
+            let already_panicking = std::thread::panicking();
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if !already_panicking {
+                panic!("adversarial panic-payload destructor");
+            }
+        }
+    }
+
+    struct AdversarialWake {
+        label: &'static str,
+        wake_calls: Arc<AtomicUsize>,
+        retirements: Arc<AtomicUsize>,
+        wake_order: Arc<Mutex<Vec<&'static str>>>,
+        wake_panic_attempts: Arc<AtomicUsize>,
+        drop_panic_attempts: Arc<AtomicUsize>,
+        panic_payload_drops: Arc<AtomicUsize>,
+        panic_on_wake: bool,
+        panic_on_drop: bool,
+    }
+
+    impl AdversarialWake {
+        fn record_wake(&self) {
+            self.wake_calls.fetch_add(1, Ordering::SeqCst);
+            self.wake_order
+                .lock()
+                .expect("wake order lock")
+                .push(self.label);
+            if self.panic_on_wake {
+                self.wake_panic_attempts.fetch_add(1, Ordering::SeqCst);
+                std::panic::panic_any(PanickingPayload {
+                    drops: Arc::clone(&self.panic_payload_drops),
+                });
+            }
+        }
+    }
+
+    impl Wake for AdversarialWake {
+        fn wake(self: Arc<Self>) {
+            self.record_wake();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.record_wake();
+        }
+    }
+
+    impl Drop for AdversarialWake {
+        fn drop(&mut self) {
+            self.retirements.fetch_add(1, Ordering::SeqCst);
+            if self.panic_on_drop {
+                self.drop_panic_attempts.fetch_add(1, Ordering::SeqCst);
+                std::panic::panic_any(PanickingPayload {
+                    drops: Arc::clone(&self.panic_payload_drops),
+                });
+            }
+        }
+    }
+
+    struct LockAwareValue {
+        drops: Arc<AtomicUsize>,
+        drops_while_locked: Arc<AtomicUsize>,
+        caller_lock: Arc<Mutex<()>>,
+    }
+
+    impl Drop for LockAwareValue {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if self.caller_lock.try_lock().is_err() {
+                self.drops_while_locked.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct LockAwareWake {
+        wake_calls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        drops_while_locked: Arc<AtomicUsize>,
+        caller_lock: Arc<Mutex<()>>,
+    }
+
+    impl Wake for LockAwareWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wake_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for LockAwareWake {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if self.caller_lock.try_lock().is_err() {
+                self.drops_while_locked.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct AdversarialCancellationMetrics {
+        calls: Arc<AtomicUsize>,
+        calls_while_locked: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        drops_while_locked: Arc<AtomicUsize>,
+        panic_payload_drops: Arc<AtomicUsize>,
+        caller_lock: Arc<Mutex<()>>,
+        panic_on_call: bool,
+        panic_on_drop: bool,
+    }
+
+    impl MetricsProvider for AdversarialCancellationMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {}
+
+        fn task_completed(
+            &self,
+            _: TaskId,
+            _: crate::observability::metrics::OutcomeKind,
+            _: std::time::Duration,
+        ) {
+        }
+
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+
+        fn region_closed(&self, _: RegionId, _: std::time::Duration) {}
+
+        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.caller_lock.try_lock().is_err() {
+                self.calls_while_locked.fetch_add(1, Ordering::SeqCst);
+            }
+            if self.panic_on_call {
+                std::panic::panic_any(PanickingPayload {
+                    drops: Arc::clone(&self.panic_payload_drops),
+                });
+            }
+        }
+
+        fn drain_completed(&self, _: RegionId, _: std::time::Duration) {}
+
+        fn deadline_set(&self, _: RegionId, _: std::time::Duration) {}
+
+        fn deadline_exceeded(&self, _: RegionId) {}
+
+        fn deadline_warning(&self, _: &str, _: &'static str, _: std::time::Duration) {}
+
+        fn deadline_violation(&self, _: &str, _: std::time::Duration) {}
+
+        fn deadline_remaining(&self, _: &str, _: std::time::Duration) {}
+
+        fn checkpoint_interval(&self, _: &str, _: std::time::Duration) {}
+
+        fn task_stuck_detected(&self, _: &str) {}
+
+        fn obligation_created(&self, _: RegionId) {}
+
+        fn obligation_discharged(&self, _: RegionId) {}
+
+        fn obligation_leaked(&self, _: RegionId) {}
+
+        fn scheduler_tick(&self, _: usize, _: std::time::Duration) {}
+    }
+
+    impl Drop for AdversarialCancellationMetrics {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if self.caller_lock.try_lock().is_err() {
+                self.drops_while_locked.fetch_add(1, Ordering::SeqCst);
+            }
+            if self.panic_on_drop {
+                std::panic::panic_any(PanickingPayload {
+                    drops: Arc::clone(&self.panic_payload_drops),
+                });
+            }
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn cancel_wake_effects_isolate_wake_and_retirement_panics() {
+        init_test("cancel_wake_effects_isolate_wake_and_retirement_panics");
+
+        let first_wakes = Arc::new(AtomicUsize::new(0));
+        let second_wakes = Arc::new(AtomicUsize::new(0));
+        let third_wakes = Arc::new(AtomicUsize::new(0));
+        let first_retirements = Arc::new(AtomicUsize::new(0));
+        let second_retirements = Arc::new(AtomicUsize::new(0));
+        let third_retirements = Arc::new(AtomicUsize::new(0));
+        let wake_order = Arc::new(Mutex::new(Vec::new()));
+        let wake_panic_attempts = Arc::new(AtomicUsize::new(0));
+        let drop_panic_attempts = Arc::new(AtomicUsize::new(0));
+        let panic_payload_drops = Arc::new(AtomicUsize::new(0));
+
+        let target = |label,
+                      wake_calls: &Arc<AtomicUsize>,
+                      retirements: &Arc<AtomicUsize>,
+                      panic_on_wake,
+                      panic_on_drop| {
+            Arc::new(CancelWaker::new(Waker::from(Arc::new(AdversarialWake {
+                label,
+                wake_calls: Arc::clone(wake_calls),
+                retirements: Arc::clone(retirements),
+                wake_order: Arc::clone(&wake_order),
+                wake_panic_attempts: Arc::clone(&wake_panic_attempts),
+                drop_panic_attempts: Arc::clone(&drop_panic_attempts),
+                panic_payload_drops: Arc::clone(&panic_payload_drops),
+                panic_on_wake,
+                panic_on_drop,
+            }))))
+        };
+
+        let mut first_batch = smallvec::SmallVec::<[Arc<CancelWaker>; 4]>::new();
+        first_batch.push(target(
+            "first",
+            &first_wakes,
+            &first_retirements,
+            true,
+            true,
+        ));
+        let mut effects = CancelWakeEffects::new(first_batch);
+
+        let mut later_batch = smallvec::SmallVec::<[Arc<CancelWaker>; 4]>::new();
+        later_batch.push(target(
+            "second",
+            &second_wakes,
+            &second_retirements,
+            false,
+            false,
+        ));
+        later_batch.push(target(
+            "third",
+            &third_wakes,
+            &third_retirements,
+            false,
+            false,
+        ));
+        effects.merge(CancelWakeEffects::new(later_batch));
+
+        assert_eq!(effects.len(), 3);
+        effects.dispatch();
+
+        assert_eq!(first_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(third_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(first_retirements.load(Ordering::SeqCst), 1);
+        assert_eq!(second_retirements.load(Ordering::SeqCst), 1);
+        assert_eq!(third_retirements.load(Ordering::SeqCst), 1);
+        assert_eq!(wake_panic_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_panic_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(panic_payload_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *wake_order.lock().expect("wake order lock"),
+            vec!["first", "second", "third"]
+        );
+
+        crate::test_complete!("cancel_wake_effects_isolate_wake_and_retirement_panics");
+    }
+
+    #[test]
+    fn cancellation_observers_merge_without_wakers_and_isolate_panics() {
+        init_test("cancellation_observers_merge_without_wakers_and_isolate_panics");
+
+        let caller_lock = Arc::new(Mutex::new(()));
+        let panic_payload_drops = Arc::new(AtomicUsize::new(0));
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_calls_while_locked = Arc::new(AtomicUsize::new(0));
+        let first_drops = Arc::new(AtomicUsize::new(0));
+        let first_drops_while_locked = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls_while_locked = Arc::new(AtomicUsize::new(0));
+        let second_drops = Arc::new(AtomicUsize::new(0));
+        let second_drops_while_locked = Arc::new(AtomicUsize::new(0));
+        let wake_calls = Arc::new(AtomicUsize::new(0));
+        let wake_drops = Arc::new(AtomicUsize::new(0));
+        let wake_drops_while_locked = Arc::new(AtomicUsize::new(0));
+
+        let mut targets = smallvec::SmallVec::<[Arc<CancelWaker>; 4]>::new();
+        targets.push(Arc::new(CancelWaker::new(Waker::from(Arc::new(
+            LockAwareWake {
+                wake_calls: Arc::clone(&wake_calls),
+                drops: Arc::clone(&wake_drops),
+                drops_while_locked: Arc::clone(&wake_drops_while_locked),
+                caller_lock: Arc::clone(&caller_lock),
+            },
+        )))));
+        let mut effects = CancelWakeEffects::new(targets);
+        effects.push_region_cancellation_metric(
+            Arc::new(AdversarialCancellationMetrics {
+                calls: Arc::clone(&first_calls),
+                calls_while_locked: Arc::clone(&first_calls_while_locked),
+                drops: Arc::clone(&first_drops),
+                drops_while_locked: Arc::clone(&first_drops_while_locked),
+                panic_payload_drops: Arc::clone(&panic_payload_drops),
+                caller_lock: Arc::clone(&caller_lock),
+                panic_on_call: true,
+                panic_on_drop: true,
+            }),
+            RegionId::testing_default(),
+            CancelKind::Shutdown,
+        );
+
+        let mut observer_only = CancelWakeEffects::empty();
+        observer_only.push_region_cancellation_metric(
+            Arc::new(AdversarialCancellationMetrics {
+                calls: Arc::clone(&second_calls),
+                calls_while_locked: Arc::clone(&second_calls_while_locked),
+                drops: Arc::clone(&second_drops),
+                drops_while_locked: Arc::clone(&second_drops_while_locked),
+                panic_payload_drops: Arc::clone(&panic_payload_drops),
+                caller_lock: Arc::clone(&caller_lock),
+                panic_on_call: false,
+                panic_on_drop: false,
+            }),
+            RegionId::testing_default(),
+            CancelKind::Shutdown,
+        );
+        assert!(observer_only.is_empty(), "is_empty remains Waker-only");
+        effects.merge(observer_only);
+
+        let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            effects.dispatch();
+        }));
+        assert!(dispatched.is_ok());
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(wake_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(wake_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(first_calls_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(first_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(second_calls_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(second_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(wake_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(panic_payload_drops.load(Ordering::SeqCst), 0);
+
+        crate::test_complete!("cancellation_observers_merge_without_wakers_and_isolate_panics");
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn cancellation_protocol_diagnostic_contains_subscriber_panic() {
+        use tracing_subscriber::prelude::*;
+
+        struct PanickingLayer {
+            attempts: Arc<AtomicUsize>,
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for PanickingLayer
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                panic!("adversarial cancellation diagnostic subscriber");
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut effects = CancelWakeEffects::empty();
+        effects.push_cancel_protocol_violation(
+            "hostile cancellation validation",
+            "Invalid { reason: deterministic fixture }".to_owned(),
+        );
+        let subscriber = tracing_subscriber::registry().with(PanickingLayer {
+            attempts: Arc::clone(&attempts),
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::subscriber::with_default(subscriber, || effects.dispatch());
+        }));
+
+        assert!(result.is_ok(), "subscriber panic must not escape dispatch");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn abandoned_cancellation_effects_leak_value_and_waker_under_outer_lock() {
+        init_test("abandoned_cancellation_effects_leak_value_and_waker_under_outer_lock");
+
+        let caller_lock = Arc::new(Mutex::new(()));
+        let value_drops = Arc::new(AtomicUsize::new(0));
+        let value_drops_while_locked = Arc::new(AtomicUsize::new(0));
+        let wake_calls = Arc::new(AtomicUsize::new(0));
+        let waker_drops = Arc::new(AtomicUsize::new(0));
+        let waker_drops_while_locked = Arc::new(AtomicUsize::new(0));
+        let metric_calls = Arc::new(AtomicUsize::new(0));
+        let metric_calls_while_locked = Arc::new(AtomicUsize::new(0));
+        let metric_drops = Arc::new(AtomicUsize::new(0));
+        let metric_drops_while_locked = Arc::new(AtomicUsize::new(0));
+        let panic_payload_drops = Arc::new(AtomicUsize::new(0));
+
+        let value = LockAwareValue {
+            drops: Arc::clone(&value_drops),
+            drops_while_locked: Arc::clone(&value_drops_while_locked),
+            caller_lock: Arc::clone(&caller_lock),
+        };
+        let target = Arc::new(CancelWaker::new(Waker::from(Arc::new(LockAwareWake {
+            wake_calls: Arc::clone(&wake_calls),
+            drops: Arc::clone(&waker_drops),
+            drops_while_locked: Arc::clone(&waker_drops_while_locked),
+            caller_lock: Arc::clone(&caller_lock),
+        }))));
+        let mut targets = smallvec::SmallVec::<[Arc<CancelWaker>; 4]>::new();
+        targets.push(target);
+        let mut wakes = CancelWakeEffects::new(targets);
+        wakes.push_region_cancellation_metric(
+            Arc::new(AdversarialCancellationMetrics {
+                calls: Arc::clone(&metric_calls),
+                calls_while_locked: Arc::clone(&metric_calls_while_locked),
+                drops: Arc::clone(&metric_drops),
+                drops_while_locked: Arc::clone(&metric_drops_while_locked),
+                panic_payload_drops: Arc::clone(&panic_payload_drops),
+                caller_lock: Arc::clone(&caller_lock),
+                panic_on_call: false,
+                panic_on_drop: false,
+            }),
+            RegionId::testing_default(),
+            CancelKind::Shutdown,
+        );
+        let effects = CancellationEffects::new(value, wakes);
+
+        let guard = caller_lock.lock().expect("caller lock");
+        drop(effects);
+        assert_eq!(value_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(value_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(wake_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(waker_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(waker_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_calls_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_drops_while_locked.load(Ordering::SeqCst), 0);
+        drop(guard);
+
+        assert_eq!(value_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(value_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(wake_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(waker_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(waker_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_calls_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(metric_drops_while_locked.load(Ordering::SeqCst), 0);
+        assert_eq!(panic_payload_drops.load(Ordering::SeqCst), 0);
+
+        crate::test_complete!(
+            "abandoned_cancellation_effects_leak_value_and_waker_under_outer_lock"
+        );
     }
 
     #[test]

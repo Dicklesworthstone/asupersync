@@ -2,15 +2,18 @@
 //! propagation in the three-lane scheduler.
 //!
 //! Operator's question: "when a task is on worker-A and parent
-//! region (on worker-B) is cancelled, does the cancellation
-//! reach worker-A's task within bounded time (< 1 quantum)?"
+//! region (on worker-B) is cancelled, what ordering and wakeup
+//! guarantees carry the cancellation across workers?"
 //!
 //! Audit findings:
 //!
-//!   The asupersync cross-worker cancel chain is **bounded by
-//!   one checkpoint observation OR one dispatch loop iteration
-//!   on worker-A**, regardless of where the cancel originates.
-//!   Both bounds are well under "one quantum":
+//!   The asupersync cross-worker cancel chain has two explicit
+//!   visibility paths: the next cooperative checkpoint observes
+//!   the shared atomic flag, while parked work receives a concrete
+//!   Parker permit and cancel-lane publication. These are protocol
+//!   ordering guarantees, not wall-clock or sub-quantum latency
+//!   claims; checkpoint cadence, worker fairness, OS scheduling,
+//!   and structural route validity still bound elapsed time.
 //!
 //!   1. **Shared state via Arc<AtomicBool>**: each task's
 //!      `CxInner.fast_cancel` is `Arc<AtomicBool>` shared
@@ -24,25 +27,33 @@
 //!   2. **Acquire-Release pair guarantees visibility on next
 //!      load**: worker-A's `cx.checkpoint()` reads
 //!      `guard.fast_cancel.load(Acquire)` (cx/cx.rs). The
-//!      Release-Acquire pair guarantees that any subsequent
-//!      checkpoint observes the cancel — not "eventually" but
-//!      "next checkpoint". For an actively-polling task on
-//!      worker-A, that's at most one cooperative-yield window.
+//!      Release-Acquire pair guarantees that the next subsequent
+//!      checkpoint load observes the published cancel. It does
+//!      not guarantee when user code reaches that checkpoint.
 //!
 //!   3. **Wake mechanism for parked tasks**: if worker-A's
 //!      task is currently PARKED (e.g., sleeping on Sleep,
 //!      awaiting on a channel), the cancel propagation also
 //!      triggers a wake. This wake path is:
-//!      a. `state.cancel_request` returns `Vec<(TaskId, u8)>`
-//!      — tasks needing cancel-lane promotion.
-//!      b. The caller invokes `scheduler.inject_cancel(task,
-//!      priority)` per task (three_lane.rs:1474).
-//!      c. For !Send local tasks, inject_cancel routes to the
+//!      a. `state.cancel_request` returns
+//!      `CancellationEffects<Vec<(TaskId, u8)>>` — a
+//!      callback-free routing list paired with opaque Wakers.
+//!      b. `defer_cancel_dispatch` stores the batch, publishes its
+//!      ready flag, then uses the scheduler's concrete
+//!      `WorkerCoordinator` to leave a Parker permit. It does not
+//!      call an arbitrary notifier or reactor under RuntimeState.
+//!      c. The scheduler takes queued effects under its state
+//!      guard, releases that guard, publishes every task ID to
+//!      the cancel lane, then panic-isolating dispatches all
+//!      Wakers. No reentrant auxiliary cancellation-Waker or
+//!      deferred cancellation-observer callback sees the task
+//!      cancellation before runnable work exists.
+//!      d. For !Send local tasks, inject_cancel routes to the
 //!      pinned worker via `local.lock().move_to_cancel_lane`
 //!      and calls `parker.unpark()` on that worker
-//!      (three_lane.rs:1493-1499). Bounded wake to the
+//!      (three_lane.rs:1493-1499). Targeted wake to the
 //!      specific worker, no broadcast.
-//!      d. For global tasks, inject_cancel calls
+//!      e. For global tasks, inject_cancel calls
 //!      `global.inject_cancel(task, priority)` and
 //!      `coordinator.wake_one()` (three_lane.rs:1527-1528).
 //!      wake_one picks an idle parker via round-robin
@@ -56,36 +67,32 @@
 //!      b. If !cancel_requested, returns (spurious-wake guard).
 //!      c. Calls `wake_state.notify()` for dedup.
 //!      d. Calls `global.inject_cancel + coordinator.wake_one`
-//!      — same path as inject_cancel.
-//!      This is the cross-thread mechanism that wakes a parked
-//!      task without requiring polling on worker-A.
+//!      — same path as inject_cancel. This is the cross-thread
+//!      mechanism that wakes a parked task without waiting for
+//!      another user-level poll to create runnable work.
 //!
 //!   5. **Strict cancel-lane priority**: once injected, the
 //!      cancel-lane work is dispatched FIRST in the worker's
-//!      next loop iteration (three_lane.rs:3411 — Phase 1 for
+//!      next eligible loop selection (three_lane.rs:3411 — Phase 1 for
 //!      Default suggestion: `pop_cancel` before timed/ready).
 //!      The `cancel_streak` fairness limit allows occasional
 //!      timed/ready interleaving but enforces "if cancel work
 //!      pending, dispatch within at most cancel_streak_limit
-//!      iterations" — typically 32.
+//!      eligible selections" — typically 32. This is not a
+//!      wall-clock bound.
 //!
 //!   6. **WorkerCoordinator.wake_one is round-robin**: the
 //!      `next_wake.fetch_add(1, Relaxed)` cursor distributes
-//!      wakes across parkers. A pathological case where
-//!      worker-A is repeatedly skipped is bounded by the
-//!      io_driver.wake() side-effect (which all parked workers
-//!      observe).
+//!      wakes across parkers. This distributes progress permits;
+//!      it does not promise that a particular worker runs within
+//!      a fixed elapsed-time window.
 //!
-//! Verdict: **SOUND**. Cross-thread cancel propagation reaches
-//! worker-A's task within:
-//!   - One checkpoint call (Acquire load observes the Release
-//!     store) for actively-polling tasks.
-//!   - One coordinator.wake_one() + one dispatch loop iteration
-//!     for parked tasks.
-//!   - One parker.unpark() + one dispatch loop iteration for
-//!     pinned local tasks (no coordinator round-robin).
-//!
-//! All three bounds are sub-quantum.
+//! Verdict: **SOUND FOR ORDERING AND WAKEUP**. The next
+//! checkpoint observes the Release store, and deferred/parked
+//! cancellation publishes a Parker permit plus cancel-lane work.
+//! This audit makes no p50/p99, wall-clock, one-iteration, or
+//! sub-quantum claim, and it does not cover permanently invalid
+//! local-owner routes.
 //!
 //! A regression that:
 //!   - changed `fast_cancel` from `Arc<AtomicBool>` to a
@@ -100,8 +107,8 @@
 //!   - changed the Release/Acquire ordering pair to Relaxed
 //!     (cross-thread visibility no longer guaranteed),
 //!   - removed the cancel-lane priority from the dispatch
-//!     loop (would push cancel behind timed/ready and break
-//!     bounded-latency guarantee),
+//!     loop (would push cancel behind timed/ready and weaken
+//!     cancel-lane selection priority),
 //!   - changed CancelLaneWaker.schedule to no-op when
 //!     cancel_requested is false but ALSO no-op when
 //!     cancel_requested is true (would silently drop the
@@ -207,6 +214,111 @@ fn cx_checkpoint_observes_fast_cancel_with_acquire_load() {
 }
 
 #[test]
+fn pending_checkpoint_ack_republishes_cancel_lane_before_wakers() {
+    // A task may acknowledge cancellation inside the poll that returns
+    // Pending before the queued handle command reaches a worker. That receipt
+    // must itself make the cancel lane visible before auxiliary Wakers run;
+    // otherwise a reentrant Waker can observe a parked, unpublished task.
+    let task = read("src/record/task.rs");
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
+    let start = scheduler
+        .find("Ok(Poll::Pending) => {")
+        .expect("three-lane Pending branch");
+    let end = scheduler[start..]
+        .find("\n            Err(payload) => {")
+        .expect("three-lane Pending branch end");
+    let body = &scheduler[start..start + end];
+
+    let receipt = body
+        .find("let (cancel_ack, mut cancel_wakes) = cancel_effects.into_parts();")
+        .expect("checkpoint receipt split");
+    let local_publication = body
+        .find("move_local_ready_task_to_cancel_lane(")
+        .expect("local cancel publication");
+    let global_publication = body
+        .find("self.global.inject_cancel(task_id, cancel_priority);")
+        .expect("global cancel publication");
+    let dispatch = body
+        .find("cancel_wakes.dispatch();")
+        .expect("post-publication Waker dispatch");
+
+    assert!(
+        task.contains("Callers that observe a receipt after `Poll::Pending` must publish a")
+            && body.contains("if wake_state.finish_poll() || cancel_ack.is_some()")
+            && receipt < local_publication
+            && receipt < global_publication
+            && local_publication < dispatch
+            && global_publication < dispatch,
+        "REGRESSION: a same-poll checkpoint acknowledgement no longer republishes the task on \
+         its cancel lane before auxiliary Wakers run. A checkpoint-first handle race can strand \
+         a Pending task or expose cancellation callbacks before runnable visibility.",
+    );
+}
+
+#[test]
+fn deferred_cancel_enqueue_publishes_queue_flag_then_parker_permit() {
+    // RegionRunner::Drop and other outer-lock owners cannot publish the
+    // scheduler routes themselves. Pin the owner handoff order: queue the
+    // opaque batch, publish the Release flag, then leave a concrete Parker
+    // permit. The notifier must be the coordinator's Parker-only path so an
+    // arbitrary reactor callback cannot run beneath RuntimeState.
+    let state = read("src/runtime/state.rs");
+    let marker = "pub(crate) fn defer_cancel_dispatch(";
+    let start = state.find(marker).expect("deferred cancel enqueue");
+    let end = state[start..]
+        .find("\n    /// Installs the concrete parked-worker notifier")
+        .expect("deferred cancel enqueue end");
+    let body = &state[start..start + end];
+
+    let enqueue = body
+        .find("self.pending_cancel_dispatches.push(effects);")
+        .expect("queue publication");
+    let ready = body
+        .find(".store(true, Ordering::Release);")
+        .expect("ready-flag publication");
+    let permit = body
+        .find("coordinator.wake_one_parker();")
+        .expect("Parker permit publication");
+    assert!(
+        enqueue < ready && ready < permit && body.contains(".and_then(std::sync::Weak::upgrade)"),
+        "REGRESSION: deferred cancellation no longer queues its opaque batch, publishes the \
+         Release-ready flag, and then leaves a concrete Parker permit in that order.",
+    );
+
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
+    let wake_marker = "pub(crate) fn wake_one_parker(&self) {";
+    let wake_start = scheduler
+        .find(wake_marker)
+        .expect("Parker-only coordinator wake");
+    let wake_end = scheduler[wake_start..]
+        .find("\n    }\n")
+        .expect("Parker-only coordinator wake end");
+    let wake_body = &scheduler[wake_start..wake_start + wake_end];
+    assert!(
+        wake_body.contains("self.parkers[slot].unpark();") && !wake_body.contains("io.wake()"),
+        "REGRESSION: deferred cancellation's outer-lock notifier is no longer Parker-only; \
+         reactor callbacks must remain outside RuntimeState.",
+    );
+
+    let coordinator = scheduler
+        .find("let coordinator = Arc::new(WorkerCoordinator::new(")
+        .expect("coordinator construction");
+    let install = scheduler[coordinator..]
+        .find("state.set_pending_cancel_dispatch_coordinator(&coordinator);")
+        .map(|offset| coordinator + offset)
+        .expect("deferred notifier installation");
+    let ready_handle = scheduler[coordinator..]
+        .find("state.pending_cancel_dispatch_ready_handle()")
+        .map(|offset| coordinator + offset)
+        .expect("deferred ready handle");
+    assert!(
+        install < ready_handle,
+        "REGRESSION: ThreeLaneScheduler no longer installs the concrete deferred-cancel \
+         coordinator before exposing the ready-flag handle.",
+    );
+}
+
+#[test]
 fn inject_cancel_unparks_pinned_local_worker() {
     // Pin (link 3): inject_cancel for !Send local tasks calls
     // parker.unpark() on the pinned worker so that worker can
@@ -264,8 +376,8 @@ fn inject_cancel_wakes_coordinator_for_global_tasks() {
 fn cancel_lane_waker_schedule_calls_inject_cancel_and_wake_one() {
     // Pin (link 4): CancelLaneWaker.schedule (the cross-
     // thread waker used for parked tasks) calls
-    // global.inject_cancel + coordinator.wake_one to ensure a
-    // worker dispatches the cancel within bounded time.
+    // global.inject_cancel + coordinator.wake_one to publish
+    // runnable work and leave a progress permit.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     let fn_marker = "impl CancelLaneWaker {";
@@ -349,8 +461,8 @@ fn cancel_lane_dispatched_first_in_default_suggestion() {
     // Pin (link 5): the dispatch loop pops cancel-lane work
     // before timed/ready in the Default (non-MeetDeadlines)
     // suggestion path. Without this priority, cross-thread
-    // cancel reaches the queue but waits behind timed/ready —
-    // breaking the bounded-latency guarantee.
+    // cancel reaches the queue but loses its documented lane
+    // selection priority behind timed/ready.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     // Phase 1 default branch: cancel before timed.
@@ -405,19 +517,59 @@ fn three_lane_local_waker_routes_cancelled_local_task_to_cancel_lane() {
 }
 
 #[test]
-fn cancel_request_returns_per_task_priorities_for_lane_routing() {
-    // Pin (link 3-prime): cancel_request returns
-    // Vec<(TaskId, u8)> so the scheduler can call inject_cancel
-    // for each entry. Without this, the per-task lane routing
-    // chain breaks at the boundary between state and scheduler.
+fn cancel_request_effects_publish_all_tasks_before_waker_dispatch() {
+    // Pin (link 3-prime): cancel_request couples per-task
+    // priorities to opaque Wakers. The scheduler takes effects
+    // while holding state, releases that guard, publishes all
+    // routing entries, and dispatches Wakers only afterward. A structurally
+    // invalid route suppresses that batch fail-closed; this contract does not
+    // claim retry, eventual recovery, or a quiescence proof for invalid input.
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("pub fn cancel_request(") && source.contains("-> Vec<(TaskId, u8)>"),
+        source.contains("pub fn cancel_request(")
+            && source.contains("-> CancellationEffects<Vec<(TaskId, u8)>>")
+            && source.contains("CancellationEffects::new(tasks_to_cancel, wakes)"),
         "REGRESSION: cancel_request signature changed. The \
-         scheduler depends on the (TaskId, priority) tuple list \
-         to drive per-task inject_cancel — without this list, \
-         lane routing for cross-thread cancel is dropped.",
+         scheduler no longer receives the (TaskId, priority) \
+         tuple list coupled to deferred Wakers; cross-thread \
+         post-lock publication cannot be enforced.",
+    );
+
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
+    let start = scheduler
+        .find("fn drain_deferred_cancel_dispatches(&self) {")
+        .expect("deferred cancel drain");
+    let body = &scheduler[start..(start + 1800).min(scheduler.len())];
+    let take = body
+        .find("state.take_deferred_cancel_dispatches()")
+        .expect("take cancellation batches");
+    let release = take
+        + body[take..]
+            .find("\n        };")
+            .expect("release RuntimeState guard");
+    let publish = body
+        .find("self.publish_deferred_cancel_task(task_id, priority)")
+        .expect("publish cancellation task");
+    let collect_wakes = body
+        .find("wakes.push((batch_published, batch_wakes));")
+        .expect("collect publication-gated Wakers");
+    let dispatch = body
+        .find("batch_wakes.dispatch();")
+        .expect("dispatch Wakers");
+    assert!(
+        body.contains("let batches = {")
+            && take < publish
+            && take < release
+            && release < publish
+            && publish < collect_wakes
+            && collect_wakes < dispatch
+            && body.contains("if batch_published {")
+            && body.contains("batch_wakes.suppress();")
+            && body.matches(".dispatch();").count() == 1,
+        "REGRESSION: scheduler no longer releases RuntimeState, publishes \
+         every cancel-lane task, and only then dispatches Wakers. A \
+         reentrant cross-thread Waker can observe unpublishable work.",
     );
 }
 

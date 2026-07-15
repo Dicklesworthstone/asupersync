@@ -109,9 +109,11 @@ fn counter_child(registry: &SharedRegistry, named_handle_slot: &NamedHandleSlot)
 
 fn request_cancel_and_drain(runtime: &mut LabRuntime, app_region: RegionId) {
     for _ in 0..8 {
-        let to_cancel = runtime
-            .state
-            .cancel_request(app_region, &CancelReason::shutdown(), None);
+        let cancel_effects =
+            runtime
+                .state
+                .cancel_request(app_region, &CancelReason::shutdown(), None);
+        let (to_cancel, cancel_wakes) = cancel_effects.into_parts();
 
         {
             let mut scheduler = runtime.scheduler.lock();
@@ -119,6 +121,7 @@ fn request_cancel_and_drain(runtime: &mut LabRuntime, app_region: RegionId) {
                 scheduler.schedule_cancel(task_id, priority);
             }
         }
+        cancel_wakes.dispatch();
 
         runtime.run_until_quiescent();
         runtime.state.advance_region_state(app_region);

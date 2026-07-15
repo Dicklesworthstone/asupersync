@@ -37,7 +37,9 @@
 //!    target region AND all descendants, builds proper
 //!    cause chains (descendants get
 //!    `CancelKind::ParentCancelled` chained to root
-//!    reason), and returns the list of tasks to cancel.
+//!    reason), and returns the task list paired with opaque
+//!    Waker effects. The caller publishes task IDs after its
+//!    outer state guard is released, before Waker dispatch.
 //!    ALL tasks in those regions observe Err(Cancelled).
 //!
 //! ── Implementation-level distinction ────────────────────
@@ -69,19 +71,25 @@
 //!     region_id: RegionId,
 //!     reason: &CancelReason,
 //!     source_task: Option<TaskId>,
-//! ) -> Vec<(TaskId, u8)> {
+//! ) -> CancellationEffects<Vec<(TaskId, u8)>> {
+//!     let mut wakes = CancelWakeEffects::empty();
 //!     let mut regions_to_cancel =
 //!         self.collect_region_and_descendants_with_depth(region_id);
 //!     regions_to_cancel.sort_by_key(|node| node.depth);
 //!     // Walk region tree, mark ALL tasks in target +
-//!     // descendants with ParentCancelled cause chain.
+//!     // descendants with ParentCancelled cause chain,
+//!     // aggregating auxiliary cancellation observers/Wakers without
+//!     // dispatching them beneath RuntimeState.
 //!     ...
+//!     CancellationEffects::new(tasks_to_cancel, wakes)
 //! }
 //! ```
 //!
 //! Walks the region tree. Mutates many tasks' Cxs.
 //! Builds cause chains (ParentCancelled for descendants).
-//! Returns the set of tasks affected.
+//! Returns the set of tasks affected coupled to deferred auxiliary
+//! cancellation observers/Wakers. Later region close/finalizer callbacks are
+//! outside this boundary.
 //!
 //! ── Why no Scope::cancel() method ───────────────────────
 //!
@@ -284,17 +292,23 @@ fn runtime_state_cancel_request_walks_region_tree() {
 }
 
 #[test]
-fn cancel_request_returns_vec_of_affected_tasks() {
-    // Pin: cancel_request returns Vec<(TaskId, u8)> —
-    // the explicit list of tasks to schedule on the
-    // cancel lane. This is the propagation surface.
+fn cancel_request_returns_effects_with_affected_tasks() {
+    // Pin: cancel_request returns the explicit task list
+    // paired with opaque Waker effects. This prevents user
+    // callbacks while RuntimeState/task locks are live and
+    // preserves the post-lock scheduler publication surface.
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("pub fn cancel_request(") && source.contains("-> Vec<(TaskId, u8)> {"),
+        source.contains("pub fn cancel_request(")
+            && source.contains("-> CancellationEffects<Vec<(TaskId, u8)>>")
+            && source.contains("let ((newly_cancelled, changed, publication), task_wakes) =",)
+            && source.contains("wakes.merge(task_wakes);")
+            && source.contains("CancellationEffects::new(tasks_to_cancel, wakes)"),
         "REGRESSION: cancel_request return type changed. \
-         Either the affected-task list is no longer \
-         exposed or the priority hint is gone.",
+         The affected-task list is no longer coupled to \
+         deferred Wakers, so the post-lock publication/\
+         dispatch boundary cannot be enforced.",
     );
 }
 

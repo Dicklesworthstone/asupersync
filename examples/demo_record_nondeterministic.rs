@@ -191,9 +191,17 @@ fn run_scenario(seed: u64, record: bool) -> SeedOutcome {
 
     // Cancel the target region.
     let cancel_reason = CancelReason::new(CancelKind::User);
-    let _ = runtime
+    let cancel_effects = runtime
         .state
         .cancel_request(cancel_target, &cancel_reason, None);
+    let (to_cancel, cancel_wakes) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+    cancel_wakes.dispatch();
 
     // Optionally advance time after cancel.
     if rng.chance(30) {
@@ -342,9 +350,17 @@ fn replay_scenario_for_trace(runtime: &mut LabRuntime, seed: u64) {
     resolve_batch(runtime, &obligations);
 
     let cancel_reason = CancelReason::new(CancelKind::User);
-    let _ = runtime
+    let cancel_effects = runtime
         .state
         .cancel_request(cancel_target, &cancel_reason, None);
+    let (to_cancel, cancel_wakes) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+    cancel_wakes.dispatch();
 
     if rng.chance(30) {
         runtime.advance_time(u64::from(rng.next_u32(50_000)) + 1);

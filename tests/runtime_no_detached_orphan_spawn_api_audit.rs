@@ -80,8 +80,16 @@
 //!   3. **Region close cancels owned tasks** (state.rs:
 //!      cancel_request second pass): cancel_request walks
 //!      `region.copy_task_ids_into(&mut task_id_buf)` and
-//!      calls `request_cancel_with_budget` on each. No
-//!      task escapes region close.
+//!      calls `request_cancel_with_budget` on each. It
+//!      captures each task's mutation result and Wakers as
+//!      effects; the scheduler publishes the resulting task
+//!      IDs after releasing its state guard, then dispatches
+//!      the auxiliary cancellation Wakers. No task escapes
+//!      region close, and those Wakers do not run under the
+//!      outer lock. This is deliberately not a universal
+//!      callback-free claim: synchronous finalizers, metrics,
+//!      tracing, region-close Wakers, and arbitrary payload
+//!      destructors have separate lock-boundary contracts.
 //!
 //!   4. **`can_region_finalize` checks all tasks
 //!      terminal** (state.rs:2785): `all_tasks_done = ...
@@ -288,10 +296,15 @@ fn cancel_request_walks_region_owned_tasks_for_close_propagation() {
 
     // The per-task cancel call.
     assert!(
-        source.contains("task.request_cancel_with_budget(task_reason.clone(), task_budget)"),
+        source.contains("task.request_cancel_with_budget_and_publication(")
+            && source.contains("let ((newly_cancelled, changed, publication), task_wakes) =",)
+            && source.contains("wakes.merge(task_wakes);")
+            && source.contains("CancellationEffects::new(tasks_to_cancel, wakes)"),
         "REGRESSION: cancel_request no longer calls \
-         request_cancel_with_budget on each owned task. \
-         The per-task cancel propagation chain is broken.",
+         request_cancel_with_budget on each owned task and \
+         captures its opaque wake effects for post-lock \
+         dispatch. The per-task cancel propagation boundary \
+         is broken.",
     );
 }
 

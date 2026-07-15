@@ -253,7 +253,7 @@ fn spawn_local_pins_task_record_to_current_worker() {
     // migration of !Send futures.
     let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn admit_local_spawn_request(";
+    let fn_marker = "pub(crate) fn admit_local_spawn_request(";
     let start = source
         .find(fn_marker)
         .expect("admit_local_spawn_request fn");
@@ -281,10 +281,10 @@ fn spawn_local_pins_task_record_to_current_worker() {
 }
 
 #[test]
-fn spawn_local_schedules_via_schedule_local_task_non_stealable() {
-    // Pin (link 5): spawn_local schedules via
-    // schedule_local_task (the non-stealable path), NOT
-    // via inject_ready (the stealable global injector).
+fn spawn_local_schedules_via_worker_local_queue_non_stealable() {
+    // Pin (link 5): spawn_local stores the task in thread-local
+    // storage and publishes directly to the owning worker's
+    // local_ready queue, NOT the stealable global injector.
     // The comment explicitly notes: 'spawn_local tasks MUST
     // NOT be stealable.'
     let source = read("src/runtime/scheduler/three_lane.rs");
@@ -303,9 +303,9 @@ fn spawn_local_schedules_via_schedule_local_task_non_stealable() {
 
     assert!(
         body.contains("crate::runtime::local::store_local_task(task_id, stored);")
-            && body.contains("schedule_local_task(task_id)"),
+            && body.contains("self.local_ready.lock().push_back(task_id);"),
         "REGRESSION: spawn_local no longer schedules via \
-         schedule_local_task. Either it uses the stealable \
+         the owning worker's local queue. Either it uses the stealable \
          path (UB for !Send) or it doesn't schedule at all \
          (the task hangs).",
     );

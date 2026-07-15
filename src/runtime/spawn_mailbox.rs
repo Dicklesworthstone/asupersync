@@ -39,11 +39,14 @@
 //! `SegQueue` on native targets, a mutexed `VecDeque` on wasm). `enqueue`
 //! never blocks and never drops a request — silent drop is forbidden by the
 //! spawn-mailbox contract. Backpressure is an *admission-side* concern:
-//! region quotas reject requests with an explicit `SpawnError` when they are
-//! admitted, and region close resolves every pending request through
+//! region quotas reject spawn requests with an explicit `SpawnError` when
+//! they are admitted, and region close resolves every pending request through
 //! [`SpawnRequest::resolve_cancelled`] so the completion slot always learns
-//! the outcome. Memory growth is therefore bounded by the same quota that
-//! bounds live tasks, just observed at admission instead of enqueue.
+//! the outcome. The task-handle cancellation-command lane is also unbounded.
+//! Producers coalesce identical or weaker reasons per handle and consumers
+//! coalesce each drained batch, but neither lane has a hard in-memory backlog
+//! bound; queue depth is an operational pressure signal, not a region-quota
+//! guarantee.
 //!
 //! # Trace ordering
 //!
@@ -66,7 +69,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll};
 
@@ -199,19 +202,243 @@ pub type SpawnFactoryFn = Box<dyn FnOnce(crate::cx::Cx) -> SpawnBoxFuture + Send
 
 /// Identity of an admitted task, published to producers via
 /// [`SpawnRequest::with_admitted_slot`].
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AdmittedTask {
     /// Canonical arena task id (replaces the provisional mailbox id).
     pub task_id: TaskId,
     /// Weak handle to the admission-built capability context, for
     /// handle-side abort plumbing (A2.2).
     pub cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+    /// True after admission transfers cancellation routing to the canonical
+    /// task/gateway. On ordinary admission that coincides with first-lane
+    /// publication; a managed pre-admission abort may transfer routing to its
+    /// delegated command before that command publishes the physical cancel
+    /// lane. This flag is therefore not a lane-visibility witness; Cx's
+    /// `RunnablePublication` owns that proof.
+    published: AtomicBool,
 }
 
-/// Public source-compatible name for the existing admission identity slot.
-pub type AdmittedTaskSlot = OnceLock<AdmittedTask>;
+impl AdmittedTask {
+    pub(crate) fn pending(
+        task_id: TaskId,
+        cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+    ) -> Self {
+        Self {
+            task_id,
+            cx_inner,
+            published: AtomicBool::new(false),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published(
+        task_id: TaskId,
+        cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+    ) -> Self {
+        Self {
+            task_id,
+            cx_inner,
+            published: AtomicBool::new(true),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_published(&self) -> bool {
+        self.published.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn mark_published(&self) {
+        self.published.store(true, Ordering::Release);
+    }
+}
+
+/// One-shot slot for publishing an admitted task's canonical identity.
+///
+/// Admission reserves the slot before mutating `RuntimeState`. Keeping the
+/// underlying [`OnceLock`] private prevents a second request from racing an
+/// external `set` between that preflight and identity publication.
+#[derive(Debug)]
+pub struct AdmittedTaskSlot {
+    admitted: OnceLock<AdmittedTask>,
+    reserved: AtomicBool,
+    cancel_gateway: Option<Arc<SpawnGateway>>,
+}
+
+impl AdmittedTaskSlot {
+    /// Creates an empty, unreserved admission slot.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            admitted: OnceLock::new(),
+            reserved: AtomicBool::new(false),
+            cancel_gateway: None,
+        }
+    }
+
+    /// Creates an empty slot bound to its runtime's cancellation-command
+    /// gateway. Only runtime spawn producers construct managed slots.
+    pub(crate) fn new_with_cancel_gateway(cancel_gateway: Arc<SpawnGateway>) -> Self {
+        Self {
+            admitted: OnceLock::new(),
+            reserved: AtomicBool::new(false),
+            cancel_gateway: Some(cancel_gateway),
+        }
+    }
+
+    /// Returns the canonical identity once admission has published it.
+    #[inline]
+    #[must_use]
+    pub fn get(&self) -> Option<&AdmittedTask> {
+        self.admitted.get()
+    }
+
+    pub(crate) fn cancel_gateway(&self) -> Option<Arc<SpawnGateway>> {
+        self.cancel_gateway.clone()
+    }
+
+    /// Reserves this one-shot slot before admission mutates runtime state.
+    #[inline]
+    pub(crate) fn try_reserve(&self) -> bool {
+        self.reserved
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Publishes the identity into a slot successfully reserved by admission.
+    pub(crate) fn publish_reserved(&self, admitted: AdmittedTask) {
+        self.admitted
+            .set(admitted)
+            .expect("a reserved admission slot is published exactly once");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set(&self, admitted: AdmittedTask) -> Result<(), AdmittedTask> {
+        if !self.try_reserve() {
+            return Err(admitted);
+        }
+        self.admitted.set(admitted)
+    }
+}
+
+impl Default for AdmittedTaskSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub(crate) type PendingCancelReason = Arc<RwLock<Option<CancelReason>>>;
+
+/// One-shot handoff from canonical identity admission to runnable-lane
+/// publication. Cached handle aborts are replayed and the effective Cx
+/// cancellation state is sampled before the admitted task becomes
+/// scheduler-visible.
+#[doc(hidden)]
+#[must_use = "admitted tasks must cross the runnable publication boundary"]
+pub struct AdmissionPublication {
+    cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+    slot: Option<Arc<AdmittedTaskSlot>>,
+    requested: Option<PendingCancelReason>,
+}
+
+impl AdmissionPublication {
+    pub(crate) fn new(
+        cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+        slot: Option<Arc<AdmittedTaskSlot>>,
+    ) -> Self {
+        let requested = slot.as_ref().map(register_pending_cancel_rendezvous);
+        Self {
+            cx_inner,
+            slot,
+            requested,
+        }
+    }
+
+    /// Publishes the canonical task and snapshots any cancellation that raced
+    /// admission. `publish_lane` receives the effective Cx cancellation
+    /// priority, or `None` for ordinary ready-lane admission, and normally
+    /// makes the task scheduler-visible without invoking user code. A managed
+    /// pre-admission handle abort delegates the first lane publication to its
+    /// runtime-owned cancellation command instead, so this closure is not
+    /// invoked on that path. This crate-private closure is part of the
+    /// scheduler boundary, not a user callback.
+    /// Returned Wakers must be dispatched after scheduler locks are released.
+    pub(crate) fn publish(
+        mut self,
+        publish_lane: impl FnOnce(Option<u8>),
+    ) -> crate::types::task_context::CancelWakeEffects {
+        let slot = self.slot.take();
+        let admitted = slot.as_ref().and_then(|slot| slot.get());
+
+        let cancel_wakes = if let Some(requested) = self.requested.take() {
+            // This lock is the abort/publication linearization point. Handle
+            // aborts either cache before this guard, or observe `published`
+            // after it and apply their own reason directly.
+            let cached = requested.write();
+            let managed_command = cached.as_ref().and_then(|reason| {
+                let admitted = admitted?;
+                let gateway = slot.as_ref()?.cancel_gateway()?;
+                Some((admitted.task_id, gateway, reason.clone()))
+            });
+            if let Some((task_id, gateway, reason)) = managed_command {
+                let effective_reason = self.cx_inner.upgrade().map_or(reason.clone(), |inner| {
+                    crate::runtime::task_handle::prepare_admitted_handle_cancel_state(
+                        &inner, &reason,
+                    )
+                });
+                if let Some(admitted) = admitted {
+                    admitted.mark_published();
+                }
+                drop(cached);
+                let _ = gateway.enqueue_handle_cancel(task_id, effective_reason);
+                crate::types::task_context::CancelWakeEffects::empty()
+            } else {
+                let wakes = if let Some(inner) = self.cx_inner.upgrade() {
+                    crate::runtime::task_handle::publish_admitted_cancel_state(
+                        &inner,
+                        cached.as_ref(),
+                        publish_lane,
+                    )
+                } else {
+                    // The runtime has already retired the Cx. Preserve the
+                    // cached reason's fail-closed lane choice without running
+                    // callbacks.
+                    publish_lane(
+                        cached
+                            .as_ref()
+                            .map(|reason| reason.cleanup_budget().priority),
+                    );
+                    crate::types::task_context::CancelWakeEffects::empty()
+                };
+                if let Some(admitted) = admitted {
+                    admitted.mark_published();
+                }
+                drop(cached);
+                wakes
+            }
+        } else {
+            let wakes = if let Some(inner) = self.cx_inner.upgrade() {
+                crate::runtime::task_handle::publish_admitted_cancel_state(
+                    &inner,
+                    None,
+                    publish_lane,
+                )
+            } else {
+                publish_lane(None);
+                crate::types::task_context::CancelWakeEffects::empty()
+            };
+            if let Some(admitted) = admitted {
+                admitted.mark_published();
+            }
+            wakes
+        };
+        if let Some(slot) = slot.as_ref() {
+            let retired = retire_pending_cancel_rendezvous(slot);
+            drop(retired);
+        }
+        cancel_wakes
+    }
+}
 
 struct PendingCancelRendezvous {
     slot: Weak<AdmittedTaskSlot>,
@@ -242,6 +469,11 @@ pub(crate) fn register_pending_cancel_rendezvous(
 ) -> PendingCancelReason {
     let key = admitted_slot_key(slot);
     let mut entries = pending_cancel_registry().lock();
+    if slot.get().is_some_and(AdmittedTask::is_published) {
+        // Late handle construction needs its own attribution cache, but no
+        // admission publisher remains to retire a global rendezvous entry.
+        return Arc::new(RwLock::new(None));
+    }
     if PENDING_CANCEL_REGISTRATIONS.fetch_add(1, Ordering::Relaxed) % RENDEZVOUS_PURGE_INTERVAL == 0
     {
         purge_stale_rendezvous(&mut entries);
@@ -281,6 +513,19 @@ pub(crate) fn retire_pending_cancel_rendezvous(
         return None;
     }
     entries.remove(&key).map(|entry| entry.reason)
+}
+
+/// Retires a rendezvous only when this request never published an identity.
+/// A duplicate request can carry the winner's already-populated slot; its
+/// denial must not retire the winner's admission gate.
+fn retire_unadmitted_cancel_rendezvous(
+    slot: &Arc<AdmittedTaskSlot>,
+) -> Option<PendingCancelReason> {
+    if slot.get().is_some() {
+        None
+    } else {
+        retire_pending_cancel_rendezvous(slot)
+    }
 }
 
 fn strengthen_with_requested_reason(
@@ -436,7 +681,7 @@ pub struct LocalSpawnRequest {
     /// task is visible in the region's task list (or on denial, last).
     pub pending_reservation: Option<crate::record::region::PendingSpawnReservation>,
     /// Producer-shared slot admission fills with the canonical identity.
-    pub admitted_slot: Option<Arc<std::sync::OnceLock<AdmittedTask>>>,
+    pub admitted_slot: Option<Arc<AdmittedTaskSlot>>,
 }
 
 impl LocalSpawnRequest {
@@ -455,7 +700,7 @@ impl LocalSpawnRequest {
         drop(factory);
         let requested = admitted_slot
             .as_ref()
-            .and_then(retire_pending_cancel_rendezvous);
+            .and_then(retire_unadmitted_cancel_rendezvous);
         if let Some(slot) = on_unadmitted_cancel {
             slot(strengthen_with_requested_reason(reason, requested.as_ref()));
         }
@@ -479,7 +724,7 @@ impl LocalSpawnRequest {
         drop(factory);
         let requested = admitted_slot
             .as_ref()
-            .and_then(retire_pending_cancel_rendezvous);
+            .and_then(retire_unadmitted_cancel_rendezvous);
         let requested_failure = requested_admission_failure_reason(&error, requested.as_ref());
         match (requested_failure, on_unadmitted_cancel, on_admission_error) {
             (Some(reason), Some(slot), _) => slot(reason),
@@ -548,7 +793,7 @@ pub struct SpawnRequest {
     on_unadmitted_cancel: Option<UnadmittedCancelFn>,
     on_admission_error: Option<AdmissionErrorFn>,
     pending_reservation: Option<PendingSpawnReservation>,
-    admitted_slot: Option<Arc<OnceLock<AdmittedTask>>>,
+    admitted_slot: Option<Arc<AdmittedTaskSlot>>,
 }
 
 /// Destructured [`SpawnRequest`] handed to the admission path.
@@ -573,7 +818,7 @@ pub struct SpawnRequestParts {
     /// (decrement-after-successor-visibility; see [`PendingSpawnCounter`]).
     pub pending_reservation: Option<PendingSpawnReservation>,
     /// Producer-shared slot admission fills with the canonical identity.
-    pub admitted_slot: Option<Arc<OnceLock<AdmittedTask>>>,
+    pub admitted_slot: Option<Arc<AdmittedTaskSlot>>,
 }
 
 impl SpawnRequest {
@@ -621,7 +866,7 @@ impl SpawnRequest {
     /// Attaches a producer-shared slot that admission fills with the
     /// canonical task identity (arena id + Cx weak handle).
     #[must_use]
-    pub fn with_admitted_slot(mut self, slot: Arc<OnceLock<AdmittedTask>>) -> Self {
+    pub(crate) fn with_admitted_slot(mut self, slot: Arc<AdmittedTaskSlot>) -> Self {
         self.admitted_slot = Some(slot);
         self
     }
@@ -744,7 +989,7 @@ impl SpawnRequestParts {
         drop(payload);
         let requested = admitted_slot
             .as_ref()
-            .and_then(retire_pending_cancel_rendezvous);
+            .and_then(retire_unadmitted_cancel_rendezvous);
         if let Some(slot) = on_unadmitted_cancel {
             slot(strengthen_with_requested_reason(reason, requested.as_ref()));
         }
@@ -769,7 +1014,7 @@ impl SpawnRequestParts {
         drop(payload);
         let requested = admitted_slot
             .as_ref()
-            .and_then(retire_pending_cancel_rendezvous);
+            .and_then(retire_unadmitted_cancel_rendezvous);
         let requested_failure = requested_admission_failure_reason(&error, requested.as_ref());
         match (requested_failure, on_unadmitted_cancel, on_admission_error) {
             (Some(reason), Some(slot), _) => slot(reason),
@@ -802,8 +1047,34 @@ impl fmt::Debug for SpawnRequest {
 /// with concurrent consumers each pop still returns the oldest *remaining*
 /// request, but the global drain order interleaves across consumers. See
 /// module docs for capacity, backpressure, and trace-ordering contracts.
+#[derive(Debug)]
+pub(crate) struct HandleCancelRequest {
+    pub(crate) task_id: TaskId,
+    pub(crate) reason: CancelReason,
+}
+
+/// Coalesces a drained command batch by canonical task identity while
+/// preserving the first-seen task order and strongest cancellation reason.
+pub(crate) fn coalesce_handle_cancel_requests(
+    requests: Vec<HandleCancelRequest>,
+) -> Vec<HandleCancelRequest> {
+    let mut coalesced: Vec<HandleCancelRequest> = Vec::with_capacity(requests.len());
+    for request in requests {
+        if let Some(existing) = coalesced
+            .iter_mut()
+            .find(|existing| existing.task_id == request.task_id)
+        {
+            existing.reason.strengthen(&request.reason);
+        } else {
+            coalesced.push(request);
+        }
+    }
+    coalesced
+}
+
 pub struct SpawnMailbox {
     queue: GlobalFifoQueue<SpawnRequest>,
+    handle_cancels: GlobalFifoQueue<HandleCancelRequest>,
     ids: SpawnIdAllocator,
     trace: Option<TraceBufferHandle>,
     total_enqueued: AtomicU64,
@@ -816,6 +1087,7 @@ impl SpawnMailbox {
     pub fn new() -> Self {
         Self {
             queue: GlobalFifoQueue::default(),
+            handle_cancels: GlobalFifoQueue::default(),
             ids: SpawnIdAllocator::new(),
             trace: None,
             total_enqueued: AtomicU64::new(0),
@@ -883,16 +1155,43 @@ impl SpawnMailbox {
         drained
     }
 
-    /// Best-effort snapshot of the number of queued requests.
+    pub(crate) fn enqueue_handle_cancel(&self, task_id: TaskId, reason: CancelReason) {
+        self.handle_cancels
+            .push(HandleCancelRequest { task_id, reason });
+    }
+
+    pub(crate) fn dequeue_handle_cancels_into(
+        &self,
+        max: usize,
+        out: &mut Vec<HandleCancelRequest>,
+    ) -> usize {
+        self.handle_cancels.pop_batch_into(max, out)
+    }
+
+    #[must_use]
+    pub(crate) fn handle_cancels_are_empty(&self) -> bool {
+        self.handle_cancels.is_empty()
+    }
+
+    /// Returns true when the spawn-request lane itself is empty. Runtime
+    /// admission uses this narrower predicate; scheduler parking and Lab
+    /// quiescence use [`Self::is_empty`] across both work lanes.
+    #[must_use]
+    pub(crate) fn spawn_requests_are_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Best-effort snapshot of queued spawn requests plus handle-cancel
+    /// commands. Lifetime enqueue/dequeue counters below remain spawn-only.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.queue.len()
+        self.queue.len().saturating_add(self.handle_cancels.len())
     }
 
     /// Returns true if the mailbox appears empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
+        self.queue.is_empty() && self.handle_cancels.is_empty()
     }
 
     /// Total requests ever enqueued.
@@ -933,7 +1232,7 @@ impl SpawnGateway {
     /// (a worker coordinator in production; a no-op in the lab, whose step
     /// loop drains synchronously).
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         mailbox: Arc<SpawnMailbox>,
         notify: Arc<dyn Fn() + Send + Sync>,
         clock: Option<crate::time::TimerDriverHandle>,
@@ -986,6 +1285,24 @@ impl SpawnGateway {
         (self.notify)();
         Ok(())
     }
+
+    /// Enqueues a task-handle cancellation command and wakes a worker. The
+    /// command contains no Wakers or user callbacks, so this is safe from a
+    /// caller's `Drop` stack and while the caller holds unrelated locks.
+    pub(crate) fn enqueue_handle_cancel(&self, task_id: TaskId, reason: CancelReason) -> bool {
+        let Some(_liveness_guard) = self.liveness_guard() else {
+            return false;
+        };
+        self.mailbox.enqueue_handle_cancel(task_id, reason);
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.notify)();
+        })) {
+            // TaskHandle abort and JoinFuture::drop are fail-closed boundaries:
+            // a broken runtime notifier must not unwind through caller code.
+            std::mem::forget(payload);
+        }
+        true
+    }
 }
 
 impl fmt::Debug for SpawnGateway {
@@ -1024,6 +1341,70 @@ mod tests {
 
     fn noop_task(id: TaskId) -> StoredTask {
         StoredTask::new_with_id(async { Outcome::Ok(()) }, id)
+    }
+
+    struct AdmissionBoundaryWake {
+        attempts: Arc<AtomicUsize>,
+        published: Arc<AtomicBool>,
+        stored: Arc<AtomicBool>,
+        scheduled: Arc<AtomicBool>,
+        completed: Arc<AtomicBool>,
+        reenter_scheduler: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl std::task::Wake for AdmissionBoundaryWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                self.published.load(Ordering::SeqCst),
+                "cancel wake observed an unpublished admitted identity"
+            );
+            assert!(
+                self.stored.load(Ordering::SeqCst),
+                "cancel wake observed an unstored canonical task"
+            );
+            assert!(
+                self.scheduled.load(Ordering::SeqCst),
+                "cancel wake ran before the canonical task was scheduled"
+            );
+            (self.reenter_scheduler)();
+            self.completed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Holds the pending-reason cache write-locked until admission publishes
+    /// the canonical Cx, then installs a cancellation Waker before cached
+    /// reason replay snapshots the registry. This gives the tests a fully
+    /// deterministic version of the producer-abort/admission race.
+    fn install_cancel_waker_during_admission(
+        admitted: Arc<AdmittedTaskSlot>,
+        pending_reason: PendingCancelReason,
+        waker: std::task::Waker,
+    ) -> (Arc<std::sync::Barrier>, thread::JoinHandle<()>) {
+        let cache_locked = Arc::new(std::sync::Barrier::new(2));
+        let installer_barrier = Arc::clone(&cache_locked);
+        let installer = thread::spawn(move || {
+            let cache_guard = pending_reason.write();
+            installer_barrier.wait();
+            let inner = loop {
+                if let Some(published) = admitted.get() {
+                    break published
+                        .cx_inner
+                        .upgrade()
+                        .expect("published admission Cx remains live");
+                }
+                thread::yield_now();
+            };
+            inner.write().cancel_waker = Some(Arc::new(
+                crate::types::task_context::CancelWaker::new(waker),
+            ));
+            drop(cache_guard);
+        });
+        (cache_locked, installer)
     }
 
     fn request(mailbox: &SpawnMailbox) -> SpawnRequest {
@@ -1622,7 +2003,7 @@ mod tests {
 
     #[test]
     fn pending_cancel_rendezvous_retires_and_replaces_stale_pointer_key() {
-        let slot: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+        let slot = Arc::new(AdmittedTaskSlot::new());
         let reason = register_pending_cancel_rendezvous(&slot);
         assert_eq!(
             Arc::strong_count(&reason),
@@ -1637,10 +2018,10 @@ mod tests {
 
         // Deterministically model allocator address reuse by placing an
         // expired slot under the live replacement slot's pointer key.
-        let stale_slot: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+        let stale_slot = Arc::new(AdmittedTaskSlot::new());
         let stale_slot = Arc::downgrade(&stale_slot);
         let stale_reason = Arc::new(RwLock::new(Some(CancelReason::timeout())));
-        let replacement: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+        let replacement = Arc::new(AdmittedTaskSlot::new());
         let replacement_key = admitted_slot_key(&replacement);
         {
             let mut entries = pending_cancel_registry().lock();
@@ -1666,11 +2047,11 @@ mod tests {
 
     #[test]
     fn pre_admission_abort_survives_handle_drop_until_successful_admission() {
-        let mut state = RuntimeState::new();
-        let root = state.create_root_region(Budget::INFINITE);
+        let mut lab = LabRuntime::new(LabConfig::new(17));
+        let root = lab.state.create_root_region(Budget::INFINITE);
         let mailbox = SpawnMailbox::new();
         let provisional = mailbox.allocate_task_id();
-        let admitted: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+        let admitted = Arc::new(AdmittedTaskSlot::new());
         let (_result_tx, result_rx) =
             crate::channel::oneshot::channel::<Result<(), crate::runtime::JoinError>>();
         let handle =
@@ -1678,22 +2059,99 @@ mod tests {
         handle.abort_with_reason(CancelReason::race_loser());
         drop(handle);
 
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(AtomicBool::new(false));
+        let stored = Arc::new(AtomicBool::new(false));
+        let scheduled = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let scheduler_for_wake = Arc::clone(&lab.scheduler);
+        let waker = std::task::Waker::from(Arc::new(AdmissionBoundaryWake {
+            attempts: Arc::clone(&attempts),
+            published: Arc::clone(&published),
+            stored: Arc::clone(&stored),
+            scheduled: Arc::clone(&scheduled),
+            completed: Arc::clone(&completed),
+            reenter_scheduler: Box::new(move || {
+                let scheduler = scheduler_for_wake
+                    .try_lock()
+                    .expect("cancel wake runs after the scheduler guard is released");
+                assert!(
+                    !scheduler.is_empty(),
+                    "cancel wake observes the canonical task in the scheduler"
+                );
+            }),
+        }));
+        let pending_reason = register_pending_cancel_rendezvous(&admitted);
+        let (cache_locked, installer) =
+            install_cancel_waker_during_admission(Arc::clone(&admitted), pending_reason, waker);
+        cache_locked.wait();
+
         let parts = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
             .with_admitted_slot(Arc::clone(&admitted))
             .into_parts();
-        let SpawnAdmission::Admitted { .. } = state.admit_spawn_request(parts) else {
+        let SpawnAdmission::Admitted {
+            task_id,
+            priority,
+            cancel_publication,
+        } = lab.state.admit_spawn_request(parts)
+        else {
             panic!("expected admission to succeed");
         };
+        installer.join().expect("cancel-waker installer completes");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "admission neither applies nor dispatches cached cancellation"
+        );
 
         let admitted_task = admitted.get().expect("admission publishes task identity");
+        assert_eq!(admitted_task.task_id, task_id);
+        assert!(!is_spawn_mailbox_id(task_id), "canonical id is published");
+        assert!(
+            lab.state.task(task_id).is_some(),
+            "canonical task record is published before dispatch"
+        );
+        published.store(true, Ordering::SeqCst);
+        assert!(
+            lab.state.get_stored_future(task_id).is_some(),
+            "Send payload is stored under the canonical id before dispatch"
+        );
+        stored.store(true, Ordering::SeqCst);
         let inner = admitted_task
             .cx_inner
             .upgrade()
             .expect("admitted task context remains live");
         let guard = inner.read();
         assert!(
+            !guard.cancel_requested && guard.cancel_reason.is_none(),
+            "cached abort remains deferred before runnable publication"
+        );
+        drop(guard);
+        assert!(
+            lab.scheduler.lock().is_empty(),
+            "admission itself does not schedule or dispatch"
+        );
+        let cancel_wakes = cancel_publication.publish(|cancel_priority| {
+            let cancel_priority = cancel_priority.expect("cached abort selects the cancel lane");
+            lab.scheduler
+                .lock()
+                .schedule_cancel(task_id, cancel_priority);
+            scheduled.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            !lab.scheduler.lock().is_empty(),
+            "canonical task is scheduled before wake dispatch"
+        );
+        assert!(admitted_task.is_published());
+        assert_eq!(
+            cancel_wakes.len(),
+            1,
+            "runnable publication snapshots the installed boundary Waker"
+        );
+        let guard = inner.read();
+        assert!(
             guard.cancel_requested,
-            "admission replays the pending abort"
+            "publication replays the pending abort"
         );
         assert!(
             guard
@@ -1703,10 +2161,238 @@ mod tests {
             "replayed abort preserves RaceLost attribution"
         );
         drop(guard);
+        cancel_wakes.dispatch();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "reentrant Waker observed published, stored, scheduled state"
+        );
         assert!(
             retire_pending_cancel_rendezvous(&admitted).is_none(),
             "successful admission retires the rendezvous"
         );
+    }
+
+    #[test]
+    fn admission_publication_uses_strongest_effective_cx_priority_under_lock() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let admitted = Arc::new(AdmittedTaskSlot::new());
+        let (_result_tx, result_rx) =
+            crate::channel::oneshot::channel::<Result<(), crate::runtime::JoinError>>();
+        let handle =
+            crate::runtime::TaskHandle::new_pending(provisional, result_rx, Arc::clone(&admitted));
+        handle.abort_with_reason(CancelReason::timeout());
+
+        let parts = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
+            .with_admitted_slot(Arc::clone(&admitted))
+            .into_parts();
+        let SpawnAdmission::Admitted {
+            task_id,
+            cancel_publication,
+            ..
+        } = state.admit_spawn_request(parts)
+        else {
+            panic!("expected admission");
+        };
+        let inner = admitted
+            .get()
+            .and_then(|task| task.cx_inner.upgrade())
+            .expect("admitted Cx remains live");
+
+        let (should_schedule, state_wakes) = state
+            .cancel_task(task_id, &CancelReason::shutdown())
+            .into_parts();
+        assert!(
+            !should_schedule,
+            "unpublished admission delegates initial scheduling"
+        );
+        let publication_wakes = cancel_publication.publish(|effective_priority| {
+            assert_eq!(
+                effective_priority,
+                Some(u8::MAX),
+                "stronger Cx shutdown must outrank the cached timeout"
+            );
+            assert!(
+                inner.try_write().is_none(),
+                "effective Cx state stays locked through callback-free lane publication"
+            );
+        });
+
+        let guard = inner.read();
+        assert!(
+            guard
+                .cancel_reason
+                .as_ref()
+                .is_some_and(|reason| reason.is_kind(CancelKind::Shutdown)),
+            "cached timeout replay cannot weaken an existing shutdown"
+        );
+        drop(guard);
+        state_wakes.dispatch();
+        publication_wakes.dispatch();
+    }
+
+    #[test]
+    fn slotless_admission_publication_uses_effective_cx_cancel_priority() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let parts = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
+            .into_parts();
+        let SpawnAdmission::Admitted {
+            task_id,
+            cancel_publication,
+            ..
+        } = state.admit_spawn_request(parts)
+        else {
+            panic!("expected admission");
+        };
+        let inner = cancel_publication
+            .cx_inner
+            .upgrade()
+            .expect("slotless admission retains a live Cx");
+        let (should_schedule, state_wakes) = state
+            .cancel_task(task_id, &CancelReason::shutdown())
+            .into_parts();
+        assert!(
+            !should_schedule,
+            "slotless unpublished admission also delegates initial scheduling"
+        );
+
+        let publication_wakes = cancel_publication.publish(|effective_priority| {
+            assert_eq!(effective_priority, Some(u8::MAX));
+            assert!(
+                inner.try_write().is_none(),
+                "slotless publication also linearizes under the Cx write lock"
+            );
+        });
+        state_wakes.dispatch();
+        publication_wakes.dispatch();
+    }
+
+    #[test]
+    fn region_cancel_before_admission_publication_delegates_first_lane_and_wake() {
+        let mut lab = LabRuntime::new(LabConfig::new(23));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let admitted = Arc::new(AdmittedTaskSlot::new());
+        let parts = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
+            .with_admitted_slot(Arc::clone(&admitted))
+            .into_parts();
+        let SpawnAdmission::Admitted {
+            task_id,
+            cancel_publication,
+            ..
+        } = lab.state.admit_spawn_request(parts)
+        else {
+            panic!("expected admission");
+        };
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(AtomicBool::new(false));
+        let stored = Arc::new(AtomicBool::new(true));
+        let scheduled = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let scheduler_for_wake = Arc::clone(&lab.scheduler);
+        let waker = std::task::Waker::from(Arc::new(AdmissionBoundaryWake {
+            attempts: Arc::clone(&attempts),
+            published: Arc::clone(&published),
+            stored,
+            scheduled: Arc::clone(&scheduled),
+            completed: Arc::clone(&completed),
+            reenter_scheduler: Box::new(move || {
+                let scheduler = scheduler_for_wake
+                    .try_lock()
+                    .expect("wake runs after the scheduler guard");
+                assert!(!scheduler.is_empty(), "cancel lane is already visible");
+            }),
+        }));
+        let inner = admitted
+            .get()
+            .and_then(|task| task.cx_inner.upgrade())
+            .expect("admitted Cx remains live");
+        inner.write().cancel_waker = Some(Arc::new(crate::types::task_context::CancelWaker::new(
+            waker,
+        )));
+
+        let effects = lab
+            .state
+            .cancel_request(root, &CancelReason::shutdown(), None);
+        lab.state.defer_cancel_dispatch(effects);
+        let deferred = lab.state.take_deferred_cancel_dispatches();
+        assert_eq!(deferred.len(), 1);
+        for effects in deferred {
+            let (tasks, wakes) = effects.into_parts();
+            assert!(
+                tasks.is_empty(),
+                "unpublished admission cannot be scheduled by another cancel publisher"
+            );
+            assert!(
+                wakes.is_empty(),
+                "unpublished cancellation delegates Waker ownership to admission"
+            );
+            wakes.dispatch();
+        }
+        assert!(lab.scheduler.lock().is_empty());
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+        let publication_wakes = cancel_publication.publish(|effective_priority| {
+            let priority = effective_priority.expect("cancelled task selects cancel lane");
+            lab.scheduler.lock().schedule_cancel(task_id, priority);
+            scheduled.store(true, Ordering::SeqCst);
+        });
+        assert!(admitted.get().is_some_and(AdmittedTask::is_published));
+        published.store(true, Ordering::SeqCst);
+        assert_eq!(publication_wakes.len(), 1);
+        publication_wakes.dispatch();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn reasonless_cancel_state_publishes_at_fail_closed_priority() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let parts = SpawnRequest::new(
+            provisional,
+            root,
+            Budget::new().with_priority(1),
+            noop_task(provisional),
+        )
+        .into_parts();
+        let SpawnAdmission::Admitted {
+            cancel_publication, ..
+        } = state.admit_spawn_request(parts)
+        else {
+            panic!("expected admission");
+        };
+        let inner = cancel_publication
+            .cx_inner
+            .upgrade()
+            .expect("admission retains a live Cx");
+        {
+            let mut guard = inner.write();
+            guard.cancel_requested = true;
+            guard.fast_cancel.store(true, Ordering::Release);
+            guard.cancel_reason = None;
+        }
+
+        cancel_publication
+            .publish(|effective_priority| {
+                assert_eq!(
+                    effective_priority,
+                    Some(u8::MAX),
+                    "reasonless cancellation must fail closed, not inherit ready priority"
+                );
+                assert!(inner.try_write().is_none());
+            })
+            .dispatch();
     }
 
     /// Successful admission: provisional id replaced by a canonical arena
@@ -1730,7 +2416,12 @@ mod tests {
 
         let parts = mailbox.dequeue().expect("queued").into_parts();
         let admission = state.admit_spawn_request(parts);
-        let SpawnAdmission::Admitted { task_id, priority } = admission else {
+        let SpawnAdmission::Admitted {
+            task_id,
+            priority,
+            cancel_publication,
+        } = admission
+        else {
             panic!("expected admission to succeed");
         };
         assert!(
@@ -1748,6 +2439,7 @@ mod tests {
             state.get_stored_future(task_id).is_some(),
             "future stored under the arena id"
         );
+        cancel_publication.publish(|_| {}).dispatch();
 
         let kinds: Vec<Kind> = state
             .trace_handle()
@@ -1886,7 +2578,9 @@ mod tests {
             while mailbox.dequeue_batch_into(3, &mut batch) > 0 {}
             for req in batch {
                 match state.admit_spawn_request(req.into_parts()) {
-                    SpawnAdmission::Admitted { .. } => {}
+                    SpawnAdmission::Admitted {
+                        cancel_publication, ..
+                    } => cancel_publication.publish(|_| {}).dispatch(),
                     SpawnAdmission::Denied { .. } => panic!("unexpected denial"),
                 }
             }
@@ -2008,7 +2702,11 @@ mod tests {
         // Admit WITHOUT polling: drain directly against state.
         let parts = mailbox.dequeue().expect("queued").into_parts();
         let admission = lab.state.admit_spawn_request(parts);
-        let crate::runtime::state::SpawnAdmission::Admitted { task_id, priority } = admission
+        let crate::runtime::state::SpawnAdmission::Admitted {
+            task_id,
+            priority,
+            cancel_publication,
+        } = admission
         else {
             panic!("expected admission");
         };
@@ -2019,7 +2717,12 @@ mod tests {
         );
 
         // Schedule + run: factory fires on first poll, future completes.
-        lab.scheduler.lock().schedule(task_id, priority);
+        cancel_publication
+            .publish(|cancel_priority| {
+                assert!(cancel_priority.is_none());
+                lab.scheduler.lock().schedule(task_id, priority);
+            })
+            .dispatch();
         lab.run_until_quiescent();
         assert_eq!(ran.load(Ordering::SeqCst), 1, "factory ran exactly once");
         assert_eq!(completed.load(Ordering::SeqCst), 1, "task completed");
@@ -2032,7 +2735,7 @@ mod tests {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
         let mailbox = SpawnMailbox::new();
-        let slot: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+        let slot = Arc::new(AdmittedTaskSlot::new());
         let ran = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(AtomicUsize::new(0));
         let req =
@@ -2041,8 +2744,11 @@ mod tests {
         mailbox.enqueue(req, Time::ZERO);
 
         let parts = mailbox.dequeue().expect("queued").into_parts();
-        let crate::runtime::state::SpawnAdmission::Admitted { task_id, .. } =
-            state.admit_spawn_request(parts)
+        let crate::runtime::state::SpawnAdmission::Admitted {
+            task_id,
+            cancel_publication,
+            ..
+        } = state.admit_spawn_request(parts)
         else {
             panic!("expected admission");
         };
@@ -2055,6 +2761,72 @@ mod tests {
         assert!(
             admitted.cx_inner.upgrade().is_some(),
             "cx weak handle is live while the task exists"
+        );
+        cancel_publication.publish(|_| {}).dispatch();
+    }
+
+    #[test]
+    fn reused_admitted_slot_denies_send_before_runtime_state_mutation() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let pending = state.region(root).expect("root").pending_spawn_handle();
+        let mailbox = SpawnMailbox::new();
+        let slot = Arc::new(AdmittedTaskSlot::new());
+        assert!(slot.try_reserve(), "model an in-flight slot owner");
+        let factory_runs = Arc::new(AtomicUsize::new(0));
+        let factory_completions = Arc::new(AtomicUsize::new(0));
+        let observed_error = Arc::new(Mutex::new(None));
+        let observed_error_slot = Arc::clone(&observed_error);
+        let request = factory_request(&mailbox, root, &factory_runs, &factory_completions)
+            .with_admitted_slot(Arc::clone(&slot))
+            .with_pending_reservation(pending.reserve())
+            .with_admission_error_slot(Box::new(move |error| {
+                *observed_error_slot.lock().expect("error lock") = Some(error);
+            }));
+        let provisional = request.task_id();
+
+        let live_before = state.live_task_count();
+        let region_tasks_before = state.region(root).expect("root").task_count();
+        let trace_before = state.trace_handle().snapshot().len();
+        let validator_before = state.cancel_protocol_validator().lock().stats();
+        let SpawnAdmission::Denied { parts, error } =
+            state.admit_spawn_request(request.into_parts())
+        else {
+            panic!("reused slot must be denied");
+        };
+        assert!(matches!(
+            error,
+            SpawnError::AdmissionSlotAlreadyReserved { task_id }
+                if task_id == provisional
+        ));
+        assert_eq!(error.code(), "ASUP-E008");
+        assert_eq!(state.live_task_count(), live_before);
+        assert_eq!(
+            state.region(root).expect("root").task_count(),
+            region_tasks_before
+        );
+        assert_eq!(state.trace_handle().snapshot().len(), trace_before);
+        assert_eq!(
+            state.cancel_protocol_validator().lock().stats(),
+            validator_before
+        );
+        assert_eq!(
+            pending.count(),
+            1,
+            "denial resolution still owns the credit"
+        );
+        assert!(
+            slot.get().is_none(),
+            "loser cannot overwrite the owner slot"
+        );
+
+        parts.resolve_failed(error.clone());
+        assert_eq!(pending.count(), 0, "denial releases the credit last");
+        assert_eq!(factory_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(factory_completions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            observed_error.lock().expect("error lock").as_ref(),
+            Some(&error)
         );
     }
 
@@ -2076,7 +2848,7 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let mut slots = Vec::new();
             for _ in 0..K {
-                let slot: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+                let slot = Arc::new(AdmittedTaskSlot::new());
                 let req = factory_request(&mailbox, root, &ran, &completed)
                     .with_pending_reservation(handle.reserve())
                     .with_admitted_slot(Arc::clone(&slot));
@@ -2147,7 +2919,7 @@ mod tests {
     /// site, factory child runs, handle exposes the canonical arena id.
     #[test]
     fn cx_spawn_runs_child_without_runtime_state() {
-        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let (mut lab, parent_cx, _root) = lab_with_parent_cx();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_in_child = Arc::clone(&counter);
         let handle = parent_cx
@@ -2723,7 +3495,13 @@ mod tests {
                 std::collections::VecDeque::new(),
             ),
         ));
+        let local_scheduler = Arc::new(parking_lot::Mutex::new(
+            crate::runtime::scheduler::priority::PriorityScheduler::new(),
+        ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _scheduler_guard = crate::runtime::scheduler::three_lane::ScopedLocalScheduler::new(
+            Arc::clone(&local_scheduler),
+        );
         let _ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
 
@@ -2754,7 +3532,10 @@ mod tests {
         let request = requests.pop().expect("request present");
         let admission = lab.state.admit_local_spawn_request(request);
         let crate::runtime::state::LocalSpawnAdmission::Admitted {
-            task_id, stored, ..
+            task_id,
+            stored,
+            cancel_publication,
+            ..
         } = admission
         else {
             panic!("expected local admission");
@@ -2773,10 +3554,15 @@ mod tests {
         );
 
         crate::runtime::local::store_local_task(task_id, stored);
-        assert!(
-            crate::runtime::scheduler::three_lane::schedule_local_task(task_id),
-            "owner worker has local_ready TLS"
-        );
+        cancel_publication
+            .publish(|cancel_priority| {
+                assert!(cancel_priority.is_none());
+                assert!(
+                    crate::runtime::scheduler::three_lane::schedule_local_task(task_id),
+                    "owner worker has local_ready TLS"
+                );
+            })
+            .dispatch();
         assert_eq!(
             local_ready.lock().pop_front(),
             Some(task_id),
@@ -2794,6 +3580,239 @@ mod tests {
         let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
         assert_eq!(result.expect("joined value"), 42);
         assert_eq!(cell.get(), 11, "non-Send future ran on owner thread");
+    }
+
+    #[test]
+    fn local_pre_admission_abort_dispatches_after_publish_store_and_schedule() {
+        clear_local_spawn_lane_for_test();
+        let (mut lab, parent_cx, _root) = lab_with_parent_cx();
+        let local_ready = Arc::new(parking_lot::Mutex::new(
+            crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
+                std::collections::VecDeque::new(),
+            ),
+        ));
+        let local_scheduler = Arc::new(parking_lot::Mutex::new(
+            crate::runtime::scheduler::priority::PriorityScheduler::new(),
+        ));
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _scheduler_guard = crate::runtime::scheduler::three_lane::ScopedLocalScheduler::new(
+            Arc::clone(&local_scheduler),
+        );
+        let _ready_guard =
+            crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(AtomicBool::new(false));
+        let stored_flag = Arc::new(AtomicBool::new(false));
+        let scheduled = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let expected_task: Arc<OnceLock<TaskId>> = Arc::new(OnceLock::new());
+        let expected_task_for_wake = Arc::clone(&expected_task);
+        let local_scheduler_for_wake = Arc::clone(&local_scheduler);
+        let waker = std::task::Waker::from(Arc::new(AdmissionBoundaryWake {
+            attempts: Arc::clone(&attempts),
+            published: Arc::clone(&published),
+            stored: Arc::clone(&stored_flag),
+            scheduled: Arc::clone(&scheduled),
+            completed: Arc::clone(&completed),
+            reenter_scheduler: Box::new(move || {
+                let expected = *expected_task_for_wake
+                    .get()
+                    .expect("canonical local task id published before dispatch");
+                let mut scheduler = local_scheduler_for_wake
+                    .try_lock()
+                    .expect("cancel wake runs after the local scheduler guard is released");
+                let observed = scheduler.pop_cancel_only();
+                assert_eq!(
+                    observed,
+                    Some(expected),
+                    "cancel wake observes the canonical task in the cancel lane"
+                );
+                scheduler.schedule_cancel(expected, Budget::ZERO.priority);
+            }),
+        }));
+
+        let marker = std::rc::Rc::new(std::cell::Cell::new(false));
+        let marker_in_child = std::rc::Rc::clone(&marker);
+        let mut handle = parent_cx
+            .spawn_local(move |_child| async move {
+                marker_in_child.set(true);
+            })
+            .expect("owner-local spawn enqueues");
+        let provisional = handle.task_id();
+        handle.abort_with_reason(CancelReason::race_loser());
+
+        let mut requests = Vec::new();
+        assert_eq!(drain_local_spawn_lane(1, &mut requests), 1);
+        let request = requests.pop().expect("local request present");
+        let admitted = Arc::clone(
+            request
+                .admitted_slot
+                .as_ref()
+                .expect("local request carries an admitted slot"),
+        );
+        let pending_reason = register_pending_cancel_rendezvous(&admitted);
+        let (cache_locked, installer) =
+            install_cancel_waker_during_admission(Arc::clone(&admitted), pending_reason, waker);
+        cache_locked.wait();
+
+        let crate::runtime::state::LocalSpawnAdmission::Admitted {
+            task_id,
+            stored,
+            cancel_publication,
+            ..
+        } = lab.state.admit_local_spawn_request(request)
+        else {
+            panic!("expected local admission");
+        };
+        installer.join().expect("cancel-waker installer completes");
+        handle.abort_with_reason(CancelReason::race_loser());
+        drop(handle.join_with_drop_reason(&parent_cx, CancelReason::race_loser()));
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "TaskHandle and JoinFuture aborts stay cached until local runnable publication"
+        );
+
+        let admitted_task = admitted.get().expect("local identity published");
+        assert_eq!(admitted_task.task_id, task_id);
+        assert_eq!(handle.task_id(), task_id, "handle observes canonical id");
+        assert_ne!(task_id, provisional, "canonical id replaces provisional id");
+        let record = lab
+            .state
+            .task(task_id)
+            .expect("local task record published");
+        assert!(record.is_local());
+        assert_eq!(record.pinned_worker(), Some(0));
+        published.store(true, Ordering::SeqCst);
+        let inner = admitted_task
+            .cx_inner
+            .upgrade()
+            .expect("admitted local Cx remains live");
+        let guard = inner.read();
+        assert!(
+            !guard.cancel_requested && guard.cancel_reason.is_none(),
+            "cached local abort remains deferred before runnable publication"
+        );
+        drop(guard);
+
+        assert_eq!(stored.task_id(), Some(task_id));
+        let local_task_baseline = crate::runtime::local::local_task_count();
+        crate::runtime::local::store_local_task(task_id, stored);
+        assert_eq!(
+            crate::runtime::local::local_task_count(),
+            local_task_baseline + 1,
+            "canonical local task stored before dispatch"
+        );
+        stored_flag.store(true, Ordering::SeqCst);
+        expected_task
+            .set(task_id)
+            .expect("expected task id set once");
+        let cancel_wakes = cancel_publication.publish(|_| {
+            panic!("managed cached abort delegates its first lane to the command consumer")
+        });
+        assert!(admitted_task.is_published());
+        assert_eq!(
+            cancel_wakes.len(),
+            0,
+            "managed publication leaves Waker ownership with the command consumer"
+        );
+        let guard = inner.read();
+        assert!(
+            guard.cancel_requested,
+            "local publication replays cached abort"
+        );
+        assert!(
+            guard
+                .cancel_reason
+                .as_ref()
+                .is_some_and(|reason| reason.is_kind(CancelKind::RaceLost)),
+            "cached local abort preserves RaceLost attribution"
+        );
+        drop(guard);
+        cancel_wakes.dispatch();
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+        // Deterministic interleaving: an ordinary runtime cancellation lands
+        // after admission delegated the first lane but before the queued handle
+        // command is consumed. It may transition the TaskRecord, but must not
+        // mistake delegation for an already-visible lane or snapshot the Waker.
+        let (region_should_schedule, region_wakes) = lab
+            .state
+            .cancel_task(task_id, &CancelReason::race_loser())
+            .into_parts();
+        assert!(
+            !region_should_schedule,
+            "delegated publication suppresses a competing initial lane"
+        );
+        assert!(
+            region_wakes.is_empty(),
+            "delegated publication retains Waker ownership for the command consumer"
+        );
+        region_wakes.dispatch();
+
+        let mut commands = Vec::new();
+        assert_eq!(
+            lab.spawn_mailbox()
+                .dequeue_handle_cancels_into(1, &mut commands),
+            1,
+            "publication enqueues one canonical cancellation command"
+        );
+        let command = commands.pop().expect("canonical command");
+        assert_eq!(command.task_id, task_id);
+        let (route, command_wakes) = lab
+            .state
+            .cancel_task_for_handle(command.task_id, &command.reason)
+            .into_parts();
+        let route = route.expect("published local cancellation has a lane route");
+        assert!(
+            route.delegated_initial,
+            "cached abort retains delegated state until physical publication"
+        );
+        assert!(command_wakes.is_empty());
+        let (published_priority, publication_wakes) = lab
+            .state
+            .publish_handle_cancel_lane(task_id, |priority, is_local, pinned_worker| {
+                assert!(is_local);
+                assert_eq!(pinned_worker, Some(0));
+                assert!(
+                    crate::runtime::scheduler::three_lane::schedule_cancel_on_current_local(
+                        task_id, priority,
+                    ),
+                    "runtime-owned consumer publishes the canonical local cancel lane"
+                );
+                scheduled.store(true, Ordering::SeqCst);
+                Some(priority)
+            })
+            .into_parts();
+        assert_eq!(published_priority, Some(route.priority));
+        command_wakes.dispatch();
+        publication_wakes.dispatch();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "reentrant local Waker observed publish/store/schedule ordering"
+        );
+        assert_eq!(
+            local_scheduler.lock().pop_cancel_only(),
+            Some(task_id),
+            "reentrant Waker restored the local cancel-lane task"
+        );
+        assert_eq!(
+            local_scheduler.lock().pop_cancel_only(),
+            None,
+            "the admission/region/handle interleaving publishes one initial lane"
+        );
+        let dropped = crate::runtime::local::remove_local_task(task_id);
+        assert!(dropped.is_some(), "test removes the unpolled local task");
+        assert_eq!(
+            crate::runtime::local::local_task_count(),
+            local_task_baseline
+        );
+        assert!(
+            !marker.get(),
+            "local factory remains unpolled in this boundary test"
+        );
     }
 
     /// Closing-region denial resolves the returned handle as Cancelled and
@@ -3077,6 +4096,7 @@ mod tests {
         let crate::runtime::state::LocalSpawnAdmission::Admitted {
             task_id,
             mut stored,
+            cancel_publication,
             ..
         } = state.admit_local_spawn_request(request)
         else {
@@ -3092,6 +4112,7 @@ mod tests {
             0,
             "factory deferred to first poll"
         );
+        cancel_publication.publish(|_| {}).dispatch();
 
         let waker = Waker::noop();
         let mut poll_cx = Context::from_waker(waker);
@@ -3101,6 +4122,90 @@ mod tests {
         ));
         assert_eq!(ran.load(Ordering::SeqCst), 1, "factory ran at first poll");
         assert_eq!(stored.task_id(), Some(task_id));
+    }
+
+    #[test]
+    fn reused_admitted_slot_denies_local_before_runtime_state_mutation() {
+        let mut state = crate::runtime::state::RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let pending = state.region(region).expect("region").pending_spawn_handle();
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let slot = Arc::new(AdmittedTaskSlot::new());
+        let original_task = TaskId::new_for_test(77, 3);
+        let original_cx = crate::cx::Cx::for_testing();
+        slot.set(AdmittedTask::published(
+            original_task,
+            Arc::downgrade(&original_cx.inner),
+        ))
+        .expect("seed an already-used slot");
+        let factory_runs = Arc::new(AtomicUsize::new(0));
+        let factory_runs_in_task = Arc::clone(&factory_runs);
+        let observed_error = Arc::new(Mutex::new(None));
+        let observed_error_slot = Arc::clone(&observed_error);
+        let request = LocalSpawnRequest {
+            task_id: provisional,
+            region,
+            budget: Budget::INFINITE,
+            factory: Box::new(move |_cx| {
+                Box::pin(async move {
+                    factory_runs_in_task.fetch_add(1, Ordering::SeqCst);
+                    Outcome::Ok(())
+                })
+            }),
+            on_unadmitted_cancel: None,
+            on_admission_error: Some(Box::new(move |error| {
+                *observed_error_slot.lock().expect("error lock") = Some(error);
+            })),
+            pending_reservation: Some(pending.reserve()),
+            admitted_slot: Some(Arc::clone(&slot)),
+        };
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let live_before = state.live_task_count();
+        let region_tasks_before = state.region(region).expect("region").task_count();
+        let trace_before = state.trace_handle().snapshot().len();
+        let validator_before = state.cancel_protocol_validator().lock().stats();
+        let local_tasks_before = crate::runtime::local::local_task_count();
+
+        let crate::runtime::state::LocalSpawnAdmission::Denied { request, error } =
+            state.admit_local_spawn_request(request)
+        else {
+            panic!("reused local slot must be denied");
+        };
+        assert!(matches!(
+            error,
+            SpawnError::AdmissionSlotAlreadyReserved { task_id }
+                if task_id == provisional
+        ));
+        assert_eq!(error.code(), "ASUP-E008");
+        assert_eq!(state.live_task_count(), live_before);
+        assert_eq!(
+            state.region(region).expect("region").task_count(),
+            region_tasks_before
+        );
+        assert_eq!(state.trace_handle().snapshot().len(), trace_before);
+        assert_eq!(
+            state.cancel_protocol_validator().lock().stats(),
+            validator_before
+        );
+        assert_eq!(
+            crate::runtime::local::local_task_count(),
+            local_tasks_before
+        );
+        assert_eq!(pending.count(), 1);
+        assert_eq!(
+            slot.get().map(|admitted| admitted.task_id),
+            Some(original_task),
+            "losing request cannot replace the original identity"
+        );
+
+        request.resolve_failed(error.clone());
+        assert_eq!(pending.count(), 0);
+        assert_eq!(factory_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            observed_error.lock().expect("error lock").as_ref(),
+            Some(&error)
+        );
     }
 
     /// Local admission denial for a closing region: factory never runs,

@@ -620,13 +620,15 @@ fn refinement_semantics_trace_golden() {
     }
 
     let reason = CancelReason::timeout();
-    let tasks_to_cancel = runtime.state.cancel_request(region, &reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, &reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (tid, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(tid, priority);
         }
     }
+    wake_effects.dispatch();
 
     runtime.run_until_quiescent();
 

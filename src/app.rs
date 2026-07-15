@@ -1551,7 +1551,7 @@ impl CompiledApp {
     }
 
     fn cleanup_failed_start(state: &mut RuntimeState, root_region: RegionId) {
-        let _ = state.cancel_request(root_region, &CancelReason::shutdown(), None);
+        let cancel_effects = state.cancel_request(root_region, &CancelReason::shutdown(), None);
         Self::force_complete_tree_tasks(state, root_region);
 
         let mut previous_region_count = usize::MAX;
@@ -1591,6 +1591,8 @@ impl CompiledApp {
                 break;
             }
         }
+        let (_, cancel_wakes) = cancel_effects.into_parts();
+        cancel_wakes.suppress();
     }
 
     fn build_app_root_cx(
@@ -1955,7 +1957,8 @@ impl AppHandle {
         }
 
         // Properly propagate cancel through the runtime state.
-        let _ = state.cancel_request(self.root_region, &reason, None);
+        let effects = state.cancel_request(self.root_region, &reason, None);
+        state.defer_cancel_dispatch(effects);
 
         self.resolved = true;
         Ok(StoppedApp {
@@ -2260,7 +2263,9 @@ mod tests {
     }
 
     fn close_app_region_and_remove_records(state: &mut RuntimeState, app_region: RegionId) {
-        let _ = state.cancel_request(app_region, &CancelReason::shutdown(), None);
+        let effects = state.cancel_request(app_region, &CancelReason::shutdown(), None);
+        let (_, cancel_wakes) = effects.into_parts();
+        cancel_wakes.dispatch();
 
         let mut previous_region_count = usize::MAX;
         while state.region(app_region).is_some() && state.regions_len() != previous_region_count {

@@ -1811,7 +1811,8 @@ pub mod error {
                 | SpawnError::RegionClosed(_)
                 | SpawnError::LocalSchedulerUnavailable
                 | SpawnError::NameRegistrationFailed { .. }
-                | SpawnError::AuthorizationDenied { .. } => SporkSeverity::Permanent,
+                | SpawnError::AuthorizationDenied { .. }
+                | SpawnError::AdmissionSlotAlreadyReserved { .. } => SporkSeverity::Permanent,
             }
         }
 

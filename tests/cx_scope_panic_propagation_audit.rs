@@ -69,7 +69,8 @@
 //!      ```ignore
 //!      Outcome::Err(_) | Outcome::Panicked(_) => {
 //!          let reason = CancelReason::fail_fast().with_region(...);
-//!          let _ = state.cancel_request(child_region, &reason, None);
+//!          let effects = state.cancel_request(child_region, &reason, None);
+//!          state.defer_cancel_dispatch(effects);
 //!          if let Some(region) = state.region(child_region) {
 //!              region.begin_close(None);
 //!          }
@@ -105,7 +106,9 @@
 //!      938): when the FACTORY closure (the `f` that
 //!      builds the future) itself panics — distinct from
 //:      the inner future panicking — the path cancels the
-//!      child region first, then resume_unwinds the
+//!      child region first, then explicitly suppresses the
+//!      captured Wakers because unwind offers no safe
+//!      post-lock dispatch boundary, and resume_unwinds the
 //!      payload to the caller. This is the ONLY legitimate
 //!      thread-unwind path; it fires when there's no
 //!      future to mark Panicked.
@@ -277,9 +280,13 @@ fn region_with_budget_panicked_outcome_triggers_fail_fast_cleanup() {
     assert!(
         body.contains("Outcome::Err(_) | Outcome::Panicked(_) => {")
             && body.contains("let reason = CancelReason::fail_fast().with_region(child_region);")
-            && body.contains("state.cancel_request(child_region, &reason, None);"),
+            && body.contains("let effects = state.cancel_request(child_region, &reason, None);")
+            && body.contains("state.defer_cancel_dispatch(effects);")
+            && !body.contains(".dispatch()")
+            && !body.contains("wake_by_ref("),
         "REGRESSION: Panicked outcome no longer triggers \
-         FailFast region cleanup. Sibling tasks orphan — \
+         FailFast region cleanup through deferred post-lock \
+         effects. Sibling tasks orphan — \
          region leak. The structured panic propagation \
          is broken (cleanup gap).",
     );
@@ -361,7 +368,10 @@ fn region_runner_drop_cancels_child_region_on_pre_completion_drop() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("state.cancel_request(self.child_region, &reason, None);")
+        body.contains("let effects = state.cancel_request(self.child_region, &reason, None);")
+            && body.contains("state.defer_cancel_dispatch(effects);")
+            && !body.contains(".dispatch()")
+            && !body.contains("wake_by_ref(")
             && body.contains("region.begin_close(None);")
             && body.contains("state.advance_region_state(self.child_region);"),
         "REGRESSION: RegionRunner::drop no longer cleans up \
@@ -389,8 +399,11 @@ fn factory_panic_path_uses_resume_unwind_only_after_region_cleanup() {
          escapes uncleanly.",
     );
 
-    // The resume_unwind must come AFTER cancel_request +
-    // begin_close + advance_region_state cleanup.
+    // The resume_unwind must come AFTER cancellation mutation/capture,
+    // begin_close, and advance_region_state, and after the captured
+    // cancellation observers/Wakers are explicitly suppressed. This pin does
+    // not claim that unrelated finalizer/close callbacks inside state advance
+    // are callback-free.
     let resume_idx = source
         .find("std::panic::resume_unwind(payload);")
         .expect("resume_unwind call");
@@ -403,11 +416,15 @@ fn factory_panic_path_uses_resume_unwind_only_after_region_cleanup() {
     let preamble = &source[safe_start..resume_idx];
 
     assert!(
-        preamble.contains("state.cancel_request(child_region, &reason, None);")
+        preamble
+            .contains("let cancel_effects = state.cancel_request(child_region, &reason, None);")
             && preamble.contains("region.begin_close(None);")
-            && preamble.contains("state.advance_region_state(child_region);"),
+            && preamble.contains("state.advance_region_state(child_region);")
+            && preamble.contains("let (_, cancel_wakes) = cancel_effects.into_parts();")
+            && preamble.contains("cancel_wakes.suppress();"),
         "REGRESSION: factory-panic resume_unwind fires \
-         BEFORE region cleanup. Region stays in non-\
+         before region cancellation cleanup and explicit suppression of the \
+         captured cancellation effects. Region stays in non-\
          quiescent state during unwind — invariant \
          violation.",
     );

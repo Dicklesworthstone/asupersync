@@ -30,8 +30,14 @@
 //!     - `inner.cancel_reason = Some(reason)` (or strengthen
 //!       existing)
 //!
-//!   And both wake the cancel_waker. The mechanism is
-//!   IDENTICAL — they differ only in:
+//!   `Cx::cancel*()` captures and dispatches its cancel Waker
+//!   directly. Runtime-managed `TaskHandle` cancellation has
+//!   one extra ownership boundary: the caller updates only
+//!   checkpoint-visible Cx state and enqueues a callback-free
+//!   command. The runtime transitions the authoritative
+//!   TaskRecord, publishes the cancel lane, and only then
+//!   dispatches panic-isolated Waker effects. The cancellation
+//!   protocol is the same; its scheduling boundary differs.
 //!
 //!   1. **Caller**: `TaskHandle::abort` is called from
 //!      OUTSIDE the task (the parent holds the handle and
@@ -52,14 +58,22 @@
 //!      child); `Cx::cancel*` operates on the running task's
 //!      own `Arc<RwLock<CxInner>>`.
 //!
-//!   The chain is the SAME for both:
+//!   The TaskHandle chain is:
 //!
 //!     1. Acquire the CxInner write lock.
 //!     2. Set cancel_requested = true.
 //!     3. fast_cancel.store(true, Release).
-//!     4. Set/strengthen cancel_reason.
-//!     5. Wake the cancel_waker (cross-thread observability).
-//!     6. The task's NEXT cx.checkpoint() returns Err(Cancelled).
+//!     4. Set/strengthen cancel_reason; do not snapshot Wakers.
+//!     5. Release the Cx and admission-cache locks.
+//!     6. Enqueue `{task_id, effective_reason}` on the runtime gateway.
+//!     7. The runtime-owned consumer reconciles the TaskRecord and returns
+//!        effects. If the task checkpoints first, that checkpoint materializes
+//!        the same authoritative request and a delayed command is idempotent.
+//!     8. Scheduler publishes the cancel lane, then dispatches effects. A
+//!        structurally invalid delegated route remains fail-closed in
+//!        `DelegatedCancel` and requires a fresh command after repair; it does
+//!        not self-requeue and monopolize the mailbox.
+//!     9. The task's NEXT cx.checkpoint() returns Err(Cancelled).
 //!
 //!   "Drop guards" (Rust destructors, finalizer guards,
 //!   panic-recovery TaskExecutionGuard, RegionRunner::Drop)
@@ -97,9 +111,9 @@
 //!     observable behavior beyond the reason kind (would
 //!     introduce subtle semantic divergence — debugging
 //!     gets harder),
-//!   - removed the cancel_waker.wake_by_ref() call from
-//!     either path (would break cross-thread observability
-//!     for parked tasks),
+//!   - dispatched TaskHandle Wakers in the caller/Drop stack,
+//!     or before cancel-lane publication (would permit lock
+//!     reentrancy or miss the parked-task scheduling boundary),
 //!   - introduced std::process::abort or libc::pthread_cancel
 //!     in the abort path (UB pathway; thread terminates
 //!     without destructor unwinding),
@@ -129,11 +143,16 @@ fn task_handle_abort_publishes_via_same_fast_cancel_release_store_as_cancel() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("apply_cancel_reason(&inner, &reason)")
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.contains("let mut cached = requested.write();")
+            && source.contains(".filter(|task| task.is_published())")
+            && source.contains("strengthen_cancel_reason_locked(&mut lock, &strongest_requested);")
             && source.contains("lock.cancel_requested = true;")
             && source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: abort_with_reason no longer publishes \
-         via cancel_requested + fast_cancel.store(Release). \
+         through the admission gate and cancel_requested + \
+         fast_cancel.store(Release). \
          Either abort is now a true hard-kill (impossible \
          in stable Rust, would require unsafe code) OR the \
          publish mechanism diverged from Cx::cancel_with.",
@@ -156,9 +175,11 @@ fn task_handle_abort_strengthens_existing_cancel_reason() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("apply_cancel_reason(&inner, &reason)")
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.contains("if let Some(existing) = cached.as_mut() {")
             && source.contains("if let Some(existing) = &mut lock.cancel_reason {")
-            && source.contains("existing.strengthen(reason);"),
+            && source.contains("existing.strengthen(reason)"),
         "REGRESSION: abort no longer strengthens existing \
          cancel_reason. Multi-abort attribution lost — \
          last-abort-wins instead of strongest.",
@@ -166,12 +187,16 @@ fn task_handle_abort_strengthens_existing_cancel_reason() {
 }
 
 #[test]
-fn task_handle_abort_wakes_cancel_waker_for_parked_task_observability() {
-    // Pin (link 2): abort wakes the cancel_waker so a
-    // parked task observes the abort. Without this, parked
-    // tasks (sleeping on Sleep/channel/etc.) miss the
-    // abort signal.
+fn task_handle_abort_defers_panic_isolated_wakers_to_runtime_publication() {
+    // Pin (link 2): the caller-side helper updates only
+    // checkpoint-visible Cx state and enqueues plain data after
+    // both locks are gone. The runtime snapshots Wakers during the
+    // authoritative TaskRecord transition, publishes every cancel
+    // lane, and only then panic-isolating dispatches the effects.
     let source = read("src/runtime/task_handle.rs");
+    let mailbox = read("src/runtime/spawn_mailbox.rs");
+    let state = read("src/runtime/state.rs");
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
 
     let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
     let start = source.find(fn_marker).expect("abort_with_reason fn");
@@ -179,12 +204,37 @@ fn task_handle_abort_wakes_cancel_waker_for_parked_task_observability() {
         .find("\n    }\n")
         .expect("abort_with_reason close");
     let body = &source[start..start + body_end];
+    let gate_start = source
+        .find("fn apply_or_defer_cancel_reason(")
+        .expect("admission-aware abort helper");
+    let gate_end = source[gate_start..]
+        .find("\n}\n")
+        .expect("admission-aware abort helper close");
+    let gate_body = &source[gate_start..gate_start + gate_end];
 
     assert!(
-        body.contains("for waker in cancel_wakers {") && body.contains("waker.wake_by_ref();"),
-        "REGRESSION: abort no longer wakes the cancel_waker. \
-         Parked tasks dont observe the abort — silent miss \
-         for the parked-task case.",
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.matches("apply_or_defer_cancel_reason(").count() >= 3
+            && gate_body.contains("let mut cached = requested.write();")
+            && gate_body.contains(".filter(|task| task.is_published())")
+            && !gate_body.contains(".dispatch()")
+            && !gate_body.contains("cancel_waker_snapshot")
+            && gate_body.contains("drop(cached);")
+            && gate_body.contains("changed || lock.runnable_publication.is_delegated_cancel()")
+            && gate_body.contains("gateway.enqueue_handle_cancel(task_id, effective_reason)")
+            && mailbox.contains("pub(crate) fn enqueue_handle_cancel(")
+            && state.contains("pub(crate) fn cancel_task_for_handle(")
+            && state.contains("record.request_cancel_for_handle(reason)")
+            && scheduler.contains("record.publish_delegated_cancel_lane(")
+            && scheduler.contains("publication_wakes.retire_without_dispatch();")
+            && !scheduler.contains("mailbox.enqueue_handle_cancel(task_id, reason);")
+            && scheduler.contains("for wakes in wakes_to_dispatch")
+            && scheduler.contains("wakes.dispatch();"),
+        "REGRESSION: TaskHandle/JoinFuture abort no longer crosses the \
+         callback-free runtime gateway before TaskRecord transition, \
+         cancel-lane publication, and post-publication Waker dispatch. \
+         Caller locks may be reentered or parked tasks may miss cancellation.",
     );
 }
 
@@ -316,23 +366,26 @@ fn abort_path_uses_weak_handle_to_avoid_keeping_task_alive() {
     // alive. Symmetric with the rest of the cancel/abort contract.
     let source = read("src/runtime/task_handle.rs");
 
-    let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
-    let start = source.find(fn_marker).expect("abort_with_reason fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("abort_with_reason close");
-    let body = &source[start..start + body_end];
+    let helper_start = source
+        .find("fn apply_or_defer_cancel_reason(")
+        .expect("admission-aware abort helper");
+    let helper_end = source[helper_start..]
+        .find("\n}\n")
+        .expect("admission-aware abort helper close");
+    let helper_body = &source[helper_start..helper_start + helper_end];
 
     assert!(
-        body.contains("self.live_inner()"),
-        "REGRESSION: abort no longer resolves through live_inner(). \
-         Mailbox-admitted task aborts may use a stale provisional \
-         weak handle instead of the canonical weak handle.",
+        helper_body.contains("admitted.cx_inner.upgrade()")
+            && helper_body.contains("fallback_inner.upgrade()"),
+        "REGRESSION: abort no longer upgrades the canonical admitted weak \
+         handle or the construction-time fallback weak at the gateway \
+         boundary.",
     );
 
     assert!(
-        source.contains("admitted.cx_inner.upgrade()") && source.contains("self.inner.upgrade()"),
-        "REGRESSION: live_inner no longer upgrades only weak \
+        !helper_body.contains("fallback_inner.write()")
+            && !helper_body.contains("fallback_inner.read()"),
+        "REGRESSION: the cancellation helper no longer upgrades only weak \
          handles. The weak-handle pattern is broken — abort \
          either keeps the task alive (semantic leak) or panics \
          on no-upgrade.",

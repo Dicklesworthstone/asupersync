@@ -102,9 +102,12 @@ fn mr2_cancellation_state_consistency() -> TestResult {
     let snapshot1 = TaskInspector::new(shared.clone(), None).wire_snapshot();
 
     // Trigger actual runtime cancellation on the region that owns the tasks.
-    let tasks_to_cancel = Arc::get_mut(&mut shared)
+    let cancel_effects = Arc::get_mut(&mut shared)
         .expect("snapshot inspector should not retain the state")
         .cancel_request(region, &CancelReason::timeout(), None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+    // This state-only inspector fixture deliberately performs no execution.
+    wake_effects.suppress();
 
     // Take second snapshot
     let snapshot2 = TaskInspector::new(shared, None).wire_snapshot();

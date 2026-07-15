@@ -320,16 +320,17 @@ fn region_state_enum_has_five_canonical_variants() {
 #[test]
 fn cancel_request_propagates_to_region_begin_close() {
     // Pin: the cancel-request path calls
-    // region.begin_close(Some(reason)) to transition the
-    // region state. Without this transition, the admission
+    // region.begin_close_without_subscriber(Some(reason)) to transition the
+    // region state without entering a tracing subscriber under RuntimeState.
+    // Without this transition, the admission
     // gate would still see Open and let drop-handler
     // spawns succeed.
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("region.begin_close(Some(region_reason.clone()))"),
+        source.contains("region.begin_close_without_subscriber(Some(region_reason.clone()))"),
         "REGRESSION: state.rs no longer calls \
-         region.begin_close with the region_reason. Without \
+         the subscriber-free region close transition with the region_reason. Without \
          the state transition, the region stays Open and \
          user spawns continue to succeed — defeating the \
          spawn-during-cancel rejection invariant.",

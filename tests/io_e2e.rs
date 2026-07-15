@@ -112,13 +112,15 @@ fn spawn_cancellable_task(runtime: &mut LabRuntime, region: RegionId) -> Option<
 
 #[cfg(unix)]
 fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> bool {
-    let tasks = runtime.state.cancel_request(region, reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, reason, None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task, priority) in tasks {
             scheduler.schedule_cancel(task, priority);
         }
     }
+    wake_effects.dispatch();
     true
 }
 

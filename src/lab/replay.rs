@@ -1160,12 +1160,16 @@ fn schedule_swarm_cancellations(
             continue;
         }
         let cancel_reason = crate::types::CancelReason::user("swarm replay cancellation cascade");
-        let targets = runtime.state.cancel_request(region, &cancel_reason, None);
+        let effects = runtime.state.cancel_request(region, &cancel_reason, None);
+        let (targets, wake_effects) = effects.into_parts();
         cancel_targets += targets.len();
-        let mut scheduler = runtime.scheduler.lock();
-        for (task, priority) in targets {
-            scheduler.schedule_cancel(task, priority);
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            for (task, priority) in targets {
+                scheduler.schedule_cancel(task, priority);
+            }
         }
+        wake_effects.dispatch();
     }
     cancel_targets
 }
@@ -3226,17 +3230,19 @@ mod tests {
                 }
             }
 
-            let cancel_targets = runtime.state.cancel_request(
+            let effects = runtime.state.cancel_request(
                 child_b,
                 &CancelReason::user("conformance partial cancel"),
                 None,
             );
+            let (cancel_targets, wake_effects) = effects.into_parts();
             {
                 let mut sched = runtime.scheduler.lock();
                 for (task, priority) in cancel_targets {
                     sched.schedule_cancel(task, priority);
                 }
             }
+            wake_effects.dispatch();
 
             runtime.run_until_quiescent();
         });
@@ -3281,17 +3287,19 @@ mod tests {
                 sched.schedule(root_task, 0);
             }
 
-            let cancel_targets = runtime.state.cancel_request(
+            let effects = runtime.state.cancel_request(
                 doomed,
                 &CancelReason::user("doomed subtree cancel"),
                 None,
             );
+            let (cancel_targets, wake_effects) = effects.into_parts();
             {
                 let mut sched = runtime.scheduler.lock();
                 for (task, priority) in cancel_targets {
                     sched.schedule_cancel(task, priority);
                 }
             }
+            wake_effects.dispatch();
 
             runtime.run_until_quiescent();
         });
@@ -3328,17 +3336,19 @@ mod tests {
                     runtime.scheduler.lock().schedule(task, 0);
                 }
             }
-            let targets = runtime.state.cancel_request(
+            let effects = runtime.state.cancel_request(
                 child_a,
                 &CancelReason::user("conformance multi-seed cancel"),
                 None,
             );
+            let (targets, wake_effects) = effects.into_parts();
             {
                 let mut sched = runtime.scheduler.lock();
                 for (task, priority) in targets {
                     sched.schedule_cancel(task, priority);
                 }
             }
+            wake_effects.dispatch();
             runtime.run_until_quiescent();
         });
 

@@ -36,7 +36,9 @@
 //!      - On completion, transitions the child region to
 //!        Closing → Drained → Closed.
 //!      - On panic-unwind drop, RegionRunner::Drop cancels
-//!        the child region.
+//!        the child region by queueing its auxiliary cancellation
+//!        observer/Waker effects for post-lock scheduler dispatch.
+//!        Other close/finalizer callbacks are outside this audit.
 //!      - Use case: structured-concurrency "do this work
 //!        inside a fresh region with its own quiescence
 //!        boundary".
@@ -408,11 +410,14 @@ fn region_runner_drop_cancels_child_only_for_scope_region_path() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("state.cancel_request(self.child_region, &reason, None);")
+        body.contains("let effects = state.cancel_request(self.child_region, &reason, None);")
+            && body.contains("state.defer_cancel_dispatch(effects);")
+            && !body.contains(".dispatch()")
+            && !body.contains("wake_by_ref(")
             && body.contains("region.begin_close(None);")
             && body.contains("state.advance_region_state(self.child_region);"),
         "REGRESSION: RegionRunner::Drop no longer cleans up \
-         the child region. Dropping a region future before \
+         the child region through the deferred effects queue. Dropping a region future before \
          await leaks the region.",
     );
 }

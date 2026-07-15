@@ -1691,8 +1691,7 @@ impl CancelProtocolValidator {
         }
     }
 
-    /// Validate a task state transition.
-    pub fn validate_task_transition(
+    fn record_task_transition(
         &mut self,
         task_id: TaskId,
         event: TaskEvent,
@@ -1704,8 +1703,6 @@ impl CancelProtocolValidator {
                 &result
             {
                 self.violation_count += 1;
-
-                self.log_violation("task", &task_id, &result);
             }
             result
         } else {
@@ -1715,9 +1712,37 @@ impl CancelProtocolValidator {
                 attempted_transition: format!("{event:?}"),
             };
             self.violation_count += 1;
-            self.log_violation("task", &task_id, &result);
             result
         }
+    }
+
+    /// Validate a task state transition and emit any configured diagnostic.
+    pub fn validate_task_transition(
+        &mut self,
+        task_id: TaskId,
+        event: TaskEvent,
+        context: &TaskContext,
+    ) -> TransitionResult {
+        let result = self.record_task_transition(task_id, event, context);
+        if let TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. } =
+            &result
+        {
+            self.log_violation("task", &task_id, &result);
+        }
+        result
+    }
+
+    /// Validate and record a task transition without invoking a tracing
+    /// subscriber. Runtime cancellation paths use this while holding their
+    /// state locks, then carry a closed diagnostic value to a post-lock effect
+    /// boundary.
+    pub(crate) fn validate_task_transition_without_logging(
+        &mut self,
+        task_id: TaskId,
+        event: TaskEvent,
+        context: &TaskContext,
+    ) -> TransitionResult {
+        self.record_task_transition(task_id, event, context)
     }
 
     /// Get the current state of a region.
@@ -1898,6 +1923,21 @@ mod tests {
             spawned_at: Time::ZERO,
             validation_level: ValidationLevel::Full,
         }
+    }
+
+    #[test]
+    fn task_transition_without_logging_preserves_validation_accounting() {
+        let mut validator = CancelProtocolValidator::new(ValidationLevel::Full);
+        let task_id = TaskId::new_for_test(77, 0);
+        let region_id = RegionId::new_for_test(78, 0);
+        let result = validator.validate_task_transition_without_logging(
+            task_id,
+            TaskEvent::RequestCancel,
+            &task_context(task_id, region_id),
+        );
+
+        assert!(matches!(result, TransitionResult::Invalid { .. }));
+        assert_eq!(validator.violation_count(), 1);
     }
 
     #[test]

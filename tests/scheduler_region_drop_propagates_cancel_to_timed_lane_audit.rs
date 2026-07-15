@@ -15,19 +15,23 @@
 //!   1. **Region close triggers subtree walk**
 //!      (`src/runtime/state.rs` `cancel_region_subtree` family,
 //!      around line 2620). Iterates regions in the dropped
-//!      subtree, calling `region.begin_close(Some(reason))` on
-//!      each. The region transitions to Closing state.
+//!      subtree, calling the subscriber-free region close
+//!      transition on each. The region transitions to Closing
+//!      state without invoking a tracing subscriber beneath the
+//!      outer runtime-state lock.
 //!
 //!   2. **Each task in each closing region gets
 //!      `request_cancel_with_budget`** (state.rs:2682). This
 //!      flips `cancel_requested = true` on the task's CxInner
 //!      AND `fast_cancel.store(true, Release)` on the atomic
 //!      so a concurrently-running task observes the flag on its
-//!      next `cx.checkpoint()` call.
+//!      next `cx.checkpoint()` call. Wakers are captured as
+//!      opaque effects; none run under task or state locks.
 //!
-//!   3. **The caller invokes
-//!      `scheduler.move_to_cancel_lane(task_id, priority)`** for
-//!      every task that was newly cancelled. This is the
+//!   3. **After the outer state guard is released, the caller
+//!      publishes every task ID before dispatching Wakers.**
+//!      Publication invokes `scheduler.move_to_cancel_lane`
+//!      for every task that was newly cancelled. This is the
 //!      O(log N) lazy-promote function in
 //!      `src/runtime/scheduler/priority.rs` (the
 //!      br-asupersync-cancel-promote-logn fix from earlier
@@ -56,8 +60,9 @@
 //!   The task does NOT continue executing orphaned because:
 //!   - `move_to_cancel_lane` puts the task in the highest-
 //!     priority lane regardless of where it was previously.
-//!   - Cancel-lane priority guarantees dispatch within
-//!     bounded time (cancel_streak fairness limit).
+//!   - Cancel-lane priority selects cancellation ahead of
+//!     timed work on eligible scheduler iterations. This is
+//!     not a wall-clock or sub-quantum guarantee.
 //!   - Once dispatched, `cx.checkpoint()` observes the cancel
 //!     and returns Err, terminating the task body.
 //!
@@ -68,6 +73,12 @@
 //! lazy-promote re-routes the task to the cancel lane, and the
 //! cooperative checkpoint protocol surfaces the cancel to the
 //! task body.
+//!
+//! This audit is narrow: it covers valid task routes and auxiliary
+//! cancellation Wakers. It does not claim that synchronous finalizers,
+//! metrics, tracing subscribers, region-close Wakers, or arbitrary payload
+//! destructors are callback-free, nor does it promise recovery for a
+//! structurally invalid local-owner route.
 //!
 //! A regression that:
 //!   - skipped `move_to_cancel_lane` for tasks already in
@@ -105,9 +116,12 @@ fn region_cancel_propagation_calls_request_cancel_with_budget() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("task.request_cancel_with_budget(task_reason.clone(), task_budget)"),
+        source.contains("task.request_cancel_with_budget_and_publication(")
+            && source.contains("let ((newly_cancelled, changed, publication), task_wakes) =",)
+            && source.contains("wakes.merge(task_wakes);"),
         "REGRESSION: state.rs no longer calls \
-         task.request_cancel_with_budget on tasks in closing \
+         task.request_cancel_with_budget and captures its \
+         effects on tasks in closing \
          regions. Without this, the cancel signal never \
          reaches the task — it continues executing orphaned \
          even though its parent region has been dropped.",
@@ -133,11 +147,61 @@ fn region_cancel_propagation_emits_tasks_to_cancel_list() {
     );
 
     assert!(
-        source.contains("tasks_to_cancel_result = Some((task_id, task_budget.priority));"),
-        "REGRESSION: the per-task tasks_to_cancel_result \
-         binding is gone. The cancel-propagation outputs the \
-         (task_id, priority) tuples that downstream code \
-         feeds to move_to_cancel_lane.",
+        source.contains("CancellationEffects::new(tasks_to_cancel, wakes)"),
+        "REGRESSION: cancel_request no longer couples the \
+         callback-free (task_id, priority) tuples to opaque \
+         Waker effects for downstream post-lock publication.",
+    );
+}
+
+#[test]
+fn deferred_cancel_drain_publishes_all_tasks_before_dispatching_wakers() {
+    // RegionRunner::Drop must not invoke the auxiliary cancellation Wakers
+    // returned by cancel_request while it owns RuntimeState. It queues those
+    // effects; the scheduler later takes them under the guard, releases it,
+    // publishes task IDs, and dispatches the auxiliary Wakers last. This does
+    // not cover close-waiter Wakers or finalizer/observer callbacks reached by
+    // the later advance_region_state call.
+    let scope = read("src/cx/scope.rs");
+    let drop_start = scope
+        .find("impl<Fut> Drop for RegionRunner<'_, Fut> {")
+        .expect("RegionRunner Drop");
+    let drop_body = &scope[drop_start..(drop_start + 1000).min(scope.len())];
+    assert!(
+        drop_body.contains("let effects = state.cancel_request(self.child_region, &reason, None);")
+            && drop_body.contains("state.defer_cancel_dispatch(effects);")
+            && !drop_body.contains(".dispatch()")
+            && !drop_body.contains("wake_by_ref("),
+        "REGRESSION: RegionRunner::Drop no longer queues its auxiliary cancellation Waker \
+         effects for later post-lock dispatch.",
+    );
+
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
+    let start = scheduler
+        .find("fn drain_deferred_cancel_dispatches(&self) {")
+        .expect("deferred cancel drain");
+    let body = &scheduler[start..(start + 1800).min(scheduler.len())];
+    let take = body
+        .find("state.take_deferred_cancel_dispatches()")
+        .expect("take cancellation batches");
+    let release = take
+        + body[take..]
+            .find("\n        };")
+            .expect("release RuntimeState guard");
+    let publish = body
+        .find("self.publish_deferred_cancel_task(task_id, priority)")
+        .expect("task publication");
+    let dispatch = body
+        .find("batch_wakes.dispatch();")
+        .expect("Waker dispatch");
+    assert!(
+        body.contains("let batches = {")
+            && take < release
+            && release < publish
+            && publish < dispatch
+            && body.matches(".dispatch();").count() == 1,
+        "REGRESSION: deferred region-drop cancellation no longer releases \
+         the state guard and publishes all task IDs before Waker dispatch.",
     );
 }
 
@@ -289,7 +353,7 @@ fn request_cancel_with_budget_sets_fast_cancel_release() {
     // called.
     let task_record = read("src/record/task.rs");
 
-    let fn_marker = "pub fn request_cancel_with_budget(";
+    let fn_marker = "pub(crate) fn request_cancel_with_budget_and_publication(";
     let pos = task_record.find(fn_marker);
     if let Some(start) = pos {
         // Take a window of 3000 chars after the fn marker.
@@ -333,7 +397,7 @@ fn request_cancel_with_budget_sets_fast_cancel_release() {
 #[test]
 fn region_close_state_transition_via_begin_close() {
     // Pin (link 1): the subtree walk transitions each region
-    // to Closing via region.begin_close(Some(reason)). A
+    // to Closing via the subscriber-free RegionRecord transition. A
     // regression that skipped this transition would leave
     // the region in Open state — the cancel propagation
     // logic gates on the region state, so tasks would not
@@ -341,9 +405,9 @@ fn region_close_state_transition_via_begin_close() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("region.begin_close(Some(region_reason.clone()))"),
+        source.contains("region.begin_close_without_subscriber(Some(region_reason.clone()))"),
         "REGRESSION: the region-cancel subtree walk no longer \
-         calls region.begin_close(Some(reason)). Without the \
+         calls the subscriber-free RegionRecord close transition. Without the \
          state transition, tasks in the region don't get \
          cancelled — they continue running normally even \
          though the parent region has logically been dropped.",

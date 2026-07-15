@@ -89,7 +89,9 @@
 //!      the closure through RegionRunner.
 //!   2. **On Outcome::Err / Outcome::Panicked** (cx/scope.rs:
 //!      971): cancels the child region via
-//!      `cancel_request(child_region, fail_fast_reason, None)`.
+//!      `cancel_request(child_region, fail_fast_reason, None)`,
+//!      then queues the returned effects so Wakers run only
+//!      after the outer RuntimeState guard is released.
 //!   3. The cancel propagates to all tasks in the child
 //!      region (per tests/scheduler_cancel_storm_propagation_audit.rs).
 //!
@@ -282,9 +284,13 @@ fn region_with_budget_cancels_on_panicked_outcome_for_failfast() {
     assert!(
         body.contains("Outcome::Err(_) | Outcome::Panicked(_) => {")
             && body.contains("CancelReason::fail_fast()")
-            && body.contains("state.cancel_request(child_region, &reason, None);"),
+            && body.contains("let effects = state.cancel_request(child_region, &reason, None);")
+            && body.contains("state.defer_cancel_dispatch(effects);")
+            && !body.contains(".dispatch()")
+            && !body.contains("wake_by_ref("),
         "REGRESSION: region_with_budget no longer cancels \
-         siblings on Err/Panicked. The region/FailFast \
+         siblings on Err/Panicked through deferred post-lock \
+         effects. The region/FailFast \
          semantic is broken — child failure no longer \
          propagates cancel to sibling tasks. The \
          distinction from join_all is lost.",

@@ -1307,14 +1307,17 @@ mod tests {
             running.cx.as_ref().expect("running task cx").clone()
         };
 
-        {
+        let cancel_effects = {
             let cancel_requested = state
                 .task_mut(cancel_requested_id)
                 .expect("cancel requested task record");
             cancel_requested.polls_remaining = 4;
             cancel_requested.increment_polls();
-            assert!(cancel_requested.request_cancel(crate::types::CancelReason::timeout()));
-        }
+            cancel_requested.request_cancel(crate::types::CancelReason::timeout())
+        };
+        let (newly_cancelled, cancel_wakes) = cancel_effects.into_parts();
+        cancel_wakes.dispatch();
+        assert!(newly_cancelled);
 
         {
             let completed = state.task_mut(completed_id).expect("completed task record");

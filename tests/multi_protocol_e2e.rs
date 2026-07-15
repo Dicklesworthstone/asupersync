@@ -509,9 +509,17 @@ fn e2e_multi_timer_driven_timeouts() {
 
     test_section!("cancel_one_protocol");
     // Simulate timeout: cancel gRPC region
-    runtime
+    let cancel_effects = runtime
         .state
         .cancel_request(grpc_region, &CancelReason::timeout(), None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+    wake_effects.dispatch();
     runtime.run_until_quiescent();
 
     tracing::info!(
@@ -578,9 +586,17 @@ fn e2e_multi_graceful_shutdown() {
     test_section!("graceful_shutdown");
     // Cancel all regions with Shutdown reason (most severe)
     for (i, &region) in regions.iter().enumerate() {
-        runtime
+        let cancel_effects = runtime
             .state
             .cancel_request(region, &CancelReason::shutdown(), None);
+        let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            for (task_id, priority) in tasks_to_cancel {
+                scheduler.schedule_cancel(task_id, priority);
+            }
+        }
+        wake_effects.dispatch();
         tracing::info!(
             correlation_id = correlation_id,
             protocol = i,

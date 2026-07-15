@@ -308,24 +308,27 @@ fn task_handle_holds_weak_for_multi_handle_safety() {
     // clones, all upgrading the same Weak.
     let source = read("src/runtime/task_handle.rs");
 
-    let abort_with_reason_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
+    let abort_with_reason_marker = "fn apply_or_defer_cancel_reason(";
     let pos = source
         .find(abort_with_reason_marker)
-        .expect("abort_with_reason fn");
-    let body = &source[pos..pos + 1000];
+        .expect("admission-aware cancellation helper");
+    let body_end = source[pos..]
+        .find("\n}\n")
+        .expect("admission-aware cancellation helper close");
+    let body = &source[pos..pos + body_end];
 
     assert!(
-        body.contains("if let Some(inner) = self.live_inner() {"),
-        "REGRESSION: TaskHandle::abort_with_reason no longer \
-         upgrades a Weak through live_inner(). Either the \
-         multi-handle safety is broken, or the cancel channel \
-         has shifted to a strong Arc that prevents drop.",
+        body.contains("admitted.cx_inner.upgrade()") && body.contains("fallback_inner.upgrade()"),
+        "REGRESSION: the TaskHandle cancellation gateway no longer \
+         upgrades both canonical-admission and construction-time Weak \
+         handles transiently. The cancel channel may have shifted to a \
+         strong Arc that prevents drop.",
     );
     assert!(
-        source.contains("fn live_inner(&self) -> Option<std::sync::Arc<RwLock<CxInner>>>")
-            && source.contains("self.inner.upgrade()"),
-        "REGRESSION: TaskHandle::live_inner no longer exposes \
-         the Weak upgrade boundary used by abort_with_reason.",
+        source.contains("inner: Weak<RwLock<CxInner>>,")
+            && source.contains("cx_inner: Weak<RwLock<CxInner>>,"),
+        "REGRESSION: TaskHandle or JoinFuture no longer stores a Weak \
+         Cx handle at the cancellation boundary.",
     );
 
     // Strong-only patterns are wrong here.

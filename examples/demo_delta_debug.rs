@@ -231,7 +231,15 @@ fn check_for_leak(elements: &[ScenarioElement]) -> bool {
                 }
                 if let Some(&rid) = regions.get(region_idx) {
                     let reason = CancelReason::new(CancelKind::User);
-                    let _ = runtime.state.cancel_request(rid, &reason, None);
+                    let cancel_effects = runtime.state.cancel_request(rid, &reason, None);
+                    let (to_cancel, cancel_wakes) = cancel_effects.into_parts();
+                    {
+                        let mut scheduler = runtime.scheduler.lock();
+                        for (task_id, priority) in to_cancel {
+                            scheduler.schedule_cancel(task_id, priority);
+                        }
+                    }
+                    cancel_wakes.dispatch();
                 }
             }
             ScenarioElement::AdvanceTime { nanos } => {

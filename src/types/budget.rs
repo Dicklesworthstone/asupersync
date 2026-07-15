@@ -490,20 +490,7 @@ impl Budget {
     #[inline]
     #[must_use]
     pub fn combine(self, other: Self) -> Self {
-        let combined = Self {
-            deadline: match (self.deadline, other.deadline) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (deadline @ Some(_), None) | (None, deadline @ Some(_)) => deadline,
-                (None, None) => None,
-            },
-            poll_quota: self.poll_quota.min(other.poll_quota),
-            cost_quota: match (self.cost_quota, other.cost_quota) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (quota @ Some(_), None) | (None, quota @ Some(_)) => quota,
-                (None, None) => None,
-            },
-            priority: self.priority.max(other.priority),
-        };
+        let combined = self.combine_untraced(other);
 
         // Trace when budget is tightened (any constraint becomes stricter)
         // For deadline comparison, None means "no constraint" (least restrictive),
@@ -548,6 +535,29 @@ impl Budget {
         }
 
         combined
+    }
+
+    /// Callback-free product meet for code that already owns a runtime/Cx
+    /// lock. The public [`Self::combine`] wrapper emits observability events;
+    /// invoking it from a cancellation critical section would let a tracing
+    /// subscriber reenter the same lock.
+    #[inline]
+    #[must_use]
+    pub(crate) fn combine_untraced(self, other: Self) -> Self {
+        Self {
+            deadline: match (self.deadline, other.deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (deadline @ Some(_), None) | (None, deadline @ Some(_)) => deadline,
+                (None, None) => None,
+            },
+            poll_quota: self.poll_quota.min(other.poll_quota),
+            cost_quota: match (self.cost_quota, other.cost_quota) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (quota @ Some(_), None) | (None, quota @ Some(_)) => quota,
+                (None, None) => None,
+            },
+            priority: self.priority.max(other.priority),
+        }
     }
 
     /// Meet operation (∧) - alias for [`combine`](Self::combine).

@@ -2733,16 +2733,18 @@ mod tests {
         assert!(started.load(Ordering::SeqCst));
         assert_eq!(sublist.lookup(&subject).total(), 1);
 
-        let cancelled =
+        let cancel_effects =
             runtime
                 .state
                 .cancel_request(region, &CancelReason::user("subject test cancel"), None);
+        let (cancelled, wake_effects) = cancel_effects.into_parts();
         {
             let mut scheduler = runtime.scheduler.lock();
             for (task, priority) in cancelled {
                 scheduler.schedule_cancel(task, priority);
             }
         }
+        wake_effects.dispatch();
 
         runtime.run_until_quiescent();
 

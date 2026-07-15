@@ -2972,16 +2972,19 @@ mod tests {
         );
 
         // Cleanup: cancel the region and drive the cancellation to quiescence.
-        let tasks_to_schedule =
+        let cancel_effects =
             runtime
                 .state
                 .cancel_request(region, &CancelReason::user("test done"), None);
-        for (tid, priority) in tasks_to_schedule {
-            runtime.scheduler.lock().schedule(tid, priority);
-        }
+        let (tasks_to_schedule, wake_effects) = cancel_effects.into_parts();
         {
-            runtime.scheduler.lock().schedule(task_id, 0);
+            let mut scheduler = runtime.scheduler.lock();
+            for (tid, priority) in tasks_to_schedule {
+                scheduler.schedule_cancel(tid, priority);
+            }
+            scheduler.schedule(task_id, 0);
         }
+        wake_effects.dispatch();
         runtime.run_until_quiescent();
 
         assert!(
@@ -6868,14 +6871,19 @@ mod tests {
         assert_eq!(registry.lock().whereis("svc"), Some(child_task));
 
         // Stop the supervisor region and drive cancellation/finalization.
-        let tasks_to_schedule = runtime.state.cancel_request(
+        let cancel_effects = runtime.state.cancel_request(
             supervisor.region,
             &crate::types::CancelReason::user("stop"),
             None,
         );
-        for (task_id, priority) in tasks_to_schedule {
-            runtime.scheduler.lock().schedule(task_id, priority);
+        let (tasks_to_schedule, wake_effects) = cancel_effects.into_parts();
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            for (task_id, priority) in tasks_to_schedule {
+                scheduler.schedule_cancel(task_id, priority);
+            }
         }
+        wake_effects.dispatch();
         runtime.run_until_quiescent();
 
         assert!(
@@ -6958,14 +6966,19 @@ mod tests {
         runtime.run_until_quiescent();
 
         // Region stop must still clean the registry + resolve the lease.
-        let tasks_to_schedule = runtime.state.cancel_request(
+        let cancel_effects = runtime.state.cancel_request(
             supervisor.region,
             &crate::types::CancelReason::user("shutdown"),
             None,
         );
-        for (task_id, priority) in tasks_to_schedule {
-            runtime.scheduler.lock().schedule(task_id, priority);
+        let (tasks_to_schedule, wake_effects) = cancel_effects.into_parts();
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            for (task_id, priority) in tasks_to_schedule {
+                scheduler.schedule_cancel(task_id, priority);
+            }
         }
+        wake_effects.dispatch();
         runtime.run_until_quiescent();
 
         assert!(

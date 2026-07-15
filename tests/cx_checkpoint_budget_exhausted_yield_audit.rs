@@ -32,10 +32,14 @@
 //!      if let Some((reason, _, _)) = &budget_exhaustion {
 //!          inner.cancel_requested = true;
 //!          inner.fast_cancel.store(true, Release);
-//!          if let Some(existing) = &mut inner.cancel_reason {
-//!              existing.strengthen(reason);
+//!          let changed = if let Some(existing) = &mut inner.cancel_reason {
+//!              existing.strengthen(reason)
 //!          } else {
 //!              inner.cancel_reason = Some(reason.clone());
+//!              true
+//!          };
+//!          if changed {
+//!              inner.cancel_wakers_pending = true;
 //!          }
 //!      }
 //!      ```
@@ -245,12 +249,15 @@ fn checkpoint_slow_path_strengthens_existing_cancel_reason() {
     let body = source_window(&source, start, 8000);
 
     assert!(
-        body.contains("if let Some(existing) = &mut inner.cancel_reason {")
-            && body.contains("existing.strengthen(reason);"),
+        body.contains("let changed = if let Some(existing) = &mut inner.cancel_reason {")
+            && body.contains("existing.strengthen(reason)")
+            && body.contains("if changed {")
+            && body.contains("inner.cancel_wakers_pending = true;"),
         "REGRESSION: checkpoint slow path no longer strengthens \
-         existing cancel_reason. A prior cancel from a parent \
-         region would be overwritten by the budget-exhaustion \
-         self-cancel — wrong attribution, lost cause chain.",
+         existing cancel_reason or no longer marks changed \
+         cancellation Wakers pending. A prior cancel from a \
+         parent region could be overwritten, or a stronger \
+         budget-exhaustion request could remain unobserved.",
     );
 
     // The Else arm sets cancel_reason for the no-prior-cancel

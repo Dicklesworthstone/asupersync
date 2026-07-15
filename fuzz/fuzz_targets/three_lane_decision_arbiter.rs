@@ -482,8 +482,12 @@ fn burst_task_id(round: usize, lane_offset: u32, index: usize) -> TaskId {
 }
 
 fn request_cancel_mask_task(record: &mut TaskRecord, task_id: TaskId, phase: &str) {
+    let cancel_effects =
+        record.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE);
+    let (accepted, cancel_wakes) = cancel_effects.into_parts();
+    cancel_wakes.suppress();
     assert!(
-        record.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE),
+        accepted,
         "cancel-mask {phase} task {task_id:?} must accept its initial cancel request"
     );
 }

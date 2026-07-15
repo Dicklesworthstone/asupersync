@@ -127,6 +127,14 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+fn panic_err_arm(source: &str) -> &str {
+    let start = source.find("Err(payload) => {").expect("Err arm marker");
+    let tail = &source[start..];
+    let end_marker = "\n            }\n        }\n        drop(guard);";
+    let end = tail.find(end_marker).expect("Err arm semantic boundary") + end_marker.len();
+    &tail[..end]
+}
+
 #[test]
 fn worker_execute_wraps_poll_in_catch_unwind_with_assert_unwind_safe() {
     // Pin (link 1+2): the catch_unwind + AssertUnwindSafe pair
@@ -173,7 +181,8 @@ fn catch_unwind_err_arm_marks_task_outcome_panicked() {
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     assert!(
-        source.contains("record.complete(crate::types::Outcome::Panicked(panic_payload));"),
+        source.contains("let panic_outcome = crate::types::Outcome::Panicked(panic_payload);")
+            && source.contains("record.complete(panic_outcome);"),
         "REGRESSION: panic-in-task Err arm no longer marks \
          the task as Outcome::Panicked. The task stays in \
          non-terminal state — region.quiesce() loops forever \
@@ -191,7 +200,7 @@ fn catch_unwind_err_arm_uses_payload_to_string_for_message_extraction() {
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     assert!(
-        source.contains("crate::cx::scope::payload_to_string(&payload),"),
+        source.contains("let panic_message = crate::cx::scope::payload_to_string(&payload);"),
         "REGRESSION: panic-in-task Err arm no longer extracts \
          the panic message via payload_to_string. The Panicked \
          outcome carries an empty/default payload — observers \
@@ -209,17 +218,7 @@ fn catch_unwind_err_arm_wakes_dependents_so_parent_observes_panic() {
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     // The Err arm contains the wake_dependents call.
-    let err_marker = "Err(payload) => {";
-    let pos = source.find(err_marker).expect("Err arm marker");
-    // The Err arm body is bounded by the next "}\n" at the
-    // match-arm indentation. Take a generous window.
-    let window_end = (pos + 4000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[pos..safe_end];
+    let body = panic_err_arm(&source);
 
     assert!(
         body.contains("self.wake_dependents_locked(&state, waiters);"),
@@ -247,15 +246,7 @@ fn catch_unwind_err_arm_does_not_resume_unwind_or_abort() {
     // operator answer (b) 'takes down everything'.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let err_marker = "Err(payload) => {";
-    let pos = source.find(err_marker).expect("Err arm marker");
-    let window_end = (pos + 4000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[pos..safe_end];
+    let body = panic_err_arm(&source);
 
     let suspect_propagation = [
         "std::panic::resume_unwind(payload)",
@@ -370,9 +361,11 @@ fn factory_panic_path_resumes_unwind_only_after_region_cleanup() {
     // Pin (link 7): the factory-construction panic path in
     // cx/scope.rs (the `f` closure that BUILDS the future)
     // is the ONLY legitimate resume_unwind in the panic
-    // chain. It runs AFTER cancel_request + region.begin_close
-    // + advance_region_state cleanup so the parent's region
-    // tree isn't left in a broken state. Verify the cleanup
+    // chain. It runs AFTER cancel_request mutation/capture,
+    // region.begin_close + advance_region_state cleanup, and
+    // explicit suppression of captured cancellation observers/Wakers, so the
+    // parent's region tree isn't left in a broken state. This does not claim
+    // unrelated close/finalizer callbacks are absent. Verify the cleanup
     // happens before resume_unwind.
     let source = read("src/cx/scope.rs");
 
@@ -392,9 +385,13 @@ fn factory_panic_path_resumes_unwind_only_after_region_cleanup() {
     let preamble = &source[safe_start..resume_idx];
 
     assert!(
-        preamble.contains("state.cancel_request(child_region, &reason, None);"),
+        preamble
+            .contains("let cancel_effects = state.cancel_request(child_region, &reason, None);")
+            && preamble.contains("let (_, cancel_wakes) = cancel_effects.into_parts();")
+            && preamble.contains("cancel_wakes.suppress();"),
         "REGRESSION: factory-panic path no longer cancels the \
-         child region before resume_unwind. The region's tasks \
+         child region and explicitly suppresses its callback \
+         effects before resume_unwind. The region's tasks \
          are orphaned and the parent's region tree is left in \
          non-quiescent state during the unwind.",
     );

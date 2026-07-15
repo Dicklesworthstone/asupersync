@@ -229,9 +229,18 @@ fn run_schedule(seed: u64) -> ScheduleOutcome {
         for _ in 0..cancel_count {
             let idx = rng.next_u32(task_ids.len() as u32) as usize;
             let cancel_reason = CancelReason::new(CancelKind::User);
-            let _ = runtime
-                .state
-                .cancel_request(root, &cancel_reason, Some(task_ids[idx]));
+            let cancel_effects =
+                runtime
+                    .state
+                    .cancel_request(root, &cancel_reason, Some(task_ids[idx]));
+            let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                for (task_id, priority) in tasks_to_cancel {
+                    scheduler.schedule_cancel(task_id, priority);
+                }
+            }
+            wake_effects.dispatch();
         }
     }
 

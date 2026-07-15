@@ -34,7 +34,10 @@ fn repro_cancel_strengthening_bug() {
     // 2. Request cancel (Timeout) with loose budget
     test_section!("request_loose_cancel");
     let loose_budget = Budget::new().with_poll_quota(1000);
-    task.request_cancel_with_budget(CancelReason::timeout(), loose_budget);
+    let loose_cancel_effects =
+        task.request_cancel_with_budget(CancelReason::timeout(), loose_budget);
+    let (_newly_cancelled, loose_cancel_wakes) = loose_cancel_effects.into_parts();
+    loose_cancel_wakes.dispatch();
 
     // 3. Acknowledge cancel -> Cancelling state
     task.acknowledge_cancel();
@@ -57,7 +60,10 @@ fn repro_cancel_strengthening_bug() {
     // 4. Request stronger cancel (Shutdown) with tight budget
     test_section!("request_tight_cancel");
     let tight_budget = Budget::new().with_poll_quota(10);
-    task.request_cancel_with_budget(CancelReason::shutdown(), tight_budget);
+    let tight_cancel_effects =
+        task.request_cancel_with_budget(CancelReason::shutdown(), tight_budget);
+    let (_newly_cancelled, tight_cancel_wakes) = tight_cancel_effects.into_parts();
+    tight_cancel_wakes.dispatch();
 
     // 5. Verify task state has tight budget
     test_section!("verify_task_budget");

@@ -719,13 +719,15 @@ fn io_cancel_009_io_op_cancel_clears_obligation() {
     }
 
     let cancel_reason = CancelReason::shutdown();
-    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task, priority);
         }
     }
+    wake_effects.dispatch();
 
     let _ = io_op.cancel(&mut runtime.state).expect("cancel io op");
     runtime.run_until_quiescent();

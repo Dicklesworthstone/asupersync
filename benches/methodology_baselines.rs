@@ -195,8 +195,10 @@ fn bench_task_cancellation(c: &mut Criterion) {
                         let reason = CancelReason::new(CancelKind::User);
 
                         let start = std::time::Instant::now();
-                        let tasks = state.cancel_request(root, &reason, None);
+                        let effects = state.cancel_request(root, &reason, None);
                         total += start.elapsed();
+                        let (tasks, cancel_wakes) = effects.into_parts();
+                        cancel_wakes.suppress();
                         black_box(tasks);
                     }
                     total

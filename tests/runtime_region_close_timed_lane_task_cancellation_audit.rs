@@ -21,8 +21,8 @@
 //!   2. **First pass — region transition**: cancel_request walks
 //!      the region subtree (state.rs:2631-2653). For each
 //!      affected region it calls
-//!      `region.begin_close(Some(region_reason))` to transition
-//!      the region to Closing state and emits a
+//!      the subscriber-free RegionRecord close transition to
+//!      enter Closing state and emits a
 //!      `RegionCloseBegin` trace event. The lane the task
 //!      is queued on is irrelevant here — close is a region-
 //!      state transition, not a per-lane operation.
@@ -30,7 +30,12 @@
 //!   3. **Second pass — per-task cancel propagation**
 //!      (state.rs:2682): for every task in every closing
 //!      region, `task.request_cancel_with_budget(task_reason,
-//!      task_budget)` is invoked. This sets:
+//!      task_budget)` is invoked. Under the task lock it
+//!      mutates state and snapshots Wakers into an opaque
+//!      effects token; the outer walk aggregates those effects
+//!      without invoking their auxiliary cancellation observers/Wakers.
+//!      This narrow boundary does not cover later region finalizers or close
+//!      waiters. The task mutation sets:
 //!        - `inner.cancel_requested = true`
 //!        - `inner.fast_cancel.store(true, Release)`
 //!          and records the cleanup budget. **No mid-poll
@@ -62,13 +67,13 @@
 //!      via `?` and the future yields naturally to the
 //!      scheduler.
 //!
-//!   6. **Sleep parking — cancel-waker wake**: tasks parked
+//!   6. **Sleep parking — post-lock cancel-waker wake**: tasks parked
 //!      on a Sleep::after(deadline) future (typical timed-lane
 //!      placement) register a cancel-aware waker via
-//!      `inner.cancel_waker`. Setting fast_cancel from
-//!      request_cancel_with_budget triggers the cancel waker,
-//!      which wakes the task and routes it to the cancel
-//!      lane. The Sleep future itself is irrelevant — the
+//!      `inner.cancel_waker`. After releasing RuntimeState, the
+//!      scheduler publishes all captured task IDs to the cancel
+//!      lane and only then dispatches the snapshotted Wakers.
+//!      The Sleep future itself is irrelevant — the
 //!      cancel-aware Cx::checkpoint returns Err before the
 //!      timer fires.
 //!
@@ -82,6 +87,11 @@
 //!     Err and the future yields).
 //!   - The task DOES get cancelled at next checkpoint via the
 //!     standard cooperative-cancel protocol.
+//!
+//! This audit is narrow: it covers valid task routes and auxiliary
+//! cancellation Wakers. It does not claim that synchronous finalizers,
+//! metrics, tracing subscribers, region-close Wakers, or arbitrary payload
+//! destructors are callback-free, and it makes no elapsed-time guarantee.
 //!
 //! Mask interaction (per AGENTS.md "cancellation is a
 //! protocol"): a Cx::with_mask block defers the *acknowledgment*
@@ -118,15 +128,15 @@ fn read(rel: &str) -> String {
 #[test]
 fn cancel_request_first_pass_transitions_regions_to_closing() {
     // Pin (link 1+2): cancel_request walks the region subtree
-    // and calls region.begin_close(Some(region_reason)) on each.
+    // and calls the subscriber-free close transition on each.
     // This is what triggers the Closing state transition that
     // gates new spawns and starts quiescence.
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("if region.begin_close(Some(region_reason.clone())) {"),
+        source.contains("if region.begin_close_without_subscriber(Some(region_reason.clone())) {"),
         "REGRESSION: state.rs cancel_request first pass no longer \
-         transitions region to Closing via begin_close. Without \
+         transitions region to Closing via the subscriber-free boundary. Without \
          this transition, the region stays Open after close() — \
          close-quiescence is silently violated.",
     );
@@ -143,9 +153,11 @@ fn cancel_request_second_pass_calls_request_cancel_with_budget_per_task() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("task.request_cancel_with_budget(task_reason.clone(), task_budget)"),
+        source.contains("task.request_cancel_with_budget_and_publication(")
+            && source.contains("let ((newly_cancelled, changed, publication), task_wakes) =",)
+            && source.contains("wakes.merge(task_wakes);"),
         "REGRESSION: state.rs cancel_request second pass no \
-         longer calls task.request_cancel_with_budget. Without \
+         longer captures and merges task cancellation effects. Without \
          this call, tasks in the timed lane (or any lane) never \
          observe the parent region's cancel — they continue \
          running to completion in violation of close-quiescence.",
@@ -349,23 +361,48 @@ fn region_state_after_begin_close_is_closing_not_open() {
 }
 
 #[test]
-fn cancel_request_returns_tasks_to_cancel_for_lane_routing() {
-    // Pin (link 4 routing audit): cancel_request returns
-    // `Vec<(TaskId, u8)>` so the caller can feed each tuple
-    // into inject_cancel for cancel-lane routing. Without this
-    // return type, the scheduler has no way to know which
-    // tasks need cancel-lane promotion.
+fn cancel_request_effects_publish_tasks_before_waker_dispatch() {
+    // Pin (link 4 routing audit): cancel_request couples the
+    // callback-free task list to opaque Waker effects. The
+    // scheduler takes deferred batches under RuntimeState,
+    // releases that guard, publishes every task ID, and only
+    // then dispatches Wakers.
     let source = read("src/runtime/state.rs");
 
     assert!(
         source.contains("pub fn cancel_request(")
-            && (source.contains("-> Vec<(TaskId, u8)>")
-                || source.contains("-> Vec<(TaskId, u8)> {")),
+            && source.contains("-> CancellationEffects<Vec<(TaskId, u8)>>")
+            && source.contains("CancellationEffects::new(tasks_to_cancel, wakes)"),
         "REGRESSION: cancel_request signature no longer returns \
-         Vec<(TaskId, u8)>. The scheduler needs this list to \
-         promote each task to the cancel lane via \
-         inject_cancel — without the return value, lane \
-         routing is silently dropped.",
+         task IDs coupled to opaque wake effects. The post-lock \
+         lane-publication boundary is silently dropped.",
+    );
+
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
+    let marker = "fn drain_deferred_cancel_dispatches(&self) {";
+    let start = scheduler.find(marker).expect("deferred cancel drain");
+    let body = &scheduler[start..(start + 1800).min(scheduler.len())];
+    let take = body
+        .find("state.take_deferred_cancel_dispatches()")
+        .expect("take effects under state guard");
+    let release = take
+        + body[take..]
+            .find("\n        };")
+            .expect("release RuntimeState guard");
+    let publish = body
+        .find("self.publish_deferred_cancel_task(task_id, priority)")
+        .expect("publish deferred cancel task");
+    let dispatch = body
+        .find("batch_wakes.dispatch();")
+        .expect("dispatch deferred cancel Wakers");
+    assert!(
+        body.contains("let batches = {")
+            && take < release
+            && release < publish
+            && publish < dispatch
+            && body.matches(".dispatch();").count() == 1,
+        "REGRESSION: deferred cancel effects are no longer taken under the \
+         state guard, then published after guard release before Waker dispatch.",
     );
 }
 

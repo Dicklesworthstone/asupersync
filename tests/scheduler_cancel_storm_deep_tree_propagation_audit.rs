@@ -74,7 +74,8 @@
 //!          let region_reason = ...;
 //!          // build chain from parent's reason in region_reasons map
 //!          if let Some(region) = self.regions.get(rid.arena_index()) {
-//!              if region.begin_close(Some(region_reason.clone())) { ... }
+//!              if region.begin_close_without_subscriber(
+//!                  Some(region_reason.clone())) { ... }
 //!          }
 //!          region_reasons.insert(rid, region_reason.clone());
 //!      }
@@ -90,8 +91,11 @@
 //!          // gather task_id_buf
 //!          for &task_id in &task_id_buf {
 //!              self.update_task(task_id, |task| {
-//!                  task.request_cancel_with_budget(...);
+//!                  let effects = task.request_cancel_with_budget(...);
+//!                  // Return effects; do not invoke callbacks here.
 //!              });
+//!              let (newly_cancelled, task_wakes) = effects.into_parts();
+//!              wakes.merge(task_wakes);
 //!          }
 //!      }
 //!      ```
@@ -296,6 +300,16 @@ fn cancel_request_second_pass_is_single_iteration_no_subtree_recollect() {
         .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
+
+    assert!(
+        body.contains("task.request_cancel_with_budget_and_publication(")
+            && body.contains("let ((newly_cancelled, changed, publication), task_wakes) =",)
+            && body.contains("wakes.merge(task_wakes);"),
+        "REGRESSION: the deep-tree second pass no longer mutates/captures \
+         cancellation effects per task without dispatching their auxiliary \
+         observers/Wakers. Waker \
+         reentrancy under the outer traversal can invalidate the O(N) walk.",
+    );
 
     let suspect_recollect = [
         "self.collect_region_and_descendants_with_depth(",

@@ -79,12 +79,64 @@ pub struct TaskHandle<T> {
     terminal_consumed: bool,
 }
 
-fn strengthen_cancel_reason(slot: &RwLock<Option<CancelReason>>, incoming: &CancelReason) {
-    let mut cached = slot.write();
-    if let Some(existing) = cached.as_mut() {
-        existing.strengthen(incoming);
+fn apply_or_defer_cancel_reason(
+    fallback_task_id: TaskId,
+    admitted: Option<&crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
+    fallback_inner: &Weak<RwLock<CxInner>>,
+    requested: &RwLock<Option<CancelReason>>,
+    reason: &CancelReason,
+) {
+    // The reason-cache write lock is the admission-publication linearization
+    // point. Admission holds the same lock while replaying cached cancellation
+    // and marking the canonical task runnable-published.
+    let mut cached = requested.write();
+    let changed = if let Some(existing) = cached.as_mut() {
+        existing.strengthen(reason)
     } else {
-        *cached = Some(incoming.clone());
+        *cached = Some(reason.clone());
+        true
+    };
+    let strongest_requested = cached
+        .as_ref()
+        .expect("a cancellation cache contains its strongest reason")
+        .clone();
+
+    let (task_id, inner, slot_gateway) = if let Some(slot) = admitted {
+        let Some(admitted) = slot.get().filter(|task| task.is_published()) else {
+            // Admission will replay the cache and own the initial cancel-lane
+            // publication. Never enqueue a provisional identity.
+            return;
+        };
+        let Some(inner) = admitted.cx_inner.upgrade() else {
+            return;
+        };
+        (admitted.task_id, inner, slot.cancel_gateway())
+    } else {
+        let Some(inner) = fallback_inner.upgrade() else {
+            return;
+        };
+        (fallback_task_id, inner, None)
+    };
+
+    // Checkpoints observe cancellation immediately, but the caller/Drop stack
+    // must never snapshot or invoke Wakers. The runtime-owned command consumer
+    // performs the authoritative TaskRecord transition, publishes the cancel
+    // lane, and only then dispatches Wakers.
+    let (gateway, effective_reason, should_enqueue) = {
+        let mut lock = inner.write();
+        strengthen_cancel_reason_locked(&mut lock, &strongest_requested);
+        let gateway = slot_gateway.or_else(|| lock.cancel_gateway.clone());
+        let effective_reason = lock.cancel_reason.clone().unwrap_or(strongest_requested);
+        // A structurally invalid delegated route is not self-requeued by the
+        // consumer. Once an operator repairs the route, an explicit repeat of
+        // the same abort reason is therefore a fresh retry trigger. Published
+        // tasks retain the ordinary same-reason coalescing behavior.
+        let should_enqueue = changed || lock.runnable_publication.is_delegated_cancel();
+        (gateway, effective_reason, should_enqueue)
+    };
+    drop(cached);
+    if should_enqueue && let Some(gateway) = gateway {
+        let _ = gateway.enqueue_handle_cancel(task_id, effective_reason);
     }
 }
 
@@ -100,20 +152,81 @@ fn strengthen_cancelled_result<T>(
     result
 }
 
-pub(crate) fn apply_cancel_reason(
-    inner: &RwLock<CxInner>,
-    reason: &CancelReason,
-) -> smallvec::SmallVec<[Arc<crate::types::task_context::CancelWaker>; 4]> {
-    let mut lock = inner.write();
+fn strengthen_cancel_reason_locked(lock: &mut CxInner, reason: &CancelReason) {
+    let newly_requested = !lock.cancel_requested;
     lock.cancel_requested = true;
     lock.fast_cancel
         .store(true, std::sync::atomic::Ordering::Release);
-    if let Some(existing) = &mut lock.cancel_reason {
-        existing.strengthen(reason);
+    let reason_changed = if let Some(existing) = &mut lock.cancel_reason {
+        existing.strengthen(reason)
     } else {
         lock.cancel_reason = Some(reason.clone());
+        true
+    };
+    let changed = newly_requested || reason_changed;
+    if changed && !lock.cancel_waker_registry_closed {
+        lock.cancel_wakers_pending = true;
     }
-    lock.cancel_waker_snapshot()
+}
+
+/// Applies a cached pre-admission abort, snapshots the task's effective
+/// cancellation priority, and publishes its first runnable lane while the Cx
+/// state is still locked. A concurrent region/task cancellation therefore
+/// linearizes either before the snapshot (and selects the cancel lane) or
+/// after runnable publication (and performs an ordinary post-publication
+/// cancel transition).
+pub(crate) fn publish_admitted_cancel_state(
+    inner: &RwLock<CxInner>,
+    cached_reason: Option<&CancelReason>,
+    publish_lane: impl FnOnce(Option<u8>),
+) -> crate::types::task_context::CancelWakeEffects {
+    let mut lock = inner.write();
+    if let Some(reason) = cached_reason {
+        strengthen_cancel_reason_locked(&mut lock, reason);
+    }
+    let effective_priority = lock.cancel_requested.then(|| {
+        lock.cancel_reason
+            .as_ref()
+            .map_or(u8::MAX, |reason| reason.cleanup_budget().priority)
+    });
+    publish_lane(effective_priority);
+    lock.runnable_publication.mark_published();
+    let wakes = if lock.cancel_requested && lock.cancel_wakers_pending {
+        let wakes = lock.cancel_waker_snapshot();
+        lock.cancel_wakers_pending = false;
+        crate::types::task_context::CancelWakeEffects::new(wakes)
+    } else {
+        crate::types::task_context::CancelWakeEffects::empty()
+    };
+    #[cfg(feature = "tracing-integration")]
+    let pending_trace = lock.pending_task_cancel_trace.take();
+    drop(lock);
+    #[cfg(feature = "tracing-integration")]
+    let wakes = {
+        let mut wakes = wakes;
+        if let Some(trace) = pending_trace {
+            trace.append_to(&mut wakes);
+        }
+        wakes
+    };
+    wakes
+}
+
+/// Replays a managed pre-admission handle abort without exposing the task to
+/// a runnable lane or snapshotting Wakers. The admission handoff enqueues an
+/// authoritative cancellation command immediately afterward; its runtime-side
+/// consumer transitions the TaskRecord before publishing the first cancel
+/// lane and dispatching any Waker.
+pub(crate) fn prepare_admitted_handle_cancel_state(
+    inner: &RwLock<CxInner>,
+    cached_reason: &CancelReason,
+) -> CancelReason {
+    let mut lock = inner.write();
+    strengthen_cancel_reason_locked(&mut lock, cached_reason);
+    lock.runnable_publication.delegate_cancel();
+    lock.cancel_reason
+        .clone()
+        .unwrap_or_else(|| cached_reason.clone())
 }
 
 impl<T> TaskHandle<T> {
@@ -142,10 +255,10 @@ impl<T> TaskHandle<T> {
     /// the canonical task context as soon as admission publishes it.
     #[inline]
     #[doc(hidden)]
-    pub fn new_pending(
+    pub(crate) fn new_pending(
         provisional_task_id: TaskId,
         receiver: oneshot::Receiver<Result<T, JoinError>>,
-        admitted: std::sync::Arc<std::sync::OnceLock<crate::runtime::spawn_mailbox::AdmittedTask>>,
+        admitted: std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
     ) -> Self {
         let requested_cancel_reason =
             crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted);
@@ -237,6 +350,7 @@ impl<T> TaskHandle<T> {
         let terminal_state = &mut self.terminal_consumed;
         JoinFuture {
             inner: receiver.recv_uninterruptible(),
+            fallback_task_id: self.task_id,
             cx_inner,
             admitted: self.admitted.as_deref(),
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
@@ -273,6 +387,7 @@ impl<T> TaskHandle<T> {
         let terminal_state = &mut self.terminal_consumed;
         JoinFuture {
             inner: receiver.recv_uninterruptible(),
+            fallback_task_id: self.task_id,
             cx_inner,
             admitted: self.admitted.as_deref(),
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
@@ -326,15 +441,21 @@ impl<T> TaskHandle<T> {
     ///
     /// If a reason is already present, this request strengthens it using
     /// [`CancelReason::strengthen`], preserving deterministic attribution.
+    /// Runtime-managed handles enqueue a callback-free command so cancel-lane
+    /// publication and Waker dispatch occur on the runtime side. A manually
+    /// constructed handle whose `CxInner` has no spawn gateway updates
+    /// checkpoint-visible cancellation state only; it does not promise to
+    /// wake a parked task, and its owner must drive authoritative
+    /// [`crate::runtime::RuntimeState`] cancellation explicitly.
     #[inline]
     pub fn abort_with_reason(&self, reason: CancelReason) {
-        strengthen_cancel_reason(&self.requested_cancel_reason, &reason);
-        if let Some(inner) = self.live_inner() {
-            let cancel_wakers = apply_cancel_reason(&inner, &reason);
-            for waker in cancel_wakers {
-                waker.wake_by_ref();
-            }
-        }
+        apply_or_defer_cancel_reason(
+            self.task_id,
+            self.admitted.as_deref(),
+            &self.inner,
+            &self.requested_cancel_reason,
+            &reason,
+        );
     }
 
     #[inline]
@@ -352,6 +473,7 @@ impl<T> TaskHandle<T> {
 /// cleanup in races and timeouts.
 pub struct JoinFuture<'a, T> {
     inner: oneshot::RecvUninterruptibleFuture<'a, Result<T, JoinError>>,
+    fallback_task_id: TaskId,
     cx_inner: Weak<RwLock<CxInner>>,
     admitted: Option<&'a crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
     requested_cancel_reason: &'a RwLock<Option<CancelReason>>,
@@ -377,13 +499,13 @@ impl<T> JoinFuture<'_, T> {
     }
 
     fn abort_with_reason(&self, reason: CancelReason) {
-        strengthen_cancel_reason(self.requested_cancel_reason, &reason);
-        if let Some(inner) = self.live_inner() {
-            let cancel_wakers = apply_cancel_reason(&inner, &reason);
-            for waker in cancel_wakers {
-                waker.wake_by_ref();
-            }
-        }
+        apply_or_defer_cancel_reason(
+            self.fallback_task_id,
+            self.admitted,
+            &self.cx_inner,
+            self.requested_cancel_reason,
+            &reason,
+        );
     }
 
     /// Prevents drop-triggered abort for internal combinator control flow.
@@ -812,6 +934,34 @@ mod tests {
     }
 
     #[test]
+    fn late_abort_cannot_reopen_completed_cancel_waker_registry() {
+        init_test("late_abort_cannot_reopen_completed_cancel_waker_registry");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(10, 20));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&cx.inner));
+
+        let retired = cx.inner.write().take_cancel_wakers();
+        drop(retired);
+        handle.abort_with_reason(CancelReason::shutdown());
+
+        let inner = cx.inner.read();
+        assert!(inner.cancel_requested);
+        assert!(
+            inner
+                .cancel_reason
+                .as_ref()
+                .is_some_and(|reason| reason.is_kind(CancelKind::Shutdown))
+        );
+        assert!(inner.cancel_waker_registry_closed);
+        assert!(
+            !inner.cancel_wakers_pending,
+            "a terminal context cannot acquire new Waker publication debt"
+        );
+        crate::test_complete!("late_abort_cannot_reopen_completed_cancel_waker_registry");
+    }
+
+    #[test]
     fn abort_reason_survives_task_context_teardown() {
         init_test("abort_reason_survives_task_context_teardown");
         let cx = test_cx();
@@ -849,10 +999,10 @@ mod tests {
         let mut handle = TaskHandle::new_pending(provisional, rx, Arc::clone(&admitted));
 
         admitted
-            .set(crate::runtime::spawn_mailbox::AdmittedTask {
-                task_id: canonical,
-                cx_inner: Arc::downgrade(&cx.inner),
-            })
+            .set(crate::runtime::spawn_mailbox::AdmittedTask::published(
+                canonical,
+                Arc::downgrade(&cx.inner),
+            ))
             .expect("admitted identity publishes");
         cx.set_cancel_reason(CancelReason::shutdown());
         drop(tx);
@@ -885,10 +1035,10 @@ mod tests {
 
         let join = handle.join(&cx);
         admitted
-            .set(crate::runtime::spawn_mailbox::AdmittedTask {
-                task_id: canonical,
-                cx_inner: Arc::downgrade(&cx.inner),
-            })
+            .set(crate::runtime::spawn_mailbox::AdmittedTask::published(
+                canonical,
+                Arc::downgrade(&cx.inner),
+            ))
             .expect("late admitted identity publishes");
         cx.set_cancel_reason(CancelReason::timeout());
         drop(tx);

@@ -161,18 +161,19 @@ impl E2eLabHarness {
     /// Cancel a region with a reason.
     pub fn cancel_region(&mut self, region: RegionId, reason: &'static str) -> usize {
         let cancel_reason = asupersync::types::CancelReason::user(reason);
-        let tasks = self
+        let cancel_effects = self
             .runtime
             .state
             .cancel_request(region, &cancel_reason, None);
-        let mut count = 0usize;
-        for (task, priority) in tasks {
-            self.runtime
-                .scheduler
-                .lock()
-                .schedule_cancel(task, priority);
-            count += 1;
+        let (tasks, wake_effects) = cancel_effects.into_parts();
+        let count = tasks.len();
+        {
+            let mut scheduler = self.runtime.scheduler.lock();
+            for (task, priority) in tasks {
+                scheduler.schedule_cancel(task, priority);
+            }
         }
+        wake_effects.dispatch();
         count
     }
 

@@ -33,8 +33,14 @@
 //!
 //!   3. **`Scope::region` future drop — CANCELS ALL CHILDREN**
 //!      (structured concurrency). RegionRunner::Drop calls
-//!      `state.cancel_request(child_region, ...)` which
-//!      propagates cancel to all tasks in the region.
+//!      `state.cancel_request(child_region, ...)`, queues the
+//!      returned auxiliary cancellation observer/Waker effects,
+//!      and later scheduler dispatch runs only after RuntimeState
+//!      is released.
+//!      This propagates cancel to all tasks in the region.
+//!      This statement does not cover close waiters, finalizers,
+//!      region metrics, tracing, or destructors reached by the
+//!      subsequent state-advance call.
 //!      Operators "region-bound tasks should abort on
 //!      region drop" maps onto this path.
 //!
@@ -77,7 +83,8 @@
 //!              if let Some(state) = self.state.take() {
 //!                  let reason = CancelReason::fail_fast()
 //!                      .with_region(self.child_region);
-//!                  let _ = state.cancel_request(self.child_region, &reason, None);
+//!                  let effects = state.cancel_request(self.child_region, &reason, None);
+//!                  state.defer_cancel_dispatch(effects);
 //!                  if let Some(region) = state.region(self.child_region) {
 //!                      region.begin_close(None);
 //!                  }
@@ -313,9 +320,13 @@ fn region_runner_drop_cancels_child_region_for_structured_concurrency() {
 
     assert!(
         body.contains("CancelReason::fail_fast().with_region(self.child_region);")
-            && body.contains("state.cancel_request(self.child_region, &reason, None);"),
+            && body
+                .contains("let effects = state.cancel_request(self.child_region, &reason, None);")
+            && body.contains("state.defer_cancel_dispatch(effects);")
+            && !body.contains(".dispatch()")
+            && !body.contains("wake_by_ref("),
         "REGRESSION: RegionRunner::Drop no longer cancels \
-         the child region. Region-drop-cancels-children \
+         the child region through deferred post-lock effects. Region-drop-cancels-children \
          semantic is broken — orphan tasks under panic-\
          above-region.",
     );

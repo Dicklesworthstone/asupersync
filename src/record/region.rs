@@ -1086,6 +1086,26 @@ impl RegionRecord {
     /// the spec-level admission-after-close-begin oracle now has a
     /// firm guarantee.
     pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {
+        let transitioned = self.begin_close_transition(reason);
+        if transitioned {
+            self.trace_state_change(RegionState::Closing);
+        }
+        transitioned
+    }
+
+    /// Begins closing without invoking the tracing subscriber.
+    ///
+    /// `RuntimeState::cancel_request` uses this mutation-only variant while its
+    /// outer state lock is held. That path records the authoritative
+    /// `RegionCloseBegin` event in the runtime trace buffer. It intentionally
+    /// omits the external `"region state transition"` subscriber event and Span
+    /// update for `Closing`: replaying only that receipt after unlock could race
+    /// a later `Draining`/`Closed` transition and rewind observer state.
+    pub(crate) fn begin_close_without_subscriber(&self, reason: Option<CancelReason>) -> bool {
+        self.begin_close_transition(reason)
+    }
+
+    fn begin_close_transition(&self, reason: Option<CancelReason>) -> bool {
         let mut inner = self.inner.write();
         if self.state.load() == RegionState::Closed {
             return false;
@@ -1103,9 +1123,6 @@ impl RegionRecord {
             .state
             .transition(RegionState::Open, RegionState::Closing);
         drop(inner);
-        if transitioned {
-            self.trace_state_change(RegionState::Closing);
-        }
         transitioned
     }
 

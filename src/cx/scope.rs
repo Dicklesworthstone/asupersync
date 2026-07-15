@@ -201,7 +201,8 @@ impl<Fut> Drop for RegionRunner<'_, Fut> {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
             let reason = CancelReason::fail_fast().with_region(self.child_region);
-            let _ = state.cancel_request(self.child_region, &reason, None);
+            let effects = state.cancel_request(self.child_region, &reason, None);
+            state.defer_cancel_dispatch(effects);
             if let Some(region) = state.region(self.child_region) {
                 region.begin_close(None);
             }
@@ -765,7 +766,7 @@ impl<P: Policy> Scope<'_, P> {
             Ok(fut) => fut,
             Err(payload) => {
                 let reason = CancelReason::fail_fast().with_region(child_region);
-                let _ = state.cancel_request(child_region, &reason, None);
+                let cancel_effects = state.cancel_request(child_region, &reason, None);
 
                 // Factory panicked after `create_stored_task(...)` returned the
                 // `(TaskHandle, StoredTask)` pair but before the StoredTask
@@ -814,6 +815,8 @@ impl<P: Policy> Scope<'_, P> {
                     region.begin_close(None);
                 }
                 state.advance_region_state(child_region);
+                let (_, cancel_wakes) = cancel_effects.into_parts();
+                cancel_wakes.suppress();
                 std::panic::resume_unwind(payload);
             }
         };
@@ -842,14 +845,16 @@ impl<P: Policy> Scope<'_, P> {
                 }
             }
             Outcome::Cancelled(reason) => {
-                let _ = state.cancel_request(child_region, reason, None);
+                let effects = state.cancel_request(child_region, reason, None);
+                state.defer_cancel_dispatch(effects);
                 if let Some(region) = state.region(child_region) {
                     region.begin_close(None);
                 }
             }
             Outcome::Err(_) | Outcome::Panicked(_) => {
                 let reason = CancelReason::fail_fast().with_region(child_region);
-                let _ = state.cancel_request(child_region, &reason, None);
+                let effects = state.cancel_request(child_region, &reason, None);
+                state.defer_cancel_dispatch(effects);
                 if let Some(region) = state.region(child_region) {
                     region.begin_close(None);
                 }
@@ -3010,7 +3015,8 @@ mod tests {
         let grandchild_task_id = grandchild_handle.task_id();
 
         let cancel_reason = CancelReason::shutdown().with_region(root);
-        let cancelled = state.cancel_request(root, &cancel_reason, None);
+        let effects = state.cancel_request(root, &cancel_reason, None);
+        let (cancelled, cancel_wakes) = effects.into_parts();
         assert!(
             cancelled
                 .iter()
@@ -3023,6 +3029,7 @@ mod tests {
                 .any(|(task_id, _)| *task_id == grandchild_task_id),
             "parent cancellation must reach grandchild task"
         );
+        cancel_wakes.dispatch();
 
         let grandchild_tasks_before_failed_spawn = state
             .region(grandchild)

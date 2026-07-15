@@ -583,11 +583,15 @@ fn request_lab_region_cancel(
     region_id: RegionId,
     reason: &CancelReason,
 ) {
-    let tasks_to_schedule = runtime.state.cancel_request(region_id, reason, None);
-    let mut scheduler = runtime.scheduler.lock();
-    for (task_id, priority) in tasks_to_schedule {
-        scheduler.schedule_cancel(task_id, priority);
+    let effects = runtime.state.cancel_request(region_id, reason, None);
+    let (tasks_to_schedule, wake_effects) = effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in tasks_to_schedule {
+            scheduler.schedule_cancel(task_id, priority);
+        }
     }
+    wake_effects.dispatch();
 }
 
 async fn join_runtime_task<T>(

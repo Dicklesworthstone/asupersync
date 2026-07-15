@@ -279,7 +279,10 @@ fn golden_runtime_state_region_lifecycle() {
         .unwrap();
     let _r3 = state.create_child_region(r1, Budget::INFINITE).unwrap();
 
-    let cancelled = state.cancel_request(r2, &CancelReason::timeout(), None);
+    let cancel_effects = state.cancel_request(r2, &CancelReason::timeout(), None);
+    // This owned-state fixture has no scheduler or installed Wakers.
+    let (cancelled, wake_effects) = cancel_effects.into_parts();
+    wake_effects.dispatch();
 
     let cs = checksum(&[
         state.live_region_count() as u64,
@@ -1029,7 +1032,10 @@ fn run_deterministic_workload(seed: u64) -> u64 {
         .unwrap();
     let _r3 = lab.state.create_child_region(r1, Budget::INFINITE).unwrap();
 
-    let _ = lab.state.cancel_request(r2, &CancelReason::timeout(), None);
+    let cancel_effects = lab.state.cancel_request(r2, &CancelReason::timeout(), None);
+    // This region-only fixture has no scheduled tasks or installed Wakers.
+    let (_cancelled, wake_effects) = cancel_effects.into_parts();
+    wake_effects.dispatch();
 
     // Use DetRng seeded from the lab seed to produce seed-dependent values
     let mut rng = DetRng::new(seed);

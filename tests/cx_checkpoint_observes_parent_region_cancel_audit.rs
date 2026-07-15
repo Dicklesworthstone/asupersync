@@ -28,7 +28,10 @@
 //!   2. **Per-task cancel propagation** (state.rs:2682): for
 //!      every task in every closing region,
 //!      `task.request_cancel_with_budget(reason, budget)` is
-//!      called. This sets:
+//!      called. Under the task lock this mutates state and
+//!      snapshots Wakers into an opaque effects token. The
+//!      outer runtime aggregates those tokens without
+//!      dispatching callbacks. This sets:
 //!        - `inner.cancel_requested = true`
 //!        - `inner.fast_cancel.store(true, Release)`
 //!        - `inner.cancel_reason = Some(reason)` (or
@@ -105,10 +108,16 @@ fn region_cancel_propagation_sets_fast_cancel_release_on_each_task() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("task.request_cancel_with_budget(task_reason.clone(), task_budget)"),
+        source.contains("task.request_cancel_with_budget_and_publication(")
+            && source.contains("let ((newly_cancelled, changed, publication), task_wakes) =",)
+            && source.contains("wakes.merge(task_wakes);")
+            && source.contains("CancellationEffects::new(tasks_to_cancel, wakes)"),
         "REGRESSION: state.rs cancel-region-subtree no longer \
-         calls task.request_cancel_with_budget. Without this \
-         call, a parent-region cancel doesn't reach the \
+         captures task.request_cancel_with_budget effects \
+         without dispatching their auxiliary cancellation observers/Wakers \
+         under the task/state \
+         mutation boundary. Without this call, a parent-\
+         region cancel doesn't reach the \
          child task's CxInner — the task's checkpoint() never \
          observes the cancel and the task continues running \
          orphaned even though the parent has logically been \

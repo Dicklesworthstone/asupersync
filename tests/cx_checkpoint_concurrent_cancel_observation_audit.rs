@@ -282,14 +282,15 @@ fn cancel_publisher_acquires_inner_write_for_cancel_state_publish() {
     // lock — neither can observe a half-published state.
     let source = read("src/record/task.rs");
 
-    let fn_marker = "pub fn request_cancel_with_budget(";
+    let fn_marker = "pub(crate) fn request_cancel_with_budget_and_publication(";
     let start = source
         .find(fn_marker)
-        .expect("request_cancel_with_budget fn");
+        .expect("request_cancel_with_budget_and_publication fn");
     let body = source_window(&source, start, 4000);
 
     assert!(
-        body.contains("let mut guard = inner.write();"),
+        body.contains("let mut inner_guard = cx_inner.as_ref().map(|inner| inner.write());")
+            && body.contains("if let Some(guard) = inner_guard.as_mut() {"),
         "REGRESSION: request_cancel_with_budget no longer \
          acquires the inner write lock. The publish is no \
          longer serialized with checkpoint slow path — \

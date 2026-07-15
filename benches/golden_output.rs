@@ -611,7 +611,8 @@ fn scenario_region_cancel_propagation() -> String {
     }
 
     let reason = CancelReason::new(CancelKind::User);
-    let affected = state.cancel_request(root, &reason, None);
+    let (affected, cancel_wakes) = state.cancel_request(root, &reason, None).into_parts();
+    cancel_wakes.suppress();
 
     let mut output = String::new();
     write!(output, "children:{},", children.len()).expect("write");

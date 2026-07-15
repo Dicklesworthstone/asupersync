@@ -162,7 +162,9 @@ fn bench_cancel_protocol(c: &mut Criterion) {
                 (state, region, reason)
             },
             |(mut state, region, reason)| {
-                let tasks = state.cancel_request(region, &reason, None);
+                let (tasks, cancel_wakes) =
+                    state.cancel_request(region, &reason, None).into_parts();
+                cancel_wakes.suppress();
                 black_box(tasks)
             },
             BatchSize::SmallInput,
@@ -187,7 +189,9 @@ fn bench_cancel_protocol(c: &mut Criterion) {
                     },
                     |(mut state, regions, reason)| {
                         for &region in &regions {
-                            let tasks = state.cancel_request(region, &reason, None);
+                            let (tasks, cancel_wakes) =
+                                state.cancel_request(region, &reason, None).into_parts();
+                            cancel_wakes.suppress();
                             black_box(&tasks);
                         }
                     },
@@ -223,7 +227,9 @@ fn bench_cancel_protocol(c: &mut Criterion) {
                         (state, region, reason)
                     },
                     |(mut state, region, reason)| {
-                        let tasks = state.cancel_request(region, &reason, None);
+                        let (tasks, cancel_wakes) =
+                            state.cancel_request(region, &reason, None).into_parts();
+                        cancel_wakes.suppress();
                         black_box(tasks)
                     },
                     BatchSize::SmallInput,

@@ -362,13 +362,15 @@ fn e2e_tracked_mpsc_cancel_mid_reserve() {
         runtime.step_for_test();
     }
     let reason = CancelReason::user("mid-reserve");
-    let tasks = runtime.state.cancel_request(root, &reason, None);
+    let cancel_effects = runtime.state.cancel_request(root, &reason, None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task, priority) in tasks {
             scheduler.schedule_cancel(task, priority);
         }
     }
+    wake_effects.dispatch();
 
     test_section!("run");
     runtime.run_until_quiescent();

@@ -965,7 +965,7 @@ impl LabRuntime {
     /// Returns true if the runtime is quiescent.
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        self.state.is_quiescent()
+        self.state.is_quiescent() && self.spawn_mailbox.is_empty()
     }
 
     /// Advances virtual time by the given number of nanoseconds.
@@ -1271,8 +1271,13 @@ impl LabRuntime {
                 }
             }
 
+            self.drain_handle_cancel_requests();
+            self.drain_deferred_cancel_dispatches();
             let is_empty = self.scheduler.lock().is_empty();
-            if is_empty {
+            if is_empty
+                && self.spawn_mailbox.handle_cancels_are_empty()
+                && !self.state.has_deferred_cancel_dispatches()
+            {
                 break;
             }
 
@@ -1708,13 +1713,25 @@ impl LabRuntime {
     /// budget priority. Deterministic: admission order is exactly enqueue
     /// order, and the admitted arena ids depend only on prior state.
     fn drain_spawn_admissions(&mut self) {
-        if self.spawn_mailbox.is_empty() {
+        if self.spawn_mailbox.spawn_requests_are_empty() {
             return;
         }
         while let Some(request) = self.spawn_mailbox.dequeue() {
             match self.state.admit_spawn_request(request.into_parts()) {
-                crate::runtime::state::SpawnAdmission::Admitted { task_id, priority } => {
-                    self.scheduler.lock().schedule(task_id, priority);
+                crate::runtime::state::SpawnAdmission::Admitted {
+                    task_id,
+                    priority,
+                    cancel_publication,
+                } => {
+                    let cancel_wakes = cancel_publication.publish(|cancel_priority| {
+                        let mut scheduler = self.scheduler.lock();
+                        if let Some(cancel_priority) = cancel_priority {
+                            scheduler.schedule_cancel(task_id, cancel_priority);
+                        } else {
+                            scheduler.schedule(task_id, priority);
+                        }
+                    });
+                    cancel_wakes.dispatch();
                 }
                 crate::runtime::state::SpawnAdmission::Denied { parts, error } => match error {
                     crate::runtime::state::SpawnError::RegionClosed(_)
@@ -1729,11 +1746,115 @@ impl LabRuntime {
         }
     }
 
+    /// Applies a bounded batch of callback-free TaskHandle cancellation
+    /// commands. Every required cancel lane is physically published before
+    /// any retained Waker is invoked.
+    fn drain_handle_cancel_requests(&mut self) {
+        const HANDLE_CANCEL_BATCH: usize = 16;
+
+        if self.spawn_mailbox.handle_cancels_are_empty() {
+            return;
+        }
+        let mut requests = Vec::with_capacity(HANDLE_CANCEL_BATCH);
+        if self
+            .spawn_mailbox
+            .dequeue_handle_cancels_into(HANDLE_CANCEL_BATCH, &mut requests)
+            == 0
+        {
+            return;
+        }
+
+        let requests = crate::runtime::spawn_mailbox::coalesce_handle_cancel_requests(requests);
+        let mut tasks = Vec::with_capacity(requests.len());
+        let mut delegated = Vec::new();
+        let mut wakes = crate::types::task_context::CancelWakeEffects::empty();
+        for request in requests {
+            let effects = self
+                .state
+                .cancel_task_for_handle(request.task_id, &request.reason);
+            let (route, task_wakes) = effects.into_parts();
+            wakes.merge(task_wakes);
+
+            let Some(route) = route else {
+                continue;
+            };
+            let target = if route.delegated_initial {
+                &mut delegated
+            } else {
+                &mut tasks
+            };
+            if let Some((_, queued_priority)) = target
+                .iter_mut()
+                .find(|(task_id, _)| *task_id == request.task_id)
+            {
+                *queued_priority = (*queued_priority).max(route.priority);
+            } else {
+                target.push((request.task_id, route.priority));
+            }
+        }
+
+        {
+            let mut scheduler = self.scheduler.lock();
+            for &(task_id, priority) in &tasks {
+                scheduler.schedule_cancel(task_id, priority);
+            }
+        }
+
+        for (task_id, requested_priority) in delegated {
+            let scheduler = &self.scheduler;
+            let (published_priority, task_wakes) = self
+                .state
+                .publish_handle_cancel_lane(task_id, |priority, _, _| {
+                    scheduler.lock().schedule_cancel(task_id, priority);
+                    Some(priority)
+                })
+                .into_parts();
+            wakes.merge(task_wakes);
+            if let Some(published_priority) = published_priority {
+                debug_assert!(published_priority >= requested_priority);
+            }
+        }
+        wakes.dispatch();
+    }
+
+    fn drain_deferred_cancel_dispatches(&mut self) {
+        let batches = self.state.take_deferred_cancel_dispatches();
+        if batches.is_empty() {
+            return;
+        }
+        let mut wakes = Vec::with_capacity(batches.len());
+        {
+            let mut scheduler = self.scheduler.lock();
+            for batch in batches {
+                let (tasks, batch_wakes) = batch.into_parts();
+                for (task_id, priority) in tasks {
+                    scheduler.schedule_cancel(task_id, priority);
+                }
+                wakes.push(batch_wakes);
+            }
+        }
+        for batch_wakes in wakes {
+            batch_wakes.dispatch();
+        }
+    }
+
     /// Executes a single step.
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) {
         self.steps += 1;
+        self.drain_deferred_cancel_dispatches();
         self.drain_spawn_admissions();
+        // Admission publication can invoke a retained cancellation Waker.
+        // Consume any command it enqueued before selecting runnable work.
+        self.drain_handle_cancel_requests();
+        self.drain_deferred_cancel_dispatches();
+        if !self.spawn_mailbox.handle_cancels_are_empty()
+            || self.state.has_deferred_cancel_dispatches()
+        {
+            // Bound each deterministic step: reentrant cancellation gets the
+            // next step, and ordinary ready work cannot overtake it.
+            return;
+        }
         let rng_value = self.rng.next_u64();
         if self.steps < 50 {
             crate::tracing_compat::trace!(
@@ -1908,12 +2029,28 @@ impl LabRuntime {
             record.mark_polled(self.steps);
         });
 
-        let cancel_ack = self.consume_cancel_ack(task_id);
+        let (cancel_ack, cancel_wakes) = self.consume_cancel_ack(task_id).into_parts();
 
-        // Notify oracle of cancel acknowledgment
-        if cancel_ack && self.config.has_cancellation_oracle() {
+        // A checkpoint can win the race with the runtime-owned handle command.
+        // Replay the logical RequestCancel -> acknowledgement ordering into the
+        // oracle even though both TaskRecord mutations are already complete.
+        if let Some(receipt) = cancel_ack.as_ref()
+            && self.config.has_cancellation_oracle()
+        {
+            self.notify_cancellation_oracle_cancel_request(
+                task_id,
+                receipt.effective_reason.clone(),
+            );
+            if let Some((from_state, to_state)) = receipt.request_transition.as_ref() {
+                self.notify_cancellation_oracle_task_transition(task_id, from_state, to_state);
+            }
+            if let Some((from_state, to_state)) = receipt.acknowledge_transition.as_ref() {
+                self.notify_cancellation_oracle_task_transition(task_id, from_state, to_state);
+            }
             self.notify_cancellation_oracle_cancel_ack(task_id);
         }
+        let cancel_priority = cancel_ack.as_ref().map(|receipt| receipt.cleanup_priority);
+        let cancel_ack = cancel_ack.is_some();
 
         // 5. Handle result
         match result {
@@ -2068,6 +2205,7 @@ impl LabRuntime {
                 }
                 drop(sched);
                 completion_observer.dispatch();
+                cancel_wakes.dispatch();
             }
             Poll::Pending => {
                 // Task yielded. Waker will reschedule it when ready.
@@ -2080,6 +2218,16 @@ impl LabRuntime {
                     record.cached_waker = Some((waker, priority));
                     record.cached_cancel_waker = cancel_waker_for_cache;
                 });
+
+                if let Some(cancel_priority) = cancel_priority {
+                    // The queued handle command may now coalesce against the
+                    // reconciled TaskRecord, so this poll owns the replacement
+                    // cancel-lane publication before any auxiliary Waker runs.
+                    self.scheduler
+                        .lock()
+                        .schedule_cancel(task_id, cancel_priority);
+                }
+                cancel_wakes.dispatch();
 
                 // 6. Post-poll chaos injection (spurious wakeups for pending tasks)
                 self.inject_post_poll_chaos(task_id, priority);
@@ -2160,8 +2308,11 @@ impl LabRuntime {
 
         // Now apply the injections (no more borrowing chaos_rng).
         // Cancel and budget_exhaust are independent — apply both when both fire.
+        let cancel_wakes = cancel.then(|| self.inject_cancel(task_id));
         if cancel {
-            self.inject_cancel(task_id);
+            // Publish the cancelled task before any virtual-time advancement
+            // or deferred cancellation callback can reenter the lab runtime.
+            self.reschedule_after_chaos_skip(task_id);
         }
 
         if let Some(d) = delay {
@@ -2172,8 +2323,11 @@ impl LabRuntime {
             self.inject_budget_exhaust(task_id);
         }
 
-        if skip_poll {
+        if skip_poll && !cancel {
             self.reschedule_after_chaos_skip(task_id);
+        }
+        if let Some(cancel_wakes) = cancel_wakes {
+            cancel_wakes.dispatch();
         }
 
         skip_poll
@@ -2282,31 +2436,17 @@ impl LabRuntime {
         }
     }
 
-    fn consume_cancel_ack(&mut self, task_id: TaskId) -> bool {
-        self.state
-            .update_task(task_id, |record| {
-                let Some(inner) = record.cx_inner.as_ref() else {
-                    return false;
-                };
-                let mut acknowledged = false;
-                {
-                    let mut guard = inner.write();
-                    if guard.cancel_acknowledged {
-                        guard.cancel_acknowledged = false;
-                        drop(guard);
-                        acknowledged = true;
-                    }
-                }
-                if acknowledged {
-                    let _ = record.acknowledge_cancel();
-                }
-                acknowledged
-            })
-            .unwrap_or(false)
+    fn consume_cancel_ack(
+        &mut self,
+        task_id: TaskId,
+    ) -> crate::types::task_context::CancellationEffects<
+        Option<crate::record::task::CheckpointCancelAck>,
+    > {
+        self.state.consume_task_checkpoint_cancel_ack(task_id)
     }
 
     /// Injects a cancellation for a task.
-    fn inject_cancel(&mut self, task_id: TaskId) {
+    fn inject_cancel(&mut self, task_id: TaskId) -> crate::types::task_context::CancelWakeEffects {
         use crate::types::{Budget, CancelReason};
 
         // Record replay event
@@ -2328,9 +2468,9 @@ impl LabRuntime {
             .update_task(task_id, |record| {
                 if !record.state.is_terminal() {
                     let old_state = record.state.clone();
-                    let (_, cancel_wakers) =
-                        record.request_cancel_with_budget_deferred(reason, Budget::ZERO);
-                    Some((old_state, record.state.clone(), cancel_wakers))
+                    let effects = record.request_cancel_with_budget(reason, Budget::ZERO);
+                    let (_, cancel_wakes) = effects.into_parts();
+                    Some((old_state, record.state.clone(), cancel_wakes))
                 } else {
                     None
                 }
@@ -2338,10 +2478,7 @@ impl LabRuntime {
             .flatten();
 
         // Record the state transition in the oracle after mutation is complete.
-        if let Some((old_state, new_state, cancel_wakers)) = transition {
-            for waker in cancel_wakers {
-                waker.wake_by_ref();
-            }
+        let cancel_wakes = if let Some((old_state, new_state, cancel_wakes)) = transition {
             if self.config.has_cancellation_oracle() {
                 self.oracles.cancellation_protocol.on_transition(
                     task_id,
@@ -2350,7 +2487,10 @@ impl LabRuntime {
                     self.virtual_time,
                 );
             }
-        }
+            cancel_wakes
+        } else {
+            crate::types::task_context::CancelWakeEffects::empty()
+        };
 
         // Emit trace event
         self.state.record_trace_event(|seq| {
@@ -2365,6 +2505,7 @@ impl LabRuntime {
                 },
             )
         });
+        cancel_wakes
     }
 
     /// Notifies the cancellation protocol oracle about runtime events.
@@ -3423,7 +3564,7 @@ mod tests {
     use crate::runtime::deadline_monitor::{AdaptiveDeadlineConfig, WarningReason};
     #[cfg(unix)]
     use crate::runtime::reactor::{Event, Interest};
-    use crate::types::{Budget, CxInner, Outcome, TaskId};
+    use crate::types::{Budget, CancelKind, CancelReason, CxInner, Outcome, TaskId};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
     use parking_lot::RwLock;
@@ -3459,6 +3600,490 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    struct HandleCancelWakeAudit {
+        task_id: TaskId,
+        caller_lock: Arc<Mutex<()>>,
+        scheduler: Arc<Mutex<LabScheduler>>,
+        wake_calls: Arc<std::sync::atomic::AtomicUsize>,
+        calls_under_caller_lock: Arc<std::sync::atomic::AtomicUsize>,
+        calls_under_scheduler_lock: Arc<std::sync::atomic::AtomicUsize>,
+        cancel_lane_published: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::task::Wake for HandleCancelWakeAudit {
+        fn wake(self: Arc<Self>) {
+            use std::sync::atomic::Ordering;
+
+            self.wake_calls.fetch_add(1, Ordering::SeqCst);
+            let caller_guard = self.caller_lock.try_lock();
+            if caller_guard.is_none() {
+                self.calls_under_caller_lock.fetch_add(1, Ordering::SeqCst);
+            }
+            drop(caller_guard);
+
+            if let Some(scheduler) = self.scheduler.try_lock() {
+                let mut scheduler = scheduler;
+                let observed = scheduler.pop_for_worker(0, 0, Time::ZERO);
+                self.cancel_lane_published.store(
+                    matches!(observed, Some((task, DispatchLane::Cancel)) if task == self.task_id),
+                    Ordering::SeqCst,
+                );
+                if observed.is_some() {
+                    scheduler.schedule_cancel(self.task_id, u8::MAX);
+                }
+            } else {
+                self.calls_under_scheduler_lock
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn exercise_managed_handle_cancel_boundary(via_join_drop: bool) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let mut runtime = LabRuntime::new(LabConfig::new(7));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, mut handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                std::future::poll_fn(|_| {
+                    if crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            })
+            .expect("create managed task");
+        let inner = runtime
+            .state
+            .task(task_id)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("managed task has a Cx");
+
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.step_for_test();
+        assert!(runtime.scheduler.lock().is_empty());
+
+        let caller_lock = Arc::new(Mutex::new(()));
+        let wake_calls = Arc::new(AtomicUsize::new(0));
+        let calls_under_caller_lock = Arc::new(AtomicUsize::new(0));
+        let calls_under_scheduler_lock = Arc::new(AtomicUsize::new(0));
+        let cancel_lane_published = Arc::new(AtomicBool::new(false));
+        let audit_waker = Waker::from(Arc::new(HandleCancelWakeAudit {
+            task_id,
+            caller_lock: Arc::clone(&caller_lock),
+            scheduler: Arc::clone(&runtime.scheduler),
+            wake_calls: Arc::clone(&wake_calls),
+            calls_under_caller_lock: Arc::clone(&calls_under_caller_lock),
+            calls_under_scheduler_lock: Arc::clone(&calls_under_scheduler_lock),
+            cancel_lane_published: Arc::clone(&cancel_lane_published),
+        }));
+        let retired_waker = {
+            let mut guard = inner.write();
+            guard
+                .cancel_waker
+                .replace(Arc::new(crate::types::task_context::CancelWaker::new(
+                    audit_waker,
+                )))
+        };
+        drop(retired_waker);
+
+        let join_cx = crate::cx::Cx::for_testing();
+        if via_join_drop {
+            let join = handle.join_with_drop_reason(&join_cx, CancelReason::timeout());
+            let caller_guard = caller_lock.lock();
+            drop(join);
+            assert_eq!(
+                wake_calls.load(Ordering::SeqCst),
+                0,
+                "JoinFuture::drop must not invoke a cancellation Waker inline"
+            );
+            drop(caller_guard);
+        } else {
+            let caller_guard = caller_lock.lock();
+            handle.abort_with_reason(CancelReason::timeout());
+            handle.abort_with_reason(CancelReason::timeout());
+            assert_eq!(
+                wake_calls.load(Ordering::SeqCst),
+                0,
+                "TaskHandle::abort must not invoke a cancellation Waker inline"
+            );
+            drop(caller_guard);
+        }
+
+        {
+            let guard = inner.read();
+            assert!(
+                guard.cancel_requested,
+                "managed handle cancellation is checkpoint-visible immediately"
+            );
+            assert_eq!(
+                guard.cancel_reason.as_ref().map(|reason| reason.kind),
+                Some(CancelKind::Timeout)
+            );
+        }
+        assert_eq!(runtime.spawn_mailbox.len(), 1, "identical aborts coalesce");
+        assert!(runtime.scheduler.lock().is_empty());
+
+        assert_eq!(runtime.run_until_quiescent(), 1);
+        assert_eq!(wake_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_under_caller_lock.load(Ordering::SeqCst), 0);
+        assert_eq!(calls_under_scheduler_lock.load(Ordering::SeqCst), 0);
+        assert!(cancel_lane_published.load(Ordering::SeqCst));
+        assert!(runtime.spawn_mailbox.handle_cancels_are_empty());
+        assert!(handle.is_finished());
+        assert!(runtime.state.task(task_id).is_none());
+        assert!(matches!(
+            runtime.state.region_close_outcome(root),
+            Some(Outcome::Cancelled(reason)) if reason.is_kind(CancelKind::Timeout)
+        ));
+        assert!(runtime.is_quiescent());
+    }
+
+    #[test]
+    fn managed_task_handle_abort_defers_waker_until_cancel_lane_publication() {
+        init_test("managed_task_handle_abort_defers_waker_until_cancel_lane_publication");
+        exercise_managed_handle_cancel_boundary(false);
+        crate::test_complete!(
+            "managed_task_handle_abort_defers_waker_until_cancel_lane_publication"
+        );
+    }
+
+    #[test]
+    fn managed_join_future_drop_defers_waker_until_cancel_lane_publication() {
+        init_test("managed_join_future_drop_defers_waker_until_cancel_lane_publication");
+        exercise_managed_handle_cancel_boundary(true);
+        crate::test_complete!(
+            "managed_join_future_drop_defers_waker_until_cancel_lane_publication"
+        );
+    }
+
+    #[test]
+    fn checkpoint_ack_ready_before_handle_command_reconciles_terminal_cancel() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        init_test("checkpoint_ack_ready_before_handle_command_reconciles_terminal_cancel");
+        let mut runtime = LabRuntime::new(LabConfig::new(19));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let entered = Arc::new(Barrier::new(2));
+        let abort_done = Arc::new(Barrier::new(2));
+        let auxiliary_calls = Arc::new(AtomicU64::new(0));
+        let auxiliary_waker = Waker::from(Arc::new(CountWaker(Arc::clone(&auxiliary_calls))));
+
+        let task_entered = Arc::clone(&entered);
+        let task_abort_done = Arc::clone(&abort_done);
+        let (task_id, handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                std::future::poll_fn(move |_| {
+                    crate::cx::Cx::with_current(|cx| {
+                        cx.register_cancel_waker(&auxiliary_waker);
+                    })
+                    .expect("task Cx is installed");
+                    task_entered.wait();
+                    task_abort_done.wait();
+                    assert!(
+                        crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false),
+                        "same-poll checkpoint observes the queued handle abort"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+            })
+            .expect("create managed task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+
+        let canceller = std::thread::spawn(move || {
+            let mut handle = handle;
+            entered.wait();
+            handle.abort_with_reason(CancelReason::race_loser());
+            abort_done.wait();
+            handle
+        });
+
+        runtime.step_for_test();
+        let mut handle = canceller.join().expect("abort thread completes");
+        assert!(
+            !runtime.spawn_mailbox.handle_cancels_are_empty(),
+            "command remains queued until the next runtime boundary"
+        );
+        assert!(runtime.state.task(task_id).is_none());
+        assert!(matches!(
+            runtime.state.region_close_outcome(root),
+            Some(Outcome::Cancelled(reason)) if reason.is_kind(CancelKind::RaceLost)
+        ));
+        assert_eq!(
+            auxiliary_calls.load(Ordering::SeqCst),
+            1,
+            "auxiliary cancellation Waker runs once after terminal publication"
+        );
+        assert!(handle.is_finished());
+        assert!(
+            !matches!(handle.try_join(), Ok(None)),
+            "join result is available regardless of path-specific payload semantics"
+        );
+
+        runtime.step_for_test();
+        assert!(runtime.spawn_mailbox.handle_cancels_are_empty());
+        assert!(runtime.state.task(task_id).is_none());
+        assert!(matches!(
+            runtime.state.region_close_outcome(root),
+            Some(Outcome::Cancelled(reason)) if reason.is_kind(CancelKind::RaceLost)
+        ));
+        assert_eq!(auxiliary_calls.load(Ordering::SeqCst), 1);
+        assert!(runtime.check_invariants().is_empty());
+        crate::test_complete!(
+            "checkpoint_ack_ready_before_handle_command_reconciles_terminal_cancel"
+        );
+    }
+
+    #[test]
+    fn checkpoint_ack_pending_republishes_cancel_lane_before_waker_dispatch() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        init_test("checkpoint_ack_pending_republishes_cancel_lane_before_waker_dispatch");
+        let mut runtime = LabRuntime::new(LabConfig::new(23));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let entered = Arc::new(Barrier::new(2));
+        let abort_done = Arc::new(Barrier::new(2));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let audit_target = Arc::new(Mutex::new(None));
+        let caller_lock = Arc::new(Mutex::new(()));
+        let wake_calls = Arc::new(AtomicUsize::new(0));
+        let calls_under_caller_lock = Arc::new(AtomicUsize::new(0));
+        let calls_under_scheduler_lock = Arc::new(AtomicUsize::new(0));
+        let cancel_lane_published = Arc::new(AtomicBool::new(false));
+
+        let task_entered = Arc::clone(&entered);
+        let task_abort_done = Arc::clone(&abort_done);
+        let task_polls = Arc::clone(&polls);
+        let task_audit_target = Arc::clone(&audit_target);
+        let (task_id, handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                std::future::poll_fn(move |_| {
+                    let poll = task_polls.fetch_add(1, Ordering::SeqCst);
+                    if poll == 0 {
+                        let target = task_audit_target
+                            .lock()
+                            .as_ref()
+                            .cloned()
+                            .expect("audit Waker installed before first poll");
+                        let retired = crate::cx::Cx::with_current(|cx| {
+                            cx.inner.write().cancel_waker.replace(target)
+                        })
+                        .expect("task Cx is installed");
+                        drop(retired);
+                        task_entered.wait();
+                        task_abort_done.wait();
+                    }
+                    assert!(
+                        crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false),
+                        "checkpoint observes cancellation on every cleanup poll"
+                    );
+                    if poll == 0 {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+            })
+            .expect("create managed task");
+        *audit_target.lock() = Some(Arc::new(crate::types::task_context::CancelWaker::new(
+            Waker::from(Arc::new(HandleCancelWakeAudit {
+                task_id,
+                caller_lock: Arc::clone(&caller_lock),
+                scheduler: Arc::clone(&runtime.scheduler),
+                wake_calls: Arc::clone(&wake_calls),
+                calls_under_caller_lock: Arc::clone(&calls_under_caller_lock),
+                calls_under_scheduler_lock: Arc::clone(&calls_under_scheduler_lock),
+                cancel_lane_published: Arc::clone(&cancel_lane_published),
+            })),
+        )));
+        runtime.scheduler.lock().schedule(task_id, 0);
+
+        let canceller = std::thread::spawn(move || {
+            let handle = handle;
+            entered.wait();
+            handle.abort_with_reason(CancelReason::shutdown());
+            abort_done.wait();
+            handle
+        });
+
+        runtime.step_for_test();
+        let handle = canceller.join().expect("abort thread completes");
+        assert!(matches!(
+            &runtime.state.task(task_id).expect("task record").state,
+            TaskState::Cancelling { reason, .. } if reason.is_kind(CancelKind::Shutdown)
+        ));
+        assert!(
+            !runtime.scheduler.lock().is_empty(),
+            "acknowledged Pending task is republished on the cancel lane"
+        );
+        assert_eq!(
+            wake_calls.load(Ordering::SeqCst),
+            1,
+            "first reconciliation dispatches the audit Waker once"
+        );
+        assert_eq!(calls_under_caller_lock.load(Ordering::SeqCst), 0);
+        assert_eq!(calls_under_scheduler_lock.load(Ordering::SeqCst), 0);
+        assert!(
+            cancel_lane_published.load(Ordering::SeqCst),
+            "the first Waker callback must observe an already-published cancel lane"
+        );
+
+        runtime.step_for_test();
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert!(runtime.state.task(task_id).is_none());
+        assert!(matches!(
+            runtime.state.region_close_outcome(root),
+            Some(Outcome::Cancelled(reason)) if reason.is_kind(CancelKind::Shutdown)
+        ));
+        assert_eq!(
+            wake_calls.load(Ordering::SeqCst),
+            1,
+            "repeated acknowledged checkpoints do not duplicate Waker dispatch"
+        );
+        assert!(handle.is_finished());
+        assert!(runtime.spawn_mailbox.handle_cancels_are_empty());
+        assert!(runtime.check_invariants().is_empty());
+        crate::test_complete!(
+            "checkpoint_ack_pending_republishes_cancel_lane_before_waker_dispatch"
+        );
+    }
+
+    #[test]
+    fn handle_cancel_command_blocks_lab_quiescence_until_drained() {
+        init_test("handle_cancel_command_blocks_lab_quiescence_until_drained");
+        let mut runtime = LabRuntime::new(LabConfig::new(11));
+        assert!(runtime.is_quiescent());
+
+        let missing = TaskId::from_arena(ArenaIndex::new(usize::MAX as u32, 0));
+        let gateway = runtime.state.spawn_gateway().expect("lab gateway");
+        assert!(gateway.enqueue_handle_cancel(missing, CancelReason::shutdown()));
+        assert!(
+            !runtime.is_quiescent(),
+            "a queued command is live runtime work even when its task is stale"
+        );
+
+        assert_eq!(runtime.run_until_quiescent(), 1);
+        assert!(runtime.spawn_mailbox.handle_cancels_are_empty());
+        assert!(runtime.is_quiescent());
+        crate::test_complete!("handle_cancel_command_blocks_lab_quiescence_until_drained");
+    }
+
+    #[test]
+    fn managed_pre_admission_abort_transitions_task_record_before_first_poll() {
+        init_test("managed_pre_admission_abort_transitions_task_record_before_first_poll");
+        let mut runtime = LabRuntime::new(LabConfig::new(13));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let pending = runtime
+            .state
+            .region(root)
+            .expect("root region")
+            .pending_spawn_handle();
+        let parent: crate::cx::Cx = crate::cx::Cx::new(
+            root,
+            TaskId::from_arena(ArenaIndex::new(u32::MAX - 1, 0)),
+            Budget::INFINITE,
+        )
+        .with_spawn_gateway(runtime.state.spawn_gateway())
+        .with_pending_spawn_counter(Some(pending));
+
+        let mut handle = parent
+            .spawn(|child| async move {
+                std::future::poll_fn(move |_| {
+                    if child.checkpoint().is_err() {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            })
+            .expect("managed spawn enqueues");
+        let provisional = handle.task_id();
+        handle.abort_with_reason(CancelReason::race_loser());
+        assert!(
+            runtime.spawn_mailbox.handle_cancels_are_empty(),
+            "pre-admission abort remains cache-only until identity publication"
+        );
+
+        assert_eq!(runtime.run_until_quiescent(), 1);
+        let canonical = handle.task_id();
+        assert_ne!(canonical, provisional);
+        assert!(matches!(
+            &runtime.state.task(canonical).expect("task record").state,
+            TaskState::Completed(Outcome::Cancelled(reason))
+                if reason.is_kind(CancelKind::RaceLost)
+        ));
+        assert!(handle.is_finished());
+        assert!(runtime.spawn_mailbox.is_empty());
+        assert!(runtime.is_quiescent());
+        let _ = handle.try_join().expect("task result is available");
+        crate::test_complete!(
+            "managed_pre_admission_abort_transitions_task_record_before_first_poll"
+        );
+    }
+
+    #[test]
+    fn stale_handle_cancel_command_cannot_weaken_newer_cx_reason() {
+        init_test("stale_handle_cancel_command_cannot_weaken_newer_cx_reason");
+        let mut runtime = LabRuntime::new(LabConfig::new(17));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                std::future::pending::<()>().await;
+            })
+            .expect("create managed task");
+        let inner = runtime
+            .state
+            .task(task_id)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("managed task Cx");
+
+        handle.abort_with_reason(CancelReason::user("stale"));
+        let mut stale = Vec::new();
+        assert_eq!(
+            runtime
+                .spawn_mailbox
+                .dequeue_handle_cancels_into(1, &mut stale),
+            1
+        );
+        handle.abort_with_reason(CancelReason::shutdown());
+        let stale = stale.pop().expect("saved stale command");
+
+        let (route, wakes) = runtime
+            .state
+            .cancel_task_for_handle(stale.task_id, &stale.reason)
+            .into_parts();
+        assert_eq!(route.map(|route| route.priority), Some(u8::MAX));
+        assert!(route.is_some_and(|route| !route.delegated_initial));
+        assert!(wakes.is_empty());
+        wakes.dispatch();
+        assert!(
+            runtime
+                .state
+                .task(task_id)
+                .and_then(TaskRecord::cancel_reason)
+                .is_some_and(|reason| reason.is_kind(CancelKind::Shutdown))
+        );
+        assert!(
+            inner
+                .read()
+                .cancel_reason
+                .as_ref()
+                .is_some_and(|reason| reason.is_kind(CancelKind::Shutdown))
+        );
+        crate::test_complete!("stale_handle_cancel_command_cannot_weaken_newer_cx_reason");
     }
 
     fn init_test(name: &str) {
@@ -6088,10 +6713,11 @@ mod tests {
         runtime.step();
 
         // Put the task through cancel protocol: CancelRequested → Cancelling
-        runtime
+        let cancel_effects = runtime
             .state
             .update_task(task_id, |record| {
-                record.request_cancel(crate::types::CancelReason::user("test-cancel"));
+                let effects =
+                    record.request_cancel(crate::types::CancelReason::user("test-cancel"));
                 let _ = record.acknowledge_cancel();
                 // Task is now in Cancelling state
                 assert!(
@@ -6101,12 +6727,15 @@ mod tests {
                     ),
                     "task should be in Cancelling state"
                 );
+                effects
             })
             .unwrap();
 
         // Reschedule and run to completion: the cancel protocol will
         // complete it as Cancelled when the wrapped future returns Ok.
-        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule_cancel(task_id, 0);
+        let (_, cancel_wakes) = cancel_effects.into_parts();
+        cancel_wakes.dispatch();
         runtime.run_until_quiescent();
 
         // Verify the task completed as Cancelled

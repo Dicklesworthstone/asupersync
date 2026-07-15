@@ -184,13 +184,18 @@ fn sharding_cancellation_drain() {
         .expect("create obligation");
 
     // Cancel the region (should cancel the task and drain obligations)
-    let tasks_to_schedule =
+    let cancel_effects =
         runtime
             .state
             .cancel_request(root, &asupersync::types::CancelReason::user("test"), None);
-    for (tid, priority) in tasks_to_schedule {
-        runtime.scheduler.lock().schedule(tid, priority);
+    let (tasks_to_schedule, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (tid, priority) in tasks_to_schedule {
+            scheduler.schedule_cancel(tid, priority);
+        }
     }
+    wake_effects.dispatch();
 
     // Abort the obligation (simulating cleanup during cancellation)
     let _ = runtime.state.abort_obligation(
@@ -619,12 +624,18 @@ fn sharding_cancel_child_region_obligations_drain() {
         .expect("create obligation");
 
     // Cancel only the child region
-    let tasks = runtime
-        .state
-        .cancel_request(child, &CancelReason::user("cancel-child"), None);
-    for (tid, priority) in tasks {
-        runtime.scheduler.lock().schedule(tid, priority);
+    let cancel_effects =
+        runtime
+            .state
+            .cancel_request(child, &CancelReason::user("cancel-child"), None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (tid, priority) in tasks {
+            scheduler.schedule_cancel(tid, priority);
+        }
     }
+    wake_effects.dispatch();
 
     // Abort the obligation during cancellation
     let _ = runtime
@@ -674,12 +685,18 @@ fn sharding_cancel_root_with_deep_hierarchy() {
     }
 
     // Cancel root — should propagate to all descendants
-    let tasks = runtime
-        .state
-        .cancel_request(root, &CancelReason::user("cancel-root"), None);
-    for (tid, priority) in tasks {
-        runtime.scheduler.lock().schedule(tid, priority);
+    let cancel_effects =
+        runtime
+            .state
+            .cancel_request(root, &CancelReason::user("cancel-root"), None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (tid, priority) in tasks {
+            scheduler.schedule_cancel(tid, priority);
+        }
     }
+    wake_effects.dispatch();
 
     runtime.run_until_quiescent();
 
@@ -856,12 +873,18 @@ fn sharding_cancel_with_pending_obligations_multiple_tasks() {
     }
 
     // Cancel root
-    let tasks = runtime
-        .state
-        .cancel_request(root, &CancelReason::user("multi-cancel"), None);
-    for (tid, priority) in tasks {
-        runtime.scheduler.lock().schedule(tid, priority);
+    let cancel_effects =
+        runtime
+            .state
+            .cancel_request(root, &CancelReason::user("multi-cancel"), None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (tid, priority) in tasks {
+            scheduler.schedule_cancel(tid, priority);
+        }
     }
+    wake_effects.dispatch();
 
     // Abort all obligations
     for obl in obligation_ids {
@@ -964,12 +987,18 @@ fn sharding_stress_cancel_mid_execution() {
     }
 
     // Cancel after initial setup (tasks are scheduled but haven't all completed)
-    let tasks = runtime
-        .state
-        .cancel_request(root, &CancelReason::user("mid-cancel"), None);
-    for (tid, priority) in tasks {
-        runtime.scheduler.lock().schedule(tid, priority);
+    let cancel_effects =
+        runtime
+            .state
+            .cancel_request(root, &CancelReason::user("mid-cancel"), None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (tid, priority) in tasks {
+            scheduler.schedule_cancel(tid, priority);
+        }
     }
+    wake_effects.dispatch();
 
     runtime.run_until_quiescent();
 
@@ -1037,12 +1066,18 @@ fn sharding_cancel_one_sibling_other_continues() {
     }
 
     // Cancel only child A
-    let tasks = runtime
-        .state
-        .cancel_request(child_a, &CancelReason::user("cancel-sibling"), None);
-    for (tid, priority) in tasks {
-        runtime.scheduler.lock().schedule(tid, priority);
+    let cancel_effects =
+        runtime
+            .state
+            .cancel_request(child_a, &CancelReason::user("cancel-sibling"), None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (tid, priority) in tasks {
+            scheduler.schedule_cancel(tid, priority);
+        }
     }
+    wake_effects.dispatch();
 
     runtime.run_until_quiescent();
 
@@ -1166,13 +1201,18 @@ fn sharding_cancel_scenario_replay_determinism() {
             }
 
             // Cancel child region
-            let tasks =
+            let cancel_effects =
                 runtime
                     .state
                     .cancel_request(child, &CancelReason::user("replay-cancel"), None);
-            for (tid, priority) in tasks {
-                runtime.scheduler.lock().schedule(tid, priority);
+            let (tasks, wake_effects) = cancel_effects.into_parts();
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                for (tid, priority) in tasks {
+                    scheduler.schedule_cancel(tid, priority);
+                }
             }
+            wake_effects.dispatch();
 
             runtime.run_until_quiescent();
             reports.push(runtime.report());

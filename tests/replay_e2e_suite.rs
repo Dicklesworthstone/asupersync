@@ -300,11 +300,19 @@ fn record_parity_trace_with_seed(seed: u64) -> ReplayTrace {
         runtime.scheduler.lock().schedule(task_id, 0);
     }
 
-    let _ = runtime.state.cancel_request(
+    let cancel_effects = runtime.state.cancel_request(
         region_cancel,
         &asupersync::types::CancelReason::timeout(),
         None,
     );
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+    wake_effects.dispatch();
     runtime.run_until_quiescent();
     runtime.finish_replay_trace().expect("finish parity trace")
 }

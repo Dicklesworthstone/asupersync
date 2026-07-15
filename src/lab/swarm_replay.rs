@@ -3936,11 +3936,12 @@ pub fn run_swarm_replay_scenario(
 
     let mut cancellation_requests = 0usize;
     for (region_index, region) in &admission_cancel_regions {
-        let tasks = runtime.state.cancel_request(
+        let effects = runtime.state.cancel_request(
             *region,
             &CancelReason::user("swarm replay admission budget exhausted"),
             None,
         );
+        let (tasks, wake_effects) = effects.into_parts();
         cancellation_requests = cancellation_requests.saturating_add(tasks.len());
         events.lock().push(SwarmReplayEvent {
             kind: SwarmReplayEventKind::CancellationRequested,
@@ -3953,10 +3954,13 @@ pub fn run_swarm_replay_scenario(
             artifact_bytes: 0,
         });
 
-        let mut scheduler = runtime.scheduler.lock();
-        for (task_id, priority) in tasks {
-            scheduler.schedule_cancel(task_id, priority);
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            for (task_id, priority) in tasks {
+                scheduler.schedule_cancel(task_id, priority);
+            }
         }
+        wake_effects.dispatch();
     }
     if let Some(cancel_after_steps) = scenario.cancel_after_steps {
         for _ in 0..cancel_after_steps {
@@ -3964,11 +3968,12 @@ pub fn run_swarm_replay_scenario(
         }
 
         for (region_index, region) in &region_ids {
-            let tasks = runtime.state.cancel_request(
+            let effects = runtime.state.cancel_request(
                 *region,
                 &CancelReason::user("swarm replay cascade"),
                 None,
             );
+            let (tasks, wake_effects) = effects.into_parts();
             cancellation_requests = cancellation_requests.saturating_add(tasks.len());
             events.lock().push(SwarmReplayEvent {
                 kind: SwarmReplayEventKind::CancellationRequested,
@@ -3981,10 +3986,13 @@ pub fn run_swarm_replay_scenario(
                 artifact_bytes: 0,
             });
 
-            let mut scheduler = runtime.scheduler.lock();
-            for (task_id, priority) in tasks {
-                scheduler.schedule_cancel(task_id, priority);
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                for (task_id, priority) in tasks {
+                    scheduler.schedule_cancel(task_id, priority);
+                }
             }
+            wake_effects.dispatch();
         }
     }
 

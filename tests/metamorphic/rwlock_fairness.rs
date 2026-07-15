@@ -11,7 +11,7 @@
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::sync::RwLock;
-use asupersync::types::{Budget, TaskId};
+use asupersync::types::{Budget, CancelReason, TaskId};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,10 +24,22 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// Test operations for RwLock access
 #[derive(Debug, Clone, PartialEq)]
 enum RwLockOp {
-    Read { duration_steps: u32, reader_id: u32 },
-    Write { duration_steps: u32, writer_id: u32, value: u64 },
-    TryRead { reader_id: u32 },
-    TryWrite { writer_id: u32, value: u64 },
+    Read {
+        duration_steps: u32,
+        reader_id: u32,
+    },
+    Write {
+        duration_steps: u32,
+        writer_id: u32,
+        value: u64,
+    },
+    TryRead {
+        reader_id: u32,
+    },
+    TryWrite {
+        writer_id: u32,
+        value: u64,
+    },
 }
 
 /// Test scenario configuration
@@ -77,13 +89,14 @@ fn rwlock_operation_strategy() -> impl Strategy<Value = RwLockOp> {
 fn rwlock_scenario_strategy() -> impl Strategy<Value = RwLockScenario> {
     (
         prop::collection::vec(rwlock_operation_strategy(), 5..25),
-        2_usize..=12,  // concurrency
-        50_u32..=200,  // max_steps
-    ).prop_map(|(operations, concurrency, max_steps)| RwLockScenario {
-        operations,
-        concurrency,
-        max_steps,
-    })
+        2_usize..=12, // concurrency
+        50_u32..=200, // max_steps
+    )
+        .prop_map(|(operations, concurrency, max_steps)| RwLockScenario {
+            operations,
+            concurrency,
+            max_steps,
+        })
 }
 
 // ============================================================================
@@ -133,60 +146,65 @@ impl RwLockFairnessHarness {
 
         let region = self.runtime.state.create_root_region(Budget::unlimited());
 
-        let (task_id, _handle) = self.runtime.state.create_task(
-            region,
-            Budget::unlimited(),
-            async move {
-                let cx = asupersync::cx::Cx::current().expect("no current context");
+        let (task_id, _handle) =
+            self.runtime
+                .state
+                .create_task(region, Budget::unlimited(), async move {
+                    let cx = asupersync::cx::Cx::current().expect("no current context");
 
-                // Record attempt to acquire
-                let attempt_time = counter.fetch_add(1, Ordering::SeqCst);
+                    // Record attempt to acquire
+                    let attempt_time = counter.fetch_add(1, Ordering::SeqCst);
 
-                // Acquire read lock
-                let _guard = match lock.read(&cx).await {
-                    Ok(guard) => {
-                        // Record successful acquisition
-                        let acquire_time = counter.fetch_add(1, Ordering::SeqCst);
-                        {
-                            let mut t = trace.lock();
-                            t.acquisition_order.push((acquire_time, "read".to_string(), reader_id));
-                        }
-
-                        // Track active readers for coalescing analysis
-                        let concurrent_readers = active_readers.fetch_add(1, Ordering::SeqCst) + 1;
-                        if concurrent_readers > 1 {
-                            let mut t = trace.lock();
-                            // Find recent reader acquisitions to detect cohorts
-                            let recent_readers: Vec<u32> = t.acquisition_order
-                                .iter()
-                                .rev()
-                                .take(8)
-                                .filter_map(|(_, op_type, id)| {
-                                    if op_type == "read" { Some(*id) } else { None }
-                                })
-                                .collect();
-                            if recent_readers.len() > 1 {
-                                t.reader_cohorts.push((acquire_time, recent_readers));
+                    // Acquire read lock
+                    let _guard = match lock.read(&cx).await {
+                        Ok(guard) => {
+                            // Record successful acquisition
+                            let acquire_time = counter.fetch_add(1, Ordering::SeqCst);
+                            {
+                                let mut t = trace.lock();
+                                t.acquisition_order.push((
+                                    acquire_time,
+                                    "read".to_string(),
+                                    reader_id,
+                                ));
                             }
+
+                            // Track active readers for coalescing analysis
+                            let concurrent_readers =
+                                active_readers.fetch_add(1, Ordering::SeqCst) + 1;
+                            if concurrent_readers > 1 {
+                                let mut t = trace.lock();
+                                // Find recent reader acquisitions to detect cohorts
+                                let recent_readers: Vec<u32> =
+                                    t.acquisition_order
+                                        .iter()
+                                        .rev()
+                                        .take(8)
+                                        .filter_map(|(_, op_type, id)| {
+                                            if op_type == "read" { Some(*id) } else { None }
+                                        })
+                                        .collect();
+                                if recent_readers.len() > 1 {
+                                    t.reader_cohorts.push((acquire_time, recent_readers));
+                                }
+                            }
+
+                            guard
                         }
+                        Err(_) => return, // Cancelled or poisoned
+                    };
 
-                        guard
+                    // Hold the lock for specified duration
+                    for _ in 0..duration_steps {
+                        if cx.checkpoint().is_err() {
+                            break;
+                        }
+                        asupersync::yield_now().await;
                     }
-                    Err(_) => return, // Cancelled or poisoned
-                };
 
-                // Hold the lock for specified duration
-                for _ in 0..duration_steps {
-                    if cx.checkpoint().is_err() {
-                        break;
-                    }
-                    asupersync::yield_now().await;
-                }
-
-                // Release tracking
-                active_readers.fetch_sub(1, Ordering::SeqCst);
-            }
-        )?;
+                    // Release tracking
+                    active_readers.fetch_sub(1, Ordering::SeqCst);
+                })?;
 
         self.runtime.scheduler.lock().schedule(task_id, 0);
         Ok(task_id)
@@ -206,50 +224,53 @@ impl RwLockFairnessHarness {
 
         let region = self.runtime.state.create_root_region(Budget::unlimited());
 
-        let (task_id, _handle) = self.runtime.state.create_task(
-            region,
-            Budget::unlimited(),
-            async move {
-                let cx = asupersync::cx::Cx::current().expect("no current context");
+        let (task_id, _handle) =
+            self.runtime
+                .state
+                .create_task(region, Budget::unlimited(), async move {
+                    let cx = asupersync::cx::Cx::current().expect("no current context");
 
-                // Record attempt to acquire
-                let attempt_time = counter.fetch_add(1, Ordering::SeqCst);
+                    // Record attempt to acquire
+                    let attempt_time = counter.fetch_add(1, Ordering::SeqCst);
 
-                // Acquire write lock
-                let mut guard = match lock.write(&cx).await {
-                    Ok(guard) => {
-                        // Record successful acquisition
-                        let acquire_time = counter.fetch_add(1, Ordering::SeqCst);
-                        {
-                            let mut t = trace.lock();
-                            t.acquisition_order.push((acquire_time, "write".to_string(), writer_id));
+                    // Acquire write lock
+                    let mut guard = match lock.write(&cx).await {
+                        Ok(guard) => {
+                            // Record successful acquisition
+                            let acquire_time = counter.fetch_add(1, Ordering::SeqCst);
+                            {
+                                let mut t = trace.lock();
+                                t.acquisition_order.push((
+                                    acquire_time,
+                                    "write".to_string(),
+                                    writer_id,
+                                ));
 
-                            // Track writer wait time
-                            let wait_time = acquire_time.saturating_sub(attempt_time);
-                            t.writer_wait_times.insert(writer_id, wait_time);
+                                // Track writer wait time
+                                let wait_time = acquire_time.saturating_sub(attempt_time);
+                                t.writer_wait_times.insert(writer_id, wait_time);
+                            }
+
+                            active_writers.fetch_add(1, Ordering::SeqCst);
+                            guard
                         }
+                        Err(_) => return, // Cancelled or poisoned
+                    };
 
-                        active_writers.fetch_add(1, Ordering::SeqCst);
-                        guard
+                    // Modify the protected data
+                    *guard = value;
+
+                    // Hold the lock for specified duration
+                    for _ in 0..duration_steps {
+                        if cx.checkpoint().is_err() {
+                            break;
+                        }
+                        asupersync::yield_now().await;
                     }
-                    Err(_) => return, // Cancelled or poisoned
-                };
 
-                // Modify the protected data
-                *guard = value;
-
-                // Hold the lock for specified duration
-                for _ in 0..duration_steps {
-                    if cx.checkpoint().is_err() {
-                        break;
-                    }
-                    asupersync::yield_now().await;
-                }
-
-                // Release tracking
-                active_writers.fetch_sub(1, Ordering::SeqCst);
-            }
-        )?;
+                    // Release tracking
+                    active_writers.fetch_sub(1, Ordering::SeqCst);
+                })?;
 
         self.runtime.scheduler.lock().schedule(task_id, 0);
         Ok(task_id)
@@ -263,7 +284,8 @@ impl RwLockFairnessHarness {
                 let acquire_time = self.acquisition_counter.fetch_add(1, Ordering::SeqCst);
                 {
                     let mut t = self.trace.lock();
-                    t.acquisition_order.push((acquire_time, "try_read".to_string(), reader_id));
+                    t.acquisition_order
+                        .push((acquire_time, "try_read".to_string(), reader_id));
                 }
                 Ok(true)
             }
@@ -272,7 +294,11 @@ impl RwLockFairnessHarness {
     }
 
     /// Execute try_write operation
-    fn execute_try_write_op(&mut self, writer_id: u32, value: u64) -> Result<bool, Box<dyn std::error::Error>> {
+    fn execute_try_write_op(
+        &mut self,
+        writer_id: u32,
+        value: u64,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match self.lock.try_write() {
             Ok(mut guard) => {
                 // Successful non-blocking acquisition
@@ -280,7 +306,8 @@ impl RwLockFairnessHarness {
                 *guard = value;
                 {
                     let mut t = self.trace.lock();
-                    t.acquisition_order.push((acquire_time, "try_write".to_string(), writer_id));
+                    t.acquisition_order
+                        .push((acquire_time, "try_write".to_string(), writer_id));
                 }
                 Ok(true)
             }
@@ -302,13 +329,21 @@ impl RwLockFairnessHarness {
             }
 
             match op {
-                RwLockOp::Read { duration_steps, reader_id } => {
+                RwLockOp::Read {
+                    duration_steps,
+                    reader_id,
+                } => {
                     if let Ok(task_id) = self.execute_read_op(*reader_id, *duration_steps) {
                         spawned_tasks.push(task_id);
                     }
                 }
-                RwLockOp::Write { duration_steps, writer_id, value } => {
-                    if let Ok(task_id) = self.execute_write_op(*writer_id, *duration_steps, *value) {
+                RwLockOp::Write {
+                    duration_steps,
+                    writer_id,
+                    value,
+                } => {
+                    if let Ok(task_id) = self.execute_write_op(*writer_id, *duration_steps, *value)
+                    {
                         spawned_tasks.push(task_id);
                     }
                 }
@@ -330,8 +365,26 @@ impl RwLockFairnessHarness {
         }
 
         // Cancel remaining tasks if any
+        let cancel_reason = CancelReason::user("rwlock fairness scenario cleanup");
+        let cancel_priority = cancel_reason.cleanup_budget().priority;
+        let mut to_schedule = Vec::new();
+        let mut cancel_wakes = Vec::new();
         for task_id in spawned_tasks {
-            let _ = self.runtime.state.cancel_task(task_id, None);
+            let effects = self.runtime.state.cancel_task(task_id, &cancel_reason);
+            let (newly_cancelled, wakes) = effects.into_parts();
+            if newly_cancelled {
+                to_schedule.push(task_id);
+            }
+            cancel_wakes.push(wakes);
+        }
+        {
+            let mut scheduler = self.runtime.scheduler.lock();
+            for task_id in to_schedule {
+                scheduler.schedule_cancel(task_id, cancel_priority);
+            }
+        }
+        for wakes in cancel_wakes {
+            wakes.dispatch();
         }
 
         // Drain remaining steps
@@ -355,7 +408,7 @@ proptest! {
     /// When writers are waiting, new readers should be blocked to prevent writer starvation.
     #[test]
     fn mr_writer_preference_fairness(scenario in rwlock_scenario_strategy()) {
-        let seed = 0xF41RNESS;
+        let seed = 0x46_34_31_52_4E_45_53_53; // ASCII "F41RNESS"
         let mut harness = RwLockFairnessHarness::new(seed);
 
         let trace = harness.run_scenario(&scenario);
@@ -412,7 +465,7 @@ proptest! {
     /// When a writer releases, waiting readers should be woken as a cohort for efficiency.
     #[test]
     fn mr_reader_cohort_coalescing(scenario in rwlock_scenario_strategy()) {
-        let seed = 0xC0ALESC;
+        let seed = 0x43_30_41_4C_45_53_43; // ASCII "C0ALESC"
         let mut harness = RwLockFairnessHarness::new(seed);
 
         let trace = harness.run_scenario(&scenario);
@@ -492,7 +545,7 @@ proptest! {
     /// Readers waiting together should be served in FIFO order, as should writers.
     #[test]
     fn mr_fifo_ordering_same_kind(scenario in rwlock_scenario_strategy()) {
-        let seed = 0xFIF0;
+        let seed = 0x46_49_46_30;
         let mut harness = RwLockFairnessHarness::new(seed);
 
         let trace = harness.run_scenario(&scenario);
@@ -676,21 +729,41 @@ proptest! {
 
 #[test]
 fn writer_preference_prevents_reader_monopoly() {
-    let seed = 0xPREVENT;
+    // ASCII "PREVENT" encoded as a deterministic numeric seed.
+    let seed = 0x50_52_45_56_45_4E_54;
     let mut harness = RwLockFairnessHarness::new(seed);
 
     // Scenario: continuous readers should not prevent writers from eventually acquiring
     let reader_monopoly_scenario = RwLockScenario {
         operations: vec![
             // Start with some readers
-            RwLockOp::Read { duration_steps: 10, reader_id: 1 },
-            RwLockOp::Read { duration_steps: 10, reader_id: 2 },
-            RwLockOp::Read { duration_steps: 10, reader_id: 3 },
+            RwLockOp::Read {
+                duration_steps: 10,
+                reader_id: 1,
+            },
+            RwLockOp::Read {
+                duration_steps: 10,
+                reader_id: 2,
+            },
+            RwLockOp::Read {
+                duration_steps: 10,
+                reader_id: 3,
+            },
             // Writer request should eventually succeed despite reader pressure
-            RwLockOp::Write { duration_steps: 5, writer_id: 1, value: 999 },
+            RwLockOp::Write {
+                duration_steps: 5,
+                writer_id: 1,
+                value: 999,
+            },
             // More readers after writer - these should be blocked initially
-            RwLockOp::Read { duration_steps: 5, reader_id: 4 },
-            RwLockOp::Read { duration_steps: 5, reader_id: 5 },
+            RwLockOp::Read {
+                duration_steps: 5,
+                reader_id: 4,
+            },
+            RwLockOp::Read {
+                duration_steps: 5,
+                reader_id: 5,
+            },
         ],
         concurrency: 6,
         max_steps: 200,
@@ -699,7 +772,8 @@ fn writer_preference_prevents_reader_monopoly() {
     let trace = harness.run_scenario(&reader_monopoly_scenario);
 
     // Verify that the writer eventually acquired the lock
-    let writer_acquired = trace.acquisition_order
+    let writer_acquired = trace
+        .acquisition_order
         .iter()
         .any(|(_, op_type, id)| op_type == "write" && *id == 1);
 
@@ -709,13 +783,15 @@ fn writer_preference_prevents_reader_monopoly() {
     );
 
     // Verify that later readers (4, 5) were delayed until after writer
-    let writer_time = trace.acquisition_order
+    let writer_time = trace
+        .acquisition_order
         .iter()
         .find(|(_, op_type, id)| op_type == "write" && *id == 1)
         .map(|(time, _, _)| *time)
         .unwrap_or(0);
 
-    let late_reader_times: Vec<_> = trace.acquisition_order
+    let late_reader_times: Vec<_> = trace
+        .acquisition_order
         .iter()
         .filter(|(_, op_type, id)| op_type == "read" && (*id == 4 || *id == 5))
         .map(|(time, _, _)| *time)
@@ -725,25 +801,42 @@ fn writer_preference_prevents_reader_monopoly() {
         assert!(
             late_reader_time >= writer_time,
             "Late readers should not acquire before writer: reader time {}, writer time {}",
-            late_reader_time, writer_time
+            late_reader_time,
+            writer_time
         );
     }
 }
 
 #[test]
 fn reader_coalescing_after_writer_release() {
-    let seed = 0xC0ALES2;
+    let seed = 0x43_30_41_4C_45_53_32; // ASCII "C0ALES2"
     let mut harness = RwLockFairnessHarness::new(seed);
 
     // Scenario: writer followed by multiple waiting readers
     let coalescing_scenario = RwLockScenario {
         operations: vec![
-            RwLockOp::Write { duration_steps: 8, writer_id: 1, value: 777 },
+            RwLockOp::Write {
+                duration_steps: 8,
+                writer_id: 1,
+                value: 777,
+            },
             // These readers should wait and then be coalesced
-            RwLockOp::Read { duration_steps: 3, reader_id: 1 },
-            RwLockOp::Read { duration_steps: 3, reader_id: 2 },
-            RwLockOp::Read { duration_steps: 3, reader_id: 3 },
-            RwLockOp::Read { duration_steps: 3, reader_id: 4 },
+            RwLockOp::Read {
+                duration_steps: 3,
+                reader_id: 1,
+            },
+            RwLockOp::Read {
+                duration_steps: 3,
+                reader_id: 2,
+            },
+            RwLockOp::Read {
+                duration_steps: 3,
+                reader_id: 3,
+            },
+            RwLockOp::Read {
+                duration_steps: 3,
+                reader_id: 4,
+            },
         ],
         concurrency: 5,
         max_steps: 100,
@@ -752,21 +845,26 @@ fn reader_coalescing_after_writer_release() {
     let trace = harness.run_scenario(&coalescing_scenario);
 
     // Find when the writer released
-    let writer_time = trace.acquisition_order
+    let writer_time = trace
+        .acquisition_order
         .iter()
         .find(|(_, op_type, id)| op_type == "write" && *id == 1)
         .map(|(time, _, _)| *time)
         .unwrap_or(0);
 
     // Find reader acquisitions after writer
-    let post_writer_readers: Vec<_> = trace.acquisition_order
+    let post_writer_readers: Vec<_> = trace
+        .acquisition_order
         .iter()
         .filter(|(time, op_type, _)| op_type == "read" && *time > writer_time)
         .collect();
 
     // Readers should acquire close together (coalesced)
     if post_writer_readers.len() >= 2 {
-        let reader_times: Vec<_> = post_writer_readers.iter().map(|(time, _, _)| **time).collect();
+        let reader_times: Vec<_> = post_writer_readers
+            .iter()
+            .map(|(time, _, _)| **time)
+            .collect();
         let time_span = reader_times.iter().max().unwrap() - reader_times.iter().min().unwrap();
 
         assert!(
@@ -791,16 +889,33 @@ fn reader_coalescing_after_writer_release() {
 
 #[test]
 fn deterministic_fairness_replay() {
-    let seed = 0xDETE12;
+    let seed = 0x44_45_54_45_31_32; // ASCII "DETE12"
 
     // Run the same scenario twice and verify deterministic fairness behavior
     let scenario = RwLockScenario {
         operations: vec![
-            RwLockOp::Read { duration_steps: 5, reader_id: 1 },
-            RwLockOp::Write { duration_steps: 3, writer_id: 1, value: 42 },
-            RwLockOp::Read { duration_steps: 4, reader_id: 2 },
-            RwLockOp::Read { duration_steps: 4, reader_id: 3 },
-            RwLockOp::Write { duration_steps: 2, writer_id: 2, value: 84 },
+            RwLockOp::Read {
+                duration_steps: 5,
+                reader_id: 1,
+            },
+            RwLockOp::Write {
+                duration_steps: 3,
+                writer_id: 1,
+                value: 42,
+            },
+            RwLockOp::Read {
+                duration_steps: 4,
+                reader_id: 2,
+            },
+            RwLockOp::Read {
+                duration_steps: 4,
+                reader_id: 3,
+            },
+            RwLockOp::Write {
+                duration_steps: 2,
+                writer_id: 2,
+                value: 84,
+            },
         ],
         concurrency: 5,
         max_steps: 80,
@@ -820,7 +935,8 @@ fn deterministic_fairness_replay() {
     );
 
     // At least some acquisitions should match deterministically
-    let matching_acquisitions = trace1.acquisition_order
+    let matching_acquisitions = trace1
+        .acquisition_order
         .iter()
         .zip(trace2.acquisition_order.iter())
         .filter(|((_, op1, id1), (_, op2, id2))| op1 == op2 && id1 == id2)

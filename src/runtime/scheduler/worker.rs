@@ -540,7 +540,9 @@ impl Worker {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
+                let (cancel_ack, cancel_wakes) =
+                    Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
+                let cancel_ack = cancel_ack.is_some();
                 let _ = state.update_task(task_id, |record| {
                     if !record.state.is_terminal() {
                         let mut completed_via_cancel = false;
@@ -642,11 +644,12 @@ impl Worker {
                 self.scratch_local.set(local_waiters);
                 self.scratch_global.set(global_waiters);
                 self.scratch_foreign_wakers.set(foreign_wakers);
+                cancel_wakes.dispatch();
             }
             PanicIsolationResult::Success(Poll::Pending) => {
                 let is_local = is_local_task;
 
-                match stored {
+                let cancel_effects = match stored {
                     AnyStoredTask::Global(t) => {
                         let mut state = self
                             .state
@@ -654,11 +657,10 @@ impl Worker {
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         state.store_spawned_task(task_id, t);
                         // Cache waker back in the task record for reuse on next poll
-                        if let Some(record) = state.task_mut(task_id) {
+                        let _ = state.update_task(task_id, |record| {
                             record.cached_waker = Some((waker, 0));
-                        }
-                        let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
-                        drop(state);
+                        });
+                        Self::consume_cancel_ack_locked(&mut state, task_id)
                     }
                     AnyStoredTask::Local(t) => {
                         crate::runtime::local::store_local_task(task_id, t);
@@ -667,15 +669,15 @@ impl Worker {
                             .state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if let Some(record) = state.task_mut(task_id) {
+                        let _ = state.update_task(task_id, |record| {
                             record.cached_waker = Some((waker, 0));
-                        }
-                        let _ = Self::consume_cancel_ack_locked(&mut state, task_id);
-                        drop(state);
+                        });
+                        Self::consume_cancel_ack_locked(&mut state, task_id)
                     }
-                }
+                };
+                let (cancel_ack, cancel_wakes) = cancel_effects.into_parts();
 
-                if wake_state.finish_poll() {
+                if wake_state.finish_poll() || cancel_ack.is_some() {
                     // Local tasks must stay on their owning worker. We reschedule
                     // local tasks to the local queue and global tasks to the global queue.
                     // WorkStealingWaker also routes cross-thread wakes for local tasks
@@ -689,6 +691,7 @@ impl Worker {
                     self.parker.unpark();
                 }
                 guard.completed = true;
+                cancel_wakes.dispatch();
             }
             PanicIsolationResult::Panicked(panic_context)
             | PanicIsolationResult::Skipped {
@@ -703,7 +706,8 @@ impl Worker {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
+                let (_cancel_ack, cancel_wakes) =
+                    Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let _ = state.update_task(task_id, |record| {
                     if !record.state.is_terminal() {
                         record.complete(panic_outcome);
@@ -761,6 +765,7 @@ impl Worker {
                 self.scratch_local.set(local_waiters);
                 self.scratch_global.set(global_waiters);
                 self.scratch_foreign_wakers.set(foreign_wakers);
+                cancel_wakes.dispatch();
             }
         }
         let _ = guard.completed;
@@ -796,24 +801,13 @@ impl Worker {
     }
 
     #[inline]
-    fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
-        let Some(record) = state.task_mut(task_id) else {
-            return false;
-        };
-        let Some(inner) = record.cx_inner.as_ref() else {
-            return false;
-        };
-        let mut acknowledged = false;
-        let mut guard = inner.write();
-        if guard.cancel_acknowledged {
-            guard.cancel_acknowledged = false;
-            acknowledged = true;
-        }
-        drop(guard);
-        if acknowledged {
-            let _ = record.acknowledge_cancel();
-        }
-        acknowledged
+    fn consume_cancel_ack_locked(
+        state: &mut RuntimeState,
+        task_id: TaskId,
+    ) -> crate::types::task_context::CancellationEffects<
+        Option<crate::record::task::CheckpointCancelAck>,
+    > {
+        state.consume_task_checkpoint_cancel_ack(task_id)
     }
 }
 
@@ -1036,6 +1030,12 @@ impl Parker {
         // protocol).
         let _guard = self.lock_unpoisoned();
         self.inner.cvar.notify_one();
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn notification_pending_for_test(&self) -> bool {
+        self.inner.notified.load(Ordering::Acquire)
     }
 }
 

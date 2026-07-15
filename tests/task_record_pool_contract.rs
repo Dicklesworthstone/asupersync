@@ -3,6 +3,7 @@
 use asupersync::record::task::TaskPhase;
 use asupersync::runtime::TaskTable;
 use asupersync::runtime::config::RuntimeCapacityHints;
+use asupersync::types::task_context::CancelWakeEffects;
 use asupersync::types::{RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 use serde_json::{Value, json};
@@ -293,8 +294,12 @@ fn stale_invariant_step_hash(
     hash_values(&values)
 }
 
-fn dirty_record_for_recycle(record: &mut asupersync::record::task::TaskRecord, burst_slot: usize) {
-    record.request_cancel(asupersync::types::CancelReason::timeout());
+fn dirty_record_for_recycle(
+    record: &mut asupersync::record::task::TaskRecord,
+    burst_slot: usize,
+) -> CancelWakeEffects {
+    let cancel_effects = record.request_cancel(asupersync::types::CancelReason::timeout());
+    let (_newly_cancelled, cancel_wakes) = cancel_effects.into_parts();
     record.waiters.push(TaskId::from_arena(ArenaIndex::new(
         u32::try_from(10_000 + burst_slot).expect("burst slot fits in u32"),
         0,
@@ -308,6 +313,7 @@ fn dirty_record_for_recycle(record: &mut asupersync::record::task::TaskRecord, b
     record.sched_generation = 44;
     record.total_polls = 12;
     record.last_polled_step = 77;
+    cancel_wakes
 }
 
 fn run_workload(task_capacity: usize, pool_limit: usize, workload: PoolWorkload) -> WorkloadStats {
@@ -367,12 +373,13 @@ fn run_workload(task_capacity: usize, pool_limit: usize, workload: PoolWorkload)
                 });
             }
 
-            dirty_record_for_recycle(
+            let cancel_wakes = dirty_record_for_recycle(
                 table
                     .task_mut(task_id)
                     .expect("mutable inserted task record exists"),
                 slot_ordinal,
             );
+            cancel_wakes.dispatch();
             task_ids.push(task_id);
         }
 

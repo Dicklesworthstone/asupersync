@@ -70,7 +70,11 @@ fn setup_runtime_state_with_draining_regions(
 
     state.set_read_biased_region_snapshot(enable_read_biased_snapshot);
     for child in draining_regions {
-        let _ = state.cancel_request(child, &asupersync::types::CancelReason::user("bench"), None);
+        let (tasks, cancel_wakes) = state
+            .cancel_request(child, &asupersync::types::CancelReason::user("bench"), None)
+            .into_parts();
+        cancel_wakes.suppress();
+        black_box(tasks);
     }
     if enable_read_biased_snapshot {
         let _ = StateSnapshot::from_runtime_state(&state);

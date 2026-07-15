@@ -1454,10 +1454,12 @@ mod tests {
             reason: reason.clone(),
             cleanup_budget: crate::types::Budget::INFINITE,
         };
-        state
-            .task_mut(task)
-            .expect("task must exist")
-            .request_cancel_with_budget(reason.clone(), crate::types::Budget::INFINITE);
+        let cancel_effects = {
+            let record = state.task_mut(task).expect("task must exist");
+            record.request_cancel_with_budget(reason.clone(), crate::types::Budget::INFINITE)
+        };
+        let (_newly_cancelled, cancel_wakes) = cancel_effects.into_parts();
+        cancel_wakes.dispatch();
 
         let mut suite = OracleSuite::new();
         suite.cancellation_protocol.on_region_create(region, None);

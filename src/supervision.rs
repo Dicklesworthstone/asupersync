@@ -1659,7 +1659,9 @@ impl CompiledSupervisor {
         }
 
         fn abort_supervisor_boot(state: &mut RuntimeState, region: RegionId) {
-            let _ = state.cancel_request(region, &crate::types::CancelReason::shutdown(), None);
+            let effects =
+                state.cancel_request(region, &crate::types::CancelReason::shutdown(), None);
+            state.defer_cancel_dispatch(effects);
             if let Some(r) = state.region(region) {
                 r.begin_close(None);
             }

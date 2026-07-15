@@ -73,7 +73,7 @@ Current witnesses: `tests/scheduler_lane_fairness.rs::test_steal_only_from_ready
 |---|---|---|---|
 | `SPAWN` | `Scope::spawn` (`src/cx/scope.rs:348`), `Scope::spawn_task` (line 493), `RuntimeState::create_task` (`src/runtime/state.rs:1338`) | Implemented | Closing-region rejection covered: `tests::spawn_into_closing_region_should_fail` (`scope.rs:1933`). |
 | `SCHEDULE` (Created → Running) | `RuntimeState::create_task` enqueues; first `poll` flips state inside `runtime/state.rs` (`mark_task_running` family) | Implemented | |
-| `COMPLETE-OK` | `complete_task_ok` (`src/runtime/state.rs:7976`); waiter wake via `task_completed` (`src/runtime/state.rs:2446`) | Implemented | Apply-policy hook flows through `apply_policy_on_child_outcome` (line 2085). |
+| `COMPLETE-OK` | `complete_task_ok` (`src/runtime/state.rs:7976`); waiter wake via `task_completed` (`src/runtime/state.rs:2446`) | Implemented | Callers compute `Policy::on_child_outcome` before taking the runtime-state lock, then pass the closed `PolicyAction` to `apply_policy_action`. |
 | `COMPLETE-ERR` | Same `task_completed` path, error outcome routed through policy aggregation | Implemented | |
 
 ### 3.2 Cancellation protocol
@@ -145,7 +145,7 @@ Current witnesses: `tests/scheduler_lane_fairness.rs::test_steal_only_from_ready
 
 | Spec § | Rust mirror | Status | Notes |
 |---|---|---|---|
-| 4.1 `join` | `Scope::join`, `Scope::join_all` (`src/cx/scope.rs`); raw `combinator/join.rs` | Implemented | Policy `FailFast` aggregates via `apply_policy_on_child_outcome` (state.rs:2085). |
+| 4.1 `join` | `Scope::join`, `Scope::join_all` (`src/cx/scope.rs`); raw `combinator/join.rs` | Implemented | Policy `FailFast` is evaluated outside `RuntimeState`; the resulting closed action is applied through `apply_policy_action`. |
 | 4.2 `race` (with loser drain) | `Scope::race`, `Scope::race_all` (`src/cx/scope.rs:1314..1356`) — abort losers with `CancelReason::race_loser()`, then `join` to drain | Implemented | Spec lemma L-LOSER-DRAINED witnessed by `src/lab/oracle/loser_drain.rs`. |
 | 4.3 `timeout` | `combinator/timeout.rs` defined as `race(f, sleep(d).then(Err))` | Implemented | LAW-TIMEOUT-MIN test in `combinator/timeout_metamorphic.rs`. |
 

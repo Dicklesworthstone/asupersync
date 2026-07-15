@@ -58,14 +58,16 @@ fn create_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
 }
 
 fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> usize {
-    let tasks = runtime.state.cancel_request(region, reason, None);
-    let mut cancel_count = 0usize;
-    let mut scheduler = runtime.scheduler.lock();
-    for (task, priority) in tasks {
-        scheduler.schedule_cancel(task, priority);
-        cancel_count += 1;
+    let cancel_effects = runtime.state.cancel_request(region, reason, None);
+    let (tasks, wake_effects) = cancel_effects.into_parts();
+    let cancel_count = tasks.len();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task, priority) in tasks {
+            scheduler.schedule_cancel(task, priority);
+        }
     }
-    drop(scheduler);
+    wake_effects.dispatch();
     cancel_count
 }
 
@@ -217,9 +219,11 @@ fn e2e_cancel_region_drains_tasks() {
     runtime.run_until_quiescent();
 
     // Cancel the region
-    runtime
-        .state
-        .cancel_request(region, &CancelReason::user("test cancellation"), None);
+    cancel_region(
+        &mut runtime,
+        region,
+        &CancelReason::user("test cancellation"),
+    );
     runtime.run_until_quiescent();
 
     let quiescent = runtime.is_quiescent();
@@ -253,9 +257,11 @@ fn e2e_cancellation_storm() {
 
         // Cancel odd regions immediately
         if i % 2 == 1 {
-            runtime
-                .state
-                .cancel_request(region, &CancelReason::user("test cancellation"), None);
+            cancel_region(
+                &mut runtime,
+                region,
+                &CancelReason::user("test cancellation"),
+            );
         }
     }
 
@@ -910,9 +916,7 @@ fn e2e_cancellation_propagates_through_region_tree() {
     tracing::info!(ran = ran, "tasks completed before cancel");
 
     // Cancel root — should propagate
-    runtime
-        .state
-        .cancel_request(root, &CancelReason::user("tree cancel"), None);
+    cancel_region(&mut runtime, root, &CancelReason::user("tree cancel"));
     runtime.run_until_quiescent();
     harness.exit_phase();
 
@@ -1343,9 +1347,11 @@ fn e2e_cancel_with_pending_obligations() {
     assert_with_log!(pending >= 3, "obligations pending", ">= 3", pending);
 
     test_section!("cancel_with_obligations_live");
-    runtime
-        .state
-        .cancel_request(root, &CancelReason::user("cancel with obligations"), None);
+    cancel_region(
+        &mut runtime,
+        root,
+        &CancelReason::user("cancel with obligations"),
+    );
 
     test_section!("abort_obligations");
     for ob in &obligations {
@@ -1404,9 +1410,7 @@ fn e2e_deep_cancel_propagation() {
     assert_with_log!(ran == depth, "all levels ran", depth, ran);
 
     test_section!("cancel_root_propagates");
-    runtime
-        .state
-        .cancel_request(root, &CancelReason::shutdown(), None);
+    cancel_region(&mut runtime, root, &CancelReason::shutdown());
     runtime.run_until_quiescent();
 
     test_section!("verify");
@@ -1467,7 +1471,7 @@ fn e2e_concurrent_cancel_reasons() {
     test_section!("fire_cancellations");
     for (i, region) in region_ids.iter().enumerate() {
         let reason = &reasons[i % reasons.len()];
-        runtime.state.cancel_request(*region, reason, None);
+        cancel_region(&mut runtime, *region, reason);
         tracing::info!(
             region = ?region,
             kind = ?reason.kind,
@@ -1525,9 +1529,7 @@ fn e2e_cancel_with_timer_interleave() {
 
         // Cancel every other wave before it runs
         if wave % 2 == 0 {
-            runtime
-                .state
-                .cancel_request(wave_region, &CancelReason::timeout(), None);
+            cancel_region(&mut runtime, wave_region, &CancelReason::timeout());
             cancelled_count.fetch_add(1, Ordering::SeqCst);
             tracing::info!(wave = wave, "cancelled wave");
         }
@@ -1600,9 +1602,7 @@ fn e2e_race_loser_drain() {
         }
 
         // Cancel the loser region
-        runtime
-            .state
-            .cancel_request(region_b, &CancelReason::race_lost(), None);
+        cancel_region(&mut runtime, region_b, &CancelReason::race_lost());
 
         tracing::info!(race = race_idx, "race loser cancelled");
     }
@@ -1651,9 +1651,11 @@ fn e2e_cancel_interrupts_obligation_commit() {
     tracing::info!(ob1 = ?ob1, ob2 = ?ob2, ob3 = ?ob3, "obligations created");
 
     // Cancel region while obligations are still pending
-    runtime
-        .state
-        .cancel_request(root, &CancelReason::user("mid-obligation cancel"), None);
+    cancel_region(
+        &mut runtime,
+        root,
+        &CancelReason::user("mid-obligation cancel"),
+    );
     tracing::info!("cancel fired with 3 pending obligations");
 
     test_section!("mixed_commit_abort");
@@ -1714,9 +1716,7 @@ fn e2e_deterministic_cancel_storm() {
 
             // Cancel every 3rd region
             if i % 3 == 0 {
-                runtime
-                    .state
-                    .cancel_request(region, &CancelReason::user("storm"), None);
+                cancel_region(runtime, region, &CancelReason::user("storm"));
             }
         }
 

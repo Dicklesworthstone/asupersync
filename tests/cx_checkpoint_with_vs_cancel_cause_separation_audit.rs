@@ -197,15 +197,22 @@ fn checkpoint_with_records_message_into_checkpoint_state() {
     let pos = source.find(fn_marker).expect("checkpoint_with fn");
     let body_window = &source[pos..pos + 2500];
 
+    let conversion = body_window
+        .find("let msg = msg.into();")
+        .expect("message conversion");
+    let inner_lock = body_window
+        .find("let mut inner = self.inner.write();")
+        .expect("CxInner write lock");
+    let record = body_window
+        .find(".record_with_message_at(msg, checkpoint_time);")
+        .expect("checkpoint message record");
     assert!(
-        body_window
-            .contains("inner\n                .checkpoint_state\n                .record_with_message_at(msg.into(), checkpoint_time);")
-            || body_window.contains("checkpoint_state")
-                && body_window.contains("record_with_message_at(msg.into(), checkpoint_time)"),
+        conversion < inner_lock && inner_lock < record,
         "REGRESSION: checkpoint_with no longer records the \
-         message into CheckpointState via \
-         record_with_message_at. The progress-message \
-         channel is broken.",
+         materialized message into CheckpointState, or it invokes \
+         user-controlled Into<String> while holding CxInner. The \
+         progress-message channel must convert before locking and \
+         record afterward.",
     );
 }
 

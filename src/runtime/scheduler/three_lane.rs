@@ -903,6 +903,23 @@ impl WorkerCoordinator {
         }
     }
 
+    /// Publishes one concrete Parker permit without calling the reactor.
+    ///
+    /// RuntimeState uses this beneath its outer lock after enqueueing deferred
+    /// cancellation work. Keeping this boundary Parker-only prevents a
+    /// user-supplied reactor callback from running under that lock while still
+    /// closing the final-check/park lost-wakeup race.
+    #[inline]
+    pub(crate) fn wake_one_parker(&self) {
+        let count = self.parkers.len();
+        if count == 0 {
+            return;
+        }
+        let idx = self.next_wake.fetch_add(1, Ordering::AcqRel);
+        let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
+        self.parkers[slot].unpark();
+    }
+
     #[inline]
     pub(crate) fn wake_many(&self, num_wakes: usize) {
         let count = self.parkers.len();
@@ -1588,6 +1605,12 @@ impl ThreeLaneScheduler {
     /// future storage/retrieval, LocalQueue push/pop) lock only the task table
     /// instead of the full RuntimeState. Cross-cutting operations
     /// (`task_completed`, `drain_ready_async_finalizers`) still use RuntimeState.
+    /// This constructor is currently a direct integration seam used by tests
+    /// and fuzzing; `RuntimeBuilder` still gates the sharded state shape, and
+    /// mailbox admission does not yet migrate newly admitted records into this
+    /// external table. RuntimeState-created async-finalizer tasks likewise
+    /// remain embedded, so this seam does not claim end-to-end execution of
+    /// asynchronous finalizers through the external table.
     ///
     /// br-asupersync-niczb3: `worker_count == 0` is silently clamped
     /// to `1` here so existing infallible callers do not regress.
@@ -1648,6 +1671,13 @@ impl ThreeLaneScheduler {
             parkers.push(Parker::new());
         }
         let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone(), io_driver.clone()));
+        let pending_cancel_dispatch_ready = {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.set_pending_cancel_dispatch_coordinator(&coordinator);
+            state.pending_cancel_dispatch_ready_handle()
+        };
 
         // Create fast queues (O(1) VecDeque) for ready-lane fast path.
         // When a sharded TaskTable is available, back the queues directly
@@ -1700,8 +1730,10 @@ impl ThreeLaneScheduler {
                 fast_stealer_locality,
                 local_ready: Arc::clone(&local_ready[id]),
                 all_local_ready: local_ready.clone(),
+                all_local_schedulers: local_schedulers.iter().cloned().collect(),
                 global: Arc::clone(&global),
                 state: Arc::clone(state),
+                pending_cancel_dispatch_ready: Arc::clone(&pending_cancel_dispatch_ready),
                 task_table: task_table.clone(),
                 parker,
                 coordinator: Arc::clone(&coordinator),
@@ -2718,10 +2750,15 @@ pub struct ThreeLaneWorker {
     /// Used to route local waiters to their owner worker's queue when a task
     /// completes and needs to wake a pinned waiter on a different worker.
     all_local_ready: SmallVec<[Arc<LocalReadyQueue>; 16]>,
+    /// Every worker's priority scheduler, indexed by pinned worker id, for
+    /// publishing deferred cancellation before any Waker callback runs.
+    all_local_schedulers: SmallVec<[Arc<Mutex<PriorityScheduler>>; 16]>,
     /// Global injection queue.
     pub global: Arc<GlobalInjector>,
     /// Shared runtime state.
     pub state: Arc<ContendedMutex<RuntimeState>>,
+    /// Lock-free hint for the exceptional deferred-cancellation queue.
+    pending_cancel_dispatch_ready: Arc<AtomicBool>,
     /// Optional sharded task table for hot-path task operations.
     ///
     /// When present, `execute()` and scheduling helpers lock this instead
@@ -3806,6 +3843,26 @@ impl PreemptionFairnessCertificate {
 /// operators can see the fallback in their logs.
 static THREE_LANE_TIME_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Closed receipt for a delegated first cancel-lane insertion. It contains no
+/// callbacks or owned user data and may safely cross the record-lock boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeferredCancelLanePublication {
+    priority: u8,
+    wake_target: DeferredCancelWakeTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredCancelWakeTarget {
+    AnyWorker,
+    PinnedWorker(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredCancelLaneError {
+    MissingPinnedWorker,
+    PinnedWorkerUnavailable(usize),
+}
+
 impl ThreeLaneWorker {
     /// Returns the current time in nanoseconds for fairness monitoring.
     ///
@@ -4276,9 +4333,11 @@ impl ThreeLaneWorker {
         let io_timeout = select_io_poll_timeout(
             timeout,
             self.fast_queue.is_empty(),
-            self.spawn_mailbox
-                .as_ref()
-                .is_some_and(|mailbox| !mailbox.is_empty()),
+            self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
+                || self
+                    .spawn_mailbox
+                    .as_ref()
+                    .is_some_and(|mailbox| !mailbox.is_empty()),
         );
 
         if self.shutdown.load(Ordering::Acquire) {
@@ -4386,6 +4445,7 @@ impl ThreeLaneWorker {
                 if !self.fast_queue.is_empty()
                     || self.global.has_cancel_work()
                     || self.global.has_ready_work()
+                    || self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
                     || self
                         .spawn_mailbox
                         .as_ref()
@@ -4436,6 +4496,7 @@ impl ThreeLaneWorker {
                             !crate::runtime::spawn_mailbox::local_spawn_lane_is_empty();
                         if local_has_runnable
                             || local_ready_has_work
+                            || self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
                             || spawn_mailbox_has_work
                             || local_spawn_lane_has_work
                         {
@@ -4656,6 +4717,375 @@ impl ThreeLaneWorker {
         snapshot
     }
 
+    /// Inserts a delegated task's first cancel lane without consulting the task
+    /// table, emitting evidence, or waking a worker. Its caller owns the
+    /// authoritative record and Cx publication gates, so even an already-awake
+    /// worker blocks at record lookup until the caller marks the lane Published.
+    fn insert_deferred_cancel_lane_without_wake(
+        &self,
+        task_id: TaskId,
+        priority: u8,
+        is_local: bool,
+        pinned_worker: Option<usize>,
+    ) -> Result<DeferredCancelLanePublication, DeferredCancelLaneError> {
+        if is_local {
+            let Some(worker_id) = pinned_worker else {
+                return Err(DeferredCancelLaneError::MissingPinnedWorker);
+            };
+            let Some(local) = self.all_local_schedulers.get(worker_id) else {
+                return Err(DeferredCancelLaneError::PinnedWorkerUnavailable(worker_id));
+            };
+            let mut local = local.lock();
+            if let Some(local_ready) = self.all_local_ready.get(worker_id) {
+                local_ready.lock().tombstone(task_id);
+            }
+            local.move_to_cancel_lane(task_id, priority);
+            drop(local);
+            return Ok(DeferredCancelLanePublication {
+                priority,
+                wake_target: DeferredCancelWakeTarget::PinnedWorker(worker_id),
+            });
+        }
+
+        self.global.remove_timed(task_id);
+        self.global.inject_cancel(task_id, priority);
+        Ok(DeferredCancelLanePublication {
+            priority,
+            wake_target: DeferredCancelWakeTarget::AnyWorker,
+        })
+    }
+
+    /// Runs subscriber/time-source evidence and worker notification only after
+    /// the record and Cx publication gates have been released.
+    fn finish_deferred_cancel_lane_publication(
+        &self,
+        task_id: TaskId,
+        publication: DeferredCancelLanePublication,
+    ) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.record_scheduler_evidence_enqueue(task_id);
+        })) {
+            // Evidence collection can reach a tracing subscriber or time
+            // source. The lane and Cx handoff are already authoritative; leak
+            // an opaque panic payload rather than skipping the only worker
+            // permit that makes the publication live.
+            std::mem::forget(payload);
+        }
+        match publication.wake_target {
+            DeferredCancelWakeTarget::AnyWorker => self.coordinator.wake_one(),
+            DeferredCancelWakeTarget::PinnedWorker(worker_id) => {
+                self.coordinator.wake_worker(worker_id);
+            }
+        }
+    }
+
+    /// Contains diagnostics on the cancellation consumer so a hostile tracing
+    /// subscriber cannot abort the rest of an already-dequeued command batch.
+    fn emit_cancel_diagnostic(diagnostic: impl FnOnce()) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(diagnostic)) {
+            std::mem::forget(payload);
+        }
+    }
+
+    fn publish_deferred_cancel_task(&self, task_id: TaskId, priority: u8) -> bool {
+        let task_location = self.with_task_table_ref(|tasks| {
+            tasks.task(task_id).map(|record| {
+                record.wake_state.notify();
+                (record.is_local(), record.pinned_worker())
+            })
+        });
+        let Some((is_local, pinned_worker)) = task_location else {
+            Self::emit_cancel_diagnostic(|| {
+                error!(
+                    ?task_id,
+                    "deferred cancellation task is absent from the task table"
+                );
+            });
+            return false;
+        };
+
+        match self.insert_deferred_cancel_lane_without_wake(
+            task_id,
+            priority,
+            is_local,
+            pinned_worker,
+        ) {
+            Ok(publication) => {
+                self.finish_deferred_cancel_lane_publication(task_id, publication);
+                true
+            }
+            Err(error) => {
+                Self::emit_cancel_diagnostic(|| {
+                    let _ = &error;
+                    error!(
+                        ?task_id,
+                        ?error,
+                        "deferred cancellation lane insertion failed"
+                    );
+                });
+                false
+            }
+        }
+    }
+
+    /// Applies task-handle cancellation commands on the runtime-owned side of
+    /// the scheduler boundary. Producers mutate only checkpoint-visible Cx
+    /// state and enqueue plain data; this consumer performs the authoritative
+    /// TaskRecord transition, physically publishes every required lane, and
+    /// only then dispatches the captured Wakers.
+    fn drain_handle_cancel_requests(&self) {
+        const HANDLE_CANCEL_BATCH: usize = 16;
+
+        let Some(mailbox) = self.spawn_mailbox.as_ref() else {
+            return;
+        };
+        if mailbox.handle_cancels_are_empty() {
+            return;
+        }
+        let mut requests = Vec::with_capacity(HANDLE_CANCEL_BATCH);
+        if mailbox.dequeue_handle_cancels_into(HANDLE_CANCEL_BATCH, &mut requests) == 0 {
+            return;
+        }
+
+        let requests = crate::runtime::spawn_mailbox::coalesce_handle_cancel_requests(requests);
+        let (tasks, delegated, immediate_wakes) = if self.task_table.is_some() {
+            let (tasks, delegated, mut immediate_wakes, new_requests) =
+                self.with_task_table(|tt| {
+                    let mut tasks = Vec::with_capacity(requests.len());
+                    let mut delegated = Vec::new();
+                    let mut immediate_wakes = Vec::new();
+                    let mut new_requests = Vec::new();
+                    for request in requests {
+                        let task_id = request.task_id;
+                        let Some((effects, region_id, spawned_at)) =
+                            tt.update_task(task_id, |record| {
+                                let effects = record.request_cancel_for_handle(&request.reason);
+                                (effects, record.owner, record.created_at)
+                            })
+                        else {
+                            continue;
+                        };
+                        let (update, task_wakes) = effects.into_parts();
+                        if update.newly_cancelled {
+                            new_requests.push((task_id, region_id, spawned_at));
+                        }
+                        match update.route {
+                            Some(route) if route.delegated_initial => delegated.push((
+                                task_id,
+                                route.priority,
+                                request.reason,
+                                task_wakes,
+                            )),
+                            Some(route) => tasks.push((task_id, route.priority, task_wakes)),
+                            None => immediate_wakes.push(task_wakes),
+                        }
+                    }
+                    (tasks, delegated, immediate_wakes, new_requests)
+                });
+            if !new_requests.is_empty() {
+                let new_requests = new_requests
+                    .into_iter()
+                    .map(|(task_id, region_id, spawned_at)| {
+                        let task_still_live =
+                            self.with_task_table_ref(|tt| tt.task(task_id).is_some());
+                        (task_id, region_id, spawned_at, !task_still_live)
+                    })
+                    .collect::<Vec<_>>();
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for (task_id, region_id, spawned_at, allow_retired_noop) in new_requests {
+                    if let Some(validation_result) = state.external_handle_cancel_request_violation(
+                        task_id,
+                        region_id,
+                        spawned_at,
+                        allow_retired_noop,
+                    ) {
+                        let mut diagnostic = crate::types::task_context::CancelWakeEffects::empty();
+                        diagnostic.push_cancel_protocol_violation(
+                            "external-shard task-handle cancellation",
+                            validation_result,
+                        );
+                        immediate_wakes.push(diagnostic);
+                    }
+                }
+            }
+            (tasks, delegated, immediate_wakes)
+        } else {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut tasks = Vec::with_capacity(requests.len());
+            let mut delegated = Vec::new();
+            let mut immediate_wakes = Vec::new();
+            for request in requests {
+                let task_id = request.task_id;
+                let effects = state.cancel_task_for_handle(task_id, &request.reason);
+                let (route, task_wakes) = effects.into_parts();
+                match route {
+                    Some(route) if route.delegated_initial => {
+                        delegated.push((task_id, route.priority, request.reason, task_wakes))
+                    }
+                    Some(route) => tasks.push((task_id, route.priority, task_wakes)),
+                    None => immediate_wakes.push(task_wakes),
+                }
+            }
+            drop(state);
+            (tasks, delegated, immediate_wakes)
+        };
+
+        let mut wakes_to_dispatch = immediate_wakes;
+        for (task_id, priority, task_wakes) in tasks {
+            if self.publish_deferred_cancel_task(task_id, priority) {
+                wakes_to_dispatch.push(task_wakes);
+            } else {
+                Self::emit_cancel_diagnostic(|| {
+                    error!(
+                        ?task_id,
+                        priority,
+                        "handle cancellation promotion failed; suppressing only this task's \
+                         Wakers fail-closed"
+                    );
+                });
+                task_wakes.suppress();
+            }
+        }
+
+        // A managed pre-admission abort owns the first physical lane. Keep the
+        // authoritative record locked while its Cx gate computes the strongest
+        // reason, inserts that lane without waking, and transitions to Published.
+        // An already-awake worker may pop the queue entry, but it cannot remove
+        // or poll the task until this record critical section completes.
+        for (task_id, requested_priority, reason, mut task_wakes) in delegated {
+            let mut lane_error = None;
+            let effects = if self.task_table.is_some() {
+                self.with_task_table(|tt| {
+                    tt.update_task(task_id, |record| {
+                        record.publish_delegated_cancel_lane(|priority, is_local, pinned_worker| {
+                            match self.insert_deferred_cancel_lane_without_wake(
+                                task_id,
+                                priority,
+                                is_local,
+                                pinned_worker,
+                            ) {
+                                Ok(publication) => Some(publication),
+                                Err(error) => {
+                                    lane_error = Some(error);
+                                    None
+                                }
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| crate::types::task_context::CancellationEffects::ready(None))
+                })
+            } else {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.publish_handle_cancel_lane(task_id, |priority, is_local, pinned_worker| {
+                    match self.insert_deferred_cancel_lane_without_wake(
+                        task_id,
+                        priority,
+                        is_local,
+                        pinned_worker,
+                    ) {
+                        Ok(publication) => Some(publication),
+                        Err(error) => {
+                            lane_error = Some(error);
+                            None
+                        }
+                    }
+                })
+            };
+            let (publication, publication_wakes) = effects.into_parts();
+
+            if let Some(publication) = publication {
+                // Publish the concrete worker permit before any allocation in
+                // effect merging/vector growth can unwind. Cx and TaskRecord
+                // are already authoritative, so an early worker is safe.
+                self.finish_deferred_cancel_lane_publication(task_id, publication);
+                debug_assert!(publication.priority >= requested_priority);
+                task_wakes.merge(publication_wakes);
+                wakes_to_dispatch.push(task_wakes);
+                continue;
+            }
+
+            // Missing/unavailable pinned-worker routes are structural topology
+            // errors. Do not internally requeue them: an unchanged command
+            // would keep the mailbox permanently nonempty and starve unrelated
+            // work. Cx remains DelegatedCancel with its original Wakers pending,
+            // so a fresh producer command can retry after repair.
+            if let Some(error) = lane_error {
+                Self::emit_cancel_diagnostic(|| {
+                    let _ = &error;
+                    error!(
+                        ?task_id,
+                        requested_priority,
+                        ?error,
+                        "delegated handle cancellation lane insertion failed; suppressing only \
+                         this attempt's Wakers without an internal retry loop"
+                    );
+                });
+            }
+            drop(reason);
+            task_wakes.suppress();
+            // The failed delegated attempt left the authoritative registry
+            // pending for retry/no-op resolution. Retire only its duplicate
+            // snapshot now that TaskTable/RuntimeState and Cx are unlocked.
+            publication_wakes.retire_without_dispatch();
+        }
+
+        // Every callback-free lane publication above has completed before the
+        // first potentially hostile RawWaker callback or destructor runs.
+        for wakes in wakes_to_dispatch {
+            wakes.dispatch();
+        }
+    }
+
+    /// Publishes cancellation routes accumulated by Drop/error paths, then
+    /// invokes their auxiliary cancellation Wakers after the runtime-state
+    /// lock is gone.
+    ///
+    /// This boundary does not cover other synchronous callbacks a producer may
+    /// reach before it enqueues the returned cancellation effects.
+    fn drain_deferred_cancel_dispatches(&self) {
+        if !self.pending_cancel_dispatch_ready.load(Ordering::Acquire) {
+            return;
+        }
+        let batches = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.take_deferred_cancel_dispatches()
+        };
+        let mut wakes = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let (tasks, batch_wakes) = batch.into_parts();
+            let mut batch_published = true;
+            for (task_id, priority) in tasks {
+                batch_published &= self.publish_deferred_cancel_task(task_id, priority);
+            }
+            wakes.push((batch_published, batch_wakes));
+        }
+        for (batch_published, batch_wakes) in wakes {
+            if batch_published {
+                batch_wakes.dispatch();
+            } else {
+                Self::emit_cancel_diagnostic(|| {
+                    error!(
+                        "deferred cancellation batch publication was incomplete; suppressing \
+                         only that batch's Wakers fail-closed"
+                    );
+                });
+                batch_wakes.suppress();
+            }
+        }
+    }
+
     /// Select the next task to dispatch, respecting lane priorities and fairness.
     ///
     /// Returns `None` when no work is available across any lane or steal target.
@@ -4742,7 +5172,7 @@ impl ThreeLaneWorker {
         let Some(mailbox) = self.spawn_mailbox.as_ref() else {
             return;
         };
-        if mailbox.is_empty() {
+        if mailbox.spawn_requests_are_empty() {
             return;
         }
         let mailbox = Arc::clone(mailbox);
@@ -4751,7 +5181,13 @@ impl ThreeLaneWorker {
             return;
         }
 
-        let mut admitted: SmallVec<[(TaskId, u8); 16]> = SmallVec::new();
+        let mut admitted: SmallVec<
+            [(
+                TaskId,
+                u8,
+                crate::runtime::spawn_mailbox::AdmissionPublication,
+            ); 16],
+        > = SmallVec::new();
         let mut denied: SmallVec<
             [(
                 crate::runtime::spawn_mailbox::SpawnRequestParts,
@@ -4765,8 +5201,12 @@ impl ThreeLaneWorker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for request in requests {
                 match state.admit_spawn_request(request.into_parts()) {
-                    crate::runtime::state::SpawnAdmission::Admitted { task_id, priority } => {
-                        admitted.push((task_id, priority));
+                    crate::runtime::state::SpawnAdmission::Admitted {
+                        task_id,
+                        priority,
+                        cancel_publication,
+                    } => {
+                        admitted.push((task_id, priority, cancel_publication));
                     }
                     crate::runtime::state::SpawnAdmission::Denied { parts, error } => {
                         denied.push((parts, error));
@@ -4775,6 +5215,22 @@ impl ThreeLaneWorker {
             }
         }
 
+        // Publish every successfully admitted task before running any callback.
+        // A cached cancellation Waker may reenter the scheduler and must see
+        // the complete admission batch already visible in a runnable lane.
+        let mut cancel_wakes = SmallVec::<
+            [crate::types::task_context::CancelWakeEffects; SPAWN_ADMISSION_BATCH],
+        >::new();
+        for (task_id, priority, publication) in admitted {
+            let wakes = publication.publish(|cancel_priority| {
+                if let Some(cancel_priority) = cancel_priority {
+                    self.global.inject_cancel(task_id, cancel_priority);
+                } else {
+                    self.global.inject_ready(task_id, priority);
+                }
+            });
+            cancel_wakes.push(wakes);
+        }
         for (parts, error) in denied {
             match error {
                 crate::runtime::state::SpawnError::RegionClosed(_)
@@ -4786,8 +5242,8 @@ impl ThreeLaneWorker {
                 other => parts.resolve_failed(other),
             }
         }
-        for (task_id, priority) in admitted {
-            self.global.inject_ready(task_id, priority);
+        for wakes in cancel_wakes {
+            wakes.dispatch();
         }
     }
 
@@ -4814,8 +5270,12 @@ impl ThreeLaneWorker {
             return;
         }
 
-        let mut admitted: Vec<(TaskId, crate::runtime::stored_task::LocalStoredTask)> =
-            Vec::with_capacity(requests.len());
+        let mut admitted: Vec<(
+            TaskId,
+            u8,
+            crate::runtime::stored_task::LocalStoredTask,
+            crate::runtime::spawn_mailbox::AdmissionPublication,
+        )> = Vec::with_capacity(requests.len());
         let mut denied: SmallVec<
             [(
                 crate::runtime::spawn_mailbox::LocalSpawnRequest,
@@ -4831,8 +5291,9 @@ impl ThreeLaneWorker {
                 match state.admit_local_spawn_request(request) {
                     crate::runtime::state::LocalSpawnAdmission::Admitted {
                         task_id,
+                        priority,
                         stored,
-                        ..
+                        cancel_publication,
                     } => {
                         // Admission already pinned the record to this
                         // worker (`admit_local_spawn_request` requires the
@@ -4841,7 +5302,7 @@ impl ThreeLaneWorker {
                         if let Some(record) = state.task_mut(task_id) {
                             record.wake_state.notify();
                         }
-                        admitted.push((task_id, stored));
+                        admitted.push((task_id, priority, stored, cancel_publication));
                     }
                     crate::runtime::state::LocalSpawnAdmission::Denied { request, error } => {
                         denied.push((request, error));
@@ -4850,6 +5311,23 @@ impl ThreeLaneWorker {
             }
         }
 
+        let mut cancel_wakes = SmallVec::<
+            [crate::types::task_context::CancelWakeEffects; LOCAL_SPAWN_ADMISSION_BATCH],
+        >::new();
+        for (task_id, _priority, stored, publication) in admitted {
+            crate::runtime::local::store_local_task(task_id, stored);
+            let wakes = publication.publish(|cancel_priority| {
+                if let Some(cancel_priority) = cancel_priority {
+                    self.local.lock().schedule_cancel(task_id, cancel_priority);
+                } else {
+                    // This worker owns both the thread-local task slot and this
+                    // non-stealable queue. Publishing directly cannot take the
+                    // missing-TLS failure path of the generic helper.
+                    self.local_ready.lock().push_back(task_id);
+                }
+            });
+            cancel_wakes.push(wakes);
+        }
         for (request, error) in denied {
             match error {
                 crate::runtime::state::SpawnError::RegionClosed(_)
@@ -4861,17 +5339,20 @@ impl ThreeLaneWorker {
                 other => request.resolve_failed(other),
             }
         }
-        for (task_id, stored) in admitted {
-            crate::runtime::local::store_local_task(task_id, stored);
-            let scheduled = schedule_local_task(task_id);
-            debug_assert!(
-                scheduled,
-                "worker thread must carry a local ready queue for owner-pinned spawns"
-            );
+        for wakes in cancel_wakes {
+            wakes.dispatch();
         }
     }
 
     pub fn next_task(&mut self) -> Option<TaskId> {
+        // PHASE -0.6: TaskHandle abort/JoinFuture Drop enqueue callback-free
+        // commands. Apply their authoritative task-state transition here.
+        self.drain_handle_cancel_requests();
+
+        // PHASE -0.5: Drop/error paths park auxiliary cancellation effects in
+        // RuntimeState. Publish every task before dispatching those Wakers.
+        self.drain_deferred_cancel_dispatches();
+
         // PHASE 0: Process expired timers (fires wakers, which may inject tasks).
         if let Some(timer) = &self.timer_driver {
             let _ = timer.process_timers();
@@ -4885,6 +5366,23 @@ impl ThreeLaneWorker {
         // worker's thread-local lane (br-asupersync-i9y5wb / A2.2a). One
         // TLS emptiness check when idle.
         self.drain_local_spawn_admissions();
+
+        // Admission publication can run a retained cancellation Waker after
+        // making the new task visible. If that callback aborts another managed
+        // task, consume its plain command before selecting any runnable work.
+        self.drain_handle_cancel_requests();
+        self.drain_deferred_cancel_dispatches();
+        if self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
+            || self
+                .spawn_mailbox
+                .as_ref()
+                .is_some_and(|mailbox| !mailbox.handle_cancels_are_empty())
+        {
+            // A just-dispatched Waker requested more cancellation. Yield this
+            // selection turn so no ordinary ready task is polled ahead of the
+            // runtime-owned command/deferred publication on the next turn.
+            return None;
+        }
 
         // Consult the governor for scheduling suggestion (amortised).
         let suggestion = self.governor_suggest();
@@ -5826,6 +6324,11 @@ impl ThreeLaneWorker {
                 if let Some(mut victim) = stealer.try_lock() {
                     let stolen_count = victim
                         .steal_ready_batch_into(self.steal_batch_size, &mut self.steal_buffer);
+                    // Queue mutation is complete. Release the victim before
+                    // debug TaskTable inspection or any own-worker queue/
+                    // evidence bookkeeping; delegated cancel publication uses
+                    // the canonical TaskTable -> Cx -> local-queue order.
+                    drop(victim);
                     if stolen_count > 0 {
                         #[cfg(debug_assertions)]
                         {
@@ -6130,49 +6633,62 @@ impl ThreeLaneWorker {
             #[allow(clippy::significant_drop_tightening)] // false positive: guard still borrowed by wake_dependents_locked
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
-                    // 1. Mark task as Panicked (using hot-path task table if available)
-                    self.worker.with_task_table(|tt| {
-                        let _ = tt.update_task(self.task_id, |record| {
-                            if !record.state.is_terminal() {
-                                record.complete(crate::types::Outcome::Panicked(
-                                    crate::types::outcome::PanicPayload::new(
-                                        "task panicked during poll",
-                                    ),
-                                ));
-                            }
-                        });
-                    });
+                    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // Mark and detach through the same authoritative table
+                        // used to begin this poll. Never ask embedded RuntimeState
+                        // to complete a record owned by the external shard.
+                        let mut detached_record = if self.worker.task_table.is_some() {
+                            self.worker.with_task_table(|tt| {
+                                let _ = tt.update_task(self.task_id, |record| {
+                                    if !record.state.is_terminal() {
+                                        record.complete(crate::types::Outcome::Panicked(
+                                            crate::types::outcome::PanicPayload::new(
+                                                "task panicked during scheduler bookkeeping",
+                                            ),
+                                        ));
+                                    }
+                                });
+                                tt.remove_task(self.task_id)
+                            })
+                        } else {
+                            self.worker.with_task_table(|tt| {
+                                let _ = tt.update_task(self.task_id, |record| {
+                                    if !record.state.is_terminal() {
+                                        record.complete(crate::types::Outcome::Panicked(
+                                            crate::types::outcome::PanicPayload::new(
+                                                "task panicked during scheduler bookkeeping",
+                                            ),
+                                        ));
+                                    }
+                                });
+                            });
+                            None
+                        };
 
-                    // 2. Wake waiters and process finalizers (requires full RuntimeState lock)
-                    // We expect success here; poisoning aborts the thread, which is acceptable during panic unwind.
-                    let mut state = self
-                        .worker
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let (waiters, cancel_waker_retirements) = state
-                        .task_completed(self.task_id)
-                        .into_waiters_and_retirements_without_observers();
-                    let finalizers = state.drain_ready_async_finalizers();
-
-                    self.worker.wake_dependents_locked(&state, waiters);
-
-                    let finalizer_wakes = finalizers.len();
-                    if finalizer_wakes > 0 {
-                        let mut reservation =
-                            self.worker.global.reserve_ready_count(finalizer_wakes);
-                        for (finalizer_task, priority) in finalizers {
-                            self.worker
-                                .global
-                                .inject_ready_uncounted(finalizer_task, priority);
-                            self.worker
-                                .record_scheduler_evidence_enqueue(finalizer_task);
-                            reservation.publish_one();
-                        }
-                        self.worker.coordinator.wake_many(finalizer_wakes);
+                        let mut state = self
+                            .worker
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let completion = match detached_record.as_mut() {
+                            Some(record) => state.task_completed_from_external_record(record),
+                            None => state.task_completed(self.task_id),
+                        };
+                        let (waiters, cancel_waker_retirements) =
+                            completion.into_waiters_and_retirements_without_observers();
+                        let finalizers = state.drain_ready_async_finalizers();
+                        self.worker.wake_dependents_locked(&state, waiters);
+                        self.worker.publish_ready_finalizers(finalizers);
+                        drop(state);
+                        cancel_waker_retirements.retire();
+                        ThreeLaneWorker::retire_detached_task_record(detached_record);
+                    }));
+                    if let Err(payload) = cleanup {
+                        // This guard already runs during an unwind. Contain a
+                        // second panic from tracing, metrics, or a foreign
+                        // destructor instead of aborting the worker process.
+                        std::mem::forget(payload);
                     }
-                    drop(state);
-                    cancel_waker_retirements.retire();
                 }
             }
         }
@@ -6191,36 +6707,37 @@ impl ThreeLaneWorker {
             // Fast path: single lock for global tasks (remove stored future + read record).
             let merged = self.with_task_table(|tt| {
                 let global_stored = tt.remove_stored_future(task_id)?;
-                let record = tt.task_mut(task_id)?;
-                record.start_running();
-                record.wake_state.begin_poll();
-                let priority = record.sched_priority;
-                let wake_state = Arc::clone(&record.wake_state);
-                // Preserve full Cx so scheduler sets CURRENT_CX during poll.
-                let task_cx = record.cx.clone();
-                let cached_waker = record.cached_waker.take();
-                let cached_cancel_waker = record.cached_cancel_waker.take();
-                // Skip cx_inner Arc clone when both wakers are cached with correct
-                // priority. Saves one atomic inc+dec per poll on the hot path.
-                // finish_poll() re-loads from the task table if needed (rare).
-                let both_cached = cached_waker.is_some()
-                    && cached_cancel_waker
-                        .as_ref()
-                        .is_some_and(|(_, p)| *p == priority);
-                let cx_inner = if both_cached {
-                    None
-                } else {
-                    record.cx_inner.clone()
-                };
-                Some((
-                    AnyStoredTask::Global(global_stored),
-                    wake_state,
-                    priority,
-                    task_cx,
-                    cx_inner,
-                    cached_waker,
-                    cached_cancel_waker,
-                ))
+                tt.update_task(task_id, |record| {
+                    record.start_running();
+                    record.wake_state.begin_poll();
+                    let priority = record.sched_priority;
+                    let wake_state = Arc::clone(&record.wake_state);
+                    // Preserve full Cx so scheduler sets CURRENT_CX during poll.
+                    let task_cx = record.cx.clone();
+                    let cached_waker = record.cached_waker.take();
+                    let cached_cancel_waker = record.cached_cancel_waker.take();
+                    // Skip cx_inner Arc clone when both wakers are cached with correct
+                    // priority. Saves one atomic inc+dec per poll on the hot path.
+                    // finish_poll() re-loads from the task table if needed (rare).
+                    let both_cached = cached_waker.is_some()
+                        && cached_cancel_waker
+                            .as_ref()
+                            .is_some_and(|(_, p)| *p == priority);
+                    let cx_inner = if both_cached {
+                        None
+                    } else {
+                        record.cx_inner.clone()
+                    };
+                    (
+                        AnyStoredTask::Global(global_stored),
+                        wake_state,
+                        priority,
+                        task_cx,
+                        cx_inner,
+                        cached_waker,
+                        cached_cancel_waker,
+                    )
+                })
             });
 
             if let Some(result) = merged {
@@ -6232,32 +6749,33 @@ impl ThreeLaneWorker {
                     return;
                 };
                 let record_info = self.with_task_table(|tt| {
-                    let record = tt.task_mut(task_id)?;
-                    record.start_running();
-                    record.wake_state.begin_poll();
-                    let priority = record.sched_priority;
-                    let wake_state = Arc::clone(&record.wake_state);
-                    // Preserve full Cx so scheduler sets CURRENT_CX during poll.
-                    let task_cx = record.cx.clone();
-                    let cached_waker = record.cached_waker.take();
-                    let cached_cancel_waker = record.cached_cancel_waker.take();
-                    let both_cached = cached_waker.is_some()
-                        && cached_cancel_waker
-                            .as_ref()
-                            .is_some_and(|(_, p)| *p == priority);
-                    let cx_inner = if both_cached {
-                        None
-                    } else {
-                        record.cx_inner.clone()
-                    };
-                    Some((
-                        wake_state,
-                        priority,
-                        task_cx,
-                        cx_inner,
-                        cached_waker,
-                        cached_cancel_waker,
-                    ))
+                    tt.update_task(task_id, |record| {
+                        record.start_running();
+                        record.wake_state.begin_poll();
+                        let priority = record.sched_priority;
+                        let wake_state = Arc::clone(&record.wake_state);
+                        // Preserve full Cx so scheduler sets CURRENT_CX during poll.
+                        let task_cx = record.cx.clone();
+                        let cached_waker = record.cached_waker.take();
+                        let cached_cancel_waker = record.cached_cancel_waker.take();
+                        let both_cached = cached_waker.is_some()
+                            && cached_cancel_waker
+                                .as_ref()
+                                .is_some_and(|(_, p)| *p == priority);
+                        let cx_inner = if both_cached {
+                            None
+                        } else {
+                            record.cx_inner.clone()
+                        };
+                        (
+                            wake_state,
+                            priority,
+                            task_cx,
+                            cx_inner,
+                            cached_waker,
+                            cached_cancel_waker,
+                        )
+                    })
                 });
                 let Some((
                     wake_state,
@@ -6404,134 +6922,143 @@ impl ThreeLaneWorker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                state.update_task(task_id, |record| {
-                    if !record.state.is_terminal() {
-                        let mut completed_via_cancel = false;
-                        if matches!(task_outcome, crate::types::Outcome::Ok(())) {
-                            let should_cancel = matches!(
-                                record.state,
-                                crate::record::task::TaskState::Cancelling { .. }
-                                    | crate::record::task::TaskState::Finalizing { .. }
-                            ) || (cancel_ack
-                                && matches!(
-                                    record.state,
-                                    crate::record::task::TaskState::CancelRequested { .. }
-                                ));
-                            if should_cancel {
-                                if matches!(
-                                    record.state,
-                                    crate::record::task::TaskState::CancelRequested { .. }
-                                ) {
-                                    let _ = record.acknowledge_cancel();
-                                }
-                                if matches!(
-                                    record.state,
-                                    crate::record::task::TaskState::Cancelling { .. }
-                                ) {
-                                    record.cleanup_done();
-                                }
-                                if matches!(
-                                    record.state,
-                                    crate::record::task::TaskState::Finalizing { .. }
-                                ) {
-                                    record.finalize_done();
-                                }
-                                completed_via_cancel = matches!(
-                                    record.state,
-                                    crate::record::task::TaskState::Completed(
-                                        crate::types::Outcome::Cancelled(_)
-                                    )
+                let (completion_observer, cancel_wakes, detached_record) = if self
+                    .task_table
+                    .is_some()
+                {
+                    // The sharded table owns the authoritative record. Reconcile
+                    // the checkpoint receipt and terminal outcome there, then
+                    // detach the record before taking RuntimeState. This avoids
+                    // both the wrong-table completion bug and shard/state lock
+                    // nesting around validator, region, and observer work.
+                    let (cancel_ack, mut cancel_wakes, mut detached_record) =
+                        self.with_task_table(|tt| {
+                            let effects = Self::consume_cancel_ack_from_table(tt, task_id);
+                            let (cancel_ack, cancel_wakes) = effects.into_parts();
+                            let _ = tt.update_task(task_id, |record| {
+                                Self::complete_polled_record(
+                                    record,
+                                    task_outcome,
+                                    cancel_ack.is_some(),
                                 );
-                            }
-                        }
-                        if !completed_via_cancel {
-                            record.complete(task_outcome);
-                        }
+                            });
+                            let detached_record = tt.remove_task(task_id);
+                            (cancel_ack, cancel_wakes, detached_record)
+                        });
+
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(receipt) = cancel_ack.as_ref()
+                        && let Some(validation_result) = state
+                            .external_checkpoint_cancel_materialization_violation(
+                                task_id, receipt, true,
+                            )
+                    {
+                        cancel_wakes.push_cancel_protocol_violation(
+                            "external-shard checkpoint cancellation materialization",
+                            validation_result,
+                        );
                     }
-                });
-
-                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
-                let finalizers = state.drain_ready_async_finalizers();
-
-                self.wake_dependents_locked(&state, waiters);
-
-                let finalizer_wakes = finalizers.len();
-                if finalizer_wakes > 0 {
-                    let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
-                    for (finalizer_task, priority) in finalizers {
-                        self.global.inject_ready_uncounted(finalizer_task, priority);
-                        self.record_scheduler_evidence_enqueue(finalizer_task);
-                        reservation.publish_one();
-                    }
-                    self.coordinator.wake_many(finalizer_wakes);
-                }
-                drop(state);
+                    let completion = match detached_record.as_mut() {
+                        Some(record) => state.task_completed_from_external_record(record),
+                        None => state.task_completed(task_id),
+                    };
+                    let (waiters, completion_observer) = completion.into_parts();
+                    let finalizers = state.drain_ready_async_finalizers();
+                    self.wake_dependents_locked(&state, waiters);
+                    self.publish_ready_finalizers(finalizers);
+                    drop(state);
+                    (completion_observer, cancel_wakes, detached_record)
+                } else {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let (cancel_ack, cancel_wakes) =
+                        Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
+                    let _ = state.update_task(task_id, |record| {
+                        Self::complete_polled_record(record, task_outcome, cancel_ack.is_some());
+                    });
+                    let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
+                    let finalizers = state.drain_ready_async_finalizers();
+                    self.wake_dependents_locked(&state, waiters);
+                    self.publish_ready_finalizers(finalizers);
+                    drop(state);
+                    (completion_observer, cancel_wakes, None)
+                };
                 guard.completed = true;
                 wake_state.clear();
+                Self::retire_detached_task_record(detached_record);
                 completion_observer.dispatch();
+                cancel_wakes.dispatch();
             }
             Ok(Poll::Pending) => {
                 // Store task back: use task table for hot-path when sharded.
                 // Move waker into cache (not clone) since it is not needed after this point.
-                // Store task back and cache wakers in a single lock acquisition.
-                // Also inline consume_cancel_ack with read-first optimization
-                // to eliminate the separate third lock acquisition on the Pending path.
-                match stored {
-                    AnyStoredTask::Global(t) => {
-                        self.with_task_table(move |tt| {
-                            tt.store_spawned_task(task_id, t);
-                            if let Some(record) = tt.task_mut(task_id) {
-                                record.cached_waker = Some((waker, priority));
-                                record.cached_cancel_waker = cancel_waker_for_cache;
-                                // Inline cancel-ack: read-first to avoid write lock
-                                // when cancel_acknowledged is false (the common case).
-                                if let Some(inner) = record.cx_inner.as_ref() {
-                                    let needs_ack = inner.read().cancel_acknowledged;
-                                    if needs_ack {
-                                        let mut g = inner.write();
-                                        if g.cancel_acknowledged {
-                                            g.cancel_acknowledged = false;
-                                            drop(g);
-                                            let _ = record.acknowledge_cancel();
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
+                // Store task, cache wakers, and reconcile the checkpoint ack in
+                // one bookkeeping-aware task-table update.
+                let cancel_effects = match stored {
+                    AnyStoredTask::Global(t) => self.with_task_table(move |tt| {
+                        tt.store_spawned_task(task_id, t);
+                        tt.update_task(task_id, |record| {
+                            record.cached_waker = Some((waker, priority));
+                            record.cached_cancel_waker = cancel_waker_for_cache;
+                            record.consume_checkpoint_cancel_ack()
+                        })
+                        .unwrap_or_else(|| {
+                            crate::types::task_context::CancellationEffects::ready(None)
+                        })
+                    }),
                     AnyStoredTask::Local(t) => {
                         crate::runtime::local::store_local_task(task_id, t);
                         // For local tasks, we also want to cache wakers in the global record
                         // (since record is global).
                         self.with_task_table(move |tt| {
-                            if let Some(record) = tt.task_mut(task_id) {
+                            tt.update_task(task_id, |record| {
                                 record.cached_waker = Some((waker, priority));
                                 record.cached_cancel_waker = cancel_waker_for_cache;
-                                // Inline cancel-ack: read-first (same as global path above).
-                                if let Some(inner) = record.cx_inner.as_ref() {
-                                    let needs_ack = inner.read().cancel_acknowledged;
-                                    if needs_ack {
-                                        let mut g = inner.write();
-                                        if g.cancel_acknowledged {
-                                            g.cancel_acknowledged = false;
-                                            drop(g);
-                                            let _ = record.acknowledge_cancel();
-                                        }
-                                    }
-                                }
-                            }
-                        });
+                                record.consume_checkpoint_cancel_ack()
+                            })
+                            .unwrap_or_else(|| {
+                                crate::types::task_context::CancellationEffects::ready(None)
+                            })
+                        })
+                    }
+                };
+                let (cancel_ack, mut cancel_wakes) = cancel_effects.into_parts();
+                if let Some(receipt) = cancel_ack.as_ref() {
+                    let state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if self.task_table.is_some() {
+                        if let Some(validation_result) = state
+                            .external_checkpoint_cancel_materialization_violation(
+                                task_id, receipt, false,
+                            )
+                        {
+                            cancel_wakes.push_cancel_protocol_violation(
+                                "external-shard checkpoint cancellation materialization",
+                                validation_result,
+                            );
+                        }
+                    } else if let Some(validation_result) =
+                        state.checkpoint_cancel_materialization_violation(task_id, receipt)
+                    {
+                        cancel_wakes.push_cancel_protocol_violation(
+                            "checkpoint cancellation materialization",
+                            validation_result,
+                        );
                     }
                 }
+                let acknowledged_priority =
+                    cancel_ack.as_ref().map(|receipt| receipt.cleanup_priority);
 
-                if wake_state.finish_poll() {
-                    let mut cancel_priority = priority;
-                    let mut schedule_cancel = false;
+                if wake_state.finish_poll() || cancel_ack.is_some() {
+                    let mut cancel_priority = acknowledged_priority.unwrap_or(priority);
+                    let mut schedule_cancel = acknowledged_priority.is_some();
                     // cx_inner may be None if we skipped the Arc clone (both wakers
                     // were cached). Re-load from task table on this rare path.
                     let cx_inner_for_finish = if cx_inner.is_some() {
@@ -6539,7 +7066,7 @@ impl ThreeLaneWorker {
                     } else {
                         self.with_task_table(|tt| tt.task(task_id).and_then(|r| r.cx_inner.clone()))
                     };
-                    if let Some(inner) = cx_inner_for_finish.as_ref() {
+                    if !schedule_cancel && let Some(inner) = cx_inner_for_finish.as_ref() {
                         let guard = inner.read();
                         if guard.cancel_requested {
                             schedule_cancel = true;
@@ -6580,6 +7107,7 @@ impl ThreeLaneWorker {
                 }
 
                 guard.completed = true;
+                cancel_wakes.dispatch();
             }
             Err(payload) => {
                 // Adaptive cancel-streak learning tracks scheduler pressure and
@@ -6588,38 +7116,77 @@ impl ThreeLaneWorker {
                 // reward signal, biasing the policy toward a wider cancel
                 // streak for the wrong reason.
                 credit_adaptive_epoch = false;
-                let panic_payload = crate::types::outcome::PanicPayload::new(
-                    crate::cx::scope::payload_to_string(&payload),
-                );
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                state.update_task(task_id, |record| {
-                    if !record.state.is_terminal() {
-                        record.complete(crate::types::Outcome::Panicked(panic_payload));
-                    }
-                });
-
-                let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
-                let finalizers = state.drain_ready_async_finalizers();
-
-                self.wake_dependents_locked(&state, waiters);
-
-                let finalizer_wakes = finalizers.len();
-                if finalizer_wakes > 0 {
-                    let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
-                    for (finalizer_task, priority) in finalizers {
-                        self.global.inject_ready_uncounted(finalizer_task, priority);
-                        reservation.publish_one();
-                    }
-                    self.coordinator.wake_many(finalizer_wakes);
-                }
-                drop(state);
+                let panic_message = crate::cx::scope::payload_to_string(&payload);
+                // The caught payload is arbitrary user-owned data. Retiring it
+                // can panic again or reenter runtime locks, so preserve only
+                // the closed message and leak the opaque payload fail-closed.
+                std::mem::forget(payload);
+                let panic_payload = crate::types::outcome::PanicPayload::new(panic_message);
+                let panic_outcome = crate::types::Outcome::Panicked(panic_payload);
+                let (completion_observer, cancel_wakes, detached_record) =
+                    if self.task_table.is_some() {
+                        let (cancel_ack, mut cancel_wakes, mut detached_record) = self
+                            .with_task_table(|tt| {
+                                let effects = Self::consume_cancel_ack_from_table(tt, task_id);
+                                let (cancel_ack, cancel_wakes) = effects.into_parts();
+                                let _ = tt.update_task(task_id, |record| {
+                                    if !record.state.is_terminal() {
+                                        record.complete(panic_outcome);
+                                    }
+                                });
+                                let detached_record = tt.remove_task(task_id);
+                                (cancel_ack, cancel_wakes, detached_record)
+                            });
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(receipt) = cancel_ack.as_ref()
+                            && let Some(validation_result) = state
+                                .external_checkpoint_cancel_materialization_violation(
+                                    task_id, receipt, true,
+                                )
+                        {
+                            cancel_wakes.push_cancel_protocol_violation(
+                                "external-shard checkpoint cancellation materialization",
+                                validation_result,
+                            );
+                        }
+                        let completion = match detached_record.as_mut() {
+                            Some(record) => state.task_completed_from_external_record(record),
+                            None => state.task_completed(task_id),
+                        };
+                        let (waiters, completion_observer) = completion.into_parts();
+                        let finalizers = state.drain_ready_async_finalizers();
+                        self.wake_dependents_locked(&state, waiters);
+                        self.publish_ready_finalizers(finalizers);
+                        drop(state);
+                        (completion_observer, cancel_wakes, detached_record)
+                    } else {
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let (_cancel_ack, cancel_wakes) =
+                            Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
+                        let _ = state.update_task(task_id, |record| {
+                            if !record.state.is_terminal() {
+                                record.complete(panic_outcome);
+                            }
+                        });
+                        let (waiters, completion_observer) =
+                            state.task_completed(task_id).into_parts();
+                        let finalizers = state.drain_ready_async_finalizers();
+                        self.wake_dependents_locked(&state, waiters);
+                        self.publish_ready_finalizers(finalizers);
+                        drop(state);
+                        (completion_observer, cancel_wakes, None)
+                    };
                 guard.completed = true;
                 wake_state.clear();
+                Self::retire_detached_task_record(detached_record);
                 completion_observer.dispatch();
+                cancel_wakes.dispatch();
             }
         }
         drop(guard);
@@ -6627,6 +7194,34 @@ impl ThreeLaneWorker {
             self.adaptive_on_dispatch();
         } else {
             self.abort_adaptive_epoch();
+        }
+    }
+
+    fn publish_ready_finalizers(&self, finalizers: smallvec::SmallVec<[(TaskId, u8); 2]>) {
+        let finalizer_wakes = finalizers.len();
+        if finalizer_wakes == 0 {
+            return;
+        }
+        let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
+        for (finalizer_task, priority) in finalizers {
+            self.global.inject_ready_uncounted(finalizer_task, priority);
+            self.record_scheduler_evidence_enqueue(finalizer_task);
+            reservation.publish_one();
+        }
+        self.coordinator.wake_many(finalizer_wakes);
+    }
+
+    fn retire_detached_task_record(record: Option<crate::record::task::TaskRecord>) {
+        let Some(record) = record else {
+            return;
+        };
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(record);
+        })) {
+            // A detached record may own foreign RawWaker payloads or user-owned
+            // context values. It is already absent from every runtime table;
+            // contain a hostile destructor at this lock-free retirement boundary.
+            std::mem::forget(payload);
         }
     }
 
@@ -6641,16 +7236,7 @@ impl ThreeLaneWorker {
         if tasks.is_empty() {
             return false;
         }
-        let finalizer_wakes = tasks.len();
-        if finalizer_wakes > 0 {
-            let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
-            for (task_id, priority) in tasks {
-                self.global.inject_ready_uncounted(task_id, priority);
-                self.record_scheduler_evidence_enqueue(task_id);
-                reservation.publish_one();
-            }
-            self.coordinator.wake_many(finalizer_wakes);
-        }
+        self.publish_ready_finalizers(tasks);
         true
     }
 
@@ -6659,40 +7245,114 @@ impl ThreeLaneWorker {
     /// This is the hot-path variant used in Poll::Pending where only task record
     /// access is needed.
     #[allow(dead_code)] // Used in scheduler dispatch + tests
-    fn consume_cancel_ack(&self, task_id: TaskId) -> bool {
-        self.with_task_table(|tt| Self::consume_cancel_ack_from_table(tt, task_id))
-    }
-
-    fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
-        Self::consume_cancel_ack_from_table(&mut state.tasks, task_id)
-    }
-
-    fn consume_cancel_ack_from_table(tt: &mut TaskTable, task_id: TaskId) -> bool {
-        let (is_ack, cx_inner) = {
-            let Some(record) = tt.task(task_id) else {
-                return false;
-            };
-            let Some(inner) = record.cx_inner.as_ref() else {
-                return false;
-            };
-            if !inner.read().cancel_acknowledged {
-                return false;
-            }
-            (true, Arc::clone(inner))
-        };
-
-        if is_ack {
-            let mut guard = cx_inner.write();
-            if guard.cancel_acknowledged {
-                guard.cancel_acknowledged = false;
-                drop(guard);
-                tt.update_task(task_id, |record| {
-                    let _ = record.acknowledge_cancel();
-                });
-                return true;
+    fn consume_cancel_ack(
+        &self,
+        task_id: TaskId,
+    ) -> crate::types::task_context::CancellationEffects<
+        Option<crate::record::task::CheckpointCancelAck>,
+    > {
+        let effects = self.with_task_table(|tt| Self::consume_cancel_ack_from_table(tt, task_id));
+        let (receipt, mut wakes) = effects.into_parts();
+        if let Some(receipt) = receipt.as_ref() {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.task_table.is_some() {
+                let task_still_live = self.with_task_table_ref(|tt| tt.task(task_id).is_some());
+                if let Some(validation_result) = state
+                    .external_checkpoint_cancel_materialization_violation(
+                        task_id,
+                        receipt,
+                        !task_still_live,
+                    )
+                {
+                    wakes.push_cancel_protocol_violation(
+                        "external-shard checkpoint cancellation materialization",
+                        validation_result,
+                    );
+                }
+            } else if let Some(validation_result) =
+                state.checkpoint_cancel_materialization_violation(task_id, receipt)
+            {
+                wakes.push_cancel_protocol_violation(
+                    "checkpoint cancellation materialization",
+                    validation_result,
+                );
             }
         }
-        false
+        crate::types::task_context::CancellationEffects::new(receipt, wakes)
+    }
+
+    fn consume_cancel_ack_locked(
+        state: &mut RuntimeState,
+        task_id: TaskId,
+    ) -> crate::types::task_context::CancellationEffects<
+        Option<crate::record::task::CheckpointCancelAck>,
+    > {
+        state.consume_task_checkpoint_cancel_ack(task_id)
+    }
+
+    fn consume_cancel_ack_from_table(
+        tt: &mut TaskTable,
+        task_id: TaskId,
+    ) -> crate::types::task_context::CancellationEffects<
+        Option<crate::record::task::CheckpointCancelAck>,
+    > {
+        tt.update_task(
+            task_id,
+            crate::record::task::TaskRecord::consume_checkpoint_cancel_ack,
+        )
+        .unwrap_or_else(|| crate::types::task_context::CancellationEffects::ready(None))
+    }
+
+    fn complete_polled_record(
+        record: &mut crate::record::task::TaskRecord,
+        task_outcome: crate::types::Outcome<(), crate::error::Error>,
+        cancel_ack: bool,
+    ) {
+        if record.state.is_terminal() {
+            return;
+        }
+        let mut completed_via_cancel = false;
+        if matches!(task_outcome, crate::types::Outcome::Ok(())) {
+            let should_cancel = matches!(
+                record.state,
+                crate::record::task::TaskState::Cancelling { .. }
+                    | crate::record::task::TaskState::Finalizing { .. }
+            ) || (cancel_ack
+                && matches!(
+                    record.state,
+                    crate::record::task::TaskState::CancelRequested { .. }
+                ));
+            if should_cancel {
+                if matches!(
+                    record.state,
+                    crate::record::task::TaskState::CancelRequested { .. }
+                ) {
+                    let _ = record.acknowledge_cancel();
+                }
+                if matches!(
+                    record.state,
+                    crate::record::task::TaskState::Cancelling { .. }
+                ) {
+                    record.cleanup_done();
+                }
+                if matches!(
+                    record.state,
+                    crate::record::task::TaskState::Finalizing { .. }
+                ) {
+                    record.finalize_done();
+                }
+                completed_via_cancel = matches!(
+                    record.state,
+                    crate::record::task::TaskState::Completed(crate::types::Outcome::Cancelled(_))
+                );
+            }
+        }
+        if !completed_via_cancel {
+            record.complete(task_outcome);
+        }
     }
 }
 
@@ -9750,6 +10410,39 @@ mod tests {
         // Verify round-robin distribution: 8 wakes across 4 workers = 2 per worker
         // (We can't directly verify which parker was woken, but the modulo math
         // guarantees even distribution over time)
+    }
+
+    #[test]
+    fn deferred_cancel_enqueue_publishes_parker_permit() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+        let parker = scheduler.parkers[0].clone();
+        assert!(!parker.notification_pending_for_test());
+
+        {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            runtime.defer_cancel_dispatch(crate::types::task_context::CancellationEffects::ready(
+                Vec::<(TaskId, u8)>::new(),
+            ));
+            assert!(runtime.has_deferred_cancel_dispatches());
+            assert!(
+                parker.notification_pending_for_test(),
+                "queue publication must leave a Parker permit before releasing RuntimeState"
+            );
+        }
+
+        let batches = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_deferred_cancel_dispatches();
+        assert_eq!(batches.len(), 1);
+        for batch in batches {
+            let (tasks, wakes) = batch.into_parts();
+            assert!(tasks.is_empty());
+            wakes.dispatch();
+        }
     }
 
     // ========== WorkerCoordinator non-power-of-two tests (br-3narc.2.1) ==========
@@ -13480,6 +14173,349 @@ mod tests {
         (scheduler, state, task_table)
     }
 
+    fn move_runtime_task_to_shard(
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        task_table: &Arc<ContendedMutex<TaskTable>>,
+        task_id: TaskId,
+    ) {
+        let (record, stored) = {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let stored = state
+                .tasks
+                .remove_stored_future(task_id)
+                .expect("runtime task has a stored future");
+            let record = state.remove_task(task_id).expect("runtime task record");
+            (record, stored)
+        };
+        let mut task_table = task_table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inserted = TaskId::from_arena(task_table.insert(record));
+        assert_eq!(inserted, task_id, "empty shard preserves canonical task id");
+        task_table.store_spawned_task(task_id, stored);
+    }
+
+    #[test]
+    fn task_table_backed_execute_retires_external_record_and_validator() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let region = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .create_root_region(Budget::INFINITE);
+        let task_id = {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task")
+                .0
+        };
+        let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
+        move_runtime_task_to_shard(&state, &task_table, task_id);
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+            1,
+            &state,
+            Some(Arc::clone(&task_table)),
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        );
+        let mut worker = scheduler.take_workers().remove(0);
+        worker.execute(task_id);
+
+        assert!(
+            task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task(task_id)
+                .is_none(),
+            "external TaskRecord is detached on Ready"
+        );
+        assert_eq!(
+            task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count(),
+            0,
+            "terminalization must update shard phase accounting before removal"
+        );
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.task(task_id).is_none());
+        assert!(matches!(
+            state.region_close_outcome(region),
+            Some(crate::types::Outcome::Ok(()))
+        ));
+        assert!(
+            state
+                .cancel_protocol_validator()
+                .lock()
+                .task_state(task_id)
+                .is_none(),
+            "external completion retires validator state"
+        );
+    }
+
+    #[test]
+    fn task_table_backed_handle_cancel_routes_and_completes_in_external_shard() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+            1,
+            &state,
+            Some(Arc::clone(&task_table)),
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        );
+        let mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::new());
+        scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+        let runtime_liveness = Arc::new(());
+        {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let gateway = crate::runtime::spawn_mailbox::SpawnGateway::new(
+                Arc::clone(&mailbox),
+                scheduler.spawn_enqueued_notifier(),
+                state.timer_driver_handle(),
+                Arc::downgrade(&runtime_liveness),
+            );
+            state.set_spawn_gateway(Arc::new(gateway));
+        }
+        let (region, task_id, handle) = {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = state.create_root_region(Budget::INFINITE);
+            let (task_id, handle) = state
+                .create_task(region, Budget::INFINITE, async {
+                    std::future::poll_fn(|_| {
+                        if crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err())
+                            .unwrap_or(false)
+                        {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                })
+                .expect("create managed task");
+            (region, task_id, handle)
+        };
+        move_runtime_task_to_shard(&state, &task_table, task_id);
+
+        let mut worker = scheduler.take_workers().remove(0);
+        worker.execute(task_id);
+        assert!(
+            task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stored_future_count()
+                == 1,
+            "first Pending poll returns the future to the external shard"
+        );
+
+        handle.abort_with_reason(crate::types::CancelReason::shutdown());
+        assert!(!mailbox.handle_cancels_are_empty());
+        worker.drain_handle_cancel_requests();
+        assert!(mailbox.handle_cancels_are_empty());
+        assert!(matches!(
+            &task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task(task_id)
+                .expect("live external task")
+                .state,
+            crate::record::task::TaskState::CancelRequested { reason, .. }
+                if reason.is_kind(crate::types::CancelKind::Shutdown)
+        ));
+        let queued = worker.global.pop_cancel().expect("cancel lane publication");
+        assert_eq!(queued.task, task_id);
+
+        worker.execute(task_id);
+        assert!(handle.is_finished());
+        assert!(
+            task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task(task_id)
+                .is_none()
+        );
+        assert_eq!(
+            task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count(),
+            0,
+            "cancel completion must not leak sharded live-task accounting"
+        );
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            state.region_close_outcome(region),
+            Some(crate::types::Outcome::Cancelled(reason))
+                if reason.is_kind(crate::types::CancelKind::Shutdown)
+        ));
+        assert!(
+            state
+                .cancel_protocol_validator()
+                .lock()
+                .task_state(task_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn handle_cancel_batch_isolates_delegated_failure_without_internal_retry_spin() {
+        struct CountWake(Arc<AtomicUsize>);
+
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::new());
+        scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+        let runtime_liveness = Arc::new(());
+        {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let gateway = crate::runtime::spawn_mailbox::SpawnGateway::new(
+                Arc::clone(&mailbox),
+                scheduler.spawn_enqueued_notifier(),
+                state.timer_driver_handle(),
+                Arc::downgrade(&runtime_liveness),
+            );
+            state.set_spawn_gateway(Arc::new(gateway));
+        }
+        let (good_task, bad_task, good_handle, bad_handle) = {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = state.create_root_region(Budget::INFINITE);
+            let (good_task, good_handle) = state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create publishable task");
+            let (bad_task, bad_handle) = state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create deliberately unpublishable task");
+            state
+                .task_mut(bad_task)
+                .expect("bad task remains live")
+                .pin_to_worker(99);
+            (good_task, bad_task, good_handle, bad_handle)
+        };
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let bad_wake_count = Arc::new(AtomicUsize::new(0));
+        let good_inner = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .task(good_task)
+            .and_then(|record| record.cx_inner.clone())
+            .expect("good task Cx");
+        good_inner.write().cancel_waker =
+            Some(Arc::new(crate::types::task_context::CancelWaker::new(
+                Waker::from(Arc::new(CountWake(Arc::clone(&wake_count)))),
+            )));
+        let bad_inner = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .task(bad_task)
+            .and_then(|record| record.cx_inner.clone())
+            .expect("bad task Cx");
+        {
+            let mut inner = bad_inner.write();
+            inner.runnable_publication =
+                crate::types::task_context::RunnablePublication::Unpublished;
+            inner.runnable_publication.delegate_cancel();
+            inner.cancel_waker = Some(Arc::new(crate::types::task_context::CancelWaker::new(
+                Waker::from(Arc::new(CountWake(Arc::clone(&bad_wake_count)))),
+            )));
+        }
+
+        good_handle.abort_with_reason(CancelReason::shutdown());
+        let bad_reason = CancelReason::shutdown();
+        bad_handle.abort_with_reason(bad_reason.clone());
+        let mut worker = scheduler.take_workers().remove(0);
+
+        worker.drain_handle_cancel_requests();
+
+        assert_eq!(
+            worker
+                .global
+                .pop_cancel()
+                .expect("good task cancel lane")
+                .task,
+            good_task
+        );
+        assert!(worker.global.pop_cancel().is_none());
+        assert_eq!(
+            wake_count.load(Ordering::SeqCst),
+            1,
+            "a failed sibling must not suppress the good task's Waker"
+        );
+        assert_eq!(
+            bad_wake_count.load(Ordering::SeqCst),
+            0,
+            "failed route retires only its duplicate snapshot without waking"
+        );
+        assert_eq!(
+            bad_inner.read().runnable_publication,
+            crate::types::task_context::RunnablePublication::DelegatedCancel,
+            "a failed first publication must retain scheduler ownership"
+        );
+        assert!(
+            mailbox.handle_cancels_are_empty(),
+            "structurally invalid routing must not self-requeue forever"
+        );
+
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .task_mut(bad_task)
+            .expect("bad task remains live for retry")
+            .pin_to_worker(0);
+        bad_handle.abort_with_reason(bad_reason);
+        worker.drain_handle_cancel_requests();
+
+        assert_eq!(
+            worker
+                .local
+                .lock()
+                .pop_cancel_only()
+                .expect("repaired task cancel lane"),
+            bad_task
+        );
+        assert_eq!(
+            bad_inner.read().runnable_publication,
+            crate::types::task_context::RunnablePublication::Published,
+            "successful retry completes delegated publication exactly once"
+        );
+        assert!(mailbox.handle_cancels_are_empty());
+        assert_eq!(
+            bad_wake_count.load(Ordering::SeqCst),
+            1,
+            "a fresh command after route repair releases the retained Waker once"
+        );
+    }
+
     #[test]
     fn task_table_backed_inject_ready() {
         let (scheduler, _state, task_table) = task_table_scheduler(1, 3);
@@ -13728,13 +14764,16 @@ mod tests {
             let mut tt = task_table
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(record) = tt.task_mut(task_id) {
+            let _ = tt.update_task(task_id, |record| {
                 record.cx_inner = Some(cx_inner.clone());
-            }
+                assert!(record.start_running());
+            });
         }
         // Set cancel_acknowledged.
         {
             let mut guard = cx_inner.write();
+            guard.cancel_requested = true;
+            guard.cancel_reason = Some(crate::types::CancelReason::shutdown());
             guard.cancel_acknowledged = true;
         }
 
@@ -13742,12 +14781,31 @@ mod tests {
         let worker = &mut workers[0];
 
         // consume_cancel_ack should use the task table path.
-        let result = worker.consume_cancel_ack(task_id);
-        assert!(result, "cancel ack should be consumed from task table");
+        let (receipt, wakes) = worker.consume_cancel_ack(task_id).into_parts();
+        assert!(
+            receipt.is_some(),
+            "cancel ack should be consumed from task table"
+        );
+        assert!(wakes.is_empty());
+        wakes.dispatch();
 
         // Flag should be cleared.
         let ack = cx_inner.read().cancel_acknowledged;
         assert!(!ack, "cancel_acknowledged should be cleared");
+        let tt = task_table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = tt.task(task_id).expect("task record remains live");
+        assert!(matches!(
+            &record.state,
+            crate::record::task::TaskState::Cancelling { reason, .. }
+                if reason.is_kind(crate::types::CancelKind::Shutdown)
+        ));
+        assert_eq!(
+            record.phase(),
+            crate::record::task::TaskPhase::Cancelling,
+            "phase bookkeeping follows checkpoint reconciliation"
+        );
     }
 
     // ================================================================

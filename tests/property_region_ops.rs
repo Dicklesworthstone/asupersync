@@ -806,12 +806,13 @@ impl TestHarness {
     pub fn cancel_region(&mut self, region: RegionId, reason: CancelKind) {
         let cancel_reason = CancelReason::new(reason);
         // Use RuntimeState's cancel_request which handles the full cancellation flow
-        let _tasks_to_schedule = self
+        let cancel_effects = self
             .runtime
             .state
             .cancel_request(region, &cancel_reason, None);
-        // Note: We don't actually schedule these tasks in this simple harness
-        // since we're testing the region tree structure, not the full execution.
+        let (_tasks_to_schedule, wake_effects) = cancel_effects.into_parts();
+        // This structural-only harness deliberately performs no execution.
+        wake_effects.suppress();
     }
 
     /// Complete a task with the given outcome.

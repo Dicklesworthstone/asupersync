@@ -195,9 +195,18 @@ fn test_cancel_cascade_ordering(
     }
 
     // Trigger cascade cancellation from the root region.
-    runtime
-        .state
-        .cancel_request(root_region, &CancelReason::user("cascade"), None);
+    let cancel_effects =
+        runtime
+            .state
+            .cancel_request(root_region, &CancelReason::user("cascade"), None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+    {
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in tasks_to_cancel {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
+    wake_effects.dispatch();
 
     // Region will close naturally when tasks complete or are cancelled
     runtime.run_until_quiescent();

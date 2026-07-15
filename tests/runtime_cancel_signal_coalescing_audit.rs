@@ -17,7 +17,7 @@
 //!   1. **Terminal-state early return** (record/task.rs:528):
 //!      ```ignore
 //!      if self.state.is_terminal() {
-//!          return false;
+//!          return CancellationEffects::ready(false);
 //!      }
 //!      ```
 //!      Any cancel call on a Completed task is a no-op —
@@ -78,45 +78,40 @@
 //!      This is what makes "first cancel observed" countable
 //!      for metrics.
 //!
-//!   7. **Bool return distinguishes new-cancel from redundant**
-//!      (task.rs:560, 587, 614 → false; 616+ → true): the
-//!      `cancel_request` higher-level walk in state.rs uses
-//!      this bool to decide whether to schedule the task on
-//!      the cancel lane:
+//!   7. **The effects value distinguishes transition from change**:
+//!      `newly_cancelled` gates the first RequestCancel protocol/trace
+//!      transition. `changed && publication.is_published()` separately
+//!      selects lane routing, so a stronger reason or tighter cleanup budget
+//!      can deliberately re-promote an already-cancelled task. Identical
+//!      repeats remain routing no-ops. Effects are extracted under state and
+//!      dispatched only after the caller's publication boundary:
 //!      ```ignore
-//!      let newly_cancelled = task.request_cancel_with_budget(...);
-//!      if newly_cancelled {
-//!          // schedule on cancel lane
+//!      let effects = task.request_cancel_with_budget(...);
+//!      let ((newly_cancelled, changed, publication), task_wakes) =
+//!          effects.into_parts();
+//!      wakes.merge(task_wakes);
+//!      if changed && publication.is_published() {
+//!          tasks_to_cancel.push((task_id, priority));
 //!      }
 //!      ```
-//!      Only the first call schedules; subsequent calls
-//!      see `newly_cancelled == false` and skip the
-//!      scheduling op (the task is already on the cancel
-//!      lane from the first call).
 //!
-//!   8. **`request_cancel_with_budget` is the SINGLE entry
-//!      point for cancel publishing**: a grep shows all
-//!      cancel sources (state.cancel_request, deadline
-//!      monitor, region close) flow through this method.
-//!      Coalescing is enforced at this single chokepoint —
-//!      no parallel uncoalesced path.
+//!   8. **Multiple producer paths share authoritative state**: region/task
+//!      cancellation, managed handles, and checkpoint reconciliation do not
+//!      share one public entrypoint. They converge through the TaskRecord/Cx
+//!      cancellation state and runtime-owned command/publication boundaries.
 //!
 //! Verdict: **SOUND**. 100 cancel signals on the same task
 //! produce 1 state transition + 99 strengthen-only updates.
 //! The fast_cancel atomic store is naturally idempotent.
-//! The bool return lets the higher-level walk skip
-//! redundant scheduling. The cancel_epoch counts ONLY the
-//! first cancel.
-//!
-//! No bead filed. The coalescing is structurally enforced.
+//! The paired booleans preserve first-transition accounting and permit only
+//! changed published cancellations to be routed again. Wakers remain deferred,
+//! and cancel_epoch counts only the first cancel.
 //!
 //! A regression that:
 //!   - removed the terminal-state early return (would let
 //!     post-completion cancels mutate state — UB),
-//!   - changed the state-match arms to ALWAYS return true
-//!     (every cancel signal would re-schedule the task on
-//!     the cancel lane — 100 cancels → 100 lane injections,
-//!     wasteful AND breaks single-shot dispatch),
+//!   - changed the state-match arms to report every call as a new transition
+//!     (duplicate protocol/trace events and broken first-transition accounting),
 //!   - changed strengthen to OVERWRITE the existing reason
 //!     (lost attribution — last cancel wins instead of
 //!     strongest),
@@ -124,9 +119,8 @@
 //!     MEET (would relax constraints under repeated cancel),
 //!   - removed the cancel_epoch increment guard (would let
 //!     the epoch grow unboundedly under coalesced cancels),
-//!   - introduced a parallel cancel-publish path that
-//!     bypasses request_cancel_with_budget (would lose the
-//!     coalescing chokepoint),
+//!   - introduced a producer that bypasses authoritative TaskRecord/Cx
+//!     reconciliation,
 //!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
@@ -138,33 +132,45 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+fn cancellation_mutation_body(source: &str) -> &str {
+    let start = source
+        .find("pub(crate) fn request_cancel_with_budget_and_publication(")
+        .expect("request_cancel_with_budget_and_publication fn");
+    let end = source[start..]
+        .find("\n    /// Returns a cancellation witness")
+        .expect("request_cancel_with_budget_and_publication end marker");
+    &source[start..start + end]
+}
+
 #[test]
-fn request_cancel_with_budget_returns_false_when_task_already_terminal() {
+fn request_cancel_with_budget_returns_ready_false_effect_when_task_already_terminal() {
     // Pin (link 1): the early return on is_terminal() is
     // the first idempotency gate. Without it, post-
     // completion cancels mutate state.
     let source = read("src/record/task.rs");
 
-    let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source
-        .find(fn_marker)
-        .expect("request_cancel_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let mutation_body = cancellation_mutation_body(&source);
 
     assert!(
-        body.contains("request_cancel_with_budget_deferred(reason, cleanup_budget)")
-            && body.contains("if self.state.is_terminal() {")
-            && body.contains("return (false, SmallVec::new());"),
+        mutation_body.contains(") -> CancellationEffects<(bool, bool, RunnablePublication)> {")
+            && mutation_body.contains("if self.state.is_terminal() {")
+            && mutation_body.contains("return CancellationEffects::ready((")
+            && mutation_body.contains("RunnablePublication::Published,")
+            && mutation_body.contains("(result.0, result.1, runnable_publication),")
+            && mutation_body.contains("let wakes = CancelWakeEffects::new(cancel_wakers);")
+            && mutation_body.contains("let trace = PendingTaskCancelTrace::new(")
+            && mutation_body.contains("trace.append_to(&mut wakes);")
+            && mutation_body.contains(".pending_task_cancel_trace;")
+            && !mutation_body.contains("trace!(")
+            && !mutation_body.contains("tracing_compat::debug!(")
+            && !mutation_body.contains(".dispatch()")
+            && !mutation_body.contains("wake_by_ref("),
         "REGRESSION: request_cancel_with_budget no longer \
-         early-returns on terminal state. Cancels on \
+         returns an empty cancellation-effects token for a \
+         terminal state. Cancels on \
          completed tasks would mutate state — UB pathway \
-         AND breaks coalescing for completed tasks.",
+         AND breaks coalescing for completed tasks; or it \
+         invokes tracing subscribers or Wakers inline instead of mutation + capture only.",
     );
 }
 
@@ -202,17 +208,7 @@ fn state_match_arms_strengthen_existing_reason_for_already_cancelling_states() {
     // multi-cancel attribution is lost.
     let source = read("src/record/task.rs");
 
-    let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source
-        .find(fn_marker)
-        .expect("request_cancel_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = cancellation_mutation_body(&source);
 
     let strengthen_count = body.matches("existing_reason.strengthen(&reason);").count();
     assert!(
@@ -249,23 +245,13 @@ fn state_match_arms_combine_budgets_via_meet_for_tightest_constraint() {
     // this, repeated cancels could RELAX budgets.
     let source = read("src/record/task.rs");
 
-    let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source
-        .find(fn_marker)
-        .expect("request_cancel_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = cancellation_mutation_body(&source);
 
-    let combine_count = body.matches(".combine(cleanup_budget)").count();
+    let combine_count = body.matches(".combine_untraced(cleanup_budget)").count();
     assert!(
         combine_count >= 3,
         "REGRESSION: only {combine_count} \
-         budget.combine(cleanup_budget) calls found \
+         budget.combine_untraced(cleanup_budget) calls found \
          (expected >= 3). Multi-cancel budget tightening \
          is broken — repeated cancels may relax \
          constraints.",
@@ -276,35 +262,23 @@ fn state_match_arms_combine_budgets_via_meet_for_tightest_constraint() {
 fn state_match_arms_for_cancelling_states_return_false_not_true() {
     // Pin (link 7): the CancelRequested/Cancelling/
     // Finalizing arms return false (NOT newly cancelled).
-    // Without this, the higher-level walk would re-schedule
-    // the task on every cancel signal.
+    // Without this, first-transition accounting and protocol
+    // diagnostics would repeat for every strengthened signal.
     let source = read("src/record/task.rs");
 
-    let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source
-        .find(fn_marker)
-        .expect("request_cancel_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = cancellation_mutation_body(&source);
 
     // Each of the three already-cancelling arms returns
     // false. We count returns inside the matching arms by
     // looking for the trace + strengthen + false pattern.
-    let already_cancelled_returns = body
-        .matches("\n                false\n            }")
-        .count();
+    let already_cancelled_returns = body.matches("reason_changed || budget_changed").count();
     assert!(
         already_cancelled_returns >= 3,
         "REGRESSION: state match arms for already-cancelling \
          states return only {already_cancelled_returns} \
          falses (expected >= 3 — one per arm). Either \
-         the arms now return true (re-scheduling on every \
-         cancel — wasteful) or the structure changed.",
+         the arms now report duplicate first transitions or \
+         the structure changed.",
     );
 }
 
@@ -317,17 +291,7 @@ fn cancel_epoch_increments_only_on_first_transition_to_cancel_requested() {
     // unboundedly under coalesced cancels.
     let source = read("src/record/task.rs");
 
-    let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source
-        .find(fn_marker)
-        .expect("request_cancel_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = cancellation_mutation_body(&source);
 
     // The increment must be inside the Created/Running arm.
     assert!(
@@ -343,28 +307,29 @@ fn cancel_epoch_increments_only_on_first_transition_to_cancel_requested() {
 }
 
 #[test]
-fn cancel_request_higher_level_walk_uses_newly_cancelled_bool() {
-    // Pin (link 7): state.cancel_request uses the bool
-    // return to gate cancel-lane scheduling. Without this,
-    // 100 coalesced cancels would each schedule the task
-    // 100 times.
+fn cancel_request_separates_first_transition_from_changed_routing() {
+    // Pin (link 7): state.cancel_request extracts both the
+    // first-transition and changed/publication receipts. The
+    // former gates protocol/trace recording; the latter gates
+    // lane routing for new or strengthened cancellation.
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("newly_cancelled =\n                        task.request_cancel_with_budget(task_reason.clone(), task_budget);")
-            || source.contains("task.request_cancel_with_budget(task_reason.clone(), task_budget)"),
-        "REGRESSION: cancel_request no longer captures the \
-         newly_cancelled bool. The coalescing signal is \
-         discarded — every cancel request schedules the \
-         task again.",
+        source.contains("task.request_cancel_with_budget_and_publication(")
+            && source.contains("let ((newly_cancelled, changed, publication), task_wakes) =",)
+            && source.contains("wakes.merge(task_wakes);"),
+        "REGRESSION: cancel_request no longer captures task \
+         mutation effects and splits/merges their opaque \
+         wake token. Auxiliary cancellation observers/Wakers may run while \
+         task/state locks are live, or be silently lost.",
     );
 
     assert!(
-        source.contains("if newly_cancelled {"),
-        "REGRESSION: cancel_request no longer gates work on \
-         newly_cancelled. Either every signal triggers \
-         redundant scheduling (wasteful) or no signal \
-         triggers any scheduling (broken).",
+        source.contains("if newly_cancelled {")
+            && source.contains("if changed && publication.is_published() {"),
+        "REGRESSION: cancel_request no longer separates the \
+         first RequestCancel transition from changed, already-published \
+         lane routing.",
     );
 }
 
@@ -390,28 +355,266 @@ fn budget_update_is_deferred_to_acknowledge_cancel_to_avoid_pre_emption() {
 }
 
 #[test]
-fn cancel_request_returns_vec_for_per_task_priority_routing() {
-    // Pin (link 8): cancel_request returns Vec<(TaskId, u8)>
-    // — the bool-gated tasks_to_cancel_result push. Without
-    // this, the higher-level scheduler can't route only
-    // newly-cancelled tasks to the cancel lane.
+fn cancel_request_returns_effects_for_per_task_priority_routing() {
+    // Pin (link 8): cancel_request returns a callback-free
+    // Vec<(TaskId, u8)> paired with opaque auxiliary Waker and
+    // cancellation-observer effects. The scheduler can publish
+    // the list only after its RuntimeState guard is gone and
+    // before dispatching those deferred effects. This does not
+    // claim that empty-region lifecycle advancement, finalizers,
+    // close waiters, heap payload retirement, or region-close metrics
+    // reachable later in this same method are deferred.
     let source = read("src/runtime/state.rs");
+    let start = source
+        .find("pub fn cancel_request(")
+        .expect("cancel_request fn");
+    let end = source[start..]
+        .find("\n    /// Collects a region and all its descendants")
+        .expect("cancel_request end marker");
+    let body = &source[start..start + end];
 
     assert!(
-        source.contains("pub fn cancel_request(") && source.contains("-> Vec<(TaskId, u8)>"),
+        body.contains("-> CancellationEffects<Vec<(TaskId, u8)>>")
+            && body.contains("CancellationEffects::new(tasks_to_cancel, wakes)")
+            && body.contains("let now = reason.timestamp;")
+            && body.contains("wakes.push_region_cancellation_metric(")
+            && body.contains("wakes.push_cancel_protocol_violation(")
+            && !body.contains(".dispatch()")
+            && !body.contains("current_runtime_time()")
+            && !body.contains("wake_by_ref("),
         "REGRESSION: cancel_request signature no longer \
-         returns Vec<(TaskId, u8)>. The coalescing signal \
-         can't be conveyed to the scheduler — every cancel \
-         request triggers full re-scheduling.",
+         returns the task-routing list coupled to deferred \
+         cancellation observers/Wakers, or invokes auxiliary Wakers inline. \
+         The post-lock publication/dispatch boundary can no \
+         longer be enforced.",
+    );
+
+    let sibling_start = source
+        .find("fn cancel_sibling_tasks(")
+        .expect("sibling cancel helper");
+    let sibling_end = source[sibling_start..]
+        .find("\n    /// Requests cancellation for a region")
+        .expect("sibling cancel helper end");
+    let sibling = &source[sibling_start..sibling_start + sibling_end];
+    assert!(
+        sibling.contains("let now = reason.timestamp;")
+            && !sibling.contains("current_runtime_time()"),
+        "REGRESSION: sibling cancellation invokes an arbitrary TimeSource callback beneath \
+         its caller's RuntimeState lock"
     );
 }
 
 #[test]
-fn no_alternate_cancel_publish_path_bypasses_request_cancel_with_budget() {
-    // Pin (link 8): there must be NO alternate path that
-    // mutates fast_cancel + cancel_requested without going
-    // through request_cancel_with_budget. The single
-    // chokepoint is what enforces coalescing.
+fn cancellation_validator_transition_never_logs_under_runtime_state() {
+    fn function_body<'a>(source: &'a str, marker: &str) -> &'a str {
+        let start = source.find(marker).expect("validator helper");
+        let tail = &source[start..];
+        let end = tail
+            .find("\n    }\n\n")
+            .expect("validator helper closing brace");
+        &tail[..end]
+    }
+
+    let validator = read("src/cancel/protocol_state_machines.rs");
+    let body = function_body(
+        &validator,
+        "pub(crate) fn validate_task_transition_without_logging(",
+    );
+    assert!(
+        body.contains("self.record_task_transition(task_id, event, context)")
+            && !body.contains("log_violation("),
+        "REGRESSION: the task validator's runtime-lock entrypoint can invoke a tracing subscriber"
+    );
+
+    let state = read("src/runtime/state.rs");
+    let shared = function_body(&state, "fn validate_task_protocol_transition(");
+    assert!(
+        shared.contains("validate_task_transition_without_logging")
+            && !shared.contains(".validate_task_transition("),
+        "REGRESSION: the shared RuntimeState task validator invokes logging under its caller's lock"
+    );
+    for marker in [
+        "pub(crate) fn external_checkpoint_cancel_materialization_violation(",
+        "pub(crate) fn external_handle_cancel_request_violation(",
+    ] {
+        let body = function_body(&state, marker);
+        assert!(
+            body.contains("validate_task_transition_without_logging")
+                && !body.contains(".validate_task_transition("),
+            "REGRESSION: {marker} returned to the logging validator API while runtime state is locked"
+        );
+    }
+}
+
+#[test]
+fn task_cancel_trace_waits_for_first_physical_lane_publication() {
+    fn function_body<'a>(source: &'a str, marker: &str) -> &'a str {
+        let start = source.find(marker).expect("publication helper");
+        let tail = &source[start..];
+        let end = tail
+            .find("\n    }\n\n")
+            .expect("publication helper closing brace");
+        &tail[..end]
+    }
+
+    let task = read("src/record/task.rs");
+    let request = function_body(
+        &task,
+        "pub(crate) fn request_cancel_with_budget_and_publication(",
+    );
+    assert!(
+        request.contains("if runnable_publication.is_published() {")
+            && request.contains(".pending_task_cancel_trace;")
+            && request.contains("if pending.is_none() {")
+            && request.contains("*pending = Some(trace);"),
+        "REGRESSION: a task-cancel trace can escape while admission is Unpublished or \
+         DelegatedCancel, or prepublication traces can grow without a bounded first receipt"
+    );
+
+    let handle = read("src/runtime/task_handle.rs");
+    let admission = function_body(&handle, "pub(crate) fn publish_admitted_cancel_state(");
+    let lane = admission
+        .find("publish_lane(effective_priority);")
+        .expect("physical admission lane publication");
+    let published = admission
+        .find("lock.runnable_publication.mark_published();")
+        .expect("Cx publication marker");
+    let trace_take = admission
+        .find("lock.pending_task_cancel_trace.take()")
+        .expect("pending trace take");
+    let unlock = admission.find("drop(lock);").expect("Cx unlock");
+    let append = admission
+        .find("trace.append_to(&mut wakes);")
+        .expect("post-lock trace effect append");
+    assert!(
+        lane < published && published < trace_take && trace_take < unlock && unlock < append,
+        "REGRESSION: admission no longer orders physical lane publication before Cx Published, \
+         pending-trace take, unlock, and observer effect release"
+    );
+
+    let delegated = function_body(&task, "pub(crate) fn publish_delegated_cancel_lane<T>(");
+    let delegated_gate = delegated
+        .find("if !guard.runnable_publication.is_delegated_cancel()")
+        .expect("delegated Cx gate check");
+    let snapshot = delegated
+        .find("let cancel_wakers =")
+        .expect("prepublication Waker snapshot");
+    let lane = delegated
+        .find("let publication = publish_lane(")
+        .expect("physical delegated lane publication");
+    let published = delegated
+        .find("guard.runnable_publication.mark_published()")
+        .expect("delegated Cx publication marker");
+    let unlock = published
+        + delegated[published..]
+            .find("drop(guard);")
+            .expect("successful-publication Cx unlock");
+    let append = delegated
+        .find("trace.append_to(&mut wakes);")
+        .expect("post-lock trace effect append");
+    assert!(
+        delegated_gate < snapshot
+            && snapshot < lane
+            && lane < published
+            && published < unlock
+            && unlock < append,
+        "REGRESSION: delegated cancellation can emit or discard its pending trace before a \
+         successful first cancel-lane publication"
+    );
+
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
+    let drain = function_body(&scheduler, "fn drain_handle_cancel_requests(&self) {");
+    assert!(
+        drain.contains("record.publish_delegated_cancel_lane(")
+            && drain.contains("self.insert_deferred_cancel_lane_without_wake(")
+            && drain
+                .contains("self.finish_deferred_cancel_lane_publication(task_id, publication);")
+            && drain.contains("publication_wakes.retire_without_dispatch();")
+            && !drain.contains("mailbox.enqueue_handle_cancel(task_id, reason);"),
+        "REGRESSION: delegated cancellation no longer keeps record/Cx publication atomic, or \
+         an invalid/stale route can self-requeue forever"
+    );
+
+    let delegated_loop = drain
+        .find("for (task_id, requested_priority, reason, mut task_wakes) in delegated")
+        .expect("delegated publication loop");
+    let successful = &drain[delegated_loop..];
+    let worker_permit = successful
+        .find("self.finish_deferred_cancel_lane_publication(task_id, publication);")
+        .expect("delegated worker permit");
+    let priority_assert = successful
+        .find("debug_assert!(publication.priority >= requested_priority);")
+        .expect("post-publication priority assertion");
+    let effect_merge = successful
+        .find("task_wakes.merge(publication_wakes);")
+        .expect("post-publication effect merge");
+    assert!(
+        worker_permit < priority_assert && worker_permit < effect_merge,
+        "REGRESSION: fallible delegated-publication bookkeeping runs before the only concrete \
+         worker permit and can strand an already-Published lane"
+    );
+
+    let finish = function_body(&scheduler, "fn finish_deferred_cancel_lane_publication(");
+    let evidence = finish
+        .find("self.record_scheduler_evidence_enqueue(task_id);")
+        .expect("scheduler evidence attempt");
+    let containment = finish
+        .find("std::panic::catch_unwind")
+        .expect("evidence unwind containment");
+    let wake = finish
+        .find("match publication.wake_target")
+        .expect("worker wake dispatch");
+    assert!(
+        containment < evidence && evidence < wake,
+        "REGRESSION: scheduler evidence can unwind past delegated publication or worker wake no \
+         longer follows the contained evidence attempt"
+    );
+    let diagnostics = function_body(&scheduler, "fn emit_cancel_diagnostic(");
+    assert!(
+        diagnostics.contains("std::panic::catch_unwind"),
+        "REGRESSION: a tracing diagnostic can abort an already-dequeued cancellation batch"
+    );
+
+    let context = read("src/types/task_context.rs");
+    let retirement = function_body(&context, "pub(crate) fn take_cancel_wakers(&mut self)");
+    assert!(
+        retirement.contains("self.pending_task_cancel_trace = None;"),
+        "REGRESSION: terminal retirement can retain and later replay a cancellation trace for a \
+         task that never acquired a physical lane"
+    );
+    let failed_route_retirement = function_body(&context, "pub(crate) fn retire_without_dispatch(");
+    assert!(
+        failed_route_retirement.contains("std::panic::catch_unwind")
+            && failed_route_retirement.contains("drop(target)"),
+        "REGRESSION: a failed delegated route can retire the final RawWaker without post-lock \
+         panic containment"
+    );
+
+    let steal = function_body(&scheduler, "pub(crate) fn try_steal(&mut self)");
+    let victim_batch = steal
+        .find(".steal_ready_batch_into(")
+        .expect("victim ready-batch mutation");
+    let victim_drop = victim_batch
+        + steal[victim_batch..]
+            .find("drop(victim);")
+            .expect("victim lock release");
+    let record_lookup = victim_batch
+        + steal[victim_batch..]
+            .find("self.with_task_table_ref(")
+            .expect("stolen-task record audit");
+    assert!(
+        victim_batch < victim_drop && victim_drop < record_lookup,
+        "REGRESSION: a steal path holds a victim local scheduler while acquiring TaskTable, \
+         reversing delegated publication's TaskTable -> Cx -> local order"
+    );
+}
+
+#[test]
+fn runtime_state_does_not_mutate_cx_cancel_flags_directly() {
+    // Pin (link 8): RuntimeState routes its task mutations
+    // through TaskRecord rather than writing Cx cancellation
+    // flags itself. Other legitimate producer paths exist in
+    // Cx, handles, and checkpoint reconciliation.
     let source = read("src/runtime/state.rs");
 
     let suspect_alternate_paths = ["task.cancel_requested = true;", ".fast_cancel.store(true,"];
@@ -438,10 +641,9 @@ fn no_alternate_cancel_publish_path_bypasses_request_cancel_with_budget() {
 
     assert!(
         findings.is_empty(),
-        "REGRESSION: state.rs now has an alternate \
-         cancel-publish path that bypasses \
-         request_cancel_with_budget. The coalescing \
-         chokepoint is lost. Findings:\n  {findings}",
+        "REGRESSION: state.rs now mutates Cx cancel flags \
+         directly instead of reconciling through TaskRecord. \
+         Findings:\n  {findings}",
         findings = findings.join("\n  "),
     );
 }
@@ -611,8 +813,7 @@ fn behavior_cancel_after_terminal_returns_false_no_state_mutation() {
         !result,
         "REGRESSION: cancel on already-CancelRequested task \
          returned true. The coalescing bool signal is \
-         broken — re-cancelling a cancelled task triggers \
-         re-scheduling.",
+         broken — a repeat is reported as a new transition.",
     );
 
     assert_eq!(

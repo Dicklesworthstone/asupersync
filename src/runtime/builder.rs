@@ -6170,9 +6170,17 @@ mod tests {
                 std::future::pending::<()>().await;
             })
             .expect("lab task spawn");
-        let _ = lab
-            .state
-            .cancel_request(lab_region, &CancelReason::user("stop"), None);
+        let lab_cancel_effects =
+            lab.state
+                .cancel_request(lab_region, &CancelReason::user("stop"), None);
+        let (tasks_to_schedule, lab_cancel_wakes) = lab_cancel_effects.into_parts();
+        {
+            let mut scheduler = lab.scheduler.lock();
+            for (task_id, priority) in tasks_to_schedule {
+                scheduler.schedule_cancel(task_id, priority);
+            }
+        }
+        lab_cancel_wakes.dispatch();
         let lab_counts = parity_counts(lab.trace().snapshot());
         assert!(
             lab_counts.cancel_request > 0,
@@ -6182,7 +6190,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("runtime build");
-        {
+        let runtime_cancel_effects = {
             let mut guard = runtime
                 .inner
                 .state
@@ -6194,8 +6202,13 @@ mod tests {
                     std::future::pending::<()>().await;
                 })
                 .expect("runtime task spawn");
-            let _ = guard.cancel_request(region, &CancelReason::user("stop"), None);
+            guard.cancel_request(region, &CancelReason::user("stop"), None)
+        };
+        let (tasks_to_schedule, runtime_cancel_wakes) = runtime_cancel_effects.into_parts();
+        for (task_id, priority) in tasks_to_schedule {
+            runtime.inner.scheduler.inject_cancel(task_id, priority);
         }
+        runtime_cancel_wakes.dispatch();
         let runtime_counts = {
             let guard = runtime
                 .inner

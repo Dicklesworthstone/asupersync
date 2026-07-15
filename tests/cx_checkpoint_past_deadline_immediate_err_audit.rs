@@ -75,10 +75,14 @@
 //!      if let Some((reason, _, _)) = &budget_exhaustion {
 //!          inner.cancel_requested = true;
 //!          inner.fast_cancel.store(true, Release);
-//!          if let Some(existing) = &mut inner.cancel_reason {
-//!              existing.strengthen(reason);
+//!          let changed = if let Some(existing) = &mut inner.cancel_reason {
+//!              existing.strengthen(reason)
 //!          } else {
 //!              inner.cancel_reason = Some(reason.clone());
+//!              true
+//!          };
+//!          if changed {
+//!              inner.cancel_wakers_pending = true;
 //!          }
 //!      }
 //!      ```
@@ -305,13 +309,15 @@ fn checkpoint_slow_path_strengthens_existing_reason_on_deadline_exhaustion() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("if let Some(existing) = &mut inner.cancel_reason {")
-            && body.contains("existing.strengthen(reason);"),
+        body.contains("let changed = if let Some(existing) = &mut inner.cancel_reason {")
+            && body.contains("existing.strengthen(reason)")
+            && body.contains("if changed {")
+            && body.contains("inner.cancel_wakers_pending = true;"),
         "REGRESSION: checkpoint slow path no longer \
-         strengthens existing cancel_reason. A parent \
-         cancel arriving before deadline would be overwritten \
-         by the deadline self-cancel — wrong attribution \
-         in the cause chain.",
+         strengthens existing cancel_reason or no longer marks \
+         changed cancellation Wakers pending. A parent cancel \
+         arriving before deadline could be overwritten, or the \
+         stronger deadline could remain unobserved.",
     );
 
     // The else arm sets reason for the no-prior-cancel case.

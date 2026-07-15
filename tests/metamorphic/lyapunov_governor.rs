@@ -26,16 +26,17 @@ use std::collections::HashMap;
 /// Generator for valid PotentialWeights
 fn weights_strategy() -> impl Strategy<Value = PotentialWeights> {
     (
-        0.0_f64..=100.0,  // w_tasks
-        0.0_f64..=100.0,  // w_obligation_age
-        0.0_f64..=100.0,  // w_draining_regions
-        0.0_f64..=100.0,  // w_deadline_pressure
-    ).prop_map(|(w_t, w_o, w_r, w_d)| PotentialWeights {
-        w_tasks: w_t,
-        w_obligation_age: w_o,
-        w_draining_regions: w_r,
-        w_deadline_pressure: w_d,
-    })
+        0.0_f64..=100.0, // w_tasks
+        0.0_f64..=100.0, // w_obligation_age
+        0.0_f64..=100.0, // w_draining_regions
+        0.0_f64..=100.0, // w_deadline_pressure
+    )
+        .prop_map(|(w_t, w_o, w_r, w_d)| PotentialWeights {
+            w_tasks: w_t,
+            w_obligation_age: w_o,
+            w_draining_regions: w_r,
+            w_deadline_pressure: w_d,
+        })
 }
 
 /// Generator for StateSnapshot configurations
@@ -55,69 +56,87 @@ fn snapshot_strategy() -> impl Strategy<Value = StateSnapshot> {
         0_u32..=50,             // cancelling_tasks
         0_u32..=50,             // finalizing_tasks
         0_u32..=100,            // ready_queue_depth
-    ).prop_map(|(time_ns, live_tasks, pending_obligations, age_sum, draining_regions,
-                deadline_pressure, send_permits, acks, leases, io_ops,
-                cancel_requested, cancelling, finalizing, ready_queue)| {
-        // Ensure per-kind breakdown sums to total obligations
-        let total_breakdown = send_permits.saturating_add(acks).saturating_add(leases).saturating_add(io_ops);
-        let adjusted_obligations = if total_breakdown == 0 {
-            0
-        } else {
-            pending_obligations.max(total_breakdown)
-        };
+    )
+        .prop_map(
+            |(
+                time_ns,
+                live_tasks,
+                pending_obligations,
+                age_sum,
+                draining_regions,
+                deadline_pressure,
+                send_permits,
+                acks,
+                leases,
+                io_ops,
+                cancel_requested,
+                cancelling,
+                finalizing,
+                ready_queue,
+            )| {
+                // Ensure per-kind breakdown sums to total obligations
+                let total_breakdown = send_permits
+                    .saturating_add(acks)
+                    .saturating_add(leases)
+                    .saturating_add(io_ops);
+                let adjusted_obligations = if total_breakdown == 0 {
+                    0
+                } else {
+                    pending_obligations.max(total_breakdown)
+                };
 
-        StateSnapshot {
-            time: Time::from_nanos(time_ns),
-            live_tasks,
-            pending_obligations: adjusted_obligations,
-            obligation_age_sum_ns: age_sum,
-            draining_regions,
-            deadline_pressure,
-            pending_send_permits: send_permits,
-            pending_acks: acks,
-            pending_leases: leases,
-            pending_io_ops: io_ops,
-            cancel_requested_tasks: cancel_requested,
-            cancelling_tasks: cancelling,
-            finalizing_tasks: finalizing,
-            ready_queue_depth: ready_queue,
-        }
-    })
+                StateSnapshot {
+                    time: Time::from_nanos(time_ns),
+                    live_tasks,
+                    pending_obligations: adjusted_obligations,
+                    obligation_age_sum_ns: age_sum,
+                    draining_regions,
+                    deadline_pressure,
+                    pending_send_permits: send_permits,
+                    pending_acks: acks,
+                    pending_leases: leases,
+                    pending_io_ops: io_ops,
+                    cancel_requested_tasks: cancel_requested,
+                    cancelling_tasks: cancelling,
+                    finalizing_tasks: finalizing,
+                    ready_queue_depth: ready_queue,
+                }
+            },
+        )
 }
 
 /// Generator for trajectories of StateSnapshots (decreasing activity)
 fn decreasing_trajectory_strategy() -> impl Strategy<Value = Vec<StateSnapshot>> {
     (5_usize..=20).prop_flat_map(|len| {
-        prop::collection::vec(snapshot_strategy(), len..=len)
-            .prop_map(|mut snapshots| {
-                // Sort by decreasing activity to simulate drain trajectory
-                snapshots.sort_by(|a, b| {
-                    let activity_a = a.live_tasks + a.pending_obligations + a.draining_regions;
-                    let activity_b = b.live_tasks + b.pending_obligations + b.draining_regions;
-                    activity_b.cmp(&activity_a) // Descending order
-                });
+        prop::collection::vec(snapshot_strategy(), len..=len).prop_map(|mut snapshots| {
+            // Sort by decreasing activity to simulate drain trajectory
+            snapshots.sort_by(|a, b| {
+                let activity_a = a.live_tasks + a.pending_obligations + a.draining_regions;
+                let activity_b = b.live_tasks + b.pending_obligations + b.draining_regions;
+                activity_b.cmp(&activity_a) // Descending order
+            });
 
-                // Ensure the last snapshot is quiescent
-                if let Some(last) = snapshots.last_mut() {
-                    *last = StateSnapshot {
-                        time: Time::from_nanos(1_000_000_000),
-                        live_tasks: 0,
-                        pending_obligations: 0,
-                        obligation_age_sum_ns: 0,
-                        draining_regions: 0,
-                        deadline_pressure: 0.0,
-                        pending_send_permits: 0,
-                        pending_acks: 0,
-                        pending_leases: 0,
-                        pending_io_ops: 0,
-                        cancel_requested_tasks: 0,
-                        cancelling_tasks: 0,
-                        finalizing_tasks: 0,
-                        ready_queue_depth: 0,
-                    };
-                }
-                snapshots
-            })
+            // Ensure the last snapshot is quiescent
+            if let Some(last) = snapshots.last_mut() {
+                *last = StateSnapshot {
+                    time: Time::from_nanos(1_000_000_000),
+                    live_tasks: 0,
+                    pending_obligations: 0,
+                    obligation_age_sum_ns: 0,
+                    draining_regions: 0,
+                    deadline_pressure: 0.0,
+                    pending_send_permits: 0,
+                    pending_acks: 0,
+                    pending_leases: 0,
+                    pending_io_ops: 0,
+                    cancel_requested_tasks: 0,
+                    cancelling_tasks: 0,
+                    finalizing_tasks: 0,
+                    ready_queue_depth: 0,
+                };
+            }
+            snapshots
+        })
     })
 }
 
@@ -492,135 +511,140 @@ fn lab_runtime_lyapunov_invariants() {
 
     let mut runner = TestRunner::default();
 
-    runner.run(&(1_u64..=1000), |seed| {
-        let mut runtime = LabRuntime::new(LabConfig::new(seed));
-        let region = runtime.state.create_root_region(Budget::unlimited());
+    runner
+        .run(&(1_u64..=1000), |seed| {
+            let mut runtime = LabRuntime::new(LabConfig::new(seed));
+            let region = runtime.state.create_root_region(Budget::unlimited());
 
-        // Create tasks with obligations to generate meaningful state
-        let task_count = 5;
-        let mut obligation_ids = Vec::new();
+            // Create tasks with obligations to generate meaningful state
+            let task_count = 5;
+            let mut obligation_ids = Vec::new();
 
-        for i in 0..task_count {
-            let (task_id, _handle) = runtime.state
-                .create_task(region, Budget::unlimited(), async {
-                    // Simple cooperative task
-                    for _ in 0..10 {
-                        if let Some(cx) = asupersync::cx::Cx::current() {
-                            if cx.checkpoint().is_err() {
-                                return;
+            for i in 0..task_count {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(region, Budget::unlimited(), async {
+                        // Simple cooperative task
+                        for _ in 0..10 {
+                            if let Some(cx) = asupersync::cx::Cx::current() {
+                                if cx.checkpoint().is_err() {
+                                    return;
+                                }
                             }
+                            // Yield control
+                            asupersync::yield_now().await;
                         }
-                        // Yield control
-                        asupersync::yield_now().await;
-                    }
-                })
-                .unwrap();
+                    })
+                    .unwrap();
 
-            // Add obligations
-            if let Ok(obl_id) = runtime.state.create_obligation(
-                ObligationKind::SendPermit,
-                task_id,
-                region,
-                Some(format!("test-obligation-{}", i)),
-            ) {
-                obligation_ids.push(obl_id);
+                // Add obligations
+                if let Ok(obl_id) = runtime.state.create_obligation(
+                    ObligationKind::SendPermit,
+                    task_id,
+                    region,
+                    Some(format!("test-obligation-{}", i)),
+                ) {
+                    obligation_ids.push(obl_id);
+                }
+
+                runtime.scheduler.lock().schedule(task_id, 0);
             }
 
-            runtime.scheduler.lock().schedule(task_id, 0);
-        }
+            // Run for a few steps to establish non-quiescent state
+            for _ in 0..5 {
+                runtime.step_for_test();
+            }
 
-        // Run for a few steps to establish non-quiescent state
-        for _ in 0..5 {
-            runtime.step_for_test();
-        }
+            let mut governor = LyapunovGovernor::with_defaults();
 
-        let mut governor = LyapunovGovernor::with_defaults();
+            // Take initial snapshot and verify MR1 (non-negativity)
+            let initial_snapshot = StateSnapshot::from_runtime_state(&runtime.state);
+            let initial_v = governor.compute_potential(&initial_snapshot);
 
-        // Take initial snapshot and verify MR1 (non-negativity)
-        let initial_snapshot = StateSnapshot::from_runtime_state(&runtime.state);
-        let initial_v = governor.compute_potential(&initial_snapshot);
-
-        prop_assert!(
-            initial_v >= 0.0,
-            "Lab runtime state should have non-negative potential: V={:.6}",
-            initial_v
-        );
-
-        // MR3: If runtime is quiescent, potential should be zero
-        if runtime.is_quiescent() {
             prop_assert!(
-                initial_snapshot.is_quiescent(),
-                "Runtime quiescence should match snapshot quiescence"
-            );
-            prop_assert!(
-                initial_v.abs() < f64::EPSILON,
-                "Quiescent runtime should have V=0, got {:.6}",
+                initial_v >= 0.0,
+                "Lab runtime state should have non-negative potential: V={:.6}",
                 initial_v
             );
-        }
 
-        // Initiate cancellation and track trajectory for MR2
-        let cancel_reason = CancelReason::shutdown();
-        let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
-        {
-            let mut scheduler = runtime.scheduler.lock();
-            for (task_id, priority) in tasks_to_cancel {
-                scheduler.schedule_cancel(task_id, priority);
-            }
-        }
-
-        // Abort obligations to simulate proper cleanup
-        for obl_id in &obligation_ids {
-            let _ = runtime.state.abort_obligation(
-                *obl_id,
-                asupersync::record::ObligationAbortReason::Cancel,
-            );
-        }
-
-        // Track potential during drain
-        let mut trajectory_potentials = vec![initial_v];
-        let max_steps = 100;
-
-        for _ in 0..max_steps {
+            // MR3: If runtime is quiescent, potential should be zero
             if runtime.is_quiescent() {
-                break;
+                prop_assert!(
+                    initial_snapshot.is_quiescent(),
+                    "Runtime quiescence should match snapshot quiescence"
+                );
+                prop_assert!(
+                    initial_v.abs() < f64::EPSILON,
+                    "Quiescent runtime should have V=0, got {:.6}",
+                    initial_v
+                );
             }
-            runtime.step_for_test();
 
-            let snapshot = StateSnapshot::from_runtime_state(&runtime.state);
-            let v = governor.compute_potential(&snapshot);
-            trajectory_potentials.push(v);
-        }
-
-        // MR2: Check for monotonic decrease (allowing for small violations due to scheduling)
-        let mut significant_increases = 0;
-        for window in trajectory_potentials.windows(2) {
-            let prev = window[0];
-            let curr = window[1];
-            if curr > prev + 0.1 { // Allow small numerical differences
-                significant_increases += 1;
+            // Initiate cancellation and track trajectory for MR2
+            let cancel_reason = CancelReason::shutdown();
+            let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+            let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
+            {
+                let mut scheduler = runtime.scheduler.lock();
+                for (task_id, priority) in tasks_to_cancel {
+                    scheduler.schedule_cancel(task_id, priority);
+                }
             }
-        }
+            wake_effects.dispatch();
 
-        prop_assert!(
-            significant_increases <= trajectory_potentials.len() / 4, // Allow some non-monotonicity
-            "Too many significant potential increases during cancel drain: {}/{}",
-            significant_increases,
-            trajectory_potentials.len()
-        );
+            // Abort obligations to simulate proper cleanup
+            for obl_id in &obligation_ids {
+                let _ = runtime
+                    .state
+                    .abort_obligation(*obl_id, asupersync::record::ObligationAbortReason::Cancel);
+            }
 
-        // MR3: Final state should minimize potential if quiescent
-        if runtime.is_quiescent() {
-            let final_v = trajectory_potentials.last().unwrap();
+            // Track potential during drain
+            let mut trajectory_potentials = vec![initial_v];
+            let max_steps = 100;
+
+            for _ in 0..max_steps {
+                if runtime.is_quiescent() {
+                    break;
+                }
+                runtime.step_for_test();
+
+                let snapshot = StateSnapshot::from_runtime_state(&runtime.state);
+                let v = governor.compute_potential(&snapshot);
+                trajectory_potentials.push(v);
+            }
+
+            // MR2: Check for monotonic decrease (allowing for small violations due to scheduling)
+            let mut significant_increases = 0;
+            for window in trajectory_potentials.windows(2) {
+                let prev = window[0];
+                let curr = window[1];
+                if curr > prev + 0.1 {
+                    // Allow small numerical differences
+                    significant_increases += 1;
+                }
+            }
+
             prop_assert!(
-                final_v.abs() < 0.01, // Allow small residual due to scheduling artifacts
-                "Final quiescent state should have V≈0, got {:.6}",
-                final_v
+                significant_increases <= trajectory_potentials.len() / 4, // Allow some non-monotonicity
+                "Too many significant potential increases during cancel drain: {}/{}",
+                significant_increases,
+                trajectory_potentials.len()
             );
-        }
 
-        Ok(())
-    }).unwrap();
+            // MR3: Final state should minimize potential if quiescent
+            if runtime.is_quiescent() {
+                let final_v = trajectory_potentials.last().unwrap();
+                prop_assert!(
+                    final_v.abs() < 0.01, // Allow small residual due to scheduling artifacts
+                    "Final quiescent state should have V≈0, got {:.6}",
+                    final_v
+                );
+            }
+
+            Ok(())
+        })
+        .unwrap();
 }
 
 // ============================================================================
@@ -643,18 +667,17 @@ fn weight_configuration_stability() {
         let mut runtime = LabRuntime::new(LabConfig::new(0xBEEF));
         let region = runtime.state.create_root_region(Budget::unlimited());
 
-        let (task_id, _handle) = runtime.state
+        let (task_id, _handle) = runtime
+            .state
             .create_task(region, Budget::unlimited(), async {
                 asupersync::yield_now().await;
             })
             .unwrap();
 
-        let _obl_id = runtime.state.create_obligation(
-            ObligationKind::Ack,
-            task_id,
-            region,
-            None,
-        ).unwrap();
+        let _obl_id = runtime
+            .state
+            .create_obligation(ObligationKind::Ack, task_id, region, None)
+            .unwrap();
 
         runtime.scheduler.lock().schedule(task_id, 0);
         runtime.step_for_test();
@@ -681,11 +704,12 @@ fn weight_configuration_stability() {
         // Check suggestion consistency
         let suggestion = governor.suggest(&snapshot);
         assert!(
-            matches!(suggestion,
-                SchedulingSuggestion::DrainObligations |
-                SchedulingSuggestion::DrainRegions |
-                SchedulingSuggestion::MeetDeadlines |
-                SchedulingSuggestion::NoPreference
+            matches!(
+                suggestion,
+                SchedulingSuggestion::DrainObligations
+                    | SchedulingSuggestion::DrainRegions
+                    | SchedulingSuggestion::MeetDeadlines
+                    | SchedulingSuggestion::NoPreference
             ),
             "{}: Invalid suggestion: {:?}",
             label,
@@ -710,7 +734,8 @@ fn deterministic_potential_trajectories() {
         let region = runtime.state.create_root_region(Budget::unlimited());
 
         for i in 0..3 {
-            let (task_id, _handle) = runtime.state
+            let (task_id, _handle) = runtime
+                .state
                 .create_task(region, Budget::unlimited(), async move {
                     for j in 0..5 {
                         if let Some(cx) = asupersync::cx::Cx::current() {

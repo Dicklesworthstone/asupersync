@@ -72,8 +72,24 @@ fn test_race_empty_wakes_on_cancel() {
 
     assert_eq!(
         wakes.load(Ordering::SeqCst),
+        0,
+        "a bare RuntimeState handle must not invoke arbitrary Wakers on the caller stack"
+    );
+
+    let (should_schedule, cancel_wakes) = state
+        .cancel_task(handle.task_id(), &CancelReason::new(CancelKind::User))
+        .into_parts();
+    assert!(
+        should_schedule,
+        "the state owner publishes cancellation work"
+    );
+    assert_eq!(wakes.load(Ordering::SeqCst), 0);
+    cancel_wakes.dispatch();
+
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
         1,
-        "cancelling a task parked in race([]) must wake its registered cancel waker"
+        "authoritative bare-state cancellation wakes race([]) after owner publication"
     );
 
     {

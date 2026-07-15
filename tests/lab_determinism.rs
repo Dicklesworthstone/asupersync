@@ -805,13 +805,15 @@ fn run_cancel_drain_stress(seed: u64, task_count: usize) -> (usize, usize, bool,
     }
 
     let cancel_reason = CancelReason::shutdown();
-    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
     }
+    wake_effects.dispatch();
 
     let steps = runtime.run_until_quiescent();
 
@@ -1030,13 +1032,15 @@ fn run_io_cancel_scenario(seed: u64) -> (bool, usize, usize, u64) {
     }
 
     let cancel_reason = CancelReason::shutdown();
-    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    let cancel_effects = runtime.state.cancel_request(region, &cancel_reason, None);
+    let (tasks_to_cancel, wake_effects) = cancel_effects.into_parts();
     {
         let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
     }
+    wake_effects.dispatch();
 
     let _ = io_op.cancel(&mut runtime.state).expect("cancel io op");
     let steps = runtime.run_until_quiescent();

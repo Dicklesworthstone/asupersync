@@ -70,8 +70,11 @@
 //!      - `MaskGuard::drop` decrements mask_depth via
 //!        saturating_sub(1) (cx/cx.rs:281-287).
 //!      - `RegionRunner::drop` cancels the child region
-//!        and advances state if dropped before await
-//!        completes (cx/scope.rs:181-192).
+//!        by queueing auxiliary cancellation observer/Waker
+//!        effects for post-lock dispatch, and advances state if
+//!        dropped before await completes (cx/scope.rs:181-192).
+//!        Close/finalizer callbacks during that advance are not
+//!        covered by this distinction audit.
 //!
 //! Verdict: **SOUND**. The two API families are observably
 //! distinct AND every with-style method has a correct RAII
@@ -318,9 +321,12 @@ fn region_runner_drop_cancels_child_region_if_dropped_pre_completion() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("state.cancel_request(self.child_region, &reason, None);"),
+        body.contains("let effects = state.cancel_request(self.child_region, &reason, None);")
+            && body.contains("state.defer_cancel_dispatch(effects);")
+            && !body.contains(".dispatch()")
+            && !body.contains("wake_by_ref("),
         "REGRESSION: RegionRunner::drop no longer cancels \
-         the child region on drop. Dropping a region future \
+         the child region through deferred post-lock effects. Dropping a region future \
          before completion would leak the region — full \
          close-protocol deadlock for the parent.",
     );

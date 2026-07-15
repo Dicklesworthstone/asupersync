@@ -107,6 +107,15 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+fn budget_combine_untraced_body(source: &str) -> &str {
+    let fn_marker = "pub(crate) fn combine_untraced(self, other: Self) -> Self {";
+    let start = source.find(fn_marker).expect("Budget::combine_untraced fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("Budget::combine_untraced close");
+    &source[start..start + body_end]
+}
+
 #[test]
 fn budget_combine_uses_min_on_deadline_axis() {
     // Pin (link 1): Budget::combine takes MIN on deadline.
@@ -114,12 +123,7 @@ fn budget_combine_uses_min_on_deadline_axis() {
     // deadline wins.
     let source = read("src/types/budget.rs");
 
-    let fn_marker = "pub fn combine(self, other: Self) -> Self {";
-    let start = source.find(fn_marker).expect("Budget::combine fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Budget::combine close");
-    let body = &source[start..start + body_end];
+    let body = budget_combine_untraced_body(&source);
 
     assert!(
         body.contains("(Some(a), Some(b)) => Some(a.min(b)),"),
@@ -154,12 +158,7 @@ fn budget_combine_uses_min_on_poll_quota() {
     // polls = tighter constraint.
     let source = read("src/types/budget.rs");
 
-    let fn_marker = "pub fn combine(self, other: Self) -> Self {";
-    let start = source.find(fn_marker).expect("Budget::combine fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Budget::combine close");
-    let body = &source[start..start + body_end];
+    let body = budget_combine_untraced_body(&source);
 
     assert!(
         body.contains("poll_quota: self.poll_quota.min(other.poll_quota),"),
@@ -175,12 +174,7 @@ fn budget_combine_uses_min_on_cost_quota_with_none_handling() {
     // None handling as deadline.
     let source = read("src/types/budget.rs");
 
-    let fn_marker = "pub fn combine(self, other: Self) -> Self {";
-    let start = source.find(fn_marker).expect("Budget::combine fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Budget::combine close");
-    let body = &source[start..start + body_end];
+    let body = budget_combine_untraced_body(&source);
 
     assert!(
         body.contains("cost_quota: match (self.cost_quota, other.cost_quota) {")
@@ -199,12 +193,7 @@ fn budget_combine_uses_max_on_priority_for_stronger_cleanup() {
     // parent meet.
     let source = read("src/types/budget.rs");
 
-    let fn_marker = "pub fn combine(self, other: Self) -> Self {";
-    let start = source.find(fn_marker).expect("Budget::combine fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Budget::combine close");
-    let body = &source[start..start + body_end];
+    let body = budget_combine_untraced_body(&source);
 
     assert!(
         body.contains("priority: self.priority.max(other.priority),"),
@@ -319,6 +308,29 @@ fn budget_combine_traces_when_tightening_for_observability() {
 }
 
 #[test]
+fn budget_combine_keeps_the_runtime_lock_path_callback_free() {
+    // The public wrapper retains observability, while cancellation paths that
+    // already own RuntimeState/Cx locks use the exact same meet without tracing
+    // subscriber callbacks.
+    let source = read("src/types/budget.rs");
+    let untraced = budget_combine_untraced_body(&source);
+    let fn_marker = "pub fn combine(self, other: Self) -> Self {";
+    let start = source.find(fn_marker).expect("Budget::combine fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("Budget::combine close");
+    let public_body = &source[start..start + body_end];
+
+    assert!(
+        public_body.contains("let combined = self.combine_untraced(other);")
+            && !untraced.contains("trace!(")
+            && !untraced.contains("info!("),
+        "REGRESSION: the public and callback-free Budget meets diverged, or \
+         the lock-safe combine_untraced path can invoke a tracing subscriber.",
+    );
+}
+
+#[test]
 fn budget_combine_traces_priority_tightening_max_direction() {
     // Pin (link 1+4): priority_tightened predicate detects
     // when combined priority is STRICTLY GREATER than
@@ -372,12 +384,7 @@ fn budget_meet_is_idempotent_under_self_combine() {
     // it via a regression that adds an asymmetric step.
     let source = read("src/types/budget.rs");
 
-    let fn_marker = "pub fn combine(self, other: Self) -> Self {";
-    let start = source.find(fn_marker).expect("Budget::combine fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Budget::combine close");
-    let body = &source[start..start + body_end];
+    let body = budget_combine_untraced_body(&source);
 
     // Forbid asymmetric arithmetic that would break
     // idempotence (e.g., adding instead of taking min).

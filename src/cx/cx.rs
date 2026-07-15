@@ -1304,6 +1304,7 @@ impl<Caps> Cx<Caps> {
         mut self,
         gateway: Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
     ) -> Self {
+        self.inner.write().cancel_gateway = gateway.clone();
         Arc::make_mut(&mut self.handles).spawn_gateway = gateway;
         self
     }
@@ -2243,10 +2244,14 @@ impl<Caps> Cx<Caps> {
                 inner
                     .fast_cancel
                     .store(true, std::sync::atomic::Ordering::Release);
-                if let Some(existing) = &mut inner.cancel_reason {
-                    existing.strengthen(reason);
+                let changed = if let Some(existing) = &mut inner.cancel_reason {
+                    existing.strengthen(reason)
                 } else {
                     inner.cancel_reason = Some(reason.clone());
+                    true
+                };
+                if changed {
+                    inner.cancel_wakers_pending = true;
                 }
             }
             if inner.cancel_requested && inner.mask_depth == 0 {
@@ -2329,6 +2334,10 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[allow(clippy::result_large_err)]
     pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {
+        // `Into<String>` is user code. Materialize it before acquiring CxInner
+        // so a custom conversion can inspect or reenter this context without
+        // self-deadlocking on the write lock.
+        let msg = msg.into();
         let checkpoint_time = self.current_checkpoint_time();
         // checkpoint_with always takes the write lock because the message
         // must be stored in CheckpointState under the lock, but we still
@@ -2349,7 +2358,7 @@ impl<Caps> Cx<Caps> {
             inner.drain_fast_path_checkpoint();
             inner
                 .checkpoint_state
-                .record_with_message_at(msg.into(), checkpoint_time);
+                .record_with_message_at(msg, checkpoint_time);
             let budget_exhaustion = Self::checkpoint_budget_exhaustion(
                 inner.region,
                 inner.task,
@@ -2361,10 +2370,14 @@ impl<Caps> Cx<Caps> {
                 inner
                     .fast_cancel
                     .store(true, std::sync::atomic::Ordering::Release);
-                if let Some(existing) = &mut inner.cancel_reason {
-                    existing.strengthen(reason);
+                let changed = if let Some(existing) = &mut inner.cancel_reason {
+                    existing.strengthen(reason)
                 } else {
                     inner.cancel_reason = Some(reason.clone());
+                    true
+                };
+                if changed {
+                    inner.cancel_wakers_pending = true;
                 }
             }
             if inner.cancel_requested && inner.mask_depth == 0 {
@@ -3068,6 +3081,9 @@ impl<Caps> Cx<Caps> {
             .store(value, std::sync::atomic::Ordering::Release);
         if !value {
             inner.cancel_reason = None;
+            inner.cancel_wakers_pending = false;
+        } else {
+            inner.cancel_wakers_pending = true;
         }
     }
 
@@ -3102,14 +3118,15 @@ impl<Caps> Cx<Caps> {
                 .store(value, std::sync::atomic::Ordering::Release);
             if !value {
                 inner.cancel_reason = None;
+                inner.cancel_wakers_pending = false;
                 smallvec::SmallVec::new()
             } else {
-                inner.cancel_waker_snapshot()
+                let wakers = inner.cancel_waker_snapshot();
+                inner.cancel_wakers_pending = false;
+                wakers
             }
         };
-        for waker in wakers {
-            waker.wake_by_ref();
-        }
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
     }
 
     /// Establishes or refreshes exactly one owned cancellation-Waker registration.
@@ -3296,15 +3313,18 @@ impl<Caps> Cx<Caps> {
             inner
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
-            inner.cancel_reason = Some(reason);
+            if let Some(existing) = inner.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                inner.cancel_reason = Some(reason);
+            }
             let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
             drop(inner);
             (region, task, wakers)
         };
 
-        for waker in wakers {
-            waker.wake_by_ref();
-        }
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
 
         debug!(
             task_id = ?task,
@@ -3353,15 +3373,18 @@ impl<Caps> Cx<Caps> {
             inner
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
-            inner.cancel_reason = Some(reason);
+            if let Some(existing) = inner.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                inner.cancel_reason = Some(reason);
+            }
             let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
             drop(inner);
             (region, wakers)
         };
 
-        for waker in wakers {
-            waker.wake_by_ref();
-        }
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
 
         trace!(
             region_id = ?region,
@@ -3554,11 +3577,11 @@ impl<Caps> Cx<Caps> {
                 .fast_cancel
                 .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
-            inner.cancel_waker_snapshot()
+            let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
+            wakers
         };
-        for waker in wakers {
-            waker.wake_by_ref();
-        }
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
     }
 
     /// Races multiple futures, waiting for the first to complete.
@@ -4332,7 +4355,9 @@ where
         // Take-once semantics across the mutually exclusive completion and
         // denial paths, as in `spawn_via_gateway`.
         let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
-        let admitted_slot = Arc::new(AdmittedTaskSlot::new());
+        let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
+            gateway,
+        )));
         let pending_cancel_reason =
             crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
@@ -4453,7 +4478,9 @@ where
         // the factory-built future) or a denial slot. `Mutex<Option<..>>`
         // gives take-once semantics across those mutually exclusive paths.
         let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
-        let admitted_slot = Arc::new(AdmittedTaskSlot::new());
+        let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
+            gateway,
+        )));
         let pending_cancel_reason =
             crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
@@ -5538,6 +5565,25 @@ mod tests {
     }
 
     #[test]
+    fn local_cancel_apis_never_weaken_existing_reason() {
+        let cx = test_cx();
+        cx.cancel_fast(CancelKind::Shutdown);
+        cx.cancel_with(CancelKind::User, Some("late weaker request"));
+        assert!(
+            cx.cancel_reason()
+                .is_some_and(|reason| reason.kind == CancelKind::Shutdown)
+        );
+
+        let cx = test_cx();
+        cx.cancel_with(CancelKind::Shutdown, None);
+        cx.cancel_fast(CancelKind::User);
+        assert!(
+            cx.cancel_reason()
+                .is_some_and(|reason| reason.kind == CancelKind::Shutdown)
+        );
+    }
+
+    #[test]
     fn cancel_reason_returns_none_when_not_cancelled() {
         let cx = test_cx();
         assert!(cx.cancel_reason().is_none());
@@ -5802,6 +5848,39 @@ mod tests {
         let state = cx.checkpoint_state();
         assert_eq!(state.last_message.as_deref(), Some("processing step 2"));
         assert_eq!(state.checkpoint_count, 2);
+    }
+
+    #[test]
+    fn checkpoint_with_converts_user_message_before_inner_lock() {
+        struct ReentrantMessage {
+            inner: Arc<parking_lot::RwLock<CxInner>>,
+            conversions: Arc<AtomicUsize>,
+        }
+
+        impl From<ReentrantMessage> for String {
+            fn from(message: ReentrantMessage) -> Self {
+                assert!(
+                    message.inner.try_read().is_some(),
+                    "message conversion must run before checkpoint_with acquires CxInner"
+                );
+                message.conversions.fetch_add(1, Ordering::SeqCst);
+                "reentrant conversion".to_owned()
+            }
+        }
+
+        let cx = test_cx();
+        let conversions = Arc::new(AtomicUsize::new(0));
+        let message = ReentrantMessage {
+            inner: Arc::clone(&cx.inner),
+            conversions: Arc::clone(&conversions),
+        };
+
+        assert!(cx.checkpoint_with(message).is_ok());
+        assert_eq!(conversions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cx.checkpoint_state().last_message.as_deref(),
+            Some("reentrant conversion")
+        );
     }
 
     #[test]

@@ -25,7 +25,7 @@ use crate::record::{
     RegionLimits, RegionRecord, SourceLocation, TaskRecord,
     finalizer::{FINALIZER_TIME_BUDGET_NANOS, Finalizer, finalizer_budget},
     region::RegionState,
-    task::TaskState,
+    task::{CheckpointCancelAck, HandleCancelRoute, TaskState},
 };
 use crate::runtime::config::{
     LeakEscalation, ObligationLeakResponse, RuntimeCapacityHints, TraceStorageProfile,
@@ -42,12 +42,14 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, debug_span, error, trace, trace_span};
+use crate::tracing_compat::{debug, error, trace};
 use crate::types::policy::PolicyAction;
-use crate::types::task_context::{CancelWaker, CxInner, MAX_MASK_DEPTH};
+use crate::types::task_context::{
+    CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
+};
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
-    CapabilityBudgetRequirements, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
+    CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, TaskId, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
 use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
@@ -430,9 +432,12 @@ impl TaskCompletionEffects {
     /// invoke user metrics providers or tracing subscribers. Suppression emits
     /// no direct completion metric or completion debug/unknown trace and does
     /// not increment the observer-panic counter because dispatch was never
-    /// attempted. Detached cancellation-Waker targets are deliberately leaked
-    /// on this exceptional path because the caller may still own an outer
-    /// runtime-state lock; normal paths use [`Self::into_parts`] or
+    /// attempted. The undispatched observer payload, including any final
+    /// metrics-provider handle, and detached cancellation-Waker targets are
+    /// deliberately leaked on this exceptional path because the caller may
+    /// still own an outer runtime-state lock. Ordinary delivery uses
+    /// [`Self::into_parts`]; unwind paths that can later retire detached
+    /// cancellation Wakers use
     /// [`Self::into_waiters_and_retirements_without_observers`].
     pub(crate) fn into_waiters_without_observers(self) -> SmallVec<[TaskId; 4]> {
         let Self {
@@ -441,14 +446,17 @@ impl TaskCompletionEffects {
             retired_cancel_wakers,
         } = self;
         // This suppression path may still be running beneath a caller-owned
-        // runtime-state lock. Abandoning the token intentionally leaks only
-        // the detached wake targets rather than invoking RawWaker destructors.
+        // runtime-state lock. Abandoning the token intentionally leaks its
+        // opaque observer payload, while dropping the retirement token leaks
+        // detached wake targets rather than invoking RawWaker destructors.
         drop(retired_cancel_wakers);
         waiters
     }
 
     /// Splits callback-free waiters from cancellation-Waker retirement for a
-    /// panic/unwind path that still owns an outer runtime-state lock.
+    /// panic/unwind path that still owns an outer runtime-state lock. The
+    /// undispatched observer payload is leaked; the caller must retire the
+    /// returned cancellation Wakers only after releasing that lock.
     pub(crate) fn into_waiters_and_retirements_without_observers(
         self,
     ) -> (SmallVec<[TaskId; 4]>, TaskCompletionRetirements) {
@@ -514,11 +522,14 @@ impl Drop for TaskCompletionRetirements {
 /// Opaque one-shot token for the direct task-completion observer callbacks.
 ///
 /// Dispatch consumes the token, so a given completion observation cannot be
-/// attempted more than once through this API.
+/// attempted more than once through this API. Abandoning the token may happen
+/// beneath a caller-owned outer runtime-state lock, so its [`Drop`]
+/// implementation deliberately leaks an undispatched payload rather than
+/// running an arbitrary metrics-provider destructor there.
 #[must_use = "task completion observers must be dispatched after waiter publication"]
 pub struct TaskCompletionObserver {
-    payload: TaskCompletionObserverPayload,
-    panic_count: Arc<AtomicU64>,
+    payload: Option<TaskCompletionObserverPayload>,
+    panic_count: Option<Arc<AtomicU64>>,
     retired_cancel_wakers: TaskCompletionRetirements,
 }
 
@@ -549,7 +560,7 @@ impl TaskCompletionObserver {
         panic_count: &Arc<AtomicU64>,
     ) -> Self {
         Self {
-            payload: TaskCompletionObserverPayload::Completed {
+            payload: Some(TaskCompletionObserverPayload::Completed {
                 metrics,
                 task_id,
                 region_id,
@@ -557,74 +568,118 @@ impl TaskCompletionObserver {
                 outcome_label,
                 duration,
                 waiter_count,
-            },
-            panic_count: Arc::clone(panic_count),
+            }),
+            panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
         }
     }
 
     fn unknown(task_id: TaskId, panic_count: &Arc<AtomicU64>) -> Self {
         Self {
-            payload: TaskCompletionObserverPayload::UnknownTask { task_id },
-            panic_count: Arc::clone(panic_count),
+            payload: Some(TaskCompletionObserverPayload::UnknownTask { task_id }),
+            panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
         }
     }
 
-    /// Runs the entire observer dispatch behind one unwind boundary. If the
-    /// metrics callback panics, tracing is intentionally skipped rather than
-    /// retrying either callback and risking duplicate completion reports. A
+    /// Runs observer delivery and final metrics-provider retirement behind
+    /// separate unwind boundaries. If the metrics callback panics, tracing is
+    /// intentionally skipped rather than retrying either callback and risking
+    /// duplicate completion reports. Separating retirement prevents a hostile
+    /// provider destructor from double-panicking during callback unwind. Any
     /// caught panic increments this runtime's callback-free atomic failure
-    /// counter without invoking another observer.
-    pub fn dispatch(self) {
-        let Self {
-            payload,
-            panic_count,
-            retired_cancel_wakers,
-        } = self;
+    /// counter once for this dispatch without invoking another observer.
+    pub fn dispatch(mut self) {
+        let Some(panic_count) = self.panic_count.take() else {
+            return;
+        };
+        let Some(payload) = self.payload.take() else {
+            return;
+        };
+        let retired_cancel_wakers = std::mem::replace(
+            &mut self.retired_cancel_wakers,
+            TaskCompletionRetirements::empty(),
+        );
         // The caller has released runtime-state locks before observer dispatch.
         // Retire arbitrary RawWaker payloads at this callback boundary.
         retired_cancel_wakers.retire();
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || match payload {
-                TaskCompletionObserverPayload::Completed {
-                    metrics,
-                    task_id,
-                    region_id,
-                    outcome_kind,
-                    outcome_label,
-                    duration,
-                    waiter_count,
-                } => {
-                    metrics.task_completed(task_id, outcome_kind, duration);
-                    #[cfg(not(feature = "tracing-integration"))]
-                    let _ = (region_id, outcome_label, waiter_count);
-                    debug!(
-                        task_id = ?task_id,
-                        region_id = ?region_id,
-                        outcome_kind = outcome_label,
-                        waiter_count,
-                        "task cleanup from runtime state"
-                    );
-                }
-                TaskCompletionObserverPayload::UnknownTask { task_id } => {
+        let observer_panicked = match payload {
+            TaskCompletionObserverPayload::Completed {
+                metrics,
+                task_id,
+                region_id,
+                outcome_kind,
+                outcome_label,
+                duration,
+                waiter_count,
+            } => {
+                let callback_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        metrics.task_completed(task_id, outcome_kind, duration);
+                        #[cfg(not(feature = "tracing-integration"))]
+                        let _ = (region_id, outcome_label, waiter_count);
+                        debug!(
+                            task_id = ?task_id,
+                            region_id = ?region_id,
+                            outcome_kind = outcome_label,
+                            waiter_count,
+                            "task cleanup from runtime state"
+                        );
+                    }));
+                let callback_panicked = if let Err(payload) = callback_result {
+                    // A panic payload is arbitrary user-owned data. Its
+                    // destructor can panic too, so leak exactly this payload.
+                    std::mem::forget(payload);
+                    true
+                } else {
+                    false
+                };
+                let retirement_panicked = if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(metrics)))
+                {
+                    // Provider destruction is an independent hostile
+                    // boundary after callback unwind has been contained.
+                    std::mem::forget(payload);
+                    true
+                } else {
+                    false
+                };
+                callback_panicked || retirement_panicked
+            }
+            TaskCompletionObserverPayload::UnknownTask { task_id } => {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     #[cfg(not(feature = "tracing-integration"))]
                     let _ = task_id;
                     trace!(
                         task_id = ?task_id,
                         "task_completed called for unknown task"
                     );
+                }));
+                if let Err(payload) = result {
+                    std::mem::forget(payload);
+                    true
+                } else {
+                    false
                 }
-            }));
-        if let Err(payload) = result {
+            }
+        };
+        if observer_panicked {
             panic_count.fetch_add(1, Ordering::Relaxed);
-            // A panic payload is arbitrary user-owned data. Its destructor can
-            // panic too, so dropping it here would reopen the unwind boundary
-            // and could double-panic a worker. Leak exactly this one payload on
-            // the already-failed observer path; the atomic counter preserves
-            // visibility without invoking another callback.
-            std::mem::forget(payload);
         }
+    }
+}
+
+impl Drop for TaskCompletionObserver {
+    fn drop(&mut self) {
+        let Some(payload) = self.payload.take() else {
+            return;
+        };
+        // Suppression and unwind guards may abandon this token while an outer
+        // runtime-state lock is still live. A completed payload can own the
+        // final Arc to an arbitrary metrics provider, whose destructor may
+        // re-enter that same lock or panic. Leak only the undispatched payload;
+        // normal `dispatch` takes it first and retires it outside the lock.
+        std::mem::forget(payload);
     }
 }
 
@@ -633,13 +688,18 @@ impl TaskCompletionObserver {
 /// Not `Debug`: the denied arm carries the request parts, whose erased
 /// future and completion slots are opaque.
 pub enum SpawnAdmission {
-    /// The request was admitted; the caller must schedule the task
-    /// (`inject_ready(task_id, priority)`) after releasing the state lock.
+    /// The request was admitted; after releasing the state lock, the caller
+    /// must publish the task's callback-free runnable lane through
+    /// `cancel_publication`, then dispatch the returned Wakers.
     Admitted {
         /// Canonical arena task id (replaces the provisional mailbox id).
         task_id: TaskId,
         /// Scheduling priority from the request budget.
         priority: u8,
+        /// One-shot abort handoff. Its publication closure selects and
+        /// publishes the ready or cancel lane under the admission gate; the
+        /// returned Wakers run only after scheduler locks are released.
+        cancel_publication: crate::runtime::spawn_mailbox::AdmissionPublication,
     },
     /// The request was denied; the caller must resolve it after releasing
     /// the state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
@@ -659,10 +719,10 @@ pub enum SpawnAdmission {
 /// admitted arm carries the built [`LocalStoredTask`] because local tasks
 /// are stored thread-locally by the calling worker, not centrally.
 pub enum LocalSpawnAdmission {
-    /// Admitted; the calling worker must store the task in its thread-local
-    /// slot and schedule it on the non-stealable local queue after releasing
-    /// the state lock. Admission has already pinned the task record to the
-    /// owner worker.
+    /// Admitted; after releasing the state lock, the calling worker must store
+    /// the task in its thread-local slot and publish its callback-free ready or
+    /// cancel lane through `cancel_publication`. Admission has already pinned
+    /// the task record to the owner worker.
     Admitted {
         /// Canonical arena task id (replaces the provisional mailbox id).
         task_id: TaskId,
@@ -670,6 +730,10 @@ pub enum LocalSpawnAdmission {
         priority: u8,
         /// The local task, ready for thread-local storage.
         stored: LocalStoredTask,
+        /// One-shot abort handoff. The caller must first store the local task,
+        /// then publish its callback-free runnable lane through this token and
+        /// dispatch the returned Wakers after releasing scheduler locks.
+        cancel_publication: crate::runtime::spawn_mailbox::AdmissionPublication,
     },
     /// Denied; the caller must resolve the request after releasing the
     /// state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
@@ -716,6 +780,12 @@ pub enum SpawnError {
         /// The capability context that was checked.
         cx_id: String,
     },
+    /// The one-shot canonical-identity slot was already reserved by another
+    /// spawn request.
+    AdmissionSlotAlreadyReserved {
+        /// Provisional mailbox identity of the rejected request.
+        task_id: TaskId,
+    },
 }
 
 impl SpawnError {
@@ -738,6 +808,7 @@ impl SpawnError {
             Self::NameRegistrationFailed { .. } => "ASUP-E005",
             Self::RegionAtCapacity { .. } => "ASUP-E006",
             Self::AuthorizationDenied { .. } => "ASUP-E007",
+            Self::AdmissionSlotAlreadyReserved { .. } => "ASUP-E008",
         }
     }
 }
@@ -792,6 +863,12 @@ impl std::fmt::Display for SpawnError {
                  tasks in region {region:?} (cx={cx_id}) — the capability context was \
                  narrowed without spawn rights; pass a Cx with HasSpawn for this \
                  region, or spawn via the owning scope instead"
+            ),
+            Self::AdmissionSlotAlreadyReserved { task_id } => write!(
+                f,
+                "[ASUP-E008] admission identity slot already reserved: task={task_id:?} — \
+                 each spawn request requires a fresh AdmittedTaskSlot; create the slot \
+                 alongside its TaskHandle and never reuse it for another request"
             ),
         }
     }
@@ -1057,6 +1134,22 @@ pub struct RuntimeState {
     /// Producer-side spawn gateway, cloned into every Cx at build time
     /// (br-asupersync-hwjqyo / A2.2).
     spawn_gateway: Option<std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
+    /// Cancellation effects produced by mutation paths that cannot return a
+    /// value, principally `RegionRunner::drop`. The state-lock owner must take
+    /// these batches, publish their task ids, and dispatch their Wakers only
+    /// after releasing the outer lock.
+    pending_cancel_dispatches: Vec<CancellationEffects<Vec<(TaskId, u8)>>>,
+    /// Lock-free scheduler hint that avoids taking the state lock when the
+    /// deferred cancellation queue is empty.
+    pending_cancel_dispatch_ready: Arc<AtomicBool>,
+    /// Concrete scheduler wake target for deferred cancellation work.
+    ///
+    /// This is deliberately a `WorkerCoordinator`, not an arbitrary callback:
+    /// `defer_cancel_dispatch` may run beneath an outer runtime-state lock and
+    /// may only publish a Parker permit there. Reactor wakeups and user code
+    /// remain outside this notification boundary.
+    pending_cancel_dispatch_coordinator:
+        Option<std::sync::Weak<crate::runtime::scheduler::three_lane::WorkerCoordinator>>,
     /// Response policy when obligation leaks are detected.
     obligation_leak_response: ObligationLeakResponse,
     /// Optional escalation policy for obligation leaks.
@@ -1169,6 +1262,14 @@ impl std::fmt::Debug for RuntimeState {
             )
             .field("observability", &self.observability.is_some())
             .field("blocking_pool", &self.blocking_pool.is_some())
+            .field(
+                "pending_cancel_dispatches",
+                &self.pending_cancel_dispatches.len(),
+            )
+            .field(
+                "has_pending_cancel_dispatch_coordinator",
+                &self.pending_cancel_dispatch_coordinator.is_some(),
+            )
             .field("obligation_leak_response", &self.obligation_leak_response)
             .field("leak_escalation", &self.leak_escalation)
             .field("leak_count", &self.leak_count)
@@ -1246,6 +1347,9 @@ impl RuntimeState {
             observability: None,
             blocking_pool: None,
             spawn_gateway: None,
+            pending_cancel_dispatches: Vec::new(),
+            pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
+            pending_cancel_dispatch_coordinator: None,
             // br-asupersync-qp2tfx: internal constructors Panic on obligation
             // leak so the lab/test paths surface bugs the same way the
             // user-facing default (Fail, set in br-gi61n1) does.
@@ -1480,7 +1584,7 @@ impl RuntimeState {
     /// (br-asupersync-hwjqyo / A2.2).
     #[inline]
     #[must_use]
-    pub fn spawn_gateway(
+    pub(crate) fn spawn_gateway(
         &self,
     ) -> Option<std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>> {
         self.spawn_gateway.clone()
@@ -1488,7 +1592,7 @@ impl RuntimeState {
 
     /// Installs the producer-side spawn gateway. Cloned into every `Cx`
     /// built after this point so `Cx::spawn` works without the state lock.
-    pub fn set_spawn_gateway(
+    pub(crate) fn set_spawn_gateway(
         &mut self,
         gateway: std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
     ) {
@@ -1566,7 +1670,7 @@ impl RuntimeState {
         context: &TaskContext,
     ) -> TransitionResult {
         let mut validator = self.cancel_protocol_validator.lock();
-        validator.validate_task_transition(task_id, event, context)
+        validator.validate_task_transition_without_logging(task_id, event, context)
     }
 
     fn validate_live_task_protocol_transition(
@@ -1575,8 +1679,18 @@ impl RuntimeState {
         event: TaskEvent,
         operation: &'static str,
     ) {
+        if let Some(validation_result) = self.live_task_protocol_violation(task_id, event) {
+            log_cancel_protocol_violation(operation, &validation_result);
+        }
+    }
+
+    fn live_task_protocol_violation(
+        &self,
+        task_id: TaskId,
+        event: TaskEvent,
+    ) -> Option<TransitionResult> {
         let Some(task) = self.task(task_id) else {
-            return;
+            return None;
         };
         let context = TaskContext {
             task_id,
@@ -1589,7 +1703,9 @@ impl RuntimeState {
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            log_cancel_protocol_violation(operation, &validation_result);
+            Some(validation_result)
+        } else {
+            None
         }
     }
 
@@ -1741,7 +1857,8 @@ impl RuntimeState {
     }
 
     /// Returns the number of direct task-completion observer dispatches whose
-    /// metrics provider or tracing subscriber panicked.
+    /// metrics callback, final provider destructor, or tracing subscriber
+    /// panicked.
     ///
     /// The counter is updated atomically without invoking another callback, so
     /// it remains safe on the observer-panic path.
@@ -1770,24 +1887,328 @@ impl RuntimeState {
         self.tasks.task(task_id)
     }
 
+    /// Records the protocol request event for a cancellation first observed
+    /// and acknowledged inside a task poll.
+    ///
+    /// The receipt contains plain state/reason data. An invalid transition is
+    /// returned as a preformatted closed value so the caller can enqueue its
+    /// tracing diagnostic with the cancellation effects and release every
+    /// task-table/runtime-state lock before subscriber dispatch.
+    pub(crate) fn checkpoint_cancel_materialization_violation(
+        &self,
+        task_id: TaskId,
+        receipt: &CheckpointCancelAck,
+    ) -> Option<String> {
+        if !receipt.newly_materialized() {
+            return None;
+        }
+        let context = TaskContext {
+            task_id,
+            region_id: receipt.region_id,
+            spawned_at: receipt.spawned_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result =
+            self.validate_task_protocol_transition(task_id, TaskEvent::RequestCancel, &context);
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            Some(format!("{validation_result:?}"))
+        } else {
+            None
+        }
+    }
+
+    /// Sharded counterpart to checkpoint validation with an explicit proof
+    /// that terminal retirement may already have overtaken the copied receipt.
+    pub(crate) fn external_checkpoint_cancel_materialization_violation(
+        &self,
+        task_id: TaskId,
+        receipt: &CheckpointCancelAck,
+        allow_retired_noop: bool,
+    ) -> Option<String> {
+        if !receipt.newly_materialized() {
+            return None;
+        }
+        let context = TaskContext {
+            task_id,
+            region_id: receipt.region_id,
+            spawned_at: receipt.spawned_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result = {
+            let mut validator = self.cancel_protocol_validator.lock();
+            if allow_retired_noop && validator.task_state(task_id).is_none() {
+                return None;
+            }
+            validator.validate_task_transition_without_logging(
+                task_id,
+                TaskEvent::RequestCancel,
+                &context,
+            )
+        };
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            Some(format!("{validation_result:?}"))
+        } else {
+            None
+        }
+    }
+
+    /// Records the protocol request event for a handle command applied to an
+    /// authoritative TaskRecord owned by an external scheduler shard.
+    ///
+    /// The shard mutation must finish before this is called. Only copied task
+    /// identity data crosses the boundary, and any invalid result is returned
+    /// as a closed value for post-lock diagnostic dispatch.
+    pub(crate) fn external_handle_cancel_request_violation(
+        &self,
+        task_id: TaskId,
+        region_id: RegionId,
+        spawned_at: Time,
+        allow_retired_noop: bool,
+    ) -> Option<String> {
+        let context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result = {
+            let mut validator = self.cancel_protocol_validator.lock();
+            // External completion validates and removes the task machine in one
+            // validator critical section. When the caller proves the record was
+            // already detached, a missing machine means completion overtook this
+            // copied receipt and synthesized the request before terminal
+            // validation. A still-live unregistered fixture remains a violation.
+            if allow_retired_noop && validator.task_state(task_id).is_none() {
+                return None;
+            }
+            validator.validate_task_transition_without_logging(
+                task_id,
+                TaskEvent::RequestCancel,
+                &context,
+            )
+        };
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            Some(format!("{validation_result:?}"))
+        } else {
+            None
+        }
+    }
+
+    fn validate_and_retire_external_task_protocol(
+        &self,
+        task_id: TaskId,
+        task_event: TaskEvent,
+        context: &TaskContext,
+        cancellation_materialized: bool,
+    ) {
+        let (request_result, completion_result) = {
+            let mut validator = self.cancel_protocol_validator.lock();
+            let request_result = if cancellation_materialized
+                && matches!(
+                    validator.task_state(task_id),
+                    Some(crate::cancel::protocol_state_machines::TaskState::Running)
+                ) {
+                Some(validator.validate_task_transition_without_logging(
+                    task_id,
+                    TaskEvent::RequestCancel,
+                    context,
+                ))
+            } else {
+                None
+            };
+            let completion_result =
+                validator.validate_task_transition_without_logging(task_id, task_event, context);
+            // Keep terminal validation and retirement indivisible so a delayed
+            // external request receipt cannot land between them.
+            validator.remove_task(task_id);
+            (request_result, completion_result)
+        };
+        if let Some(result) = request_result
+            && matches!(
+                result,
+                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+            )
+        {
+            log_cancel_protocol_violation(
+                "external-shard synthesized cancellation request",
+                &result,
+            );
+        }
+        if matches!(
+            completion_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation("external-shard task completion", &completion_result);
+        }
+    }
+
+    /// Consumes a task checkpoint acknowledgement through the runtime-owned
+    /// task table and records a missing RequestCancel validator event exactly
+    /// once when the Cx observation won the race with command delivery.
+    pub(crate) fn consume_task_checkpoint_cancel_ack(
+        &mut self,
+        task_id: TaskId,
+    ) -> CancellationEffects<Option<CheckpointCancelAck>> {
+        let Some(effects) = self.update_task(task_id, TaskRecord::consume_checkpoint_cancel_ack)
+        else {
+            return CancellationEffects::ready(None);
+        };
+        let (receipt, mut wakes) = effects.into_parts();
+        if let Some(receipt) = receipt.as_ref()
+            && let Some(validation_result) =
+                self.checkpoint_cancel_materialization_violation(task_id, receipt)
+        {
+            wakes.push_cancel_protocol_violation(
+                "checkpoint cancellation materialization",
+                validation_result,
+            );
+        }
+        CancellationEffects::new(receipt, wakes)
+    }
+
     /// Requests cancellation of a task.
     ///
     /// O(1) — maintained incrementally for O(1) Lyapunov snapshots.
-    pub fn cancel_task(&mut self, task_id: TaskId, reason: &CancelReason) -> bool {
+    pub fn cancel_task(
+        &mut self,
+        task_id: TaskId,
+        reason: &CancelReason,
+    ) -> CancellationEffects<bool> {
         let budget = reason.cleanup_budget();
-        let Some(newly_cancelled) = self.update_task(task_id, |record| {
-            record.request_cancel_with_budget(reason.clone(), budget)
+        let Some(effects) = self.update_task(task_id, |record| {
+            record.request_cancel_with_budget_and_publication(reason.clone(), budget)
         }) else {
-            return false;
+            return CancellationEffects::ready(false);
         };
+        let ((newly_cancelled, changed, publication), mut wakes) = effects.into_parts();
         if newly_cancelled {
-            self.validate_live_task_protocol_transition(
-                task_id,
-                TaskEvent::RequestCancel,
-                "task cancellation",
-            );
+            if let Some(validation_result) =
+                self.live_task_protocol_violation(task_id, TaskEvent::RequestCancel)
+            {
+                wakes.push_cancel_protocol_violation(
+                    "task cancellation",
+                    format!("{validation_result:?}"),
+                );
+            }
         }
-        newly_cancelled
+        CancellationEffects::new(changed && publication.is_published(), wakes)
+    }
+
+    /// Applies a task-handle cancellation command and returns the effective
+    /// cancel-lane priority captured with the initial-publication decision.
+    ///
+    /// Unlike [`Self::cancel_task`], a stronger request for an already
+    /// cancelling task still returns a priority so the scheduler can promote
+    /// its existing lane entry. The publication bit comes from the same Cx
+    /// critical section as the cancellation mutation, preventing admission
+    /// from racing a later gate re-read.
+    pub(crate) fn cancel_task_for_handle(
+        &mut self,
+        task_id: TaskId,
+        reason: &CancelReason,
+    ) -> CancellationEffects<Option<HandleCancelRoute>> {
+        let Some(effects) =
+            self.update_task(task_id, |record| record.request_cancel_for_handle(reason))
+        else {
+            return CancellationEffects::ready(None);
+        };
+        let (update, mut wakes) = effects.into_parts();
+        if update.newly_cancelled {
+            if let Some(validation_result) =
+                self.live_task_protocol_violation(task_id, TaskEvent::RequestCancel)
+            {
+                wakes.push_cancel_protocol_violation(
+                    "task-handle cancellation",
+                    format!("{validation_result:?}"),
+                );
+            }
+        }
+        CancellationEffects::new(update.route, wakes)
+    }
+
+    /// Publishes a delegated handle-cancel lane while this RuntimeState keeps
+    /// the authoritative task record unavailable to already-awake workers.
+    /// The closure must only mutate scheduler queues and return a closed token;
+    /// Wakers, evidence, tracing, and worker notification happen after this
+    /// method releases RuntimeState.
+    pub(crate) fn publish_handle_cancel_lane<T>(
+        &mut self,
+        task_id: TaskId,
+        publish_lane: impl FnOnce(u8, bool, Option<usize>) -> Option<T>,
+    ) -> CancellationEffects<Option<T>> {
+        self.update_task(task_id, |record| {
+            record.publish_delegated_cancel_lane(publish_lane)
+        })
+        .unwrap_or_else(|| CancellationEffects::ready(None))
+    }
+
+    /// Parks an otherwise-unreturnable cancellation batch for the owner of the
+    /// outer runtime-state lock.
+    ///
+    /// This operation is callback-free. Abandoning `RuntimeState` before the
+    /// batch is taken leaks the opaque value and Waker targets rather than
+    /// invoking their destructors under an unknown lock.
+    pub(crate) fn defer_cancel_dispatch(
+        &mut self,
+        effects: CancellationEffects<Vec<(TaskId, u8)>>,
+    ) {
+        self.pending_cancel_dispatches.reserve(1);
+        self.pending_cancel_dispatches.push(effects);
+        self.pending_cancel_dispatch_ready
+            .store(true, Ordering::Release);
+        if let Some(coordinator) = self
+            .pending_cancel_dispatch_coordinator
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            // Publish a concrete Parker permit after the queue+flag release.
+            // This closes the final-check/park race without invoking an
+            // arbitrary notifier or reactor callback beneath RuntimeState.
+            coordinator.wake_one_parker();
+        }
+    }
+
+    /// Installs the concrete parked-worker notifier for deferred cancellation.
+    pub(crate) fn set_pending_cancel_dispatch_coordinator(
+        &mut self,
+        coordinator: &Arc<crate::runtime::scheduler::three_lane::WorkerCoordinator>,
+    ) {
+        self.pending_cancel_dispatch_coordinator = Some(Arc::downgrade(coordinator));
+    }
+
+    /// Returns the lock-free hint used by scheduler workers to discover
+    /// deferred cancellation batches without adding a state-lock acquisition
+    /// to the empty hot path.
+    pub(crate) fn pending_cancel_dispatch_ready_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.pending_cancel_dispatch_ready)
+    }
+
+    /// Returns whether callback-free cancellation work still awaits owner-side
+    /// publication. Used to avoid polling ordinary ready work ahead of a
+    /// reentrant cancellation request.
+    #[inline]
+    pub(crate) fn has_deferred_cancel_dispatches(&self) -> bool {
+        self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
+    }
+
+    /// Takes callback-free cancellation batches for post-unlock publication
+    /// and dispatch by the state-lock owner.
+    pub(crate) fn take_deferred_cancel_dispatches(
+        &mut self,
+    ) -> Vec<CancellationEffects<Vec<(TaskId, u8)>>> {
+        let pending = std::mem::take(&mut self.pending_cancel_dispatches);
+        self.pending_cancel_dispatch_ready
+            .store(false, Ordering::Release);
+        pending
     }
 
     /// Completes a task with the given outcome.
@@ -2519,10 +2940,20 @@ impl RuntimeState {
     /// (`resolve_cancelled` / `resolve_failed`) **after** releasing the state
     /// lock — completion slots are user code and must not run under the
     /// runtime lock.
-    pub fn admit_spawn_request(
+    pub(crate) fn admit_spawn_request(
         &mut self,
         parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
     ) -> SpawnAdmission {
+        if parts
+            .admitted_slot
+            .as_ref()
+            .is_some_and(|slot| !slot.try_reserve())
+        {
+            let error = SpawnError::AdmissionSlotAlreadyReserved {
+                task_id: parts.task_id,
+            };
+            return SpawnAdmission::Denied { parts, error };
+        }
         let region = parts.region;
         let budget = parts.budget;
         let (task_id, cx, now) = match self.admit_spawn_record(region, budget) {
@@ -2632,6 +3063,12 @@ impl RuntimeState {
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_spawn_handle),
         );
+        // Mailbox admission is visible in RuntimeState before its caller can
+        // publish the first scheduler lane. Cancellation mutates this Cx while
+        // the gate is false but delegates lane/Waker publication to the
+        // AdmissionPublication handoff.
+        cx.inner.write().runnable_publication =
+            crate::types::task_context::RunnablePublication::Unpublished;
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         self.update_task(task_id, |record| {
@@ -2676,24 +3113,15 @@ impl RuntimeState {
             }
         };
         self.tasks.store_spawned_task(task_id, stored);
-        if let Some(slot) = admitted_slot {
-            let _ = slot.set(crate::runtime::spawn_mailbox::AdmittedTask {
+        let cx_inner = std::sync::Arc::downgrade(&cx.inner);
+        if let Some(slot) = admitted_slot.as_ref() {
+            slot.publish_reserved(crate::runtime::spawn_mailbox::AdmittedTask::pending(
                 task_id,
-                cx_inner: std::sync::Arc::downgrade(&cx.inner),
-            });
-            // Publish identity before replaying the cache. A concurrent abort
-            // either lands in this replay or observes the published identity
-            // and applies the reason directly.
-            let requested = crate::runtime::spawn_mailbox::retire_pending_cancel_rendezvous(&slot);
-            let reason = requested.as_ref().and_then(|cache| cache.read().clone());
-            if let Some(reason) = reason {
-                let cancel_wakers =
-                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason);
-                for waker in cancel_wakers {
-                    waker.wake_by_ref();
-                }
-            }
+                cx_inner.clone(),
+            ));
         }
+        let cancel_publication =
+            crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
         self.record_task_spawn(task_id, region);
         self.record_task_trace_event(task_id, |seq| {
@@ -2708,6 +3136,7 @@ impl RuntimeState {
         SpawnAdmission::Admitted {
             task_id,
             priority: budget.priority,
+            cancel_publication,
         }
     }
 
@@ -2721,7 +3150,7 @@ impl RuntimeState {
     /// store it in its thread-local task slot and schedule it on the
     /// non-stealable local queue after releasing the state lock. Denials are
     /// returned for out-of-lock resolution exactly like the Send path.
-    pub fn admit_local_spawn_request(
+    pub(crate) fn admit_local_spawn_request(
         &mut self,
         request: crate::runtime::spawn_mailbox::LocalSpawnRequest,
     ) -> LocalSpawnAdmission {
@@ -2731,6 +3160,16 @@ impl RuntimeState {
                 error: SpawnError::LocalSchedulerUnavailable,
             };
         };
+        if request
+            .admitted_slot
+            .as_ref()
+            .is_some_and(|slot| !slot.try_reserve())
+        {
+            let error = SpawnError::AdmissionSlotAlreadyReserved {
+                task_id: request.task_id,
+            };
+            return LocalSpawnAdmission::Denied { request, error };
+        }
         let region = request.region;
         let budget = request.budget;
         let (task_id, cx, now) = match self.admit_spawn_record(region, budget) {
@@ -2754,21 +3193,15 @@ impl RuntimeState {
             crate::runtime::spawn_mailbox::LocalLazyFactoryTask::new(factory, cx.clone()),
             task_id,
         );
-        if let Some(slot) = admitted_slot {
-            let _ = slot.set(crate::runtime::spawn_mailbox::AdmittedTask {
+        let cx_inner = std::sync::Arc::downgrade(&cx.inner);
+        if let Some(slot) = admitted_slot.as_ref() {
+            slot.publish_reserved(crate::runtime::spawn_mailbox::AdmittedTask::pending(
                 task_id,
-                cx_inner: std::sync::Arc::downgrade(&cx.inner),
-            });
-            let requested = crate::runtime::spawn_mailbox::retire_pending_cancel_rendezvous(&slot);
-            let reason = requested.as_ref().and_then(|cache| cache.read().clone());
-            if let Some(reason) = reason {
-                let cancel_wakers =
-                    crate::runtime::task_handle::apply_cancel_reason(&cx.inner, &reason);
-                for waker in cancel_wakers {
-                    waker.wake_by_ref();
-                }
-            }
+                cx_inner.clone(),
+            ));
         }
+        let cancel_publication =
+            crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
         self.record_task_spawn(task_id, region);
         self.record_task_trace_event(task_id, |seq| {
@@ -2785,6 +3218,7 @@ impl RuntimeState {
             task_id,
             priority: budget.priority,
             stored,
+            cancel_publication,
         }
     }
 
@@ -3674,33 +4108,36 @@ impl RuntimeState {
         // early if any preceding condition is already false.
         self.live_task_count() == 0
             && self.pending_obligation_count() == 0
+            && self.pending_cancel_dispatches.is_empty()
             && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
             && self.regions.iter().all(|(_, r)| {
                 r.finalizers_empty() && !r.state().is_closing() && r.pending_spawn_count() == 0
             })
     }
 
-    /// Applies the region policy when a child reaches a terminal outcome.
+    /// Applies a precomputed region-policy action after a child reaches a
+    /// terminal outcome.
     ///
-    /// This is the core hook for fail-fast behavior: the policy decides whether
-    /// siblings should be cancelled.
+    /// The caller must invoke `Policy::on_child_outcome` before acquiring the
+    /// outer `RuntimeState` lock. Policy implementations are user code and may
+    /// reenter the runtime, panic, or own hostile destructors; this mutation
+    /// boundary therefore accepts only the closed callback-free action value.
     ///
     /// Returns the policy action taken and a list of tasks that need to be
     /// moved to the cancel lane in the scheduler.
-    pub fn apply_policy_on_child_outcome<P: Policy<Error = crate::error::Error>>(
+    pub fn apply_policy_action(
         &mut self,
         region: RegionId,
         child: TaskId,
-        outcome: &Outcome<(), crate::error::Error>,
-        policy: &P,
-    ) -> (PolicyAction, SmallVec<[(TaskId, u8); 4]>) {
-        let action = policy.on_child_outcome(child, outcome);
-        let tasks_to_schedule = if let PolicyAction::CancelSiblings(reason) = &action {
+        action: PolicyAction,
+    ) -> CancellationEffects<(PolicyAction, SmallVec<[(TaskId, u8); 4]>)> {
+        let sibling_effects = if let PolicyAction::CancelSiblings(reason) = &action {
             self.cancel_sibling_tasks(region, child, reason)
         } else {
-            SmallVec::new()
+            CancellationEffects::ready(SmallVec::new())
         };
-        (action, tasks_to_schedule)
+        let (tasks_to_schedule, wakes) = sibling_effects.into_parts();
+        CancellationEffects::new((action, tasks_to_schedule), wakes)
     }
 
     /// Implements `inv.cancel.propagates_down` (#6, SEM-INV-003):
@@ -3710,44 +4147,50 @@ impl RuntimeState {
         region: RegionId,
         child: TaskId,
         reason: &CancelReason,
-    ) -> SmallVec<[(TaskId, u8); 4]> {
+    ) -> CancellationEffects<SmallVec<[(TaskId, u8); 4]>> {
         let Some(region_record) = self.regions.get(region.arena_index()) else {
-            return SmallVec::new();
+            return CancellationEffects::ready(SmallVec::new());
         };
         let sibling_candidates = region_record.task_ids_small();
         let mut tasks_to_cancel =
             SmallVec::with_capacity(sibling_candidates.len().saturating_sub(1));
-        let now = self.current_runtime_time();
+        let mut wakes = CancelWakeEffects::empty();
+        // Cancellation already carries its logical request time. Reusing that
+        // closed value avoids invoking an arbitrary TimeSource callback while
+        // callers hold the outer RuntimeState lock.
+        let now = reason.timestamp;
 
         for &task_id in &sibling_candidates {
             if task_id == child {
                 continue;
             }
             let budget = reason.cleanup_budget();
-            let mut newly_cancelled = false;
-            let mut is_cancelling = false;
             let res = self.update_task(task_id, |task_record| {
-                newly_cancelled = task_record.request_cancel_with_budget(reason.clone(), budget);
-                is_cancelling = task_record.state.is_cancelling();
+                task_record.request_cancel_with_budget_and_publication(reason.clone(), budget)
             });
-            if res.is_none() {
+            let Some(effects) = res else {
                 continue;
-            }
+            };
+            let ((newly_cancelled, changed, publication), task_wakes) = effects.into_parts();
+            wakes.merge(task_wakes);
             if newly_cancelled {
-                self.validate_live_task_protocol_transition(
-                    task_id,
-                    TaskEvent::RequestCancel,
-                    "sibling task cancellation",
-                );
+                if let Some(validation_result) =
+                    self.live_task_protocol_violation(task_id, TaskEvent::RequestCancel)
+                {
+                    wakes.push_cancel_protocol_violation(
+                        "sibling task cancellation",
+                        format!("{validation_result:?}"),
+                    );
+                }
                 self.record_task_trace_event(task_id, |seq| {
                     TraceEvent::cancel_request(seq, now, task_id, region, reason.clone())
                 });
             }
-            if newly_cancelled || is_cancelling {
+            if changed && publication.is_published() {
                 tasks_to_cancel.push((task_id, budget.priority));
             }
         }
-        tasks_to_cancel
+        CancellationEffects::new(tasks_to_cancel, wakes)
     }
 
     /// Requests cancellation for a region and all its descendants.
@@ -3762,6 +4205,14 @@ impl RuntimeState {
     /// moved to the cancel lane. The caller is responsible for updating the
     /// scheduler.
     ///
+    /// The returned effect token covers auxiliary task-cancellation Wakers,
+    /// task-cancel tracing, cancellation-request metrics, and cancellation
+    /// protocol diagnostics. It is not a universal callback-free boundary:
+    /// affected regions with no children or tasks are still advanced
+    /// synchronously below, and that existing close/finalizer path may invoke
+    /// finalizers, close waiters, heap payload destructors, tracing, and
+    /// region-close metrics before this method returns.
+    ///
     /// # Arguments
     /// * `region_id` - The region to cancel
     /// * `reason` - The reason for cancellation
@@ -3769,10 +4220,12 @@ impl RuntimeState {
     ///
     /// # Example
     /// ```ignore
-    /// let tasks_to_schedule = state.cancel_request(region, &CancelReason::timeout(), None);
-    /// for (task_id, priority) in tasks_to_schedule {
+    /// let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+    /// let (tasks_to_schedule, wakes) = effects.into_parts();
+    /// for &(task_id, priority) in &tasks_to_schedule {
     ///     scheduler.move_to_cancel_lane(task_id, priority);
     /// }
+    /// wakes.dispatch();
     /// ```
     #[allow(clippy::too_many_lines)]
     pub fn cancel_request(
@@ -3780,35 +4233,17 @@ impl RuntimeState {
         region_id: RegionId,
         reason: &CancelReason,
         source_task: Option<TaskId>,
-    ) -> Vec<(TaskId, u8)> {
+    ) -> CancellationEffects<Vec<(TaskId, u8)>> {
         // Use a modest initial capacity instead of scanning the entire task
         // arena for live_task_count(). The Vec will grow if needed, but avoids
         // the O(arena_capacity) scan just for a size hint.
         let mut tasks_to_cancel = Vec::with_capacity(32);
-        let cleanup_budget = reason.cleanup_budget();
-        #[cfg(not(feature = "tracing-integration"))]
-        let _ = (source_task, cleanup_budget);
-        let root_span = debug_span!(
-            "cancel_request",
-            target_region = ?region_id,
-            cancel_kind = ?reason.kind,
-            cancel_message = ?reason.message,
-            cleanup_poll_quota = cleanup_budget.poll_quota,
-            cleanup_priority = cleanup_budget.priority,
-            source_task = ?source_task
-        );
-        let _root_guard = root_span.enter();
-
-        debug!(
-            target_region = ?region_id,
-            cancel_kind = ?reason.kind,
-            cancel_message = ?reason.message,
-            cleanup_poll_quota = cleanup_budget.poll_quota,
-            cleanup_priority = cleanup_budget.priority,
-            source_task = ?source_task,
-            "cancel request initiated"
-        );
-        let now = self.current_runtime_time();
+        let mut wakes = CancelWakeEffects::empty();
+        let _ = source_task;
+        // Cancellation already carries its logical request time. Reusing that
+        // closed value avoids invoking an arbitrary TimeSource callback while
+        // callers hold the outer RuntimeState lock.
+        let now = reason.timestamp;
 
         // Collect all regions to cancel (target + descendants) with depth information
         let mut regions_to_cancel = self.collect_region_and_descendants_with_depth(region_id);
@@ -3842,8 +4277,8 @@ impl RuntimeState {
                 // (the ROOT target's reason), which papered over the
                 // bookkeeping bug AND poisoned the cause chain by
                 // stamping the root reason as if it were the immediate
-                // parent's. Now we log the violation as `error!` and
-                // synthesize a self-rooted ParentCancelled diagnostic sentinel
+                // parent's. Now we synthesize a self-rooted ParentCancelled
+                // diagnostic sentinel
                 // (no `with_cause_limited` chain) so cause-chain
                 // consumers see "depth>0 region with empty parent cause"
                 // — a clear signal that something is wrong, instead of
@@ -3851,15 +4286,6 @@ impl RuntimeState {
                 let parent_reason = match region_reasons.get(&parent_id) {
                     Some(r) => r.clone(),
                     None => {
-                        error!(
-                            target_region = ?rid,
-                            parent_region = ?parent_id,
-                            depth = node.depth,
-                            "INVARIANT VIOLATION: parent region's cancel reason missing \
-                             from chain map; regions must be processed depth-ascending — \
-                             this indicates either an out-of-order traversal or a parent \
-                             that was skipped (br-tnk8ny)"
-                        );
                         // Self-rooted sentinel: ParentCancelled stamped
                         // at the missing parent's region so post-mortem
                         // inspection can find the chain break. Do NOT
@@ -3882,49 +4308,25 @@ impl RuntimeState {
 
             // Store this region's reason for child chain building
             region_reasons.insert(rid, region_reason.clone());
+            let region_cancel_kind = region_reason.kind;
 
             self.record_trace_event(|seq| {
                 TraceEvent::region_cancelled(seq, now, rid, region_reason.clone())
             });
-            self.metrics.cancellation_requested(rid, region_reason.kind);
-
-            if let Some(parent) = node.parent {
-                #[cfg(not(feature = "tracing-integration"))]
-                let _ = parent;
-                let span = trace_span!(
-                    "cancel_propagate_region",
-                    from_region = ?parent,
-                    to_region = ?rid,
-                    depth = node.depth,
-                    cancel_kind = ?region_reason.kind,
-                    chain_depth = region_reason.chain_depth()
-                );
-                span.follows_from(&root_span);
-                let _guard = span.enter();
-                trace!(
-                    from_region = ?parent,
-                    to_region = ?rid,
-                    depth = node.depth,
-                    cancel_kind = ?region_reason.kind,
-                    chain_depth = region_reason.chain_depth(),
-                    root_cause = ?region_reason.root_cause().kind,
-                    "cancel propagated to region with cause chain"
-                );
-            } else {
-                trace!(
-                    target_region = ?rid,
-                    depth = node.depth,
-                    cancel_kind = ?region_reason.kind,
-                    "cancel target region"
-                );
-            }
 
             if let Some(region) = self.regions.get_mut(rid.arena_index()) {
                 // Use the properly chained reason.
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
                 let old_state = region.state();
-                if region.begin_close(Some(region_reason.clone())) {
+                // `cancel_request` is commonly called beneath the outer
+                // RuntimeState lock. Use the subscriber-free transition here;
+                // the runtime TraceBuffer event below remains authoritative.
+                // The external Closing subscriber event/span update is omitted:
+                // deferring just that transition could publish after a later
+                // Draining/Closed event and rewind observer state. Task/metrics
+                // cancellation observers still travel in `wakes` for dispatch.
+                if region.begin_close_without_subscriber(Some(region_reason.clone())) {
                     let new_state = region.state();
                     let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
                     self.record_trace_event(|seq| {
@@ -3942,6 +4344,11 @@ impl RuntimeState {
                     region.strengthen_cancel_reason(region_reason);
                 }
             }
+            wakes.push_region_cancellation_metric(
+                Arc::clone(&self.metrics),
+                rid,
+                region_cancel_kind,
+            );
         }
 
         // Second pass: mark tasks for cancellation.
@@ -3962,53 +4369,36 @@ impl RuntimeState {
                 .unwrap_or_else(|| reason.clone());
 
             for &task_id in &task_id_buf {
-                let mut newly_cancelled = false;
-                let mut task_budget_res = crate::types::Budget::INFINITE;
-                let mut tasks_to_cancel_result = None;
-
-                self.update_task(task_id, |task| {
+                let Some((effects, task_budget_res)) = self.update_task(task_id, |task| {
                     let task_budget = task_reason.cleanup_budget();
-                    task_budget_res = task_budget;
-                    newly_cancelled =
-                        task.request_cancel_with_budget(task_reason.clone(), task_budget);
-                    let already_cancelling = task.state.is_cancelling();
-
-                    if newly_cancelled {
-                        // Task was newly cancelled, add to list
-                        tasks_to_cancel_result = Some((task_id, task_budget.priority));
-                    } else if already_cancelling {
-                        // Task already cancelling, but still needs scheduling priority
-                        tasks_to_cancel_result = Some((task_id, task_budget.priority));
-                    }
-                });
+                    let effects = task.request_cancel_with_budget_and_publication(
+                        task_reason.clone(),
+                        task_budget,
+                    );
+                    (effects, task_budget)
+                }) else {
+                    continue;
+                };
+                let ((newly_cancelled, changed, publication), task_wakes) = effects.into_parts();
+                wakes.merge(task_wakes);
 
                 if newly_cancelled {
-                    self.validate_live_task_protocol_transition(
-                        task_id,
-                        TaskEvent::RequestCancel,
-                        "region task cancellation",
-                    );
+                    if let Some(validation_result) =
+                        self.live_task_protocol_violation(task_id, TaskEvent::RequestCancel)
+                    {
+                        wakes.push_cancel_protocol_violation(
+                            "region task cancellation",
+                            format!("{validation_result:?}"),
+                        );
+                    }
                     self.record_task_trace_event(task_id, |seq| {
                         TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
                     });
                 }
 
-                if let Some(t) = tasks_to_cancel_result {
-                    tasks_to_cancel.push(t);
+                if changed && publication.is_published() {
+                    tasks_to_cancel.push((task_id, task_budget_res.priority));
                 }
-
-                // Trace log
-                debug!(
-                    from_region = ?rid,
-                    to_task = ?task_id,
-                    depth = node.depth,
-                    newly_cancelled,
-                    cleanup_poll_quota = task_budget_res.poll_quota,
-                    cleanup_priority = task_budget_res.priority,
-                    chain_depth = task_reason.chain_depth(),
-                    root_cause = ?task_reason.root_cause().kind,
-                    "cancel propagated to task with cause chain"
-                );
             }
         }
 
@@ -4026,7 +4416,7 @@ impl RuntimeState {
             }
         }
 
-        tasks_to_cancel
+        CancellationEffects::new(tasks_to_cancel, wakes)
     }
 
     /// Collects a region and all its descendants (recursive).
@@ -4070,11 +4460,14 @@ impl RuntimeState {
             return false;
         };
 
-        // Check all tasks are terminal
+        // Check all tasks are terminal. An id absent from the embedded table is
+        // not evidence of completion: sharded schedulers keep live records in
+        // an external TaskTable and remove the id from the region only at the
+        // cross-cutting completion boundary.
         let all_tasks_done = region
             .task_ids()
             .iter()
-            .all(|&task_id| self.task(task_id).is_none_or(|t| t.state.is_terminal()));
+            .all(|&task_id| self.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
         // Check all child regions are closed
         let all_children_closed = region.child_ids().iter().all(|&child_id| {
@@ -4188,6 +4581,96 @@ impl RuntimeState {
         // br-asupersync-ndhjfj: `waiters` was already taken atomically
         // at the top of the function under `update_task`. The previous
         // separate `task_mut` re-acquisition has been removed.
+        self.finish_task_completion(
+            task_id,
+            owner,
+            completion,
+            close_outcome,
+            waiters,
+            observer,
+            retired_cancel_wakers,
+            true,
+        )
+    }
+
+    /// Completes cross-cutting runtime bookkeeping for a task record owned by
+    /// an external scheduler shard.
+    ///
+    /// The caller removes the record from its [`TaskTable`] first and retains
+    /// ownership until this method returns. That keeps the shard lock out of
+    /// validator, metrics, region, obligation, and finalizer paths while still
+    /// preserving the same completion semantics as [`Self::task_completed`].
+    pub(crate) fn task_completed_from_external_record(
+        &mut self,
+        task: &mut TaskRecord,
+    ) -> TaskCompletionEffects {
+        let task_id = task.id;
+        let waiters = std::mem::take(&mut task.waiters);
+        let waiter_count = waiters.len();
+        let task_event = match &task.state {
+            TaskState::Completed(Outcome::Cancelled(_)) => TaskEvent::DrainComplete,
+            TaskState::Completed(Outcome::Panicked(payload)) => TaskEvent::Panic {
+                message: payload.message().to_string(),
+            },
+            _ => TaskEvent::Complete,
+        };
+        let context = TaskContext {
+            task_id,
+            region_id: task.owner,
+            spawned_at: task.created_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        // `cancel_epoch` survives terminal completion, including a panic that
+        // wins after cancellation was requested. Terminal state alone would
+        // lose that ordering witness for Completed(Panicked).
+        let cancellation_materialized = task.cancel_epoch > 0;
+        self.validate_and_retire_external_task_protocol(
+            task_id,
+            task_event,
+            &context,
+            cancellation_materialized,
+        );
+
+        let retired_cancel_wakers =
+            task.cx_inner
+                .as_ref()
+                .map_or_else(TaskCompletionRetirements::empty, |inner| {
+                    TaskCompletionRetirements::new({
+                        let mut guard = inner.write();
+                        guard.take_cancel_wakers()
+                    })
+                });
+        let observer = self.prepare_task_completion_observer(task, waiter_count);
+        let close_outcome = match &task.state {
+            TaskState::Completed(outcome) => Some(outcome.clone()),
+            _ => None,
+        };
+        let owner = task.owner;
+        let completion = TaskCompletionKind::from_state(&task.state);
+        self.finish_task_completion(
+            task_id,
+            owner,
+            completion,
+            close_outcome,
+            waiters,
+            observer,
+            retired_cancel_wakers,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_task_completion(
+        &mut self,
+        task_id: TaskId,
+        owner: RegionId,
+        completion: TaskCompletionKind,
+        close_outcome: Option<Outcome<(), Error>>,
+        waiters: SmallVec<[TaskId; 4]>,
+        observer: TaskCompletionObserver,
+        retired_cancel_wakers: TaskCompletionRetirements,
+        remove_embedded_record: bool,
+    ) -> TaskCompletionEffects {
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks_for_holder(task_id);
             if !leaks.is_empty() {
@@ -4250,8 +4733,15 @@ impl RuntimeState {
             let _ = self.abort_obligation(ob_id, ObligationAbortReason::Cancel);
         }
 
-        // Remove the task record to prevent memory leaks
-        self.recycle_task(task_id);
+        // Embedded tables still own their record here. External-shard callers
+        // already detached it before taking the RuntimeState lock.
+        if remove_embedded_record {
+            self.recycle_task(task_id);
+        } else {
+            // External completion atomically retired its validator state with
+            // the terminal transition before entering this common tail.
+            self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+        }
 
         // Remove task from owning region to prevent memory leak
         if let Some(region) = self.regions.get(owner.arena_index()) {
@@ -6537,6 +7027,9 @@ pub(crate) mod completion_observer_test_support {
         completion_panics_remaining: AtomicUsize,
         panic_payload_drop_counter: Option<Arc<AtomicUsize>>,
         panic_while_recording_task_panic: AtomicBool,
+        provider_drop_attempts: Option<Arc<AtomicUsize>>,
+        provider_drop_while_state_locked: Option<Arc<AtomicUsize>>,
+        panic_on_provider_drop: bool,
     }
 
     impl PanickingCompletionMetrics {
@@ -6549,6 +7042,9 @@ pub(crate) mod completion_observer_test_support {
                 completion_panics_remaining: AtomicUsize::new(completion_panics_remaining),
                 panic_payload_drop_counter: None,
                 panic_while_recording_task_panic: AtomicBool::new(false),
+                provider_drop_attempts: None,
+                provider_drop_while_state_locked: None,
+                panic_on_provider_drop: false,
             })
         }
 
@@ -6571,6 +7067,44 @@ pub(crate) mod completion_observer_test_support {
                 completion_panics_remaining: AtomicUsize::new(1),
                 panic_payload_drop_counter: Some(drop_counter),
                 panic_while_recording_task_panic: AtomicBool::new(false),
+                provider_drop_attempts: None,
+                provider_drop_while_state_locked: None,
+                panic_on_provider_drop: false,
+            })
+        }
+
+        pub(crate) fn provider_drop_probe(
+            drop_attempts: Arc<AtomicUsize>,
+            drop_while_state_locked: Arc<AtomicUsize>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(None),
+                completion_attempts: AtomicUsize::new(0),
+                reentry_successes: AtomicUsize::new(0),
+                completed_state_observed: AtomicUsize::new(0),
+                completion_panics_remaining: AtomicUsize::new(0),
+                panic_payload_drop_counter: None,
+                panic_while_recording_task_panic: AtomicBool::new(false),
+                provider_drop_attempts: Some(drop_attempts),
+                provider_drop_while_state_locked: Some(drop_while_state_locked),
+                panic_on_provider_drop: false,
+            })
+        }
+
+        pub(crate) fn panic_callback_and_provider_drop(
+            drop_attempts: Arc<AtomicUsize>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(None),
+                completion_attempts: AtomicUsize::new(0),
+                reentry_successes: AtomicUsize::new(0),
+                completed_state_observed: AtomicUsize::new(0),
+                completion_panics_remaining: AtomicUsize::new(1),
+                panic_payload_drop_counter: None,
+                panic_while_recording_task_panic: AtomicBool::new(false),
+                provider_drop_attempts: Some(drop_attempts),
+                provider_drop_while_state_locked: None,
+                panic_on_provider_drop: true,
             })
         }
 
@@ -6683,6 +7217,31 @@ pub(crate) mod completion_observer_test_support {
             }
         }
     }
+
+    impl Drop for PanickingCompletionMetrics {
+        fn drop(&mut self) {
+            let Some(drop_attempts) = &self.provider_drop_attempts else {
+                return;
+            };
+            drop_attempts.fetch_add(1, Ordering::Relaxed);
+
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if state.is_some_and(|state| state.try_lock().is_err())
+                && let Some(locked_drops) = &self.provider_drop_while_state_locked
+            {
+                locked_drops.fetch_add(1, Ordering::Relaxed);
+            }
+            assert!(
+                !self.panic_on_provider_drop,
+                "adversarial metrics-provider destructor"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6694,9 +7253,11 @@ mod tests {
     use crate::record::{ObligationKind, ObligationRecord, RegionLimits};
     use crate::runtime::ModuleId;
     use crate::runtime::reactor::LabReactor;
+    use crate::sync::ContendedMutex;
     use crate::test_utils::init_test_logging;
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
+    use crate::types::Policy;
     use crate::types::{CancelAttributionConfig, CancelKind};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
@@ -6707,6 +7268,90 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
+
+    #[derive(Default)]
+    struct CancellationWakeAudit {
+        attempts: AtomicUsize,
+        outer_lock_reentries: AtomicUsize,
+        observed_cancelled: AtomicUsize,
+        observed_published: AtomicUsize,
+    }
+
+    struct ReentrantCancellationWake {
+        state: std::sync::Weak<ContendedMutex<RuntimeState>>,
+        expected_tasks: Vec<TaskId>,
+        published: Arc<Mutex<Vec<TaskId>>>,
+        audit: Arc<CancellationWakeAudit>,
+        panic_after_observation: bool,
+    }
+
+    impl ReentrantCancellationWake {
+        fn observe(&self) {
+            self.audit.attempts.fetch_add(1, Ordering::SeqCst);
+
+            if let Some(state) = self.state.upgrade()
+                && let Ok(state) = state.try_lock()
+            {
+                self.audit
+                    .outer_lock_reentries
+                    .fetch_add(1, Ordering::SeqCst);
+                if self.expected_tasks.iter().all(|task_id| {
+                    state
+                        .task(*task_id)
+                        .is_some_and(|task| task.state.is_cancelling())
+                }) {
+                    self.audit.observed_cancelled.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+
+            let published = self.published.lock();
+            if self
+                .expected_tasks
+                .iter()
+                .all(|task_id| published.contains(task_id))
+            {
+                self.audit.observed_published.fetch_add(1, Ordering::SeqCst);
+            }
+            drop(published);
+
+            if self.panic_after_observation {
+                std::panic::panic_any("intentional cancellation wake panic");
+            }
+        }
+    }
+
+    impl std::task::Wake for ReentrantCancellationWake {
+        fn wake(self: Arc<Self>) {
+            self.observe();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.observe();
+        }
+    }
+
+    fn reentrant_cancellation_waker(
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        expected_tasks: &[TaskId],
+        published: &Arc<Mutex<Vec<TaskId>>>,
+        audit: &Arc<CancellationWakeAudit>,
+        panic_after_observation: bool,
+    ) -> Waker {
+        Waker::from(Arc::new(ReentrantCancellationWake {
+            state: Arc::downgrade(state),
+            expected_tasks: expected_tasks.to_vec(),
+            published: Arc::clone(published),
+            audit: Arc::clone(audit),
+            panic_after_observation,
+        }))
+    }
+
+    fn assert_cancellation_wake_audit(audit: &CancellationWakeAudit) {
+        assert_eq!(audit.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(audit.outer_lock_reentries.load(Ordering::SeqCst), 1);
+        assert_eq!(audit.observed_cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(audit.observed_published.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn spawn_error_codes_are_stable_and_displayed() {
@@ -6738,6 +7383,12 @@ mod tests {
                 },
                 "ASUP-E007",
             ),
+            (
+                SpawnError::AdmissionSlotAlreadyReserved {
+                    task_id: TaskId::new_for_test(9, 1),
+                },
+                "ASUP-E008",
+            ),
         ];
         let mut seen = std::collections::BTreeSet::new();
         for (error, expected_code) in cases {
@@ -6756,7 +7407,7 @@ mod tests {
                 "duplicate error code {expected_code}"
             );
         }
-        assert_eq!(seen.len(), 7, "every variant has a distinct code");
+        assert_eq!(seen.len(), 8, "every variant has a distinct code");
     }
 
     #[derive(Default)]
@@ -6764,6 +7415,10 @@ mod tests {
         cancellations: AtomicUsize,
         completions: Mutex<Vec<OutcomeKind>>,
         spawns: AtomicUsize,
+        cancellation_state: Mutex<Option<std::sync::Weak<ContendedMutex<RuntimeState>>>>,
+        cancellation_reentries: AtomicUsize,
+        cancellation_observed_closing: AtomicUsize,
+        panic_on_cancellation: AtomicBool,
     }
 
     impl MetricsProvider for TestMetrics {
@@ -6779,8 +7434,29 @@ mod tests {
 
         fn region_closed(&self, _: RegionId, _: Duration) {}
 
-        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {
+        fn cancellation_requested(&self, region: RegionId, _: CancelKind) {
             self.cancellations.fetch_add(1, Ordering::Relaxed);
+            let state = self
+                .cancellation_state
+                .lock()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade);
+            if let Some(state) = state
+                && let Ok(runtime) = state.try_lock()
+            {
+                self.cancellation_reentries.fetch_add(1, Ordering::Relaxed);
+                if runtime
+                    .region(region)
+                    .is_some_and(|record| record.state().is_closing())
+                {
+                    self.cancellation_observed_closing
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            assert!(
+                !self.panic_on_cancellation.load(Ordering::Relaxed),
+                "adversarial cancellation metrics callback"
+            );
         }
 
         fn drain_completed(&self, _: RegionId, _: Duration) {}
@@ -6871,6 +7547,102 @@ mod tests {
             1,
             "the one-shot panic must be contained and counted once"
         );
+    }
+
+    #[test]
+    fn task_completion_observer_retires_metrics_provider_after_outer_lock() {
+        use super::completion_observer_test_support::PanickingCompletionMetrics;
+
+        let provider_drops = Arc::new(AtomicUsize::new(0));
+        let provider_drops_while_locked = Arc::new(AtomicUsize::new(0));
+        let metrics = PanickingCompletionMetrics::provider_drop_probe(
+            Arc::clone(&provider_drops),
+            Arc::clone(&provider_drops_while_locked),
+        );
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+
+        let (observer, retired_provider) = {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("create task");
+            runtime
+                .task_mut(task_id)
+                .expect("task record")
+                .complete(Outcome::Ok(()));
+            let (waiters, observer) = runtime.task_completed(task_id).into_parts();
+            assert!(waiters.is_empty());
+            let retired_provider = std::mem::replace(&mut runtime.metrics, Arc::new(NoOpMetrics));
+            (observer, retired_provider)
+        };
+
+        drop(retired_provider);
+        drop(metrics);
+        assert_eq!(provider_drops.load(Ordering::Relaxed), 0);
+
+        observer.dispatch();
+
+        assert_eq!(provider_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(provider_drops_while_locked.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn suppressed_task_completion_observer_never_drops_provider_under_outer_lock() {
+        use super::completion_observer_test_support::PanickingCompletionMetrics;
+
+        let provider_drops = Arc::new(AtomicUsize::new(0));
+        let provider_drops_while_locked = Arc::new(AtomicUsize::new(0));
+        let metrics = PanickingCompletionMetrics::provider_drop_probe(
+            Arc::clone(&provider_drops),
+            Arc::clone(&provider_drops_while_locked),
+        );
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+
+        let (effects, retired_provider) = {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("create task");
+            runtime
+                .task_mut(task_id)
+                .expect("task record")
+                .complete(Outcome::Ok(()));
+            let effects = runtime.task_completed(task_id);
+            let retired_provider = std::mem::replace(&mut runtime.metrics, Arc::new(NoOpMetrics));
+            (effects, retired_provider)
+        };
+
+        // Leave the observer payload as the final strong provider handle.
+        drop(retired_provider);
+        drop(metrics);
+        assert_eq!(provider_drops.load(Ordering::Relaxed), 0);
+
+        {
+            let _runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let waiters = effects.into_waiters_without_observers();
+            assert!(waiters.is_empty());
+            assert_eq!(provider_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(provider_drops_while_locked.load(Ordering::Relaxed), 0);
+        }
+
+        assert_eq!(provider_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(provider_drops_while_locked.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -6968,6 +7740,118 @@ mod tests {
                 .task_completion_observer_panic_count(),
             1
         );
+    }
+
+    #[test]
+    fn task_completion_observer_isolates_callback_and_provider_drop_panics() {
+        use super::completion_observer_test_support::PanickingCompletionMetrics;
+
+        let provider_drop_attempts = Arc::new(AtomicUsize::new(0));
+        let metrics = PanickingCompletionMetrics::panic_callback_and_provider_drop(Arc::clone(
+            &provider_drop_attempts,
+        ));
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+
+        let (observer, retired_provider) = {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("create task");
+            runtime
+                .task_mut(task_id)
+                .expect("task record")
+                .complete(Outcome::Ok(()));
+            let (waiters, observer) = runtime.task_completed(task_id).into_parts();
+            assert!(waiters.is_empty());
+            let retired_provider = std::mem::replace(&mut runtime.metrics, Arc::new(NoOpMetrics));
+            (observer, retired_provider)
+        };
+
+        // Make the observer the final provider owner so dispatch must contain
+        // both its callback panic and its independently panicking destructor.
+        drop(retired_provider);
+        drop(metrics);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            observer.dispatch();
+        }));
+
+        assert!(
+            result.is_ok(),
+            "neither hostile boundary may escape dispatch"
+        );
+        assert_eq!(provider_drop_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task_completion_observer_panic_count(),
+            1,
+            "one dispatch with two contained panics is counted once"
+        );
+    }
+
+    #[test]
+    fn external_completion_orders_delayed_cancel_receipt_before_terminal_retirement() {
+        fn run_case(panic_after_cancel: bool) {
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("create task");
+            let mut record = state
+                .remove_task(task_id)
+                .expect("detach authoritative record");
+            let region_id = record.owner;
+            let spawned_at = record.created_at;
+
+            let effects = record.request_cancel_with_budget_and_publication(
+                CancelReason::shutdown(),
+                CancelReason::shutdown().cleanup_budget(),
+            );
+            let ((newly_cancelled, _, _), wakes) = effects.into_parts();
+            assert!(newly_cancelled);
+            wakes.dispatch();
+            if panic_after_cancel {
+                record.complete(Outcome::Panicked(crate::types::outcome::PanicPayload::new(
+                    "panic after external cancel",
+                )));
+            } else {
+                record.complete(Outcome::Ok(()));
+            }
+
+            let violations_before = state.cancel_protocol_validator().lock().violation_count();
+            let (waiters, observer) = state
+                .task_completed_from_external_record(&mut record)
+                .into_parts();
+            assert!(waiters.is_empty());
+
+            // Deliver the copied handle receipt after completion deliberately.
+            // The detached record already supplied RequestCancel before the
+            // terminal event, so retirement makes this a proven stale no-op.
+            assert_eq!(
+                state.external_handle_cancel_request_violation(
+                    task_id, region_id, spawned_at, true,
+                ),
+                None
+            );
+            let validator = state.cancel_protocol_validator().lock();
+            assert_eq!(validator.violation_count(), violations_before);
+            assert!(validator.task_state(task_id).is_none());
+            drop(validator);
+
+            observer.dispatch();
+            drop(record);
+        }
+
+        run_case(false);
+        run_case(true);
     }
 
     #[cfg(feature = "tracing-integration")]
@@ -7139,9 +8023,10 @@ mod tests {
         let reason = CancelReason::deadline()
             .with_message("budget exhausted")
             .with_timestamp(Time::from_millis(42));
-        let _ = state.cancel_request(root, &reason, None);
+        let effects = state.cancel_request(root, &reason, None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
-        json!({
+        let snapshot = json!({
             "config": {
                 "max_chain_depth": max_chain_depth,
                 "max_chain_memory": CancelAttributionConfig::DEFAULT_MAX_MEMORY,
@@ -7188,7 +8073,9 @@ mod tests {
                     &labels,
                 ),
             },
-        })
+        });
+        wake_effects.dispatch();
+        snapshot
     }
 
     fn region_close_to_quiescence_transition_trace_snapshot() -> Value {
@@ -7199,7 +8086,8 @@ mod tests {
         let task = insert_task(state, child);
         let labels = [(root, "root"), (child, "child")];
 
-        let _ = state.cancel_request(root, &CancelReason::user("done"), None);
+        let effects = state.cancel_request(root, &CancelReason::user("done"), None);
+        let (_tasks, wake_effects) = effects.into_parts();
         state
             .task_mut(task)
             .expect("task")
@@ -7227,10 +8115,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        json!({
+        let snapshot = json!({
             "seed": 17,
             "events": events,
-        })
+        });
+        wake_effects.dispatch();
+        snapshot
     }
 
     fn init_test(name: &str) {
@@ -7549,6 +8439,225 @@ mod tests {
     }
 
     #[test]
+    fn cancel_task_defers_reentrant_waker_until_after_outer_unlock_and_publication() {
+        init_test("cancel_task_defers_reentrant_waker_until_after_outer_unlock_and_publication");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let cx_inner = state
+            .task(task_id)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("task cancellation context");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let audit = Arc::new(CancellationWakeAudit::default());
+        let waker = reentrant_cancellation_waker(&state, &[task_id], &published, &audit, false);
+        let target = Arc::new(crate::types::task_context::CancelWaker::new(waker.clone()));
+        cx_inner.write().cancel_waker = Some(target);
+        drop(waker);
+
+        let effects = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let effects = guard.cancel_task(task_id, &CancelReason::timeout());
+            assert_eq!(
+                audit.attempts.load(Ordering::SeqCst),
+                0,
+                "cancel_task must only snapshot Wakers while the outer lock is live"
+            );
+            effects
+        };
+        let (newly_cancelled, wakes) = effects.into_parts();
+        assert!(newly_cancelled);
+        published.lock().push(task_id);
+        wakes.dispatch();
+
+        assert_cancellation_wake_audit(&audit);
+        crate::test_complete!(
+            "cancel_task_defers_reentrant_waker_until_after_outer_unlock_and_publication"
+        );
+    }
+
+    #[test]
+    fn region_cancel_deferred_queue_publishes_all_tasks_before_panic_isolated_wakers() {
+        init_test("region_cancel_deferred_queue_publishes_all_tasks_before_panic_isolated_wakers");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (first_task, _first_handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create first task");
+        let (second_task, _second_handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create second task");
+        let first_inner = state
+            .task(first_task)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("first task cancellation context");
+        let second_inner = state
+            .task(second_task)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("second task cancellation context");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let expected_tasks = vec![first_task, second_task];
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let audits: Vec<_> = (0..4)
+            .map(|_| Arc::new(CancellationWakeAudit::default()))
+            .collect();
+        let wakers: Vec<_> = audits
+            .iter()
+            .map(|audit| {
+                reentrant_cancellation_waker(&state, &expected_tasks, &published, audit, true)
+            })
+            .collect();
+        let targets: Vec<_> = wakers
+            .iter()
+            .map(|waker| Arc::new(crate::types::task_context::CancelWaker::new(waker.clone())))
+            .collect();
+        {
+            let mut inner = first_inner.write();
+            inner.cancel_waker = Some(Arc::clone(&targets[0]));
+            inner.untracked_cancel_waker = Some(Arc::clone(&targets[1]));
+            inner.next_cancel_waker_token = 1;
+            inner.cancel_waker_registrations.push(
+                crate::types::task_context::CancelWakerRegistration {
+                    token: 1,
+                    target: Arc::clone(&targets[2]),
+                },
+            );
+        }
+        second_inner.write().cancel_waker = Some(Arc::clone(&targets[3]));
+        drop(targets);
+        drop(wakers);
+
+        {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let effects = guard.cancel_request(root, &CancelReason::shutdown(), None);
+            guard.defer_cancel_dispatch(effects);
+            assert!(
+                audits
+                    .iter()
+                    .all(|audit| audit.attempts.load(Ordering::SeqCst) == 0),
+                "enqueueing deferred region effects must not invoke any Waker"
+            );
+        }
+
+        let batches = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let batches = guard.take_deferred_cancel_dispatches();
+            assert!(
+                audits
+                    .iter()
+                    .all(|audit| audit.attempts.load(Ordering::SeqCst) == 0),
+                "taking deferred region effects must remain callback-free"
+            );
+            batches
+        };
+        assert_eq!(batches.len(), 1);
+
+        let mut wake_batches = Vec::new();
+        for batch in batches {
+            let (tasks, wakes) = batch.into_parts();
+            assert_eq!(tasks.len(), expected_tasks.len());
+            published
+                .lock()
+                .extend(tasks.into_iter().map(|(task_id, _priority)| task_id));
+            wake_batches.push(wakes);
+        }
+        for wakes in wake_batches {
+            wakes.dispatch();
+        }
+
+        for audit in &audits {
+            assert_cancellation_wake_audit(audit);
+        }
+        crate::test_complete!(
+            "region_cancel_deferred_queue_publishes_all_tasks_before_panic_isolated_wakers"
+        );
+    }
+
+    #[test]
+    fn sibling_cancel_defers_wakers_and_excludes_policy_child() {
+        init_test("sibling_cancel_defers_wakers_and_excludes_policy_child");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (policy_child, _child_handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create policy child");
+        let (first_sibling, _first_handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create first sibling");
+        let (second_sibling, _second_handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create second sibling");
+        let first_inner = state
+            .task(first_sibling)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("first sibling cancellation context");
+        let second_inner = state
+            .task(second_sibling)
+            .and_then(|task| task.cx_inner.clone())
+            .expect("second sibling cancellation context");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let expected_tasks = vec![first_sibling, second_sibling];
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let audits: Vec<_> = (0..2)
+            .map(|_| Arc::new(CancellationWakeAudit::default()))
+            .collect();
+
+        for (inner, audit) in [(&first_inner, &audits[0]), (&second_inner, &audits[1])] {
+            let waker =
+                reentrant_cancellation_waker(&state, &expected_tasks, &published, audit, false);
+            let target = Arc::new(crate::types::task_context::CancelWaker::new(waker.clone()));
+            inner.write().cancel_waker = Some(target);
+            drop(waker);
+        }
+
+        let effects = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let effects =
+                guard.cancel_sibling_tasks(root, policy_child, &CancelReason::fail_fast());
+            assert!(
+                audits
+                    .iter()
+                    .all(|audit| audit.attempts.load(Ordering::SeqCst) == 0)
+            );
+            assert!(
+                !guard
+                    .task(policy_child)
+                    .expect("excluded child remains present")
+                    .state
+                    .is_cancelling(),
+                "the policy child must not be cancelled as its own sibling"
+            );
+            effects
+        };
+        let (tasks, wakes) = effects.into_parts();
+        assert_eq!(tasks.len(), expected_tasks.len());
+        assert!(tasks.iter().all(|(task_id, _)| *task_id != policy_child));
+        published
+            .lock()
+            .extend(tasks.into_iter().map(|(task_id, _priority)| task_id));
+        wakes.dispatch();
+
+        for audit in &audits {
+            assert_cancellation_wake_audit(audit);
+        }
+        crate::test_complete!("sibling_cancel_defers_wakers_and_excludes_policy_child");
+    }
+
+    #[test]
     fn timer_driver_timestamps_runtime_records_and_snapshot() {
         init_test("timer_driver_timestamps_runtime_records_and_snapshot");
 
@@ -7684,8 +8793,8 @@ mod tests {
     }
 
     #[test]
-    fn timer_driver_timestamps_cancel_traces() {
-        init_test("timer_driver_timestamps_cancel_traces");
+    fn closed_reason_timestamp_drives_cancel_traces() {
+        init_test("closed_reason_timestamp_drives_cancel_traces");
 
         let mut state = RuntimeState::new();
         let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(7)));
@@ -7697,8 +8806,10 @@ mod tests {
             .expect("create task");
 
         clock.advance(Time::from_millis(5).as_nanos());
-        let expected_time = Time::from_millis(12);
-        let _ = state.cancel_request(root, &CancelReason::timeout(), None);
+        let expected_time = Time::from_millis(41);
+        let reason = CancelReason::timeout().with_timestamp(expected_time);
+        let effects = state.cancel_request(root, &reason, None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let events = state.trace.snapshot();
         let cancel_event = events
@@ -7714,7 +8825,7 @@ mod tests {
             .expect("cancel request event");
         crate::assert_with_log!(
             cancel_event.time == expected_time,
-            "cancel request trace uses timer-driver time",
+            "cancel request trace uses closed reason time",
             expected_time,
             cancel_event.time
         );
@@ -7731,7 +8842,7 @@ mod tests {
             .expect("region cancelled event");
         crate::assert_with_log!(
             region_cancel_event.time == expected_time,
-            "region cancelled trace uses timer-driver time",
+            "region cancelled trace uses closed reason time",
             expected_time,
             region_cancel_event.time
         );
@@ -7751,12 +8862,13 @@ mod tests {
             .expect("region close begin event");
         crate::assert_with_log!(
             region_close_begin.time == expected_time,
-            "region close begin trace uses timer-driver time",
+            "region close begin trace uses closed reason time",
             expected_time,
             region_close_begin.time
         );
 
-        crate::test_complete!("timer_driver_timestamps_cancel_traces");
+        wake_effects.dispatch();
+        crate::test_complete!("closed_reason_timestamp_drives_cancel_traces");
     }
 
     #[test]
@@ -8045,7 +9157,8 @@ mod tests {
             .create_task(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
         let reason = CancelReason::timeout();
-        let _ = state.cancel_request(root, &reason, None);
+        let effects = state.cancel_request(root, &reason, None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let events = state.trace.snapshot();
         let saw_cancel = events
@@ -8053,14 +9166,67 @@ mod tests {
             .any(|event| event.kind == TraceEventKind::CancelRequest);
         crate::assert_with_log!(saw_cancel, "cancel trace recorded", true, saw_cancel);
 
-        let cancellations = metrics.cancellations.load(Ordering::Relaxed);
+        let cancellations_before_dispatch = metrics.cancellations.load(Ordering::Relaxed);
         crate::assert_with_log!(
-            cancellations == 1,
-            "cancellation metrics",
+            cancellations_before_dispatch == 0,
+            "cancellation metrics deferred",
+            0usize,
+            cancellations_before_dispatch
+        );
+        wake_effects.dispatch();
+        let cancellations_after_dispatch = metrics.cancellations.load(Ordering::Relaxed);
+        crate::assert_with_log!(
+            cancellations_after_dispatch == 1,
+            "cancellation metrics dispatched",
             1usize,
-            cancellations
+            cancellations_after_dispatch
         );
         crate::test_complete!("cancel_request_emits_trace_and_metrics");
+    }
+
+    #[test]
+    fn cancel_metrics_reenter_only_after_state_unlock_and_panic_is_contained() {
+        let metrics = Arc::new(TestMetrics::default());
+        metrics.panic_on_cancellation.store(true, Ordering::Relaxed);
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        *metrics.cancellation_state.lock() = Some(Arc::downgrade(&state));
+
+        let (root, effects) = {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let _task = insert_task(&mut runtime, root);
+            let effects = runtime.cancel_request(root, &CancelReason::shutdown(), None);
+            assert_eq!(metrics.cancellations.load(Ordering::Relaxed), 0);
+            assert_eq!(metrics.cancellation_reentries.load(Ordering::Relaxed), 0);
+            (root, effects)
+        };
+
+        let (tasks, observers_and_wakes) = effects.into_parts();
+        assert_eq!(tasks.len(), 1);
+        let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            observers_and_wakes.dispatch();
+        }));
+        assert!(dispatched.is_ok(), "observer panic must be contained");
+        assert_eq!(metrics.cancellations.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.cancellation_reentries.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics
+                .cancellation_observed_closing
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .region(root)
+                .is_some_and(|region| region.state().is_closing())
+        );
     }
 
     #[test]
@@ -8519,7 +9685,9 @@ mod tests {
         let outcome = Outcome::<(), crate::error::Error>::Err(crate::error::Error::new(
             crate::error::ErrorKind::User,
         ));
-        let (action, tasks) = state.apply_policy_on_child_outcome(region, child, &outcome, &policy);
+        let action = policy.on_child_outcome(child, &outcome);
+        let effects = state.apply_policy_action(region, child, action);
+        let ((action, tasks), wake_effects) = effects.into_parts();
 
         let expected_action = PolicyAction::CancelSiblings(CancelReason::sibling_failed());
         crate::assert_with_log!(
@@ -8551,6 +9719,7 @@ mod tests {
         let child_record = state.task(child).expect("child missing");
         let is_created = matches!(child_record.state, TaskState::Created);
         crate::assert_with_log!(is_created, "child remains created", true, is_created);
+        wake_effects.dispatch();
         crate::test_complete!("policy_can_cancel_siblings");
     }
 
@@ -8565,7 +9734,9 @@ mod tests {
 
         let policy = crate::types::policy::FailFast;
         let outcome = Outcome::<(), crate::error::Error>::Cancelled(CancelReason::timeout());
-        let (action, _) = state.apply_policy_on_child_outcome(region, child, &outcome, &policy);
+        let action = policy.on_child_outcome(child, &outcome);
+        let effects = state.apply_policy_action(region, child, action);
+        let ((action, _tasks), wake_effects) = effects.into_parts();
 
         crate::assert_with_log!(
             action == PolicyAction::Continue,
@@ -8576,6 +9747,7 @@ mod tests {
         let sib_record = state.task(sib).expect("sib missing");
         let is_created = matches!(sib_record.state, TaskState::Created);
         crate::assert_with_log!(is_created, "sibling remains created", true, is_created);
+        wake_effects.dispatch();
         crate::test_complete!("policy_does_not_cancel_siblings_on_cancelled_child");
     }
 
@@ -8645,7 +9817,8 @@ mod tests {
             .add_task(TaskId::from_arena(idx))
             .unwrap();
 
-        let _tasks = state.cancel_request(region, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let region_record = state
             .regions
@@ -8665,6 +9838,7 @@ mod tests {
             CancelKind::Timeout,
             kind
         );
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_marks_region");
     }
 
@@ -8676,7 +9850,8 @@ mod tests {
         let task1 = insert_task(&mut state, region);
         let task2 = insert_task(&mut state, region);
 
-        let tasks_to_schedule = state.cancel_request(region, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+        let (tasks_to_schedule, wake_effects) = effects.into_parts();
 
         // Both tasks should be returned for scheduling
         crate::assert_with_log!(
@@ -8710,6 +9885,7 @@ mod tests {
                 is_cancel_requested
             );
         }
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_marks_tasks");
     }
 
@@ -8725,7 +9901,8 @@ mod tests {
         let child_task = insert_task(&mut state, child);
         let grandchild_task = insert_task(&mut state, grandchild);
 
-        let tasks_to_schedule = state.cancel_request(root, &CancelReason::user("stop"), None);
+        let effects = state.cancel_request(root, &CancelReason::user("stop"), None);
+        let (tasks_to_schedule, wake_effects) = effects.into_parts();
 
         // All 3 tasks should be scheduled
         crate::assert_with_log!(
@@ -8826,6 +10003,7 @@ mod tests {
                 reason.kind
             );
         }
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_propagates_to_descendants");
     }
 
@@ -8847,7 +10025,8 @@ mod tests {
 
         // Cancel the root with a Deadline reason
         let original_reason = CancelReason::deadline().with_message("budget exhausted");
-        let _ = state.cancel_request(root, &original_reason, None);
+        let effects = state.cancel_request(root, &original_reason, None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // Verify root region has original reason (no cause chain)
         let root_record = state.regions.get(root.arena_index()).expect("root missing");
@@ -8995,6 +10174,7 @@ mod tests {
         let _ = root_task;
         let _ = child_task;
 
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_builds_cause_chains");
     }
 
@@ -9051,7 +10231,8 @@ mod tests {
             .unwrap();
 
         let reason = CancelReason::deadline().with_message("root deadline");
-        let _ = state.cancel_request(root, &reason, None);
+        let effects = state.cancel_request(root, &reason, None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let child_reason = state
             .regions
@@ -9095,6 +10276,7 @@ mod tests {
             grandchild_reason.truncated_at_depth
         );
 
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_respects_attribution_limits");
     }
 
@@ -9111,7 +10293,8 @@ mod tests {
         }
         let leaf_task = insert_task(&mut state, current);
 
-        let _ = state.cancel_request(root, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(root, &CancelReason::timeout(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let leaf_record = state
             .regions
@@ -9156,6 +10339,7 @@ mod tests {
             }
         }
 
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_respects_chain_depth_limit");
     }
 
@@ -9172,7 +10356,8 @@ mod tests {
         }
         let leaf_task = insert_task(&mut state, current);
 
-        let _ = state.cancel_request(root, &CancelReason::shutdown(), None);
+        let effects = state.cancel_request(root, &CancelReason::shutdown(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let leaf_record = state
             .regions
@@ -9217,6 +10402,7 @@ mod tests {
             }
         }
 
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_truncates_large_tree");
     }
 
@@ -9228,10 +10414,12 @@ mod tests {
         let task = insert_task(&mut state, region);
 
         // First cancel with User
-        let _ = state.cancel_request(region, &CancelReason::user("stop"), None);
+        let first_effects = state.cancel_request(region, &CancelReason::user("stop"), None);
+        let (_first_tasks, first_wakes) = first_effects.into_parts();
 
         // Second cancel with Shutdown (higher severity)
-        let _ = state.cancel_request(region, &CancelReason::shutdown(), None);
+        let second_effects = state.cancel_request(region, &CancelReason::shutdown(), None);
+        let (_second_tasks, second_wakes) = second_effects.into_parts();
 
         // Region should have Shutdown reason
         let region_record = state
@@ -9263,6 +10451,8 @@ mod tests {
                 reason.kind
             );
         }
+        first_wakes.dispatch();
+        second_wakes.dispatch();
         crate::test_complete!("cancel_request_strengthens_existing_reason");
     }
 
@@ -10291,7 +11481,8 @@ mod tests {
             .unwrap();
 
         // Request cancellation
-        let _ = state.cancel_request(region, &CancelReason::user("stop"), None);
+        let effects = state.cancel_request(region, &CancelReason::user("stop"), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // Verify state transition
         let region_record = state.regions.get(region.arena_index()).expect("region");
@@ -10308,6 +11499,7 @@ mod tests {
         let result = state.create_task(region, Budget::INFINITE, async { 42 });
         let rejected = matches!(result, Err(SpawnError::RegionClosed(_)));
         crate::assert_with_log!(rejected, "spawn rejected", true, rejected);
+        wake_effects.dispatch();
         crate::test_complete!("cancel_request_should_prevent_new_spawns");
     }
 
@@ -10565,8 +11757,9 @@ mod tests {
         let cancel_root = cancel_requested.create_root_region(Budget::INFINITE);
         let cancel_child = create_child_region(&mut cancel_requested, cancel_root);
         let _cancel_task = insert_task(&mut cancel_requested, cancel_child);
-        let tasks_to_cancel =
+        let effects =
             cancel_requested.cancel_request(cancel_root, &CancelReason::user("stop"), None);
+        let (tasks_to_cancel, wake_effects) = effects.into_parts();
         crate::assert_with_log!(
             !tasks_to_cancel.is_empty(),
             "cancel request schedules live child work",
@@ -10737,6 +11930,7 @@ mod tests {
             true,
             closed_snapshot == closed_direct
         );
+        wake_effects.dispatch();
         crate::test_complete!("quiescence_observation_matrix_has_no_early_true_reports");
     }
 
@@ -10837,7 +12031,8 @@ mod tests {
             registered
         );
 
-        let first_attempt = state.cancel_request(root, &CancelReason::user("first close"), None);
+        let first_effects = state.cancel_request(root, &CancelReason::user("first close"), None);
+        let (first_attempt, first_wakes) = first_effects.into_parts();
         crate::assert_with_log!(
             first_attempt.len() == 1,
             "first close request schedules the live root task",
@@ -10859,7 +12054,8 @@ mod tests {
             pending_close
         );
 
-        let second_attempt = state.cancel_request(root, &CancelReason::timeout(), None);
+        let second_effects = state.cancel_request(root, &CancelReason::timeout(), None);
+        let (second_attempt, second_wakes) = second_effects.into_parts();
         crate::assert_with_log!(
             first_attempt.len() == 1
                 && second_attempt.len() == 1
@@ -10920,8 +12116,9 @@ mod tests {
             true,
             state.task(finalizer_task).is_some()
         );
-        let _fourth_attempt =
+        let fourth_effects =
             state.cancel_request(root, &CancelReason::user("finalizer close"), None);
+        let (_fourth_attempt, fourth_wakes) = fourth_effects.into_parts();
         let during_finalizer_drain = observe(
             &state,
             "during_finalizer_drain",
@@ -10992,7 +12189,8 @@ mod tests {
             after_close_complete
         );
 
-        let fifth_attempt = state.cancel_request(root, &CancelReason::user("post-close"), None);
+        let fifth_effects = state.cancel_request(root, &CancelReason::user("post-close"), None);
+        let (fifth_attempt, fifth_wakes) = fifth_effects.into_parts();
         crate::assert_with_log!(
             fifth_attempt.is_empty(),
             "post-close re-entry returns no scheduled work",
@@ -11105,6 +12303,10 @@ mod tests {
             0usize,
             state.pending_obligation_count()
         );
+        first_wakes.dispatch();
+        second_wakes.dispatch();
+        fourth_wakes.dispatch();
+        fifth_wakes.dispatch();
         crate::test_complete!(
             "redundant_region_close_requests_quiesce_once_without_double_finalize"
         );
@@ -11134,7 +12336,8 @@ mod tests {
         });
 
         // Phase 1: Cancel request → region enters Closing
-        let tasks_to_schedule = state.cancel_request(root, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(root, &CancelReason::timeout(), None);
+        let (tasks_to_schedule, wake_effects) = effects.into_parts();
         crate::assert_with_log!(
             tasks_to_schedule.len() == 2,
             "both tasks scheduled for cancel",
@@ -11241,6 +12444,7 @@ mod tests {
             true,
             cancel_events >= 1
         );
+        wake_effects.dispatch();
         crate::test_complete!("cancel_drain_finalize_full_lifecycle");
     }
 
@@ -11253,7 +12457,8 @@ mod tests {
 
         // Request cancel (timeout) so the region begins closing; this is what
         // drives the region to tear down once its last task completes.
-        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
         state
             .task_mut(task)
             .expect("task")
@@ -11280,6 +12485,7 @@ mod tests {
             true,
             format!("{:?}", state.region_close_outcome(region))
         );
+        wake_effects.dispatch();
         crate::test_complete!("region_close_outcome_tracks_error_after_region_teardown");
     }
 
@@ -11469,7 +12675,8 @@ mod tests {
         let child_task = insert_task(&mut state, child);
 
         // Cancel the root region (propagates to child)
-        let _ = state.cancel_request(root, &CancelReason::user("stop"), None);
+        let effects = state.cancel_request(root, &CancelReason::user("stop"), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // Complete child task first
         state
@@ -11523,6 +12730,7 @@ mod tests {
             true,
             root_state_removed
         );
+        wake_effects.dispatch();
         crate::test_complete!("cancel_drain_finalize_nested_regions");
     }
 
@@ -11545,7 +12753,8 @@ mod tests {
         runtime.step_for_test();
 
         let cancel_reason = CancelReason::user("validator regression");
-        let cancelled = runtime.state.cancel_task(task_id, &cancel_reason);
+        let effects = runtime.state.cancel_task(task_id, &cancel_reason);
+        let (cancelled, wake_effects) = effects.into_parts();
         crate::assert_with_log!(
             cancelled,
             "task cancellation should be recorded",
@@ -11557,6 +12766,7 @@ mod tests {
             .scheduler
             .lock()
             .schedule_cancel(task_id, cancel_reason.cleanup_budget().priority);
+        wake_effects.dispatch();
         runtime.run_until_quiescent();
 
         let validator = runtime.state.cancel_protocol_validator().lock();
@@ -11607,7 +12817,8 @@ mod tests {
         );
 
         // Cancel region → task gets cancel-requested
-        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // Complete task with Cancelled outcome
         // task_completed() should auto-abort orphaned obligations
@@ -11651,6 +12862,7 @@ mod tests {
             3usize,
             abort_events
         );
+        wake_effects.dispatch();
         crate::test_complete!("obligations_auto_aborted_on_cancelled_task_completion");
     }
 
@@ -11675,7 +12887,8 @@ mod tests {
         );
 
         // Cancel and complete the task
-        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
         state
             .task_mut(task)
             .expect("task")
@@ -11703,6 +12916,7 @@ mod tests {
             1usize,
             commit_events
         );
+        wake_effects.dispatch();
         crate::test_complete!("obligation_commit_before_cancel_then_drain");
     }
 
@@ -11776,7 +12990,8 @@ mod tests {
             .expect("create obligation");
 
         // Cancel and complete
-        let _ = state.cancel_request(region, &CancelReason::deadline(), None);
+        let effects = state.cancel_request(region, &CancelReason::deadline(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
         state
             .task_mut(task)
             .expect("task")
@@ -11840,6 +13055,7 @@ mod tests {
             true,
             region_state_removed
         );
+        wake_effects.dispatch();
         crate::test_complete!("cancel_with_obligations_full_trace_lifecycle");
     }
 
@@ -11877,7 +13093,8 @@ mod tests {
         );
 
         // Cancel and complete task (obl_orphaned should be auto-aborted)
-        let _ = state.cancel_request(region, &CancelReason::shutdown(), None);
+        let effects = state.cancel_request(region, &CancelReason::shutdown(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
         state
             .task_mut(task)
             .expect("task")
@@ -11912,6 +13129,7 @@ mod tests {
             true,
             region_state_removed
         );
+        wake_effects.dispatch();
         crate::test_complete!("mixed_obligation_resolution_during_cancel");
     }
 
@@ -11942,7 +13160,8 @@ mod tests {
         );
 
         // Cancel and complete everything
-        let _ = state.cancel_request(root, &CancelReason::user("done"), None);
+        let effects = state.cancel_request(root, &CancelReason::user("done"), None);
+        let (_tasks, wake_effects) = effects.into_parts();
         state
             .task_mut(task)
             .expect("task")
@@ -11964,6 +13183,7 @@ mod tests {
             true,
             root_state_removed
         );
+        wake_effects.dispatch();
         crate::test_complete!("region_quiescence_requires_no_live_children_or_tasks");
     }
 
@@ -11975,7 +13195,8 @@ mod tests {
         let task = insert_task(&mut state, region);
 
         // Cancel the region
-        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // Attempt to create an obligation in a cancelled region should fail
         let result = state.create_obligation(ObligationKind::SendPermit, task, region, None);
@@ -11992,6 +13213,7 @@ mod tests {
             0usize,
             state.pending_obligation_count()
         );
+        wake_effects.dispatch();
         crate::test_complete!("cancel_prevents_new_obligation_creation");
     }
 
@@ -12023,7 +13245,8 @@ mod tests {
         );
 
         // Cancel the region
-        let _ = state.cancel_request(region, &CancelReason::deadline(), None);
+        let effects = state.cancel_request(region, &CancelReason::deadline(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // task_a commits its obligation during cleanup, then completes
         let _ = state.commit_obligation(obl_a).expect("commit obl_a");
@@ -12113,6 +13336,7 @@ mod tests {
         // Suppress unused variable warnings
         let _ = obl_b1;
         let _ = obl_b2;
+        wake_effects.dispatch();
         crate::test_complete!("multiple_tasks_obligations_cancel_drain_finalize");
     }
 
@@ -12527,7 +13751,8 @@ mod tests {
         );
 
         // Cancel root (propagates to child and grandchild)
-        let tasks_to_schedule = state.cancel_request(root, &CancelReason::user("shutdown"), None);
+        let effects = state.cancel_request(root, &CancelReason::user("shutdown"), None);
+        let (tasks_to_schedule, wake_effects) = effects.into_parts();
         crate::assert_with_log!(
             tasks_to_schedule.len() == 3,
             "all three tasks scheduled for cancel",
@@ -12648,6 +13873,7 @@ mod tests {
             true,
             abort_events >= 2
         );
+        wake_effects.dispatch();
         crate::test_complete!("three_level_cascade_with_obligations");
     }
 
@@ -12670,7 +13896,8 @@ mod tests {
             .expect("obl2");
 
         // Cancel region → Closing
-        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        let effects = state.cancel_request(region, &CancelReason::timeout(), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // Complete task (obligations become orphans → auto-aborted only if
         // task_completed detects them). Let's commit one before completing.
@@ -12703,6 +13930,7 @@ mod tests {
             0usize,
             state.pending_obligation_count()
         );
+        wake_effects.dispatch();
         crate::test_complete!("obligation_resolve_advances_draining_region");
     }
 
@@ -13193,7 +14421,9 @@ mod tests {
 
         // Cancel siblings of task_b (should cancel a, c, d but not b)
         let reason = CancelReason::fail_fast().with_message("sibling failed");
-        let to_cancel = state.cancel_sibling_tasks(region, task_b, &reason);
+        let (to_cancel, cancel_wakes) = state
+            .cancel_sibling_tasks(region, task_b, &reason)
+            .into_parts();
 
         // task_b should NOT appear in the cancellation list
         let cancelled_ids: Vec<TaskId> = to_cancel.iter().map(|(id, _)| *id).collect();
@@ -13240,6 +14470,7 @@ mod tests {
                 is_cancel_requested
             );
         }
+        cancel_wakes.dispatch();
         crate::test_complete!("cancel_sibling_tasks_preserves_triggering_child");
     }
 
@@ -13450,7 +14681,8 @@ mod tests {
         let _ = state.commit_obligation(root_obl).expect("commit root obl");
 
         // Cancel the root (cascades to child)
-        let _ = state.cancel_request(root, &CancelReason::user("test"), None);
+        let effects = state.cancel_request(root, &CancelReason::user("test"), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         // Abort child_obl1 explicitly during cancellation
         let _ = state
@@ -13508,6 +14740,7 @@ mod tests {
             0usize,
             state.pending_obligation_count()
         );
+        wake_effects.dispatch();
         crate::test_complete!("mixed_obligation_resolution_during_cancel_cascade");
     }
 
@@ -14327,7 +15560,8 @@ mod tests {
                 let _ = insert_task(&mut state, niece);
             }
 
-            let _ = state.cancel_request(branch, reason, None);
+            let effects = state.cancel_request(branch, reason, None);
+            let (_tasks, wake_effects) = effects.into_parts();
 
             let branch_region_reason = state
                 .regions
@@ -14358,12 +15592,14 @@ mod tests {
                 other => panic!("expected leaf task to be cancelling, got {other:?}"),
             };
 
-            BranchCancelSnapshot {
+            let snapshot = BranchCancelSnapshot {
                 branch_region_reason,
                 leaf_region_reason,
                 branch_task_reason,
                 leaf_task_reason,
-            }
+            };
+            wake_effects.dispatch();
+            snapshot
         }
 
         #[test]
@@ -14394,7 +15630,8 @@ mod tests {
                 let expected_root_kind = original_reason.kind;
                 let expected_root_message = original_reason.message.clone();
 
-                let _ = state.cancel_request(root, &original_reason, None);
+                let effects = state.cancel_request(root, &original_reason, None);
+                let (_tasks, wake_effects) = effects.into_parts();
 
                 for (depth_idx, &region_id) in lineage.iter().enumerate() {
                     let region_record = state
@@ -14450,6 +15687,7 @@ mod tests {
                         prop_assert!(false, "expected CancelRequested task state, got {other:?}");
                     }
                 }
+                wake_effects.dispatch();
             });
         }
 
@@ -14477,7 +15715,9 @@ mod tests {
                     }
                 }
 
-                let scheduled = state.cancel_request(root, &reason_from_variant(reason_variant), None);
+                let effects =
+                    state.cancel_request(root, &reason_from_variant(reason_variant), None);
+                let (scheduled, wake_effects) = effects.into_parts();
                 prop_assert_eq!(
                     scheduled.len(),
                     depth_by_task.len(),
@@ -14497,6 +15737,7 @@ mod tests {
                     scheduled_depths.windows(2).all(|pair| pair[0] <= pair[1]),
                     "cancel scheduling should not visit descendants before ancestors: {scheduled_depths:?}"
                 );
+                wake_effects.dispatch();
             });
         }
 
@@ -14526,15 +15767,19 @@ mod tests {
                         }
                     }
 
-                    state
-                        .cancel_request(root, &reason_from_variant(reason_variant), None)
+                    let effects =
+                        state.cancel_request(root, &reason_from_variant(reason_variant), None);
+                    let (scheduled, wake_effects) = effects.into_parts();
+                    let profile = scheduled
                         .into_iter()
                         .map(|(task_id, _priority)| {
                             *depth_by_task
                                 .get(&task_id)
                                 .expect("scheduled task missing from depth map")
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    wake_effects.dispatch();
+                    profile
                 };
 
                 let lhs_profile = build_depth_profile(lhs_reason_variant);
@@ -14580,7 +15825,8 @@ mod tests {
                     prop_assert!(region.complete_close());
                 }
 
-                let tasks_to_cancel = state.cancel_request(region_id, &followup_reason, None);
+                let effects = state.cancel_request(region_id, &followup_reason, None);
+                let (tasks_to_cancel, wake_effects) = effects.into_parts();
                 let region = state
                     .regions
                     .get(region_id.arena_index())
@@ -14589,6 +15835,7 @@ mod tests {
                 prop_assert!(tasks_to_cancel.is_empty());
                 prop_assert_eq!(region.state(), crate::record::region::RegionState::Closed);
                 prop_assert_eq!(region.cancel_reason(), Some(initial_reason));
+                wake_effects.dispatch();
             });
         }
     }
@@ -14653,9 +15900,12 @@ mod tests {
         // Request cancel on every other task — these enter
         // CancelRequested (still non-terminal). The two methods must
         // continue to agree across the in-flight cancel transition.
+        let mut cancel_wakes = Vec::new();
         for (idx, &task_id) in spawned.iter().enumerate() {
             if idx.is_multiple_of(2) {
-                let _ = state.cancel_task(task_id, &CancelReason::user("test"));
+                let effects = state.cancel_task(task_id, &CancelReason::user("test"));
+                let (_cancelled, wake_effects) = effects.into_parts();
+                cancel_wakes.push(wake_effects);
             }
         }
         crate::assert_with_log!(
@@ -14671,6 +15921,9 @@ mod tests {
             32usize,
             state.live_task_count()
         );
+        for wake_effects in cancel_wakes {
+            wake_effects.dispatch();
+        }
 
         // Complete each task — drives them to TaskState::Completed
         // (terminal) and TaskPhase::Completed (excluded from
@@ -14704,7 +15957,8 @@ mod tests {
         let root = state.create_root_region(Budget::INFINITE);
         let child = create_child_region(&mut state, root);
         let _grandchild = create_child_region(&mut state, child);
-        let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+        let effects = state.cancel_request(child, &CancelReason::user("drain"), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let expected = state.regions.draining_region_count() as u32;
         let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
@@ -14722,6 +15976,7 @@ mod tests {
             format!("{:?}", state.read_biased_region_snapshot_stats())
         );
 
+        wake_effects.dispatch();
         crate::test_complete!("read_biased_region_snapshot_disabled_matches_authoritative_scan");
     }
 
@@ -14735,7 +15990,8 @@ mod tests {
         let grandchild = create_child_region(&mut state, child);
         state.set_read_biased_region_snapshot(true);
 
-        let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+        let first_effects = state.cancel_request(child, &CancelReason::user("drain"), None);
+        let (_first_tasks, first_wakes) = first_effects.into_parts();
         let draining_snapshot =
             crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
         crate::assert_with_log!(
@@ -14745,7 +16001,8 @@ mod tests {
             draining_snapshot.draining_regions
         );
 
-        let _ = state.cancel_request(grandchild, &CancelReason::user("close"), None);
+        let second_effects = state.cancel_request(grandchild, &CancelReason::user("close"), None);
+        let (_second_tasks, second_wakes) = second_effects.into_parts();
         state.advance_region_state(child);
         let closed_snapshot =
             crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
@@ -14770,6 +16027,8 @@ mod tests {
             stats.writer_adjustments >= 2
         );
 
+        first_wakes.dispatch();
+        second_wakes.dispatch();
         crate::test_complete!("read_biased_region_snapshot_tracks_draining_runtime_transitions");
     }
 
@@ -14782,7 +16041,8 @@ mod tests {
         let child = create_child_region(&mut state, root);
         let _grandchild = create_child_region(&mut state, child);
         state.set_read_biased_region_snapshot(true);
-        let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+        let effects = state.cancel_request(child, &CancelReason::user("drain"), None);
+        let (_tasks, wake_effects) = effects.into_parts();
 
         let _ = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
         let before = state.read_biased_region_snapshot_stats();
@@ -14809,6 +16069,7 @@ mod tests {
             after.fallback_scans
         );
 
+        wake_effects.dispatch();
         crate::test_complete!("read_biased_region_snapshot_invalidation_forces_fallback_scan");
     }
 
@@ -14825,8 +16086,11 @@ mod tests {
             draining_regions.push(child);
         }
         state.set_read_biased_region_snapshot(true);
+        let mut cancel_wakes = Vec::new();
         for child in draining_regions {
-            let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+            let effects = state.cancel_request(child, &CancelReason::user("drain"), None);
+            let (_tasks, wake_effects) = effects.into_parts();
+            cancel_wakes.push(wake_effects);
         }
 
         let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
@@ -14850,6 +16114,9 @@ mod tests {
             stats.fallback_scans >= 1
         );
 
+        for wake_effects in cancel_wakes {
+            wake_effects.dispatch();
+        }
         crate::test_complete!("read_biased_region_snapshot_write_heavy_mix_falls_back_to_scan");
     }
 
@@ -15103,10 +16370,16 @@ mod tests {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
         state.set_read_biased_region_snapshot(enable_read_biased_path);
+        let mut cancel_wakes = Vec::new();
         for _ in 0..draining_regions {
             let child = create_child_region(&mut state, root);
             let _grandchild = create_child_region(&mut state, child);
-            let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+            let effects = state.cancel_request(child, &CancelReason::user("drain"), None);
+            let (_tasks, wake_effects) = effects.into_parts();
+            cancel_wakes.push(wake_effects);
+        }
+        for wake_effects in cancel_wakes {
+            wake_effects.dispatch();
         }
         state
     }
