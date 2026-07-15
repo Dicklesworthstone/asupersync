@@ -46,7 +46,8 @@ pub struct Framed<T, U> {
     ///
     /// Mirrors [`FramedRead`](crate::codec::FramedRead)'s cap (default
     /// [`DEFAULT_MAX_BUFFER_LEN`](crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN)
-    /// = 8 MiB); `0` disables enforcement (br-asupersync-bj427s).
+    /// = an 8 MiB payload plus four-byte length prefix); `0` disables
+    /// enforcement (br-asupersync-bj427s).
     max_buffer_len: usize,
     /// Set once the read half surfaces an `Err` (decode, `decode_eof`, or IO).
     ///
@@ -217,9 +218,21 @@ where
                 };
             }
 
-            // Read more data.
+            // br-asupersync-yf1bg1: cap each ordinary read at the remaining
+            // buffer capacity so transport batching cannot turn several
+            // legal frames into one apparent oversized partial frame. At
+            // exact capacity, a one-byte probe distinguishes EOF and IO
+            // errors from actual over-cap growth without using a zero-length
+            // ReadBuf (which would report zero progress even with data ready).
+            let read_len = if this.max_buffer_len == 0 {
+                READ_BUF_SIZE
+            } else {
+                this.max_buffer_len
+                    .saturating_sub(this.read_buf.len())
+                    .clamp(1, READ_BUF_SIZE)
+            };
             let mut tmp = [0u8; READ_BUF_SIZE];
-            let mut read_buf = ReadBuf::new(&mut tmp);
+            let mut read_buf = ReadBuf::new(&mut tmp[..read_len]);
 
             match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
                 Poll::Pending => return Poll::Pending,
@@ -349,7 +362,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::codec::{LinesCodec, LinesCodecError};
+    use crate::codec::{LengthDelimitedCodec, LinesCodec, LinesCodecError};
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -621,12 +634,76 @@ mod tests {
     }
 
     #[test]
+    fn framed_decodes_coalesced_frames_at_per_frame_cap() {
+        let transport = DuplexBuf::new(b"a\nb\nc\n");
+        let mut framed = Framed::new(transport, LinesCodec::new()).with_max_buffer_len(2);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for expected in ["a", "b", "c"] {
+            let poll = Pin::new(&mut framed).poll_next(&mut cx);
+            assert!(
+                matches!(&poll, Poll::Ready(Some(Ok(line))) if line == expected),
+                "expected line {expected:?}, got {poll:?}"
+            );
+            assert!(framed.read_buffer().len() <= 2);
+        }
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn framed_exact_cap_eof_frame_reaches_decode_eof() {
+        let transport = DuplexBuf::new(b"tail");
+        let mut framed = Framed::new(transport, LinesCodec::new()).with_max_buffer_len(4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref line))) if line == "tail"));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn framed_exact_cap_probe_preserves_io_error() {
+        let transport = ErrorDuplex::new(io::ErrorKind::ConnectionReset);
+        let mut framed = Framed::new(transport, LinesCodec::new()).with_max_buffer_len(4);
+        framed.read_buf.extend_from_slice(b"tail");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(
+            poll,
+            Poll::Ready(Some(Err(LinesCodecError::Io(ref error))))
+                if error.kind() == io::ErrorKind::ConnectionReset
+        ));
+        assert_eq!(framed.read_buffer(), b"tail".as_slice());
+    }
+
+    #[test]
+    fn framed_default_max_buffer_len_accommodates_lengthdelimited_header() {
+        let transport = DuplexBuf::new(b"");
+        let framed = Framed::new(transport, LengthDelimitedCodec::new());
+        assert_eq!(
+            framed.max_buffer_len(),
+            crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN
+        );
+        assert_eq!(framed.max_buffer_len(), 8 * 1024 * 1024 + 4);
+    }
+
+    #[test]
     fn framed_rejects_buffer_growth_past_max_buffer_len_then_poisons() {
         // br-asupersync-bj427s + br-asupersync-3asq77: 256 bytes of 'A' with
         // no newline → LinesCodec never frames, so without the cap the buffer
-        // grows unbounded. Cap at 64 → the first read trips the cap and
-        // surfaces InvalidData; the read half is then poisoned so a re-poll
-        // returns None instead of re-emitting the same error forever.
+        // grows unbounded. Cap at 64 → retain the cap, then a one-byte probe
+        // trips InvalidData; the read half is poisoned so a re-poll returns
+        // None instead of re-emitting the same error forever.
         let payload: Vec<u8> = vec![b'A'; 256];
         let transport = DuplexBuf::new(&payload);
         let mut framed = Framed::new(transport, LinesCodec::new()).with_max_buffer_len(64);
@@ -645,12 +722,9 @@ mod tests {
             }
             other => panic!("expected InvalidData from max_buffer_len, got {other:?}"),
         }
-        // Pre-append check: the buffer never crosses the cap.
-        assert!(
-            framed.read_buffer().len() <= 64,
-            "buffer crossed the cap before enforcement (len={})",
-            framed.read_buffer().len()
-        );
+        // The probe byte is never appended, so retained memory stops exactly
+        // at the configured cap.
+        assert_eq!(framed.read_buffer().len(), 64);
         // Poisoned: subsequent polls return None, not a re-emitted error.
         let next = Pin::new(&mut framed).poll_next(&mut cx);
         assert!(

@@ -22,16 +22,16 @@ const MAX_READ_PASSES_PER_POLL: usize = 32;
 /// Default upper bound, in bytes, on the partial-frame buffer
 /// retained across `poll_next` calls.
 ///
-/// 8 MiB matches `LengthDelimitedCodec`'s default `max_frame_length`,
-/// so the cap accommodates a single max-size frame mid-flight per
-/// FramedRead. Without this bound, a slowloris-style attacker can
+/// 8 MiB plus the default four-byte length prefix accommodates one
+/// `LengthDelimitedCodec` frame at its default `max_frame_length`.
+/// Without this bound, a slowloris-style attacker can
 /// stream just under `max_frame_length` bytes per connection without
 /// ever producing a complete frame; the buffer grows monotonically
 /// per connection and, multiplied by concurrent connections, exhausts
 /// server memory. The cooperative `MAX_READ_PASSES_PER_POLL` budget
 /// only yields the executor — it does NOT free the buffer.
 /// (br-asupersync-bj427s.)
-pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024 + 4;
 
 /// Async framed reader that applies a `Decoder` to an `AsyncRead` source.
 ///
@@ -47,8 +47,9 @@ pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024;
 /// # Memory bound (security)
 ///
 /// Each instance carries a `max_buffer_len` cap (default
-/// [`DEFAULT_MAX_BUFFER_LEN`] = 8 MiB). When inbound bytes would push
-/// the partial-frame buffer past this cap, `poll_next` yields
+/// [`DEFAULT_MAX_BUFFER_LEN`] = an 8 MiB payload plus four-byte length
+/// prefix). When inbound bytes would push the partial-frame buffer past
+/// this cap, `poll_next` yields
 /// `Err(InvalidData)` rather than appending — the caller MUST treat
 /// the FramedRead as terminated. Without this bound, a peer that
 /// streams bytes without ever closing a frame causes unbounded
@@ -101,7 +102,8 @@ impl<R, D> FramedRead<R, D> {
     /// yields `Err(InvalidData)` rather than appending. A value of `0`
     /// disables enforcement entirely (matches the no-cap convention
     /// used elsewhere in this crate). Defaults to
-    /// [`DEFAULT_MAX_BUFFER_LEN`] = 8 MiB.
+    /// [`DEFAULT_MAX_BUFFER_LEN`] = an 8 MiB payload plus four-byte
+    /// length prefix.
     /// (br-asupersync-bj427s.)
     #[must_use]
     pub fn with_max_buffer_len(mut self, max: usize) -> Self {
@@ -214,9 +216,23 @@ where
                 };
             }
 
-            // Read more data from the underlying reader.
+            // br-asupersync-yf1bg1: cap each ordinary read at the remaining
+            // buffer capacity. This makes framing invariant to transport
+            // batching: one read containing several legal frames can no
+            // longer be rejected as though it were one oversized partial
+            // frame. At exact capacity, offer a one-byte probe rather than a
+            // zero-length ReadBuf: EOF must still reach decode_eof, IO errors
+            // retain precedence, and a real extra byte takes the existing
+            // over-cap error path below.
+            let read_len = if this.max_buffer_len == 0 {
+                READ_BUF_SIZE
+            } else {
+                this.max_buffer_len
+                    .saturating_sub(this.buffer.len())
+                    .clamp(1, READ_BUF_SIZE)
+            };
             let mut tmp = [0u8; READ_BUF_SIZE];
-            let mut read_buf = ReadBuf::new(&mut tmp);
+            let mut read_buf = ReadBuf::new(&mut tmp[..read_len]);
 
             match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
                 Poll::Pending => return Poll::Pending,
@@ -294,7 +310,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::codec::{LinesCodec, LinesCodecError};
+    use crate::codec::{LengthDelimitedCodec, LinesCodec, LinesCodecError};
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -565,12 +581,12 @@ mod tests {
     // partial-frame memory exhaustion.
 
     #[test]
-    fn framed_read_default_max_buffer_len_matches_lengthdelimited_default() {
+    fn framed_read_default_max_buffer_len_accommodates_lengthdelimited_header() {
         let reader = SliceReader::new(b"");
-        let framed: FramedRead<SliceReader, LinesCodec> =
-            FramedRead::new(reader, LinesCodec::new());
+        let framed: FramedRead<SliceReader, LengthDelimitedCodec> =
+            FramedRead::new(reader, LengthDelimitedCodec::new());
         assert_eq!(framed.max_buffer_len(), DEFAULT_MAX_BUFFER_LEN);
-        assert_eq!(framed.max_buffer_len(), 8 * 1024 * 1024);
+        assert_eq!(framed.max_buffer_len(), 8 * 1024 * 1024 + 4);
     }
 
     #[test]
@@ -590,11 +606,70 @@ mod tests {
     }
 
     #[test]
+    fn framed_read_decodes_coalesced_frames_at_per_frame_cap() {
+        // Each encoded line is exactly two bytes, matching the cap. A single
+        // transport read may coalesce all three; enforcement must apply to
+        // the undecoded partial frame, not the aggregate read batch.
+        let reader = SliceReader::new(b"a\nb\nc\n");
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(2);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for expected in ["a", "b", "c"] {
+            let poll = Pin::new(&mut framed).poll_next(&mut cx);
+            assert!(
+                matches!(&poll, Poll::Ready(Some(Ok(line))) if line == expected),
+                "expected line {expected:?}, got {poll:?}"
+            );
+            assert!(framed.read_buffer().len() <= 2);
+        }
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn framed_read_exact_cap_eof_frame_reaches_decode_eof() {
+        // LinesCodec accepts a final line without a delimiter at EOF. Once
+        // the buffer reaches the cap, the one-byte probe must observe EOF
+        // rather than rejecting an exact-cap legal frame.
+        let reader = SliceReader::new(b"tail");
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref line))) if line == "tail"));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn framed_read_exact_cap_probe_preserves_io_error() {
+        let reader = ErrorReader::new(io::ErrorKind::ConnectionReset);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(4);
+        framed.buffer.extend_from_slice(b"tail");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(
+            poll,
+            Poll::Ready(Some(Err(LinesCodecError::Io(ref error))))
+                if error.kind() == io::ErrorKind::ConnectionReset
+        ));
+        assert_eq!(framed.read_buffer(), b"tail".as_slice());
+    }
+
+    #[test]
     fn framed_read_rejects_buffer_growth_past_max_buffer_len() {
         // Reader serves 256 bytes of "A" with NO newline → LinesCodec
         // never produces a frame, so without the cap the buffer would
-        // accumulate forever. Cap at 64 bytes — the first read of 256
-        // bytes must trip the cap and surface InvalidData.
+        // accumulate forever. Cap at 64 bytes — retain exactly the cap,
+        // then let the one-byte probe prove the peer is still growing it.
         let payload: Vec<u8> = vec![b'A'; 256];
         let reader = SliceReader::new(&payload);
         let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(64);
@@ -617,13 +692,9 @@ mod tests {
             }
             other => panic!("expected InvalidData from max_buffer_len enforcement, got {other:?}"),
         }
-        // The buffer must NOT have crossed the cap — the check is
-        // pre-append, so we never allocate over-the-cap memory.
-        assert!(
-            framed.read_buffer().len() <= 64,
-            "buffer crossed the cap before enforcement fired (len={})",
-            framed.read_buffer().len()
-        );
+        // The probe byte is never appended, so retained memory stops exactly
+        // at the configured cap.
+        assert_eq!(framed.read_buffer().len(), 64);
     }
 
     #[test]
