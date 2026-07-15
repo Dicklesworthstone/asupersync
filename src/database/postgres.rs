@@ -1510,24 +1510,33 @@ enum BackendMessage {
 /// Buffer for building protocol messages.
 struct MessageBuffer {
     buf: Vec<u8>,
+    /// Set when a caller supplied a string containing an embedded NUL to
+    /// [`MessageBuffer::write_cstring`]. Because a PostgreSQL C-string cannot
+    /// carry an interior NUL, the buffer is "poisoned" and the finalizing
+    /// `build_*` call fails closed rather than emitting a truncated,
+    /// injection-prone message.
+    nul_error: Option<String>,
 }
 
 impl MessageBuffer {
     fn new() -> Self {
         Self {
             buf: Vec::with_capacity(256),
+            nul_error: None,
         }
     }
 
     fn with_capacity(cap: usize) -> Self {
         Self {
             buf: Vec::with_capacity(cap),
+            nul_error: None,
         }
     }
 
     #[cfg(test)]
     fn clear(&mut self) {
         self.buf.clear();
+        self.nul_error = None;
     }
 
     fn write_byte(&mut self, b: u8) {
@@ -1547,15 +1556,25 @@ impl MessageBuffer {
     }
 
     fn write_cstring(&mut self, s: &str) {
-        // Prevent protocol injection: if the string contains an embedded NUL,
-        // only write up to the first NUL byte (matching PostgreSQL server
-        // C-string semantics). This avoids a mismatch where the client thinks
-        // it sent one string but the server sees a truncated version followed
-        // by attacker-controlled bytes.
+        // Prevent protocol injection: a PostgreSQL C-string is NUL-terminated,
+        // so a caller-supplied embedded NUL cannot be represented. The previous
+        // behavior truncated at the first NUL and continued, guarded only by a
+        // `debug_assert!` — meaning release builds silently emitted a truncated
+        // string followed by whatever bytes trailed the NUL (a
+        // truncation-injection hazard). Instead, poison the buffer so the
+        // finalizing `build_message` / `build_startup_message` fails closed with
+        // an error in both debug and release builds. Nothing is appended for the
+        // offending field, keeping the poisoned buffer unambiguous.
         let bytes = s.as_bytes();
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        debug_assert!(end == bytes.len(), "embedded NUL in C-string: {s:?}");
-        self.buf.extend_from_slice(&bytes[..end]);
+        if let Some(pos) = bytes.iter().position(|&b| b == 0) {
+            if self.nul_error.is_none() {
+                self.nul_error = Some(format!(
+                    "C-string contains embedded NUL byte at offset {pos}"
+                ));
+            }
+            return;
+        }
+        self.buf.extend_from_slice(bytes);
         self.buf.push(0);
     }
 
@@ -1572,6 +1591,9 @@ impl MessageBuffer {
 
     /// Build a typed message with length prefix.
     fn build_message(&mut self, msg_type: u8) -> Result<Vec<u8>, PgError> {
+        if let Some(err) = &self.nul_error {
+            return Err(PgError::Protocol(err.clone()));
+        }
         // PostgreSQL protocol uses i32 for message length. Guard against
         // overflow for pathologically large messages (> 2 GiB payload).
         let payload_len = self.buf.len().saturating_add(4); // +4 for length field
@@ -1587,6 +1609,9 @@ impl MessageBuffer {
 
     /// Build a startup message (no type byte, includes protocol version).
     fn build_startup_message(&mut self) -> Result<Vec<u8>, PgError> {
+        if let Some(err) = &self.nul_error {
+            return Err(PgError::Protocol(err.clone()));
+        }
         let payload_len = self.buf.len().saturating_add(4);
         let len: i32 = i32::try_from(payload_len).map_err(|_| {
             PgError::Protocol("message payload exceeds PostgreSQL 2 GiB limit".into())
@@ -1901,13 +1926,17 @@ impl ScramAuth {
         let salt = salt.ok_or_else(|| PgError::AuthenticationFailed("missing salt".to_string()))?;
         let iterations = iterations
             .ok_or_else(|| PgError::AuthenticationFailed("missing iterations".to_string()))?;
-        // Reject unreasonable iteration counts to prevent DoS from a malicious
-        // server. Real PostgreSQL uses 4096; anything above 600,000 is suspicious
-        // and would cause multi-second PBKDF2 computation.
+        // Reject unreasonable iteration counts. On the low end, a malicious (or
+        // MITM-downgraded) server can weaken the PBKDF2 stretch by advertising a
+        // tiny iteration count, making an offline dictionary attack on the
+        // password cheap. RFC 5802 / RFC 7677 and real PostgreSQL use 4096, so
+        // refuse anything below that floor. On the high end, counts above 600,000
+        // are suspicious and would cause multi-second PBKDF2 computation (DoS).
+        const MIN_PBKDF2_ITERATIONS: u32 = 4096;
         const MAX_PBKDF2_ITERATIONS: u32 = 600_000;
-        if iterations == 0 || iterations > MAX_PBKDF2_ITERATIONS {
+        if iterations < MIN_PBKDF2_ITERATIONS || iterations > MAX_PBKDF2_ITERATIONS {
             return Err(PgError::AuthenticationFailed(format!(
-                "SCRAM iteration count {iterations} outside safe range 1..={MAX_PBKDF2_ITERATIONS}"
+                "SCRAM iteration count {iterations} outside safe range {MIN_PBKDF2_ITERATIONS}..={MAX_PBKDF2_ITERATIONS}"
             )));
         }
 
@@ -3846,11 +3875,12 @@ impl PgConnection {
                             //     from the leaf cert. This is the strongest
                             //     posture and binds auth to the TLS channel.
                             //   * If TLS is in use but the server did NOT
-                            //     advertise -PLUS, use SCRAM-SHA-256 with
-                            //     `n,,` GS2. Several Postgres poolers reject
-                            //     the `y,,` supported-but-not-used signal;
-                            //     libpq/common drivers use the plain SCRAM
-                            //     path for this case.
+                            //     advertise -PLUS, use SCRAM-SHA-256 with the
+                            //     `y,,` supported-but-not-used GS2 header
+                            //     (RFC 5802 §6). This is channel-binding
+                            //     downgrade detection: a MITM that stripped
+                            //     -PLUS is caught because the genuine server
+                            //     would have offered it and aborts on `y,,`.
                             //   * Otherwise (plain TCP), use SCRAM-SHA-256
                             //     with `n,,` GS2 (no CB).
                             let cb = Self::pick_scram_channel_binding(
@@ -3958,10 +3988,14 @@ impl PgConnection {
                     cbind_data: tls_server_end_point_cbind(&cert),
                 }
             } else {
-                // TLS is in use but the server did not advertise -PLUS.
-                // Some Postgres poolers reject the `y,,` GS2 signal, so
-                // use plain SCRAM like libpq/common drivers.
-                ScramChannelBinding::None
+                // TLS is in use but the server did not advertise -PLUS. Per
+                // RFC 5802 §6, a channel-binding-capable client MUST send the
+                // `y,,` GS2 header in this case (SupportedNotUsed). If a MITM
+                // stripped -PLUS from the advertised mechanism list, the real
+                // server — which would have offered -PLUS — sees the `y,,`
+                // signal and aborts, making the downgrade detectable. Emitting
+                // plain `n,,` here would silently mask that attack.
+                ScramChannelBinding::SupportedNotUsed
             });
         }
 
@@ -9589,8 +9623,9 @@ mod tests {
     ///
     /// Verifies that when the server offers SCRAM-SHA-256-PLUS, the client
     /// chooses PLUS with channel binding. When a TLS server offers only plain
-    /// SCRAM-SHA-256, the client follows libpq/common-driver behavior and uses
-    /// the plain `n,,` GS2 header for pooler compatibility.
+    /// SCRAM-SHA-256, the client sends the `y,,` supported-but-not-used GS2
+    /// header (RFC 5802 §6) so a channel-binding downgrade by a MITM that
+    /// stripped -PLUS is detectable by the genuine server.
     #[test]
     fn audit_scram_channel_binding_preference_and_pooler_compatibility() {
         // Test 1: TLS active + server offers both → should choose PLUS
@@ -9616,7 +9651,8 @@ mod tests {
             );
         }
 
-        // Test 2: TLS active + server offers only SHA-256 → use plain SCRAM for pooler compatibility.
+        // Test 2: TLS active + server offers only SHA-256 → send `y,,`
+        // (supported-but-not-used) for channel-binding downgrade detection.
         #[cfg(feature = "tls")]
         {
             let mechanisms_no_plus = vec!["SCRAM-SHA-256".to_string()];
@@ -9627,7 +9663,7 @@ mod tests {
                 true, // TLS active
                 Some(der_prefix_cert),
             )
-            .expect("should use plain SCRAM");
+            .expect("should select supported-but-not-used SCRAM");
 
             assert_eq!(
                 result.mechanism(),
@@ -9635,10 +9671,14 @@ mod tests {
                 "RFC 7677: When TLS active but server doesn't offer PLUS, use SHA-256"
             );
             match &result {
-                ScramChannelBinding::None => {
-                    assert_eq!(result.gs2_header(), "n,,");
+                ScramChannelBinding::SupportedNotUsed => {
+                    assert_eq!(
+                        result.gs2_header(),
+                        "y,,",
+                        "RFC 5802 §6: TLS without -PLUS must send `y,,` for downgrade detection"
+                    );
                 }
-                _ => panic!("Expected None for pooler-compatible plain SCRAM"),
+                _ => panic!("Expected SupportedNotUsed (`y,,`) for TLS without -PLUS"),
             }
         }
 

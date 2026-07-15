@@ -2445,12 +2445,31 @@ impl MySqlConnection {
 
     #[inline]
     const fn client_handshake_response_capabilities(connects_with_db: bool) -> u32 {
+        // SECURITY: CLIENT_MULTI_RESULTS is deliberately NOT advertised.
+        //
+        // Advertising it lets the server return multiple result sets for a
+        // single COM_QUERY — e.g. a stored-procedure `CALL proc()`, which is
+        // reachable through the public `query()` path (it passes
+        // `validate_sql_security`). Both COM_QUERY read paths — the collecting
+        // `read_result_set` and the `query_stream` iterator — consume exactly
+        // ONE result set and its terminating OK/EOF, and nothing in this driver
+        // ever inspects the `SERVER_MORE_RESULTS_EXISTS` (0x0008) status-flag
+        // bit. Any additional result sets plus the trailing status OK packet
+        // would therefore be left undrained in the socket. On connection reuse
+        // the next command reads that stale packet and, whenever the leftover
+        // packet's 8-bit sequence id happens to match the expected value,
+        // accepts it as its own response => silent wrong-result corruption.
+        //
+        // By not advertising the capability the server rejects a
+        // result-set-returning CALL with a clean error (ER_SP_BADSELECT, 1312)
+        // instead of streaming extra result sets, so the connection can never
+        // desync. CLIENT_PS_MULTI_RESULTS is likewise not advertised, which
+        // protects the prepared-statement (COM_STMT_EXECUTE) path the same way.
         let mut client_caps = capability::CLIENT_PROTOCOL_41
             | capability::CLIENT_SECURE_CONNECTION
             | capability::CLIENT_PLUGIN_AUTH
             | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
-            | capability::CLIENT_TRANSACTIONS
-            | capability::CLIENT_MULTI_RESULTS;
+            | capability::CLIENT_TRANSACTIONS;
 
         if connects_with_db {
             client_caps |= capability::CLIENT_CONNECT_WITH_DB;
@@ -7750,6 +7769,42 @@ mod tests {
             capability::CLIENT_PROTOCOL_41
         );
         assert_eq!(negotiated & capability::CLIENT_DEPRECATE_EOF, 0);
+    }
+
+    #[test]
+    fn handshake_response_does_not_advertise_multi_results() {
+        // Regression (asupersync-mysql-multi-results-dirty-4aeorh):
+        // advertising CLIENT_MULTI_RESULTS lets the server return multiple
+        // result sets for one COM_QUERY (e.g. a stored-procedure `CALL`). Both
+        // COM_QUERY read paths consume exactly one result set, so the extra
+        // sets and the trailing status OK would be left undrained in the socket
+        // and later mis-read as another command's response => silent
+        // wrong-result corruption. The capability must never be advertised —
+        // with or without a connect-time database — and AND-based negotiation
+        // must never re-enable it even when the server offers it.
+        for connects_with_db in [false, true] {
+            let client_caps =
+                MySqlConnection::client_handshake_response_capabilities(connects_with_db);
+            assert_eq!(
+                client_caps & capability::CLIENT_MULTI_RESULTS,
+                0,
+                "CLIENT_MULTI_RESULTS must not be advertised (connects_with_db={connects_with_db})"
+            );
+            assert_eq!(
+                client_caps & capability::CLIENT_PS_MULTI_RESULTS,
+                0,
+                "CLIENT_PS_MULTI_RESULTS must not be advertised (connects_with_db={connects_with_db})"
+            );
+
+            // Even a server offering every capability must not cause the
+            // AND-based negotiation to enable multi-result handling.
+            let negotiated = MySqlConnection::negotiated_capabilities(u32::MAX, client_caps);
+            assert_eq!(
+                negotiated & capability::CLIENT_MULTI_RESULTS,
+                0,
+                "negotiation must not enable CLIENT_MULTI_RESULTS (connects_with_db={connects_with_db})"
+            );
+        }
     }
 
     #[test]

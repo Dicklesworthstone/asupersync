@@ -601,13 +601,24 @@ impl std::hash::Hash for BytesMut {
 impl BufMut for BytesMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
-        usize::MAX - self.len()
+        // `chunk_mut` cannot hand out writable spare capacity safely (that would
+        // require exposing uninitialized bytes), so this buffer grows only
+        // through the `put_slice` override below. Report `0` writable bytes to
+        // keep the required-method trio self-consistent: a generic BufMut
+        // consumer that drives `remaining_mut` / `chunk_mut` / `advance_mut`
+        // directly (e.g. a readv-into-spare-capacity path, or the default
+        // `put_slice`) would otherwise see `usize::MAX - len` here, get an empty
+        // slice from `chunk_mut`, and panic ("chunk_mut returned empty with
+        // remaining_mut() > 0"). Direct writes via `put_slice`/`put_u*` are
+        // unaffected because they bypass `chunk_mut` entirely.
+        0
     }
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut [u8] {
-        // For BytesMut, we grow dynamically via put_slice
-        // Return an empty slice since we handle growth in put_slice
+        // For BytesMut, we grow dynamically via the put_slice override; there is
+        // no pre-initialized writable window to expose. Consistent with
+        // remaining_mut() == 0 and advance_mut(cnt == 0).
         &mut []
     }
 

@@ -646,19 +646,20 @@ async fn wait_consumer_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), Kaf
 }
 
 #[cfg(feature = "kafka")]
-async fn retry_consumer_operation<T, F>(
+async fn retry_consumer_operation<T, F, Fut>(
     cx: &Cx,
     config: &ConsumerConfig,
     mut attempt_operation: F,
 ) -> Result<T, KafkaError>
 where
-    F: FnMut() -> Result<T, KafkaError>,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, KafkaError>>,
 {
     let mut attempt = 0;
     loop {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
-        match attempt_operation() {
+        match attempt_operation().await {
             Ok(value) => return Ok(value),
             Err(err) if err.is_retryable() && attempt < config.retries => {
                 let delay = consumer_retry_backoff(config, attempt);
@@ -1339,31 +1340,29 @@ impl KafkaConsumer {
             let config = &self.config;
 
             retry_consumer_operation(cx, config, || {
-                let commit_batch = &commit_batch;
-                let consumer = &consumer;
-                let broker_ops = &broker_ops;
+                // Clone owned handles per attempt so the synchronous
+                // `commit(CommitMode::Sync)` runs on the blocking pool via a
+                // `'static` closure (matching subscribe/poll/etc.) instead of
+                // pinning the executor worker thread through
+                // `thread::scope().join()` for the full broker round-trip.
+                let commit_batch = commit_batch.clone();
+                let consumer = Arc::clone(&consumer);
+                let broker_ops = Arc::clone(&broker_ops);
 
-                // Use sync spawn_blocking to perform the commit with retry
-                std::thread::scope(|scope| {
-                    scope
-                        .spawn(|| {
-                            let _guard = broker_ops.lock();
-                            let mut tpl = TopicPartitionList::new();
-                            for ((topic, partition), offset) in commit_batch {
-                                tpl.add_partition_offset(
-                                    topic,
-                                    *partition,
-                                    Offset::Offset(*offset),
-                                )
+                async move {
+                    crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+                        let _guard = broker_ops.lock();
+                        let mut tpl = TopicPartitionList::new();
+                        for ((topic, partition), offset) in &commit_batch {
+                            tpl.add_partition_offset(topic, *partition, Offset::Offset(*offset))
                                 .map_err(map_consumer_error)?;
-                            }
-                            consumer
-                                .commit(&tpl, CommitMode::Sync)
-                                .map_err(map_consumer_error)
-                        })
-                        .join()
-                        .unwrap()
-                })
+                        }
+                        consumer
+                            .commit(&tpl, CommitMode::Sync)
+                            .map_err(map_consumer_error)
+                    })
+                    .await
+                }
             })
             .await?;
         }

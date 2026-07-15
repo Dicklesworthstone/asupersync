@@ -138,9 +138,17 @@ impl TaskDetails {
     /// idle-time sample exists yet, only classify old tasks that have never
     /// been polled as potentially stuck so long-lived waiting tasks are not
     /// misreported just because they are old.
+    ///
+    /// A pending wake does NOT short-circuit the staleness check. Treating
+    /// `wake_pending` as an automatic "not stuck" blinded the detector exactly
+    /// when the scheduler is the wedged component: a task can sit with a wake
+    /// queued indefinitely if the executor never re-polls it, and that is
+    /// precisely the situation this heuristic exists to surface. A wake that was
+    /// delivered but not serviced within `age_threshold` is therefore still
+    /// flagged.
     #[must_use]
     pub fn is_potentially_stuck(&self, age_threshold: Duration) -> bool {
-        if self.is_terminal() || self.wake_pending {
+        if self.is_terminal() {
             return false;
         }
 

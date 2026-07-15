@@ -400,20 +400,25 @@ impl LogicalTime {
     /// Compares two logical times for causal ordering.
     ///
     /// Returns the causal relationship between `self` and `other`.
-    /// For Lamport/Hybrid clocks this is derived from total/partial order;
-    /// for vector clocks this uses the vector clock causal order directly.
     ///
-    /// Returns `CausalOrder::Concurrent` if the clock types differ.
+    /// Only vector clocks can establish true happens-before: their componentwise
+    /// partial order *is* the causality relation, so it is reported directly.
+    ///
+    /// Scalar Lamport / Hybrid clocks cannot. They guarantee only the forward
+    /// implication `a → b ⟹ counter(a) < counter(b)`; the converse does not
+    /// hold. A bare counter comparison therefore never establishes causal order:
+    /// `counter(a) < counter(b)` is fully consistent with `a` and `b` being
+    /// concurrent, and equal counters do not mean the two events are the same
+    /// (distinct concurrent events routinely share a Lamport counter). Mapping
+    /// those comparisons onto `Before`/`After`/`Equal` asserted causality the
+    /// clock cannot support, so for scalar clocks — and for mismatched clock
+    /// kinds — we honestly report the relationship as undetermined
+    /// (`CausalOrder::Concurrent`) rather than fabricate a happens-before edge.
     #[must_use]
     pub fn causal_order(&self, other: &Self) -> CausalOrder {
         match (self, other) {
             (Self::Vector(a), Self::Vector(b)) => a.causal_order(b),
-            _ => match self.partial_cmp(other) {
-                Some(std::cmp::Ordering::Less) => CausalOrder::Before,
-                Some(std::cmp::Ordering::Greater) => CausalOrder::After,
-                Some(std::cmp::Ordering::Equal) => CausalOrder::Equal,
-                None => CausalOrder::Concurrent,
-            },
+            _ => CausalOrder::Concurrent,
         }
     }
 }
@@ -580,11 +585,35 @@ impl TimeSource for TimerDriverSource {
 /// - `a ≤ b` iff `∀ node: a[node] ≤ b[node]`
 /// - `a < b` (happens-before) iff `a ≤ b` and `a ≠ b`
 /// - `a ∥ b` (concurrent) iff `¬(a ≤ b)` and `¬(b ≤ a)`
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct VectorClock {
     /// BTreeMap for deterministic iteration order.
     entries: BTreeMap<NodeId, u64>,
 }
+
+/// Equality treats an absent node the same as a node mapped to `0`.
+///
+/// The derived `PartialEq` compared the backing maps structurally, so a clock
+/// that carries an explicit zero entry (e.g. `{"A": 0}` materialized by a
+/// deserialization round-trip) was `!=` an empty clock `{}`. That diverged from
+/// [`VectorClock::partial_cmp`] / [`VectorClock::causal_order`], which read
+/// missing counters as `0` via [`VectorClock::get`] and report the two clocks as
+/// `Equal`. The mismatch broke `Ord`/`Eq` coherence (`a == b` no longer implied
+/// `partial_cmp(a, b) == Some(Equal)`). This manual implementation restores the
+/// invariant by comparing every key that appears in either clock under the same
+/// absent-is-zero rule the ordering uses.
+impl PartialEq for VectorClock {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries
+            .keys()
+            .chain(other.entries.keys())
+            .all(|node| self.get(node) == other.get(node))
+    }
+}
+
+// Absent-is-zero equality is a genuine equivalence relation (reflexive,
+// symmetric, transitive), so `Eq` remains sound.
+impl Eq for VectorClock {}
 
 impl VectorClock {
     /// Creates an empty vector clock (all components zero).

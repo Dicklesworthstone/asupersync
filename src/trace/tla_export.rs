@@ -102,15 +102,26 @@ impl fmt::Display for TlaObligationState {
     }
 }
 
+/// A `(arena index, generation)` key that uniquely identifies a snapshot
+/// entity across arena slot reuse.
+///
+/// Keying the TLA+ domains on this pair — rather than the bare
+/// `ArenaIndex::index()` — keeps distinct generations distinct domain elements.
+/// Otherwise a reused slot (task `5` gen `0` completes, then task `5` gen `1`
+/// spawns) would alias two distinct entities onto one key, and invariants like
+/// `QuiescenceOnClose` could pass *vacuously* because one entity silently
+/// overwrote the other in the map.
+pub type EntityKey = (u32, u32);
+
 /// A snapshot of the runtime state for TLA+ export.
 #[derive(Debug, Clone)]
 pub struct TlaStateSnapshot {
-    /// Task states.
-    pub tasks: BTreeMap<u32, (TlaTaskState, u32)>, // task_index -> (state, region_index)
-    /// Region states.
-    pub regions: BTreeMap<u32, (TlaRegionState, Option<u32>)>, // region_index -> (state, parent)
-    /// Obligation states.
-    pub obligations: BTreeMap<u32, (TlaObligationState, u32, u32)>, // obl_index -> (state, task, region)
+    /// Task states: `(task index, gen) -> (state, (region index, gen))`.
+    pub tasks: BTreeMap<EntityKey, (TlaTaskState, EntityKey)>,
+    /// Region states: `(region index, gen) -> (state, parent (index, gen))`.
+    pub regions: BTreeMap<EntityKey, (TlaRegionState, Option<EntityKey>)>,
+    /// Obligation states: `(obl index, gen) -> (state, task key, region key)`.
+    pub obligations: BTreeMap<EntityKey, (TlaObligationState, EntityKey, EntityKey)>,
     /// Virtual time in nanoseconds.
     pub time_nanos: u64,
     /// Step counter.
@@ -134,52 +145,54 @@ impl TlaStateSnapshot {
 
         match (&event.kind, &event.data) {
             (TraceEventKind::Spawn, TraceData::Task { task, region }) => {
-                self.tasks
-                    .insert(task.0.index(), (TlaTaskState::Spawned, region.0.index()));
+                self.tasks.insert(
+                    arena_key(task.0),
+                    (TlaTaskState::Spawned, arena_key(region.0)),
+                );
             }
             (TraceEventKind::Schedule, TraceData::Task { task, .. }) => {
-                if let Some(entry) = self.tasks.get_mut(&task.0.index()) {
+                if let Some(entry) = self.tasks.get_mut(&arena_key(task.0)) {
                     entry.0 = TlaTaskState::Scheduled;
                 }
             }
             (TraceEventKind::Poll, TraceData::Task { task, .. }) => {
-                if let Some(entry) = self.tasks.get_mut(&task.0.index()) {
+                if let Some(entry) = self.tasks.get_mut(&arena_key(task.0)) {
                     entry.0 = TlaTaskState::Polling;
                 }
             }
             (TraceEventKind::Yield, TraceData::Task { task, .. }) => {
-                if let Some(entry) = self.tasks.get_mut(&task.0.index()) {
+                if let Some(entry) = self.tasks.get_mut(&arena_key(task.0)) {
                     entry.0 = TlaTaskState::Yielded;
                 }
             }
             (TraceEventKind::Complete, TraceData::Task { task, .. }) => {
-                if let Some(entry) = self.tasks.get_mut(&task.0.index()) {
+                if let Some(entry) = self.tasks.get_mut(&arena_key(task.0)) {
                     entry.0 = TlaTaskState::Completed;
                 }
             }
             (TraceEventKind::CancelAck, TraceData::Cancel { task, .. }) => {
-                if let Some(entry) = self.tasks.get_mut(&task.0.index()) {
+                if let Some(entry) = self.tasks.get_mut(&arena_key(task.0)) {
                     entry.0 = TlaTaskState::Cancelled;
                 }
             }
             (TraceEventKind::RegionCreated, TraceData::Region { region, parent }) => {
                 self.regions.insert(
-                    region.0.index(),
-                    (TlaRegionState::Open, parent.map(|p| p.0.index())),
+                    arena_key(region.0),
+                    (TlaRegionState::Open, parent.map(|p| arena_key(p.0))),
                 );
             }
             (TraceEventKind::RegionCloseBegin, TraceData::Region { region, .. }) => {
-                if let Some(entry) = self.regions.get_mut(&region.0.index()) {
+                if let Some(entry) = self.regions.get_mut(&arena_key(region.0)) {
                     entry.0 = TlaRegionState::Closing;
                 }
             }
             (TraceEventKind::RegionCloseComplete, TraceData::Region { region, .. }) => {
-                if let Some(entry) = self.regions.get_mut(&region.0.index()) {
+                if let Some(entry) = self.regions.get_mut(&arena_key(region.0)) {
                     entry.0 = TlaRegionState::Closed;
                 }
             }
             (TraceEventKind::RegionCancelled, TraceData::RegionCancel { region, .. }) => {
-                if let Some(entry) = self.regions.get_mut(&region.0.index()) {
+                if let Some(entry) = self.regions.get_mut(&arena_key(region.0)) {
                     entry.0 = TlaRegionState::Cancelled;
                 }
             }
@@ -193,26 +206,26 @@ impl TlaStateSnapshot {
                 },
             ) => {
                 self.obligations.insert(
-                    obligation.0.index(),
+                    arena_key(obligation.0),
                     (
                         TlaObligationState::Reserved,
-                        task.0.index(),
-                        region.0.index(),
+                        arena_key(task.0),
+                        arena_key(region.0),
                     ),
                 );
             }
             (TraceEventKind::ObligationCommit, TraceData::Obligation { obligation, .. }) => {
-                if let Some(entry) = self.obligations.get_mut(&obligation.0.index()) {
+                if let Some(entry) = self.obligations.get_mut(&arena_key(obligation.0)) {
                     entry.0 = TlaObligationState::Committed;
                 }
             }
             (TraceEventKind::ObligationAbort, TraceData::Obligation { obligation, .. }) => {
-                if let Some(entry) = self.obligations.get_mut(&obligation.0.index()) {
+                if let Some(entry) = self.obligations.get_mut(&arena_key(obligation.0)) {
                     entry.0 = TlaObligationState::Aborted;
                 }
             }
             (TraceEventKind::ObligationLeak, TraceData::Obligation { obligation, .. }) => {
-                if let Some(entry) = self.obligations.get_mut(&obligation.0.index()) {
+                if let Some(entry) = self.obligations.get_mut(&arena_key(obligation.0)) {
                     entry.0 = TlaObligationState::Leaked;
                 }
             }
@@ -257,6 +270,9 @@ impl TlaExporter {
     /// Export a TLA+ behavior (concrete trace as a sequence of states).
     #[must_use]
     pub fn export_behavior(&self, name: &str) -> TlaModule {
+        // Sanitize so a name with whitespace/newlines/`-` cannot produce an
+        // invalid or injected `---- MODULE ... ----` header.
+        let name = sanitize_module_name(name);
         let mut src = String::new();
         let _ = writeln!(&mut src, "---- MODULE {name} ----");
         src.push_str("EXTENDS Integers, Sequences, TLC\n\n");
@@ -344,15 +360,15 @@ impl TlaExporter {
         src.push_str("Spec == Init /\\ [][Next]_<<tasks, regions, obligations, time, step>>\n\n");
         src.push_str("====\n");
 
-        TlaModule {
-            name: name.to_string(),
-            source: src,
-        }
+        TlaModule { name, source: src }
     }
 
     /// Export a TLA+ spec skeleton (parametric model).
     #[must_use]
     pub fn export_spec_skeleton(name: &str) -> TlaModule {
+        // Sanitize so a name with whitespace/newlines/`-` cannot produce an
+        // invalid or injected `---- MODULE ... ----` header.
+        let name = sanitize_module_name(name);
         let mut src = String::new();
         let _ = writeln!(&mut src, "---- MODULE {name} ----");
         src.push_str("EXTENDS Integers, Sequences, FiniteSets\n\n");
@@ -412,10 +428,7 @@ impl TlaExporter {
         src.push_str("Spec == Init /\\ [][Next]_<<tasks, regions, obligations, time>>\n\n");
         src.push_str("====\n");
 
-        TlaModule {
-            name: name.to_string(),
-            source: src,
-        }
+        TlaModule { name, source: src }
     }
 
     /// Number of state snapshots (trace length + 1 for initial state).
@@ -427,40 +440,98 @@ impl TlaExporter {
 
 // === Formatting helpers ===
 
-fn format_tla_task_map(tasks: &BTreeMap<u32, (TlaTaskState, u32)>) -> String {
+/// Build an [`EntityKey`] (index + generation) from an id's arena index.
+fn arena_key(arena: crate::util::ArenaIndex) -> EntityKey {
+    (arena.index(), arena.generation())
+}
+
+/// Render an [`EntityKey`] as a TLA+ string literal, e.g. `"5.0"`.
+///
+/// Emitting the composite key as a quoted string keeps distinct generations
+/// distinct domain elements and matches the `"NONE"` sentinel already used for
+/// absent parents, so region references and region domains compare on the same
+/// (string) type.
+fn tla_entity_key(key: EntityKey) -> String {
+    format!("\"{}.{}\"", key.0, key.1)
+}
+
+/// Sanitize a caller-supplied name into a valid TLA+ module identifier.
+///
+/// TLA+ module names are identifiers (letters, digits, underscores). An
+/// unsanitized name containing whitespace, a newline, or `-`/`=` would produce
+/// an invalid `---- MODULE ... ----` header or let a crafted name inject spec
+/// syntax. Every character outside `[A-Za-z0-9_]` is replaced with `_`; a
+/// leading digit is prefixed with `_`; an empty/all-invalid name becomes
+/// `Module`.
+fn sanitize_module_name(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        return "Module".to_string();
+    }
+    if out.as_bytes()[0].is_ascii_digit() {
+        out.insert(0, '_');
+    }
+    out
+}
+
+fn format_tla_task_map(tasks: &BTreeMap<EntityKey, (TlaTaskState, EntityKey)>) -> String {
     if tasks.is_empty() {
         return "<<>>".to_string();
     }
     let entries: Vec<String> = tasks
         .iter()
-        .map(|(k, (state, region))| format!("{k} :> <<{state}, {region}>>"))
+        .map(|(k, (state, region))| {
+            format!(
+                "{} :> <<{state}, {}>>",
+                tla_entity_key(*k),
+                tla_entity_key(*region)
+            )
+        })
         .collect();
     format!("({})", entries.join(" @@ "))
 }
 
-fn format_tla_region_map(regions: &BTreeMap<u32, (TlaRegionState, Option<u32>)>) -> String {
+fn format_tla_region_map(
+    regions: &BTreeMap<EntityKey, (TlaRegionState, Option<EntityKey>)>,
+) -> String {
     if regions.is_empty() {
         return "<<>>".to_string();
     }
     let entries: Vec<String> = regions
         .iter()
         .map(|(k, (state, parent))| {
-            let p = parent.map_or("\"NONE\"".to_string(), |p| p.to_string());
-            format!("{k} :> <<{state}, {p}>>")
+            let p = parent.map_or_else(|| "\"NONE\"".to_string(), tla_entity_key);
+            format!("{} :> <<{state}, {p}>>", tla_entity_key(*k))
         })
         .collect();
     format!("({})", entries.join(" @@ "))
 }
 
 fn format_tla_obligation_map(
-    obligations: &BTreeMap<u32, (TlaObligationState, u32, u32)>,
+    obligations: &BTreeMap<EntityKey, (TlaObligationState, EntityKey, EntityKey)>,
 ) -> String {
     if obligations.is_empty() {
         return "<<>>".to_string();
     }
     let entries: Vec<String> = obligations
         .iter()
-        .map(|(k, (state, task, region))| format!("{k} :> <<{state}, {task}, {region}>>"))
+        .map(|(k, (state, task, region))| {
+            format!(
+                "{} :> <<{state}, {}, {}>>",
+                tla_entity_key(*k),
+                tla_entity_key(*task),
+                tla_entity_key(*region)
+            )
+        })
         .collect();
     format!("({})", entries.join(" @@ "))
 }
@@ -695,7 +766,7 @@ mod tests {
         snap.apply(&event);
         assert_eq!(snap.step, 42);
         assert_eq!(snap.time_nanos, 100);
-        assert!(snap.tasks.contains_key(&1));
+        assert!(snap.tasks.contains_key(&(1, 0)));
     }
 
     #[test]
@@ -759,9 +830,25 @@ mod tests {
     #[test]
     fn format_tla_task_map_with_entries() {
         let mut map = BTreeMap::new();
-        map.insert(1, (TlaTaskState::Spawned, 0));
+        map.insert((1, 0), (TlaTaskState::Spawned, (0, 0)));
         let result = format_tla_task_map(&map);
-        assert!(result.contains("1 :>"));
+        assert!(result.contains("\"1.0\" :>"));
+        assert!(result.contains("\"Spawned\""));
+        // Region reference carries generation and matches a region domain key.
+        assert!(result.contains("\"0.0\""));
+    }
+
+    #[test]
+    fn format_tla_task_map_distinct_generations_are_distinct_keys() {
+        // Same arena slot, different generations must be distinct domain
+        // elements (no vacuous QuiescenceOnClose via slot-reuse aliasing).
+        let mut map = BTreeMap::new();
+        map.insert((5, 0), (TlaTaskState::Completed, (1, 0)));
+        map.insert((5, 1), (TlaTaskState::Spawned, (1, 0)));
+        let result = format_tla_task_map(&map);
+        assert!(result.contains("\"5.0\" :>"));
+        assert!(result.contains("\"5.1\" :>"));
+        assert!(result.contains("\"Completed\""));
         assert!(result.contains("\"Spawned\""));
     }
 
@@ -774,16 +861,16 @@ mod tests {
     #[test]
     fn format_tla_region_map_with_parent() {
         let mut map = BTreeMap::new();
-        map.insert(1, (TlaRegionState::Open, Some(0)));
+        map.insert((1, 0), (TlaRegionState::Open, Some((0, 0))));
         let result = format_tla_region_map(&map);
         assert!(result.contains("\"Open\""));
-        assert!(result.contains('0'));
+        assert!(result.contains("\"0.0\""));
     }
 
     #[test]
     fn format_tla_region_map_without_parent() {
         let mut map = BTreeMap::new();
-        map.insert(1, (TlaRegionState::Closed, None));
+        map.insert((1, 0), (TlaRegionState::Closed, None));
         let result = format_tla_region_map(&map);
         assert!(result.contains("\"NONE\""));
     }
@@ -797,10 +884,33 @@ mod tests {
     #[test]
     fn format_tla_obligation_map_with_entries() {
         let mut map = BTreeMap::new();
-        map.insert(1, (TlaObligationState::Committed, 2, 3));
+        map.insert((1, 0), (TlaObligationState::Committed, (2, 0), (3, 0)));
         let result = format_tla_obligation_map(&map);
         assert!(result.contains("\"Committed\""));
-        assert!(result.contains('2'));
-        assert!(result.contains('3'));
+        assert!(result.contains("\"2.0\""));
+        assert!(result.contains("\"3.0\""));
+    }
+
+    #[test]
+    fn module_name_is_sanitized() {
+        // A crafted name with whitespace/newlines/`-`/`=` must not produce an
+        // invalid or injected MODULE header.
+        let module = TlaExporter::export_spec_skeleton("Bad Name\n==== \\* inject -- x");
+        // No raw spaces/newlines/hyphens survive in the module identifier.
+        assert!(module.source.contains("---- MODULE Bad_Name"));
+        assert!(!module.name.contains(' '));
+        assert!(!module.name.contains('\n'));
+        assert!(!module.name.contains('-'));
+        // Header/footer remain well-formed.
+        assert!(module.source.starts_with("---- MODULE "));
+        assert!(module.source.trim_end().ends_with("===="));
+    }
+
+    #[test]
+    fn empty_and_leading_digit_names_sanitized() {
+        assert_eq!(sanitize_module_name(""), "Module");
+        assert_eq!(sanitize_module_name("   "), "___");
+        assert_eq!(sanitize_module_name("3M"), "_3M");
+        assert_eq!(sanitize_module_name("Good_Name1"), "Good_Name1");
     }
 }

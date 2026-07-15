@@ -310,11 +310,23 @@ impl LabConfig {
 
     /// Enables chaos injection with the given configuration.
     ///
-    /// The chaos seed will be derived from the main seed for determinism.
+    /// The chaos seed is honored as follows:
+    /// - If the caller set an explicit, non-zero seed on the [`ChaosConfig`]
+    ///   (e.g. via [`ChaosConfig::new`] or [`ChaosConfig::with_seed`], such as
+    ///   from a `CHAOS_SEED` reproduction), that seed is used verbatim so the
+    ///   run is byte-for-byte reproducible from the chaos seed alone.
+    /// - Otherwise (the preset path — [`ChaosConfig::light`]/[`ChaosConfig::heavy`]
+    ///   carry seed `0`), the chaos seed is derived deterministically from the
+    ///   runtime seed so chaos is still reproducible from `LabConfig::new(seed)`.
     #[must_use]
     pub fn with_chaos(mut self, config: ChaosConfig) -> Self {
-        // Derive chaos seed from main seed for determinism
-        let chaos_seed = self.seed.wrapping_add(0xCAFE_BABE);
+        // Honor an explicitly-set chaos seed (seed 0 is the preset "unset"
+        // sentinel); only fall back to deriving from the main seed for presets.
+        let chaos_seed = if config.seed == 0 {
+            self.seed.wrapping_add(0xCAFE_BABE)
+        } else {
+            config.seed
+        };
         self.chaos = Some(config.with_seed(chaos_seed));
         self
     }

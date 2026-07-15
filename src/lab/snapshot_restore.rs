@@ -127,6 +127,21 @@ pub enum RestoreError {
         /// Tasks that are still live.
         live_tasks: Vec<u32>,
     },
+    /// An obligation is still unresolved (Reserved/pending) even though its
+    /// context can no longer make progress: either its owning region is
+    /// `Closed`, or its holder task is terminal (`Completed`). Such a snapshot
+    /// can never reach quiescence because nothing remains to commit or abort it.
+    UnresolvedObligation {
+        /// The unresolved obligation's ID.
+        obligation_id: u32,
+        /// The task holding the obligation.
+        holder_task_id: u32,
+        /// The obligation's owning region.
+        owning_region_id: u32,
+        /// Why quiescence is unreachable
+        /// (`"closed region"` or `"terminal holder task"`).
+        reason: &'static str,
+    },
     /// Snapshot timestamp is inconsistent.
     InvalidTimestamp {
         /// The snapshot's timestamp.
@@ -206,6 +221,18 @@ impl fmt::Display for RestoreError {
                     "closed region {region_id} has {} live children and {} live tasks",
                     live_children.len(),
                     live_tasks.len()
+                )
+            }
+            Self::UnresolvedObligation {
+                obligation_id,
+                holder_task_id,
+                owning_region_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "obligation {obligation_id} (holder task {holder_task_id}, owning region \
+                     {owning_region_id}) is unresolved but can never resolve: {reason}"
                 )
             }
             Self::InvalidTimestamp {
@@ -554,6 +581,44 @@ impl RestorableSnapshot {
                         live_tasks,
                     });
                 }
+            }
+        }
+
+        // Obligation-resolution invariant. Quiescence requires that every
+        // obligation is eventually resolved (Committed/Aborted/Leaked). An
+        // obligation still Reserved/pending can only resolve while its owning
+        // region is live and its holder task is live. If either has already
+        // reached a terminal state, the obligation is stranded and the snapshot
+        // can never quiesce — reject it. (The closed-region quiescence check
+        // above only inspects live child regions and live tasks, never
+        // obligations, so this closes that gap.)
+        let terminal_tasks: HashSet<SnapshotIdKey> = self
+            .snapshot
+            .tasks
+            .iter()
+            .filter(|task| is_task_terminal(&task.state))
+            .map(|task| snapshot_id_key(task.id))
+            .collect();
+        for obligation in &self.snapshot.obligations {
+            if is_obligation_resolved(&obligation.state) {
+                continue;
+            }
+            let owning_region = snapshot_id_key(obligation.owning_region);
+            let holder = snapshot_id_key(obligation.holder_task);
+            if closed_regions.contains(&owning_region) {
+                errors.push(RestoreError::UnresolvedObligation {
+                    obligation_id: obligation.id.index,
+                    holder_task_id: obligation.holder_task.index,
+                    owning_region_id: obligation.owning_region.index,
+                    reason: "closed region",
+                });
+            } else if terminal_tasks.contains(&holder) {
+                errors.push(RestoreError::UnresolvedObligation {
+                    obligation_id: obligation.id.index,
+                    holder_task_id: obligation.holder_task.index,
+                    owning_region_id: obligation.owning_region.index,
+                    reason: "terminal holder task",
+                });
             }
         }
 

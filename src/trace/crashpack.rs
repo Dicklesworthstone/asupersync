@@ -51,6 +51,7 @@ use crate::trace::replay::ReplayEvent;
 use crate::trace::scoring::EvidenceEntry;
 use crate::types::{CancelKind, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 // =============================================================================
@@ -297,6 +298,17 @@ pub struct CrashPackManifest {
     /// discover content without deserializing the full payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ManifestAttachment>,
+
+    /// SHA-256 (hex) of the serialized crash pack body, excluding this field.
+    ///
+    /// The [`fingerprint`](Self::fingerprint) is derived from the *full* trace,
+    /// which is not inlined in the pack, so a tampered or bit-rotted pack body
+    /// would otherwise be indistinguishable from an intact one. This checksum
+    /// seals the actual serialized bytes so [`CrashPack::verify_integrity`] can
+    /// recompute and compare it. Optional so packs written before this field
+    /// existed still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_checksum: Option<String>,
 }
 
 /// Errors from manifest schema validation.
@@ -372,6 +384,7 @@ impl CrashPackManifest {
             event_count,
             created_at,
             attachments: Vec::new(),
+            content_checksum: None,
         }
     }
 
@@ -554,6 +567,36 @@ impl CrashPack {
     pub fn fingerprint(&self) -> u64 {
         self.manifest.fingerprint
     }
+
+    /// Recompute the content checksum and compare it to the sealed value.
+    ///
+    /// Returns `true` iff the manifest carries a `content_checksum` that matches
+    /// a fresh SHA-256 digest of this pack's serialized body. This detects
+    /// tampering or bit rot of any body field — including sections (evidence,
+    /// prefixes, supervision log) that the manifest `fingerprint` does not
+    /// cover. A pack whose `content_checksum` is `None` (written before the
+    /// field existed) returns `false`: there is nothing to verify against.
+    #[must_use]
+    pub fn verify_integrity(&self) -> bool {
+        let Some(stored) = self.manifest.content_checksum.as_deref() else {
+            return false;
+        };
+        let mut probe = self.clone();
+        probe.manifest.content_checksum = None;
+        compute_content_checksum(&probe).as_str() == stored
+    }
+}
+
+/// Compute the content checksum of a crash pack: SHA-256 (hex) of the pack
+/// serialized with `manifest.content_checksum` cleared.
+///
+/// The digest is over the body only. Callers pass a pack whose
+/// `content_checksum` is `None`; the field's `skip_serializing_if` also keeps
+/// it out of the serialized bytes, so the digest never covers itself and is
+/// reproducible.
+fn compute_content_checksum(pack: &CrashPack) -> String {
+    let bytes = serde_json::to_vec(pack).unwrap_or_default();
+    hex::encode(Sha256::digest(&bytes))
 }
 
 // =============================================================================
@@ -776,7 +819,7 @@ impl CrashPackBuilder {
         };
         manifest.attachments = attachments;
 
-        Ok(CrashPack {
+        let mut pack = CrashPack {
             manifest,
             failure,
             canonical_prefix: self.canonical_prefix,
@@ -785,7 +828,13 @@ impl CrashPackBuilder {
             supervision_log,
             oracle_violations: self.oracle_violations,
             replay: self.replay,
-        })
+        };
+        // Seal the serialized body with a content checksum (over bytes with the
+        // checksum field itself cleared) so a tampered/bit-rotted pack is
+        // detectable via `CrashPack::verify_integrity`.
+        let checksum = compute_content_checksum(&pack);
+        pack.manifest.content_checksum = Some(checksum);
+        Ok(pack)
     }
 }
 
@@ -1075,7 +1124,22 @@ impl CrashPackWriter for FileCrashPackWriter {
         let json = serde_json::to_string_pretty(pack)
             .map_err(|e| CrashPackWriteError::Serialize(e.to_string()))?;
 
-        std::fs::write(&path, json.as_bytes()).map_err(CrashPackWriteError::Io)?;
+        // Atomic write: stage the JSON to a unique temp file in the same
+        // directory, then rename it into place. `rename` is atomic on a single
+        // filesystem, so a crash mid-write can only leave the temp file behind —
+        // never a truncated JSON at the canonical, reader-visible path. The
+        // temp name embeds the pid so concurrent writers of the same pack do
+        // not clobber each other's staging file.
+        let tmp_path = self
+            .base_dir
+            .join(format!(".{filename}.{}.tmp", std::process::id())); // ubs:ignore - staging path from deterministic filename
+
+        std::fs::write(&tmp_path, json.as_bytes()).map_err(CrashPackWriteError::Io)?;
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            // Best-effort cleanup of the staged temp file on rename failure.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(CrashPackWriteError::Io(e));
+        }
 
         Ok(ArtifactId {
             path: path.to_string_lossy().into_owned(),
@@ -1261,6 +1325,69 @@ mod tests {
         assert_eq!(pack.manifest.schema_version, 1);
 
         crate::test_complete!("schema_version_is_set");
+    }
+
+    #[test]
+    fn built_pack_carries_valid_content_checksum() {
+        init_test("built_pack_carries_valid_content_checksum");
+
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .fingerprint(0xCAFE_BABE)
+            .oracle_violations(vec!["inv-1".into()])
+            .build()
+            .expect("crash pack builder should have failure metadata");
+
+        // The builder seals the pack with a content checksum.
+        assert!(pack.manifest.content_checksum.is_some());
+        // A 32-byte SHA-256 renders to 64 hex chars.
+        assert_eq!(pack.manifest.content_checksum.as_deref().unwrap().len(), 64);
+        // A freshly built pack verifies against its own seal.
+        assert!(pack.verify_integrity());
+
+        crate::test_complete!("built_pack_carries_valid_content_checksum");
+    }
+
+    #[test]
+    fn content_checksum_detects_body_tampering() {
+        init_test("content_checksum_detects_body_tampering");
+
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .fingerprint(0xCAFE_BABE)
+            .build()
+            .expect("crash pack builder should have failure metadata");
+        assert!(pack.verify_integrity());
+
+        // Tamper a body field that the fingerprint does not cover.
+        let mut tampered = pack.clone();
+        tampered.oracle_violations.push("smuggled-violation".into());
+        assert!(
+            !tampered.verify_integrity(),
+            "checksum must catch body tampering"
+        );
+
+        // Tampering the manifest metadata is caught too.
+        let mut tampered_meta = pack;
+        tampered_meta.manifest.fingerprint ^= 1;
+        assert!(!tampered_meta.verify_integrity());
+
+        crate::test_complete!("content_checksum_detects_body_tampering");
+    }
+
+    #[test]
+    fn verify_integrity_false_without_checksum() {
+        init_test("verify_integrity_false_without_checksum");
+
+        let mut pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .build()
+            .expect("crash pack builder should have failure metadata");
+        // Emulate a legacy pack with no sealed checksum.
+        pack.manifest.content_checksum = None;
+        assert!(!pack.verify_integrity());
+
+        crate::test_complete!("verify_integrity_false_without_checksum");
     }
 
     #[test]
@@ -3531,6 +3658,7 @@ mod tests {
             event_count: 100,
             created_at: 0,
             attachments: vec![],
+            content_checksum: None,
         };
         let m2 = m.clone();
         assert_eq!(m, m2);

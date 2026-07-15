@@ -234,6 +234,36 @@ impl SagaConsistencyChecker {
     }
 
     /// Finds obligations where the merged state was never observed by any node.
+    ///
+    /// # Structural note — single-obligation phantoms are unreachable
+    ///
+    /// For a **single** obligation this detection can never fire, and that is a
+    /// property of the [`LatticeState`] join table rather than a coding
+    /// accident. `merged` is `LatticeState::Unknown` folded over each node's
+    /// observation via [`LatticeState::join`]. The only way `join` yields a
+    /// terminal, non-conflict state (`Committed` or `Aborted`) is for one of its
+    /// inputs — i.e. one node's own observation — to already be that terminal
+    /// state: `Unknown`/`Reserved` joins never manufacture a terminal
+    /// (`Unknown ⊔ x = x`, `Reserved ⊔ Reserved = Reserved`), and mixing the two
+    /// terminals yields `Conflict`, which is excluded here. Hence whenever
+    /// `merged.is_terminal() && !merged.is_conflict()` holds, some node observed
+    /// exactly `merged`, so `any_node_saw_merged` is always `true` and the push
+    /// below is dead.
+    ///
+    /// A **genuine** phantom — a terminal "global section" that emerges only
+    /// from gluing and that no single node witnessed — is inherently a
+    /// *multi-obligation* phenomenon (e.g. an all-or-nothing saga where each
+    /// node saw a different subset committed, so the pairwise merge is
+    /// "all committed" yet no node witnessed the whole set). That case is
+    /// detected by [`Self::check_all_or_nothing`], not here.
+    ///
+    /// The `debug_assert!` encodes the invariant so that any future change to
+    /// the lattice which *would* make a single-obligation phantom reachable
+    /// trips loudly in debug builds. Future work: if per-obligation phantoms
+    /// ever become meaningful (e.g. a lattice that can synthesize a terminal
+    /// from non-terminal inputs), redesign this to compare the merged terminal
+    /// against node observations across an obligation *cover* rather than a
+    /// single obligation.
     fn find_phantom_states(&self) -> Vec<PhantomState> {
         let mut phantoms = Vec::new();
         let all_obligations = self.all_obligations();
@@ -249,10 +279,18 @@ impl SagaConsistencyChecker {
                 }
             }
 
-            // A phantom exists when the merged state is terminal but no node
-            // actually observed that terminal state.
+            // A phantom would exist when the merged state is terminal but no
+            // node actually observed that terminal state. See the doc comment:
+            // for a single obligation this is unreachable under the current
+            // join table, and the assertion below guards that invariant.
             if merged.is_terminal() && !merged.is_conflict() {
                 let any_node_saw_merged = observations.values().any(|&s| s == merged);
+                debug_assert!(
+                    any_node_saw_merged,
+                    "single-obligation terminal merge {merged:?} witnessed by no node: \
+                     impossible under the current LatticeState join table (see fn docs); \
+                     a lattice change may have made per-obligation phantoms reachable"
+                );
                 if !any_node_saw_merged {
                     phantoms.push(PhantomState {
                         obligation,

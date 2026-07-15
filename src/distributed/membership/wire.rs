@@ -51,6 +51,10 @@ pub enum WireError {
     InvalidUtf8,
     /// The payload alone does not fit within the MTU budget.
     PayloadExceedsMtu,
+    /// A string is longer than the `u16` length prefix can describe
+    /// (`> u16::MAX`); encoding it would silently truncate the length field and
+    /// corrupt the datagram. Carries the offending byte length.
+    StringTooLong(usize),
 }
 
 impl std::fmt::Display for WireError {
@@ -62,6 +66,9 @@ impl std::fmt::Display for WireError {
             Self::UnknownRumorTag(t) => write!(f, "unknown rumor tag {t}"),
             Self::InvalidUtf8 => write!(f, "invalid utf-8 in node id"),
             Self::PayloadExceedsMtu => write!(f, "payload alone exceeds the MTU budget"),
+            Self::StringTooLong(len) => {
+                write!(f, "string length {len} exceeds u16 length-prefix capacity")
+            }
         }
     }
 }
@@ -89,7 +96,7 @@ pub struct EncodedDatagram {
 pub fn encode_packet(packet: &Packet, mtu: usize) -> Result<EncodedDatagram, WireError> {
     let mut buf = Vec::new();
     buf.push(WIRE_VERSION);
-    encode_payload(&packet.payload, &mut buf);
+    encode_payload(&packet.payload, &mut buf)?;
 
     // Reserve space for the gossip count, written once the tail is packed.
     let count_pos = buf.len();
@@ -105,7 +112,7 @@ pub fn encode_packet(packet: &Packet, mtu: usize) -> Result<EncodedDatagram, Wir
             break;
         }
         let mut encoded = Vec::new();
-        encode_rumor(rumor, &mut encoded);
+        encode_rumor(rumor, &mut encoded)?;
         if buf.len() + encoded.len() > mtu {
             break;
         }
@@ -148,7 +155,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<Packet, WireError> {
     Ok(Packet { payload, gossip })
 }
 
-fn encode_payload(payload: &Payload, buf: &mut Vec<u8>) {
+fn encode_payload(payload: &Payload, buf: &mut Vec<u8>) -> Result<(), WireError> {
     match payload {
         Payload::Ping { seq } => {
             buf.push(0);
@@ -161,13 +168,14 @@ fn encode_payload(payload: &Payload, buf: &mut Vec<u8>) {
         Payload::PingReq { seq, target } => {
             buf.push(2);
             buf.extend_from_slice(&seq.to_le_bytes());
-            encode_str(target.as_str(), buf);
+            encode_str(target.as_str(), buf)?;
         }
         Payload::Nack { seq } => {
             buf.push(3);
             buf.extend_from_slice(&seq.to_le_bytes());
         }
     }
+    Ok(())
 }
 
 fn decode_payload(reader: &mut Reader<'_>) -> Result<Payload, WireError> {
@@ -191,11 +199,11 @@ fn decode_payload(reader: &mut Reader<'_>) -> Result<Payload, WireError> {
     }
 }
 
-fn encode_rumor(rumor: &Rumor, buf: &mut Vec<u8>) {
+fn encode_rumor(rumor: &Rumor, buf: &mut Vec<u8>) -> Result<(), WireError> {
     match rumor {
         Rumor::Alive { node, incarnation } => {
             buf.push(0);
-            encode_str(node.as_str(), buf);
+            encode_str(node.as_str(), buf)?;
             buf.extend_from_slice(&incarnation.to_le_bytes());
         }
         Rumor::Suspect {
@@ -204,9 +212,9 @@ fn encode_rumor(rumor: &Rumor, buf: &mut Vec<u8>) {
             from,
         } => {
             buf.push(1);
-            encode_str(node.as_str(), buf);
+            encode_str(node.as_str(), buf)?;
             buf.extend_from_slice(&incarnation.to_le_bytes());
-            encode_str(from.as_str(), buf);
+            encode_str(from.as_str(), buf)?;
         }
         Rumor::Confirm {
             node,
@@ -214,16 +222,17 @@ fn encode_rumor(rumor: &Rumor, buf: &mut Vec<u8>) {
             from,
         } => {
             buf.push(2);
-            encode_str(node.as_str(), buf);
+            encode_str(node.as_str(), buf)?;
             buf.extend_from_slice(&incarnation.to_le_bytes());
-            encode_str(from.as_str(), buf);
+            encode_str(from.as_str(), buf)?;
         }
         Rumor::Leave { node, incarnation } => {
             buf.push(3);
-            encode_str(node.as_str(), buf);
+            encode_str(node.as_str(), buf)?;
             buf.extend_from_slice(&incarnation.to_le_bytes());
         }
     }
+    Ok(())
 }
 
 fn decode_rumor(reader: &mut Reader<'_>) -> Result<Rumor, WireError> {
@@ -263,10 +272,19 @@ fn decode_rumor(reader: &mut Reader<'_>) -> Result<Rumor, WireError> {
     }
 }
 
-fn encode_str(value: &str, buf: &mut Vec<u8>) {
-    let len = value.len() as u16;
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(&value.as_bytes()[..len as usize]);
+fn encode_str(value: &str, buf: &mut Vec<u8>) -> Result<(), WireError> {
+    let len = value.len();
+    // The wire format prefixes each string with a little-endian `u16` length.
+    // Casting `value.len() as u16` silently truncated any string longer than
+    // 65535 bytes, writing a length prefix that no longer matched the appended
+    // bytes and corrupting the rest of the datagram. Reject over-long strings
+    // instead of emitting a malformed frame.
+    if len > u16::MAX as usize {
+        return Err(WireError::StringTooLong(len));
+    }
+    buf.extend_from_slice(&(len as u16).to_le_bytes());
+    buf.extend_from_slice(value.as_bytes());
+    Ok(())
 }
 
 /// A bounds-checked cursor over a datagram.
