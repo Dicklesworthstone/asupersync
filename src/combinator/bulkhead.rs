@@ -19,8 +19,9 @@
 //!
 //! let bulkhead = Bulkhead::new(policy);
 //!
-//! // Try to acquire a permit
-//! if let Some(permit) = bulkhead.try_acquire(1) {
+//! // Try to acquire a permit (pass the current clock reading so stale queued
+//! // entries are drained before the fast path).
+//! if let Some(permit) = bulkhead.try_acquire(1, now) {
 //!     // Execute protected operation
 //!     do_work();
 //!     // Permit automatically released on drop
@@ -286,11 +287,29 @@ impl Bulkhead {
     ///
     /// Returns `Some(permit)` if acquired immediately, `None` if bulkhead is full.
     /// Queued operations hold priority once they enter the FIFO wait queue.
+    ///
+    /// `now` is the deterministic clock reading used to drain stale timed-out
+    /// queue entries before the fast path (mirrors [`RateLimiter::try_acquire`]).
+    ///
+    /// [`RateLimiter::try_acquire`]: crate::combinator::rate_limit::RateLimiter::try_acquire
     #[must_use]
-    pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
-        // Fast-path rejection when a published waiter already exists.
+    pub fn try_acquire(&self, weight: u32, now: Time) -> Option<BulkheadPermit<'_>> {
+        // Fast-path rejection when a published waiter already exists — but first
+        // time out any stale queue entries. An abandoned bare `enqueue` (never
+        // resolved via check_entry/cancel_entry) would otherwise keep
+        // `pending_queue_count > 0` past its deadline forever and starve every
+        // try_acquire/call/call_weighted with all permits free
+        // (br-asupersync-bulkhead-tryacquire-starve-kodql2). We only *time out*
+        // expired entries here — we deliberately do NOT grant live queued
+        // entries (that is `process_queue`'s job on permit release): granting a
+        // waiter inside the fast path would consume a permit into a
+        // granted-but-unclaimed slot and, for an abandoned entry, that permit
+        // would never be reclaimed, re-starving the fast path.
         if self.pending_queue_count.load(Ordering::Acquire) > 0 {
-            return None;
+            self.drain_expired_entries(now);
+            if self.pending_queue_count.load(Ordering::Acquire) > 0 {
+                return None;
+            }
         }
 
         // Serialize against queue mutation so a waiter cannot slip into the
@@ -334,6 +353,44 @@ impl Bulkhead {
     pub fn process_queue(&self, now: Time) -> Option<u64> {
         let mut queue = self.queue.write();
         self.process_queue_inner(&mut queue, now)
+    }
+
+    /// Time out (but never grant) any queue entries whose deadline has passed.
+    ///
+    /// Used by [`try_acquire`](Self::try_acquire) so an abandoned bare `enqueue`
+    /// — one never resolved via `check_entry`/`cancel_entry` — cannot keep
+    /// `pending_queue_count > 0` past its deadline and starve the fast path
+    /// forever. Unlike [`process_queue`](Self::process_queue) this deliberately
+    /// does NOT grant a live waiter: granting inside the fast path would consume
+    /// a permit into a granted-but-unclaimed slot that, for an abandoned entry,
+    /// is never reclaimed (br-asupersync-bulkhead-tryacquire-starve-kodql2).
+    #[allow(clippy::significant_drop_tightening)]
+    fn drain_expired_entries(&self, now: Time) {
+        let now_millis = now.as_millis();
+        let mut queue = self.queue.write();
+        let mut timeout_count = 0u64;
+        let mut timeout_wait_ms = 0u64;
+        let mut max_individual_wait_ms = 0u64;
+        for entry in queue.iter_mut() {
+            if entry.result.is_none() && now_millis >= entry.deadline_millis {
+                entry.result = Some(Err(RejectionReason::Timeout));
+                timeout_count += 1;
+                let wait = now_millis.saturating_sub(entry.enqueued_at_millis);
+                timeout_wait_ms += wait;
+                max_individual_wait_ms = max_individual_wait_ms.max(wait);
+            }
+        }
+        if timeout_count > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            self.pending_queue_count
+                .fetch_sub(timeout_count as u32, Ordering::Release);
+            self.total_timeout_atomic
+                .fetch_add(timeout_count, Ordering::Relaxed);
+            self.total_wait_time_ms
+                .fetch_add(timeout_wait_ms, Ordering::Relaxed);
+            self.max_queue_wait_ms_atomic
+                .fetch_max(max_individual_wait_ms, Ordering::Relaxed);
+        }
     }
 
     /// Inner queue processing logic that operates on an already-locked queue.
@@ -564,24 +621,33 @@ impl Bulkhead {
 
     /// Execute an operation with bulkhead protection (synchronous, immediate).
     ///
-    /// This is a convenience method for synchronous operations that don't need queuing.
-    pub fn call<T, E, F>(&self, op: F) -> Result<T, BulkheadError<E>>
+    /// This is a convenience method for synchronous operations that don't need
+    /// queuing. `now` is the deterministic clock reading forwarded to
+    /// [`try_acquire`](Self::try_acquire) for stale-entry draining.
+    pub fn call<T, E, F>(&self, now: Time, op: F) -> Result<T, BulkheadError<E>>
     where
         F: FnOnce() -> Result<T, E>,
         E: fmt::Display,
     {
-        self.call_weighted(1, op)
+        self.call_weighted(1, now, op)
     }
 
     /// Execute an operation with weighted bulkhead protection.
     ///
-    /// The permit is always released, even if the operation panics.
-    pub fn call_weighted<T, E, F>(&self, weight: u32, op: F) -> Result<T, BulkheadError<E>>
+    /// The permit is always released, even if the operation panics. `now` is the
+    /// deterministic clock reading forwarded to
+    /// [`try_acquire`](Self::try_acquire) for stale-entry draining.
+    pub fn call_weighted<T, E, F>(
+        &self,
+        weight: u32,
+        now: Time,
+        op: F,
+    ) -> Result<T, BulkheadError<E>>
     where
         F: FnOnce() -> Result<T, E>,
         E: fmt::Display,
     {
-        let _permit = self.try_acquire(weight).ok_or(BulkheadError::Full)?;
+        let _permit = self.try_acquire(weight, now).ok_or(BulkheadError::Full)?;
         op().map_err(BulkheadError::Inner)
     }
 
@@ -963,12 +1029,13 @@ mod tests {
 
     #[test]
     fn try_acquire_reduces_available() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
         });
 
-        let permit = bh.try_acquire(1).unwrap();
+        let permit = bh.try_acquire(1, now).unwrap();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 9);
         assert_eq!(bh.metrics().active_permits, 1);
 
@@ -979,14 +1046,15 @@ mod tests {
 
     #[test]
     fn try_acquire_fails_when_exhausted() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 2,
             ..Default::default()
         });
 
-        let p1 = bh.try_acquire(1).unwrap();
-        let p2 = bh.try_acquire(1).unwrap();
-        let p3 = bh.try_acquire(1);
+        let p1 = bh.try_acquire(1, now).unwrap();
+        let p2 = bh.try_acquire(1, now).unwrap();
+        let p3 = bh.try_acquire(1, now);
 
         assert!(p3.is_none());
         assert_eq!(bh.metrics().active_permits, 2);
@@ -1001,20 +1069,21 @@ mod tests {
 
     #[test]
     fn weighted_permit_consumes_multiple() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
         });
 
-        let permit = bh.try_acquire(5).unwrap();
+        let permit = bh.try_acquire(5, now).unwrap();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 5);
         assert_eq!(permit.weight(), 5);
 
         // Cannot acquire 6 more
-        assert!(bh.try_acquire(6).is_none());
+        assert!(bh.try_acquire(6, now).is_none());
 
         // Can acquire 5
-        let p2 = bh.try_acquire(5).unwrap();
+        let p2 = bh.try_acquire(5, now).unwrap();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 0);
 
         permit.release();
@@ -1024,13 +1093,14 @@ mod tests {
 
     #[test]
     fn weighted_permit_zero_weight_allowed() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
         });
 
         // Zero weight permits can be useful for "observer" patterns
-        let permit = bh.try_acquire(0).unwrap();
+        let permit = bh.try_acquire(0, now).unwrap();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 10);
         permit.release();
     }
@@ -1050,7 +1120,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // Exhaust permits
-        let _p = bh.try_acquire(1).unwrap();
+        let _p = bh.try_acquire(1, now).unwrap();
 
         // Enqueue should succeed
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1070,13 +1140,13 @@ mod tests {
 
         let now = Time::from_millis(0);
 
-        let permit = bh.try_acquire(1).unwrap();
+        let permit = bh.try_acquire(1, now).unwrap();
         let entry_id = bh.enqueue(1, now).unwrap();
 
         permit.release();
 
         assert!(
-            bh.try_acquire(1).is_none(),
+            bh.try_acquire(1, now).is_none(),
             "queued entry should block barging try_acquire"
         );
 
@@ -1096,6 +1166,42 @@ mod tests {
     }
 
     #[test]
+    fn try_acquire_recovers_after_abandoned_enqueue_times_out() {
+        // A bare enqueue() that is never resolved via check_entry/cancel_entry
+        // must NOT starve try_acquire forever: once the entry's deadline passes,
+        // try_acquire drains it (process_queue-first) and succeeds with permits
+        // free (br-asupersync-bulkhead-tryacquire-starve-kodql2).
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            queue_timeout: Duration::from_secs(60),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        // Hold the only permit, enqueue a waiter, then release the permit. The
+        // waiter is now "abandoned" — nobody will ever call check_entry/cancel.
+        let permit = bh.try_acquire(1, now).unwrap();
+        let _abandoned = bh.enqueue(1, now).unwrap();
+        permit.release();
+
+        // Before the deadline, the pending waiter correctly blocks the fast path.
+        assert!(
+            bh.try_acquire(1, now).is_none(),
+            "pending waiter blocks try_acquire before its deadline"
+        );
+
+        // Past the entry deadline (queue_timeout 60s), try_acquire must drain the
+        // stale entry and succeed instead of starving forever.
+        let later = Time::from_millis(60_001);
+        let recovered = bh.try_acquire(1, later);
+        assert!(
+            recovered.is_some(),
+            "try_acquire must recover once the abandoned entry times out"
+        );
+    }
+
+    #[test]
     fn dropping_unclaimed_queued_acquire_releases_granted_permit() {
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
@@ -1105,7 +1211,7 @@ mod tests {
         });
         let now = Time::from_millis(0);
 
-        let permit = bh.try_acquire(1).unwrap();
+        let permit = bh.try_acquire(1, now).unwrap();
         let guard = bh.acquire_queued(1, now).expect("queued acquire");
         let entry_id = guard.entry_id();
         permit.release();
@@ -1127,7 +1233,7 @@ mod tests {
             "granted-but-unclaimed permit must be released on guard drop, not leaked",
         );
         assert!(
-            bh.try_acquire(1).is_some(),
+            bh.try_acquire(1, now).is_some(),
             "permit is reusable after the guard releases it",
         );
     }
@@ -1154,7 +1260,7 @@ mod tests {
         }
 
         assert!(
-            bh.try_acquire(1).is_none(),
+            bh.try_acquire(1, now).is_none(),
             "direct acquisition must not barge ahead of a waiter that is already in the queue"
         );
         assert_eq!(
@@ -1175,7 +1281,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // Exhaust permits
-        let _p = bh.try_acquire(1).unwrap();
+        let _p = bh.try_acquire(1, now).unwrap();
 
         // Fill queue
         bh.enqueue(1, now).unwrap();
@@ -1199,7 +1305,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // Exhaust permits
-        let p = bh.try_acquire(1).unwrap();
+        let p = bh.try_acquire(1, now).unwrap();
 
         // Enqueue
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1224,8 +1330,8 @@ mod tests {
         let now = Time::from_millis(0);
 
         // Exhaust permits
-        let p1 = bh.try_acquire(1).unwrap();
-        let _p2 = bh.try_acquire(1).unwrap();
+        let p1 = bh.try_acquire(1, now).unwrap();
+        let _p2 = bh.try_acquire(1, now).unwrap();
 
         // Enqueue
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1254,7 +1360,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // Exhaust permits
-        let _p = bh.try_acquire(1).unwrap();
+        let _p = bh.try_acquire(1, now).unwrap();
 
         // Enqueue
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1279,7 +1385,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // Exhaust permits
-        let _p = bh.try_acquire(1).unwrap();
+        let _p = bh.try_acquire(1, now).unwrap();
 
         // Enqueue
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1296,6 +1402,7 @@ mod tests {
 
     #[test]
     fn metrics_track_active_permits() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
@@ -1303,10 +1410,10 @@ mod tests {
 
         assert_eq!(bh.metrics().active_permits, 0);
 
-        let p1 = bh.try_acquire(1).unwrap();
+        let p1 = bh.try_acquire(1, now).unwrap();
         assert_eq!(bh.metrics().active_permits, 1);
 
-        let p2 = bh.try_acquire(3).unwrap();
+        let p2 = bh.try_acquire(3, now).unwrap();
         assert_eq!(bh.metrics().active_permits, 4);
 
         p1.release();
@@ -1318,6 +1425,7 @@ mod tests {
 
     #[test]
     fn metrics_calculate_utilization() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
@@ -1325,10 +1433,10 @@ mod tests {
 
         assert!((bh.metrics().utilization - 0.0).abs() < f64::EPSILON);
 
-        let p1 = bh.try_acquire(5).unwrap();
+        let p1 = bh.try_acquire(5, now).unwrap();
         assert!((bh.metrics().utilization - 0.5).abs() < f64::EPSILON);
 
-        let p2 = bh.try_acquire(5).unwrap();
+        let p2 = bh.try_acquire(5, now).unwrap();
         assert!((bh.metrics().utilization - 1.0).abs() < f64::EPSILON);
 
         p1.release();
@@ -1400,13 +1508,14 @@ mod tests {
 
     #[test]
     fn registry_all_metrics() {
+        let now = Time::from_millis(0);
         let registry = BulkheadRegistry::new(BulkheadPolicy::default());
 
         let bh1 = registry.get_or_create("db");
         let bh2 = registry.get_or_create("api");
 
-        let _p1 = bh1.try_acquire(1);
-        let _p2 = bh2.try_acquire(3);
+        let _p1 = bh1.try_acquire(1, now);
+        let _p2 = bh2.try_acquire(3, now);
 
         let all = registry.all_metrics();
         assert_eq!(all.len(), 2);
@@ -1438,6 +1547,7 @@ mod tests {
     fn concurrent_acquire_release_safe() {
         use std::thread;
 
+        let now = Time::from_millis(0);
         let bh = Arc::new(Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
@@ -1448,7 +1558,7 @@ mod tests {
                 let bh = bh.clone();
                 thread::spawn(move || {
                     for _ in 0..100 {
-                        if let Some(permit) = bh.try_acquire(1) {
+                        if let Some(permit) = bh.try_acquire(1, now) {
                             // Simulate work
                             std::thread::yield_now();
                             permit.release();
@@ -1471,6 +1581,7 @@ mod tests {
         use std::sync::atomic::AtomicU32;
         use std::thread;
 
+        let now = Time::from_millis(0);
         let bh = Arc::new(Bulkhead::new(BulkheadPolicy {
             max_concurrent: 5,
             ..Default::default()
@@ -1487,7 +1598,7 @@ mod tests {
 
                 thread::spawn(move || {
                     for _ in 0..20 {
-                        if let Some(permit) = bh.try_acquire(1) {
+                        if let Some(permit) = bh.try_acquire(1, now) {
                             let c = current.fetch_add(1, Ordering::SeqCst) + 1;
                             peak.fetch_max(c, Ordering::SeqCst);
 
@@ -1514,9 +1625,10 @@ mod tests {
 
     #[test]
     fn call_executes_and_records() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy::default());
 
-        let result = bh.call(|| Ok::<_, &str>(42));
+        let result = bh.call(now, || Ok::<_, &str>(42));
 
         assert_eq!(result.unwrap(), 42);
         assert_eq!(bh.metrics().total_executed, 1);
@@ -1524,9 +1636,10 @@ mod tests {
 
     #[test]
     fn call_handles_inner_error() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy::default());
 
-        let result: Result<i32, BulkheadError<&str>> = bh.call(|| Err("error"));
+        let result: Result<i32, BulkheadError<&str>> = bh.call(now, || Err("error"));
 
         assert!(matches!(result, Err(BulkheadError::Inner("error"))));
         assert_eq!(
@@ -1546,7 +1659,7 @@ mod tests {
         });
 
         let now = Time::MAX;
-        let _p = bh.try_acquire(1).unwrap();
+        let _p = bh.try_acquire(1, now).unwrap();
         let entry_id = bh.enqueue(1, now).unwrap();
 
         // If deadline arithmetic wraps, this may spuriously timeout immediately.
@@ -1559,14 +1672,15 @@ mod tests {
 
     #[test]
     fn call_rejects_when_full() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
             ..Default::default()
         });
 
-        let _p = bh.try_acquire(1).unwrap();
+        let _p = bh.try_acquire(1, now).unwrap();
 
-        let result: Result<i32, BulkheadError<&str>> = bh.call(|| Ok(42));
+        let result: Result<i32, BulkheadError<&str>> = bh.call(now, || Ok(42));
 
         assert!(matches!(result, Err(BulkheadError::Full)));
     }
@@ -1575,6 +1689,7 @@ mod tests {
     fn call_releases_permit_on_panic() {
         use std::panic::{AssertUnwindSafe, catch_unwind};
 
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
             ..Default::default()
@@ -1585,7 +1700,7 @@ mod tests {
 
         // Call that panics
         let result = catch_unwind(AssertUnwindSafe(|| {
-            bh.call(|| -> Result<(), &str> { panic!("intentional test panic") })
+            bh.call(now, || -> Result<(), &str> { panic!("intentional test panic") })
         }));
 
         // Should have panicked
@@ -1595,7 +1710,7 @@ mod tests {
         assert_eq!(bh.available(), 1, "permit should be released after panic");
 
         // Should be able to acquire again
-        let permit = bh.try_acquire(1);
+        let permit = bh.try_acquire(1, now);
         assert!(permit.is_some(), "should be able to acquire after panic");
     }
 
@@ -1650,13 +1765,14 @@ mod tests {
 
     #[test]
     fn reset_restores_capacity() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
         });
 
-        let _p1 = bh.try_acquire(5).unwrap();
-        let _p2 = bh.try_acquire(3).unwrap();
+        let _p1 = bh.try_acquire(5, now).unwrap();
+        let _p2 = bh.try_acquire(3, now).unwrap();
 
         assert_eq!(bh.available(), 2);
 
@@ -1667,14 +1783,15 @@ mod tests {
 
     #[test]
     fn release_after_reset_does_not_exceed_max_concurrent() {
+        let now = Time::from_millis(0);
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 10,
             ..Default::default()
         });
 
         // Acquire permits
-        let p1 = bh.try_acquire(5).unwrap();
-        let p2 = bh.try_acquire(3).unwrap();
+        let p1 = bh.try_acquire(5, now).unwrap();
+        let p2 = bh.try_acquire(3, now).unwrap();
         assert_eq!(bh.available(), 2);
 
         // Reset while permits outstanding
@@ -1699,10 +1816,10 @@ mod tests {
         // Core invariant: must not grant more than max_concurrent permits
         let mut permits: Vec<BulkheadPermit> = Vec::new();
         for _ in 0..10 {
-            permits.push(bh.try_acquire(1).unwrap());
+            permits.push(bh.try_acquire(1, now).unwrap());
         }
         assert!(
-            bh.try_acquire(1).is_none(),
+            bh.try_acquire(1, now).is_none(),
             "must reject 11th permit even after reset + release"
         );
 
@@ -1722,7 +1839,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Exhaust permits
-        let p1 = bh.try_acquire(1).unwrap();
+        let p1 = bh.try_acquire(1, now).unwrap();
 
         // 2. Enqueue waiter
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1761,7 +1878,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Exhaust permits
-        let _p1 = bh.try_acquire(1).unwrap();
+        let _p1 = bh.try_acquire(1, now).unwrap();
 
         // 2. Enqueue waiter
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1796,7 +1913,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Exhaust permits
-        let _p1 = bh.try_acquire(1).unwrap();
+        let _p1 = bh.try_acquire(1, now).unwrap();
 
         // 2. Enqueue waiter
         let entry_id = bh.enqueue(1, now).unwrap();
@@ -1830,7 +1947,7 @@ mod tests {
 
         let now = Time::from_millis(0);
 
-        let p1 = bh.try_acquire(1).unwrap();
+        let p1 = bh.try_acquire(1, now).unwrap();
         let id1 = bh.enqueue(1, now).unwrap();
         let id2 = bh.enqueue(1, now).unwrap();
 
@@ -1858,7 +1975,7 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Exhaust permits
-        let p1 = bh.try_acquire(1).unwrap();
+        let p1 = bh.try_acquire(1, now).unwrap();
 
         // 2. Fill queue
         let id1 = bh.enqueue(1, now).unwrap();
@@ -1904,7 +2021,7 @@ mod tests {
             ..Default::default()
         });
         let now = Time::from_millis(0);
-        let held = bh.try_acquire(1).expect("seed permit must exist");
+        let held = bh.try_acquire(1, now).expect("seed permit must exist");
         let mut entries = Vec::new();
 
         for (position, &is_cancelled) in cancelled.iter().enumerate() {
@@ -2009,20 +2126,20 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Overflow the batch service
-        let _batch_p1 = bh_batch.try_acquire(1).unwrap();
+        let _batch_p1 = bh_batch.try_acquire(1, now).unwrap();
         let _batch_queue_id = bh_batch.enqueue(1, now).unwrap();
         let batch_overflow = bh_batch.enqueue(1, now);
         assert!(matches!(batch_overflow, Err(BulkheadError::QueueFull)));
 
         // 2. Verify critical service unaffected by batch overflow
         assert_eq!(bh_critical.available(), 2);
-        let crit_p1 = bh_critical.try_acquire(1);
+        let crit_p1 = bh_critical.try_acquire(1, now);
         assert!(
             crit_p1.is_some(),
             "critical service should be unaffected by batch overflow"
         );
 
-        let crit_p2 = bh_critical.try_acquire(1);
+        let crit_p2 = bh_critical.try_acquire(1, now);
         assert!(
             crit_p2.is_some(),
             "critical service should maintain full capacity"
@@ -2058,8 +2175,8 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Overflow both bulkheads simultaneously
-        let _db_p = bh_db.try_acquire(1).unwrap();
-        let _api_p = bh_api.try_acquire(1).unwrap();
+        let _db_p = bh_db.try_acquire(1, now).unwrap();
+        let _api_p = bh_api.try_acquire(1, now).unwrap();
 
         // Fill queues
         let _db_q1 = bh_db.enqueue(1, now).unwrap();
@@ -2087,7 +2204,7 @@ mod tests {
         });
 
         // Should work normally despite other overflows
-        let p1 = third_service.try_acquire(3);
+        let p1 = third_service.try_acquire(3, now);
         assert!(
             p1.is_some(),
             "unaffected service should work during other overflows"
@@ -2115,14 +2232,14 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Create overflow condition
-        let overloaded_permit = bh_overloaded.try_acquire(1).unwrap();
+        let overloaded_permit = bh_overloaded.try_acquire(1, now).unwrap();
         let _q1 = bh_overloaded.enqueue(1, now).unwrap();
         let _q2 = bh_overloaded.enqueue(1, now).unwrap();
         let overflow = bh_overloaded.enqueue(1, now);
         assert!(matches!(overflow, Err(BulkheadError::QueueFull)));
 
         // 2. Stable service operating normally
-        let _stable_p1 = bh_stable.try_acquire(1).unwrap();
+        let _stable_p1 = bh_stable.try_acquire(1, now).unwrap();
         let _stable_q1 = bh_stable.enqueue(1, now).unwrap();
         assert_eq!(bh_stable.available(), 1);
 
@@ -2143,7 +2260,7 @@ mod tests {
         // Grant the stable bulkhead's queued entry first so that the FIFO
         // waiter does not block a subsequent `try_acquire` fast-path.
         let _granted_stable = bh_stable.process_queue(now);
-        let new_stable = bh_stable.try_acquire(1);
+        let new_stable = bh_stable.try_acquire(1, now);
         // After granting the queued entry, the stable bulkhead is back to
         // zero-available (1 stable_p1 + 1 granted queued entry). The new
         // try_acquire should therefore fail, confirming the service is
@@ -2186,7 +2303,7 @@ mod tests {
         // 1. Overflow heavy service with weighted permits. Queue capacity
         //    is measured in entry count (max_queue=3), independent of the
         //    weighted permits held by each entry.
-        let _heavy_p1 = bh_heavy.try_acquire(8).unwrap(); // 2 remaining
+        let _heavy_p1 = bh_heavy.try_acquire(8, now).unwrap(); // 2 remaining
         let _heavy_q1 = bh_heavy.enqueue(2, now).unwrap();
         let _heavy_q2 = bh_heavy.enqueue(1, now).unwrap();
         let _heavy_q3 = bh_heavy.enqueue(2, now).unwrap();
@@ -2196,7 +2313,7 @@ mod tests {
         assert!(matches!(heavy_overflow, Err(BulkheadError::QueueFull)));
 
         // 2. Light service should work normally with weighted permits
-        let light_p1 = bh_light.try_acquire(3);
+        let light_p1 = bh_light.try_acquire(3, now);
         assert!(
             light_p1.is_some(),
             "light service should work despite heavy overflow"
@@ -2235,11 +2352,11 @@ mod tests {
         let now = Time::from_millis(0);
 
         // 1. Create timeout condition in fast bulkhead
-        let _fast_p = bh_fast.try_acquire(1).unwrap();
+        let _fast_p = bh_fast.try_acquire(1, now).unwrap();
         let fast_q1 = bh_fast.enqueue(1, now).unwrap();
 
         // Create similar condition in slow bulkhead
-        let _slow_p = bh_slow.try_acquire(1).unwrap();
+        let _slow_p = bh_slow.try_acquire(1, now).unwrap();
         let slow_q1 = bh_slow.enqueue(1, now).unwrap();
 
         // 2. Advance time to trigger timeout in fast bulkhead only
@@ -2307,7 +2424,7 @@ mod tests {
                 let holder =
                     LabRuntimeTarget::spawn(&holder_spawn_cx, Budget::INFINITE, async move {
                         let permit = holder_bulkhead
-                            .try_acquire(1)
+                            .try_acquire(1, holder_task_cx.now())
                             .expect("holder should acquire the only permit");
                         let acquired = serde_json::json!({
                             "phase": "holder_acquired",

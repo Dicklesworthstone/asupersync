@@ -1579,11 +1579,18 @@ impl HttpClient {
             Http1Client::request_with_io(acquired.io, req).await
         };
         match result {
-            Ok((response, io)) => {
+            Ok((response, io, body_withheld)) => {
                 check_cx(cx)?;
                 guard.defused = true;
                 self.store_response_cookies(&parsed.host, &response.headers);
-                if !request_forbids_reuse && connection_can_be_reused(&response, method) {
+                // A withheld `Expect: 100-continue` body leaves the connection in
+                // an indeterminate framing state (Content-Length advertised, body
+                // never written), so it must never re-enter the keep-alive pool
+                // (br-asupersync-h1-expect-100-pool-h9le7v).
+                if !request_forbids_reuse
+                    && !body_withheld
+                    && connection_can_be_reused(&response, method)
+                {
                     self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
                 } else {
                     self.drop_connection(&key, acquired.pool_id);
@@ -1637,11 +1644,18 @@ impl HttpClient {
             Http1Client::request_with_io(acquired.io, req).await
         };
         match result {
-            Ok((response, io)) => {
+            Ok((response, io, body_withheld)) => {
                 check_cx(cx)?;
                 guard.defused = true;
                 self.store_response_cookies(&parsed.host, &response.headers);
-                if !request_forbids_reuse && connection_can_be_reused(&response, method) {
+                // A withheld `Expect: 100-continue` body leaves the connection in
+                // an indeterminate framing state (Content-Length advertised, body
+                // never written), so it must never re-enter the keep-alive pool
+                // (br-asupersync-h1-expect-100-pool-h9le7v).
+                if !request_forbids_reuse
+                    && !body_withheld
+                    && connection_can_be_reused(&response, method)
+                {
                     self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
                 } else {
                     self.drop_connection(&key, acquired.pool_id);
@@ -1715,7 +1729,8 @@ impl HttpClient {
             request_target,
             proxy_conn.proxy_authorization.as_deref(),
         );
-        let (response, _io) = if let Some(max_body_size) = self.config.max_body_size {
+        let (response, _io, _body_withheld) = if let Some(max_body_size) = self.config.max_body_size
+        {
             Http1Client::request_with_io_and_max_body_size(proxy_conn.io, req, max_body_size)
                 .await?
         } else {

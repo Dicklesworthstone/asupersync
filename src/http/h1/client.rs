@@ -613,7 +613,7 @@ impl Http1Client {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let (response, _io) = Self::request_with_io(io, req).await?;
+        let (response, _io, _body_withheld) = Self::request_with_io(io, req).await?;
         Ok(response)
     }
 
@@ -626,7 +626,12 @@ impl Http1Client {
     /// in the parser buffer after body drain (for example protocol upgrade
     /// bytes). Callers should use [`request_streaming`](Self::request_streaming)
     /// in that case.
-    pub async fn request_with_io<T>(io: T, req: Request) -> Result<(Response, T), HttpError>
+    /// Returns `(response, io, body_withheld)`. `body_withheld` is true when an
+    /// `Expect: 100-continue` request body was never written (the server sent a
+    /// final response without a `100 Continue`); a caller that pools the returned
+    /// `io` MUST NOT reuse it in that case
+    /// (br-asupersync-h1-expect-100-pool-h9le7v).
+    pub async fn request_with_io<T>(io: T, req: Request) -> Result<(Response, T, bool), HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
@@ -634,12 +639,13 @@ impl Http1Client {
     }
 
     /// Like [`request_with_io`](Self::request_with_io) but with an explicit
-    /// maximum body size limit.
+    /// maximum body size limit. Returns `(response, io, body_withheld)`; see
+    /// [`request_with_io`](Self::request_with_io) for the `body_withheld` contract.
     pub async fn request_with_io_and_max_body_size<T>(
         io: T,
         req: Request,
         max_body_size: usize,
-    ) -> Result<(Response, T), HttpError>
+    ) -> Result<(Response, T, bool), HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
@@ -647,6 +653,7 @@ impl Http1Client {
         // correctly ignore Content-Length/Transfer-Encoding bodies.
         let mut streaming =
             Self::request_streaming_with_max_body_size(io, req, max_body_size).await?;
+        let body_withheld = streaming.body_withheld;
 
         let mut response = Response {
             version: streaming.head.version,
@@ -682,7 +689,7 @@ impl Http1Client {
         if !prefetched.is_empty() {
             return Err(HttpError::PrefetchedDataRemaining(prefetched.len()));
         }
-        Ok((response, io))
+        Ok((response, io, body_withheld))
     }
 
     /// Send a request and return a streaming response body.
@@ -806,7 +813,14 @@ impl Http1Client {
 
                 let body =
                     ClientIncomingBody::with_max_body_size(io, kind, body_buf, max_body_size);
-                return Ok(ClientStreamingResponse { head, body });
+                // `request_body_sent` is false only when an `Expect: 100-continue`
+                // body was withheld because this final response arrived without a
+                // preceding `100 Continue` (br-asupersync-h1-expect-100-pool-h9le7v).
+                return Ok(ClientStreamingResponse {
+                    head,
+                    body,
+                    body_withheld: !request_body_sent,
+                });
             }
 
             if read_buf.len() > DEFAULT_MAX_HEADERS_SIZE {
@@ -842,6 +856,15 @@ pub struct ClientStreamingResponse<T> {
     pub head: crate::http::h1::stream::ResponseHead,
     /// Streaming response body.
     pub body: ClientIncomingBody<T>,
+    /// True when an `Expect: 100-continue` request body was withheld because a
+    /// final (non-100) response arrived before the interim `100 Continue`. The
+    /// encoder advertised `Content-Length: N` but never wrote the N body bytes,
+    /// so the connection is in an indeterminate framing state and MUST NOT be
+    /// returned to a keep-alive pool — the next request written on it would be
+    /// consumed by the server as this request's missing body
+    /// (br-asupersync-h1-expect-100-pool-h9le7v). Mirrors hyper disabling
+    /// keep-alive in this case.
+    pub body_withheld: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1629,6 +1652,13 @@ mod tests {
 
         let resp = block_on(Http1Client::request_with_io(io, req)).expect("response");
         assert_eq!(resp.0.status, 417);
+        // The Expect:100-continue body was withheld (final response arrived
+        // without a 100), so the connection must be flagged non-reusable
+        // (br-asupersync-h1-expect-100-pool-h9le7v).
+        assert!(
+            resp.2,
+            "withheld Expect:100 body must mark the connection body_withheld"
+        );
 
         let writes = resp.1.writes;
         assert_eq!(
@@ -1800,9 +1830,11 @@ mod tests {
             peer_addr: None,
         };
 
-        let (resp, io) = block_on(Http1Client::request_with_io(io, req)).expect("response");
+        let (resp, io, body_withheld) =
+            block_on(Http1Client::request_with_io(io, req)).expect("response");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"ok");
+        assert!(!body_withheld, "full body was sent; connection is reusable");
         let request_bytes = String::from_utf8(io.written).expect("request write should be utf8");
         assert!(request_bytes.starts_with("GET /reuse HTTP/1.1\r\n"));
         assert!(request_bytes.contains("Host: example.com\r\n"));

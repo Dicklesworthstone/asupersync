@@ -603,6 +603,13 @@ pub trait TimerDriverApi: Send + Sync + std::fmt::Debug {
 
     /// Returns true if no timers are pending.
     fn is_empty(&self) -> bool;
+
+    /// Returns the maximum timer duration this driver can represent. A
+    /// registration whose deadline exceeds `now + max_timer_duration` is clamped
+    /// to fire EARLY at the horizon (see `TimerWheel::register`); callers that
+    /// need the true deadline must detect the clamp and re-register
+    /// (br-asupersync-sleep-horizon-early-youlxs).
+    fn max_timer_duration(&self) -> std::time::Duration;
 }
 
 impl<T: TimeSource + std::fmt::Debug + 'static> TimerDriverApi for TimerDriver<T> {
@@ -636,6 +643,10 @@ impl<T: TimeSource + std::fmt::Debug + 'static> TimerDriverApi for TimerDriver<T
 
     fn is_empty(&self) -> bool {
         Self::is_empty(self)
+    }
+
+    fn max_timer_duration(&self) -> std::time::Duration {
+        self.wheel.lock().config().max_timer_duration
     }
 }
 
@@ -734,6 +745,15 @@ impl TimerDriverHandle {
     #[must_use]
     pub fn cancel(&self, handle: &TimerHandle) -> bool {
         self.inner.cancel(handle)
+    }
+
+    /// Returns the maximum timer duration before this driver clamps a
+    /// registration to fire early at the horizon
+    /// (br-asupersync-sleep-horizon-early-youlxs).
+    #[inline]
+    #[must_use]
+    pub fn max_timer_duration(&self) -> std::time::Duration {
+        self.inner.max_timer_duration()
     }
 
     /// Returns the next deadline that will fire, if any.

@@ -800,7 +800,12 @@ impl<H: Handler> Handler for BulkheadMiddleware<H> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-            match self.bulkhead.try_acquire(1) {
+            // Deterministic clock reading so bulkhead can drain stale timed-out
+            // queue entries before admitting (br-asupersync-bulkhead-tryacquire-starve-kodql2).
+            let now = cx
+                .timer_driver()
+                .map_or_else(crate::time::wall_now, |timer| timer.now());
+            match self.bulkhead.try_acquire(1, now) {
                 Some(p) => {
                     let resp = self.inner.call(&cx, req).await;
                     p.release();

@@ -1579,7 +1579,9 @@ where
 {
     ensure_epoch_ready(epoch_ctx, policy, time_source, epoch_source)
         .map_err(EpochBulkheadError::Epoch)?;
-    bulkhead.call(op).map_err(EpochBulkheadError::Bulkhead)
+    bulkhead
+        .call(time_source.now(), op)
+        .map_err(EpochBulkheadError::Bulkhead)
 }
 
 /// Execute a weighted bulkhead operation with epoch checks.
@@ -1601,7 +1603,7 @@ where
     ensure_epoch_ready(epoch_ctx, policy, time_source, epoch_source)
         .map_err(EpochBulkheadError::Epoch)?;
     bulkhead
-        .call_weighted(weight, op)
+        .call_weighted(weight, time_source.now(), op)
         .map_err(EpochBulkheadError::Bulkhead)
 }
 

@@ -265,6 +265,14 @@ struct SleepState {
     timer_handle: Option<TimerHandle>,
     /// Timer driver used to register the current handle.
     timer_driver: Option<TimerDriverHandle>,
+    /// True when the current registration was CLAMPED because the true deadline
+    /// exceeds the driver's timer horizon: the wheel will fire early at the
+    /// horizon as a re-arm signal, so `Future::poll` must re-register for the
+    /// remaining duration instead of completing. A latched fire with
+    /// `registered_partial == false` is authoritative completion, even across a
+    /// driver migration whose clock reads before the deadline
+    /// (br-asupersync-sleep-horizon-early-youlxs).
+    registered_partial: bool,
 }
 
 #[derive(Debug)]
@@ -381,6 +389,7 @@ impl Sleep {
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None,
                 timer_driver: None,
+                registered_partial: false,
             })),
         }
     }
@@ -434,6 +443,7 @@ impl Sleep {
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None,
                 timer_driver: None,
+                registered_partial: false,
             })),
         }
     }
@@ -459,6 +469,7 @@ impl Sleep {
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None,
                 timer_driver: None,
+                registered_partial: false,
             })),
         }
     }
@@ -518,6 +529,10 @@ impl Sleep {
                 request_stop_fallback(&fallback);
                 handles.push(fallback.join);
             }
+            // The new deadline gets a fresh registration on the next poll; clear
+            // the clamp flag so it is recomputed rather than left stale
+            // (br-asupersync-sleep-horizon-early-youlxs).
+            state.registered_partial = false;
             (
                 state.timer_handle.take(),
                 state.timer_driver.take(),
@@ -557,6 +572,10 @@ impl Sleep {
                 request_stop_fallback(&fallback);
                 handles.push(fallback.join);
             }
+            // The new deadline gets a fresh registration on the next poll; clear
+            // the clamp flag so it is recomputed rather than left stale
+            // (br-asupersync-sleep-horizon-early-youlxs).
+            state.registered_partial = false;
             (
                 state.timer_handle.take(),
                 state.timer_driver.take(),
@@ -641,6 +660,13 @@ impl Sleep {
         );
         self.polled
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // A latched timer fire is authoritative completion — even when this
+        // poll's clock reads `now < deadline` (driver migration to a different
+        // clock, fallback-thread wake, custom time getter). The one exception is
+        // a *clamped-wheel* early fire (deadline beyond the wheel horizon, fired
+        // early at the horizon as a re-arm signal); that case is intercepted and
+        // re-armed by `Future::poll` BEFORE this runs, which consumes the latch,
+        // so it never reaches here (br-asupersync-sleep-horizon-early-youlxs).
         if self.ready.swap(false, Ordering::AcqRel) || now >= self.deadline {
             self.completed
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -710,6 +736,33 @@ impl Future for Sleep {
                 .map_or_else(|| self.current_time(), TimerDriverHandle::now)
         };
 
+        // Intercept a CLAMPED-wheel early fire before poll_with_time. When the
+        // true deadline exceeds the driver horizon, the wheel fires the readiness
+        // latch early at the horizon purely as a re-arm signal (wheel.rs
+        // `register`); `registered_partial` records that the current registration
+        // was clamped. Only then do we consume the latch and drop the spent
+        // handle so the Pending path below re-registers for the remaining
+        // duration. A NON-partial latched fire is authoritative completion — even
+        // across a driver migration or fallback→driver transition whose clock
+        // reads before the deadline — so we leave its latch intact for
+        // poll_with_time (br-asupersync-sleep-horizon-early-youlxs).
+        if now < self.deadline {
+            let mut state = self.state.lock();
+            if state.registered_partial && self.ready.swap(false, Ordering::AcqRel) {
+                if let Some(handle) = state.timer_handle.take() {
+                    let driver = state.timer_driver.clone().or_else(|| timer_driver.clone());
+                    if let Some(driver) = driver {
+                        if let Some(trace) = trace.as_ref() {
+                            trace.record_event(|seq| {
+                                TraceEvent::timer_cancelled(seq, now, handle.id())
+                            });
+                        }
+                        let _ = driver.cancel(&handle);
+                    }
+                }
+            }
+        }
+
         match self.poll_with_time(now) {
             Poll::Ready(()) => {
                 // Cancel any registered timer on completion.
@@ -763,6 +816,16 @@ impl Future for Sleep {
 
                     state.timer_driver = Some(timer.clone());
 
+                    // Record whether THIS registration is clamped: the wheel fires
+                    // early at `now + max_timer_duration` when the true deadline is
+                    // farther out than the driver can represent. Computed at
+                    // registration time (mirrors the wheel's own clamp test) so the
+                    // flag matches the actual handle, not a later recomputation
+                    // (br-asupersync-sleep-horizon-early-youlxs).
+                    let horizon_ns =
+                        u64::try_from(timer.max_timer_duration().as_nanos()).unwrap_or(u64::MAX);
+                    let registered_partial = self.deadline > now.saturating_add_nanos(horizon_ns);
+
                     let mut armed = false;
                     if state.timer_handle.is_none() {
                         // Register new timer
@@ -776,6 +839,7 @@ impl Future for Sleep {
                             });
                         }
                         state.timer_handle = Some(handle);
+                        state.registered_partial = registered_partial;
                         armed = true;
                     } else if waker_changed {
                         // Update existing timer with new waker
@@ -800,6 +864,7 @@ impl Future for Sleep {
                                 });
                             }
                             state.timer_handle = Some(new_handle);
+                            state.registered_partial = registered_partial;
                             armed = true;
                         }
                     }
@@ -948,6 +1013,7 @@ impl Clone for Sleep {
                 zombie_fallbacks: Vec::new(),
                 timer_handle: None, // Fresh clone has no timer registration
                 timer_driver: None,
+                registered_partial: false,
             })),
         }
     }
@@ -1624,6 +1690,86 @@ mod tests {
         );
 
         crate::test_complete!("reset_cancels_old_timer_and_re_registers_on_poll");
+    }
+
+    #[test]
+    fn sleep_beyond_max_horizon_re_registers_and_does_not_fire_early() {
+        init_test("sleep_beyond_max_horizon_re_registers_and_does_not_fire_early");
+
+        // The wheel's default max_timer_duration is 7 days (wheel.rs). A sleep
+        // whose deadline is 8 days out is clamped by the wheel and its timer
+        // fires EARLY at the 7-day horizon. The sleep must treat that early fire
+        // as a re-arm signal (re-register for the true deadline), NOT as
+        // completion (br-asupersync-sleep-horizon-early-youlxs).
+        const HORIZON_SECS: u64 = 7 * 24 * 60 * 60; // 604_800 (default max horizon)
+        const DEADLINE_SECS: u64 = 8 * 24 * 60 * 60; // 691_200 (one day past horizon)
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut sleep = Sleep::after(timer.now(), Duration::from_secs(DEADLINE_SECS));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // First poll registers a clamped timer at the 7-day horizon.
+        let first = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(first.is_pending(), "first poll pending", true, first.is_pending());
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "clamped timer registered",
+            1,
+            timer.pending_count()
+        );
+
+        // Fire the clamped timer at the horizon. The true deadline is still a day
+        // away, so the sleep must stay pending and re-register.
+        clock.set(Time::from_secs(HORIZON_SECS));
+        let fired = timer.process_timers();
+        crate::assert_with_log!(fired == 1, "clamped timer fires at horizon", 1, fired);
+        let early = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            early.is_pending(),
+            "must NOT complete early at the clamp horizon",
+            true,
+            early.is_pending()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "timer re-registered for the true deadline",
+            1,
+            timer.pending_count()
+        );
+
+        // Nothing fires before the true deadline.
+        clock.set(Time::from_secs(DEADLINE_SECS - 1));
+        let none = timer.process_timers();
+        crate::assert_with_log!(none == 0, "no fire before true deadline", 0, none);
+        let still = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            still.is_pending(),
+            "still pending before true deadline",
+            true,
+            still.is_pending()
+        );
+
+        // At the true deadline the sleep completes.
+        clock.set(Time::from_secs(DEADLINE_SECS));
+        let _ = timer.process_timers();
+        let done = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(done.is_ready(), "ready at the true deadline", true, done.is_ready());
+
+        crate::test_complete!("sleep_beyond_max_horizon_re_registers_and_does_not_fire_early");
     }
 
     #[test]

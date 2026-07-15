@@ -1595,6 +1595,30 @@ impl CancelProtocolValidator {
         self.obligation_machines.insert(obligation_id, machine);
     }
 
+    /// Remove a task's state machine once the task is fully retired.
+    ///
+    /// Without this, `task_machines` grows without bound — roughly one
+    /// `TaskStateMachine` (~100 bytes) leaked per task ever spawned — because
+    /// `register_task` is called on every spawn and nothing ever removed the
+    /// entry, and `TaskId`s carry generations so slot reuse mints fresh keys
+    /// rather than overwriting. Call this from the task completion/recycle path
+    /// (br-asupersync-cancelvalidator-leak-mdvuf9).
+    pub fn remove_task(&mut self, task_id: TaskId) {
+        self.task_machines.remove(&task_id);
+    }
+
+    /// Remove a region's state machine once the region is fully closed and
+    /// retired (br-asupersync-cancelvalidator-leak-mdvuf9).
+    pub fn remove_region(&mut self, region_id: RegionId) {
+        self.region_machines.remove(&region_id);
+    }
+
+    /// Remove an obligation's state machine once it is fully resolved
+    /// (committed or aborted) (br-asupersync-cancelvalidator-leak-mdvuf9).
+    pub fn remove_obligation(&mut self, obligation_id: ObligationId) {
+        self.obligation_machines.remove(&obligation_id);
+    }
+
     /// Register a new channel for tracking.
     pub fn register_channel(&mut self, channel_id: u64) {
         let machine = ChannelStateMachine::new(channel_id, self.validation_level);
@@ -1874,6 +1898,42 @@ mod tests {
             spawned_at: Time::ZERO,
             validation_level: ValidationLevel::Full,
         }
+    }
+
+    #[test]
+    fn validator_remove_methods_drop_state_machines_no_leak() {
+        // register_* runs on every spawn/region-open/obligation-reserve, and
+        // TaskIds carry generations so recycled slots mint fresh keys. Without a
+        // matching remove_*, task_machines/region_machines/obligation_machines
+        // grow without bound — the leak fixed in
+        // br-asupersync-cancelvalidator-leak-mdvuf9. Distinct generations here
+        // model slot reuse minting fresh keys rather than overwriting.
+        let mut validator = CancelProtocolValidator::new(ValidationLevel::Basic);
+
+        for i in 0..100u32 {
+            let region_id = RegionId::new_for_test(1, i);
+            validator.register_region(region_id);
+            validator.register_task(TaskId::new_for_test(1, i), region_id);
+            validator.register_obligation(ObligationId::new_for_test(1, i));
+        }
+        let (regions, tasks, obligations, ..) = validator.stats();
+        assert_eq!(
+            (regions, tasks, obligations),
+            (100, 100, 100),
+            "all registered entities are tracked"
+        );
+
+        for i in 0..100u32 {
+            validator.remove_task(TaskId::new_for_test(1, i));
+            validator.remove_region(RegionId::new_for_test(1, i));
+            validator.remove_obligation(ObligationId::new_for_test(1, i));
+        }
+        let (regions, tasks, obligations, ..) = validator.stats();
+        assert_eq!(
+            (regions, tasks, obligations),
+            (0, 0, 0),
+            "remove_* must drop the state machines so the maps do not leak"
+        );
     }
 
     fn channel_context(channel_id: u64) -> ChannelContext {

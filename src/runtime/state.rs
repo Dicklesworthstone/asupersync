@@ -1778,6 +1778,13 @@ impl RuntimeState {
     #[inline]
     pub fn recycle_task(&mut self, task_id: TaskId) {
         self.tasks.remove_and_recycle_task(task_id);
+        // Drop the task's cancel-protocol state machine now that the task is
+        // fully retired. Without this, `task_machines` grows without bound — one
+        // ~100-byte entry per task ever spawned, since `register_task` runs on
+        // every spawn and `TaskId`s carry generations so recycled slots mint
+        // fresh keys rather than overwriting
+        // (br-asupersync-cancelvalidator-leak-mdvuf9).
+        self.cancel_protocol_validator.lock().remove_task(task_id);
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
     }
 
@@ -3229,6 +3236,15 @@ impl RuntimeState {
             region_record.resolve_obligation();
         }
 
+        // The obligation is resolved; drop its cancel-protocol state machine so
+        // `obligation_machines` doesn't leak one entry per obligation ever
+        // reserved (br-asupersync-cancelvalidator-leak-mdvuf9). Finalizers run by
+        // `advance_region_state` acquire fresh obligation ids, so this removal
+        // does not affect them.
+        self.cancel_protocol_validator
+            .lock()
+            .remove_obligation(obligation);
+
         self.advance_region_state(info.region);
 
         Ok(info.duration)
@@ -3322,6 +3338,13 @@ impl RuntimeState {
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
             region_record.resolve_obligation();
         }
+
+        // The obligation is resolved (aborted); drop its cancel-protocol state
+        // machine so `obligation_machines` doesn't leak
+        // (br-asupersync-cancelvalidator-leak-mdvuf9).
+        self.cancel_protocol_validator
+            .lock()
+            .remove_obligation(obligation);
 
         // During leak handling, defer region state advancement to prevent reentrancy.
         // Finalizers run by advance_region_state could acquire new obligations, violating
@@ -5045,6 +5068,13 @@ impl RuntimeState {
                             self.remember_closed_region(region_id, close_outcome);
                             // Cleanup: Remove the closed region from the arena to prevent memory leaks
                             self.regions.remove(region_id.arena_index());
+                            // Drop the region's cancel-protocol state machine too;
+                            // otherwise `region_machines` leaks one entry per
+                            // region ever opened
+                            // (br-asupersync-cancelvalidator-leak-mdvuf9).
+                            self.cancel_protocol_validator
+                                .lock()
+                                .remove_region(region_id);
                             self.notify_runtime_epoch_advance(
                                 super::epoch_tracker::ModuleId::RegionTable,
                             );

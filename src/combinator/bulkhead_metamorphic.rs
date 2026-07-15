@@ -302,10 +302,11 @@ fn mr1_isolation_invariant(
     }
 
     // Execute work on each bulkhead
+    let now = Time::from_millis(0);
     for (bulkhead_name, bulkhead) in &bulkheads {
         if let Some(work_units) = work_assignments.get(bulkhead_name) {
             for work_unit in work_units {
-                match bulkhead.try_acquire(work_unit.weight) {
+                match bulkhead.try_acquire(work_unit.weight, now) {
                     Some(permit) => {
                         // Simulate work execution
                         global_state.record_acquisition();
@@ -389,15 +390,15 @@ fn mr2_rejection_accuracy(
     let mut acquired_permits = Vec::new();
     let mut actual_rejections = 0;
 
+    let now = Time::from_millis(0);
     for work_id in 0..work_burst_size {
-        match bulkhead.try_acquire(1) {
+        match bulkhead.try_acquire(1, now) {
             Some(permit) => {
                 global_state.record_acquisition();
                 acquired_permits.push(permit);
             }
             None => {
                 // Try to enqueue
-                let now = Time::from_millis(0);
                 match bulkhead.enqueue(1, now) {
                     Ok(_entry_id) => {
                         // Successfully queued
@@ -456,15 +457,15 @@ fn mr3_cancel_propagation(worker_count: u32, in_flight_count: u32, _seed: u64) -
     let mut queue_entries = Vec::new();
 
     // Fill up the workers
+    let now = Time::from_millis(0);
     for _work_id in 0..worker_count {
-        if let Some(permit) = bulkhead.try_acquire(1) {
+        if let Some(permit) = bulkhead.try_acquire(1, now) {
             global_state.record_acquisition();
             permits.push(permit);
         }
     }
 
     // Queue additional work
-    let now = Time::from_millis(0);
     for _work_id in worker_count..worker_count + in_flight_count {
         match bulkhead.enqueue(1, now) {
             Ok(entry_id) => {
@@ -541,8 +542,9 @@ fn mr4_metrics_accuracy(
     let mut rejected_count = 0;
     let mut permits = Vec::new();
 
+    let now = Time::from_millis(0);
     for op_id in 0..operation_count {
-        match bulkhead.try_acquire(1) {
+        match bulkhead.try_acquire(1, now) {
             Some(permit) => {
                 executed_count += 1;
                 global_state.record_acquisition();
@@ -649,8 +651,9 @@ fn run_deterministic_sequence(
     let mut results = Vec::new();
     let mut permits = Vec::new();
 
+    let now = Time::from_millis(0);
     for (i, &weight) in work_sequence.iter().enumerate() {
-        let op_result = match bulkhead.try_acquire(weight) {
+        let op_result = match bulkhead.try_acquire(weight, now) {
             Some(permit) => {
                 permits.push(permit);
                 OperationResult::Acquired { weight }
