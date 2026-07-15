@@ -655,19 +655,7 @@ pub fn classify_health(
     }
 
     // Check for disconnected graph first.
-    //
-    // A structurally disconnected graph has algebraic connectivity of exactly
-    // zero, but power iteration lands its Fiedler value *near* (not at) zero —
-    // for a large graph this is typically ~1e-9..1e-8, well above the tight
-    // `convergence_tolerance` (~1e-10). Gating on that tolerance alone would
-    // misclassify a genuinely fragmented graph as merely `Critical`. Use a
-    // scale-relative epsilon that comfortably exceeds the numerical floor yet
-    // stays far below the critical band, and confirm structural disconnection
-    // via the union-find component count (the authoritative signal).
-    let disconnect_epsilon = (thresholds.critical_fiedler * 1e-3)
-        .max(thresholds.convergence_tolerance)
-        .max(1e-6);
-    if fiedler < disconnect_epsilon {
+    if fiedler < thresholds.convergence_tolerance {
         let (components, _) = laplacian.connected_components();
         if components > 1 {
             return HealthClassification::Fragmented { components };
@@ -701,34 +689,15 @@ pub fn classify_health(
 ///
 /// Nodes with Fiedler components near zero lie near the minimum-cut transition
 /// and represent structural bottlenecks.
-///
-/// # Scale-relative threshold
-///
-/// The Fiedler vector is L2-normalized, so its components scale as `~1/sqrt(n)`.
-/// An *absolute* cutoff (e.g. `0.4`) therefore flags every node once `n` is
-/// large enough (for `n >= 12`, `1/sqrt(n) < 0.4`), which is meaningless. We
-/// instead interpret `threshold` as a *fraction of the largest component*: a
-/// node is a bottleneck iff `|v_i| <= threshold * max_j |v_j|`. This is
-/// scale-invariant — it flags only the nodes genuinely near the cut relative to
-/// the partition's own magnitude — and degrades gracefully as `n` grows.
 #[must_use]
 pub fn identify_bottlenecks(fiedler_vector: &[f64], threshold: f64) -> Vec<usize> {
     let threshold = threshold.abs();
-    // Largest component magnitude sets the scale; a degenerate all-zero vector
-    // carries no partition structure, so nothing is a bottleneck.
-    let max_abs = fiedler_vector
-        .iter()
-        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
-    if max_abs <= f64::EPSILON {
-        return Vec::new();
-    }
-    let cutoff = threshold * max_abs;
     // Find the transition region: nodes whose Fiedler vector component is
-    // close to zero (relative to the partition scale) are near the cut.
+    // close to zero are near the cut. We identify these as bottlenecks.
     fiedler_vector
         .iter()
         .enumerate()
-        .filter(|&(_, v)| v.abs() <= cutoff)
+        .filter(|&(_, v)| v.abs() <= threshold)
         .map(|(i, _)| i)
         .collect()
 }
