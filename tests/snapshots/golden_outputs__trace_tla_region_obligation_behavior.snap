@@ -21,33 +21,33 @@ Init ==
 Next ==
     \/ /\ step = 0 /\ step' = 1
        /\ tasks' = <<>>
-       /\ regions' = (1 :> <<"Open", "NONE">>)
+       /\ regions' = ("1.0" :> <<"Open", "NONE">>)
        /\ obligations' = <<>>
        /\ time' = 0
     \/ /\ step = 1 /\ step' = 2
-       /\ tasks' = (1 :> <<"Spawned", 1>>)
-       /\ regions' = (1 :> <<"Open", "NONE">>)
+       /\ tasks' = ("1.0" :> <<"Spawned", "1.0">>)
+       /\ regions' = ("1.0" :> <<"Open", "NONE">>)
        /\ obligations' = <<>>
        /\ time' = 5
     \/ /\ step = 2 /\ step' = 3
-       /\ tasks' = (1 :> <<"Spawned", 1>>)
-       /\ regions' = (1 :> <<"Open", "NONE">>)
-       /\ obligations' = (1 :> <<"Reserved", 1, 1>>)
+       /\ tasks' = ("1.0" :> <<"Spawned", "1.0">>)
+       /\ regions' = ("1.0" :> <<"Open", "NONE">>)
+       /\ obligations' = ("1.0" :> <<"Reserved", "1.0", "1.0">>)
        /\ time' = 8
     \/ /\ step = 3 /\ step' = 4
-       /\ tasks' = (1 :> <<"Spawned", 1>>)
-       /\ regions' = (1 :> <<"Open", "NONE">>)
-       /\ obligations' = (1 :> <<"Committed", 1, 1>>)
+       /\ tasks' = ("1.0" :> <<"Spawned", "1.0">>)
+       /\ regions' = ("1.0" :> <<"Open", "NONE">>)
+       /\ obligations' = ("1.0" :> <<"Committed", "1.0", "1.0">>)
        /\ time' = 13
     \/ /\ step = 4 /\ step' = 5
-       /\ tasks' = (1 :> <<"Completed", 1>>)
-       /\ regions' = (1 :> <<"Open", "NONE">>)
-       /\ obligations' = (1 :> <<"Committed", 1, 1>>)
+       /\ tasks' = ("1.0" :> <<"Completed", "1.0">>)
+       /\ regions' = ("1.0" :> <<"Open", "NONE">>)
+       /\ obligations' = ("1.0" :> <<"Committed", "1.0", "1.0">>)
        /\ time' = 21
     \/ /\ step = 5 /\ step' = 6
-       /\ tasks' = (1 :> <<"Completed", 1>>)
-       /\ regions' = (1 :> <<"Closed", "NONE">>)
-       /\ obligations' = (1 :> <<"Committed", 1, 1>>)
+       /\ tasks' = ("1.0" :> <<"Completed", "1.0">>)
+       /\ regions' = ("1.0" :> <<"Closed", "NONE">>)
+       /\ obligations' = ("1.0" :> <<"Committed", "1.0", "1.0">>)
        /\ time' = 34
 
 \* Safety: no leaked obligations in terminal states
