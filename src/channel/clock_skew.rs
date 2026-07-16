@@ -75,6 +75,9 @@ pub struct ClockSkewConfig {
     /// Probability of applying a random jitter on each `now()` call [0.0, 1.0].
     pub jitter_probability: f64,
     /// Maximum jitter magnitude in nanoseconds (applied symmetrically).
+    ///
+    /// This must not exceed [`i64::MAX`]; builders and clock constructors reject
+    /// larger direct-field configurations.
     pub jitter_max_ns: u64,
     /// One-time clock jump: (trigger_after_ns, jump_offset_ns).
     /// When base-clock time exceeds `trigger_after_ns`, a single jump of
@@ -83,6 +86,14 @@ pub struct ClockSkewConfig {
 }
 
 impl ClockSkewConfig {
+    #[inline]
+    fn assert_valid_jitter_max_ns(max_ns: u64) {
+        assert!(
+            SkewNanos::try_from(max_ns).is_ok(),
+            "jitter max must fit in i64 nanoseconds, got {max_ns}"
+        );
+    }
+
     /// Create a new config with the given seed and no skew.
     #[must_use]
     pub const fn new(seed: u64) -> Self {
@@ -121,13 +132,15 @@ impl ClockSkewConfig {
     ///
     /// # Panics
     ///
-    /// Panics if `probability` is not in [0.0, 1.0].
+    /// Panics if `probability` is not in [0.0, 1.0], or if `max_ns` exceeds
+    /// [`i64::MAX`].
     #[must_use]
     pub fn with_jitter(mut self, probability: f64, max_ns: u64) -> Self {
         assert!(
             (0.0..=1.0).contains(&probability),
             "probability must be in [0.0, 1.0], got {probability}"
         );
+        Self::assert_valid_jitter_max_ns(max_ns);
         self.jitter_probability = probability;
         self.jitter_max_ns = max_ns;
         self
@@ -266,12 +279,18 @@ impl std::fmt::Debug for SkewClock {
 
 impl SkewClock {
     /// Create a new skewed clock wrapping the given base clock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the public configuration's `jitter_max_ns` does not fit in
+    /// the signed nanosecond offset used by this clock.
     #[must_use]
     pub fn new(
         base: Arc<dyn TimeSource>,
         config: ClockSkewConfig,
         evidence_sink: Arc<dyn EvidenceSink>,
     ) -> Self {
+        ClockSkewConfig::assert_valid_jitter_max_ns(config.jitter_max_ns);
         let rng = ChaosRng::new(config.seed);
         Self {
             base,
@@ -303,6 +322,13 @@ impl SkewClock {
                 drift as SkewNanos
             }
         }
+    }
+
+    #[inline]
+    fn signed_jitter_ns(magnitude: u64, positive: bool) -> SkewNanos {
+        let magnitude = SkewNanos::try_from(magnitude)
+            .expect("validated jitter_max_ns guarantees a signed magnitude");
+        if positive { magnitude } else { -magnitude }
     }
 
     /// Compute the skew offset for a given base time.
@@ -344,9 +370,7 @@ impl SkewClock {
                 (should, mag, dir)
             };
             if should {
-                let sign: SkewNanos = if direction { 1 } else { -1 };
-                #[allow(clippy::cast_possible_wrap)]
-                let jitter = sign * (magnitude as SkewNanos);
+                let jitter = Self::signed_jitter_ns(magnitude, direction);
                 total_skew = total_skew.saturating_add(jitter);
                 jitter_applied = true;
                 self.stats.record_jitter();
@@ -406,6 +430,10 @@ impl TimeSource for SkewClock {
 /// Create a skewed clock wrapping a base clock.
 ///
 /// Returns the `SkewClock` (as `Arc<SkewClock>` for shared ownership).
+///
+/// # Panics
+///
+/// Panics if the public configuration's `jitter_max_ns` exceeds [`i64::MAX`].
 #[must_use]
 pub fn skew_clock(
     base: Arc<dyn TimeSource>,
@@ -689,6 +717,25 @@ mod tests {
     }
 
     #[test]
+    fn signed_jitter_conversion_accepts_full_valid_range() {
+        let max = i64::MAX.unsigned_abs();
+        let config = ClockSkewConfig::new(42).with_jitter(1.0, max);
+
+        assert_eq!(config.jitter_max_ns, max);
+        assert_eq!(SkewClock::signed_jitter_ns(0, true), 0);
+        assert_eq!(SkewClock::signed_jitter_ns(max, true), i64::MAX);
+        assert_eq!(SkewClock::signed_jitter_ns(max, false), -i64::MAX);
+
+        let base = make_base_clock();
+        let (_, sink) = make_sink();
+        let mut direct_config = ClockSkewConfig::new(42);
+        direct_config.jitter_probability = 1.0;
+        direct_config.jitter_max_ns = max;
+        let direct = SkewClock::new(base as Arc<dyn TimeSource>, direct_config, sink);
+        assert_eq!(direct.config.jitter_max_ns, max);
+    }
+
+    #[test]
     fn jitter_bounded() {
         let base = make_base_clock();
         let (_, sink) = make_sink();
@@ -706,7 +753,7 @@ mod tests {
                 10_000_000_000 - t.as_nanos()
             };
             assert!(
-                diff < max_jitter_ns,
+                diff <= max_jitter_ns,
                 "Jitter {diff}ns exceeds max {max_jitter_ns}ns"
             );
         }
@@ -776,6 +823,32 @@ mod tests {
     #[should_panic(expected = "probability must be in [0.0, 1.0]")]
     fn config_rejects_invalid_jitter_probability() {
         let _ = ClockSkewConfig::new(42).with_jitter(1.5, 1000);
+    }
+
+    #[test]
+    fn config_builder_rejects_jitter_above_signed_range() {
+        for max in [i64::MAX.unsigned_abs() + 1, u64::MAX] {
+            let result = std::panic::catch_unwind(|| {
+                let _ = ClockSkewConfig::new(42).with_jitter(1.0, max);
+            });
+            assert!(result.is_err(), "builder accepted jitter_max_ns={max}");
+        }
+    }
+
+    #[test]
+    fn skew_clock_rejects_direct_config_above_signed_range() {
+        for max in [i64::MAX.unsigned_abs() + 1, u64::MAX] {
+            let base = make_base_clock();
+            let (_, sink) = make_sink();
+            let mut config = ClockSkewConfig::new(42);
+            config.jitter_probability = 1.0;
+            config.jitter_max_ns = max;
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = SkewClock::new(base as Arc<dyn TimeSource>, config, sink);
+            }));
+            assert!(result.is_err(), "constructor accepted jitter_max_ns={max}");
+        }
     }
 
     #[test]
