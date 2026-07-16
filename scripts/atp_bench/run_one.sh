@@ -17,14 +17,14 @@ PERF_OUT="$TMP/perf.txt"
 # mpstat per-core sampling for the duration of the run (1s interval).
 MPSTAT_PID=0
 if command -v mpstat >/dev/null 2>&1; then
-    LC_ALL=C mpstat -P ALL 1 > "$TMP/mpstat.txt" 2>/dev/null &
+    LC_ALL=C mpstat -P ALL 1 </dev/null > "$TMP/mpstat.txt" 2>/dev/null &
     MPSTAT_PID=$!
 fi
 
 START_LOAD=$(cut -d' ' -f1 /proc/loadavg)
 STATUS=0
 if command -v perf >/dev/null 2>&1 \
-   && perf stat -e task-clock true >/dev/null 2>&1; then
+   && perf stat -e task-clock true </dev/null >/dev/null 2>&1; then
     /usr/bin/time -v -o "$TIME_OUT" \
         perf stat -x, -e task-clock,cycles,instructions -o "$PERF_OUT" \
         "$@" >/dev/null 2>"$TMP/cmd.stderr" || STATUS=$?

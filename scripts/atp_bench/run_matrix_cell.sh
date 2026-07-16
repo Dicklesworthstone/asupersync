@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Keep both the legacy clap environment input and the shell-only staging name
+# out of every child environment, even if the invoking shell exported them.
+if [[ ${ATP_RQ_AUTH_KEY_HEX+x} ]]; then
+    set +x
+    unset ATP_RQ_AUTH_KEY_HEX RQ_AUTH_SECRET
+    echo "ATP_RQ_AUTH_KEY_HEX is forbidden; authenticated cells generate a protected per-cell key" >&2
+    exit 2
+fi
+unset RQ_AUTH_SECRET
+if [[ ${RQ_AUTH_KEY_HEX+x} ]]; then
+    set +x
+    unset RQ_AUTH_KEY_HEX
+    echo "RQ_AUTH_KEY_HEX is forbidden; authenticated cells generate a protected per-cell key" >&2
+    exit 2
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # run_matrix_cell.sh — the per-cell runner for matrix_bench.sh (cc_1 lane).
 #
@@ -33,7 +49,7 @@ set -euo pipefail
 #   ATP_MATRIX_TIER ATP_MATRIX_METHOD ATP_MATRIX_REP ATP_MATRIX_STREAMS ATP_MATRIX_RESULTS
 #   ATP_MATRIX_NETEM_JSON ATP_MATRIX_RUN_ID ATP_MATRIX_GIT_HEAD
 # Tunables (env): BIN, WORKERS, STREAMS, SYMBOL_SIZE, MAX_BLOCK_SIZE, MAX_BYTES,
-#   RQ_AUTH_KEY_HEX, HOST_IP, NS_IP, CIDR, ATP_MATRIX_TIMEOUT,
+#   HOST_IP, NS_IP, CIDR, ATP_MATRIX_TIMEOUT,
 #   RSS_SAMPLE_INTERVAL, REMOTE_USER, SSH_KEY, RECEIVER_READY_SLEEP, CELL_TMP.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -56,6 +72,14 @@ RESULTS="$ATP_MATRIX_RESULTS"
 NETEM_JSON="$ATP_MATRIX_NETEM_JSON"
 RUN_ID="${ATP_MATRIX_RUN_ID:-adhoc}"
 GIT_HEAD="${ATP_MATRIX_GIT_HEAD:-unknown}"
+case "$METHOD" in
+    atp-rq-lab)             AUTH_POSTURE=rq-lab-unauthenticated-v1 ;;
+    atp-rq-auth)            AUTH_POSTURE=rq-symbol-hmac-v1 ;;
+    atp-quic-tls13)         AUTH_POSTURE=quic-tls13-transport-aead-v1 ;;
+    rsyncd)                 AUTH_POSTURE=rsyncd-plaintext-v1 ;;
+    rsync-ssh-aes128gcm)    AUTH_POSTURE=ssh-aes128-gcm-v1 ;;
+    *) echo "unknown matrix method for auth posture" >&2; exit 2 ;;
+esac
 
 BIN="${BIN:-/tmp/atp_bench/atp}"
 WORKERS="${WORKERS:-4}"
@@ -64,7 +88,7 @@ STREAMS="${ATP_MATRIX_STREAMS:-$STREAMS}"
 SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
 MAX_BLOCK_SIZE="${ATP_MATRIX_MAX_BLOCK_SIZE:-${MAX_BLOCK_SIZE:-auto}}"
 MAX_BYTES="${MAX_BYTES:-6442450944}"
-RQ_AUTH_KEY_HEX="${RQ_AUTH_KEY_HEX:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}"
+RQ_AUTH_SECRET=""
 HOST_IP="${HOST_IP:-10.99.0.1}"
 NS_IP="${NS_IP:-10.99.0.2}"
 CIDR="${CIDR:-24}"
@@ -97,8 +121,18 @@ PORT=$(( 40000 + ($(printf '%s' "$SUFFIX" | cksum | awk '{print $1}') % 20000) )
 CASE_DIR="${CELL_TMP}/${WORKLOAD}/${REGIME}/${TIER}/${METHOD}/rep${REP}"
 RSYNCD_PID=""
 
+clear_rq_auth_secret() {
+    set +x
+    if [[ -n "${RQ_AUTH_SECRET:-}" ]]; then
+        RQ_AUTH_SECRET=0000000000000000000000000000000000000000000000000000000000000000
+    fi
+    unset RQ_AUTH_SECRET
+}
 cleanup() {
-    [ -n "$RSYNCD_PID" ] && kill "$RSYNCD_PID" 2>/dev/null || true
+    clear_rq_auth_secret
+    if [ -n "$RSYNCD_PID" ]; then
+        kill "$RSYNCD_PID" 2>/dev/null || true
+    fi
     ip netns del "$NS" >/dev/null 2>&1 || true
     ip link del "$IF_HOST" >/dev/null 2>&1 || true
 }
@@ -109,6 +143,22 @@ mkdir -p "$CASE_DIR"
 # ── helpers ──────────────────────────────────────────────────────────────────
 now_s() { date +%s.%N; }
 elapsed_s() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", b - a }'; }
+ensure_rq_auth_secret() {
+    if [[ -z "$RQ_AUTH_SECRET" ]]; then
+        # Command substitution traces assignment values, so fail closed on
+        # xtrace before acquiring key material.
+        set +x
+        RQ_AUTH_SECRET=$(env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX "$BIN" rq-keygen)
+    fi
+    [[ "$RQ_AUTH_SECRET" =~ ^[0-9A-Fa-f]{64}$ ]] \
+        || { echo "generated ATP RQ auth key is not 64 hex characters" >&2; return 2; }
+}
+send_rq_auth_secret() {
+    set +x
+    [[ ${#RQ_AUTH_SECRET} -eq 64 ]] \
+        || { echo "ATP RQ auth key is not initialized" >&2; return 2; }
+    builtin printf '%s\n' "$RQ_AUTH_SECRET"
+}
 max_rss_kb_from_time() {
     [ -f "$1" ] || { printf ''; return; }
     awk -F: '/Maximum resident set size/ { gsub(/^[ \t]+/, "", $2); print $2 }' "$1" | tail -n 1
@@ -269,7 +319,7 @@ ssh_opts() { printf '%s' "-i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnown
 
 # ── transfer kinds ───────────────────────────────────────────────────────────
 # Each populates: WALL S_PEAK R_PEAK S_AVG R_AVG CPU ROUNDS STATUS_CODE TIMED_OUT
-run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
+run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
     local mode="$1" transport="$2"
     local recv_dir="$CASE_DIR/recv"; mkdir -p "$recv_dir"
     local rl="$CASE_DIR/recv.log" sl="$CASE_DIR/send.log" rt="$CASE_DIR/recv.time" st="$CASE_DIR/send.time"
@@ -287,11 +337,27 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     # Disable the receiver-state sidecar probe so netns route issues cannot add
     # fallback noise to wall-time or obscure the transport under test.
     delta_args=(--no-delta)
-    if [ "$mode" = "lab" ]; then
-        auth_recv=(--rq-allow-unauthenticated-lab); auth_send=(--rq-allow-unauthenticated-lab)
-    else
-        auth_recv=(--rq-auth-key-hex "$RQ_AUTH_KEY_HEX"); auth_send=(--rq-auth-key-hex "$RQ_AUTH_KEY_HEX")
-    fi
+    case "$mode" in
+        lab)
+            auth_recv=(--rq-allow-unauthenticated-lab)
+            auth_send=(--rq-allow-unauthenticated-lab)
+            ;;
+        key)
+            [ "$transport" = "rq" ] \
+                || { echo "protected RQ key mode requires the rq transport" >&2; return 2; }
+            ensure_rq_auth_secret
+            auth_recv=(--rq-auth-key-stdin)
+            auth_send=(--rq-auth-key-stdin)
+            ;;
+        tls)
+            [ "$transport" = "quic" ] \
+                || { echo "TLS transport-auth mode requires the quic transport" >&2; return 2; }
+            ;;
+        *)
+            echo "unknown ATP auth mode: $mode" >&2
+            return 2
+            ;;
+    esac
     if [ "$transport" = "quic" ]; then
         local cert="$CASE_DIR/cert.pem" key="$CASE_DIR/key.pem"
         # Keep the encrypted matrix on the same P-256 leaf shape used by the
@@ -318,9 +384,9 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
         # atp-internal framing detail and does not affect the rsync-ssh comparison,
         # so the encrypted tier stays apples-to-apples. (z0v7ri encrypted-tier fix.)
         if [ "$sym" -gt 1141 ]; then sym=1141; fi
-        # quic adds TLS identity ON TOP of the per-symbol auth posture; keep the
-        # key/lab flags so the encrypted tier stays crypto-symmetric vs rsync-ssh
-        # and the receiver does not fail closed for missing symbol auth.
+        # QUIC TLS 1.3 authenticates every symbol datagram at the transport
+        # layer. RQ key flags are intentionally absent here: ATP ignores the
+        # legacy hex flag on QUIC and rejects the protected stdin flag.
     fi
 
     local extra_send=()
@@ -341,23 +407,38 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
         extra_send+=(--bwlimit "$ATP_SEND_BWLIMIT")
     fi
 
+    local -a recv_cmd=(
+        timeout "$TIMEOUT_S" /usr/bin/time -v env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX "$BIN" recv "$recv_dir"
+        --listen "0.0.0.0:${PORT}" --transport "$transport" --once --peer-id "$r_tag"
+        --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$sym"
+        "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}"
+    )
     set +e
-    timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$recv_dir" \
-        --listen "0.0.0.0:${PORT}" --transport "$transport" --once --peer-id "$r_tag" \
-        --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$sym" \
-        "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}" >"$rl" 2>"$rt" &
+    if [ "$mode" = "key" ]; then
+        send_rq_auth_secret | "${recv_cmd[@]}" >"$rl" 2>"$rt" &
+    else
+        "${recv_cmd[@]}" >"$rl" 2>"$rt" &
+    fi
     local recv_pid=$!
     sample_rss "$r_tag" "$r_stop" "$r_out" & local r_samp=$!
     sleep "$RECEIVER_READY_SLEEP"
     sample_rss "$s_tag" "$s_stop" "$s_out" & local s_samp=$!
     local start finish ss rs; TIMED_OUT=false
     start="$(now_s)"
-    ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" send "$WL_PATH" "${HOST_IP}:${PORT}" \
-        --transport "$transport" --symbol-size "$sym" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" \
-        "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}" >"$sl" 2>"$st"
+    local -a send_cmd=(
+        ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX "$BIN" send "$WL_PATH" "${HOST_IP}:${PORT}"
+        --transport "$transport" --symbol-size "$sym" --peer-id "$s_tag" --max-bytes "$MAX_BYTES"
+        "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}"
+    )
+    if [ "$mode" = "key" ]; then
+        send_rq_auth_secret | "${send_cmd[@]}" >"$sl" 2>"$st"
+    else
+        "${send_cmd[@]}" >"$sl" 2>"$st"
+    fi
     ss=$?; [ "$ss" = "124" ] && TIMED_OUT=true
     if [ "$ss" != "0" ] && kill -0 "$recv_pid" 2>/dev/null; then kill "$recv_pid" 2>/dev/null || true; fi
     wait "$recv_pid"; rs=$?; [ "$rs" = "124" ] && TIMED_OUT=true
+    clear_rq_auth_secret
     finish="$(now_s)"
     touch "$r_stop" "$s_stop"; wait "$r_samp" "$s_samp" 2>/dev/null || true
     set -e
@@ -441,8 +522,7 @@ WALL=""; S_PEAK=""; R_PEAK=""; S_AVG=""; R_AVG=""; CPU=""; S_CTX=""; ROUNDS=""; 
 case "$METHOD" in
     atp-rq-lab)             run_atp lab rq ;;
     atp-rq-auth)            run_atp key rq ;;
-    atp-quic-tls13)         run_atp key quic ;;
-    atp-quic-tls13-xauth)   run_atp lab quic ;;
+    atp-quic-tls13)         run_atp tls quic ;;
     rsyncd)                 run_rsync daemon ;;
     rsync-ssh-aes128gcm)    run_rsync ssh ;;
     *) log "unknown method '$METHOD' — recording as error"; STATUS_CODE=2 ;;
@@ -512,7 +592,7 @@ ROW_AVG="${AVG_RSS_KB:-0}" ROW_SP="${S_PEAK:-0}" ROW_RP="${R_PEAK:-0}" ROW_SA="$
 ROW_RA="${R_AVG:-0}" ROW_CPU="${CPU:-0}" ROW_ROUNDS="${ROUNDS:-0}" ROW_SRC="$SRC_SHA" \
 ROW_DST="$DST_SHA" ROW_SHA_OK="$SHA_OK" ROW_TO="$TIMED_OUT" ROW_SC="${STATUS_CODE:-1}" \
 ROW_STATUS="$STATUS" ROW_CASE="$CASE_DIR" ROW_CTX="${S_CTX:-0}" ROW_ESTPKT="${EST_DGRAMS:-0}" \
-ROW_STREAMS="${STREAMS:-0}" \
+ROW_STREAMS="${STREAMS:-0}" ROW_AUTH="$AUTH_POSTURE" \
 python3 - >>"$RESULTS" <<'PY'
 import json, os
 
@@ -546,6 +626,7 @@ row = {
     "regime": e("ROW_REGIME", ""),
     "crypto_tier": e("ROW_TIER", ""),
     "method": e("ROW_METHOD", ""),
+    "auth_posture": e("ROW_AUTH", ""),
     "rep": num("ROW_REP"),
     "netem": jobj("ROW_NETEM", {}),
     "wall_s": num("ROW_WALL"),

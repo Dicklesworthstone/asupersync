@@ -480,8 +480,8 @@ Every result — and every refuted hypothesis — is logged append-only in
 | tier | atp | rsync |
 |---|---|---|
 | `nocrypto`  | `atp-rq-lab` (`--rq-allow-unauthenticated-lab`) | `rsyncd` plaintext daemon |
-| `auth`      | `atp-rq-auth` (`--rq-auth-key-hex`)            | rsync over ssh (aes128-gcm) |
-| `encrypted` | `atp-quic-tls13` (TLS-1.3 + symbol auth)       | rsync over ssh (aes128-gcm) |
+| `auth`      | `atp-rq-auth` (fresh key via `--rq-auth-key-stdin`) | rsync over ssh (aes128-gcm) |
+| `encrypted` | `atp-quic-tls13` (TLS-1.3 transport auth)      | rsync over ssh (aes128-gcm) |
 
 ### Run it
 ```bash

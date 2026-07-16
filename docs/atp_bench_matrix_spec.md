@@ -57,14 +57,18 @@ Apply netem on BOTH veth ends (symmetric). Use `netem ... rate <r>` (or tbf) for
 
 ## Crypto tiers (apples-to-apples; pick per run)
 - `nocrypto`: atp-lab (`--rq-allow-unauthenticated-lab`) vs rsync **daemon** (rsync://, no ssh).
-- `auth`: atp-rq `--rq-auth-key-hex` (HMAC) vs rsync over ssh (aes128-gcm). [needs AUTH-1]
+- `auth`: atp-rq with a fresh HMAC key delivered through `--rq-auth-key-stdin` vs rsync over
+  ssh (aes128-gcm). The key must stay out of argv, environments, time-command records, and
+  result artifacts. [needs AUTH-1]
 - `encrypted`: atp-quic (TLS-1.3) vs rsync over ssh. [needs QUIC.1; full encryption parity]
 
 ## Output
-- `JSONL`: one row per (workload, regime, method, rep): all metrics above + binary sha prefix +
-  netem params + git HEAD. (artifacts/ is gitignored → write under a tracked path or attach to ledger.)
+- `JSONL`: one row per (workload, regime, method, rep): all metrics above + explicit
+  `auth_posture` + binary sha prefix + netem params + git HEAD. (artifacts/ is gitignored → write
+  under a tracked path or attach to ledger.)
 - `score_matrix.py`: JSONL → per-cell median + cv + atp/rsync wall & RSS ratios + per-regime geomean
-  + a markdown scorecard. Headline = atp-vs-rsync ONLY.
+  + a markdown scorecard. Missing/mismatched current QUIC auth postures are quarantined before
+  median grouping. Headline = atp-vs-rsync ONLY.
 
 ## Files
 - `scripts/atp_bench/matrix_bench.sh` — the harness (gen + regimes + run + measure + JSONL).

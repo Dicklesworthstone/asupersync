@@ -16,6 +16,7 @@ from typing import Any, Iterable
 
 ATP_PREFIXES = ("atp", "atp-rq", "atp-quic", "rq", "quic")
 RSYNC_PREFIXES = ("rsync", "rsyncd", "rsync-ssh")
+QUIC_TLS13_AUTH_POSTURE = "quic-tls13-transport-aead-v1"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class Sample:
     status: str
     timed_out: bool
     status_code: int | None
+    auth_posture: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,6 +169,7 @@ def load_samples(path: Path) -> list[Sample]:
                     "conditions.atp_rq_streams",
                 )
             )
+            auth_posture_value = pick(row, "auth_posture")
             sample = Sample(
                 workload=str(pick(row, "workload", "payload", "case") or "unknown"),
                 regime=str(pick(row, "regime", "network", "netem.name") or "unknown"),
@@ -213,6 +216,7 @@ def load_samples(path: Path) -> list[Sample]:
                 status=str(pick(row, "status", "outcome") or "ok").lower(),
                 timed_out=as_bool(pick(row, "timed_out", "timeout", "metrics.timed_out"), False),
                 status_code=as_int(pick(row, "status_code", "exit_code", "rc")),
+                auth_posture=(str(auth_posture_value).strip() if auth_posture_value is not None else None),
             )
             samples.append(sample)
     return samples
@@ -246,10 +250,36 @@ def stream_key(sample: Sample) -> str:
     return ""
 
 
-def summarize(samples: list[Sample]) -> tuple[dict[SummaryKey, dict[str, Any]], list[Sample]]:
+def auth_posture_exclusion_reason(sample: Sample) -> str | None:
+    if sample.method.lower() != "atp-quic-tls13":
+        return None
+    if sample.auth_posture == QUIC_TLS13_AUTH_POSTURE:
+        return None
+    actual = sample.auth_posture or "(missing)"
+    return f"expected {QUIC_TLS13_AUTH_POSTURE}; found {actual}"
+
+
+def summarize(
+    samples: list[Sample],
+) -> tuple[dict[SummaryKey, dict[str, Any]], list[Sample], list[dict[str, Any]]]:
     grouped: dict[SummaryKey, list[Sample]] = defaultdict(list)
     failures: list[Sample] = []
+    posture_exclusions: list[dict[str, Any]] = []
     for sample in samples:
+        posture_reason = auth_posture_exclusion_reason(sample)
+        if posture_reason is not None:
+            posture_exclusions.append(
+                {
+                    "workload": sample.workload,
+                    "regime": sample.regime,
+                    "tier": sample.tier,
+                    "method": sample.method,
+                    "rep": sample.rep,
+                    "auth_posture": sample.auth_posture or "(missing)",
+                    "reason": posture_reason,
+                }
+            )
+            continue
         key = (sample.workload, sample.regime, sample.tier, sample.method, stream_key(sample))
         grouped[key].append(sample)
         if sample.status not in {"ok", "passed", "pass"} or not sample.sha_ok:
@@ -304,7 +334,7 @@ def summarize(samples: list[Sample]) -> tuple[dict[SummaryKey, dict[str, Any]], 
             "feedback_rounds_median": median(feedback_values) if feedback_values else None,
             "failed": len(ok_group) != len(group),
         }
-    return summary, failures
+    return summary, failures, posture_exclusions
 
 
 def matched_pairs(
@@ -426,11 +456,12 @@ def render_markdown(
     pairs: list[dict[str, Any]],
     excluded_pairs: list[dict[str, Any]],
     failures: list[Sample],
+    posture_exclusions: list[dict[str, Any]],
 ) -> str:
     lines = [
         "# ATP vs rsync matrix scorecard",
         "",
-        "Integrity policy: ratios compare ATP only against optimally tuned rsync in the same workload, regime, and crypto tier. Failed SHA or incomplete rows are not admitted to headline ratios.",
+        "Integrity policy: ratios compare ATP only against optimally tuned rsync in the same workload, regime, and crypto tier. Failed SHA, incomplete rows, and mismatched current auth postures are not admitted to headline ratios.",
         "",
         "## Per-cell method medians",
         "",
@@ -550,6 +581,23 @@ def render_markdown(
     else:
         lines.append("No crypto-asymmetric ATP/rsync pairs were present.")
 
+    lines.extend(["", "## Auth-posture exclusions", ""])
+    if posture_exclusions:
+        lines.extend(
+            [
+                "These append-only rows were excluded before median grouping because their method label does not prove the current authentication posture.",
+                "",
+                "| workload | regime | tier | method | rep | auth posture | reason |",
+                "|---|---|---|---|---:|---|---|",
+            ]
+        )
+        for exclusion in posture_exclusions:
+            lines.append(
+                f"| {exclusion['workload']} | {exclusion['regime']} | {exclusion['tier']} | {exclusion['method']} | {exclusion['rep']} | {exclusion['auth_posture']} | {exclusion['reason']} |"
+            )
+    else:
+        lines.append("No rows were excluded for missing or mismatched authentication posture.")
+
     lines.extend(["", "## Failed or incomplete rows", ""])
     if failures:
         lines.extend(
@@ -594,18 +642,37 @@ def run_self_test() -> int:
             "50M", "bad", "auth", "atp-rq-lab", 1, 1, 9.0, 90.0, 70.0,
             35.0, 90.0, 25.0, 70.0, 0.0, True, "ok", False, 0
         ),
+        Sample(
+            "5M", "good", "encrypted", "atp-quic-tls13", None, 1, 100.0, None, None,
+            None, None, None, None, None, True, "ok", False, 0
+        ),
+        Sample(
+            "5M", "good", "encrypted", "atp-quic-tls13", None, 2, 10.0, None, None,
+            None, None, None, None, None, True, "ok", False, 0,
+            QUIC_TLS13_AUTH_POSTURE,
+        ),
+        Sample(
+            "5M", "good", "encrypted", "rsync-ssh-aes128gcm", None, 1, 20.0, None, None,
+            None, None, None, None, None, True, "ok", False, 0
+        ),
     ]
-    summary, failures = summarize(rows)
+    summary, failures, posture_exclusions = summarize(rows)
     pairs, excluded_pairs = matched_pairs(summary)
     assert failures and failures[0].sha_ok is False
-    assert pairs and round(pairs[0]["wall_ratio_atp_over_rsync"], 3) == 0.524
-    assert pairs[0]["atp_streams"] == "4"
+    auth_pair = next(pair for pair in pairs if pair["tier"] == "auth")
+    encrypted_pair = next(pair for pair in pairs if pair["tier"] == "encrypted")
+    assert round(auth_pair["wall_ratio_atp_over_rsync"], 3) == 0.524
+    assert auth_pair["atp_streams"] == "4"
+    assert round(encrypted_pair["wall_ratio_atp_over_rsync"], 3) == 0.5
+    assert len(posture_exclusions) == 1
+    assert posture_exclusions[0]["auth_posture"] == "(missing)"
     assert excluded_pairs and excluded_pairs[0]["atp_method"] == "atp-rq-lab"
-    assert round(pairs[0]["receiver_peak_rss_ratio_atp_over_rsync"], 3) == 0.524
-    assert round(pairs[0]["receiver_avg_rss_ratio_atp_over_rsync"], 3) == 0.529
-    rendered = render_markdown(summary, pairs, excluded_pairs, failures)
+    assert round(auth_pair["receiver_peak_rss_ratio_atp_over_rsync"], 3) == 0.524
+    assert round(auth_pair["receiver_avg_rss_ratio_atp_over_rsync"], 3) == 0.529
+    rendered = render_markdown(summary, pairs, excluded_pairs, failures, posture_exclusions)
     assert "ATP vs rsync" in rendered
     assert "Crypto-symmetry warnings" in rendered
+    assert "Auth-posture exclusions" in rendered
     assert "cv_pct" in rendered
     assert "timed out" in rendered
     return 0
@@ -618,9 +685,9 @@ def main() -> int:
     if args.jsonl is None:
         raise ValueError("missing matrix result JSONL")
     samples = load_samples(args.jsonl)
-    summary, failures = summarize(samples)
+    summary, failures, posture_exclusions = summarize(samples)
     pairs, excluded_pairs = matched_pairs(summary)
-    markdown = render_markdown(summary, pairs, excluded_pairs, failures)
+    markdown = render_markdown(summary, pairs, excluded_pairs, failures, posture_exclusions)
     if args.out_md:
         args.out_md.parent.mkdir(parents=True, exist_ok=True)
         args.out_md.write_text(markdown, encoding="utf-8")

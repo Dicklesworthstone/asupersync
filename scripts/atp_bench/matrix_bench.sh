@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ ${ATP_RQ_AUTH_KEY_HEX+x} ]]; then
+  set +x
+  unset ATP_RQ_AUTH_KEY_HEX RQ_AUTH_SECRET
+  echo "ATP_RQ_AUTH_KEY_HEX is forbidden; authenticated cells generate protected per-cell keys" >&2
+  exit 2
+fi
+if [[ ${RQ_AUTH_KEY_HEX+x} ]]; then
+  set +x
+  unset RQ_AUTH_KEY_HEX RQ_AUTH_SECRET
+  echo "RQ_AUTH_KEY_HEX is forbidden; authenticated cells generate protected per-cell keys" >&2
+  exit 2
+fi
+unset RQ_AUTH_SECRET
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -150,6 +164,8 @@ validate_streams() {
 split_csv() {
   local value="$1"
   local -n out_ref="$2"
+  # ShellCheck cannot see that the nameref writes into the caller's array.
+  # shellcheck disable=SC2034
   IFS=',' read -r -a out_ref <<<"${value}"
 }
 
@@ -217,18 +233,20 @@ methods_for_tier() {
     encrypted)
       printf '%s\n' "atp-quic-tls13" "rsync-ssh-aes128gcm"
       ;;
-    encrypted-xauth)
-      # Crypto-SYMMETRIC encrypted tier: atp over TLS-1.3 transport authentication
-      # (connection-level encryption+auth, the same security class as rsync's ssh) with
-      # NO extra per-symbol HMAC — so it is reliable-source-stream eligible and skips the
-      # RaptorQ decode wall. This is the apples-to-apples encrypted comparison; the stricter
-      # `encrypted` tier (TLS-1.3 + per-symbol HMAC, extra integrity for untrusted relays)
-      # stays as its own row.
-      printf '%s\n' "atp-quic-tls13-xauth" "rsync-ssh-aes128gcm"
-      ;;
     *)
       die "unknown crypto tier: ${tier}"
       ;;
+  esac
+}
+
+auth_posture_for_method() {
+  case "$1" in
+    atp-rq-lab)             printf '%s' 'rq-lab-unauthenticated-v1' ;;
+    atp-rq-auth)            printf '%s' 'rq-symbol-hmac-v1' ;;
+    atp-quic-tls13)         printf '%s' 'quic-tls13-transport-aead-v1' ;;
+    rsyncd)                 printf '%s' 'rsyncd-plaintext-v1' ;;
+    rsync-ssh-aes128gcm)    printf '%s' 'ssh-aes128-gcm-v1' ;;
+    *)                      die "unknown method for auth posture: $1" ;;
   esac
 }
 
@@ -336,6 +354,9 @@ import sys
 
 path, workload, regime, tier, method, rep, streams = sys.argv[1:8]
 requires_stream_match = method.startswith("atp-rq-")
+expected_auth_posture = (
+    "quic-tls13-transport-aead-v1" if method == "atp-quic-tls13" else None
+)
 with open(path, encoding="utf-8") as fh:
     for line in fh:
         if not line.strip():
@@ -345,6 +366,10 @@ with open(path, encoding="utf-8") as fh:
         stream_match = not requires_stream_match or (
             row_streams is not None and str(row_streams) == streams
         )
+        auth_posture_match = (
+            expected_auth_posture is None
+            or row.get("auth_posture") == expected_auth_posture
+        )
         if (
             str(row.get("workload")) == workload
             and str(row.get("regime")) == regime
@@ -352,6 +377,7 @@ with open(path, encoding="utf-8") as fh:
             and str(row.get("method")) == method
             and str(row.get("rep")) == rep
             and stream_match
+            and auth_posture_match
             and str(row.get("status", "ok")).lower() == "ok"
         ):
             raise SystemExit(0)
@@ -363,11 +389,13 @@ write_plan_row() {
   local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7" streams="$8"
   local netem
   netem="$(netem_json "${regime}")"
+  local auth_posture
+  auth_posture="$(auth_posture_for_method "${method}")"
   local atp_streams_json="null"
   if method_uses_stream_sweep "${method}"; then
     atp_streams_json="${streams}"
   fi
-  printf '{"schema":"atp-bench-matrix-plan-v1","run_id":%s,"git_head":%s,"workload":%s,"workload_path":%s,"regime":%s,"crypto_tier":%s,"method":%s,"rep":%s,"stream_count":%s,"atp_rq_streams":%s,"netem":%s}\n' \
+  printf '{"schema":"atp-bench-matrix-plan-v1","run_id":%s,"git_head":%s,"workload":%s,"workload_path":%s,"regime":%s,"crypto_tier":%s,"method":%s,"auth_posture":%s,"rep":%s,"stream_count":%s,"atp_rq_streams":%s,"netem":%s}\n' \
     "$(json_escape "${RUN_ID}")" \
     "$(json_escape "${git}")" \
     "$(json_escape "${workload}")" \
@@ -375,6 +403,7 @@ write_plan_row() {
     "$(json_escape "${regime}")" \
     "$(json_escape "${tier}")" \
     "$(json_escape "${method}")" \
+    "$(json_escape "${auth_posture}")" \
     "${rep}" \
     "${streams}" \
     "${atp_streams_json}" \

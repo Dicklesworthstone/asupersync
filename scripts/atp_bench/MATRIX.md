@@ -48,8 +48,35 @@ runner picks the method per `(tier)`:
 | tier | atp method | rsync method (optimally tuned) |
 |---|---|---|
 | `nocrypto`  | `atp-rq-lab` (`--rq-allow-unauthenticated-lab`) | `rsyncd` (plaintext daemon) |
-| `auth`      | `atp-rq-auth` (`--rq-auth-key-hex`)            | `rsync-ssh-aes128gcm` |
-| `encrypted` | `atp-quic-tls13` (TLS-1.3 + symbol auth)       | `rsync-ssh-aes128gcm` |
+| `auth`      | `atp-rq-auth` (fresh key over protected stdin) | `rsync-ssh-aes128gcm` |
+| `encrypted` | `atp-quic-tls13` (TLS-1.3 transport auth)      | `rsync-ssh-aes128gcm` |
+
+Every authenticated RQ cell generates a fresh 32-byte key before the timed
+transfer and gives the receiver and sender one copy each through
+`--rq-auth-key-stdin`. The key never enters a process argument, environment,
+`/usr/bin/time` command record, or result artifact. The old `RQ_AUTH_KEY_HEX`
+and `ATP_RQ_AUTH_KEY_HEX` environment inputs are rejected. QUIC cells do not
+receive an RQ key: TLS 1.3 already authenticates every symbol datagram at the
+transport layer.
+
+This protection applies to newly produced artifacts. Older retained matrix-cell
+`send.time` / `recv.time`, fleet receiver `recv_time.txt`, and sender
+`atp_bench_one.*/time.txt` files may contain raw key-designated values from the
+former argv-based interface. Treat them as expired and compromised, do not
+reuse them, and audit both local and fleet retention before sharing historical
+results. The current harness does not rewrite or delete old artifacts, and its
+Bash overwrite-and-unset cleanup is best effort rather than cryptographic heap
+zeroization.
+
+The resume key now includes an explicit auth-posture gate for
+`atp-quic-tls13`. A completed row is reusable only when it carries
+`"auth_posture":"quic-tls13-transport-aead-v1"`; older rows without that field
+are rerun. This deliberately avoids conflating historical per-symbol-HMAC and
+transport-AEAD implementations under the same method label. Because results are
+append-only, `score_matrix.py` also quarantines missing or mismatched QUIC
+posture rows before median grouping and reports them under auth-posture
+exclusions. This does not make old `.time` artifacts safe to share; the
+retention warning above still applies.
 
 rsync is always `-aW --inplace --no-compress` (whole-file, in-place, no `-z` on
 incompressible payloads), and over ssh uses `-c aes128-gcm@openssh.com`. This is
