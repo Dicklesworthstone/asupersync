@@ -399,23 +399,24 @@ impl Buf for &[u8] {
     }
 }
 
+#[inline]
+fn cursor_logical_start(position: u64, len: usize) -> usize {
+    usize::try_from(position).unwrap_or(usize::MAX).min(len)
+}
+
 impl Buf for std::io::Cursor<&[u8]> {
     #[inline]
     fn remaining(&self) -> usize {
-        let pos = self.position() as usize;
         let len = self.get_ref().len();
+        let pos = cursor_logical_start(self.position(), len);
         len.saturating_sub(pos)
     }
 
     #[inline]
     fn chunk(&self) -> &[u8] {
-        let pos = self.position() as usize;
         let inner = self.get_ref();
-        if pos >= inner.len() {
-            &[]
-        } else {
-            &inner[pos..]
-        }
+        let pos = cursor_logical_start(self.position(), inner.len());
+        &inner[pos..]
     }
 
     #[inline]
@@ -433,20 +434,16 @@ impl Buf for std::io::Cursor<&[u8]> {
 impl Buf for std::io::Cursor<Vec<u8>> {
     #[inline]
     fn remaining(&self) -> usize {
-        let pos = self.position() as usize;
         let len = self.get_ref().len();
+        let pos = cursor_logical_start(self.position(), len);
         len.saturating_sub(pos)
     }
 
     #[inline]
     fn chunk(&self) -> &[u8] {
-        let pos = self.position() as usize;
         let inner = self.get_ref();
-        if pos >= inner.len() {
-            &[]
-        } else {
-            &inner[pos..]
-        }
+        let pos = cursor_logical_start(self.position(), inner.len());
+        &inner[pos..]
     }
 
     #[inline]
@@ -689,6 +686,43 @@ mod tests {
         let remaining = cursor.remaining();
         crate::assert_with_log!(remaining == 4, "remaining", 4, remaining);
         crate::test_complete!("test_buf_cursor");
+    }
+
+    #[test]
+    fn test_cursor_logical_start_clamps_past_end_positions() {
+        init_test("test_cursor_logical_start_clamps_past_end_positions");
+        for position in [3, 1_u64 << 32, (1_u64 << 32) + 1, u64::MAX] {
+            let start = cursor_logical_start(position, 3);
+            crate::assert_with_log!(start == 3, "logical start", 3, start);
+        }
+        crate::test_complete!("test_cursor_logical_start_clamps_past_end_positions");
+    }
+
+    #[test]
+    fn test_buf_cursor_wide_positions_do_not_replay_data() {
+        fn assert_fail_closed<T>(cursor: &mut std::io::Cursor<T>, position: u64)
+        where
+            std::io::Cursor<T>: Buf,
+        {
+            cursor.set_position(position);
+            let initial_remaining = cursor.remaining();
+            assert_eq!(initial_remaining, 0, "position {position}");
+            assert!(cursor.chunk().is_empty(), "position {position}");
+            assert!(!cursor.has_remaining(), "position {position}");
+            cursor.advance(0);
+            assert_eq!(cursor.position(), position);
+        }
+
+        init_test("test_buf_cursor_wide_positions_do_not_replay_data");
+        let data = [1u8, 2, 3];
+        for position in [1_u64 << 32, (1_u64 << 32) + 1, u64::MAX] {
+            let mut slice_cursor = std::io::Cursor::new(data.as_slice());
+            assert_fail_closed(&mut slice_cursor, position);
+
+            let mut vec_cursor = std::io::Cursor::new(data.to_vec());
+            assert_fail_closed(&mut vec_cursor, position);
+        }
+        crate::test_complete!("test_buf_cursor_wide_positions_do_not_replay_data");
     }
 
     #[test]
