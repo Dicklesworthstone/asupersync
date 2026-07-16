@@ -737,7 +737,7 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
                 this.completed = true;
                 drop(inner);
                 retire_waker_after_unlock(retired_waker);
-                retire_waker_after_unlock(retired_closed_waker);
+                wake_waker_after_unlock(retired_closed_waker);
                 return Poll::Ready(Ok(value));
             }
 
@@ -748,7 +748,7 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
                 this.completed = true;
                 drop(inner);
                 retire_waker_after_unlock(retired_waker);
-                retire_waker_after_unlock(retired_closed_waker);
+                wake_waker_after_unlock(retired_closed_waker);
                 return Poll::Ready(Err(RecvError::Closed));
             }
 
@@ -770,7 +770,7 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             this.completed = true;
             drop(inner);
             retire_waker_after_unlock(retired_waker);
-            retire_waker_after_unlock(retired_closed_waker);
+            wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
             return Poll::Ready(Ok(value));
         }
@@ -782,7 +782,7 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             this.completed = true;
             drop(inner);
             retire_waker_after_unlock(retired_waker);
-            retire_waker_after_unlock(retired_closed_waker);
+            wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
             return Poll::Ready(Err(RecvError::Closed));
         }
@@ -891,7 +891,7 @@ impl<T, Caps> RecvFuture<'_, T, Caps> {
             self.completed = true;
             drop(inner);
             retire_waker_after_unlock(retired_waker);
-            retire_waker_after_unlock(retired_closed_waker);
+            wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
             self.clear_cancel_waker();
             self.cx.trace("oneshot::recv received value");
@@ -905,7 +905,7 @@ impl<T, Caps> RecvFuture<'_, T, Caps> {
             self.completed = true;
             drop(inner);
             retire_waker_after_unlock(retired_waker);
-            retire_waker_after_unlock(retired_closed_waker);
+            wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
             self.clear_cancel_waker();
             self.cx.trace("oneshot::recv channel closed");
@@ -956,7 +956,7 @@ impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
                 this.completed = true;
                 drop(inner);
                 retire_waker_after_unlock(retired_waker);
-                retire_waker_after_unlock(retired_closed_waker);
+                wake_waker_after_unlock(retired_closed_waker);
                 this.clear_cancel_waker();
                 this.cx.trace("oneshot::recv received value");
                 return Poll::Ready(Ok(value));
@@ -969,7 +969,7 @@ impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
                 this.completed = true;
                 drop(inner);
                 retire_waker_after_unlock(retired_waker);
-                retire_waker_after_unlock(retired_closed_waker);
+                wake_waker_after_unlock(retired_closed_waker);
                 this.clear_cancel_waker();
                 this.cx.trace("oneshot::recv channel closed");
                 return Poll::Ready(Err(RecvError::Closed));
@@ -1004,7 +1004,7 @@ impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
             this.completed = true;
             drop(inner);
             retire_waker_after_unlock(retired_waker);
-            retire_waker_after_unlock(retired_closed_waker);
+            wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
             this.clear_cancel_waker();
             this.cx.trace("oneshot::recv received value");
@@ -1018,7 +1018,7 @@ impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
             this.completed = true;
             drop(inner);
             retire_waker_after_unlock(retired_waker);
-            retire_waker_after_unlock(retired_closed_waker);
+            wake_waker_after_unlock(retired_closed_waker);
             retire_waker_after_unlock(incoming_waker);
             this.clear_cancel_waker();
             this.cx.trace("oneshot::recv channel closed");
@@ -1151,7 +1151,11 @@ impl<T> Receiver<T> {
             }
         };
         retire_waker_after_unlock(retired_waker);
-        retire_waker_after_unlock(retired_closed_waker);
+        // A terminal value drain (or observing an already-closed channel) makes
+        // `is_closed()` true, so any registered `poll_closed` waiter must be
+        // WOKEN, not silently dropped — otherwise it parks forever
+        // (br-asupersync-0i8acc). For the `Empty` path this is None (no-op).
+        wake_waker_after_unlock(retired_closed_waker);
         result
     }
 
@@ -1220,7 +1224,7 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let (sender_waker, retired_recv_waker, retired_closed_waker, _value) = {
+        let (sender_waker, retired_recv_waker, retired_closed_waker, closed_after_drop, _value) = {
             let mut inner = self.inner.lock();
             inner.receiver_dropped = true;
             inner.closed_reason = Some("receiver_drop");
@@ -1229,17 +1233,28 @@ impl<T> Drop for Receiver<T> {
             let retired_recv_waker = inner.take_waker();
             // Take sender waker to notify poll_closed waiters
             let sender_waker = inner.sender_waker.take();
+            // Always retire the receiver-closed slot so a dropped receiver keeps
+            // no executor state, but capture whether the channel is terminal
+            // AFTER the drop so a still-registered `poll_closed` waiter is only
+            // woken when its awaited predicate actually holds
+            // (br-asupersync-0i8acc).
             let retired_closed_waker = inner.receiver_closed_waker.take();
             let value = inner.value.take();
+            let closed_after_drop = inner.is_closed();
             (
                 sender_waker,
                 retired_recv_waker,
                 retired_closed_waker,
+                closed_after_drop,
                 value,
             )
         };
         retire_waker_after_unlock(retired_recv_waker);
-        retire_waker_after_unlock(retired_closed_waker);
+        if closed_after_drop {
+            wake_waker_after_unlock(retired_closed_waker);
+        } else {
+            retire_waker_after_unlock(retired_closed_waker);
+        }
         // Wake sender waker outside lock to avoid deadlock.
         wake_waker_after_unlock(sender_waker);
     }
@@ -2030,7 +2045,11 @@ mod tests {
             assert_eq!(state.closed_reason, None);
         }
         assert_eq!(rx.try_recv(), Ok(37));
-        assert_eq!(close_wakes.load(Ordering::SeqCst), 0);
+        // The terminal value drain makes is_closed() true, so a registered
+        // poll_closed waiter must be woken — symmetric with the sender-drop path
+        // below (later_wakes == 1). Previously the drain silently dropped this
+        // waker, stranding poll_closed forever (br-asupersync-0i8acc).
+        assert_eq!(close_wakes.load(Ordering::SeqCst), 1);
 
         let (tx, mut rx) = channel::<()>();
         let panic_wakes = Arc::new(AtomicUsize::new(0));
@@ -2052,6 +2071,86 @@ mod tests {
         assert_eq!(rx.try_recv(), Err(TryRecvError::Closed));
 
         crate::test_complete!("wake_panics_do_not_corrupt_commit_or_skip_other_waiters");
+    }
+
+    #[test]
+    fn terminal_drain_and_close_wake_poll_closed_waiter() {
+        // br-asupersync-0i8acc: every terminal transition that makes is_closed()
+        // true — a value drain via recv / recv_uninterruptible / try_recv, and a
+        // receiver drop that leaves the channel closed — must WAKE a registered
+        // poll_closed waiter rather than silently dropping it (which stranded the
+        // waiter forever).
+        init_test("terminal_drain_and_close_wake_poll_closed_waiter");
+        let cx = test_cx();
+        let task_wakes = Arc::new(AtomicUsize::new(0));
+        let task_waker = counting_waker(Arc::clone(&task_wakes));
+        let mut ctx = Context::from_waker(&task_waker);
+
+        // recv (RecvFuture) drain wakes the poll_closed waiter.
+        {
+            let (tx, mut rx) = channel::<u8>();
+            let closes = Arc::new(AtomicUsize::new(0));
+            tx.send(&cx, 7).expect("send");
+            rx.inner.lock().receiver_closed_waker = Some(counting_waker(Arc::clone(&closes)));
+            let mut recv = Box::pin(rx.recv(&cx));
+            assert!(matches!(recv.as_mut().poll(&mut ctx), Poll::Ready(Ok(7))));
+            assert_eq!(
+                closes.load(Ordering::SeqCst),
+                1,
+                "recv value drain must wake the poll_closed waiter"
+            );
+        }
+
+        // recv_uninterruptible drain wakes the poll_closed waiter.
+        {
+            let (tx, mut rx) = channel::<u8>();
+            let closes = Arc::new(AtomicUsize::new(0));
+            tx.send(&cx, 8).expect("send");
+            rx.inner.lock().receiver_closed_waker = Some(counting_waker(Arc::clone(&closes)));
+            let mut recv = Box::pin(rx.recv_uninterruptible());
+            assert!(matches!(recv.as_mut().poll(&mut ctx), Poll::Ready(Ok(8))));
+            assert_eq!(
+                closes.load(Ordering::SeqCst),
+                1,
+                "recv_uninterruptible value drain must wake the poll_closed waiter"
+            );
+        }
+
+        // Receiver drop that leaves the channel closed (sender consumed by send,
+        // value taken on drop -> is_closed()) wakes the poll_closed waiter.
+        {
+            let (tx, rx) = channel::<u8>();
+            let closes = Arc::new(AtomicUsize::new(0));
+            tx.send(&cx, 9).expect("send");
+            rx.inner.lock().receiver_closed_waker = Some(counting_waker(Arc::clone(&closes)));
+            drop(rx);
+            assert_eq!(
+                closes.load(Ordering::SeqCst),
+                1,
+                "receiver drop that closes the channel must wake the poll_closed waiter"
+            );
+        }
+
+        // Receiver drop with the sender still live is NOT closed, so the waiter
+        // is retired (not spuriously woken) per the post-drop predicate.
+        {
+            let (_tx, rx) = channel::<u8>();
+            let closes = Arc::new(AtomicUsize::new(0));
+            rx.inner.lock().receiver_closed_waker = Some(counting_waker(Arc::clone(&closes)));
+            drop(rx);
+            assert_eq!(
+                closes.load(Ordering::SeqCst),
+                0,
+                "receiver drop with a live sender is not closed; retire, do not wake"
+            );
+        }
+
+        assert_eq!(
+            task_wakes.load(Ordering::SeqCst),
+            0,
+            "terminal value drains resolve Ready without self-waking the recv task"
+        );
+        crate::test_complete!("terminal_drain_and_close_wake_poll_closed_waiter");
     }
 
     #[derive(Debug, Clone, Copy)]
