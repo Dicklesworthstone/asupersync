@@ -332,8 +332,25 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
 
                     self.state = WaitState::Done;
                     self.clear_cancel_waker();
+                    // A user `Waker::wake` may panic. The generation is already
+                    // committed and the leader is already `Done`, so contain each
+                    // wake panic long enough to notify EVERY detached waiter —
+                    // otherwise the loop aborts and the remaining peers park
+                    // forever despite the tripped generation — then resume the
+                    // first panic to the leader's caller
+                    // (br-asupersync-barrier-trip-waker-panic-28i6pa).
+                    let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
                     for (_, waker) in wakers {
-                        waker.wake();
+                        if let Err(payload) =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+                        {
+                            if first_panic.is_none() {
+                                first_panic = Some(payload);
+                            }
+                        }
+                    }
+                    if let Some(payload) = first_panic {
+                        std::panic::resume_unwind(payload);
                     }
 
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
@@ -576,6 +593,98 @@ mod tests {
             wakes: Arc::clone(&wakes),
         }));
         (waker, wakes)
+    }
+
+    struct PanickingWake;
+    impl std::task::Wake for PanickingWake {
+        fn wake(self: Arc<Self>) {
+            panic!("panicking barrier peer waker");
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("panicking barrier peer waker");
+        }
+    }
+
+    #[test]
+    fn trip_notifies_all_peers_despite_wake_panic_then_resumes() {
+        // br-asupersync-barrier-trip-waker-panic-28i6pa: when the barrier trips,
+        // a panicking Waker::wake on one detached peer must NOT strand the
+        // others. Every peer is still notified, the generation is committed, the
+        // leader is Done (PolledAfterCompletion on repoll, never a re-trip), and
+        // the first panic is resumed to the leader's caller.
+        init_test("trip_notifies_all_peers_despite_wake_panic_then_resumes");
+        let barrier = Barrier::new(3);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+
+        // Peer A parks with a panicking waker.
+        let panic_waker = Waker::from(Arc::new(PanickingWake));
+        let mut wait_a = barrier.wait(&cx);
+        assert!(
+            {
+                let mut tcx = Context::from_waker(&panic_waker);
+                Pin::new(&mut wait_a).poll(&mut tcx)
+            }
+            .is_pending()
+        );
+
+        // Peer B parks with a counting waker.
+        let (count_waker, wakes) = counting_waker();
+        let mut wait_b = barrier.wait(&cx);
+        assert!(
+            {
+                let mut tcx = Context::from_waker(&count_waker);
+                Pin::new(&mut wait_b).poll(&mut tcx)
+            }
+            .is_pending()
+        );
+
+        let (_, gen_before, _) = barrier.state_snapshot_for_test();
+
+        // Peer C is the leader (3rd arrival) and trips the barrier. Waking A
+        // panics; that panic is contained until B is notified, then resumed.
+        let (leader_waker, _) = counting_waker();
+        let mut wait_c = barrier.wait(&cx);
+        let leader_poll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut tcx = Context::from_waker(&leader_waker);
+            Pin::new(&mut wait_c).poll(&mut tcx)
+        }));
+
+        // The first wake panic propagated to the leader's caller...
+        assert!(
+            leader_poll.is_err(),
+            "the first wake panic must be resumed to the leader"
+        );
+        // ...but peer B was still notified despite peer A's wake panic.
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            1,
+            "peer B must be woken despite peer A's wake panic"
+        );
+        // The trip committed the generation and detached every waiter.
+        let (arrived_after, gen_after, waiters_after) = barrier.state_snapshot_for_test();
+        assert_eq!(
+            gen_after,
+            gen_before.wrapping_add(1),
+            "generation committed on trip"
+        );
+        assert_eq!(arrived_after, 0, "arrival count reset");
+        assert_eq!(waiters_after, 0, "all waiters detached");
+
+        // The leader was marked Done before the panic: repolling yields
+        // PolledAfterCompletion rather than re-entering the next generation.
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut tcx = Context::from_waker(&leader_waker);
+            Pin::new(&mut wait_c).poll(&mut tcx)
+        }));
+        assert!(
+            matches!(
+                repoll,
+                Ok(Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion)))
+            ),
+            "leader must be Done, not re-enter the next generation"
+        );
+
+        crate::test_complete!("trip_notifies_all_peers_despite_wake_panic_then_resumes");
     }
 
     fn assert_cancel_waker_registration<Caps>(
