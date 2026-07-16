@@ -395,6 +395,9 @@ fn atp_bench_rq_auth_keys_use_protected_stdin_only() {
         .expect("read atp matrix cell runner");
     let matrix_plan =
         std::fs::read_to_string(scripts.join("matrix_bench.sh")).expect("read atp matrix planner");
+    let resync_path = scripts.join("resync_bench.sh");
+    let resync = std::fs::read_to_string(&resync_path)
+        .expect("read authenticated resync benchmark runner");
     let run_one_path = scripts.join("run_one.sh");
     let run_one = std::fs::read_to_string(&run_one_path).expect("read sender run helper");
     let score_matrix_path = scripts.join("score_matrix.py");
@@ -411,6 +414,7 @@ fn atp_bench_rq_auth_keys_use_protected_stdin_only() {
         ("run_bench", &run_bench),
         ("run_matrix", &run_matrix),
         ("matrix_plan", &matrix_plan),
+        ("resync", &resync),
     ] {
         for forbidden in [
             "--rq-auth-key-hex",
@@ -430,6 +434,85 @@ fn atp_bench_rq_auth_keys_use_protected_stdin_only() {
             );
         }
     }
+
+    assert!(resync.contains("CHANGES=\"${CHANGES:-0pct}\""));
+    assert!(resync.contains("ATP_TRANSPORT must be rq"));
+    assert!(resync.contains("ensure_rq_auth_secret"));
+    assert_eq!(
+        resync.matches("send_rq_auth_secret |").count(),
+        4,
+        "resync must feed the seed and measured RQ receiver/sender pairs"
+    );
+    assert_eq!(
+        resync.matches("--rq-auth-key-stdin --no-delta").count(),
+        2,
+        "only the seed receiver and sender must force a full transfer"
+    );
+    for required in [
+        "verify_rq_authenticated_noop",
+        "run_cell_strict",
+        "set -e",
+        "fail-closed cell gate failed",
+        "emitted_rows",
+        "planned_rows",
+        "destination payload identity or metadata changed",
+        "sender/receiver transfer_id is empty or mismatched",
+        "0 < wire < source size",
+        "delta_mode_observed",
+        "delta_control_auth_posture",
+        "delta_acceptance_ok",
+        "\"performance_claim\": False",
+    ] {
+        assert!(
+            resync.contains(required),
+            "authenticated resync gate must retain {required}"
+        );
+    }
+    for removed in [
+        "RQ_AUTH_LAB",
+        "--rq-allow-unauthenticated-lab",
+        "ATP_DELTA_SIDECAR_READY_TIMEOUT_S",
+        "probe_atp_delta_sidecar",
+        "require_atp_delta_state",
+        "atp_delta_state_path",
+        "dedicated authenticated-delta matrix profile",
+    ] {
+        assert!(
+            !resync.contains(removed),
+            "authenticated resync gate must not retain legacy surface {removed}"
+        );
+    }
+
+    let strict_cell_probe = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+log() { :; }
+stop_rsyncd() { :; }
+source <(awk '
+    /^run_cell_strict\(\)/ { emit = 1 }
+    /^# ── measured re-sync/ { exit }
+    emit { print }
+' "$RESYNC_BENCH_PATH")
+CELL_FAILURES=0
+failing_cell() {
+    false
+    printf 'errexit was disabled inside the strict cell\n' >&2
+}
+run_cell_strict fixture failing_cell
+[[ "$CELL_FAILURES" == 1 ]]
+"#,
+        )
+        .env("RESYNC_BENCH_PATH", &resync_path)
+        .output()
+        .expect("run strict resync cell failure fixture");
+    assert!(
+        strict_cell_probe.status.success(),
+        "strict resync cell did not fail closed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&strict_cell_probe.stdout),
+        String::from_utf8_lossy(&strict_cell_probe.stderr)
+    );
 
     assert!(!run_bench.contains("--atp-rq-auth-key-hex"));
     assert!(run_bench.contains("--atp-rq-auth-key-stdin"));
