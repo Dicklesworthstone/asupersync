@@ -329,6 +329,32 @@ impl<T> PartitionSender<T> {
         }
     }
 
+    fn handle_partitioned_send(&self, value: T) -> Result<(), SendError<T>> {
+        match self.controller.behavior() {
+            PartitionBehavior::Drop => {
+                self.controller.record_drop();
+                emit_partition_evidence(
+                    &self.controller.evidence_sink,
+                    self.controller.next_evidence_ts(),
+                    "message_dropped",
+                    self.src,
+                    self.dst,
+                );
+                Ok(())
+            }
+            PartitionBehavior::Error => {
+                emit_partition_evidence(
+                    &self.controller.evidence_sink,
+                    self.controller.next_evidence_ts(),
+                    "message_rejected",
+                    self.src,
+                    self.dst,
+                );
+                Err(SendError::Disconnected(value))
+            }
+        }
+    }
+
     /// Send a value, respecting the partition controller.
     ///
     /// If the link is partitioned, the behavior depends on
@@ -341,31 +367,32 @@ impl<T> PartitionSender<T> {
         }
 
         if self.controller.is_partitioned(self.src, self.dst) {
-            return match self.controller.behavior() {
-                PartitionBehavior::Drop => {
-                    self.controller.record_drop();
-                    emit_partition_evidence(
-                        &self.controller.evidence_sink,
-                        self.controller.next_evidence_ts(),
-                        "message_dropped",
-                        self.src,
-                        self.dst,
-                    );
-                    Ok(())
-                }
-                PartitionBehavior::Error => {
-                    emit_partition_evidence(
-                        &self.controller.evidence_sink,
-                        self.controller.next_evidence_ts(),
-                        "message_rejected",
-                        self.src,
-                        self.dst,
-                    );
-                    Err(SendError::Disconnected(value))
-                }
-            };
+            return self.handle_partitioned_send(value);
         }
-        self.inner.send(cx, value).await
+
+        let permit = match self.inner.reserve(cx).await {
+            Ok(permit) => permit,
+            Err(SendError::Disconnected(())) => return Err(SendError::Disconnected(value)),
+            Err(SendError::Cancelled(())) => return Err(SendError::Cancelled(value)),
+            Err(SendError::Full(())) => return Err(SendError::Full(value)),
+        };
+
+        // Recheck the authoritative set after the capacity wait. Keep the
+        // topology lock through the queue commit so partition() cannot return
+        // while a previously parked, still sender-side value remains able to
+        // enter the channel afterward. The MPSC helper detaches its receiver
+        // waker so no external callback runs under this lock.
+        let partitions = self.controller.partitions.lock();
+        if partitions.contains(&(self.src.0, self.dst.0)) {
+            drop(partitions);
+            permit.abort();
+            return self.handle_partitioned_send(value);
+        }
+
+        let (result, recv_waker) = permit.try_send_deferred_wake(value);
+        drop(partitions);
+        recv_waker.wake();
+        result
     }
 
     /// Returns the source actor id.
@@ -529,6 +556,30 @@ mod tests {
         }
     }
 
+    struct PartitionTryLockWake {
+        controller: Arc<PartitionController>,
+        lock_was_available: std::sync::atomic::AtomicBool,
+        wake_count: AtomicUsize,
+    }
+
+    impl PartitionTryLockWake {
+        fn record_wake(&self) {
+            let available = self.controller.partitions.try_lock().is_some();
+            self.lock_was_available.store(available, Ordering::SeqCst);
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl std::task::Wake for PartitionTryLockWake {
+        fn wake(self: Arc<Self>) {
+            self.record_wake();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.record_wake();
+        }
+    }
+
     #[test]
     fn no_partition_passthrough() {
         let (ctrl, _) = make_controller(PartitionBehavior::Drop);
@@ -643,6 +694,194 @@ mod tests {
         ctrl.partition(a, b);
         let result = block_on(ptx.send(&cx, 11));
         assert!(matches!(result, Err(SendError::Cancelled(11))));
+    }
+
+    #[test]
+    fn capacity_parked_send_rechecks_partition_before_commit() {
+        for behavior in [PartitionBehavior::Drop, PartitionBehavior::Error] {
+            let (ctrl, collector) = make_controller(behavior);
+            let a = ActorId::new(1);
+            let b = ActorId::new(2);
+            let (ptx, mut rx) = partition_channel::<u32>(1, ctrl.clone(), a, b);
+            let cx = test_cx();
+            ptx.inner().try_send(10).expect("prefill channel");
+
+            let mut send = Box::pin(ptx.send(&cx, 20));
+            let waker = std::task::Waker::noop().clone();
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(matches!(send.as_mut().poll(&mut task_cx), Poll::Pending));
+
+            ctrl.partition(a, b);
+            assert_eq!(rx.try_recv(), Ok(10));
+
+            let result = match send.as_mut().poll(&mut task_cx) {
+                Poll::Ready(result) => result,
+                Poll::Pending => panic!("send remained parked after capacity was released"),
+            };
+            drop(send);
+
+            match behavior {
+                PartitionBehavior::Drop => assert_eq!(result, Ok(())),
+                PartitionBehavior::Error => {
+                    assert_eq!(result, Err(SendError::Disconnected(20)));
+                }
+            }
+            assert!(
+                rx.try_recv().is_err(),
+                "blocked value must not be delivered"
+            );
+
+            let telemetry = ptx.inner().telemetry_snapshot(91);
+            assert_eq!(telemetry.reserved_uncommitted_obligations, 0);
+            assert_eq!(telemetry.send_waiter_count, 0);
+            assert_eq!(telemetry.cancellation_count, 1);
+
+            let stats = ctrl.stats();
+            let entries = collector.entries();
+            match behavior {
+                PartitionBehavior::Drop => {
+                    assert_eq!(stats.messages_dropped, 1);
+                    assert_eq!(
+                        entries
+                            .iter()
+                            .filter(|entry| entry.action == "partition_message_dropped")
+                            .count(),
+                        1
+                    );
+                }
+                PartitionBehavior::Error => {
+                    assert_eq!(stats.messages_dropped, 0);
+                    assert_eq!(
+                        entries
+                            .iter()
+                            .filter(|entry| entry.action == "partition_message_rejected")
+                            .count(),
+                        1
+                    );
+                }
+            }
+
+            ctrl.heal(a, b);
+            block_on(ptx.send(&cx, 30)).expect("send after heal");
+            assert_eq!(rx.try_recv(), Ok(30));
+        }
+    }
+
+    #[test]
+    fn cancellation_wins_while_partition_send_is_capacity_parked() {
+        let (ctrl, collector) = make_controller(PartitionBehavior::Drop);
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let (ptx, mut rx) = partition_channel::<u32>(1, ctrl.clone(), a, b);
+        let cx = test_cx();
+        ptx.inner().try_send(10).expect("prefill channel");
+
+        let mut send = Box::pin(ptx.send(&cx, 20));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(matches!(send.as_mut().poll(&mut task_cx), Poll::Pending));
+
+        ctrl.partition(a, b);
+        cx.set_cancel_requested(true);
+        let result = match send.as_mut().poll(&mut task_cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => panic!("cancelled send remained parked"),
+        };
+        drop(send);
+
+        assert_eq!(result, Err(SendError::Cancelled(20)));
+        assert_eq!(rx.try_recv(), Ok(10));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(ctrl.stats().messages_dropped, 0);
+        assert!(!collector.entries().iter().any(|entry| {
+            matches!(
+                entry.action.as_str(),
+                "partition_message_dropped" | "partition_message_rejected"
+            )
+        }));
+
+        let telemetry = ptx.inner().telemetry_snapshot(92);
+        assert_eq!(telemetry.reserved_uncommitted_obligations, 0);
+        assert_eq!(telemetry.send_waiter_count, 0);
+    }
+
+    #[test]
+    fn receiver_drop_while_partition_send_is_parked_preserves_value() {
+        let (ctrl, collector) = make_controller(PartitionBehavior::Error);
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let (ptx, rx) = partition_channel::<u32>(1, ctrl.clone(), a, b);
+        let cx = test_cx();
+        ptx.inner().try_send(10).expect("prefill channel");
+
+        let mut send = Box::pin(ptx.send(&cx, 20));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(matches!(send.as_mut().poll(&mut task_cx), Poll::Pending));
+
+        drop(rx);
+        let result = match send.as_mut().poll(&mut task_cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => panic!("send remained parked after receiver drop"),
+        };
+        drop(send);
+
+        assert_eq!(result, Err(SendError::Disconnected(20)));
+        assert_eq!(ctrl.stats().messages_dropped, 0);
+        assert!(collector.entries().is_empty());
+        let telemetry = ptx.inner().telemetry_snapshot(93);
+        assert_eq!(telemetry.reserved_uncommitted_obligations, 0);
+        assert_eq!(telemetry.send_waiter_count, 0);
+    }
+
+    #[test]
+    fn partition_commit_wakes_receiver_after_topology_unlock() {
+        let (ctrl, _) = make_controller(PartitionBehavior::Drop);
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let (ptx, mut rx) = partition_channel::<u32>(1, ctrl.clone(), a, b);
+        let cx = test_cx();
+
+        let probe = Arc::new(PartitionTryLockWake {
+            controller: ctrl,
+            lock_was_available: std::sync::atomic::AtomicBool::new(false),
+            wake_count: AtomicUsize::new(0),
+        });
+        let waker = std::task::Waker::from(Arc::clone(&probe));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut recv = Box::pin(rx.recv(&cx));
+        assert!(matches!(recv.as_mut().poll(&mut task_cx), Poll::Pending));
+
+        block_on(ptx.send(&cx, 77)).expect("send");
+        assert_eq!(probe.wake_count.load(Ordering::SeqCst), 1);
+        assert!(probe.lock_was_available.load(Ordering::SeqCst));
+
+        drop(recv);
+        assert_eq!(rx.try_recv(), Ok(77));
+    }
+
+    #[test]
+    fn already_partitioned_send_does_not_wait_for_channel_capacity() {
+        let (ctrl, _) = make_controller(PartitionBehavior::Drop);
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let (ptx, mut rx) = partition_channel::<u32>(1, ctrl.clone(), a, b);
+        let cx = test_cx();
+        ptx.inner().try_send(10).expect("prefill channel");
+        ctrl.partition(a, b);
+
+        let mut send = Box::pin(ptx.send(&cx, 20));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(matches!(
+            send.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(()))
+        ));
+        drop(send);
+
+        assert_eq!(rx.try_recv(), Ok(10));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(ctrl.stats().messages_dropped, 1);
     }
 
     #[test]

@@ -1156,6 +1156,30 @@ impl<T> Clone for WeakUnboundedSender<T> {
     }
 }
 
+/// Detached receiver notification returned by an internal permit commit.
+///
+/// This token must be consumed only after the caller releases every external
+/// lock: both waking and destroying an executor-provided `Waker` may run
+/// arbitrary code.
+#[derive(Debug)]
+#[must_use = "deferred receiver wake must be consumed after releasing external locks"]
+pub(crate) struct DeferredReceiverWake(Option<Arc<RegisteredWaker>>);
+
+impl DeferredReceiverWake {
+    #[inline]
+    fn none() -> Self {
+        Self(None)
+    }
+
+    /// Invokes the detached receiver notification, if any.
+    #[inline]
+    pub(crate) fn wake(mut self) {
+        if let Some(waker) = self.0.take() {
+            waker.wake_by_ref();
+        }
+    }
+}
+
 /// A permit to send a single value.
 #[derive(Debug)]
 #[must_use = "SendPermit must be consumed via send() or abort()"]
@@ -1180,7 +1204,23 @@ impl<T> SendPermit<'_, T> {
 
     /// Commits the reserved slot, returning an error if the receiver was dropped.
     #[inline]
-    pub fn try_send(mut self, value: T) -> Result<(), SendError<T>> {
+    pub fn try_send(self, value: T) -> Result<(), SendError<T>> {
+        let (result, recv_waker) = self.try_send_deferred_wake(value);
+        recv_waker.wake();
+        result
+    }
+
+    /// Commits the reserved slot while returning any detached receiver waker.
+    ///
+    /// This crate-private split lets an adapter commit under its own state lock,
+    /// release that lock, and only then invoke the arbitrary receiver callback.
+    /// The returned waker must be woken or dropped after all external locks have
+    /// been released.
+    #[inline]
+    pub(crate) fn try_send_deferred_wake(
+        mut self,
+        value: T,
+    ) -> (Result<(), SendError<T>>, DeferredReceiverWake) {
         self.sent = true;
         let mut inner = self.sender.shared.inner.lock();
 
@@ -1194,7 +1234,10 @@ impl<T> SendPermit<'_, T> {
             // Receiver is gone; drop the value and release capacity.
             // Note: Receiver::drop already drained and woke any pending send_wakers.
             drop(inner);
-            return Err(SendError::Disconnected(value));
+            return (
+                Err(SendError::Disconnected(value)),
+                DeferredReceiverWake::none(),
+            );
         }
 
         inner.queue.push_back(value);
@@ -1202,10 +1245,7 @@ impl<T> SendPermit<'_, T> {
         // Extract waker before dropping the lock to avoid wake-under-lock.
         let recv_waker = inner.recv_waker.take();
         drop(inner);
-        if let Some(waker) = recv_waker {
-            waker.wake_by_ref();
-        }
-        Ok(())
+        (Ok(()), DeferredReceiverWake(recv_waker))
     }
 
     /// Aborts the reserved slot without sending.
@@ -3377,6 +3417,35 @@ mod tests {
         );
 
         crate::test_complete!("send_permit_surfaces_disconnected_as_outcome");
+    }
+
+    #[test]
+    fn deferred_permit_commit_enqueues_before_explicit_receiver_wake() {
+        init_test("deferred_permit_commit_enqueues_before_explicit_receiver_wake");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(1);
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wake_count));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut recv_fut = Box::pin(rx.recv(&cx));
+        assert!(matches!(
+            recv_fut.as_mut().poll(&mut task_cx),
+            Poll::Pending
+        ));
+
+        let permit = block_on(tx.reserve(&cx)).expect("reserve should succeed");
+        let (result, deferred_wake) = permit.try_send_deferred_wake(7);
+        assert_eq!(result, Ok(()));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 0);
+        assert_eq!(tx.shared.inner.lock().queue.front().copied(), Some(7));
+
+        deferred_wake.wake();
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+
+        drop(recv_fut);
+        assert_eq!(rx.try_recv(), Ok(7));
+        crate::test_complete!("deferred_permit_commit_enqueues_before_explicit_receiver_wake");
     }
 
     #[test]
