@@ -154,9 +154,9 @@ fn test_buffer_composition(sequence: CompositionSequence) {
             CompositionOperation::TestLimitRemaining => {
                 let buf_mut = BytesMut::with_capacity(1024);
                 let limit = 512;
-                let original_remaining_mut = buf_mut.remaining_mut();
                 let limited = buf_mut.limit(limit);
-                assert_eq!(limited.remaining_mut(), limit.min(original_remaining_mut));
+                assert_eq!(limited.remaining_mut(), limit);
+                assert_eq!(limited.direct_remaining_mut(), 0);
             }
 
             CompositionOperation::TestLimitWrite { data } => {
@@ -166,8 +166,9 @@ fn test_buffer_composition(sequence: CompositionSequence) {
                     let mut limited = buf_mut.limit(limit);
 
                     limited.put_slice(&data);
-                    // Verify write succeeded and didn't exceed limit
-                    assert!(limited.remaining_mut() <= limit);
+                    assert_eq!(limited.remaining_mut(), 100);
+                    assert_eq!(limited.direct_remaining_mut(), 0);
+                    assert_eq!(limited.get_ref().as_ref(), data.as_slice());
                 }
             }
 
@@ -175,10 +176,10 @@ fn test_buffer_composition(sequence: CompositionSequence) {
                 let buf_mut = BytesMut::with_capacity(1024);
                 let mut limited = buf_mut.limit(100);
 
-                if limited.remaining_mut() >= 4 {
-                    limited.put_u32(val);
-                    assert!(limited.remaining_mut() <= 100);
-                }
+                assert!(limited.has_remaining_mut());
+                limited.put_u32(val);
+                assert_eq!(limited.remaining_mut(), 96);
+                assert_eq!(limited.get_ref().as_ref(), val.to_be_bytes());
             }
 
             CompositionOperation::TestLimitPutSlice { data } => {
@@ -187,10 +188,10 @@ fn test_buffer_composition(sequence: CompositionSequence) {
                     let limit = data.len() * 2; // Ensure room
                     let mut limited = buf_mut.limit(limit);
 
-                    if limited.remaining_mut() >= data.len() {
-                        limited.put_slice(&data);
-                        assert!(limited.remaining_mut() <= limit);
-                    }
+                    assert!(data.is_empty() || limited.has_remaining_mut());
+                    limited.put_slice(&data);
+                    assert_eq!(limited.remaining_mut(), data.len());
+                    assert_eq!(limited.get_ref().as_ref(), data.as_slice());
                 }
             }
 
@@ -241,10 +242,10 @@ fn test_buffer_composition(sequence: CompositionSequence) {
                     let limited1 = buf1_mut.limit(limit1);
                     let limited2 = buf2_mut.limit(limit2);
 
-                    // This tests composition of limited buffers
-                    // (Note: actual chaining would need unsafe or different API)
-                    assert!(limited1.remaining_mut() <= limit1);
-                    assert!(limited2.remaining_mut() <= limit2);
+                    assert_eq!(limited1.remaining_mut(), limit1);
+                    assert_eq!(limited2.remaining_mut(), limit2);
+                    assert_eq!(limited1.direct_remaining_mut(), 0);
+                    assert_eq!(limited2.direct_remaining_mut(), 0);
                 }
             }
 
@@ -295,12 +296,11 @@ fn test_limit_basic(limit: usize) {
     use asupersync::bytes::{BufMut, BytesMut};
 
     let buf = BytesMut::with_capacity(limit * 2);
-    let capacity = buf.capacity();
     let limited = buf.limit(limit);
 
-    // Test basic properties
-    assert!(limited.remaining_mut() <= limit);
-    assert!(limited.remaining_mut() <= capacity);
+    assert_eq!(limited.remaining_mut(), limit);
+    assert_eq!(limited.direct_remaining_mut(), 0);
+    assert_eq!(limited.has_remaining_mut(), limit > 0);
 }
 
 fn test_take_basic(buf: asupersync::bytes::Bytes, limit: usize) {

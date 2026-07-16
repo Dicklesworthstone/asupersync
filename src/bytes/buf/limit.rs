@@ -69,22 +69,23 @@ impl<T: BufMut> BufMut for Limit<T> {
         std::cmp::min(self.inner.remaining_mut(), self.limit)
     }
 
+    #[inline]
+    fn direct_remaining_mut(&self) -> usize {
+        std::cmp::min(self.inner.direct_remaining_mut(), self.limit)
+    }
+
     fn chunk_mut(&mut self) -> &mut [u8] {
-        let remaining = self.remaining_mut();
+        let remaining = self.direct_remaining_mut();
         let chunk = self.inner.chunk_mut();
         let len = std::cmp::min(chunk.len(), remaining);
-        assert!(
-            remaining == 0 || len > 0,
-            "chunk_mut returned empty with remaining_mut() > 0; inner buffer does not expose direct writable space"
-        );
         &mut chunk[..len]
     }
 
     fn advance_mut(&mut self, cnt: usize) {
-        let remaining = self.remaining_mut();
+        let remaining = self.direct_remaining_mut();
         assert!(
             cnt <= remaining,
-            "advance_mut out of bounds: cnt={cnt}, remaining={remaining}, limit={}",
+            "advance_mut out of bounds: cnt={cnt}, direct_remaining={remaining}, limit={}",
             self.limit
         );
         self.inner.advance_mut(cnt);
@@ -115,7 +116,36 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::bytes::BytesMut;
     use proptest::prelude::*;
+
+    fn append_if_room(buf: &mut impl BufMut, src: &[u8]) {
+        assert!(buf.has_remaining_mut());
+        assert!(buf.remaining_mut() >= src.len());
+        buf.put_slice(src);
+    }
+
+    fn put_via_direct_window_or_append(buf: &mut impl BufMut, src: &[u8]) {
+        assert!(buf.remaining_mut() >= src.len());
+
+        if buf.direct_remaining_mut() == 0 {
+            buf.put_slice(src);
+            return;
+        }
+
+        let mut offset = 0;
+        while offset < src.len() {
+            let direct_remaining = buf.direct_remaining_mut();
+            assert!(direct_remaining > 0);
+            let chunk = buf.chunk_mut();
+            assert!(!chunk.is_empty());
+            assert!(chunk.len() <= direct_remaining);
+            let count = chunk.len().min(src.len() - offset);
+            chunk[..count].copy_from_slice(&src[offset..offset + count]);
+            buf.advance_mut(count);
+            offset += count;
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -158,6 +188,59 @@ mod tests {
         let ok = data[..5] == [1, 2, 3, 0, 0];
         crate::assert_with_log!(ok, "data", &[1, 2, 3, 0, 0], &data[..5]);
         crate::test_complete!("test_limit_put_slice");
+    }
+
+    #[test]
+    fn growable_limits_preserve_logical_capacity_and_guarded_appends() {
+        init_test("growable_limits_preserve_logical_capacity_and_guarded_appends");
+
+        let mut bytes = BytesMut::new().limit(3);
+        assert_eq!(bytes.remaining_mut(), 3);
+        assert_eq!(bytes.direct_remaining_mut(), 0);
+        assert!(bytes.has_remaining_mut());
+        append_if_room(&mut bytes, b"abc");
+        assert_eq!(bytes.remaining_mut(), 0);
+        assert_eq!(bytes.into_inner().as_ref(), b"abc");
+
+        let mut vec = Vec::new().limit(3);
+        assert_eq!(vec.remaining_mut(), 3);
+        assert_eq!(vec.direct_remaining_mut(), 0);
+        assert!(vec.has_remaining_mut());
+        append_if_room(&mut vec, b"abc");
+        assert_eq!(vec.remaining_mut(), 0);
+        assert_eq!(vec.into_inner().as_slice(), b"abc");
+
+        crate::test_complete!("growable_limits_preserve_logical_capacity_and_guarded_appends");
+    }
+
+    #[test]
+    fn generic_direct_writer_falls_back_for_append_only_buffers() {
+        init_test("generic_direct_writer_falls_back_for_append_only_buffers");
+
+        let mut bytes = BytesMut::new();
+        put_via_direct_window_or_append(&mut bytes, b"bytes");
+        assert_eq!(bytes.as_ref(), b"bytes");
+
+        let mut vec = Vec::new();
+        put_via_direct_window_or_append(&mut vec, b"vec");
+        assert_eq!(vec.as_slice(), b"vec");
+
+        let mut limited_bytes = BytesMut::new().limit(3);
+        put_via_direct_window_or_append(&mut limited_bytes, b"abc");
+        assert_eq!(limited_bytes.into_inner().as_ref(), b"abc");
+
+        let mut limited_vec = Vec::new().limit(3);
+        put_via_direct_window_or_append(&mut limited_vec, b"abc");
+        assert_eq!(limited_vec.into_inner().as_slice(), b"abc");
+
+        let mut direct = [0u8; 3];
+        {
+            let mut slice: &mut [u8] = &mut direct;
+            put_via_direct_window_or_append(&mut slice, b"abc");
+        }
+        assert_eq!(direct, *b"abc");
+
+        crate::test_complete!("generic_direct_writer_falls_back_for_append_only_buffers");
     }
 
     #[test]
@@ -315,10 +398,54 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "chunk_mut returned empty with remaining_mut() > 0")]
-    fn test_limit_chunk_mut_panics_when_inner_cannot_expose_direct_space() {
+    fn test_limit_chunk_mut_is_empty_when_inner_cannot_expose_direct_space() {
         let mut limit = Limit::new(Vec::new(), 3);
-        let _ = limit.chunk_mut();
+        assert_eq!(limit.remaining_mut(), 3);
+        assert_eq!(limit.direct_remaining_mut(), 0);
+        assert!(limit.has_remaining_mut());
+        assert!(limit.chunk_mut().is_empty());
+        limit.advance_mut(0);
+    }
+
+    #[test]
+    fn nested_limits_bound_logical_and_direct_capacity_independently() {
+        init_test("nested_limits_bound_logical_and_direct_capacity_independently");
+
+        let mut append_only = BytesMut::new().limit(6).limit(3);
+        assert_eq!(append_only.remaining_mut(), 3);
+        assert_eq!(append_only.direct_remaining_mut(), 0);
+        append_only.put_slice(b"abc");
+        assert_eq!(append_only.remaining_mut(), 0);
+        assert_eq!(append_only.into_inner().into_inner().as_ref(), b"abc");
+
+        let mut direct = [0u8; 8];
+        {
+            let inner = (&mut direct[..]).limit(6);
+            let mut outer = inner.limit(3);
+            assert_eq!(outer.remaining_mut(), 3);
+            assert_eq!(outer.direct_remaining_mut(), 3);
+            put_via_direct_window_or_append(&mut outer, b"abc");
+            assert_eq!(outer.remaining_mut(), 0);
+            assert_eq!(outer.direct_remaining_mut(), 0);
+        }
+        assert_eq!(&direct[..3], b"abc");
+
+        crate::test_complete!("nested_limits_bound_logical_and_direct_capacity_independently");
+    }
+
+    #[test]
+    fn over_limit_append_panics_before_mutating_growable_inner() {
+        init_test("over_limit_append_panics_before_mutating_growable_inner");
+        let mut limit = BytesMut::new().limit(3);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            limit.put_slice(b"abcd");
+        }));
+
+        assert!(result.is_err());
+        assert!(limit.get_ref().is_empty());
+        assert_eq!(limit.limit(), 3);
+        crate::test_complete!("over_limit_append_panics_before_mutating_growable_inner");
     }
 
     #[test]

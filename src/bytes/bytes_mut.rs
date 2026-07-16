@@ -601,24 +601,20 @@ impl std::hash::Hash for BytesMut {
 impl BufMut for BytesMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
-        // `chunk_mut` cannot hand out writable spare capacity safely (that would
-        // require exposing uninitialized bytes), so this buffer grows only
-        // through the `put_slice` override below. Report `0` writable bytes to
-        // keep the required-method trio self-consistent: a generic BufMut
-        // consumer that drives `remaining_mut` / `chunk_mut` / `advance_mut`
-        // directly (e.g. a readv-into-spare-capacity path, or the default
-        // `put_slice`) would otherwise see `usize::MAX - len` here, get an empty
-        // slice from `chunk_mut`, and panic ("chunk_mut returned empty with
-        // remaining_mut() > 0"). Direct writes via `put_slice`/`put_u*` are
-        // unaffected because they bypass `chunk_mut` entirely.
+        usize::MAX - self.len()
+    }
+
+    #[inline]
+    fn direct_remaining_mut(&self) -> usize {
+        // `chunk_mut` cannot expose uninitialized spare capacity through a safe
+        // `&mut [u8]`. Logical appends remain available through `put_slice`.
         0
     }
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut [u8] {
         // For BytesMut, we grow dynamically via the put_slice override; there is
-        // no pre-initialized writable window to expose. Consistent with
-        // remaining_mut() == 0 and advance_mut(cnt == 0).
+        // no initialized direct writable window to expose.
         &mut []
     }
 
@@ -1214,15 +1210,39 @@ mod tests {
     }
 
     #[test]
-    fn chunk_mut_returns_empty_and_advance_mut_zero_is_ok() {
-        init_test("chunk_mut_returns_empty_and_advance_mut_zero_is_ok");
+    fn logical_append_capacity_is_distinct_from_direct_window() {
+        init_test("logical_append_capacity_is_distinct_from_direct_window");
         let mut b = BytesMut::with_capacity(16);
+        let remaining = b.remaining_mut();
+        crate::assert_with_log!(
+            remaining == usize::MAX,
+            "logical remaining",
+            usize::MAX,
+            remaining
+        );
+        let direct_remaining = b.direct_remaining_mut();
+        crate::assert_with_log!(
+            direct_remaining == 0,
+            "direct remaining",
+            0,
+            direct_remaining
+        );
+        let has_remaining = b.has_remaining_mut();
+        crate::assert_with_log!(has_remaining, "has logical remaining", true, has_remaining);
         let chunk = b.chunk_mut();
         let ok = chunk.is_empty();
         crate::assert_with_log!(ok, "chunk_mut empty", true, ok);
         // advance_mut(0) must not panic.
         b.advance_mut(0);
-        crate::test_complete!("chunk_mut_returns_empty_and_advance_mut_zero_is_ok");
+        b.put_slice(b"abc");
+        let remaining = b.remaining_mut();
+        crate::assert_with_log!(
+            remaining == usize::MAX - 3,
+            "logical remaining after append",
+            usize::MAX - 3,
+            remaining
+        );
+        crate::test_complete!("logical_append_capacity_is_distinct_from_direct_window");
     }
 
     #[test]

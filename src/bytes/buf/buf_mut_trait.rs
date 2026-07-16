@@ -10,9 +10,14 @@ use super::Limit;
 /// # Required Methods
 ///
 /// Implementors must provide:
-/// - [`remaining_mut()`](BufMut::remaining_mut): Returns bytes that can be written
-/// - [`chunk_mut()`](BufMut::chunk_mut): Returns a mutable slice for writing
-/// - [`advance_mut()`](BufMut::advance_mut): Advances after writing
+/// - [`remaining_mut()`](BufMut::remaining_mut): Returns logical append capacity
+/// - [`chunk_mut()`](BufMut::chunk_mut): Returns a directly writable slice
+/// - [`advance_mut()`](BufMut::advance_mut): Advances after a direct write
+///
+/// Growable buffers that append through an overridden
+/// [`put_slice()`](BufMut::put_slice) may have logical capacity without exposing
+/// a direct writable window. Such implementations must override
+/// [`direct_remaining_mut()`](BufMut::direct_remaining_mut) to return `0`.
 ///
 /// # Default Implementations
 ///
@@ -29,23 +34,42 @@ use super::Limit;
 /// assert_eq!(buf, vec![0x12, 0x34, 0x78, 0x56]);
 /// ```
 pub trait BufMut {
-    /// Returns number of bytes that can be written.
+    /// Returns the number of bytes that can be appended.
+    ///
+    /// This is the logical capacity used by [`put_slice()`](BufMut::put_slice)
+    /// and the scalar `put_*` helpers. It can be greater than
+    /// [`direct_remaining_mut()`](BufMut::direct_remaining_mut) for growable
+    /// buffers that append without exposing initialized spare storage.
     ///
     /// For growable buffers like `Vec<u8>`, this returns `usize::MAX - len()`.
     fn remaining_mut(&self) -> usize;
 
-    /// Returns a mutable slice for writing.
+    /// Returns the number of bytes writable through `chunk_mut`/`advance_mut`.
     ///
-    /// The returned slice may be uninitialized. Callers must initialize bytes
-    /// before calling [`advance_mut()`](BufMut::advance_mut).
+    /// The default matches [`remaining_mut()`](BufMut::remaining_mut), which is
+    /// appropriate for fixed or cursor-backed buffers. Append-only growable
+    /// buffers must override this to return `0` while still reporting their
+    /// logical append capacity from `remaining_mut`.
+    #[inline]
+    fn direct_remaining_mut(&self) -> usize {
+        self.remaining_mut()
+    }
+
+    /// Returns an initialized mutable slice for direct writing.
+    ///
+    /// The slice may be empty even when [`remaining_mut()`](BufMut::remaining_mut)
+    /// is positive if the implementation supports logical appends but has no
+    /// direct window. Callers that require direct access must check
+    /// [`direct_remaining_mut()`](BufMut::direct_remaining_mut). When that value
+    /// is positive, this method must return a non-empty slice whose length does
+    /// not exceed it.
     fn chunk_mut(&mut self) -> &mut [u8];
 
     /// Advance the write cursor by `cnt` bytes.
     ///
-    /// # Safety Note
-    ///
-    /// While this method is safe, callers must ensure that `cnt` bytes have
-    /// been written to the buffer returned by [`chunk_mut()`](BufMut::chunk_mut).
+    /// `cnt` must not exceed the direct capacity reported before the most recent
+    /// call to [`chunk_mut()`](BufMut::chunk_mut). Calling this with `0` is always
+    /// permitted, including for append-only buffers with no direct window.
     fn advance_mut(&mut self, cnt: usize);
 
     // === Default implementations ===
@@ -72,10 +96,20 @@ pub trait BufMut {
 
         let mut off = 0;
         while off < src.len() {
+            let direct_remaining = self.direct_remaining_mut();
+            assert!(
+                direct_remaining > 0,
+                "put_slice requires direct writable space; append-only implementors must override put_slice"
+            );
             let dst = self.chunk_mut();
             assert!(
                 !dst.is_empty(),
-                "chunk_mut returned empty with remaining_mut() > 0; implementor must provide writable space"
+                "chunk_mut returned empty with direct_remaining_mut() > 0"
+            );
+            assert!(
+                dst.len() <= direct_remaining,
+                "chunk_mut exceeded direct capacity: chunk_len={}, direct_remaining={direct_remaining}",
+                dst.len()
             );
             let cnt = std::cmp::min(dst.len(), src.len() - off);
             dst[..cnt].copy_from_slice(&src[off..off + cnt]);
@@ -295,6 +329,11 @@ impl BufMut for Vec<u8> {
     }
 
     #[inline]
+    fn direct_remaining_mut(&self) -> usize {
+        0
+    }
+
+    #[inline]
     fn chunk_mut(&mut self) -> &mut [u8] {
         // For Vec, we grow dynamically via put_slice override.
         // chunk_mut returns empty because Vec doesn't have pre-allocated
@@ -466,6 +505,40 @@ mod tests {
         let ok = buf == b"hello world";
         crate::assert_with_log!(ok, "buf", b"hello world", buf);
         crate::test_complete!("test_buf_mut_vec_put_slice");
+    }
+
+    #[test]
+    fn test_buf_mut_vec_separates_logical_and_direct_capacity() {
+        init_test("test_buf_mut_vec_separates_logical_and_direct_capacity");
+        let mut buf = Vec::new();
+
+        let remaining = buf.remaining_mut();
+        crate::assert_with_log!(
+            remaining == usize::MAX,
+            "logical remaining",
+            usize::MAX,
+            remaining
+        );
+        let direct_remaining = buf.direct_remaining_mut();
+        crate::assert_with_log!(
+            direct_remaining == 0,
+            "direct remaining",
+            0,
+            direct_remaining
+        );
+        let chunk_empty = buf.chunk_mut().is_empty();
+        crate::assert_with_log!(chunk_empty, "chunk empty", true, chunk_empty);
+        buf.advance_mut(0);
+        buf.put_slice(b"abc");
+        let remaining = buf.remaining_mut();
+        crate::assert_with_log!(
+            remaining == usize::MAX - 3,
+            "logical remaining after append",
+            usize::MAX - 3,
+            remaining
+        );
+
+        crate::test_complete!("test_buf_mut_vec_separates_logical_and_direct_capacity");
     }
 
     #[test]
