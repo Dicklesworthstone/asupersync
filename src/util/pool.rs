@@ -72,7 +72,13 @@ impl<T> Pool<T> {
 
     /// Clears all objects from the pool.
     pub fn clear(&self) {
-        self.lock_storage().clear();
+        let retired = {
+            let mut storage = self.lock_storage();
+            std::mem::take(&mut *storage)
+        };
+        // `T::drop` is arbitrary user code and may re-enter this pool. Retire
+        // every value only after releasing the non-reentrant storage mutex.
+        drop(retired);
     }
 }
 
@@ -176,6 +182,30 @@ mod tests {
         }
     }
 
+    struct ClearDropProbe {
+        on_drop: Option<Box<dyn FnOnce() + Send>>,
+    }
+
+    impl ClearDropProbe {
+        fn new(on_drop: impl FnOnce() + Send + 'static) -> Self {
+            Self {
+                on_drop: Some(Box::new(on_drop)),
+            }
+        }
+    }
+
+    impl Drop for ClearDropProbe {
+        fn drop(&mut self) {
+            if let Some(on_drop) = self.on_drop.take() {
+                on_drop();
+            }
+        }
+    }
+
+    impl Recyclable for ClearDropProbe {
+        fn reset(&mut self) {}
+    }
+
     #[test]
     fn pool_basic_operations() {
         let pool = Pool::new(10);
@@ -224,6 +254,31 @@ mod tests {
     }
 
     #[test]
+    fn pool_clear_drops_values_after_unlock() {
+        let pool = Arc::new(Pool::new(1));
+        let weak_pool = Arc::downgrade(&pool);
+        let (observation_tx, observation_rx) = std::sync::mpsc::channel();
+        assert!(pool.put(ClearDropProbe::new(move || {
+            let pool = weak_pool
+                .upgrade()
+                .expect("pool remains alive during clear");
+            let storage_is_free = pool.storage.try_lock().is_ok();
+            observation_tx
+                .send((storage_is_free, storage_is_free.then(|| pool.len())))
+                .expect("record clear drop observation");
+        })));
+
+        pool.clear();
+
+        assert_eq!(
+            observation_rx.try_recv(),
+            Ok((true, Some(0))),
+            "Drop may re-enter the empty pool after clear detaches its values"
+        );
+        assert!(pool.is_empty());
+    }
+
+    #[test]
     fn recycling_pool_reset() {
         let pool = RecyclingPool::new(5);
 
@@ -240,5 +295,30 @@ mod tests {
         let recycled = pool.get_or_create(|| TestObject::new(999));
         assert_eq!(recycled.value, 0); // Reset value
         assert!(recycled.data.is_empty()); // Reset data
+    }
+
+    #[test]
+    fn recycling_pool_clear_drops_values_after_unlock() {
+        let pool = Arc::new(RecyclingPool::new(1));
+        let weak_pool = Arc::downgrade(&pool);
+        let (observation_tx, observation_rx) = std::sync::mpsc::channel();
+        assert!(pool.put_recycled(ClearDropProbe::new(move || {
+            let pool = weak_pool
+                .upgrade()
+                .expect("recycling pool remains alive during clear");
+            let storage_is_free = pool.pool.storage.try_lock().is_ok();
+            observation_tx
+                .send((storage_is_free, storage_is_free.then(|| pool.len())))
+                .expect("record recycling clear drop observation");
+        })));
+
+        pool.clear();
+
+        assert_eq!(
+            observation_rx.try_recv(),
+            Ok((true, Some(0))),
+            "Drop may re-enter the empty recycling pool after clear detaches its values"
+        );
+        assert!(pool.is_empty());
     }
 }
