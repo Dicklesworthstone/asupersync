@@ -253,6 +253,107 @@ fn authenticated_perfect_roundtrip_does_not_wait_for_close_timeout() {
 }
 
 #[test]
+fn authenticated_delta_exact_match_is_a_zero_payload_noop() {
+    let root = unique_tmp("auth_delta_noop");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let payload: Vec<u8> = (0..95_371u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761).rotate_right(5) >> 9) as u8)
+        .collect();
+    let src_file = src_dir.join("payload.bin");
+    let dst_file = dst_dir.join("payload.bin");
+    std::fs::write(&src_file, &payload).unwrap();
+    std::fs::write(&dst_file, &payload).unwrap();
+    let destination_modified_before = std::fs::metadata(&dst_file).unwrap().modified().unwrap();
+
+    let mut receiver_config = auth_test_config();
+    receiver_config.enable_delta = true;
+    let mut sender_config = auth_test_config();
+    sender_config.enable_delta = true;
+
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), receiver_config);
+    let send = run_sender(addr, src_file, sender_config).expect("authenticated delta no-op");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("authenticated delta receive");
+
+    assert!(send.receipt.committed);
+    assert!(send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(send.bytes_sent, 0);
+    assert_eq!(send.symbols_sent, 0);
+    assert_eq!(send.feedback_rounds, 0);
+    assert_eq!(send.receipt.bytes_received, 0);
+    assert_eq!(send.receipt.symbols_accepted, 0);
+    assert_eq!(send.receipt.feedback_rounds, 0);
+    assert!(
+        send.receipt.committed_paths.is_empty(),
+        "plaintext authenticated proof must not disclose receiver paths"
+    );
+
+    assert!(recv.committed);
+    assert_eq!(recv.bytes_received, 0);
+    assert_eq!(recv.symbols_accepted, 0);
+    assert_eq!(recv.feedback_rounds, 0);
+    assert_eq!(recv.committed_paths, vec![dst_file.clone()]);
+    assert_eq!(std::fs::read(&dst_file).unwrap(), payload);
+    assert_eq!(
+        std::fs::metadata(&dst_file).unwrap().modified().unwrap(),
+        destination_modified_before,
+        "no-op must not rewrite the destination"
+    );
+
+    let mut destination_entries = std::fs::read_dir(&dst_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    destination_entries.sort();
+    assert_eq!(
+        destination_entries,
+        vec![std::ffi::OsString::from("payload.bin")],
+        "no-op must not leave a staging directory"
+    );
+}
+
+#[test]
+fn authenticated_delta_mismatch_falls_back_to_full_transfer() {
+    let root = unique_tmp("auth_delta_full");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let payload: Vec<u8> = (0..79_113u32)
+        .map(|i| (i.wrapping_mul(1_664_525).rotate_left(3) >> 7) as u8)
+        .collect();
+    let src_file = src_dir.join("payload.bin");
+    let dst_file = dst_dir.join("payload.bin");
+    std::fs::write(&src_file, &payload).unwrap();
+    std::fs::write(&dst_file, vec![0xA5; payload.len()]).unwrap();
+
+    let mut receiver_config = auth_test_config();
+    receiver_config.enable_delta = true;
+    let mut sender_config = auth_test_config();
+    sender_config.enable_delta = true;
+
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), receiver_config);
+    let send = run_sender(addr, src_file, sender_config).expect("authenticated full fallback");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("authenticated fallback receive");
+
+    assert!(send.receipt.committed);
+    assert_eq!(send.bytes_sent, payload.len() as u64);
+    assert!(recv.committed);
+    assert_eq!(recv.bytes_received, payload.len() as u64);
+    assert_eq!(std::fs::read(dst_file).unwrap(), payload);
+}
+
+#[test]
 fn directory_tree_roundtrip_preserves_structure_and_bytes() {
     let root = unique_tmp("dir");
     let src_dir = root.join("src");

@@ -63,6 +63,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
+use crate::atp::delta::{CasChunkRef, PersistentChunkManifest};
+use crate::atp::object::ContentId;
 use crate::atp::object::MetadataPolicy;
 use crate::atp::safety::{
     portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
@@ -89,7 +91,9 @@ use crate::net::atp::datagram::congestion::{
 use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
+use crate::net::atp::protocol::session::TransferNonce;
 use crate::net::atp::protocol::varint::VarInt;
+use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, HardlinkIdentity,
     MetadataApplyReport, PathLinkKind, apply_entry_metadata, capture_directory_metadata_manifest,
@@ -98,8 +102,9 @@ use crate::net::atp::transport_common::metadata::{
     validate_entry_metadata_for_receive,
 };
 use crate::net::atp::transport_common::{
-    EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
-    hash_file_streaming, hex_encode, plan_multi_object_split,
+    DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode, EntryDigest,
+    MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests, hash_file_streaming,
+    hex_encode, plan_multi_object_split,
 };
 use crate::net::{TcpListener, TcpStream, UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
@@ -178,6 +183,18 @@ pub const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Default maximum time an RQ sender waits to open the TCP control connection.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Fixed chunk size for the first authenticated RQ delta-control rollout. The
+/// first rollout selects only full-object vs no-op, so near-frame-sized chunks
+/// keep the signed manifest bounded while covering the 500 MiB resync cell.
+const RQ_DELTA_CHUNK_SIZE: usize = 1024 * 1024 - 12;
+/// Bound the signed manifest independently of the transport-wide frame limit.
+const RQ_DELTA_MAX_MANIFEST_CHUNKS: u64 = 4_096;
+/// Reserve space for session bindings and the authentication tag around a
+/// delta-capable `ObjectManifest`.
+const RQ_DELTA_ENVELOPE_WIRE_BUDGET: usize = 2 * 1024;
+/// Protocol-wide bound for authenticated receiver UDP endpoint advertisements.
+const RQ_DELTA_MAX_ADVERTISED_UDP_PORTS: usize = 256;
 
 /// Maximum number of files a single transfer manifest may declare. This bounds
 /// receiver bookkeeping derived from attacker-controlled control-plane JSON.
@@ -548,6 +565,20 @@ pub struct RqConfig {
     /// Explicit escape hatch for loopback/lab callers that run over a trusted
     /// transport and accept integrity-vs-manifest only.
     pub allow_unauthenticated_symbols: bool,
+    /// Offer receiver-driven delta negotiation on the existing framed control
+    /// stream when a strict symbol-authentication key is configured.
+    ///
+    /// Delta is deliberately unavailable in the trusted unauthenticated lab
+    /// posture: destination state is never consulted for an unauthenticated
+    /// challenge or manifest. A strict symmetric symbol key is the sole
+    /// authorization for this equality query; `peer_id` is self-asserted, so
+    /// deployments that treat destination-state probing as sensitive should
+    /// use a narrowly scoped per-peer or per-transfer key. This opt-in does not
+    /// disable legacy unauthenticated clients or provide an admission replay
+    /// cache, so deployment-level connection limits remain necessary.
+    pub enable_delta: bool,
+    /// Absolute per-frame deadline for the authenticated delta-control exchange.
+    pub delta_control_timeout: Duration,
 }
 
 /// Public per-symbol authentication posture for ATP-over-RaptorQ.
@@ -584,6 +615,8 @@ impl Default for RqConfig {
             debug_drop_one_in: 0,
             symbol_auth_context: None,
             allow_unauthenticated_symbols: false,
+            enable_delta: false,
+            delta_control_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
     }
 }
@@ -2551,6 +2584,7 @@ pub enum RqError {
 // ─── Wire control payloads (JSON over TCP) ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Hello {
     protocol: u32,
     role: String,
@@ -2570,9 +2604,19 @@ struct Hello {
     /// the sender to fall back to the UDP/RaptorQ symbol path.
     #[serde(default)]
     prefer_control_source_stream: bool,
+    /// Fresh sender challenge. Present only when an exact authenticated delta
+    /// manifest will follow a successfully authenticated acknowledgement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_transfer_nonce: Option<TransferNonce>,
+    /// Sender-role shared-key possession proof over the exact initial offer.
+    /// It must accompany `delta_transfer_nonce` and is verified before the
+    /// receiver allocates delta state or UDP sockets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_client_auth_tag: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HelloAck {
     accepted: bool,
     peer_id: String,
@@ -2586,21 +2630,39 @@ struct HelloAck {
     control_source_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Echo of the sender's delta challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_transfer_nonce: Option<TransferNonce>,
+    /// Fresh receiver challenge for cross-session replay rejection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_receiver_nonce: Option<TransferNonce>,
+    /// Keyed commitment to the configured destination root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_destination_root: Option<[u8; 32]>,
+    /// Receiver-role shared-key possession proof over the complete
+    /// acknowledgement and both peer labels. This does not establish a unique
+    /// peer identity because every holder of the symmetric key can produce it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_server_auth_tag: Option<[u8; 32]>,
 }
 
 fn hello_ack_udp_ports(ack: &HelloAck) -> SmallVec<[u16; DEFAULT_UDP_FANOUT]> {
+    advertised_udp_ports(ack.udp_port, &ack.udp_ports)
+}
+
+fn advertised_udp_ports(primary: u16, advertised: &[u16]) -> SmallVec<[u16; DEFAULT_UDP_FANOUT]> {
     let mut ports = SmallVec::<[u16; DEFAULT_UDP_FANOUT]>::new();
-    if ack.udp_ports.is_empty() {
-        if ack.udp_port != 0 {
-            ports.push(ack.udp_port);
+    if advertised.is_empty() {
+        if primary != 0 {
+            ports.push(primary);
         }
         return ports;
     }
 
-    if ack.udp_port != 0 {
-        ports.push(ack.udp_port);
+    if primary != 0 {
+        ports.push(primary);
     }
-    for &port in &ack.udp_ports {
+    for &port in advertised {
         if port != 0 && !ports.contains(&port) {
             ports.push(port);
         }
@@ -2633,6 +2695,7 @@ fn receiver_udp_addr_for_socket(
 /// runtime overhead (decode pipeline / tasks / commit) that makes many-small-file
 /// trees slow (profiled: ~81% runtime sync, 5.8× a same-byte single file).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PackedMember {
     /// Path of this file relative to the transfer root.
     pub rel_path: String,
@@ -2651,6 +2714,7 @@ pub struct PackedMember {
 /// after all shards verify. `sha256_hex` is the whole logical file SHA-256, not
 /// the per-shard object hash (that remains [`ManifestEntry::sha256_hex`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LargeObjectFragment {
     /// Logical file path relative to the transfer root.
     pub rel_path: String,
@@ -2670,6 +2734,7 @@ pub struct LargeObjectFragment {
 
 /// One file within a transfer manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestEntry {
     /// Stable index within the transfer (manifest order).
     pub index: u32,
@@ -2696,6 +2761,7 @@ pub struct ManifestEntry {
 /// Metadata is keyed by the final logical path rather than encoded-object path,
 /// so packing and large-file fragmentation cannot change its meaning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RqMetadataEntry {
     /// Path relative to the transfer root.
     pub rel_path: String,
@@ -2705,6 +2771,7 @@ pub struct RqMetadataEntry {
 
 /// Versioned metadata block committed independently from content integrity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RqMetadataManifest {
     /// RQ metadata schema version.
     pub version: u8,
@@ -2721,6 +2788,7 @@ pub struct RqMetadataManifest {
 
 /// Transfer manifest carried in the `ObjectManifest` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TransferManifest {
     /// Stable transfer identifier (hex).
     pub transfer_id: String,
@@ -2737,6 +2805,10 @@ pub struct TransferManifest {
     /// validation rejects `None` so the whole block cannot be stripped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<RqMetadataManifest>,
+    /// Bounded receiver-driven delta manifest. It is authoritative only inside
+    /// an authenticated `RqDeltaManifestEnvelope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_manifest: Option<DeltaManifestWire>,
     /// File entries in manifest order.
     pub entries: Vec<ManifestEntry>,
 }
@@ -2903,6 +2975,7 @@ struct SourceSymbolRequest {
 
 /// Receipt returned by the receiver in the `Proof` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReceiveReceipt {
     /// Whether the receiver atomically committed the transfer to its destination.
     pub committed: bool,
@@ -2921,8 +2994,91 @@ pub struct ReceiveReceipt {
     /// Failure reason when `committed` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Absolute destination paths that were committed.
+    /// Absolute destination paths that were committed. Privacy-preserving
+    /// authenticated no-op proofs leave this empty; the receiver keeps its
+    /// local paths in [`ReceiveReport::committed_paths`].
     pub committed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RqDeltaHandshakeContext {
+    sender_nonce: TransferNonce,
+    receiver_nonce: TransferNonce,
+    destination_root: [u8; 32],
+    handshake_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RqDeltaSessionContext {
+    session_id: [u8; 32],
+    destination_root: [u8; 32],
+}
+
+#[derive(zeroize::ZeroizeOnDrop)]
+struct RqDeltaDestinationBinding {
+    receiver_secret_salt: [u8; 32],
+    commitment: [u8; 32],
+}
+
+// Security boundary: these envelopes authenticate the delta negotiation and
+// its zero-byte completion with a symmetric key. They do not encrypt the raw
+// TCP stream, authorize a self-asserted `peer_id`, or authenticate the legacy
+// NeedMore/Proof exchange after a signed FullObject request. In that fallback
+// branch the existing wire receipt can still expose committed receiver paths.
+
+/// Sender-role shared-key possession proof over the exact typed manifest.
+/// It authenticates the protocol role, not a unique peer identity or signer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RqDeltaManifestEnvelope {
+    session_id: [u8; 32],
+    destination_root: [u8; 32],
+    control_seq: u64,
+    manifest: TransferManifest,
+    client_auth_tag: [u8; 32],
+}
+
+/// Receiver-selected delta mode, authenticated by shared-key role possession
+/// on the raw TCP control stream. The stream provides no confidentiality.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RqDeltaObjectRequestEnvelope {
+    session_id: [u8; 32],
+    transfer_id: String,
+    destination_root: [u8; 32],
+    control_seq: u64,
+    request: DeltaObjectRequest,
+    /// UDP ports are deferred until after the sender's manifest proof verifies.
+    /// They are empty for an already-in-sync no-op.
+    #[serde(default)]
+    udp_port: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    udp_ports: Vec<u16>,
+    server_auth_tag: [u8; 32],
+}
+
+/// Sender-role authenticated zero-object completion for the no-op branch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RqDeltaCompleteEnvelope {
+    session_id: [u8; 32],
+    transfer_id: String,
+    destination_root: [u8; 32],
+    control_seq: u64,
+    bytes_sent: u64,
+    client_auth_tag: [u8; 32],
+}
+
+/// Receiver-role authenticated proof after live destination revalidation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RqDeltaProofEnvelope {
+    session_id: [u8; 32],
+    transfer_id: String,
+    destination_root: [u8; 32],
+    control_seq: u64,
+    receipt: ReceiveReceipt,
+    server_auth_tag: [u8; 32],
 }
 
 /// Outcome of a successful [`send_path`] call.
@@ -3432,6 +3588,781 @@ fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError>
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
 }
 
+fn rq_delta_control_auth_context(config: &RqConfig) -> Option<&SecurityContext> {
+    config
+        .symbol_auth_context
+        .as_ref()
+        .filter(|context| context.mode() == AuthMode::Strict)
+}
+
+fn fresh_rq_delta_nonce(
+    cx: &Cx,
+    role: &'static [u8],
+    avoid: Option<TransferNonce>,
+) -> Result<TransferNonce, RqError> {
+    for attempt in 0u32..4 {
+        let mut entropy = [0u8; 32];
+        cx.random_bytes(&mut entropy);
+        let mut hasher = Sha256::new();
+        hasher.update(b"ATP-RQ-DELTA-NONCE-V1\0");
+        hasher.update(u64::try_from(role.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(role);
+        hasher.update(attempt.to_be_bytes());
+        hasher.update(entropy);
+        let nonce = TransferNonce::new(hasher.finalize().into());
+        if !nonce.is_zero() && Some(nonce) != avoid {
+            return Ok(nonce);
+        }
+    }
+    Err(RqError::Control(
+        "unable to derive a distinct non-zero RQ delta nonce".to_string(),
+    ))
+}
+
+fn rq_delta_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn rq_delta_hello_auth_symbol(hello: &Hello) -> Result<Symbol, RqError> {
+    let mut unsigned_hello = hello.clone();
+    unsigned_hello.delta_client_auth_tag = None;
+    let transcript = serde_json::to_vec(&unsigned_hello)
+        .map_err(|error| RqError::Control(format!("serialize RQ delta initial offer: {error}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-RQ-DELTA-CLIENT-HELLO-V1\0");
+    rq_delta_hash_len_prefixed(&mut hasher, &transcript);
+    Ok(Symbol::new(
+        SymbolId::new(
+            ObjectId::new(0x4154_502d_5251_2d44, 0x454c_5441_2d48_454c),
+            0,
+            0,
+        ),
+        hasher.finalize().to_vec(),
+        SymbolKind::Source,
+    ))
+}
+
+fn sign_rq_delta_hello(context: &SecurityContext, hello: &Hello) -> Result<[u8; 32], RqError> {
+    if context.mode() != AuthMode::Strict {
+        return Err(RqError::Authentication(
+            "RQ delta initial offer requires strict authentication".to_string(),
+        ));
+    }
+    let control = context.derive_context(b"atp-rq-delta-client-hello-v1");
+    Ok(*control
+        .sign_symbol_tag(&rq_delta_hello_auth_symbol(hello)?)
+        .as_bytes())
+}
+
+fn rq_delta_destination_root_commitment(
+    context: &SecurityContext,
+    receiver_nonce: TransferNonce,
+    dest_dir: &Path,
+    receiver_secret_salt: &[u8; 32],
+) -> Result<[u8; 32], RqError> {
+    if context.mode() != AuthMode::Strict {
+        return Err(RqError::Authentication(
+            "RQ delta destination binding requires strict authentication".to_string(),
+        ));
+    }
+    let encoded_path = dest_dir.as_os_str().as_encoded_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-RQ-DELTA-DESTINATION-ROOT-V1\0");
+    hasher.update(receiver_nonce.as_bytes());
+    hasher.update(receiver_secret_salt);
+    rq_delta_hash_len_prefixed(&mut hasher, encoded_path);
+    let symbol = Symbol::new(
+        SymbolId::new(
+            ObjectId::new(0x4154_502d_5251_2d44, 0x454c_5441_2d44_5354),
+            0,
+            0,
+        ),
+        hasher.finalize().to_vec(),
+        SymbolKind::Source,
+    );
+    let control = context.derive_context(b"atp-rq-delta-destination-root-v1");
+    Ok(*control.sign_symbol_tag(&symbol).as_bytes())
+}
+
+fn new_rq_delta_destination_binding(
+    cx: &Cx,
+    context: &SecurityContext,
+    receiver_nonce: TransferNonce,
+    dest_dir: &Path,
+) -> Result<RqDeltaDestinationBinding, RqError> {
+    let mut receiver_secret_salt = [0u8; 32];
+    cx.random_bytes(&mut receiver_secret_salt);
+    let commitment = rq_delta_destination_root_commitment(
+        context,
+        receiver_nonce,
+        dest_dir,
+        &receiver_secret_salt,
+    )?;
+    Ok(RqDeltaDestinationBinding {
+        receiver_secret_salt,
+        commitment,
+    })
+}
+
+fn validate_rq_delta_destination_binding(
+    binding: &RqDeltaDestinationBinding,
+    context: &SecurityContext,
+    receiver_nonce: TransferNonce,
+    dest_dir: &Path,
+) -> Result<(), RqError> {
+    let current = rq_delta_destination_root_commitment(
+        context,
+        receiver_nonce,
+        dest_dir,
+        &binding.receiver_secret_salt,
+    )?;
+    if current != binding.commitment {
+        return Err(RqError::Authentication(
+            "RQ delta destination binding changed during the session".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn rq_delta_ack_transcript_digest(hello: &Hello, ack: &HelloAck) -> Result<[u8; 32], RqError> {
+    let mut unsigned_ack = ack.clone();
+    unsigned_ack.delta_server_auth_tag = None;
+    let transcript = serde_json::to_vec(&(hello, unsigned_ack)).map_err(|error| {
+        RqError::Control(format!(
+            "serialize RQ delta acknowledgement transcript: {error}"
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-RQ-DELTA-SERVER-ACK-V1\0");
+    rq_delta_hash_len_prefixed(&mut hasher, &transcript);
+    Ok(hasher.finalize().into())
+}
+
+fn rq_delta_ack_auth_symbol(hello: &Hello, ack: &HelloAck) -> Result<Symbol, RqError> {
+    Ok(Symbol::new(
+        SymbolId::new(
+            ObjectId::new(0x4154_502d_5251_2d44, 0x454c_5441_2d41_434b),
+            0,
+            0,
+        ),
+        rq_delta_ack_transcript_digest(hello, ack)?.to_vec(),
+        SymbolKind::Source,
+    ))
+}
+
+fn sign_rq_delta_ack(
+    context: &SecurityContext,
+    hello: &Hello,
+    ack: &HelloAck,
+) -> Result<[u8; 32], RqError> {
+    if context.mode() != AuthMode::Strict {
+        return Err(RqError::Authentication(
+            "RQ delta acknowledgement requires strict authentication".to_string(),
+        ));
+    }
+    let control = context.derive_context(b"atp-rq-delta-server-ack-v1");
+    Ok(*control
+        .sign_symbol_tag(&rq_delta_ack_auth_symbol(hello, ack)?)
+        .as_bytes())
+}
+
+fn verify_rq_delta_auth_tag(
+    context: &SecurityContext,
+    derivation: &'static [u8],
+    symbol: Symbol,
+    tag: [u8; 32],
+    label: &'static str,
+) -> Result<(), RqError> {
+    if context.mode() != AuthMode::Strict {
+        return Err(RqError::Authentication(format!(
+            "{label} requires strict authentication"
+        )));
+    }
+    let mut authenticated =
+        AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::from_bytes(tag));
+    let control = context.derive_context(derivation);
+    if control
+        .verify_authenticated_symbol(&mut authenticated)
+        .is_err()
+        || !authenticated.is_verified()
+    {
+        return Err(RqError::Authentication(format!(
+            "{label} authentication failed"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_rq_delta_hello(
+    context: Option<&SecurityContext>,
+    hello: &Hello,
+) -> Result<Option<TransferNonce>, RqError> {
+    match (hello.delta_transfer_nonce, hello.delta_client_auth_tag) {
+        (None, None) => Ok(None),
+        (Some(sender_nonce), Some(tag)) => {
+            let context = context.ok_or_else(|| {
+                RqError::Authentication(
+                    "RQ delta offer requires a strict receiver authentication context".to_string(),
+                )
+            })?;
+            if sender_nonce.is_zero() {
+                return Err(RqError::Authentication(
+                    "RQ delta offer used an all-zero sender nonce".to_string(),
+                ));
+            }
+            verify_rq_delta_auth_tag(
+                context,
+                b"atp-rq-delta-client-hello-v1",
+                rq_delta_hello_auth_symbol(hello)?,
+                tag,
+                "RQ delta initial offer",
+            )?;
+            Ok(Some(sender_nonce))
+        }
+        _ => Err(RqError::Authentication(
+            "RQ delta initial offer has a partial authentication tuple".to_string(),
+        )),
+    }
+}
+
+fn validate_rq_delta_ack(
+    context: &SecurityContext,
+    hello: &Hello,
+    ack: &HelloAck,
+) -> Result<Option<RqDeltaHandshakeContext>, RqError> {
+    let offered = hello.delta_transfer_nonce;
+    let response = (
+        ack.delta_transfer_nonce,
+        ack.delta_receiver_nonce,
+        ack.delta_destination_root,
+        ack.delta_server_auth_tag,
+    );
+    let Some(expected) = offered else {
+        return if response == (None, None, None, None) {
+            Ok(None)
+        } else {
+            Err(RqError::HandshakeRejected(
+                "receiver returned unsolicited RQ delta binding fields".to_string(),
+            ))
+        };
+    };
+    let (Some(echoed), receiver, destination_root, Some(tag)) = response else {
+        return Err(RqError::Authentication(
+            "receiver omitted its authenticated RQ delta response".to_string(),
+        ));
+    };
+    verify_rq_delta_auth_tag(
+        context,
+        b"atp-rq-delta-server-ack-v1",
+        rq_delta_ack_auth_symbol(hello, ack)?,
+        tag,
+        "RQ delta acknowledgement",
+    )?;
+    if echoed != expected {
+        return Err(RqError::Authentication(
+            "receiver echoed the wrong RQ delta transfer nonce".to_string(),
+        ));
+    }
+    match (receiver, destination_root) {
+        (None, None) => Ok(None),
+        (Some(receiver_nonce), Some(destination_root)) => {
+            if receiver_nonce.is_zero() || receiver_nonce == expected {
+                return Err(RqError::Authentication(
+                    "receiver RQ delta nonce must be distinct and non-zero".to_string(),
+                ));
+            }
+            if destination_root.iter().all(|byte| *byte == 0) {
+                return Err(RqError::Authentication(
+                    "receiver RQ delta destination commitment is all zero".to_string(),
+                ));
+            }
+            Ok(Some(RqDeltaHandshakeContext {
+                sender_nonce: expected,
+                receiver_nonce,
+                destination_root,
+                handshake_hash: rq_delta_ack_transcript_digest(hello, ack)?,
+            }))
+        }
+        _ => Err(RqError::Authentication(
+            "receiver returned a partial RQ delta binding tuple".to_string(),
+        )),
+    }
+}
+
+fn rq_decode_delta_root(value: &str, label: &str) -> Result<[u8; 32], RqError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(RqError::Control(format!(
+            "{label} must be a canonical 64-character lowercase hex digest"
+        )));
+    }
+    let mut decoded = [0u8; 32];
+    hex::decode_to_slice(value, &mut decoded)
+        .map_err(|error| RqError::Control(format!("decode {label}: {error}")))?;
+    Ok(decoded)
+}
+
+fn derive_rq_delta_session(
+    handshake: RqDeltaHandshakeContext,
+    sender_peer_id: &str,
+    receiver_peer_id: &str,
+    manifest: &TransferManifest,
+) -> Result<RqDeltaSessionContext, RqError> {
+    let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        RqError::Control("delta-bound RQ session requires a delta manifest".to_string())
+    })?;
+    let outer_root = rq_decode_delta_root(&manifest.merkle_root_hex, "manifest Merkle root")?;
+    let delta_root = rq_decode_delta_root(&delta.merkle_root_hex, "delta manifest Merkle root")?;
+    let metadata_root = manifest
+        .metadata
+        .as_ref()
+        .ok_or_else(|| RqError::Control("RQ delta manifest requires metadata".to_string()))?
+        .commitment_hex
+        .as_str();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-RQ-DELTA-SESSION-V1\0");
+    hasher.update(ATP_RQ_PROTOCOL.to_be_bytes());
+    hasher.update(handshake.sender_nonce.as_bytes());
+    hasher.update(handshake.receiver_nonce.as_bytes());
+    hasher.update(handshake.destination_root);
+    hasher.update(handshake.handshake_hash);
+    rq_delta_hash_len_prefixed(&mut hasher, sender_peer_id.as_bytes());
+    rq_delta_hash_len_prefixed(&mut hasher, receiver_peer_id.as_bytes());
+    rq_delta_hash_len_prefixed(&mut hasher, manifest.transfer_id.as_bytes());
+    rq_delta_hash_len_prefixed(&mut hasher, manifest.root_name.as_bytes());
+    hasher.update([u8::from(manifest.is_directory)]);
+    hasher.update(manifest.total_bytes.to_be_bytes());
+    hasher.update(outer_root);
+    hasher.update(delta_root);
+    hasher.update(rq_decode_delta_root(
+        metadata_root,
+        "manifest metadata commitment",
+    )?);
+    let exact_manifest = serde_json::to_vec(manifest)
+        .map_err(|error| RqError::Control(format!("serialize exact RQ delta manifest: {error}")))?;
+    let mut manifest_hasher = Sha256::new();
+    manifest_hasher.update(b"ATP-RQ-DELTA-EXACT-MANIFEST-V1\0");
+    rq_delta_hash_len_prefixed(&mut manifest_hasher, &exact_manifest);
+    hasher.update(manifest_hasher.finalize());
+    Ok(RqDeltaSessionContext {
+        session_id: hasher.finalize().into(),
+        destination_root: handshake.destination_root,
+    })
+}
+
+fn rq_delta_control_auth_symbol<T: Serialize>(
+    domain: &'static [u8],
+    session: RqDeltaSessionContext,
+    transfer_id: &str,
+    control_seq: u64,
+    payload: &T,
+) -> Result<Symbol, RqError> {
+    let payload = serde_json::to_vec(payload)
+        .map_err(|error| RqError::Control(format!("serialize RQ delta proof: {error}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(session.session_id);
+    hasher.update(session.destination_root);
+    hasher.update(control_seq.to_be_bytes());
+    rq_delta_hash_len_prefixed(&mut hasher, transfer_id.as_bytes());
+    rq_delta_hash_len_prefixed(&mut hasher, &payload);
+    Ok(Symbol::new(
+        SymbolId::new(
+            ObjectId::new(0x4154_502d_5251_2d44, 0x454c_5441_2d43_5452),
+            0,
+            u32::try_from(control_seq).unwrap_or(u32::MAX),
+        ),
+        hasher.finalize().to_vec(),
+        SymbolKind::Source,
+    ))
+}
+
+fn sign_rq_delta_control<T: Serialize>(
+    context: &SecurityContext,
+    derivation: &'static [u8],
+    domain: &'static [u8],
+    session: RqDeltaSessionContext,
+    transfer_id: &str,
+    control_seq: u64,
+    payload: &T,
+) -> Result<[u8; 32], RqError> {
+    if context.mode() != AuthMode::Strict {
+        return Err(RqError::Authentication(
+            "RQ delta control requires strict authentication".to_string(),
+        ));
+    }
+    let control = context.derive_context(derivation);
+    Ok(*control
+        .sign_symbol_tag(&rq_delta_control_auth_symbol(
+            domain,
+            session,
+            transfer_id,
+            control_seq,
+            payload,
+        )?)
+        .as_bytes())
+}
+
+fn verify_rq_delta_control<T: Serialize>(
+    context: &SecurityContext,
+    derivation: &'static [u8],
+    domain: &'static [u8],
+    session: RqDeltaSessionContext,
+    transfer_id: &str,
+    control_seq: u64,
+    payload: &T,
+    tag: [u8; 32],
+    label: &'static str,
+) -> Result<(), RqError> {
+    verify_rq_delta_auth_tag(
+        context,
+        derivation,
+        rq_delta_control_auth_symbol(domain, session, transfer_id, control_seq, payload)?,
+        tag,
+        label,
+    )
+}
+
+fn make_rq_delta_manifest_envelope(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<RqDeltaManifestEnvelope, RqError> {
+    let client_auth_tag = sign_rq_delta_control(
+        context,
+        b"atp-rq-delta-manifest-client-proof-v1",
+        b"ATP-RQ-DELTA-MANIFEST-CLIENT-PROOF-V1\0",
+        session,
+        &manifest.transfer_id,
+        0,
+        manifest,
+    )?;
+    Ok(RqDeltaManifestEnvelope {
+        session_id: session.session_id,
+        destination_root: session.destination_root,
+        control_seq: 0,
+        manifest: manifest.clone(),
+        client_auth_tag,
+    })
+}
+
+fn validate_rq_delta_manifest_envelope(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    envelope: &RqDeltaManifestEnvelope,
+) -> Result<(), RqError> {
+    if envelope.control_seq != 0
+        || envelope.session_id != session.session_id
+        || envelope.destination_root != session.destination_root
+    {
+        return Err(RqError::HandshakeRejected(
+            "RQ delta manifest client-proof binding mismatch".to_string(),
+        ));
+    }
+    verify_rq_delta_control(
+        context,
+        b"atp-rq-delta-manifest-client-proof-v1",
+        b"ATP-RQ-DELTA-MANIFEST-CLIENT-PROOF-V1\0",
+        session,
+        &envelope.manifest.transfer_id,
+        envelope.control_seq,
+        &envelope.manifest,
+        envelope.client_auth_tag,
+        "RQ delta manifest client proof",
+    )
+}
+
+fn make_rq_delta_request_envelope(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    manifest: &TransferManifest,
+    request: DeltaObjectRequest,
+    udp_port: u16,
+    udp_ports: Vec<u16>,
+) -> Result<RqDeltaObjectRequestEnvelope, RqError> {
+    let control_seq = 1;
+    let server_auth_tag = sign_rq_delta_control(
+        context,
+        b"atp-rq-delta-object-request-server-proof-v1",
+        b"ATP-RQ-DELTA-OBJECT-REQUEST-SERVER-PROOF-V1\0",
+        session,
+        &manifest.transfer_id,
+        control_seq,
+        &(&request, udp_port, &udp_ports),
+    )?;
+    Ok(RqDeltaObjectRequestEnvelope {
+        session_id: session.session_id,
+        transfer_id: manifest.transfer_id.clone(),
+        destination_root: session.destination_root,
+        control_seq,
+        request,
+        udp_port,
+        udp_ports,
+        server_auth_tag,
+    })
+}
+
+fn validate_rq_delta_request_envelope(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    manifest: &TransferManifest,
+    envelope: &RqDeltaObjectRequestEnvelope,
+    control_source_stream: bool,
+) -> Result<DeltaWireMode, RqError> {
+    if envelope.control_seq != 1
+        || envelope.session_id != session.session_id
+        || envelope.transfer_id != manifest.transfer_id
+        || envelope.destination_root != session.destination_root
+    {
+        return Err(RqError::Control(
+            "RQ delta ObjectRequest binding mismatch".to_string(),
+        ));
+    }
+    verify_rq_delta_control(
+        context,
+        b"atp-rq-delta-object-request-server-proof-v1",
+        b"ATP-RQ-DELTA-OBJECT-REQUEST-SERVER-PROOF-V1\0",
+        session,
+        &manifest.transfer_id,
+        envelope.control_seq,
+        &(&envelope.request, envelope.udp_port, &envelope.udp_ports),
+        envelope.server_auth_tag,
+        "RQ delta ObjectRequest",
+    )?;
+    let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        RqError::Control("bound RQ delta request without a delta manifest".to_string())
+    })?;
+    let request = &envelope.request;
+    if request.sender_merkle_root_hex != delta.merkle_root_hex {
+        return Err(RqError::Control(
+            "RQ delta ObjectRequest sender root mismatch".to_string(),
+        ));
+    }
+    match request.mode {
+        DeltaWireMode::FullObject => {
+            let canonical_udp_ports = envelope.udp_port != 0
+                && !envelope.udp_ports.is_empty()
+                && envelope.udp_ports.first() == Some(&envelope.udp_port)
+                && envelope.udp_ports.len() <= RQ_DELTA_MAX_ADVERTISED_UDP_PORTS
+                && envelope.udp_ports.iter().all(|port| *port != 0)
+                && envelope
+                    .udp_ports
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == envelope.udp_ports.len();
+            if request.fallback_reason.as_deref() != Some("full_object_required")
+                || request.receiver_merkle_root_hex.is_some()
+                || request.missing_bytes != 0
+                || request.shared_chunks != 0
+                || request.stale_chunks != 0
+                || !request.missing_chunks.is_empty()
+                || (control_source_stream
+                    && (envelope.udp_port != 0 || !envelope.udp_ports.is_empty()))
+                || (!control_source_stream && !canonical_udp_ports)
+            {
+                return Err(RqError::Control(
+                    "malformed RQ full-object delta request".to_string(),
+                ));
+            }
+        }
+        DeltaWireMode::AlreadyInSync => {
+            let expected_shared = u64::try_from(delta.chunks.len()).unwrap_or(u64::MAX);
+            if request.fallback_reason.is_some()
+                || request.receiver_merkle_root_hex.as_deref()
+                    != Some(delta.merkle_root_hex.as_str())
+                || request.missing_bytes != 0
+                || !request.missing_chunks.is_empty()
+                || request.stale_chunks != 0
+                || request.shared_chunks != expected_shared
+                || envelope.udp_port != 0
+                || !envelope.udp_ports.is_empty()
+            {
+                return Err(RqError::Control(
+                    "malformed RQ AlreadyInSync delta request".to_string(),
+                ));
+            }
+        }
+        DeltaWireMode::DeltaChunks => {
+            return Err(RqError::Control(
+                "RQ missing-chunk delta requests are not enabled in this rollout".to_string(),
+            ));
+        }
+    }
+    Ok(request.mode)
+}
+
+fn make_rq_delta_complete(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<RqDeltaCompleteEnvelope, RqError> {
+    let control_seq = 2;
+    let bytes_sent = 0u64;
+    let client_auth_tag = sign_rq_delta_control(
+        context,
+        b"atp-rq-delta-complete-client-proof-v1",
+        b"ATP-RQ-DELTA-COMPLETE-CLIENT-PROOF-V1\0",
+        session,
+        &manifest.transfer_id,
+        control_seq,
+        &bytes_sent,
+    )?;
+    Ok(RqDeltaCompleteEnvelope {
+        session_id: session.session_id,
+        transfer_id: manifest.transfer_id.clone(),
+        destination_root: session.destination_root,
+        control_seq,
+        bytes_sent,
+        client_auth_tag,
+    })
+}
+
+fn validate_rq_delta_complete(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    manifest: &TransferManifest,
+    complete: &RqDeltaCompleteEnvelope,
+) -> Result<(), RqError> {
+    if complete.control_seq != 2
+        || complete.session_id != session.session_id
+        || complete.transfer_id != manifest.transfer_id
+        || complete.destination_root != session.destination_root
+        || complete.bytes_sent != 0
+    {
+        return Err(RqError::Control(
+            "RQ delta ObjectComplete binding mismatch".to_string(),
+        ));
+    }
+    verify_rq_delta_control(
+        context,
+        b"atp-rq-delta-complete-client-proof-v1",
+        b"ATP-RQ-DELTA-COMPLETE-CLIENT-PROOF-V1\0",
+        session,
+        &manifest.transfer_id,
+        complete.control_seq,
+        &complete.bytes_sent,
+        complete.client_auth_tag,
+        "RQ delta ObjectComplete",
+    )
+}
+
+fn make_rq_delta_proof(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    manifest: &TransferManifest,
+    receipt: ReceiveReceipt,
+) -> Result<RqDeltaProofEnvelope, RqError> {
+    let control_seq = 3;
+    let server_auth_tag = sign_rq_delta_control(
+        context,
+        b"atp-rq-delta-proof-server-proof-v1",
+        b"ATP-RQ-DELTA-PROOF-SERVER-PROOF-V1\0",
+        session,
+        &manifest.transfer_id,
+        control_seq,
+        &receipt,
+    )?;
+    Ok(RqDeltaProofEnvelope {
+        session_id: session.session_id,
+        transfer_id: manifest.transfer_id.clone(),
+        destination_root: session.destination_root,
+        control_seq,
+        receipt,
+        server_auth_tag,
+    })
+}
+
+fn validate_rq_delta_proof(
+    context: &SecurityContext,
+    session: RqDeltaSessionContext,
+    manifest: &TransferManifest,
+    proof: RqDeltaProofEnvelope,
+) -> Result<ReceiveReceipt, RqError> {
+    if proof.control_seq != 3
+        || proof.session_id != session.session_id
+        || proof.transfer_id != manifest.transfer_id
+        || proof.destination_root != session.destination_root
+    {
+        return Err(RqError::Control(
+            "RQ delta Proof binding mismatch".to_string(),
+        ));
+    }
+    verify_rq_delta_control(
+        context,
+        b"atp-rq-delta-proof-server-proof-v1",
+        b"ATP-RQ-DELTA-PROOF-SERVER-PROOF-V1\0",
+        session,
+        &manifest.transfer_id,
+        proof.control_seq,
+        &proof.receipt,
+        proof.server_auth_tag,
+        "RQ delta Proof",
+    )?;
+    if !proof.receipt.committed
+        || !proof.receipt.sha_ok
+        || !proof.receipt.merkle_ok
+        || proof.receipt.bytes_received != 0
+        || proof.receipt.files != 1
+        || proof.receipt.symbols_accepted != 0
+        || proof.receipt.feedback_rounds != 0
+        || proof.receipt.reason.is_some()
+        || !proof.receipt.committed_paths.is_empty()
+    {
+        return Err(RqError::Integrity(
+            proof
+                .receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "receiver did not commit the RQ delta no-op".to_string()),
+        ));
+    }
+    Ok(proof.receipt)
+}
+
+async fn send_delta_control_frame<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    frame: &Frame,
+    timeout: Duration,
+    phase: &'static str,
+) -> Result<(), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    match crate::time::timeout(cx.now(), timeout, control.send(frame)).await {
+        Ok(result) => result,
+        Err(_) => Err(RqError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("delta control timed out during {phase} after {timeout:?}"),
+        ))),
+    }
+}
+
+async fn recv_delta_control_frame<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    timeout: Duration,
+    phase: &'static str,
+) -> Result<Frame, RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    match crate::time::timeout(cx.now(), timeout, control.recv()).await {
+        Ok(result) => result,
+        Err(_) => Err(RqError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("delta control timed out during {phase} after {timeout:?}"),
+        ))),
+    }
+}
+
 /// Receive the sender-side handshake acknowledgement and preserve its protocol
 /// stage in the error type. Auto selection may fall back after this function,
 /// but never after the manifest or payload phase begins.
@@ -3783,6 +4714,320 @@ struct RqSourceEntry {
     members: Vec<PackedMember>,
     /// Large-file multi-object metadata for this encoded object.
     fragment: Option<LargeObjectFragment>,
+}
+
+fn rq_delta_manifest_entry(manifest: &TransferManifest) -> Option<&ManifestEntry> {
+    let [entry] = manifest.entries.as_slice() else {
+        return None;
+    };
+    (!manifest.is_directory && entry.members.is_empty() && entry.fragment.is_none())
+        .then_some(entry)
+}
+
+fn rq_manifest_entry_metadata(manifest: &TransferManifest, rel_path: &str) -> EntryMetadata {
+    manifest
+        .metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata
+                .entries
+                .iter()
+                .find(|entry| entry.rel_path == rel_path)
+        })
+        .map_or_else(EntryMetadata::default, |entry| entry.metadata.clone())
+}
+
+async fn read_rq_entry_metadata(
+    path: &Path,
+    policy: &MetadataPolicy,
+) -> Result<EntryMetadata, RqError> {
+    let path = path.to_path_buf();
+    let policy = policy.clone();
+    crate::runtime::spawn_blocking(move || read_entry_metadata_sync(&path, &policy))
+        .await
+        .map_err(|error| RqError::Source(error.into_message()))
+}
+
+async fn build_rq_delta_manifest_for_file(
+    cx: &Cx,
+    tree_id: &str,
+    path: &Path,
+    entry_index: u32,
+    rel_path: &str,
+    expected_size: u64,
+    expected_sha256_hex: &str,
+    chunk_size: usize,
+) -> Result<DeltaManifestWire, RqError> {
+    const OBJECT_DATA_HEADER_BYTES: usize = 12;
+    let max_chunk_size = usize::try_from(MAX_FRAME_SIZE)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(OBJECT_DATA_HEADER_BYTES);
+    let chunk_size = chunk_size.max(1).min(max_chunk_size);
+    let mut file = crate::fs::File::open(path)
+        .await
+        .map_err(|error| RqError::Source(format!("{}: {error}", path.display())))?;
+    let mut buf = vec![0u8; chunk_size];
+    let mut chunks = Vec::new();
+    let mut planner_chunks = Vec::new();
+    let mut offset = 0u64;
+    let mut index = 0u32;
+    let mut sha256 = Sha256::new();
+    let mut whole_content_id = ContentId::streaming();
+    loop {
+        cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let read = file
+            .read(&mut buf)
+            .await
+            .map_err(|error| RqError::Source(format!("{}: {error}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        let bytes = &buf[..read];
+        sha256.update(bytes);
+        whole_content_id.update(bytes);
+        let size_bytes = u64::try_from(read)
+            .map_err(|_| RqError::Control("RQ delta chunk size overflow".to_string()))?;
+        let content_id = ContentId::from_bytes(bytes);
+        planner_chunks.push(CasChunkRef {
+            index,
+            byte_offset: offset,
+            size_bytes,
+            content_id: content_id.clone(),
+        });
+        chunks.push(DeltaChunkWire {
+            index,
+            entry_index,
+            rel_path: rel_path.to_string(),
+            entry_offset: offset,
+            stream_offset: offset,
+            size_bytes,
+            content_id_hex: content_id.to_hex(),
+        });
+        index = index
+            .checked_add(1)
+            .ok_or_else(|| RqError::Control("RQ delta chunk index overflow".to_string()))?;
+        offset = offset
+            .checked_add(size_bytes)
+            .ok_or_else(|| RqError::Control("RQ delta chunk offset overflow".to_string()))?;
+    }
+    if offset != expected_size {
+        return Err(RqError::Source(format!(
+            "{} changed while building RQ delta manifest (read {offset} bytes, expected {expected_size})",
+            path.display()
+        )));
+    }
+    let content_sha256: [u8; 32] = sha256.finalize().into();
+    if hex_encode(&content_sha256) != expected_sha256_hex
+        || flat_merkle_root_from_digests(&[EntryDigest {
+            rel_path: rel_path.to_string(),
+            size: offset,
+            content_id: crate::atp::object::ObjectId::content(whole_content_id.finalize()),
+            content_sha256,
+        }]) != tree_id
+    {
+        return Err(RqError::Source(format!(
+            "{} changed while building its RQ delta manifest",
+            path.display()
+        )));
+    }
+    let planner = PersistentChunkManifest::new(tree_id.to_string(), planner_chunks)
+        .map_err(|error| RqError::Control(format!("build RQ delta manifest: {error}")))?;
+    Ok(DeltaManifestWire {
+        schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
+        tree_id: tree_id.to_string(),
+        chunk_size,
+        total_size_bytes: planner.total_size_bytes,
+        merkle_root_hex: planner.merkle_root.to_hex(),
+        chunks,
+    })
+}
+
+async fn maybe_attach_rq_delta_manifest(
+    cx: &Cx,
+    manifest: &mut TransferManifest,
+    entries: &[RqSourceEntry],
+    config: &RqConfig,
+) -> Result<(), RqError> {
+    let Some(manifest_entry) = rq_delta_manifest_entry(manifest) else {
+        return Ok(());
+    };
+    let [source_entry] = entries else {
+        return Ok(());
+    };
+    let metadata = rq_manifest_entry_metadata(manifest, &manifest_entry.rel_path);
+    if !config.enable_delta
+        || rq_delta_control_auth_context(config).is_none()
+        || source_entry.source_offset != 0
+        || source_entry.source_len.is_some()
+        || source_entry.rel_path != manifest_entry.rel_path
+        || !matches!(
+            metadata.file_kind,
+            crate::net::atp::transport_common::FileKind::Regular
+        )
+        || metadata.hardlink_target.is_some()
+        || metadata.symlink_target.is_some()
+        || metadata.symlink_target_info.is_some()
+    {
+        return Ok(());
+    }
+    let chunk_size_u64 = u64::try_from(RQ_DELTA_CHUNK_SIZE).unwrap_or(u64::MAX);
+    if manifest_entry.size.div_ceil(chunk_size_u64) > RQ_DELTA_MAX_MANIFEST_CHUNKS {
+        return Ok(());
+    }
+    let delta = build_rq_delta_manifest_for_file(
+        cx,
+        &manifest.merkle_root_hex,
+        &source_entry.abs_path,
+        manifest_entry.index,
+        &manifest_entry.rel_path,
+        manifest_entry.size,
+        &manifest_entry.sha256_hex,
+        RQ_DELTA_CHUNK_SIZE,
+    )
+    .await?;
+    manifest.delta_manifest = Some(delta);
+    match json_frame(FrameType::ObjectManifest, manifest) {
+        Ok(frame)
+            if frame.payload().len()
+                <= usize::try_from(MAX_FRAME_SIZE)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(RQ_DELTA_ENVELOPE_WIRE_BUDGET) => {}
+        Ok(_) | Err(RqError::Frame(_)) => {
+            manifest.delta_manifest = None;
+            cx.trace_with_fields(
+                "atp_rq.delta_manifest_fallback",
+                &[
+                    ("reason", "authenticated_envelope_budget"),
+                    ("mode", "full_object"),
+                ],
+            );
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+async fn validate_rq_delta_source_unchanged(
+    cx: &Cx,
+    manifest: &TransferManifest,
+    entries: &[RqSourceEntry],
+    config: &RqConfig,
+) -> Result<(), RqError> {
+    let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        RqError::Control("cannot revalidate an RQ source without a delta manifest".to_string())
+    })?;
+    let entry = rq_delta_manifest_entry(manifest).ok_or_else(|| {
+        RqError::Control("RQ delta source no longer has a supported transfer shape".to_string())
+    })?;
+    let [source] = entries else {
+        return Err(RqError::Control(
+            "RQ delta source must contain exactly one entry".to_string(),
+        ));
+    };
+    let expected_metadata = rq_manifest_entry_metadata(manifest, &entry.rel_path);
+    if read_rq_entry_metadata(&source.abs_path, &config.metadata_policy).await? != expected_metadata
+    {
+        return Err(RqError::Source(
+            "RQ source metadata changed before delta no-op completion".to_string(),
+        ));
+    }
+    let current = build_rq_delta_manifest_for_file(
+        cx,
+        &manifest.merkle_root_hex,
+        &source.abs_path,
+        entry.index,
+        &entry.rel_path,
+        entry.size,
+        &entry.sha256_hex,
+        delta.chunk_size,
+    )
+    .await?;
+    if current != *delta
+        || read_rq_entry_metadata(&source.abs_path, &config.metadata_policy).await?
+            != expected_metadata
+    {
+        return Err(RqError::Integrity(
+            "RQ source changed before delta no-op completion".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn build_rq_receiver_delta_request(
+    cx: &Cx,
+    dest_dir: &Path,
+    config: &RqConfig,
+    manifest: &TransferManifest,
+) -> Result<DeltaObjectRequest, RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        RqError::Control("cannot build an RQ delta request without a delta manifest".to_string())
+    })?;
+    let entry = rq_delta_manifest_entry(manifest).ok_or_else(|| {
+        RqError::Control("cannot build an RQ delta request for this transfer shape".to_string())
+    })?;
+    let full =
+        || DeltaObjectRequest::full(delta.merkle_root_hex.clone(), None, "full_object_required");
+
+    reject_existing_symlink(dest_dir).await?;
+    let path = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    reject_destination_symlink_prefix(&path, &path).await?;
+    let existing = match crate::fs::metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(full());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !existing.is_file() || existing.len() != entry.size {
+        return Ok(full());
+    }
+    let expected_metadata = rq_manifest_entry_metadata(manifest, &entry.rel_path);
+    let receiver_metadata = match read_rq_entry_metadata(&path, &config.metadata_policy).await {
+        Ok(metadata) => metadata,
+        Err(RqError::Source(_)) => return Ok(full()),
+        Err(error) => return Err(error),
+    };
+    if receiver_metadata != expected_metadata {
+        return Ok(full());
+    }
+
+    let receiver_delta = match build_rq_delta_manifest_for_file(
+        cx,
+        &manifest.merkle_root_hex,
+        &path,
+        entry.index,
+        &entry.rel_path,
+        entry.size,
+        &entry.sha256_hex,
+        delta.chunk_size,
+    )
+    .await
+    {
+        Ok(delta) => delta,
+        Err(RqError::Source(_)) => {
+            return Ok(full());
+        }
+        Err(error) => return Err(error),
+    };
+    reject_destination_symlink_prefix(&path, &path).await?;
+    if read_rq_entry_metadata(&path, &config.metadata_policy).await? != expected_metadata {
+        return Ok(full());
+    }
+    if receiver_delta != *delta {
+        return Ok(full());
+    }
+
+    Ok(DeltaObjectRequest {
+        mode: DeltaWireMode::AlreadyInSync,
+        fallback_reason: None,
+        sender_merkle_root_hex: delta.merkle_root_hex.clone(),
+        receiver_merkle_root_hex: Some(delta.merkle_root_hex.clone()),
+        missing_bytes: 0,
+        shared_chunks: u64::try_from(delta.chunks.len()).unwrap_or(u64::MAX),
+        stale_chunks: 0,
+        missing_chunks: Vec::new(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -5132,6 +6377,99 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
         manifest.is_directory,
         config,
     )?;
+    validate_rq_delta_manifest(manifest)?;
+    Ok(())
+}
+
+fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError> {
+    let Some(delta) = manifest.delta_manifest.as_ref() else {
+        return Ok(());
+    };
+    let Some(entry) = rq_delta_manifest_entry(manifest) else {
+        return Err(RqError::Frame(
+            "RQ delta manifest is supported only for one unpacked regular file".to_string(),
+        ));
+    };
+    if u64::try_from(delta.chunks.len()).unwrap_or(u64::MAX) > RQ_DELTA_MAX_MANIFEST_CHUNKS {
+        return Err(RqError::Frame(
+            "RQ delta manifest declares too many chunks".to_string(),
+        ));
+    }
+    if delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
+        return Err(RqError::Frame(format!(
+            "unsupported RQ delta manifest schema: {}",
+            delta.schema
+        )));
+    }
+    if delta.tree_id != manifest.merkle_root_hex {
+        return Err(RqError::Frame(
+            "RQ delta manifest tree id does not match the transfer Merkle root".to_string(),
+        ));
+    }
+    let max_chunk_size = usize::try_from(MAX_FRAME_SIZE)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(12);
+    if delta.chunk_size == 0 || delta.chunk_size > max_chunk_size {
+        return Err(RqError::Frame(format!(
+            "RQ delta manifest chunk size {} is outside 1..={max_chunk_size}",
+            delta.chunk_size
+        )));
+    }
+    if delta.total_size_bytes != manifest.total_bytes || delta.total_size_bytes != entry.size {
+        return Err(RqError::Frame(format!(
+            "RQ delta manifest size {} does not match transfer size {}",
+            delta.total_size_bytes, manifest.total_bytes
+        )));
+    }
+    let max_chunk_size = u64::try_from(delta.chunk_size).unwrap_or(u64::MAX);
+    let mut planner_chunks = Vec::with_capacity(delta.chunks.len());
+    let mut expected_offset = 0u64;
+    for (position, chunk) in delta.chunks.iter().enumerate() {
+        let expected_index = u32::try_from(position)
+            .map_err(|_| RqError::Frame("too many RQ delta manifest chunks".to_string()))?;
+        let is_final = position.saturating_add(1) == delta.chunks.len();
+        if chunk.index != expected_index
+            || chunk.entry_index != entry.index
+            || chunk.rel_path != entry.rel_path
+            || chunk.entry_offset != expected_offset
+            || chunk.stream_offset != expected_offset
+            || chunk.size_bytes == 0
+            || chunk.size_bytes > max_chunk_size
+            || (!is_final && chunk.size_bytes != max_chunk_size)
+        {
+            return Err(RqError::Frame(format!(
+                "malformed RQ delta chunk at position {position}"
+            )));
+        }
+        let content_id = ContentId::new(rq_decode_delta_root(
+            &chunk.content_id_hex,
+            "RQ delta chunk content id",
+        )?);
+        planner_chunks.push(CasChunkRef {
+            index: chunk.index,
+            byte_offset: chunk.stream_offset,
+            size_bytes: chunk.size_bytes,
+            content_id,
+        });
+        expected_offset = expected_offset
+            .checked_add(chunk.size_bytes)
+            .ok_or_else(|| RqError::Frame("RQ delta chunk offsets overflow".to_string()))?;
+    }
+    if expected_offset != delta.total_size_bytes {
+        return Err(RqError::Frame(format!(
+            "RQ delta chunks cover {expected_offset} bytes, expected {}",
+            delta.total_size_bytes
+        )));
+    }
+    let planner = PersistentChunkManifest::new(delta.tree_id.clone(), planner_chunks)
+        .map_err(|error| RqError::Frame(format!("validate RQ delta manifest: {error}")))?;
+    if planner.total_size_bytes != delta.total_size_bytes
+        || planner.merkle_root.to_hex() != delta.merkle_root_hex
+    {
+        return Err(RqError::Frame(
+            "RQ delta manifest chunk commitment mismatch".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -6314,6 +7652,11 @@ pub async fn send_path(
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    if config.delta_control_timeout.is_zero() {
+        return Err(RqError::Control(
+            "RQ delta_control_timeout must be greater than zero".to_string(),
+        ));
+    }
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
@@ -6338,8 +7681,15 @@ pub async fn send_path(
             max: config.max_transfer_bytes,
         });
     }
+    let delta_hash_first_candidate = config.enable_delta
+        && rq_delta_control_auth_context(&config).is_some()
+        && !is_directory
+        && raw_entries.len() == 1
+        && preflight_total_bytes.div_ceil(u64::try_from(RQ_DELTA_CHUNK_SIZE).unwrap_or(u64::MAX))
+            <= RQ_DELTA_MAX_MANIFEST_CHUNKS;
     let prefer_control_source_stream =
-        control_source_stream_eligible(preflight_total_bytes, &config);
+        control_source_stream_eligible(preflight_total_bytes, &config)
+            && !delta_hash_first_candidate;
     if prefer_control_source_stream {
         let stream = match crate::time::timeout(
             cx.now(),
@@ -6374,6 +7724,8 @@ pub async fn send_path(
                 symbol_auth: symbol_auth_enabled,
                 total_bytes: preflight_total_bytes,
                 prefer_control_source_stream,
+                delta_transfer_nonce: None,
+                delta_client_auth_tag: None,
             },
         )?;
         control
@@ -6558,14 +7910,22 @@ pub async fn send_path(
     );
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
     let tag = transfer_tag(&transfer_id);
-    let manifest = TransferManifest {
+    let mut manifest = TransferManifest {
         transfer_id: transfer_id.clone(),
         root_name,
         is_directory,
         total_bytes,
         merkle_root_hex: merkle_root_hex.clone(),
         metadata: Some(metadata),
+        delta_manifest: None,
         entries: manifest_entries,
+    };
+    maybe_attach_rq_delta_manifest(cx, &mut manifest, &entries, &config).await?;
+    let delta_auth = rq_delta_control_auth_context(&config).cloned();
+    let delta_transfer_nonce = if manifest.delta_manifest.is_some() && delta_auth.is_some() {
+        Some(fresh_rq_delta_nonce(cx, b"sender", None)?)
+    } else {
+        None
     };
     let prefer_control_source_stream = control_source_stream_eligible(total_bytes, &config);
 
@@ -6594,31 +7954,91 @@ pub async fn send_path(
     }
     let peer = stream.peer_addr().unwrap_or(addr);
     let mut control = FrameTransport::new(stream);
-    let hello = json_frame(
-        FrameType::Handshake,
-        &Hello {
-            protocol: ATP_RQ_PROTOCOL,
-            role: "sender".to_string(),
-            peer_id: peer_id.to_string(),
-            symbol_size: config.symbol_size,
-            max_block_size: config.max_block_size as u64,
-            symbol_auth: symbol_auth_enabled,
-            total_bytes,
-            prefer_control_source_stream,
-        },
-    )?;
-    control
-        .send(&hello)
+    let mut hello = Hello {
+        protocol: ATP_RQ_PROTOCOL,
+        role: "sender".to_string(),
+        peer_id: peer_id.to_string(),
+        symbol_size: config.symbol_size,
+        max_block_size: config.max_block_size as u64,
+        symbol_auth: symbol_auth_enabled,
+        total_bytes,
+        prefer_control_source_stream,
+        delta_transfer_nonce,
+        delta_client_auth_tag: None,
+    };
+    if delta_transfer_nonce.is_some() {
+        let context = delta_auth.as_ref().ok_or_else(|| {
+            RqError::Authentication(
+                "RQ delta offer is missing its strict sender authentication context".to_string(),
+            )
+        })?;
+        hello.delta_client_auth_tag = Some(sign_rq_delta_hello(context, &hello)?);
+    }
+    let hello_frame = json_frame(FrameType::Handshake, &hello)?;
+    if delta_transfer_nonce.is_some() {
+        send_delta_control_frame(
+            cx,
+            &mut control,
+            &hello_frame,
+            config.delta_control_timeout,
+            "send delta handshake",
+        )
         .await
-        .map_err(|err| sender_handshake_transport_error("send sender handshake", err))?;
-    let ack = receive_sender_handshake_ack(cx, &mut control, DEFAULT_CONNECT_TIMEOUT).await?;
+        .map_err(|error| sender_handshake_transport_error("send delta handshake", error))?;
+    } else {
+        control
+            .send(&hello_frame)
+            .await
+            .map_err(|err| sender_handshake_transport_error("send sender handshake", err))?;
+    }
+    let ack_timeout = if delta_transfer_nonce.is_some() {
+        config.delta_control_timeout
+    } else {
+        DEFAULT_CONNECT_TIMEOUT
+    };
+    let ack = receive_sender_handshake_ack(cx, &mut control, ack_timeout)
+        .await
+        .map_err(|error| {
+            if delta_transfer_nonce.is_some() {
+                RqError::Authentication(format!(
+                    "authenticated RQ delta acknowledgement unavailable: {error}"
+                ))
+            } else {
+                error
+            }
+        })?;
+    let delta_handshake = if let Some(context) = delta_auth.as_ref() {
+        validate_rq_delta_ack(context, &hello, &ack)?
+    } else if ack.delta_transfer_nonce.is_some()
+        || ack.delta_receiver_nonce.is_some()
+        || ack.delta_destination_root.is_some()
+        || ack.delta_server_auth_tag.is_some()
+    {
+        return Err(RqError::HandshakeRejected(
+            "receiver returned unsolicited RQ delta binding fields".to_string(),
+        ));
+    } else {
+        None
+    };
     if ack.control_source_stream && !prefer_control_source_stream {
         return Err(RqError::HandshakeRejected(
             "receiver selected control source stream for an ineligible transfer".to_string(),
         ));
     }
     let control_source_stream = ack.control_source_stream;
-    let udp_ports = if control_source_stream {
+    if delta_transfer_nonce.is_some() && delta_handshake.is_none() {
+        manifest.delta_manifest = None;
+    }
+    let delta_session = match delta_handshake {
+        Some(handshake) => Some(derive_rq_delta_session(
+            handshake,
+            peer_id,
+            &ack.peer_id,
+            &manifest,
+        )?),
+        None => None,
+    };
+    let mut udp_ports = if control_source_stream {
         SmallVec::<[u16; DEFAULT_UDP_FANOUT]>::new()
     } else {
         hello_ack_udp_ports(&ack)
@@ -6651,10 +8071,109 @@ pub async fn send_path(
         });
     }
 
-    // Send the manifest, then spray round 0 (source + optional overhead repair).
-    control
-        .send(&json_frame(FrameType::ObjectManifest, &manifest)?)
+    // Complete the authenticated delta-control exchange before opening a data
+    // socket or emitting any object byte. A signed full-object request falls
+    // through to the ordinary RaptorQ path; a live no-op closes here.
+    if let Some(session) = delta_session {
+        let context = delta_auth.as_ref().ok_or_else(|| {
+            RqError::Authentication(
+                "RQ delta session is missing its strict authentication context".to_string(),
+            )
+        })?;
+        let envelope = make_rq_delta_manifest_envelope(context, session, &manifest)?;
+        let manifest_frame = json_frame(FrameType::ObjectManifest, &envelope)?;
+        send_delta_control_frame(
+            cx,
+            &mut control,
+            &manifest_frame,
+            config.delta_control_timeout,
+            "send authenticated manifest",
+        )
         .await?;
+        let request_frame = recv_delta_control_frame(
+            cx,
+            &mut control,
+            config.delta_control_timeout,
+            "receive authenticated object request",
+        )
+        .await?;
+        if request_frame.frame_type() != FrameType::ObjectRequest {
+            return Err(RqError::Unexpected {
+                got: request_frame.frame_type(),
+                expected: "authenticated ObjectRequest",
+            });
+        }
+        let request: RqDeltaObjectRequestEnvelope = parse_json(&request_frame)?;
+        match validate_rq_delta_request_envelope(
+            context,
+            session,
+            &manifest,
+            &request,
+            control_source_stream,
+        )? {
+            DeltaWireMode::FullObject => {
+                udp_ports = advertised_udp_ports(request.udp_port, &request.udp_ports);
+            }
+            DeltaWireMode::AlreadyInSync => {
+                validate_rq_delta_source_unchanged(cx, &manifest, &entries, &config).await?;
+                let complete = make_rq_delta_complete(context, session, &manifest)?;
+                let complete_frame = json_frame(FrameType::ObjectComplete, &complete)?;
+                send_delta_control_frame(
+                    cx,
+                    &mut control,
+                    &complete_frame,
+                    config.delta_control_timeout,
+                    "send authenticated zero completion",
+                )
+                .await?;
+                let proof_frame = recv_delta_control_frame(
+                    cx,
+                    &mut control,
+                    config.delta_control_timeout,
+                    "receive authenticated no-op proof",
+                )
+                .await?;
+                if proof_frame.frame_type() != FrameType::Proof {
+                    return Err(RqError::Unexpected {
+                        got: proof_frame.frame_type(),
+                        expected: "authenticated Proof",
+                    });
+                }
+                let proof: RqDeltaProofEnvelope = parse_json(&proof_frame)?;
+                let receipt = validate_rq_delta_proof(context, session, &manifest, proof)?;
+                let close = Frame::empty(FrameType::Close)
+                    .map_err(|error| RqError::Frame(error.to_string()))?;
+                send_delta_control_frame(
+                    cx,
+                    &mut control,
+                    &close,
+                    config.delta_control_timeout,
+                    "send authenticated delta close",
+                )
+                .await?;
+                return Ok(SendReport {
+                    transfer_id,
+                    bytes_sent: 0,
+                    files: 1,
+                    symbols_sent: 0,
+                    feedback_rounds: 0,
+                    merkle_root_hex,
+                    receipt,
+                    udp_send_acceleration: UdpSendAccelerationReport::default(),
+                    peer,
+                });
+            }
+            DeltaWireMode::DeltaChunks => {
+                return Err(RqError::Control(
+                    "RQ missing-chunk mode passed strict request validation".to_string(),
+                ));
+            }
+        }
+    } else {
+        control
+            .send(&json_frame(FrameType::ObjectManifest, &manifest)?)
+            .await?;
+    }
 
     if control_source_stream {
         let digest_report = stream_control_source_entries(
@@ -8092,6 +9611,7 @@ async fn prepare_control_source_transfer(
         total_bytes,
         merkle_root_hex: sha256_hex_placeholder(),
         metadata: Some(metadata),
+        delta_manifest: None,
         entries: manifest_entries,
     };
 
@@ -8533,6 +10053,37 @@ pub async fn receive_once(
     receive_connection(cx, stream, peer, udp_bind_ip, dest_dir, config, peer_id).await
 }
 
+async fn bind_rq_receiver_udp_fanout(
+    udp_bind_ip: &str,
+    total_bytes: u64,
+    config: &RqConfig,
+) -> Result<(RqReceiverUdpFanout, Vec<u16>, u16), RqError> {
+    let bind_ip: std::net::IpAddr = udp_bind_ip.parse().map_err(|error| {
+        RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {error}"))
+    })?;
+    let recv_buf_bytes = if total_bytes == 0 {
+        16 * 1024 * 1024
+    } else {
+        usize::try_from(total_bytes.saturating_add(32 * 1024 * 1024))
+            .unwrap_or(usize::MAX)
+            .clamp(16 * 1024 * 1024, 120 * 1024 * 1024)
+    };
+    let udp = RqReceiverUdpFanout::bind(bind_ip, config.udp_fanout.max(1), recv_buf_bytes).await?;
+    let udp_ports = udp.local_ports()?;
+    let udp_port = udp_ports.first().copied().ok_or_else(|| {
+        RqError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "RQ receiver UDP fanout has no bound sockets",
+        ))
+    })?;
+    rqtrace!(
+        "receiver: udp fanout sockets={} ports={:?}",
+        udp.len(),
+        udp_ports
+    );
+    Ok((udp, udp_ports, udp_port))
+}
+
 /// Drive a single accepted control connection through the receive protocol.
 pub async fn receive_connection(
     cx: &Cx,
@@ -8543,6 +10094,11 @@ pub async fn receive_connection(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, RqError> {
+    if config.delta_control_timeout.is_zero() {
+        return Err(RqError::Control(
+            "RQ delta_control_timeout must be greater than zero".to_string(),
+        ));
+    }
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
     let should_tune_for_bulk_source = near_clean_control_source_stream_round0(&config);
@@ -8552,7 +10108,16 @@ pub async fn receive_connection(
     let mut control = FrameTransport::new(stream);
 
     // Handshake.
-    let hello_frame = control.recv().await?;
+    let hello_frame =
+        match crate::time::timeout(cx.now(), config.accept_timeout, control.recv()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(RqError::HandshakeRejected(format!(
+                    "sender did not provide an RQ handshake within {:?}",
+                    config.accept_timeout
+                )));
+            }
+        };
     if hello_frame.frame_type() != FrameType::Handshake {
         return Err(RqError::Unexpected {
             got: hello_frame.frame_type(),
@@ -8560,105 +10125,298 @@ pub async fn receive_connection(
         });
     }
     let hello: Hello = parse_json(&hello_frame)?;
-    let accepted = hello.protocol == ATP_RQ_PROTOCOL && hello.symbol_auth == symbol_auth_enabled;
+    let strict_delta_context = rq_delta_control_auth_context(&config);
+    let authenticated_delta_nonce = validate_rq_delta_hello(strict_delta_context, &hello)?;
+    let delta_offered = authenticated_delta_nonce.is_some();
+    let accepted = hello.protocol == ATP_RQ_PROTOCOL
+        && hello.role == "sender"
+        && hello.symbol_auth == symbol_auth_enabled
+        && hello.total_bytes <= config.max_transfer_bytes
+        && (!delta_offered || config.udp_fanout.max(1) <= RQ_DELTA_MAX_ADVERTISED_UDP_PORTS);
     let control_source_stream = accepted
         && hello.prefer_control_source_stream
         && control_source_stream_eligible(hello.total_bytes, &config);
 
-    let (udp, udp_ports, udp_port) = if control_source_stream {
+    let defer_udp_until_manifest_proof =
+        accepted && delta_offered && config.enable_delta && !control_source_stream;
+    let (mut udp, udp_ports, udp_port) = if !accepted {
+        (None, Vec::new(), 0)
+    } else if control_source_stream {
         rqtrace!(
             "receiver: control_source_stream accepted total_bytes={}",
             hello.total_bytes
         );
         (None, Vec::new(), 0)
+    } else if defer_udp_until_manifest_proof {
+        (None, Vec::new(), 0)
     } else {
-        // Bind the UDP data sockets before acking so the sender can spray immediately.
-        // Build an owned `SocketAddr` (Copy + 'static) so it satisfies
-        // `UdpSocket::bind`'s `'static` address bound and handles IPv6 correctly.
-        let bind_ip: std::net::IpAddr = udp_bind_ip
-            .parse()
-            .map_err(|e| RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {e}")))?;
-        // Size the receive buffer to ABSORB the sender's symbol burst: the sender now encodes
-        // blocks in parallel (F3) and can spray them faster than the CPU-bound decode drains, so
-        // we set the buffer to the transfer size plus headroom, clamped to a generous cap (the
-        // kernel further caps at net.core.rmem_max). For a transfer that fits, the whole burst
-        // lands in the buffer with no kernel drops and the decoder drains at its own pace. The
-        // control-source fast lane skips this allocation entirely.
-        let recv_buf_bytes = if hello.total_bytes == 0 {
-            16 * 1024 * 1024
-        } else {
-            usize::try_from(hello.total_bytes.saturating_add(32 * 1024 * 1024))
-                .unwrap_or(usize::MAX)
-                .clamp(16 * 1024 * 1024, 120 * 1024 * 1024)
-        };
-        let udp =
-            RqReceiverUdpFanout::bind(bind_ip, config.udp_fanout.max(1), recv_buf_bytes).await?;
-        let udp_ports = udp.local_ports()?;
-        let udp_port = udp_ports.first().copied().ok_or_else(|| {
-            RqError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "RQ receiver UDP fanout has no bound sockets",
-            ))
-        })?;
-        rqtrace!(
-            "receiver: udp fanout sockets={} ports={:?}",
-            udp.len(),
-            udp_ports
-        );
+        let (udp, udp_ports, udp_port) =
+            bind_rq_receiver_udp_fanout(udp_bind_ip, hello.total_bytes, &config).await?;
         (Some(udp), udp_ports, udp_port)
     };
 
-    control
-        .send(&json_frame(
-            FrameType::HandshakeAck,
-            &HelloAck {
-                accepted,
-                peer_id: peer_id.to_string(),
-                udp_port,
-                udp_ports,
-                control_source_stream,
-                reason: if accepted {
-                    None
-                } else if hello.protocol != ATP_RQ_PROTOCOL {
-                    Some(format!(
-                        "unsupported protocol {} (this peer speaks {ATP_RQ_PROTOCOL})",
-                        hello.protocol
-                    ))
-                } else if hello.symbol_auth != symbol_auth_enabled {
-                    Some(format!(
-                        "symbol authentication mismatch: sender={}, receiver={symbol_auth_enabled}",
-                        hello.symbol_auth
-                    ))
-                } else {
-                    Some("handshake rejected".to_string())
-                },
-            },
-        )?)
+    let rejection_reason = if accepted {
+        None
+    } else if hello.protocol != ATP_RQ_PROTOCOL {
+        Some(format!(
+            "unsupported protocol {} (this peer speaks {ATP_RQ_PROTOCOL})",
+            hello.protocol
+        ))
+    } else if hello.role != "sender" {
+        Some("RQ control peer did not identify as sender".to_string())
+    } else if hello.symbol_auth != symbol_auth_enabled {
+        Some(format!(
+            "symbol authentication mismatch: sender={}, receiver={symbol_auth_enabled}",
+            hello.symbol_auth
+        ))
+    } else if hello.total_bytes > config.max_transfer_bytes {
+        Some(format!(
+            "transfer size {} exceeds receiver maximum {}",
+            hello.total_bytes, config.max_transfer_bytes
+        ))
+    } else if delta_offered && config.udp_fanout.max(1) > RQ_DELTA_MAX_ADVERTISED_UDP_PORTS {
+        Some(format!(
+            "RQ delta receiver fanout {} exceeds protocol maximum {RQ_DELTA_MAX_ADVERTISED_UDP_PORTS}",
+            config.udp_fanout.max(1)
+        ))
+    } else {
+        Some("handshake rejected".to_string())
+    };
+    let mut ack = HelloAck {
+        accepted,
+        peer_id: peer_id.to_string(),
+        udp_port,
+        udp_ports,
+        control_source_stream,
+        reason: rejection_reason.clone(),
+        delta_transfer_nonce: None,
+        delta_receiver_nonce: None,
+        delta_destination_root: None,
+        delta_server_auth_tag: None,
+    };
+    let mut delta_handshake = None;
+    let mut delta_destination_binding = None;
+    if accepted && let Some(sender_nonce) = authenticated_delta_nonce {
+        let context = strict_delta_context.ok_or_else(|| {
+            RqError::Authentication(
+                "accepted RQ delta offer is missing strict authentication".to_string(),
+            )
+        })?;
+        ack.delta_transfer_nonce = Some(sender_nonce);
+        if config.enable_delta {
+            let receiver_nonce = fresh_rq_delta_nonce(cx, b"receiver", Some(sender_nonce))?;
+            let destination_binding =
+                new_rq_delta_destination_binding(cx, context, receiver_nonce, dest_dir)?;
+            ack.delta_receiver_nonce = Some(receiver_nonce);
+            ack.delta_destination_root = Some(destination_binding.commitment);
+            delta_destination_binding = Some(destination_binding);
+        }
+        ack.delta_server_auth_tag = Some(sign_rq_delta_ack(context, &hello, &ack)?);
+        if let (Some(receiver_nonce), Some(destination_root)) =
+            (ack.delta_receiver_nonce, ack.delta_destination_root)
+        {
+            delta_handshake = Some(RqDeltaHandshakeContext {
+                sender_nonce,
+                receiver_nonce,
+                destination_root,
+                handshake_hash: rq_delta_ack_transcript_digest(&hello, &ack)?,
+            });
+        }
+    }
+    let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
+    if delta_offered && accepted {
+        send_delta_control_frame(
+            cx,
+            &mut control,
+            &ack_frame,
+            config.delta_control_timeout,
+            "send authenticated acknowledgement",
+        )
         .await?;
+    } else {
+        control.send(&ack_frame).await?;
+    }
     if !accepted {
         return Err(RqError::HandshakeRejected(
-            if hello.protocol != ATP_RQ_PROTOCOL {
-                format!("unsupported protocol {}", hello.protocol)
-            } else if hello.symbol_auth != symbol_auth_enabled {
-                format!(
-                    "symbol authentication mismatch: sender={}, receiver={symbol_auth_enabled}",
-                    hello.symbol_auth
-                )
-            } else {
-                "handshake rejected".to_string()
-            },
+            rejection_reason.unwrap_or_else(|| "handshake rejected".to_string()),
         ));
     }
 
-    // Manifest.
-    let manifest_frame = control.recv().await?;
+    // Manifest. An accepted delta offer uses a sender-authenticated envelope;
+    // no destination state is inspected before that proof verifies.
+    let manifest_frame = if delta_handshake.is_some() {
+        recv_delta_control_frame(
+            cx,
+            &mut control,
+            config.delta_control_timeout,
+            "receive authenticated manifest",
+        )
+        .await?
+    } else {
+        match crate::time::timeout(cx.now(), config.accept_timeout, control.recv()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(RqError::HandshakeRejected(format!(
+                    "sender did not provide an RQ manifest within {:?}",
+                    config.accept_timeout
+                )));
+            }
+        }
+    };
     if manifest_frame.frame_type() != FrameType::ObjectManifest {
         return Err(RqError::Unexpected {
             got: manifest_frame.frame_type(),
             expected: "ObjectManifest",
         });
     }
-    let manifest = parse_and_validate_manifest_frame(&manifest_frame, &config)?;
+    let manifest = if let Some(handshake) = delta_handshake {
+        let context = strict_delta_context.ok_or_else(|| {
+            RqError::Authentication(
+                "RQ delta manifest arrived without strict authentication".to_string(),
+            )
+        })?;
+        let envelope: RqDeltaManifestEnvelope = parse_json(&manifest_frame)?;
+        let session =
+            derive_rq_delta_session(handshake, &hello.peer_id, peer_id, &envelope.manifest)?;
+        validate_rq_delta_manifest_envelope(context, session, &envelope)?;
+        validate_manifest(&envelope.manifest, &config)?;
+        if hello.total_bytes != envelope.manifest.total_bytes {
+            return Err(RqError::Frame(format!(
+                "authenticated handshake total_bytes {} does not match manifest total_bytes {}",
+                hello.total_bytes, envelope.manifest.total_bytes
+            )));
+        }
+        let destination_binding = delta_destination_binding.ok_or_else(|| {
+            RqError::Authentication(
+                "RQ delta receiver lost its private destination binding".to_string(),
+            )
+        })?;
+        validate_rq_delta_destination_binding(
+            &destination_binding,
+            context,
+            handshake.receiver_nonce,
+            dest_dir,
+        )?;
+
+        let request =
+            build_rq_receiver_delta_request(cx, dest_dir, &config, &envelope.manifest).await?;
+        let (request_udp_port, request_udp_ports) =
+            if request.mode == DeltaWireMode::FullObject && !control_source_stream {
+                let (bound_udp, ports, primary) =
+                    bind_rq_receiver_udp_fanout(udp_bind_ip, hello.total_bytes, &config).await?;
+                udp = Some(bound_udp);
+                (primary, ports)
+            } else {
+                (0, Vec::new())
+            };
+        let request_envelope = make_rq_delta_request_envelope(
+            context,
+            session,
+            &envelope.manifest,
+            request.clone(),
+            request_udp_port,
+            request_udp_ports,
+        )?;
+        let request_frame = json_frame(FrameType::ObjectRequest, &request_envelope)?;
+        send_delta_control_frame(
+            cx,
+            &mut control,
+            &request_frame,
+            config.delta_control_timeout,
+            "send authenticated object request",
+        )
+        .await?;
+
+        match request.mode {
+            DeltaWireMode::FullObject => envelope.manifest,
+            DeltaWireMode::AlreadyInSync => {
+                let complete_frame = recv_delta_control_frame(
+                    cx,
+                    &mut control,
+                    config.delta_control_timeout,
+                    "receive authenticated zero completion",
+                )
+                .await?;
+                if complete_frame.frame_type() != FrameType::ObjectComplete {
+                    return Err(RqError::Unexpected {
+                        got: complete_frame.frame_type(),
+                        expected: "authenticated ObjectComplete",
+                    });
+                }
+                let complete: RqDeltaCompleteEnvelope = parse_json(&complete_frame)?;
+                validate_rq_delta_complete(context, session, &envelope.manifest, &complete)?;
+                validate_rq_delta_destination_binding(
+                    &destination_binding,
+                    context,
+                    handshake.receiver_nonce,
+                    dest_dir,
+                )?;
+                let revalidated =
+                    build_rq_receiver_delta_request(cx, dest_dir, &config, &envelope.manifest)
+                        .await?;
+                if revalidated != request || revalidated.mode != DeltaWireMode::AlreadyInSync {
+                    return Err(RqError::Integrity(
+                        "RQ destination changed before the authenticated no-op proof".to_string(),
+                    ));
+                }
+                let receipt = ReceiveReceipt {
+                    committed: true,
+                    bytes_received: 0,
+                    files: 1,
+                    sha_ok: true,
+                    merkle_ok: true,
+                    symbols_accepted: 0,
+                    feedback_rounds: 0,
+                    reason: None,
+                    // Absolute receiver paths are deliberately not disclosed on
+                    // the plaintext control stream.
+                    committed_paths: Vec::new(),
+                };
+                let proof = make_rq_delta_proof(context, session, &envelope.manifest, receipt)?;
+                let proof_frame = json_frame(FrameType::Proof, &proof)?;
+                send_delta_control_frame(
+                    cx,
+                    &mut control,
+                    &proof_frame,
+                    config.delta_control_timeout,
+                    "send authenticated no-op proof",
+                )
+                .await?;
+                let close = recv_delta_control_frame(
+                    cx,
+                    &mut control,
+                    config.delta_control_timeout,
+                    "receive authenticated delta close",
+                )
+                .await?;
+                if close.frame_type() != FrameType::Close {
+                    return Err(RqError::Unexpected {
+                        got: close.frame_type(),
+                        expected: "Close",
+                    });
+                }
+                let committed_path =
+                    safe_base_for_root_name(dest_dir, &envelope.manifest.root_name)?;
+                return Ok(ReceiveReport {
+                    transfer_id: envelope.manifest.transfer_id,
+                    bytes_received: 0,
+                    files: 1,
+                    committed: true,
+                    symbols_accepted: 0,
+                    feedback_rounds: 0,
+                    committed_paths: vec![committed_path],
+                    peer,
+                });
+            }
+            DeltaWireMode::DeltaChunks => {
+                return Err(RqError::Control(
+                    "RQ receiver emitted unsupported missing-chunk mode".to_string(),
+                ));
+            }
+        }
+    } else {
+        parse_and_validate_manifest_frame(&manifest_frame, &config)?
+    };
     if hello.total_bytes != 0 && hello.total_bytes != manifest.total_bytes {
         return Err(RqError::Frame(format!(
             "handshake total_bytes {} does not match manifest total_bytes {}",
@@ -13467,6 +15225,10 @@ mod tests {
             udp_ports: Vec::new(),
             control_source_stream: false,
             reason: None,
+            delta_transfer_nonce: None,
+            delta_receiver_nonce: None,
+            delta_destination_root: None,
+            delta_server_auth_tag: None,
         };
 
         assert_eq!(hello_ack_udp_ports(&ack).as_slice(), &[8472]);
@@ -13481,6 +15243,10 @@ mod tests {
             udp_ports: vec![3001, 3002, 3003],
             control_source_stream: false,
             reason: None,
+            delta_transfer_nonce: None,
+            delta_receiver_nonce: None,
+            delta_destination_root: None,
+            delta_server_auth_tag: None,
         };
         let ports = hello_ack_udp_ports(&ack);
         let peer: SocketAddr = "192.0.2.10:8472".parse().unwrap();
@@ -15497,8 +17263,524 @@ mod tests {
             total_bytes,
             merkle_root_hex: "0".repeat(64),
             metadata: Some(metadata),
+            delta_manifest: None,
             entries,
         }
+    }
+
+    fn rq_delta_manifest_for_bytes(bytes: &[u8]) -> TransferManifest {
+        assert!(!bytes.is_empty());
+        let rel_path = "payload.bin";
+        let digest = digest_for_bytes(rel_path, bytes);
+        let tree_id = flat_merkle_root_from_digests(std::slice::from_ref(&digest));
+        let content_id = ContentId::from_bytes(bytes);
+        let size_bytes = u64::try_from(bytes.len()).unwrap();
+        let planner = PersistentChunkManifest::new(
+            tree_id.clone(),
+            vec![CasChunkRef {
+                index: 0,
+                byte_offset: 0,
+                size_bytes,
+                content_id: content_id.clone(),
+            }],
+        )
+        .unwrap();
+        TransferManifest {
+            transfer_id: "rqdelta1".to_string(),
+            root_name: rel_path.to_string(),
+            is_directory: false,
+            total_bytes: size_bytes,
+            merkle_root_hex: tree_id.clone(),
+            metadata: Some(bare_metadata_manifest([rel_path])),
+            delta_manifest: Some(DeltaManifestWire {
+                schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
+                tree_id,
+                chunk_size: bytes.len(),
+                total_size_bytes: size_bytes,
+                merkle_root_hex: planner.merkle_root.to_hex(),
+                chunks: vec![DeltaChunkWire {
+                    index: 0,
+                    entry_index: 0,
+                    rel_path: rel_path.to_string(),
+                    entry_offset: 0,
+                    stream_offset: 0,
+                    size_bytes,
+                    content_id_hex: content_id.to_hex(),
+                }],
+            }),
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: rel_path.to_string(),
+                size: size_bytes,
+                sha256_hex: hex_encode(&digest.content_sha256),
+                members: Vec::new(),
+                fragment: None,
+            }],
+        }
+    }
+
+    fn rq_delta_test_hello(sender_nonce: TransferNonce) -> Hello {
+        Hello {
+            protocol: ATP_RQ_PROTOCOL,
+            role: "sender".to_string(),
+            peer_id: "sender-peer".to_string(),
+            symbol_size: DEFAULT_SYMBOL_SIZE,
+            max_block_size: DEFAULT_MAX_BLOCK_SIZE as u64,
+            symbol_auth: true,
+            total_bytes: 7,
+            prefer_control_source_stream: true,
+            delta_transfer_nonce: Some(sender_nonce),
+            delta_client_auth_tag: None,
+        }
+    }
+
+    fn rq_delta_test_ack(
+        context: &SecurityContext,
+        hello: &Hello,
+    ) -> (HelloAck, RqDeltaHandshakeContext) {
+        let sender_nonce = hello.delta_transfer_nonce.unwrap();
+        let mut ack = HelloAck {
+            accepted: true,
+            peer_id: "receiver-peer".to_string(),
+            udp_port: 0,
+            udp_ports: Vec::new(),
+            control_source_stream: true,
+            reason: None,
+            delta_transfer_nonce: Some(sender_nonce),
+            delta_receiver_nonce: Some(TransferNonce::new([0x22; 32])),
+            delta_destination_root: Some([0x33; 32]),
+            delta_server_auth_tag: None,
+        };
+        ack.delta_server_auth_tag = Some(sign_rq_delta_ack(context, hello, &ack).unwrap());
+        let handshake = validate_rq_delta_ack(context, hello, &ack)
+            .unwrap()
+            .unwrap();
+        (ack, handshake)
+    }
+
+    #[test]
+    fn rq_delta_initial_offer_requires_live_strict_key_possession() {
+        let context = SecurityContext::for_testing(0xD3_17_A0);
+        let wrong_context = SecurityContext::for_testing(0xBAD0_0BAD);
+        let mut hello = rq_delta_test_hello(TransferNonce::new([0x11; 32]));
+        hello.delta_client_auth_tag = Some(sign_rq_delta_hello(&context, &hello).unwrap());
+
+        assert_eq!(
+            validate_rq_delta_hello(Some(&context), &hello).unwrap(),
+            hello.delta_transfer_nonce
+        );
+        assert!(validate_rq_delta_hello(Some(&wrong_context), &hello).is_err());
+
+        let mut tampered = hello.clone();
+        tampered.peer_id.push_str("-tampered");
+        assert!(validate_rq_delta_hello(Some(&context), &tampered).is_err());
+
+        let mut partial = hello.clone();
+        partial.delta_client_auth_tag = None;
+        assert!(validate_rq_delta_hello(Some(&context), &partial).is_err());
+
+        let mut legacy = hello;
+        legacy.delta_transfer_nonce = None;
+        legacy.delta_client_auth_tag = None;
+        assert_eq!(validate_rq_delta_hello(None, &legacy).unwrap(), None);
+    }
+
+    #[test]
+    fn rq_delta_ack_is_fail_closed_and_decline_is_authenticated() {
+        let context = SecurityContext::for_testing(0xD3_17_A0);
+        let wrong_context = SecurityContext::for_testing(0xBAD0_0BAD);
+        let mut hello = rq_delta_test_hello(TransferNonce::new([0x11; 32]));
+        hello.delta_client_auth_tag = Some(sign_rq_delta_hello(&context, &hello).unwrap());
+        let (ack, _handshake) = rq_delta_test_ack(&context, &hello);
+
+        assert!(
+            validate_rq_delta_ack(&context, &hello, &ack)
+                .unwrap()
+                .is_some()
+        );
+        assert!(validate_rq_delta_ack(&wrong_context, &hello, &ack).is_err());
+
+        let mut tampered = ack.clone();
+        tampered.peer_id.push_str("-tampered");
+        assert!(validate_rq_delta_ack(&context, &hello, &tampered).is_err());
+
+        let mut wrong_echo = ack.clone();
+        wrong_echo.delta_transfer_nonce = Some(TransferNonce::new([0x44; 32]));
+        wrong_echo.delta_server_auth_tag =
+            Some(sign_rq_delta_ack(&context, &hello, &wrong_echo).unwrap());
+        assert!(matches!(
+            validate_rq_delta_ack(&context, &hello, &wrong_echo),
+            Err(RqError::Authentication(_))
+        ));
+
+        let mut partial = ack.clone();
+        partial.delta_receiver_nonce = None;
+        partial.delta_server_auth_tag =
+            Some(sign_rq_delta_ack(&context, &hello, &partial).unwrap());
+        assert!(matches!(
+            validate_rq_delta_ack(&context, &hello, &partial),
+            Err(RqError::Authentication(_))
+        ));
+
+        let mut decline = ack;
+        decline.delta_receiver_nonce = None;
+        decline.delta_destination_root = None;
+        decline.delta_server_auth_tag = None;
+        decline.delta_server_auth_tag =
+            Some(sign_rq_delta_ack(&context, &hello, &decline).unwrap());
+        assert_eq!(
+            validate_rq_delta_ack(&context, &hello, &decline).unwrap(),
+            None
+        );
+        decline.delta_server_auth_tag = None;
+        assert!(matches!(
+            validate_rq_delta_ack(&context, &hello, &decline),
+            Err(RqError::Authentication(_))
+        ));
+    }
+
+    #[test]
+    fn rq_delta_requires_strict_mode_and_uses_private_destination_salt() {
+        let strict = SecurityContext::for_testing(0xD3_17_A0);
+        let permissive = SecurityContext::for_testing_with_mode(
+            0xD3_17_A0,
+            crate::security::AuthMode::Permissive,
+        );
+        let disabled =
+            SecurityContext::for_testing_with_mode(0xD3_17_A0, crate::security::AuthMode::Disabled);
+        let strict_config = RqConfig::default().with_symbol_auth(strict.clone());
+        let permissive_config = RqConfig::default().with_symbol_auth(permissive);
+        let disabled_config = RqConfig::default().with_symbol_auth(disabled);
+        assert!(rq_delta_control_auth_context(&strict_config).is_some());
+        assert!(rq_delta_control_auth_context(&permissive_config).is_none());
+        assert!(rq_delta_control_auth_context(&disabled_config).is_none());
+
+        let nonce = TransferNonce::new([0x22; 32]);
+        let path = Path::new("/receiver/private-destination");
+        let first =
+            rq_delta_destination_root_commitment(&strict, nonce, path, &[0x41; 32]).unwrap();
+        let second =
+            rq_delta_destination_root_commitment(&strict, nonce, path, &[0x42; 32]).unwrap();
+        assert_ne!(first, second, "private salt must blind path equality");
+        let binding = RqDeltaDestinationBinding {
+            receiver_secret_salt: [0x41; 32],
+            commitment: first,
+        };
+        validate_rq_delta_destination_binding(&binding, &strict, nonce, path).unwrap();
+        assert!(
+            validate_rq_delta_destination_binding(
+                &binding,
+                &strict,
+                nonce,
+                Path::new("/receiver/other-destination"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rq_delta_control_rejects_spoof_tamper_and_cross_session_replay() {
+        let context = SecurityContext::for_testing(0xD3_17_A0);
+        let wrong_context = SecurityContext::for_testing(0xBAD0_0BAD);
+        let hello = rq_delta_test_hello(TransferNonce::new([0x11; 32]));
+        let (_ack, handshake) = rq_delta_test_ack(&context, &hello);
+        let manifest = rq_delta_manifest_for_bytes(b"payload");
+        validate_manifest(&manifest, &RqConfig::default()).unwrap();
+        let session =
+            derive_rq_delta_session(handshake, &hello.peer_id, "receiver-peer", &manifest).unwrap();
+        let envelope = make_rq_delta_manifest_envelope(&context, session, &manifest).unwrap();
+        validate_rq_delta_manifest_envelope(&context, session, &envelope).unwrap();
+        assert!(validate_rq_delta_manifest_envelope(&wrong_context, session, &envelope).is_err());
+
+        let mut exact_tamper = envelope.clone();
+        exact_tamper.manifest.transfer_id.push('x');
+        assert!(validate_rq_delta_manifest_envelope(&context, session, &exact_tamper).is_err());
+        let mut replay_handshake = handshake;
+        replay_handshake.receiver_nonce = TransferNonce::new([0x55; 32]);
+        let replay_session =
+            derive_rq_delta_session(replay_handshake, &hello.peer_id, "receiver-peer", &manifest)
+                .unwrap();
+        assert!(validate_rq_delta_manifest_envelope(&context, replay_session, &envelope).is_err());
+
+        let delta = manifest.delta_manifest.as_ref().unwrap();
+        let request = DeltaObjectRequest {
+            mode: DeltaWireMode::AlreadyInSync,
+            fallback_reason: None,
+            sender_merkle_root_hex: delta.merkle_root_hex.clone(),
+            receiver_merkle_root_hex: Some(delta.merkle_root_hex.clone()),
+            missing_bytes: 0,
+            shared_chunks: 1,
+            stale_chunks: 0,
+            missing_chunks: Vec::new(),
+        };
+        let request_envelope =
+            make_rq_delta_request_envelope(&context, session, &manifest, request, 0, Vec::new())
+                .unwrap();
+        assert_eq!(
+            validate_rq_delta_request_envelope(
+                &context,
+                session,
+                &manifest,
+                &request_envelope,
+                true,
+            )
+            .unwrap(),
+            DeltaWireMode::AlreadyInSync
+        );
+        let mut spoofed_request = request_envelope.clone();
+        spoofed_request.request.shared_chunks = 0;
+        assert!(
+            validate_rq_delta_request_envelope(
+                &context,
+                session,
+                &manifest,
+                &spoofed_request,
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_rq_delta_request_envelope(
+                &context,
+                replay_session,
+                &manifest,
+                &request_envelope,
+                true,
+            )
+            .is_err()
+        );
+
+        let complete = make_rq_delta_complete(&context, session, &manifest).unwrap();
+        validate_rq_delta_complete(&context, session, &manifest, &complete).unwrap();
+        let mut tampered_complete = complete;
+        tampered_complete.control_seq = 9;
+        assert!(
+            validate_rq_delta_complete(&context, session, &manifest, &tampered_complete).is_err()
+        );
+
+        let canonical_receipt = ReceiveReceipt {
+            committed: true,
+            bytes_received: 0,
+            files: 1,
+            sha_ok: true,
+            merkle_ok: true,
+            symbols_accepted: 0,
+            feedback_rounds: 0,
+            reason: None,
+            committed_paths: Vec::new(),
+        };
+        let proof =
+            make_rq_delta_proof(&context, session, &manifest, canonical_receipt.clone()).unwrap();
+        validate_rq_delta_proof(&context, session, &manifest, proof).unwrap();
+        let noncanonical_receipt = ReceiveReceipt {
+            committed_paths: vec!["/secret/destination/payload.bin".to_string()],
+            ..canonical_receipt
+        };
+        let noncanonical =
+            make_rq_delta_proof(&context, session, &manifest, noncanonical_receipt).unwrap();
+        assert!(validate_rq_delta_proof(&context, session, &manifest, noncanonical).is_err());
+    }
+
+    #[test]
+    fn rq_delta_full_request_ports_have_one_canonical_encoding() {
+        let context = SecurityContext::for_testing(0xD3_17_A0);
+        let hello = rq_delta_test_hello(TransferNonce::new([0x11; 32]));
+        let (_ack, handshake) = rq_delta_test_ack(&context, &hello);
+        let manifest = rq_delta_manifest_for_bytes(b"payload");
+        let session =
+            derive_rq_delta_session(handshake, &hello.peer_id, "receiver-peer", &manifest).unwrap();
+        let full = DeltaObjectRequest::full(
+            manifest
+                .delta_manifest
+                .as_ref()
+                .unwrap()
+                .merkle_root_hex
+                .clone(),
+            None,
+            "full_object_required",
+        );
+        let canonical = make_rq_delta_request_envelope(
+            &context,
+            session,
+            &manifest,
+            full.clone(),
+            4001,
+            vec![4001, 4002],
+        )
+        .unwrap();
+        assert_eq!(
+            validate_rq_delta_request_envelope(&context, session, &manifest, &canonical, false,)
+                .unwrap(),
+            DeltaWireMode::FullObject
+        );
+
+        for (primary, ports) in [
+            (4001, vec![4002, 4001]),
+            (4001, vec![4001, 4001]),
+            (4001, vec![4001, 0]),
+            (0, vec![4001]),
+        ] {
+            let malformed = make_rq_delta_request_envelope(
+                &context,
+                session,
+                &manifest,
+                full.clone(),
+                primary,
+                ports,
+            )
+            .unwrap();
+            assert!(
+                validate_rq_delta_request_envelope(
+                    &context,
+                    session,
+                    &manifest,
+                    &malformed,
+                    false,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_rq_delta_request_envelope(&context, session, &manifest, &canonical, true,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rq_delta_manifest_is_strict_and_bounded() {
+        let benchmark_bytes = 500_u64 * 1024 * 1024;
+        assert!(
+            benchmark_bytes.div_ceil(u64::try_from(RQ_DELTA_CHUNK_SIZE).unwrap())
+                <= RQ_DELTA_MAX_MANIFEST_CHUNKS,
+            "the default 500 MiB resync file must remain delta-eligible"
+        );
+        let manifest = rq_delta_manifest_for_bytes(b"payload");
+        validate_rq_delta_manifest(&manifest).unwrap();
+
+        let mut too_many = manifest.clone();
+        let chunk = too_many
+            .delta_manifest
+            .as_ref()
+            .unwrap()
+            .chunks
+            .first()
+            .unwrap()
+            .clone();
+        too_many.delta_manifest.as_mut().unwrap().chunks =
+            vec![chunk; usize::try_from(RQ_DELTA_MAX_MANIFEST_CHUNKS + 1).unwrap()];
+        assert!(validate_rq_delta_manifest(&too_many).is_err());
+
+        let context = SecurityContext::for_testing(0xD3_17_A0);
+        let hello = rq_delta_test_hello(TransferNonce::new([0x11; 32]));
+        let (_ack, handshake) = rq_delta_test_ack(&context, &hello);
+        let session =
+            derive_rq_delta_session(handshake, &hello.peer_id, "receiver-peer", &manifest).unwrap();
+        let envelope = make_rq_delta_manifest_envelope(&context, session, &manifest).unwrap();
+        let mut outer = serde_json::to_value(&envelope).unwrap();
+        outer
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<RqDeltaManifestEnvelope>(outer).is_err());
+
+        let mut nested = serde_json::to_value(&envelope).unwrap();
+        nested["manifest"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<RqDeltaManifestEnvelope>(nested).is_err());
+    }
+
+    #[test]
+    fn rq_delta_live_file_selects_noop_and_revalidates_source() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let source_dir = tempfile::tempdir().unwrap();
+            let source = source_dir.path().join("payload.bin");
+            std::fs::write(&source, b"payload").unwrap();
+            let (root_name, is_directory, mut entries, empty_directories) =
+                collect_entries(&source).await.unwrap();
+            assert!(!is_directory);
+            assert!(empty_directories.is_empty());
+
+            let mut config =
+                RqConfig::default().with_symbol_auth(SecurityContext::for_testing(0xD3_17_A0));
+            config.enable_delta = true;
+            capture_source_metadata(
+                &mut entries,
+                &config.metadata_policy,
+                config.preserve_hardlinks,
+            )
+            .await
+            .unwrap();
+            let metadata = metadata_manifest_from_source_entries(
+                &entries,
+                DirectoryMetadataManifest::default(),
+            );
+            let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
+            let (size, content_id, content_sha256) =
+                hash_source_entry_streaming(&entries[0], &mut hash_buf)
+                    .await
+                    .unwrap();
+            let digest = EntryDigest {
+                rel_path: entries[0].rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            };
+            let merkle_root_hex = flat_merkle_root_from_digests(std::slice::from_ref(&digest));
+            let mut manifest = TransferManifest {
+                transfer_id: transfer_id_hex(&merkle_root_hex, size, 1),
+                root_name: root_name.clone(),
+                is_directory,
+                total_bytes: size,
+                merkle_root_hex,
+                metadata: Some(metadata),
+                delta_manifest: None,
+                entries: vec![ManifestEntry {
+                    index: 0,
+                    rel_path: entries[0].rel_path.clone(),
+                    size,
+                    sha256_hex: hex_encode(&digest.content_sha256),
+                    members: Vec::new(),
+                    fragment: None,
+                }],
+            };
+            maybe_attach_rq_delta_manifest(&cx, &mut manifest, &entries, &config)
+                .await
+                .unwrap();
+            assert!(manifest.delta_manifest.is_some());
+            validate_manifest(&manifest, &config).unwrap();
+
+            let dest = tempfile::tempdir().unwrap();
+            let destination = dest.path().join(&root_name);
+            std::fs::write(&destination, b"payload").unwrap();
+            let request = build_rq_receiver_delta_request(&cx, dest.path(), &config, &manifest)
+                .await
+                .unwrap();
+            assert_eq!(request.mode, DeltaWireMode::AlreadyInSync);
+
+            std::fs::write(&destination, b"PAYLOAD").unwrap();
+            let changed = build_rq_receiver_delta_request(&cx, dest.path(), &config, &manifest)
+                .await
+                .unwrap();
+            assert_eq!(changed.mode, DeltaWireMode::FullObject);
+            assert_eq!(
+                changed.fallback_reason.as_deref(),
+                Some("full_object_required")
+            );
+            assert!(changed.receiver_merkle_root_hex.is_none());
+
+            validate_rq_delta_source_unchanged(&cx, &manifest, &entries, &config)
+                .await
+                .unwrap();
+            std::fs::write(&source, b"changed").unwrap();
+            assert!(
+                validate_rq_delta_source_unchanged(&cx, &manifest, &entries, &config)
+                    .await
+                    .is_err()
+            );
+        });
     }
 
     fn manifest_entry(index: u32, size: u64) -> ManifestEntry {
@@ -16498,6 +18780,7 @@ mod tests {
             total_bytes: size,
             merkle_root_hex,
             metadata: None,
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path,
@@ -18704,6 +20987,43 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct PendingDeltaControlIo;
+
+    impl crate::io::AsyncRead for PendingDeltaControlIo {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl crate::io::AsyncWrite for PendingDeltaControlIo {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     #[test]
     fn proof_close_drain_does_not_inherit_accept_timeout() {
         let cx = Cx::for_testing();
@@ -18732,6 +21052,38 @@ mod tests {
 
         assert!(matches!(error, RqError::HandshakeRejected(_)));
         assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn authenticated_delta_control_stalls_hit_read_and_write_deadlines() {
+        let cx = Cx::for_testing();
+        let mut stalled_read = FrameTransport::new(PendingDeltaControlIo);
+        let read_error = futures_lite::future::block_on(recv_delta_control_frame(
+            &cx,
+            &mut stalled_read,
+            Duration::ZERO,
+            "test read",
+        ))
+        .expect_err("stalled delta read must time out");
+        assert!(matches!(
+            read_error,
+            RqError::Io(ref error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
+
+        let mut stalled_write = FrameTransport::new(PendingDeltaControlIo);
+        let frame = Frame::empty(FrameType::ObjectRequest).unwrap();
+        let write_error = futures_lite::future::block_on(send_delta_control_frame(
+            &cx,
+            &mut stalled_write,
+            &frame,
+            Duration::ZERO,
+            "test write",
+        ))
+        .expect_err("stalled delta write must time out");
+        assert!(matches!(
+            write_error,
+            RqError::Io(ref error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
     }
 
     #[test]
@@ -19409,6 +21761,7 @@ mod tests {
             total_bytes: bytes.len() as u64,
             merkle_root_hex: "00".repeat(32),
             metadata: None,
+            delta_manifest: None,
             entries: vec![entry],
         };
         BondTransferDescriptor::from_manifest(
@@ -19857,6 +22210,7 @@ mod tests {
             total_bytes: bytes.len() as u64,
             merkle_root_hex: flat_merkle_root_from_digests(std::slice::from_ref(&digest)),
             metadata: Some(one_entry_metadata_manifest("payload.bin", entry_metadata)),
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "payload.bin".to_string(),
@@ -19966,6 +22320,7 @@ mod tests {
             total_bytes: whole.len() as u64,
             merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
             metadata: None,
+            delta_manifest: None,
             entries: vec![
                 fragment_entry(
                     0,
@@ -20130,6 +22485,7 @@ mod tests {
             total_bytes: whole.len() as u64,
             merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
             metadata: Some(bare_metadata_manifest(["huge.bin"])),
+            delta_manifest: None,
             entries,
         };
         assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
@@ -20202,6 +22558,7 @@ mod tests {
             total_bytes: whole.len() as u64,
             merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
             metadata: Some(one_entry_metadata_manifest("huge.bin", entry_metadata)),
+            delta_manifest: None,
             entries: vec![
                 fragment_entry(
                     0,
@@ -20495,6 +22852,7 @@ mod tests {
             total_bytes: whole.len() as u64,
             merkle_root_hex: placeholder.clone(),
             metadata: None,
+            delta_manifest: None,
             entries: vec![
                 ManifestEntry {
                     index: 0,
@@ -20665,6 +23023,7 @@ mod tests {
             total_bytes: payload.len() as u64,
             merkle_root_hex: sha256_hex_placeholder(),
             metadata: None,
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "payload.bin".to_string(),
@@ -21036,6 +23395,7 @@ mod tests {
                 entries: metadata_entries,
                 directories: None,
             }),
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: ".atp-pack-0".to_string(),
@@ -21437,6 +23797,7 @@ mod tests {
             total_bytes: object.len() as u64,
             merkle_root_hex,
             metadata: None,
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: ".atp-pack-0".to_string(),

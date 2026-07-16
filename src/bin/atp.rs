@@ -419,9 +419,9 @@ struct SendArgs {
     /// transfer path.
     #[arg(long)]
     no_delta: bool,
-    /// Enable the legacy plaintext delta-state sidecar on direct RQ sends.
-    /// This can leak hashes and can spoof AlreadyInSync; trusted labs only.
-    #[arg(long)]
+    /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
+    /// delta negotiation now runs inside authenticated framed control.
+    #[arg(long, hide = true)]
     allow_unauthenticated_delta_sidecar: bool,
     /// Permit `--transport auto` to fall back from encrypted QUIC to unencrypted
     /// RQ and plaintext TCP. Without this opt-in, trust failures never downgrade.
@@ -504,9 +504,9 @@ struct RecvArgs {
     /// Disable receiver-side delta package application and state refresh.
     #[arg(long)]
     no_delta: bool,
-    /// Expose the legacy plaintext RQ delta-state sidecar on listen-port + 1.
-    /// This leaks receiver hashes/signatures; trusted labs only.
-    #[arg(long)]
+    /// Removed legacy plaintext RQ sidecar flag. Passing it is an error; RQ
+    /// delta negotiation now runs inside authenticated framed control.
+    #[arg(long, hide = true)]
     allow_unauthenticated_delta_sidecar: bool,
 }
 
@@ -923,7 +923,7 @@ fn rq_send_config(args: &SendArgs) -> Result<RqConfig, String> {
 
 fn rq_send_config_with_auth(args: &SendArgs, auth: &RqAuthChoice) -> Result<RqConfig, String> {
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
-    let config = rq_config_base(
+    let mut config = rq_config_base(
         args.max_bytes,
         symbol_size,
         args.streams,
@@ -932,6 +932,7 @@ fn rq_send_config_with_auth(args: &SendArgs, auth: &RqAuthChoice) -> Result<RqCo
         args.rq_round0_loss_pct,
         args.rq_tail_drain_ms,
     )?;
+    config.enable_delta = !args.no_delta;
     Ok(config_with_rq_auth(config, auth))
 }
 
@@ -3011,31 +3012,6 @@ fn add_auto_selection_metadata(
     report
 }
 
-fn annotate_direct_delta_package_report(
-    report: &mut serde_json::Value,
-    plan: &DeltaResyncPlan,
-    package_payload_bytes: u64,
-    subdelta_chunks: usize,
-) {
-    if let Some(object) = report.as_object_mut() {
-        object.insert(
-            "delta".to_string(),
-            serde_json::json!({
-                "mode": "delta_chunks",
-                "negotiation": "direct_receiver_state_sidecar",
-                "sender_merkle_root": plan.sender_merkle_root.to_string(),
-                "receiver_merkle_root": plan.receiver_merkle_root.as_ref().map(ToString::to_string),
-                "shared_chunks": plan.shared_chunks,
-                "stale_chunks": plan.stale_chunks.len(),
-                "missing_chunks": plan.missing_chunks.len(),
-                "missing_bytes": plan.missing_bytes,
-                "package_payload_bytes": package_payload_bytes,
-                "subdelta_chunks": subdelta_chunks,
-            }),
-        );
-    }
-}
-
 fn auto_transport_exhausted_error(attempts: &[TransportAttempt]) -> String {
     let details = attempts
         .iter()
@@ -3056,46 +3032,20 @@ fn auto_transport_exhausted_error(attempts: &[TransportAttempt]) -> String {
 }
 
 fn run_send_to_addrs(
-    mut args: SendArgs,
+    args: SendArgs,
     addresses: &[SocketAddr],
-    use_direct_delta_probe: bool,
+    _use_direct_delta_probe: bool,
     rq_config_override: Option<RqConfig>,
     quic_auth_override: Option<RqAuthChoice>,
 ) -> Result<(), String> {
-    let first_address = addresses
-        .first()
-        .copied()
-        .ok_or_else(|| "send target has no resolved addresses".to_string())?;
-    let mut direct_delta_plan = None;
-    let mut delta_package_guard = None;
-    if use_direct_delta_probe
-        && args.transport == Transport::Rq
-        && let Some(delta) = prepare_direct_delta_send(&args, first_address)?
-    {
-        match delta {
-            DeltaPreparedSend::Package {
-                package_root,
-                plan,
-                package_payload_bytes,
-                subdelta_chunks,
-            } => {
-                eprintln!(
-                    "[atp] delta planner: direct receiver state selected {} chunk(s), {} logical byte(s), {} package byte(s), {} sub-delta chunk(s), shared {} chunk(s)",
-                    plan.missing_chunks.len(),
-                    plan.missing_bytes,
-                    package_payload_bytes,
-                    subdelta_chunks,
-                    plan.shared_chunks
-                );
-                delta_package_guard = Some(DeltaPackageRootGuard::new(package_root.clone())?);
-                args.source = package_root;
-                direct_delta_plan = Some((plan, package_payload_bytes, subdelta_chunks));
-            }
-        }
+    if args.allow_unauthenticated_delta_sidecar {
+        return Err(
+            "--allow-unauthenticated-delta-sidecar was removed; RQ delta negotiation is authenticated on the existing control stream"
+                .to_string(),
+        );
     }
-
     let runtime = build_runtime(args.workers)?;
-    let mut report = if args.transport == Transport::Auto {
+    let report = if args.transport == Transport::Auto {
         run_send_auto_to_addrs(
             &runtime,
             &args,
@@ -3116,17 +3066,6 @@ fn run_send_to_addrs(
         })
         .map_err(|failure| failure.message)?
     };
-    if let Some((plan, package_payload_bytes, subdelta_chunks)) = direct_delta_plan.as_ref() {
-        annotate_direct_delta_package_report(
-            &mut report,
-            plan,
-            *package_payload_bytes,
-            *subdelta_chunks,
-        );
-    }
-    if let Some(mut guard) = delta_package_guard {
-        guard.cleanup()?;
-    }
     print_json(&report);
     Ok(())
 }
@@ -3601,6 +3540,12 @@ fn run_send_via_ssh(
     remote: &RemoteTarget,
     prepared_auth: Option<RqAuthChoice>,
 ) -> Result<(), String> {
+    if args.allow_unauthenticated_delta_sidecar {
+        return Err(
+            "--allow-unauthenticated-delta-sidecar was removed; RQ delta negotiation is authenticated on the existing control stream"
+                .to_string(),
+        );
+    }
     let remote_shell =
         resolve_remote_shell(args.remote_shell, &args.ssh_options, &remote.ssh_host)?;
     validate_ssh_bootstrap(remote_shell, &args, remote)?;
@@ -3655,12 +3600,14 @@ fn run_send_via_ssh(
     if args.transport == Transport::Quic && args.server_name.is_none() {
         args.server_name = Some(default_quic_server_name_for_ssh(remote));
     }
-    let delta_package =
-        if args.transport != Transport::Rq || !cli_content_delta_enabled(args.no_delta) {
-            None
-        } else {
-            prepare_delta_ssh_send(&args, remote, remote_shell)?
-        };
+    let delta_package = if args.transport != Transport::Rq
+        || !args.allow_unauthenticated_delta_sidecar
+        || !cli_content_delta_enabled(args.no_delta)
+    {
+        None
+    } else {
+        prepare_delta_ssh_send(&args, remote, remote_shell)?
+    };
     let mut delta_package_guard = None;
     if let Some(delta) = delta_package {
         match delta {
@@ -4348,6 +4295,9 @@ fn prepare_delta_ssh_send(
     prepare_delta_send_from_state(args, receiver_state, None)
 }
 
+// Retained only so the legacy sidecar decoder remains covered by regression
+// tests while every production entry point rejects the removed opt-in flag.
+#[allow(dead_code)]
 fn prepare_direct_delta_send(
     args: &SendArgs,
     addr: SocketAddr,
@@ -6089,6 +6039,7 @@ fn delta_state_addr(base: SocketAddr) -> Option<SocketAddr> {
     Some(SocketAddr::new(base.ip(), port))
 }
 
+#[allow(dead_code)]
 struct DeltaStateServerGuard {
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
@@ -6103,6 +6054,7 @@ impl Drop for DeltaStateServerGuard {
     }
 }
 
+#[allow(dead_code)]
 fn spawn_delta_state_server(
     dest: PathBuf,
     listen: SocketAddr,
@@ -8240,6 +8192,12 @@ async fn create_receive_destination(dest: &Path) -> Result<(), String> {
 }
 
 fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
+    if args.allow_unauthenticated_delta_sidecar {
+        return Err(
+            "--allow-unauthenticated-delta-sidecar was removed; RQ delta negotiation is authenticated on the existing control stream"
+                .to_string(),
+        );
+    }
     if args.transport == Transport::Auto {
         return Err(
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
@@ -8273,10 +8231,6 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
     let udp_bind_ip = listen.ip().to_string();
     let max_bytes = args.max_bytes;
     let delta_enabled = cli_content_delta_enabled(args.no_delta);
-    let direct_delta_sidecar_enabled = args.transport == Transport::Rq
-        && delta_enabled
-        && args.allow_unauthenticated_delta_sidecar;
-
     match args.transport {
         Transport::Auto => Err(
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
@@ -8360,6 +8314,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                 .expect("RQ auth resolved before transport dispatch");
             let mut cfg = config_with_rq_auth(cfg, &auth);
             drop(auth);
+            cfg.enable_delta = !args.no_delta;
             cfg.accept_timeout = recv_listen_timeout(&args)?;
             let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
@@ -8369,8 +8324,6 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                     .await
                     .map_err(|e| format!("bind {listen}: {e}"))?;
                 let bound = listener.local_addr().map_err(|e| e.to_string())?;
-                let _delta_state_server =
-                    spawn_delta_state_server(dest.clone(), bound, direct_delta_sidecar_enabled);
                 eprintln!(
                     "atp: rq control listening on {bound} (udp on {udp_bind_ip}), dest {}",
                     dest.display()
@@ -8455,11 +8408,6 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                         let endpoint = bind_server_endpoint(&cx, listen)
                             .await
                             .map_err(|e| e.to_string())?;
-                        let _delta_state_server = spawn_delta_state_server(
-                            dest.clone(),
-                            endpoint.local_addr(),
-                            direct_delta_sidecar_enabled,
-                        );
                         eprintln!(
                             "atp: quic listening on {}, dest {}",
                             endpoint.local_addr(),
@@ -8490,11 +8438,6 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                             .map_err(|e| e.to_string())?;
                         let bound = first_endpoint.local_addr();
                         create_receive_destination(&dest).await?;
-                        let _delta_state_server = spawn_delta_state_server(
-                            dest.clone(),
-                            bound,
-                            direct_delta_sidecar_enabled,
-                        );
                         eprintln!("atp: quic listening on {bound}, dest {}", dest.display());
                         // Each accepted transfer consumes the endpoint. Preserve
                         // the successfully bound first endpoint, then rebind its
@@ -10169,6 +10112,18 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 "symbol authentication mismatch".to_string(),
             )),
             classify_rq_send_failure(RqError::Authentication("invalid symbol tag".to_string())),
+            classify_rq_send_failure(RqError::Authentication(
+                "receiver omitted its authenticated RQ delta response".to_string(),
+            )),
+            classify_rq_send_failure(RqError::Authentication(
+                "receiver echoed the wrong RQ delta transfer nonce".to_string(),
+            )),
+            classify_rq_send_failure(RqError::Authentication(
+                "receiver returned a partial RQ delta binding tuple".to_string(),
+            )),
+            classify_rq_send_failure(RqError::Authentication(
+                "receiver RQ delta nonce must be distinct and non-zero".to_string(),
+            )),
             classify_rq_send_failure(RqError::Integrity("tampered manifest".to_string())),
         ] {
             assert!(!failure.address_fallback_eligible);
@@ -10418,7 +10373,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn quic_never_uses_plaintext_delta_sidecar_even_with_lab_opt_in() {
+    fn removed_plaintext_delta_sidecar_flag_is_rejected_before_network_io() {
         let cli = Cli::parse_from([
             "atp",
             "send",
@@ -10432,11 +10387,9 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             panic!("expected send command");
         };
 
-        assert!(
-            prepare_direct_delta_send(&args, "127.0.0.1:9".parse().unwrap())
-                .expect("QUIC must not perform plaintext sidecar network I/O")
-                .is_none()
-        );
+        let error = run_send_to_addrs(args, &["127.0.0.1:9".parse().unwrap()], true, None, None)
+            .expect_err("removed sidecar flag must fail before network I/O");
+        assert!(error.contains("was removed"));
     }
 
     #[test]
