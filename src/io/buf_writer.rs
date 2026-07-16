@@ -118,9 +118,16 @@ impl<W: AsyncWrite + Unpin> BufWriter<W> {
     /// This is a helper method to drive the flush to completion.
     fn poll_flush_buf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.written < self.buf.len() {
+            let remaining = self.buf.len() - self.written;
             match Pin::new(&mut self.inner).poll_write(cx, &self.buf[self.written..]) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Ok(n)) if n > remaining => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("writer reported {n} bytes written for {remaining}-byte buffer"),
+                    )));
+                }
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                 }
@@ -284,6 +291,43 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    struct ReportedProgressWriter {
+        reported: std::collections::VecDeque<usize>,
+        offered: Vec<Vec<u8>>,
+    }
+
+    impl ReportedProgressWriter {
+        fn new(reported: impl IntoIterator<Item = usize>) -> Self {
+            Self {
+                reported: reported.into_iter().collect(),
+                offered: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncWrite for ReportedProgressWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            this.offered.push(buf.to_vec());
+            Poll::Ready(Ok(this
+                .reported
+                .pop_front()
+                .expect("write script exhausted")))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[test]
     fn buf_writer_new() {
         init_test("buf_writer_new");
@@ -376,6 +420,70 @@ mod tests {
         let inner = buf_writer.get_ref();
         crate::assert_with_log!(inner == b"hello", "inner", b"hello", inner);
         crate::test_complete!("buf_writer_flush_writes_to_inner");
+    }
+
+    #[test]
+    fn buf_writer_flush_rejects_immediate_overreport_without_advancing() {
+        init_test("buf_writer_flush_rejects_immediate_overreport_without_advancing");
+        let writer = ReportedProgressWriter::new([5]);
+        let mut buf_writer = BufWriter::with_capacity(8, writer);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let buffered = Pin::new(&mut buf_writer).poll_write(&mut cx, b"abcd");
+        let buffered_ok = matches!(buffered, Poll::Ready(Ok(4)));
+        crate::assert_with_log!(buffered_ok, "buffered write", true, buffered_ok);
+
+        let flushed = Pin::new(&mut buf_writer).poll_flush(&mut cx);
+        let invalid_data =
+            matches!(flushed, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::InvalidData);
+        crate::assert_with_log!(invalid_data, "invalid data", true, invalid_data);
+        crate::assert_with_log!(buf_writer.written == 0, "written", 0, buf_writer.written);
+        crate::assert_with_log!(
+            buf_writer.buffer() == b"abcd",
+            "buffer",
+            b"abcd",
+            buf_writer.buffer()
+        );
+        crate::assert_with_log!(
+            buf_writer.get_ref().offered == vec![b"abcd".to_vec()],
+            "offered slices",
+            vec![b"abcd".to_vec()],
+            buf_writer.get_ref().offered.clone()
+        );
+        crate::test_complete!("buf_writer_flush_rejects_immediate_overreport_without_advancing");
+    }
+
+    #[test]
+    fn buf_writer_flush_rejects_overreport_after_valid_partial_progress() {
+        init_test("buf_writer_flush_rejects_overreport_after_valid_partial_progress");
+        let writer = ReportedProgressWriter::new([2, usize::MAX]);
+        let mut buf_writer = BufWriter::with_capacity(8, writer);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let buffered = Pin::new(&mut buf_writer).poll_write(&mut cx, b"abcd");
+        let buffered_ok = matches!(buffered, Poll::Ready(Ok(4)));
+        crate::assert_with_log!(buffered_ok, "buffered write", true, buffered_ok);
+
+        let flushed = Pin::new(&mut buf_writer).poll_flush(&mut cx);
+        let invalid_data =
+            matches!(flushed, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::InvalidData);
+        crate::assert_with_log!(invalid_data, "invalid data", true, invalid_data);
+        crate::assert_with_log!(buf_writer.written == 2, "written", 2, buf_writer.written);
+        crate::assert_with_log!(
+            buf_writer.buffer() == b"abcd",
+            "buffer",
+            b"abcd",
+            buf_writer.buffer()
+        );
+        crate::assert_with_log!(
+            buf_writer.get_ref().offered == vec![b"abcd".to_vec(), b"cd".to_vec()],
+            "offered slices",
+            vec![b"abcd".to_vec(), b"cd".to_vec()],
+            buf_writer.get_ref().offered.clone()
+        );
+        crate::test_complete!("buf_writer_flush_rejects_overreport_after_valid_partial_progress");
     }
 
     #[test]
