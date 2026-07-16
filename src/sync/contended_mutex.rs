@@ -260,10 +260,24 @@ mod inner {
         {
             match self.inner.try_lock() {
                 Ok(guard) => {
-                    // Check and record lock ordering for successful try_lock
+                    // Validate lock ordering WITHOUT unwinding through the live
+                    // raw guard: a lock-order panic here would drop `guard`
+                    // mid-unwind and poison otherwise-untouched data. Catch the
+                    // diagnostic, drop the guard cleanly (the thread is no longer
+                    // unwinding after catch_unwind), then re-raise it identically
+                    // (br-asupersync-czdhfs). Checking before try_lock is wrong
+                    // because a WouldBlock must remain an ordinary result.
                     if let Some(rank) = self.rank {
-                        lock_ordering::check_acquire_with_module(self.name, rank, self.module);
-                        lock_ordering::record_acquire_with_module(self.name, rank, self.module);
+                        let (name, module) = (self.name, self.module);
+                        if let Err(payload) =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                lock_ordering::check_acquire_with_module(name, rank, module);
+                            }))
+                        {
+                            drop(guard);
+                            std::panic::resume_unwind(payload);
+                        }
+                        lock_ordering::record_acquire_with_module(name, rank, module);
                     }
 
                     let acquired_at = Instant::now();
@@ -434,10 +448,23 @@ mod inner {
         {
             match self.inner.try_lock() {
                 Ok(guard) => {
-                    // Check and record lock ordering for successful try_lock
+                    // See the lock-metrics arm: run the panic-based order check
+                    // WITHOUT holding the raw guard across the unwind, so an
+                    // order violation cannot poison otherwise-untouched data
+                    // (br-asupersync-czdhfs). `check_acquire` is a no-op here in
+                    // release (no-metrics), so the catch_unwind of the empty
+                    // closure is optimized away.
                     if let Some(rank) = self.rank {
-                        lock_ordering::check_acquire(self.name, rank);
-                        lock_ordering::record_acquire(self.name, rank);
+                        let name = self.name;
+                        if let Err(payload) =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                lock_ordering::check_acquire(name, rank);
+                            }))
+                        {
+                            drop(guard);
+                            std::panic::resume_unwind(payload);
+                        }
+                        lock_ordering::record_acquire(name, rank);
                     }
                     Ok(ContendedMutexGuard {
                         guard,
@@ -752,6 +779,47 @@ mod tests {
             snap.contentions
         );
         crate::test_complete!("poisoned_lock_does_not_count_as_contention");
+    }
+
+    // Covers both `mod inner` configs: run under `cargo test` (no-metrics arm,
+    // check active via debug_assertions) and `cargo test --features lock-metrics`
+    // (lock-metrics arm). Gated so it is only compiled where the ordering check
+    // and clear_held_locks exist (br-asupersync-czdhfs).
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    #[test]
+    fn try_lock_order_violation_does_not_poison_lower_mutex() {
+        use crate::sync::lock_ordering;
+        init_test("try_lock_order_violation_does_not_poison_lower_mutex");
+        lock_ordering::clear_held_locks();
+        let high = ContendedMutex::new("tasks", 100u32); // Tasks rank (higher)
+        let low = ContendedMutex::new("regions_table", 7u32); // Regions rank (lower)
+        let high_guard = high.lock().expect("acquire higher rank");
+
+        // Holding Tasks and try_lock-ing Regions inverts the hierarchy, raising
+        // ASUP-E205. The raw `low` guard must be dropped cleanly (not mid-unwind)
+        // before the diagnostic is re-raised.
+        let inverted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = low.try_lock();
+        }));
+        assert!(
+            inverted.is_err(),
+            "inverted try_lock must raise the lock-order diagnostic"
+        );
+
+        // Release the higher rank + reset held tracking; the lower mutex must
+        // still lock with unchanged data — proving the order panic did NOT poison
+        // it (a poisoning drop would leave `try_lock` returning Poisoned).
+        drop(high_guard);
+        lock_ordering::clear_held_locks();
+        match low.try_lock() {
+            Ok(guard) => assert_eq!(*guard, 7u32, "lower mutex data unchanged"),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("lower mutex was poisoned by the lock-order panic")
+            }
+            Err(std::sync::TryLockError::WouldBlock) => panic!("unexpected WouldBlock"),
+        }
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("try_lock_order_violation_does_not_poison_lower_mutex");
     }
 
     #[cfg(feature = "lock-metrics")]
