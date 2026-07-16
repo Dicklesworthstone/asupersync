@@ -435,22 +435,17 @@ impl<R> PooledResource<R> {
         time_getter: fn() -> Instant,
     ) -> Self {
         let now = time_getter();
-        Self {
-            resource: Some(resource),
-            return_obligation: ReturnObligation::new(),
-            return_tx,
-            acquired_at: now,
-            created_at: now,
-            time_getter,
-            return_wakers: None,
-            is_broken: false,
-        }
+        Self::new_with_timestamps(resource, return_tx, now, now, time_getter)
     }
 
-    /// Creates a pooled resource wrapper preserving the original creation time.
-    fn new_with_created_at(
+    /// Creates a pooled resource wrapper from already-snapshotted timestamps.
+    ///
+    /// This constructor performs no callbacks, so pool checkout accounting can
+    /// remain guarded until the wrapper is complete.
+    fn new_with_timestamps(
         resource: R,
         return_tx: PoolReturnSender<R>,
+        acquired_at: Instant,
         created_at: Instant,
         time_getter: fn() -> Instant,
     ) -> Self {
@@ -458,7 +453,7 @@ impl<R> PooledResource<R> {
             resource: Some(resource),
             return_obligation: ReturnObligation::new(),
             return_tx,
-            acquired_at: time_getter(),
+            acquired_at,
             created_at,
             time_getter,
             return_wakers: None,
@@ -1135,23 +1130,67 @@ where
     }
 }
 
-struct HealthCheckGuard<'a, R, F>
+/// Roll back an active checkout until a complete [`PooledResource`] owns its
+/// return obligation.
+///
+/// This guard is armed immediately after pool state moves a slot into
+/// `active`. It stays armed across health checks, waiter retirement, clocks,
+/// and wrapper construction so a panic in any of those steps cannot strand
+/// capacity. Once the complete wrapper owns the return obligation, that
+/// wrapper becomes responsible for unwind cleanup.
+struct ActiveCheckoutGuard<'a, R, F>
 where
     R: Send + 'static,
     F: AsyncResourceFactory<Resource = R>,
 {
     pool: &'a GenericPool<R, F>,
     completed: bool,
+    health_check_in_progress: bool,
 }
 
-impl<R, F> Drop for HealthCheckGuard<'_, R, F>
+impl<'a, R, F> ActiveCheckoutGuard<'a, R, F>
+where
+    R: Send + 'static,
+    F: AsyncResourceFactory<Resource = R>,
+{
+    fn new(pool: &'a GenericPool<R, F>) -> Self {
+        Self {
+            pool,
+            completed: false,
+            health_check_in_progress: false,
+        }
+    }
+
+    fn begin_health_check(&mut self) {
+        self.health_check_in_progress = true;
+    }
+
+    fn finish_health_check(&mut self) {
+        self.health_check_in_progress = false;
+    }
+
+    fn reject_unhealthy(mut self) {
+        self.completed = true;
+        self.pool.reject_unhealthy_idle_resource();
+    }
+
+    fn commit(mut self) {
+        self.completed = true;
+    }
+}
+
+impl<R, F> Drop for ActiveCheckoutGuard<'_, R, F>
 where
     R: Send + 'static,
     F: AsyncResourceFactory<Resource = R>,
 {
     fn drop(&mut self) {
         if !self.completed {
-            self.pool.reject_unhealthy_idle_resource();
+            if self.health_check_in_progress {
+                self.pool.reject_unhealthy_idle_resource();
+            } else {
+                self.pool.rollback_active_checkout();
+            }
         }
     }
 }
@@ -1465,12 +1504,12 @@ where
             .is_none_or(|check| check(resource))
     }
 
-    /// Handle an unhealthy idle resource that was popped by `try_get_idle`.
+    /// Undo accounting for a checkout that never reached the caller.
     ///
-    /// `try_get_idle` increments `active` and `total_acquisitions` when it
-    /// pops an idle entry. If health-check rejects that entry we must undo
-    /// those counters, and (when metrics are enabled) record a destroy event.
-    fn reject_unhealthy_idle_resource(&self) {
+    /// Both idle checkout and committed creation increment `active` and
+    /// `total_acquisitions` before panic-capable handoff work. Roll those
+    /// counters back and notify the newly marginal waiter.
+    fn rollback_active_checkout(&self) {
         let waker = {
             let mut state = self.state.lock();
             state.active = state.active.saturating_sub(1);
@@ -1485,14 +1524,21 @@ where
             }
         };
 
+        #[cfg(feature = "metrics")]
+        self.update_metrics_gauges();
+
         if let Some(waker) = waker {
             waker.wake();
         }
+    }
+
+    /// Reject an unhealthy idle resource after undoing its checkout.
+    fn reject_unhealthy_idle_resource(&self) {
+        self.rollback_active_checkout();
 
         #[cfg(feature = "metrics")]
         if let Some(ref metrics) = self.metrics {
             metrics.record_destroyed(DestroyReason::Unhealthy);
-            self.update_metrics_gauges();
         }
     }
 
@@ -1755,15 +1801,25 @@ where
     /// `false` and the caller must drop the freshly created resource.
     fn commit_create_slot(&self) -> bool {
         let mut state = self.state.lock();
-        state.creating = state.creating.saturating_sub(1);
-        state.total_created += 1;
+        let creating = state.creating.saturating_sub(1);
+        let total_created = state.total_created + 1;
 
         if state.closed {
+            state.creating = creating;
+            state.total_created = total_created;
             return false;
         }
 
-        state.active += 1;
-        state.total_acquisitions += 1;
+        // Precompute every overflow-capable counter before mutating state. The
+        // active checkout guard cannot be armed until this transition returns,
+        // so a debug-overflow panic must leave the reservation intact for its
+        // own Drop rollback.
+        let active = state.active + 1;
+        let total_acquisitions = state.total_acquisitions + 1;
+        state.creating = creating;
+        state.total_created = total_created;
+        state.active = active;
+        state.total_acquisitions = total_acquisitions;
         true
     }
 
@@ -2035,20 +2091,18 @@ where
 
                 // Try to get a healthy idle resource.
                 while let Some((resource, created_at)) = self.try_get_idle(cleanup.waiter_id) {
+                    let mut checkout = ActiveCheckoutGuard::new(self);
                     let is_healthy = if self.config.health_check_on_acquire {
-                        let mut guard = HealthCheckGuard {
-                            pool: self,
-                            completed: false,
-                        };
+                        checkout.begin_health_check();
                         let healthy = self.is_healthy(&resource);
-                        guard.completed = true;
+                        checkout.finish_health_check();
                         healthy
                     } else {
                         true
                     };
 
                     if !is_healthy {
-                        self.reject_unhealthy_idle_resource();
+                        checkout.reject_unhealthy();
                         continue;
                     }
 
@@ -2061,20 +2115,26 @@ where
                     let acquire_duration =
                         Duration::from_nanos(get_now().duration_since(acquire_start));
 
-                    // Record metrics
+                    let acquired_at = (self.time_getter)();
+                    let pooled = PooledResource::new_with_timestamps(
+                        resource,
+                        self.return_tx.clone(),
+                        acquired_at,
+                        created_at,
+                        self.time_getter,
+                    )
+                    .with_return_notify(Arc::clone(&self.return_wakers));
+                    checkout.commit();
+
+                    // Count the acquisition only after responsibility has
+                    // transferred to the complete wrapper.
                     #[cfg(feature = "metrics")]
                     if let Some(ref metrics) = self.metrics {
                         metrics.record_acquired(acquire_duration);
                         self.update_metrics_gauges();
                     }
 
-                    return Ok(PooledResource::new_with_created_at(
-                        resource,
-                        self.return_tx.clone(),
-                        created_at,
-                        self.time_getter,
-                    )
-                    .with_return_notify(Arc::clone(&self.return_wakers)));
+                    return Ok(pooled);
                 }
 
                 // Try to create a new resource if under capacity
@@ -2138,29 +2198,44 @@ where
                     };
 
                     let committed = create_slot.commit();
+                    let checkout = committed.then(|| ActiveCheckoutGuard::new(self));
                     let acquire_duration =
                         Duration::from_nanos(get_now().duration_since(acquire_start));
 
-                    // Record metrics for create and acquire
+                    // The factory succeeded even if handoff is interrupted.
                     #[cfg(feature = "metrics")]
                     if let Some(ref metrics) = self.metrics {
                         metrics.record_created();
-                        if committed {
-                            metrics.record_acquired(acquire_duration);
-                        }
-                        self.update_metrics_gauges();
                     }
 
                     if !committed {
+                        #[cfg(feature = "metrics")]
+                        self.update_metrics_gauges();
                         return Err(PoolError::Closed);
                     }
 
-                    return Ok(PooledResource::new_with_time_getter(
+                    let acquired_at = (self.time_getter)();
+                    let pooled = PooledResource::new_with_timestamps(
                         resource,
                         self.return_tx.clone(),
+                        acquired_at,
+                        acquired_at,
                         self.time_getter,
                     )
-                    .with_return_notify(Arc::clone(&self.return_wakers)));
+                    .with_return_notify(Arc::clone(&self.return_wakers));
+                    checkout
+                        .expect("committed creation slot arms active checkout guard")
+                        .commit();
+
+                    // Count the acquisition only after responsibility has
+                    // transferred to the complete wrapper.
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_acquired(acquire_duration);
+                        self.update_metrics_gauges();
+                    }
+
+                    return Ok(pooled);
                 }
 
                 // Check for timeout
@@ -2226,41 +2301,47 @@ where
         }
 
         while let Some((resource, created_at)) = self.try_get_idle(None) {
+            let mut checkout = ActiveCheckoutGuard::new(self);
             let is_healthy = if self.config.health_check_on_acquire {
-                let mut guard = HealthCheckGuard {
-                    pool: self,
-                    completed: false,
-                };
+                checkout.begin_health_check();
                 let healthy = self.is_healthy(&resource);
-                guard.completed = true;
-                let _ = guard.completed;
+                checkout.finish_health_check();
                 healthy
             } else {
                 true
             };
 
             if !is_healthy {
-                self.reject_unhealthy_idle_resource();
+                checkout.reject_unhealthy();
                 continue;
             }
 
-            // Record metrics for the acquire
             #[cfg(feature = "metrics")]
-            if let Some(ref metrics) = self.metrics {
-                metrics
-                    .record_acquired((self.time_getter)().saturating_duration_since(acquire_start));
+            let acquire_duration = self
+                .metrics
+                .as_ref()
+                .map(|_| (self.time_getter)().saturating_duration_since(acquire_start));
+
+            let acquired_at = (self.time_getter)();
+            let pooled = PooledResource::new_with_timestamps(
+                resource,
+                self.return_tx.clone(),
+                acquired_at,
+                created_at,
+                self.time_getter,
+            )
+            .with_return_notify(Arc::clone(&self.return_wakers));
+            checkout.commit();
+
+            // Count the acquisition only after responsibility has transferred
+            // to the complete wrapper.
+            #[cfg(feature = "metrics")]
+            if let (Some(metrics), Some(acquire_duration)) = (&self.metrics, acquire_duration) {
+                metrics.record_acquired(acquire_duration);
                 self.update_metrics_gauges();
             }
 
-            return Some(
-                PooledResource::new_with_created_at(
-                    resource,
-                    self.return_tx.clone(),
-                    created_at,
-                    self.time_getter,
-                )
-                .with_return_notify(Arc::clone(&self.return_wakers)),
-            );
+            return Some(pooled);
         }
 
         None
@@ -2734,6 +2815,8 @@ mod tests {
     std::thread_local! {
         static TEST_POOL_TIME_BASE: RefCell<Option<Instant>> = const { RefCell::new(None) };
         static TEST_POOL_TIME_OFFSET_NANOS: Cell<u64> = const { Cell::new(0) };
+        static TEST_POOL_TIME_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
+        static TEST_POOL_TIME_PANIC_ON_CALL: Cell<Option<usize>> = const { Cell::new(None) };
     }
 
     fn test_pool_time_now() -> Instant {
@@ -2752,6 +2835,42 @@ mod tests {
             *base.borrow_mut() = None;
         });
         TEST_POOL_TIME_OFFSET_NANOS.with(|offset| offset.set(0));
+        TEST_POOL_TIME_CALL_COUNT.with(|count| count.set(0));
+        TEST_POOL_TIME_PANIC_ON_CALL.with(|call| call.set(None));
+    }
+
+    fn panic_once_test_pool_time_now() -> Instant {
+        let call = TEST_POOL_TIME_CALL_COUNT.with(|count| {
+            let call = count.get().saturating_add(1);
+            count.set(call);
+            call
+        });
+        let should_panic = TEST_POOL_TIME_PANIC_ON_CALL.with(|panic_on_call| {
+            if panic_on_call.get() == Some(call) {
+                panic_on_call.set(None);
+                true
+            } else {
+                false
+            }
+        });
+        assert!(!should_panic, "intentional pool time panic on call {call}");
+        test_pool_time_now()
+    }
+
+    fn panic_test_pool_time_on_call(call: usize) {
+        assert!(call > 0, "pool time call indices are one-based");
+        TEST_POOL_TIME_CALL_COUNT.with(|count| count.set(0));
+        TEST_POOL_TIME_PANIC_ON_CALL.with(|panic_on_call| panic_on_call.set(Some(call)));
+    }
+
+    fn test_pool_time_probe_state() -> (usize, Option<usize>) {
+        let calls = TEST_POOL_TIME_CALL_COUNT.with(Cell::get);
+        let panic_on_call = TEST_POOL_TIME_PANIC_ON_CALL.with(Cell::get);
+        (calls, panic_on_call)
+    }
+
+    fn disarm_test_pool_time_panic() {
+        TEST_POOL_TIME_PANIC_ON_CALL.with(|panic_on_call| panic_on_call.set(None));
     }
 
     fn set_test_pool_time_offset(offset: Duration) {
@@ -3299,6 +3418,19 @@ mod tests {
         Box<dyn Future<Output = Result<u32, Box<dyn std::error::Error + Send + Sync>>> + Send>,
     > {
         Box::pin(async { Ok(42u32) })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn counting_factory(
+        created: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl Fn() -> Pin<
+        Box<dyn Future<Output = Result<usize, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+    > + Send
+    + Sync {
+        move || {
+            let id = created.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok(id) })
+        }
     }
 
     #[test]
@@ -5952,6 +6084,190 @@ mod tests {
         );
 
         crate::test_complete!("metamorphic_cancelled_waiter_preserves_reuse_identity");
+    }
+
+    #[test]
+    fn pool_fresh_handoff_time_panic_rolls_back_active_capacity() {
+        init_test("pool_fresh_handoff_time_panic_rolls_back_active_capacity");
+        let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = GenericPool::with_time_getter(
+            counting_factory(Arc::clone(&created)),
+            PoolConfig::with_max_size(1),
+            panic_once_test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+        panic_test_pool_time_on_call(2);
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures_lite::future::block_on(pool.acquire(&cx))
+        }));
+        let (time_calls, pending_panic) = test_pool_time_probe_state();
+        disarm_test_pool_time_panic();
+        assert!(
+            panic_result.is_err(),
+            "fresh wrapper construction must hit the injected time panic"
+        );
+        assert_eq!(time_calls, 2, "fresh handoff must reach the guarded clock");
+        assert_eq!(pending_panic, None, "fresh handoff must consume the probe");
+        assert_eq!(
+            created.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the panic must occur after one resource is created"
+        );
+
+        let after_panic = pool.stats();
+        assert_eq!(
+            after_panic.active, 0,
+            "fresh handoff panic rolls back active"
+        );
+        assert_eq!(after_panic.total, 0, "fresh handoff panic frees capacity");
+        assert_eq!(
+            after_panic.total_acquisitions, 0,
+            "a resource never handed out is not a completed acquisition"
+        );
+
+        let replacement = futures_lite::future::block_on(pool.acquire(&cx))
+            .expect("replacement acquire after fresh handoff panic");
+        assert_eq!(*replacement, 1, "replacement must use the recovered slot");
+        assert_eq!(
+            created.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "replacement must create in the recovered slot"
+        );
+        replacement.return_to_pool();
+        assert_eq!(pool.stats().idle, 1, "replacement remains reusable");
+
+        crate::test_complete!("pool_fresh_handoff_time_panic_rolls_back_active_capacity");
+    }
+
+    #[test]
+    fn pool_idle_handoff_time_panic_rolls_back_active_capacity() {
+        init_test("pool_idle_handoff_time_panic_rolls_back_active_capacity");
+        let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = GenericPool::with_time_getter(
+            counting_factory(Arc::clone(&created)),
+            PoolConfig::with_max_size(1),
+            panic_once_test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+
+        let initial = futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
+        initial.return_to_pool();
+        let baseline = pool.stats();
+        assert_eq!(
+            (
+                baseline.active,
+                baseline.idle,
+                baseline.total,
+                baseline.total_acquisitions,
+            ),
+            (0, 1, 1, 1),
+            "initial resource must be the sole idle slot"
+        );
+        panic_test_pool_time_on_call(2);
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures_lite::future::block_on(pool.acquire(&cx))
+        }));
+        let (time_calls, pending_panic) = test_pool_time_probe_state();
+        disarm_test_pool_time_panic();
+        assert!(
+            panic_result.is_err(),
+            "idle wrapper construction must hit the injected time panic"
+        );
+        assert_eq!(time_calls, 2, "idle handoff must reach the guarded clock");
+        assert_eq!(pending_panic, None, "idle handoff must consume the probe");
+
+        let after_panic = pool.stats();
+        assert_eq!(
+            after_panic.active, 0,
+            "idle handoff panic rolls back active"
+        );
+        assert_eq!(after_panic.idle, 0, "the detached resource was destroyed");
+        assert_eq!(after_panic.total, 0, "idle handoff panic frees capacity");
+        assert_eq!(
+            after_panic.total_acquisitions, baseline.total_acquisitions,
+            "failed idle handoff rolls back acquisition accounting"
+        );
+
+        let replacement = futures_lite::future::block_on(pool.acquire(&cx))
+            .expect("replacement acquire after idle handoff panic");
+        assert_eq!(*replacement, 1, "replacement must use the recovered slot");
+        assert_eq!(
+            created.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "replacement must create in the recovered slot"
+        );
+        replacement.return_to_pool();
+        assert_eq!(pool.stats().idle, 1, "replacement remains reusable");
+
+        crate::test_complete!("pool_idle_handoff_time_panic_rolls_back_active_capacity");
+    }
+
+    #[test]
+    fn pool_try_acquire_handoff_time_panic_rolls_back_active_capacity() {
+        init_test("pool_try_acquire_handoff_time_panic_rolls_back_active_capacity");
+        let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = GenericPool::with_time_getter(
+            counting_factory(Arc::clone(&created)),
+            PoolConfig::with_max_size(1),
+            panic_once_test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+
+        let initial = futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
+        initial.return_to_pool();
+        let baseline = pool.stats();
+        assert_eq!(
+            (
+                baseline.active,
+                baseline.idle,
+                baseline.total,
+                baseline.total_acquisitions,
+            ),
+            (0, 1, 1, 1),
+            "initial resource must be the sole idle slot"
+        );
+        panic_test_pool_time_on_call(3);
+
+        let panic_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.try_acquire()));
+        let (time_calls, pending_panic) = test_pool_time_probe_state();
+        disarm_test_pool_time_panic();
+        assert!(
+            panic_result.is_err(),
+            "try_acquire handoff must hit the injected time panic"
+        );
+        assert_eq!(
+            time_calls, 3,
+            "try_acquire handoff must reach the guarded clock"
+        );
+        assert_eq!(
+            pending_panic, None,
+            "try_acquire handoff must consume the probe"
+        );
+
+        let after_panic = pool.stats();
+        assert_eq!(after_panic.active, 0, "try_acquire panic rolls back active");
+        assert_eq!(after_panic.idle, 0, "the detached resource was destroyed");
+        assert_eq!(after_panic.total, 0, "try_acquire panic frees capacity");
+        assert_eq!(
+            after_panic.total_acquisitions, baseline.total_acquisitions,
+            "failed try_acquire handoff rolls back acquisition accounting"
+        );
+
+        let replacement = futures_lite::future::block_on(pool.acquire(&cx))
+            .expect("replacement acquire after try_acquire handoff panic");
+        assert_eq!(*replacement, 1, "replacement must use the recovered slot");
+        assert_eq!(
+            created.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "replacement must create in the recovered slot"
+        );
+        replacement.return_to_pool();
+        assert_eq!(pool.stats().idle, 1, "replacement remains reusable");
+
+        crate::test_complete!("pool_try_acquire_handoff_time_panic_rolls_back_active_capacity");
     }
 
     fn assert_panicking_resource_discard_releases_capacity(release_via_broken_drop: bool) {
