@@ -215,17 +215,11 @@ impl Transport {
     }
 
     const fn auto_fallback_order(
-        delta_enabled: bool,
+        _delta_enabled: bool,
         allow_plaintext_fallback: bool,
         rq_configured: bool,
     ) -> &'static [Self] {
-        if delta_enabled {
-            if allow_plaintext_fallback {
-                &[Self::Tcp]
-            } else {
-                &[]
-            }
-        } else if allow_plaintext_fallback && rq_configured {
+        if allow_plaintext_fallback && rq_configured {
             &[Self::Quic, Self::Rq, Self::Tcp]
         } else if allow_plaintext_fallback {
             &[Self::Quic, Self::Tcp]
@@ -381,19 +375,18 @@ struct SendArgs {
     /// Receiver quiet-drain window after each RQ round marker, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_ROUND_TAIL_DRAIN_MS)]
     rq_tail_drain_ms: u64,
-    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    /// Hex-encoded 32-byte ATP auth key, or set ATP_RQ_AUTH_KEY_HEX.
     ///
-    /// Direct RQ transfers require this unless --rq-allow-unauthenticated-lab
-    /// is explicitly set. Direct QUIC/TLS transfers authenticate symbol bytes
-    /// with QUIC 1-RTT AEAD and ignore this per-symbol HMAC key.
+    /// Direct RQ requires it unless lab mode is explicit. QUIC additionally
+    /// uses it for a live client proof before exposing destination delta state.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
-    /// Read one 64-hex RQ authentication key line from local stdin.
+    /// Read one 64-hex ATP authentication key line from local stdin.
     /// This avoids exposing a caller-supplied key in this process's argv.
     #[arg(long)]
     rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
-    /// Direct QUIC/TLS transfers are already transport-authenticated.
+    /// This does not enable QUIC delta without a shared authentication key.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
     // ─── QUIC (`--transport quic`) TLS material ───
@@ -426,7 +419,7 @@ struct SendArgs {
     /// transfer path.
     #[arg(long)]
     no_delta: bool,
-    /// Enable the legacy plaintext delta-state sidecar on direct RQ/QUIC sends.
+    /// Enable the legacy plaintext delta-state sidecar on direct RQ sends.
     /// This can leak hashes and can spoof AlreadyInSync; trusted labs only.
     #[arg(long)]
     allow_unauthenticated_delta_sidecar: bool,
@@ -487,13 +480,13 @@ struct RecvArgs {
     /// Receiver quiet-drain window after each RQ round marker, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_ROUND_TAIL_DRAIN_MS)]
     rq_tail_drain_ms: u64,
-    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    /// Hex-encoded 32-byte ATP auth key, or set ATP_RQ_AUTH_KEY_HEX.
     ///
-    /// Direct QUIC/TLS transfers authenticate symbol bytes with QUIC 1-RTT AEAD
-    /// and ignore this per-symbol HMAC key.
+    /// RQ uses it for symbols. QUIC additionally uses it to verify a live
+    /// client proof before reading receiver delta state.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
-    /// Read one 64-hex RQ authentication key line from stdin.
+    /// Read one 64-hex ATP authentication key line from stdin.
     #[arg(long, hide = true)]
     rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
@@ -511,7 +504,7 @@ struct RecvArgs {
     /// Disable receiver-side delta package application and state refresh.
     #[arg(long)]
     no_delta: bool,
-    /// Expose the legacy plaintext delta-state sidecar on listen-port + 1.
+    /// Expose the legacy plaintext RQ delta-state sidecar on listen-port + 1.
     /// This leaks receiver hashes/signatures; trusted labs only.
     #[arg(long)]
     allow_unauthenticated_delta_sidecar: bool,
@@ -1330,8 +1323,6 @@ fn default_quic_server_name_for_ssh(remote: &RemoteTarget) -> String {
     default_server_name(ssh_host_without_user(&remote.ssh_host))
 }
 
-/// Apply the direct QUIC/TLS authentication posture to a base QUIC config.
-#[cfg(feature = "tls")]
 /// Resolve the effective RaptorQ symbol size for a transport.
 ///
 /// An explicit `--symbol-size` always wins (and still fails closed downstream
@@ -1347,24 +1338,44 @@ fn resolved_symbol_size(explicit: Option<u16>, quic: bool) -> u16 {
     })
 }
 
+/// Apply the direct QUIC/TLS authentication posture to a base QUIC config.
+#[cfg(feature = "tls")]
 fn quic_with_transport_auth(
     base: asupersync::net::atp::transport_quic::QuicConfig,
     rq_auth_key_hex: Option<&str>,
-    _rq_allow_unauthenticated_lab: bool,
-) -> asupersync::net::atp::transport_quic::QuicConfig {
-    if rq_auth_key_hex.is_some() {
-        eprintln!(
-            "[atp] note: --rq-auth-key-hex is ignored on --transport quic — QUIC's TLS 1.3 AEAD \
-             already authenticates every symbol datagram"
-        );
+    rq_allow_unauthenticated_lab: bool,
+) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
+    let base = base.use_transport_authenticated_symbols();
+    let configured_key = configured_rq_auth_key(rq_auth_key_hex);
+    if rq_allow_unauthenticated_lab && configured_key.is_some() {
+        return Err(format!(
+            "--rq-allow-unauthenticated-lab conflicts with --rq-auth-key-hex/{RQ_AUTH_ENV}"
+        ));
     }
-    base.use_transport_authenticated_symbols()
+    if let Some(key_hex) = configured_key {
+        let key = auth_key_from_configured_hex(key_hex.as_str())?;
+        return Ok(base.with_delta_control_auth(SecurityContext::new(key)));
+    }
+    Ok(base)
+}
+
+#[cfg(feature = "tls")]
+fn quic_with_resolved_auth(
+    base: asupersync::net::atp::transport_quic::QuicConfig,
+    auth: &RqAuthChoice,
+) -> asupersync::net::atp::transport_quic::QuicConfig {
+    let base = base.use_transport_authenticated_symbols();
+    match auth {
+        RqAuthChoice::Key(key) => base.with_delta_control_auth(SecurityContext::new(key.clone())),
+        RqAuthChoice::UnauthenticatedLab => base,
+    }
 }
 
 /// Build the sending QUIC config: client TLS trust + transport auth + tuning.
 #[cfg(feature = "tls")]
 fn quic_config_send(
     args: &SendArgs,
+    auth_override: Option<&RqAuthChoice>,
 ) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
     use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicClientTls};
     use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
@@ -1392,17 +1403,21 @@ fn quic_config_send(
         repair_overhead: args.repair_overhead.max(1.0),
         round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
         max_transfer_bytes: args.max_bytes,
+        enable_delta: cli_quic_delta_enabled(args.no_delta),
         bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         metadata_policy: selected_cli_metadata_policy(),
         preserve_hardlinks: true,
         ..QuicConfig::default()
     };
-    let mut cfg = quic_with_transport_auth(
-        base,
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
-    );
+    let mut cfg = match auth_override {
+        Some(auth) => quic_with_resolved_auth(base, auth),
+        None => quic_with_transport_auth(
+            base,
+            args.rq_auth_key_hex.as_deref(),
+            args.rq_allow_unauthenticated_lab,
+        )?,
+    };
     cfg.client_tls = Some(QuicClientTls {
         server_name,
         config,
@@ -1414,6 +1429,7 @@ fn quic_config_send(
 #[cfg(feature = "tls")]
 fn quic_config_recv(
     args: &RecvArgs,
+    auth_override: Option<&RqAuthChoice>,
 ) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
     use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicServerTls};
     use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, server_config};
@@ -1437,17 +1453,21 @@ fn quic_config_recv(
         repair_overhead: args.repair_overhead.max(1.0),
         round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
         max_transfer_bytes: args.max_bytes,
+        enable_delta: cli_quic_delta_enabled(args.no_delta),
         accept_timeout: recv_listen_timeout(args)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         metadata_policy: selected_cli_metadata_policy(),
         preserve_hardlinks: true,
         ..QuicConfig::default()
     };
-    let mut cfg = quic_with_transport_auth(
-        base,
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
-    );
+    let mut cfg = match auth_override {
+        Some(auth) => quic_with_resolved_auth(base, auth),
+        None => quic_with_transport_auth(
+            base,
+            args.rq_auth_key_hex.as_deref(),
+            args.rq_allow_unauthenticated_lab,
+        )?,
+    };
     cfg.server_tls = Some(QuicServerTls { config });
     Ok(cfg)
 }
@@ -1814,10 +1834,17 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
         return run_send_dry_run(&args);
     }
     validate_auto_security_policy(&args)?;
-    if args.rq_auth_key_stdin && args.transport != Transport::Rq {
-        return Err("--rq-auth-key-stdin is only valid with --transport rq".to_string());
+    if args.rq_auth_key_stdin
+        && !matches!(
+            args.transport,
+            Transport::Rq | Transport::Quic | Transport::Auto
+        )
+    {
+        return Err(
+            "--rq-auth-key-stdin is valid only with --transport rq, quic, or auto".to_string(),
+        );
     }
-    let prepared_rq_auth = if args.rq_auth_key_stdin {
+    let prepared_auth = if args.rq_auth_key_stdin {
         let stdin = std::io::stdin();
         Some(resolve_rq_auth_choice_with_stdin(
             args.rq_auth_key_hex.take().map(SecretString::from_string),
@@ -1830,16 +1857,26 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
     };
     match resolve(&args.target) {
         Ok(addresses) => {
-            let rq_config_override = prepared_rq_auth
+            let rq_config_override = prepared_auth
                 .as_ref()
+                .filter(|_| matches!(args.transport, Transport::Rq | Transport::Auto))
                 .map(|auth| rq_send_config_with_auth(&args, auth))
                 .transpose()?;
-            drop(prepared_rq_auth);
-            run_send_to_addrs(args, &addresses, true, rq_config_override)
+            let quic_auth_override = matches!(args.transport, Transport::Quic | Transport::Auto)
+                .then(|| prepared_auth.clone())
+                .flatten();
+            drop(prepared_auth);
+            run_send_to_addrs(
+                args,
+                &addresses,
+                true,
+                rq_config_override,
+                quic_auth_override,
+            )
         }
         Err(resolve_error) => {
             if let Some(remote) = RemoteTarget::parse(&args.target) {
-                run_send_via_ssh(args, &remote, prepared_rq_auth)
+                run_send_via_ssh(args, &remote, prepared_auth)
             } else {
                 Err(resolve_error)
             }
@@ -1850,17 +1887,6 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
 fn validate_auto_security_policy(args: &SendArgs) -> Result<(), String> {
     if args.allow_plaintext_fallback && args.transport != Transport::Auto {
         return Err("--allow-plaintext-fallback is valid only with --transport auto".to_string());
-    }
-    if args.transport == Transport::Auto
-        && cli_content_delta_enabled(args.no_delta)
-        && !args.allow_plaintext_fallback
-    {
-        return Err(
-            "--transport auto with delta planning would select plaintext TCP; choose an explicit \
-             transport, pass --no-delta for QUIC-only fail-closed selection, or explicitly \
-             allow downgrade with --allow-plaintext-fallback"
-                .to_string(),
-        );
     }
     Ok(())
 }
@@ -3034,6 +3060,7 @@ fn run_send_to_addrs(
     addresses: &[SocketAddr],
     use_direct_delta_probe: bool,
     rq_config_override: Option<RqConfig>,
+    quic_auth_override: Option<RqAuthChoice>,
 ) -> Result<(), String> {
     let first_address = addresses
         .first()
@@ -3041,7 +3068,9 @@ fn run_send_to_addrs(
         .ok_or_else(|| "send target has no resolved addresses".to_string())?;
     let mut direct_delta_plan = None;
     let mut delta_package_guard = None;
-    if use_direct_delta_probe && let Some(delta) = prepare_direct_delta_send(&args, first_address)?
+    if use_direct_delta_probe
+        && args.transport == Transport::Rq
+        && let Some(delta) = prepare_direct_delta_send(&args, first_address)?
     {
         match delta {
             DeltaPreparedSend::Package {
@@ -3067,7 +3096,13 @@ fn run_send_to_addrs(
 
     let runtime = build_runtime(args.workers)?;
     let mut report = if args.transport == Transport::Auto {
-        run_send_auto_to_addrs(&runtime, &args, addresses)?
+        run_send_auto_to_addrs(
+            &runtime,
+            &args,
+            addresses,
+            rq_config_override.as_ref(),
+            quic_auth_override.as_ref(),
+        )?
     } else {
         try_address_candidates(args.transport, addresses, |address| {
             send_to_addr_with_transport(
@@ -3076,6 +3111,7 @@ fn run_send_to_addrs(
                 args.transport,
                 address,
                 rq_config_override.as_ref(),
+                quic_auth_override.as_ref(),
             )
         })
         .map_err(|failure| failure.message)?
@@ -3277,9 +3313,12 @@ fn run_send_auto_to_addrs(
     runtime: &asupersync::runtime::Runtime,
     args: &SendArgs,
     addresses: &[SocketAddr],
+    rq_config_override: Option<&RqConfig>,
+    quic_auth_override: Option<&RqAuthChoice>,
 ) -> Result<serde_json::Value, String> {
     let mut attempts = Vec::new();
-    let rq_configured = args.rq_allow_unauthenticated_lab
+    let rq_configured = rq_config_override.is_some()
+        || args.rq_allow_unauthenticated_lab
         || configured_rq_auth_key(args.rq_auth_key_hex.as_deref()).is_some();
     for transport in Transport::auto_fallback_order(
         cli_content_delta_enabled(args.no_delta),
@@ -3291,7 +3330,14 @@ fn run_send_auto_to_addrs(
     {
         eprintln!("[atp] transport selection: trying {}", transport.cli_arg());
         match try_address_candidates(transport, addresses, |address| {
-            send_to_addr_with_transport(runtime, args, transport, address, None)
+            send_to_addr_with_transport(
+                runtime,
+                args,
+                transport,
+                address,
+                rq_config_override,
+                quic_auth_override,
+            )
         }) {
             Ok(report) => {
                 eprintln!(
@@ -3335,6 +3381,7 @@ fn send_to_addr_with_transport(
     transport: Transport,
     addr: SocketAddr,
     rq_config_override: Option<&RqConfig>,
+    quic_auth_override: Option<&RqAuthChoice>,
 ) -> Result<serde_json::Value, SendTransportFailure> {
     let bwlimit_bps = normalize_bwlimit_bps(args.bwlimit_bps)?;
     if bwlimit_bps.is_some() && transport != Transport::Quic {
@@ -3429,7 +3476,7 @@ fn send_to_addr_with_transport(
         Transport::Quic => {
             #[cfg(feature = "tls")]
             {
-                let cfg = quic_config_send(args)?;
+                let cfg = quic_config_send(args, quic_auth_override)?;
                 let chosen_fanout = cfg.datagram_fanout.max(1);
                 let start = Instant::now();
                 let report = runtime
@@ -3552,7 +3599,7 @@ fn validate_ssh_bootstrap(
 fn run_send_via_ssh(
     mut args: SendArgs,
     remote: &RemoteTarget,
-    prepared_rq_auth: Option<RqAuthChoice>,
+    prepared_auth: Option<RqAuthChoice>,
 ) -> Result<(), String> {
     let remote_shell =
         resolve_remote_shell(args.remote_shell, &args.ssh_options, &remote.ssh_host)?;
@@ -3568,11 +3615,13 @@ fn run_send_via_ssh(
     }
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
 
-    // RQ still needs a per-symbol HMAC key. Direct QUIC/TLS authenticates the
-    // same symbol bytes with QUIC 1-RTT AEAD, so SSH bootstrap does not generate
-    // or deliver an RQ auth key for that transport.
-    let rq_auth = if args.transport == Transport::Rq {
-        match prepared_rq_auth {
+    // RQ authenticates symbols with this key. QUIC keeps symbols on its native
+    // AEAD boundary and uses the same protected bootstrap channel for the
+    // receiver-challenged delta-control proof.
+    let transfer_auth = if args.transport == Transport::Rq
+        || (args.transport == Transport::Quic && cli_quic_delta_enabled(args.no_delta))
+    {
+        match prepared_auth {
             Some(auth) => Some(auth),
             None => Some(resolve_rq_auth_choice_owned(
                 args.rq_auth_key_hex.take().map(SecretString::from_string),
@@ -3581,13 +3630,16 @@ fn run_send_via_ssh(
             )?),
         }
     } else {
-        debug_assert!(prepared_rq_auth.is_none());
-        None
+        prepared_auth
     };
-    let rq_config_override = rq_auth
+    let rq_config_override = transfer_auth
         .as_ref()
+        .filter(|_| args.transport == Transport::Rq)
         .map(|auth| rq_send_config_with_auth(&args, auth))
         .transpose()?;
+    let quic_auth_override = (args.transport == Transport::Quic)
+        .then(|| transfer_auth.clone())
+        .flatten();
     if args.transport == Transport::Quic
         && (args.server_cert.is_none() || args.server_key.is_none())
     {
@@ -3603,11 +3655,12 @@ fn run_send_via_ssh(
     if args.transport == Transport::Quic && args.server_name.is_none() {
         args.server_name = Some(default_quic_server_name_for_ssh(remote));
     }
-    let delta_package = if !cli_content_delta_enabled(args.no_delta) {
-        None
-    } else {
-        prepare_delta_ssh_send(&args, remote, remote_shell)?
-    };
+    let delta_package =
+        if args.transport != Transport::Rq || !cli_content_delta_enabled(args.no_delta) {
+            None
+        } else {
+            prepare_delta_ssh_send(&args, remote, remote_shell)?
+        };
     let mut delta_package_guard = None;
     if let Some(delta) = delta_package {
         match delta {
@@ -3632,16 +3685,22 @@ fn run_send_via_ssh(
     }
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addresses = resolve(&data_target)?;
-    let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref(), remote_shell)?;
-    let log_redaction = auth_key_hex_secret(rq_auth_key(rq_auth.as_ref()));
-    drop(rq_auth);
+    let mut child = spawn_remote_receiver(&args, remote, transfer_auth.as_ref(), remote_shell)?;
+    let log_redaction = auth_key_hex_secret(rq_auth_key(transfer_auth.as_ref()));
+    drop(transfer_auth);
     let stderr_log = wait_for_remote_ready(
         &mut child,
         Duration::from_secs(args.ssh_ready_timeout_secs.max(1)),
         log_redaction,
     )?;
 
-    let send_result = run_send_to_addrs(args, &addresses, false, rq_config_override);
+    let send_result = run_send_to_addrs(
+        args,
+        &addresses,
+        false,
+        rq_config_override,
+        quic_auth_override,
+    );
     if send_result.is_err() {
         terminate_and_reap(&mut child);
         return send_result;
@@ -4130,6 +4189,10 @@ fn cli_content_delta_enabled(no_delta: bool) -> bool {
     !no_delta && cli_delta_policy_is_content_only(&selected_cli_metadata_policy())
 }
 
+fn cli_quic_delta_enabled(no_delta: bool) -> bool {
+    !no_delta
+}
+
 fn validate_user_transfer_namespace(source: &Path) -> Result<(), String> {
     validate_user_transfer_namespace_entry(source, true)
 }
@@ -4289,16 +4352,11 @@ fn prepare_direct_delta_send(
     args: &SendArgs,
     addr: SocketAddr,
 ) -> Result<Option<DeltaPreparedSend>, String> {
-    if !cli_content_delta_enabled(args.no_delta) {
+    if args.transport != Transport::Rq || !cli_content_delta_enabled(args.no_delta) {
         return Ok(None);
     }
     if !args.allow_unauthenticated_delta_sidecar {
-        if !args.no_delta
-            && matches!(
-                args.transport,
-                Transport::Auto | Transport::Rq | Transport::Quic
-            )
-        {
+        if !args.no_delta && args.transport == Transport::Rq {
             eprintln!(
                 "[atp] delta planner: direct plaintext sidecar disabled; using full-object \
                  transfer (trusted labs may opt in with \
@@ -4307,12 +4365,7 @@ fn prepare_direct_delta_send(
         }
         return Ok(None);
     }
-    if args.no_delta
-        || !matches!(
-            args.transport,
-            Transport::Auto | Transport::Rq | Transport::Quic
-        )
-    {
+    if args.no_delta || args.transport != Transport::Rq {
         return Ok(None);
     }
 
@@ -8192,10 +8245,10 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
         );
     }
-    if args.rq_auth_key_stdin && args.transport != Transport::Rq {
-        return Err("--rq-auth-key-stdin is only valid with --transport rq".to_string());
+    if args.rq_auth_key_stdin && !matches!(args.transport, Transport::Rq | Transport::Quic) {
+        return Err("--rq-auth-key-stdin is valid only with --transport rq or quic".to_string());
     }
-    let mut rq_auth = if args.transport == Transport::Rq {
+    let mut rq_auth = if args.transport == Transport::Rq || args.rq_auth_key_stdin {
         let stdin = std::io::stdin();
         Some(resolve_rq_auth_choice_with_stdin(
             args.rq_auth_key_hex.take().map(SecretString::from_string),
@@ -8220,7 +8273,9 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
     let udp_bind_ip = listen.ip().to_string();
     let max_bytes = args.max_bytes;
     let delta_enabled = cli_content_delta_enabled(args.no_delta);
-    let direct_delta_sidecar_enabled = delta_enabled && args.allow_unauthenticated_delta_sidecar;
+    let direct_delta_sidecar_enabled = args.transport == Transport::Rq
+        && delta_enabled
+        && args.allow_unauthenticated_delta_sidecar;
 
     match args.transport {
         Transport::Auto => Err(
@@ -8387,7 +8442,8 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
         Transport::Quic => {
             #[cfg(feature = "tls")]
             {
-                let cfg = quic_config_recv(&args)?;
+                let cfg = quic_config_recv(&args, rq_auth.as_ref())?;
+                drop(rq_auth);
                 let chosen_fanout = cfg.datagram_fanout.max(1);
                 runtime.block_on(runtime.handle().spawn(async move {
                     use asupersync::net::atp::transport_quic::native_link::{
@@ -8767,11 +8823,13 @@ mod tests {
     }
 
     #[test]
-    fn cli_content_delta_falls_back_when_metadata_must_be_preserved() {
+    fn cli_quic_delta_supports_metadata_while_legacy_packaging_falls_back() {
         assert!(!cli_delta_policy_is_content_only(&MetadataPolicy::default()));
         assert!(cli_delta_policy_is_content_only(&MetadataPolicy::portable()));
         assert!(!cli_content_delta_enabled(false));
         assert!(!cli_content_delta_enabled(true));
+        assert!(cli_quic_delta_enabled(false));
+        assert!(!cli_quic_delta_enabled(true));
     }
 
     #[test]
@@ -9522,18 +9580,29 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[cfg(feature = "tls")]
     #[test]
-    fn direct_quic_uses_transport_auth_even_when_rq_key_is_configured() {
+    fn direct_quic_uses_configured_key_for_mutual_delta_control_auth() {
         let cfg = quic_with_transport_auth(
             asupersync::net::atp::transport_quic::QuicConfig::default(),
             Some(VALID_KEY_HEX),
             false,
-        );
+        )
+        .expect("configure QUIC authentication");
 
         assert_eq!(
             cfg.symbol_auth_mode(),
             asupersync::net::atp::transport_quic::QuicSymbolAuthMode::TransportAuthenticated
         );
+        assert!(cfg.delta_control_auth_context.is_some());
         assert!(cfg.validate().is_ok());
+        assert!(
+            quic_with_transport_auth(
+                asupersync::net::atp::transport_quic::QuicConfig::default(),
+                Some(VALID_KEY_HEX),
+                true,
+            )
+            .is_err(),
+            "direct and SSH QUIC must reject the same key plus lab-override conflict"
+        );
     }
 
     #[test]
@@ -10254,11 +10323,14 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn auto_transport_delta_requires_plaintext_opt_in() {
-        assert!(Transport::auto_fallback_order(true, false, true).is_empty());
+    fn auto_transport_delta_starts_with_authenticated_quic() {
+        assert_eq!(
+            Transport::auto_fallback_order(true, false, true),
+            &[Transport::Quic]
+        );
         assert_eq!(
             Transport::auto_fallback_order(true, true, true),
-            &[Transport::Tcp]
+            &[Transport::Quic, Transport::Rq, Transport::Tcp]
         );
     }
 
@@ -10332,7 +10404,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             "./source-does-not-need-to-exist",
             "127.0.0.1:9",
             "--transport",
-            "quic",
+            "rq",
         ]);
         let Command::Send(args) = cli.command else {
             panic!("expected send command");
@@ -10341,6 +10413,28 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert!(
             prepare_direct_delta_send(&args, "127.0.0.1:9".parse().unwrap())
                 .expect("disabled sidecar must not perform network I/O")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn quic_never_uses_plaintext_delta_sidecar_even_with_lab_opt_in() {
+        let cli = Cli::parse_from([
+            "atp",
+            "send",
+            "./source-does-not-need-to-exist",
+            "127.0.0.1:9",
+            "--transport",
+            "quic",
+            "--allow-unauthenticated-delta-sidecar",
+        ]);
+        let Command::Send(args) = cli.command else {
+            panic!("expected send command");
+        };
+
+        assert!(
+            prepare_direct_delta_send(&args, "127.0.0.1:9".parse().unwrap())
+                .expect("QUIC must not perform plaintext sidecar network I/O")
                 .is_none()
         );
     }

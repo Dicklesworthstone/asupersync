@@ -51,6 +51,7 @@ use crate::atp::safety::{
     portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
     validate_portable_relative_path,
 };
+use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
@@ -127,8 +128,6 @@ const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
 /// once. This bounds child task fan-out while preventing one slow peer from
 /// monopolizing the accept loop.
 pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
-
-const DELTA_CHUNK_SCHEMA: &str = "asupersync.atp.tcp.delta-chunk-manifest.v1";
 
 /// Transport tuning knobs.
 ///
@@ -293,6 +292,7 @@ struct HelloAck {
 /// trees slow on the QUIC tier (mirrors the RaptorQ tier's E-15 coalescing,
 /// plus per-member metadata because this wire family preserves metadata).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PackedMember {
     /// Path of this file relative to the transfer root.
     pub rel_path: String,
@@ -310,6 +310,7 @@ pub struct PackedMember {
 
 /// One file within a transfer manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestEntry {
     /// Stable index within the transfer (manifest order).
     pub index: u32,
@@ -336,6 +337,7 @@ pub struct ManifestEntry {
 
 /// Transfer manifest carried in the `ObjectManifest` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TransferManifest {
     /// Stable transfer identifier (hex).
     pub transfer_id: String,
@@ -370,6 +372,7 @@ pub struct TransferManifest {
 
 /// Receipt returned by the receiver in the `Proof` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReceiveReceipt {
     /// Whether the receiver committed every integrity-verified entry.
     ///
@@ -578,7 +581,7 @@ mod unused_delta_legacy {
     fn delta_wire_to_manifest(
         wire: &DeltaManifestWire,
     ) -> Result<PersistentChunkManifest, TransportError> {
-        if wire.schema != DELTA_CHUNK_SCHEMA {
+        if wire.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
             return Err(TransportError::Frame(format!(
                 "unsupported delta manifest schema: {}",
                 wire.schema
@@ -705,7 +708,7 @@ mod unused_delta_legacy {
         let manifest = PersistentChunkManifest::new(tree_id.to_string(), refs)
             .map_err(|err| TransportError::Frame(format!("build delta manifest: {err}")))?;
         let wire = DeltaManifestWire {
-            schema: DELTA_CHUNK_SCHEMA.to_string(),
+            schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
             tree_id: tree_id.to_string(),
             chunk_size,
             total_size_bytes: manifest.total_size_bytes,
@@ -1726,7 +1729,7 @@ fn decode_hex_32(hex_value: &str, label: &str) -> Result<[u8; 32], TransportErro
 fn planner_manifest_from_wire(
     manifest: &DeltaManifestWire,
 ) -> Result<PersistentChunkManifest, TransportError> {
-    if manifest.schema != DELTA_CHUNK_SCHEMA {
+    if manifest.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
         return Err(TransportError::Frame(format!(
             "unsupported delta manifest schema: {}",
             manifest.schema
@@ -1813,7 +1816,7 @@ async fn build_delta_manifest_from_entries(
     let planner = PersistentChunkManifest::new(tree_id.clone(), planner_chunks)
         .map_err(|err| TransportError::Frame(format!("build sender delta manifest: {err}")))?;
     Ok(DeltaManifestWire {
-        schema: DELTA_CHUNK_SCHEMA.to_string(),
+        schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
         tree_id,
         chunk_size,
         total_size_bytes: planner.total_size_bytes,
@@ -4671,7 +4674,7 @@ mod tests {
     #[test]
     fn manifest_json_roundtrips() {
         let delta_manifest = DeltaManifestWire {
-            schema: DELTA_CHUNK_SCHEMA.to_string(),
+            schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
             tree_id: "data".to_string(),
             chunk_size: 64 * 1024,
             total_size_bytes: 9,

@@ -10,8 +10,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical schema tag for ATP's receiver-driven delta chunk manifest.
+pub const ATP_DELTA_CHUNK_MANIFEST_SCHEMA: &str = "asupersync.atp.tcp.delta-chunk-manifest.v1";
+
 /// Sender-side chunk manifest used by receiver-driven delta planning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DeltaManifestWire {
     /// Stable schema tag for fail-closed receiver decoding.
     pub schema: String,
@@ -29,6 +33,7 @@ pub struct DeltaManifestWire {
 
 /// One chunk ref in the sender delta manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
 pub struct DeltaChunkWire {
     /// Planner chunk index in logical transfer order.
     pub index: u32,
@@ -47,7 +52,7 @@ pub struct DeltaChunkWire {
 }
 
 /// Receiver-selected wire mode for one delta-capable object request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeltaWireMode {
     /// Send every object byte through the transport's ordinary full path.
@@ -60,6 +65,7 @@ pub(crate) enum DeltaWireMode {
 
 /// Receiver response to a sender's delta-capable object manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DeltaObjectRequest {
     pub(crate) mode: DeltaWireMode,
     #[serde(skip_serializing_if = "Option::is_none")]

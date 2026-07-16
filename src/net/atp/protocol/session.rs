@@ -133,6 +133,13 @@ impl TransferNonce {
 pub struct SessionId([u8; 32]);
 
 impl SessionId {
+    /// Construct a session id from a domain-separated protocol digest.
+    #[cfg(any(feature = "tls", test))]
+    #[must_use]
+    pub(crate) const fn from_digest(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
     /// Borrow the session-id bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {

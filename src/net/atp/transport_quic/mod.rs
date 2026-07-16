@@ -81,6 +81,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::atp::delta::{CasChunkRef, PersistentChunkManifest};
 use crate::atp::object::{ContentId, MetadataPolicy};
 use crate::atp::safety::{
     portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
@@ -99,7 +100,13 @@ use crate::encoding::EncodingPipeline;
 use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
+use crate::net::atp::protocol::session::TransferNonce;
+#[cfg(any(feature = "tls", test))]
+use crate::net::atp::protocol::session::{PeerId, SessionId};
 use crate::net::atp::quic::AtpTransportMetrics;
+use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
+#[cfg(any(feature = "tls", test))]
+use crate::net::atp::transport_common::metadata::read_entry_metadata;
 use crate::net::atp::transport_common::metadata::{
     HardlinkIdentity, commit_hardlink_transactionally, commit_symlink_transactionally,
     path_is_link_or_reparse, validate_entry_metadata_for_receive,
@@ -110,19 +117,22 @@ use crate::net::atp::transport_common::metadata::{
     SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
 };
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
+use crate::net::atp::transport_common::{
+    DeltaChunkWire, DeltaManifestWire, EntryDigest, EntryMetadata, FileKind, MetadataApplyReport,
+    StreamingError, apply_entry_metadata, capture_directory_metadata_manifest,
+    flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
+    metadata_commitment,
+};
+#[cfg(any(feature = "tls", test))]
+use crate::net::atp::transport_common::{DeltaObjectRequest, DeltaWireMode};
 #[cfg(test)]
 use crate::net::atp::transport_common::{DirectoryMetadataEntry, DirectoryMetadataManifest};
-use crate::net::atp::transport_common::{
-    EntryDigest, EntryMetadata, FileKind, MetadataApplyReport, StreamingError,
-    apply_entry_metadata, capture_directory_metadata_manifest, flat_merkle_root_from_digests,
-    flat_merkle_root_from_slices, hash_file_streaming, hex_encode, metadata_commitment,
-};
 use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
     QuicConnection, QuicPathStats, QuicTransportMachine, StreamDirection, StreamId, StreamRole,
     StreamTableError,
 };
-use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use crate::security::{AuthMode, AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::transport::{
     AggregatorConfig, MultipathAggregator, PathId, ReordererConfig, TransportPath,
 };
@@ -456,6 +466,21 @@ pub struct QuicConfig {
     pub round0_loss_target: f64,
     /// Maximum total bytes a single transfer may carry.
     pub max_transfer_bytes: u64,
+    /// Enable receiver-driven delta negotiation on the authenticated control stream.
+    ///
+    /// The first rollout supports a live already-in-sync receipt for one
+    /// unpacked regular file and requires a strict shared [`SecurityContext`]
+    /// for receiver-challenged client proof. Server-authenticated TLS without
+    /// that key stays on the full-object path and never probes delta state.
+    /// This gate does not add client authorization to ordinary full uploads.
+    pub enable_delta: bool,
+    /// Shared strict authentication context for receiver-challenged delta control.
+    ///
+    /// This is deliberately separate from [`Self::symbol_auth_context`]. Native
+    /// QUIC keeps source symbols on its reliable transport-authenticated stream,
+    /// while this context proves possession of the shared key before receiver
+    /// filesystem state is inspected or disclosed.
+    pub delta_control_auth_context: Option<SecurityContext>,
     /// Maximum time to wait for the next protocol frame before failing closed.
     pub idle_timeout: Duration,
     /// Maximum time to wait for the QUIC handshake to complete.
@@ -547,6 +572,8 @@ impl Default for QuicConfig {
             repair_overhead: DEFAULT_REPAIR_OVERHEAD,
             round0_loss_target: 0.0,
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
+            enable_delta: false,
+            delta_control_auth_context: None,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             accept_timeout: DEFAULT_ACCEPT_TIMEOUT,
@@ -571,6 +598,13 @@ impl Default for QuicConfig {
 }
 
 impl QuicConfig {
+    /// Require receiver-challenged delta control authentication with this context.
+    #[must_use]
+    pub fn with_delta_control_auth(mut self, context: SecurityContext) -> Self {
+        self.delta_control_auth_context = Some(context);
+        self
+    }
+
     /// Require per-symbol authentication with this context.
     #[must_use]
     pub fn with_symbol_auth(mut self, context: SecurityContext) -> Self {
@@ -2203,6 +2237,7 @@ impl From<SymbolDatagramError> for QuicTransportError {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct QuicHello {
     protocol: u32,
     role: String,
@@ -2217,10 +2252,14 @@ struct QuicHello {
     source_stream_id: Option<u64>,
     #[serde(default)]
     total_bytes: u64,
+    /// Fresh sender challenge offered only for authenticated delta control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_transfer_nonce: Option<TransferNonce>,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct QuicHelloAck {
     accepted: bool,
     peer_id: String,
@@ -2236,6 +2275,66 @@ struct QuicHelloAck {
     source_stream_recv_window: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Echo of the sender's delta challenge when the receiver accepts delta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_transfer_nonce: Option<TransferNonce>,
+    /// Fresh receiver challenge for cross-session replay rejection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_receiver_nonce: Option<TransferNonce>,
+    /// Opaque commitment to the receiver's configured destination root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_destination_root: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(feature = "tls", test))]
+struct QuicDeltaHandshakeContext {
+    sender_nonce: TransferNonce,
+    receiver_nonce: TransferNonce,
+    destination_root: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(feature = "tls", test))]
+struct QuicDeltaSessionContext {
+    session_id: SessionId,
+    destination_root: [u8; 32],
+}
+
+/// Sender proof of live PSK possession over the receiver-challenged delta session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg(any(feature = "tls", test))]
+struct QuicDeltaManifestEnvelope {
+    session_id: SessionId,
+    destination_root: [u8; 32],
+    control_seq: u64,
+    manifest: TransferManifest,
+    client_auth_tag: [u8; 32],
+}
+
+/// QUIC-only binding around the TCP-compatible inner delta request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg(any(feature = "tls", test))]
+struct QuicDeltaObjectRequest {
+    session_id: SessionId,
+    transfer_id: String,
+    destination_root: [u8; 32],
+    control_seq: u64,
+    request: DeltaObjectRequest,
+}
+
+/// Terminal proof for an authenticated QUIC delta no-op.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg(any(feature = "tls", test))]
+struct QuicDeltaProof {
+    session_id: SessionId,
+    transfer_id: String,
+    destination_root: [u8; 32],
+    control_seq: u64,
+    receipt: ReceiveReceipt,
 }
 
 /// Sender → receiver marker for one completed QUIC symbol spray round.
@@ -3571,6 +3670,247 @@ enum QuicBuildItem {
     Pack(Vec<usize>),
 }
 
+const QUIC_DELTA_MAX_MANIFEST_CHUNKS: u64 = 4_096;
+const QUIC_DELTA_ENVELOPE_WIRE_BUDGET: usize = 2 * 1024;
+
+fn quic_delta_control_auth_context(config: &QuicConfig) -> Option<&SecurityContext> {
+    config
+        .delta_control_auth_context
+        .as_ref()
+        .filter(|context| context.mode() == AuthMode::Strict)
+}
+
+fn quic_delta_manifest_entry(manifest: &TransferManifest) -> Option<&ManifestEntry> {
+    let [entry] = manifest.entries.as_slice() else {
+        return None;
+    };
+    let metadata = entry.metadata.clone().unwrap_or_default();
+    (!manifest.is_directory
+        && entry.members.is_empty()
+        && matches!(metadata.file_kind, FileKind::Regular)
+        && metadata.hardlink_target.is_none()
+        && metadata.symlink_target.is_none()
+        && metadata.symlink_target_info.is_none())
+    .then_some(entry)
+}
+
+async fn build_quic_delta_manifest_for_file(
+    cx: &Cx,
+    tree_id: &str,
+    path: &Path,
+    entry_index: u32,
+    rel_path: &str,
+    expected_size: u64,
+    expected_sha256_hex: &str,
+    chunk_size: usize,
+) -> Result<DeltaManifestWire, QuicTransportError> {
+    const OBJECT_DATA_HEADER_BYTES: usize = 12;
+    let max_chunk_size = usize::try_from(MAX_FRAME_SIZE)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(OBJECT_DATA_HEADER_BYTES);
+    let chunk_size = chunk_size.max(1).min(max_chunk_size);
+    let mut file = crate::fs::File::open(path)
+        .await
+        .map_err(|error| QuicTransportError::Source(format!("{}: {error}", path.display())))?;
+    let mut buf = vec![0u8; chunk_size];
+    let mut chunks = Vec::new();
+    let mut planner_chunks = Vec::new();
+    let mut offset = 0u64;
+    let mut index = 0u32;
+    let mut sha256 = Sha256::new();
+    let mut content_id = ContentId::streaming();
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let read = file
+            .read(&mut buf)
+            .await
+            .map_err(|error| QuicTransportError::Source(format!("{}: {error}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        let bytes = &buf[..read];
+        sha256.update(bytes);
+        content_id.update(bytes);
+        let size_bytes = u64::try_from(read)
+            .map_err(|_| QuicTransportError::Control("delta chunk size overflow".to_string()))?;
+        let content_id = ContentId::from_bytes(bytes);
+        planner_chunks.push(CasChunkRef {
+            index,
+            byte_offset: offset,
+            size_bytes,
+            content_id: content_id.clone(),
+        });
+        chunks.push(DeltaChunkWire {
+            index,
+            entry_index,
+            rel_path: rel_path.to_string(),
+            entry_offset: offset,
+            stream_offset: offset,
+            size_bytes,
+            content_id_hex: content_id.to_hex(),
+        });
+        index = index
+            .checked_add(1)
+            .ok_or_else(|| QuicTransportError::Control("delta chunk index overflow".to_string()))?;
+        offset = offset.checked_add(size_bytes).ok_or_else(|| {
+            QuicTransportError::Control("delta chunk offset overflow".to_string())
+        })?;
+    }
+    if offset != expected_size {
+        return Err(QuicTransportError::Source(format!(
+            "{} changed while building QUIC delta manifest (read {offset} bytes, expected {})",
+            path.display(),
+            expected_size
+        )));
+    }
+    let content_sha256: [u8; 32] = sha256.finalize().into();
+    if hex_encode(&content_sha256) != expected_sha256_hex
+        || flat_merkle_root_from_digests(&[EntryDigest {
+            rel_path: rel_path.to_string(),
+            size: offset,
+            content_id: crate::atp::object::ObjectId::content(content_id.finalize()),
+            content_sha256,
+        }]) != tree_id
+    {
+        return Err(QuicTransportError::Source(format!(
+            "{} changed while building its QUIC delta manifest",
+            path.display()
+        )));
+    }
+    let planner =
+        PersistentChunkManifest::new(tree_id.to_string(), planner_chunks).map_err(|error| {
+            QuicTransportError::Control(format!("build QUIC delta manifest: {error}"))
+        })?;
+    Ok(DeltaManifestWire {
+        schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
+        tree_id: tree_id.to_string(),
+        chunk_size,
+        total_size_bytes: planner.total_size_bytes,
+        merkle_root_hex: planner.merkle_root.to_hex(),
+        chunks,
+    })
+}
+
+async fn maybe_attach_quic_delta_manifest(
+    cx: &Cx,
+    manifest: &mut TransferManifest,
+    entries: &[QuicSourceEntry],
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    let Some(manifest_entry) = quic_delta_manifest_entry(manifest) else {
+        return Ok(());
+    };
+    let [source_entry] = entries else {
+        return Ok(());
+    };
+    if !config.enable_delta
+        || quic_delta_control_auth_context(config).is_none()
+        || source_entry.index != manifest_entry.index
+        || source_entry.rel_path != manifest_entry.rel_path
+        || source_entry.size != manifest_entry.size
+        || source_entry.sha256_hex != manifest_entry.sha256_hex
+    {
+        return Ok(());
+    }
+    let chunk_size = config.chunk_size.max(1).min(
+        usize::try_from(MAX_FRAME_SIZE)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(12),
+    );
+    let chunk_size_u64 = u64::try_from(chunk_size).unwrap_or(u64::MAX);
+    if manifest_entry.size.div_ceil(chunk_size_u64) > QUIC_DELTA_MAX_MANIFEST_CHUNKS {
+        return Ok(());
+    }
+    let delta = build_quic_delta_manifest_for_file(
+        cx,
+        &manifest.merkle_root_hex,
+        &source_entry.abs_path,
+        source_entry.index,
+        &source_entry.rel_path,
+        source_entry.size,
+        &source_entry.sha256_hex,
+        chunk_size,
+    )
+    .await?;
+    manifest.delta_manifest = Some(delta);
+    match json_frame(FrameType::ObjectManifest, manifest) {
+        Ok(frame)
+            if frame.payload().len()
+                <= usize::try_from(MAX_FRAME_SIZE)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(QUIC_DELTA_ENVELOPE_WIRE_BUDGET) => {}
+        Ok(_) => {
+            manifest.delta_manifest = None;
+            cx.trace_with_fields(
+                "atp_quic.delta_manifest_fallback",
+                &[
+                    ("reason", "authenticated_envelope_budget"),
+                    ("mode", "full_object"),
+                ],
+            );
+        }
+        Err(QuicTransportError::Frame(reason)) => {
+            manifest.delta_manifest = None;
+            cx.trace_with_fields(
+                "atp_quic.delta_manifest_fallback",
+                &[("reason", reason.as_str()), ("mode", "full_object")],
+            );
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "tls", test))]
+async fn validate_quic_prepared_delta_source_unchanged(
+    cx: &Cx,
+    prepared: &QuicPreparedSource,
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    let manifest = &prepared.manifest;
+    let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        QuicTransportError::Control(
+            "cannot revalidate a prepared QUIC source without a delta manifest".to_string(),
+        )
+    })?;
+    let entry = quic_delta_manifest_entry(manifest).ok_or_else(|| {
+        QuicTransportError::Control(
+            "prepared QUIC delta source no longer has a supported transfer shape".to_string(),
+        )
+    })?;
+    let [source] = prepared.entries.as_slice() else {
+        return Err(QuicTransportError::Control(
+            "prepared QUIC delta source must contain exactly one entry".to_string(),
+        ));
+    };
+    let expected_metadata = entry.metadata.clone().unwrap_or_default();
+    if read_entry_metadata(&source.abs_path, &config.metadata_policy).await? != expected_metadata {
+        return Err(QuicTransportError::Source(
+            "prepared QUIC source metadata changed before delta no-op completion".to_string(),
+        ));
+    }
+    let current = build_quic_delta_manifest_for_file(
+        cx,
+        &manifest.merkle_root_hex,
+        &source.abs_path,
+        entry.index,
+        &entry.rel_path,
+        entry.size,
+        &entry.sha256_hex,
+        delta.chunk_size,
+    )
+    .await?;
+    if current != *delta
+        || read_entry_metadata(&source.abs_path, &config.metadata_policy).await?
+            != expected_metadata
+    {
+        return Err(QuicTransportError::Integrity(
+            "prepared QUIC source changed before delta no-op completion".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn quic_flush_pack_group(
     items: &mut Vec<QuicBuildItem>,
     group: &mut Vec<usize>,
@@ -3907,7 +4247,6 @@ async fn prepare_source_manifest(
     // Computed from the built entries (members flattened) so the sender and
     // receiver commitments are symmetric by construction.
     manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
-    validate_quic_manifest(&manifest, &effective_config)?;
 
     let entries = manifest
         .entries
@@ -3922,6 +4261,9 @@ async fn prepare_source_manifest(
             sha256_hex: entry.sha256_hex.clone(),
         })
         .collect::<Vec<_>>();
+
+    maybe_attach_quic_delta_manifest(cx, &mut manifest, &entries, &effective_config).await?;
+    validate_quic_manifest(&manifest, &effective_config)?;
 
     Ok(QuicPreparedSource {
         manifest,
@@ -6141,7 +6483,7 @@ fn next_native_control_frame(
 
 #[allow(dead_code)]
 fn sender_hello(peer_id: &str, config: &QuicConfig, symbol_auth: bool) -> QuicHello {
-    sender_hello_with_source_stream(peer_id, config, symbol_auth, None, 0)
+    sender_hello_with_source_stream(peer_id, config, symbol_auth, None, 0, None)
 }
 
 #[allow(dead_code)]
@@ -6151,6 +6493,7 @@ fn sender_hello_with_source_stream(
     symbol_auth: bool,
     source_stream: Option<StreamId>,
     total_bytes: u64,
+    delta_transfer_nonce: Option<TransferNonce>,
 ) -> QuicHello {
     QuicHello {
         protocol: ATP_QUIC_PROTOCOL,
@@ -6162,7 +6505,499 @@ fn sender_hello_with_source_stream(
         source_stream: source_stream.is_some(),
         source_stream_id: source_stream.map(|stream| stream.0),
         total_bytes,
+        delta_transfer_nonce,
     }
+}
+
+#[cfg(feature = "tls")]
+fn fresh_quic_delta_nonce(
+    cx: &Cx,
+    role: &'static [u8],
+    avoid: Option<TransferNonce>,
+) -> Result<TransferNonce, QuicTransportError> {
+    for attempt in 0u32..4 {
+        let mut entropy = [0u8; 32];
+        cx.random_bytes(&mut entropy);
+        let mut hasher = Sha256::new();
+        hasher.update(b"ATP-QUIC-DELTA-NONCE-V1\0");
+        hasher.update(u64::try_from(role.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(role);
+        hasher.update(attempt.to_be_bytes());
+        hasher.update(entropy);
+        let nonce = TransferNonce::new(hasher.finalize().into());
+        if !nonce.is_zero() && Some(nonce) != avoid {
+            return Ok(nonce);
+        }
+    }
+    Err(QuicTransportError::Control(
+        "unable to derive a distinct non-zero QUIC delta nonce".to_string(),
+    ))
+}
+
+#[cfg(any(feature = "tls", test))]
+fn quic_delta_destination_root_commitment(
+    context: &SecurityContext,
+    receiver_nonce: TransferNonce,
+    dest_dir: &Path,
+) -> Result<[u8; 32], QuicTransportError> {
+    if context.mode() != AuthMode::Strict {
+        return Err(QuicTransportError::Config(
+            "QUIC delta destination binding requires a strict authentication context".to_string(),
+        ));
+    }
+    let encoded_path = dest_dir.as_os_str().as_encoded_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-QUIC-DELTA-DESTINATION-ROOT-V1\0");
+    hasher.update(receiver_nonce.as_bytes());
+    hasher.update(
+        u64::try_from(encoded_path.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(encoded_path);
+    let transcript_digest: [u8; 32] = hasher.finalize().into();
+    let symbol = Symbol::new(
+        SymbolId::new(
+            ObjectId::new(0x4154_502d_5155_4943, 0x2d44_454c_5441_2d44),
+            0,
+            0,
+        ),
+        transcript_digest.to_vec(),
+        SymbolKind::Source,
+    );
+    let control = context.derive_context(b"atp-quic-delta-destination-root-v1");
+    Ok(*control.sign_symbol_tag(&symbol).as_bytes())
+}
+
+fn quic_decode_delta_root(value: &str, label: &str) -> Result<[u8; 32], QuicTransportError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(QuicTransportError::Control(format!(
+            "{label} must be a canonical 64-character lowercase hex digest"
+        )));
+    }
+    let mut decoded = [0u8; 32];
+    hex::decode_to_slice(value, &mut decoded)
+        .map_err(|error| QuicTransportError::Control(format!("decode {label}: {error}")))?;
+    Ok(decoded)
+}
+
+#[cfg(any(feature = "tls", test))]
+fn quic_delta_hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(bytes);
+}
+
+#[cfg(any(feature = "tls", test))]
+fn derive_quic_delta_session(
+    handshake: QuicDeltaHandshakeContext,
+    sender_peer_id: &str,
+    receiver_peer_id: &str,
+    manifest: &TransferManifest,
+) -> Result<QuicDeltaSessionContext, QuicTransportError> {
+    let delta_manifest = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        QuicTransportError::Control(
+            "delta-bound QUIC session requires a delta manifest".to_string(),
+        )
+    })?;
+    let outer_root = quic_decode_delta_root(&manifest.merkle_root_hex, "manifest Merkle root")?;
+    let delta_root = quic_decode_delta_root(
+        &delta_manifest.merkle_root_hex,
+        "delta manifest Merkle root",
+    )?;
+    let sender = PeerId::from_label(sender_peer_id);
+    let receiver = PeerId::from_label(receiver_peer_id);
+
+    // These application labels provide transcript domain separation only;
+    // they are not asserted to be TLS certificate identities.
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-QUIC-DELTA-SESSION-V1\0");
+    hasher.update(ATP_QUIC_PROTOCOL.to_be_bytes());
+    hasher.update(handshake.sender_nonce.as_bytes());
+    hasher.update(handshake.receiver_nonce.as_bytes());
+    hasher.update(handshake.destination_root);
+    quic_delta_hash_len_prefixed(&mut hasher, sender.as_bytes());
+    quic_delta_hash_len_prefixed(&mut hasher, receiver.as_bytes());
+    quic_delta_hash_len_prefixed(&mut hasher, manifest.transfer_id.as_bytes());
+    quic_delta_hash_len_prefixed(&mut hasher, manifest.root_name.as_bytes());
+    hasher.update([u8::from(manifest.is_directory)]);
+    hasher.update(manifest.total_bytes.to_be_bytes());
+    hasher.update(outer_root);
+    hasher.update(delta_root);
+    match manifest.metadata_root_hex.as_deref() {
+        Some(root) => {
+            hasher.update([1]);
+            hasher.update(quic_decode_delta_root(root, "manifest metadata root")?);
+        }
+        None => hasher.update([0]),
+    }
+
+    Ok(QuicDeltaSessionContext {
+        session_id: SessionId::from_digest(hasher.finalize().into()),
+        destination_root: handshake.destination_root,
+    })
+}
+
+#[cfg(any(feature = "tls", test))]
+fn quic_delta_manifest_auth_symbol(
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<Symbol, QuicTransportError> {
+    let manifest_bytes = serde_json::to_vec(manifest).map_err(|error| {
+        QuicTransportError::Control(format!(
+            "serialize canonical QUIC delta manifest client proof: {error}"
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ATP-QUIC-DELTA-MANIFEST-CLIENT-PROOF-V1\0");
+    hasher.update(session.session_id.as_bytes());
+    hasher.update(session.destination_root);
+    hasher.update(0u64.to_be_bytes());
+    quic_delta_hash_len_prefixed(&mut hasher, manifest.transfer_id.as_bytes());
+    quic_delta_hash_len_prefixed(&mut hasher, &manifest_bytes);
+    let transcript_digest: [u8; 32] = hasher.finalize().into();
+    Ok(Symbol::new(
+        SymbolId::new(
+            ObjectId::new(0x4154_502d_5155_4943, 0x2d44_454c_5441_2d4d),
+            0,
+            0,
+        ),
+        transcript_digest.to_vec(),
+        SymbolKind::Source,
+    ))
+}
+
+#[cfg(any(feature = "tls", test))]
+fn make_quic_delta_manifest_envelope(
+    context: &SecurityContext,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<QuicDeltaManifestEnvelope, QuicTransportError> {
+    if context.mode() != AuthMode::Strict {
+        return Err(QuicTransportError::Config(
+            "QUIC delta control requires a strict authentication context".to_string(),
+        ));
+    }
+    let control = context.derive_context(b"atp-quic-delta-manifest-client-proof-v1");
+    let symbol = quic_delta_manifest_auth_symbol(session, manifest)?;
+    Ok(QuicDeltaManifestEnvelope {
+        session_id: session.session_id,
+        destination_root: session.destination_root,
+        control_seq: 0,
+        manifest: manifest.clone(),
+        client_auth_tag: *control.sign_symbol_tag(&symbol).as_bytes(),
+    })
+}
+
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_manifest_envelope(
+    context: &SecurityContext,
+    session: QuicDeltaSessionContext,
+    envelope: &QuicDeltaManifestEnvelope,
+) -> Result<(), QuicTransportError> {
+    if context.mode() != AuthMode::Strict
+        || envelope.control_seq != 0
+        || envelope.session_id != session.session_id
+        || envelope.destination_root != session.destination_root
+    {
+        return Err(QuicTransportError::HandshakeRejected(
+            "QUIC delta client proof binding mismatch".to_string(),
+        ));
+    }
+    let symbol = quic_delta_manifest_auth_symbol(session, &envelope.manifest)?;
+    let mut authenticated = AuthenticatedSymbol::from_parts(
+        symbol,
+        AuthenticationTag::from_bytes(envelope.client_auth_tag),
+    );
+    let control = context.derive_context(b"atp-quic-delta-manifest-client-proof-v1");
+    if control
+        .verify_authenticated_symbol(&mut authenticated)
+        .is_err()
+        || !authenticated.is_verified()
+    {
+        return Err(QuicTransportError::HandshakeRejected(
+            "QUIC delta client proof authentication failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_ack(
+    offered: Option<TransferNonce>,
+    ack: &QuicHelloAck,
+) -> Result<Option<QuicDeltaHandshakeContext>, QuicTransportError> {
+    let response = (
+        ack.delta_transfer_nonce,
+        ack.delta_receiver_nonce,
+        ack.delta_destination_root,
+    );
+    match (offered, response) {
+        (None, (None, None, None)) | (Some(_), (None, None, None)) => Ok(None),
+        (None, _) => Err(QuicTransportError::HandshakeRejected(
+            "receiver returned unsolicited QUIC delta binding fields".to_string(),
+        )),
+        (Some(expected), (Some(echoed), Some(receiver), Some(destination_root))) => {
+            if echoed != expected {
+                return Err(QuicTransportError::HandshakeRejected(
+                    "receiver echoed the wrong QUIC delta transfer nonce".to_string(),
+                ));
+            }
+            if receiver.is_zero() || receiver == expected {
+                return Err(QuicTransportError::HandshakeRejected(
+                    "receiver QUIC delta nonce must be distinct and non-zero".to_string(),
+                ));
+            }
+            if destination_root.iter().all(|byte| *byte == 0) {
+                return Err(QuicTransportError::HandshakeRejected(
+                    "receiver QUIC delta destination commitment is all zero".to_string(),
+                ));
+            }
+            Ok(Some(QuicDeltaHandshakeContext {
+                sender_nonce: expected,
+                receiver_nonce: receiver,
+                destination_root,
+            }))
+        }
+        (Some(_), _) => Err(QuicTransportError::HandshakeRejected(
+            "receiver returned a partial QUIC delta binding tuple".to_string(),
+        )),
+    }
+}
+
+#[cfg(any(feature = "tls", test))]
+fn make_quic_delta_request(
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+    request: DeltaObjectRequest,
+) -> QuicDeltaObjectRequest {
+    QuicDeltaObjectRequest {
+        session_id: session.session_id,
+        transfer_id: manifest.transfer_id.clone(),
+        destination_root: session.destination_root,
+        control_seq: 0,
+        request,
+    }
+}
+
+#[cfg(any(feature = "tls", test))]
+async fn build_quic_receiver_delta_request(
+    cx: &Cx,
+    dest_dir: &Path,
+    config: &QuicConfig,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<QuicDeltaObjectRequest, QuicTransportError> {
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        QuicTransportError::Control(
+            "cannot build a bound QUIC delta request without a delta manifest".to_string(),
+        )
+    })?;
+    let entry = quic_delta_manifest_entry(manifest).ok_or_else(|| {
+        QuicTransportError::Control(
+            "cannot build a bound QUIC delta request for this transfer shape".to_string(),
+        )
+    })?;
+    let full = |receiver_root: Option<String>, reason: &'static str| {
+        make_quic_delta_request(
+            session,
+            manifest,
+            DeltaObjectRequest::full(delta.merkle_root_hex.clone(), receiver_root, reason),
+        )
+    };
+
+    prepare_quic_destination_root(dest_dir).await?;
+    let path = quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    reject_quic_destination_symlink_prefix(&path, &path).await?;
+    let existing = match crate::fs::symlink_metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(full(None, "destination_missing"));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !existing.is_file() || existing.len() != entry.size {
+        return Ok(full(None, "destination_shape_or_size_mismatch"));
+    }
+    let expected_metadata = entry.metadata.clone().unwrap_or_default();
+    let receiver_metadata = read_entry_metadata(&path, &config.metadata_policy).await?;
+    if receiver_metadata != expected_metadata {
+        return Ok(full(None, "destination_metadata_mismatch"));
+    }
+
+    let receiver_delta = match build_quic_delta_manifest_for_file(
+        cx,
+        &manifest.merkle_root_hex,
+        &path,
+        entry.index,
+        &entry.rel_path,
+        entry.size,
+        &entry.sha256_hex,
+        delta.chunk_size,
+    )
+    .await
+    {
+        Ok(delta) => delta,
+        Err(QuicTransportError::Source(_)) => {
+            return Ok(full(None, "destination_changed_during_delta_validation"));
+        }
+        Err(error) => return Err(error),
+    };
+    reject_quic_destination_symlink_prefix(&path, &path).await?;
+    if read_entry_metadata(&path, &config.metadata_policy).await? != expected_metadata {
+        return Ok(full(None, "destination_metadata_changed_during_validation"));
+    }
+    if receiver_delta != *delta {
+        return Ok(full(
+            Some(receiver_delta.merkle_root_hex),
+            "destination_delta_root_mismatch",
+        ));
+    }
+
+    Ok(make_quic_delta_request(
+        session,
+        manifest,
+        DeltaObjectRequest {
+            mode: DeltaWireMode::AlreadyInSync,
+            fallback_reason: None,
+            sender_merkle_root_hex: delta.merkle_root_hex.clone(),
+            receiver_merkle_root_hex: Some(delta.merkle_root_hex.clone()),
+            missing_bytes: 0,
+            shared_chunks: u64::try_from(delta.chunks.len()).unwrap_or(u64::MAX),
+            stale_chunks: 0,
+            missing_chunks: Vec::new(),
+        },
+    ))
+}
+
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_request(
+    envelope: &QuicDeltaObjectRequest,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<DeltaWireMode, QuicTransportError> {
+    if envelope.control_seq != 0
+        || envelope.session_id != session.session_id
+        || envelope.transfer_id != manifest.transfer_id
+        || envelope.destination_root != session.destination_root
+    {
+        return Err(QuicTransportError::Control(
+            "QUIC delta ObjectRequest binding mismatch".to_string(),
+        ));
+    }
+    let delta_manifest = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        QuicTransportError::Control("bound delta request without a delta manifest".to_string())
+    })?;
+    let request = &envelope.request;
+    if request.sender_merkle_root_hex != delta_manifest.merkle_root_hex {
+        return Err(QuicTransportError::Control(
+            "QUIC delta ObjectRequest sender root mismatch".to_string(),
+        ));
+    }
+    match request.mode {
+        DeltaWireMode::FullObject => {
+            let fallback_reason_valid = request.fallback_reason.as_deref().is_some_and(|reason| {
+                !reason.trim().is_empty() && reason.len() <= 256 && reason.is_ascii()
+            });
+            let receiver_root_valid =
+                request
+                    .receiver_merkle_root_hex
+                    .as_deref()
+                    .is_none_or(|root| {
+                        quic_decode_delta_root(root, "receiver delta manifest Merkle root").is_ok()
+                    });
+            if !fallback_reason_valid
+                || !receiver_root_valid
+                || request.missing_bytes != 0
+                || request.shared_chunks != 0
+                || request.stale_chunks != 0
+                || !request.missing_chunks.is_empty()
+            {
+                return Err(QuicTransportError::Control(
+                    "malformed QUIC full-object delta request".to_string(),
+                ));
+            }
+        }
+        DeltaWireMode::AlreadyInSync => {
+            let expected_shared = u64::try_from(delta_manifest.chunks.len()).unwrap_or(u64::MAX);
+            if request.fallback_reason.is_some()
+                || request.receiver_merkle_root_hex.as_deref()
+                    != Some(delta_manifest.merkle_root_hex.as_str())
+                || request.missing_bytes != 0
+                || !request.missing_chunks.is_empty()
+                || request.stale_chunks != 0
+                || request.shared_chunks != expected_shared
+            {
+                return Err(QuicTransportError::Control(
+                    "malformed QUIC AlreadyInSync delta request".to_string(),
+                ));
+            }
+        }
+        DeltaWireMode::DeltaChunks => {
+            return Err(QuicTransportError::Control(
+                "QUIC missing-chunk delta requests are not enabled in this rollout".to_string(),
+            ));
+        }
+    }
+    Ok(request.mode)
+}
+
+#[cfg(any(feature = "tls", test))]
+fn make_quic_delta_proof(
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+    receipt: ReceiveReceipt,
+) -> QuicDeltaProof {
+    QuicDeltaProof {
+        session_id: session.session_id,
+        transfer_id: manifest.transfer_id.clone(),
+        destination_root: session.destination_root,
+        control_seq: 1,
+        receipt,
+    }
+}
+
+#[cfg(any(feature = "tls", test))]
+fn validate_quic_delta_proof(
+    proof: QuicDeltaProof,
+    session: QuicDeltaSessionContext,
+    manifest: &TransferManifest,
+) -> Result<ReceiveReceipt, QuicTransportError> {
+    if proof.control_seq != 1
+        || proof.session_id != session.session_id
+        || proof.transfer_id != manifest.transfer_id
+        || proof.destination_root != session.destination_root
+    {
+        return Err(QuicTransportError::Control(
+            "QUIC delta Proof binding mismatch".to_string(),
+        ));
+    }
+    if !proof.receipt.committed
+        || !proof.receipt.sha_ok
+        || !proof.receipt.merkle_ok
+        || proof.receipt.bytes_received != 0
+        || proof.receipt.files != manifest_logical_files(manifest)
+        || proof.receipt.symbols_accepted != 0
+        || proof.receipt.feedback_rounds != 0
+        || proof.receipt.decode_count != 0
+        || proof.receipt.decode_micros != 0
+        || proof.receipt.reason.is_some()
+        || proof.receipt.committed_paths.len() != 1
+        || proof.receipt.committed_paths[0].is_empty()
+    {
+        return Err(QuicTransportError::Integrity(
+            proof
+                .receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "receiver did not commit the QUIC delta no-op".to_string()),
+        ));
+    }
+    Ok(proof.receipt)
 }
 
 #[allow(dead_code)]
@@ -6246,6 +7081,12 @@ fn reject_hello_reason(
             "symbol authentication mismatch: sender={}, receiver={expected_symbol_auth}",
             hello.symbol_auth
         ));
+    }
+    if hello
+        .delta_transfer_nonce
+        .is_some_and(TransferNonce::is_zero)
+    {
+        return Some("delta_transfer_nonce must not be all zero".to_string());
     }
     if let Some(reason) = reject_source_stream_hello_reason(hello) {
         return Some(reason);
@@ -6340,6 +7181,9 @@ fn receive_sender_hello_and_ack(
         source_stream: accepted_source_stream,
         source_stream_recv_window: None,
         reason: reason.clone(),
+        delta_transfer_nonce: None,
+        delta_receiver_nonce: None,
+        delta_destination_root: None,
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
     control.send(cx, conn, &ack_frame)?;
@@ -6378,6 +7222,9 @@ fn receive_native_sender_hello_and_ack(
         source_stream: accepted_source_stream,
         source_stream_recv_window: None,
         reason: reason.clone(),
+        delta_transfer_nonce: None,
+        delta_receiver_nonce: None,
+        delta_destination_root: None,
     };
     let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
     control.send(cx, conn, &ack_frame)?;
@@ -6397,10 +7244,18 @@ fn send_native_sender_hello(
     symbol_auth: bool,
     source_stream: Option<StreamId>,
     total_bytes: u64,
+    delta_transfer_nonce: Option<TransferNonce>,
 ) -> Result<(), QuicTransportError> {
     let frame = json_frame(
         FrameType::Handshake,
-        &sender_hello_with_source_stream(peer_id, config, symbol_auth, source_stream, total_bytes),
+        &sender_hello_with_source_stream(
+            peer_id,
+            config,
+            symbol_auth,
+            source_stream,
+            total_bytes,
+            delta_transfer_nonce,
+        ),
     )?;
     control.send(cx, conn, &frame)
 }
@@ -7423,6 +8278,7 @@ where
         symbol_auth_enabled,
         offered_source_stream,
         prepared.manifest.total_bytes,
+        None,
     )?;
     drive_peer(NativeSenderDrivePoint::HelloSent, conn)?;
     let ack = receive_native_sender_hello_ack(cx, conn, &mut control)?;
@@ -8101,6 +8957,109 @@ fn validate_quic_manifest(
             "manifest metadata commitment mismatch".to_string(),
         ));
     }
+    validate_quic_delta_manifest(manifest)?;
+    Ok(())
+}
+
+fn validate_quic_delta_manifest(manifest: &TransferManifest) -> Result<(), QuicTransportError> {
+    let Some(delta) = manifest.delta_manifest.as_ref() else {
+        return Ok(());
+    };
+    let Some(entry) = quic_delta_manifest_entry(manifest) else {
+        return Err(QuicTransportError::Source(
+            "QUIC delta manifest is supported only for one unpacked regular file".to_string(),
+        ));
+    };
+    if u64::try_from(delta.chunks.len()).unwrap_or(u64::MAX) > QUIC_DELTA_MAX_MANIFEST_CHUNKS {
+        return Err(QuicTransportError::Source(
+            "QUIC delta manifest declares too many chunks".to_string(),
+        ));
+    }
+    if delta.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
+        return Err(QuicTransportError::Source(format!(
+            "unsupported QUIC delta manifest schema: {}",
+            delta.schema
+        )));
+    }
+    if delta.tree_id != manifest.merkle_root_hex {
+        return Err(QuicTransportError::Source(
+            "QUIC delta manifest tree id does not match the transfer Merkle root".to_string(),
+        ));
+    }
+    let max_chunk_size = usize::try_from(MAX_FRAME_SIZE)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(12);
+    if delta.chunk_size == 0 || delta.chunk_size > max_chunk_size {
+        return Err(QuicTransportError::Source(format!(
+            "QUIC delta manifest chunk size {} is outside 1..={max_chunk_size}",
+            delta.chunk_size
+        )));
+    }
+    if delta.total_size_bytes != manifest.total_bytes || delta.total_size_bytes != entry.size {
+        return Err(QuicTransportError::Source(format!(
+            "QUIC delta manifest size {} does not match transfer size {}",
+            delta.total_size_bytes, manifest.total_bytes
+        )));
+    }
+    let max_chunk_size = u64::try_from(delta.chunk_size).unwrap_or(u64::MAX);
+    let mut planner_chunks = Vec::with_capacity(delta.chunks.len());
+    let mut expected_offset = 0u64;
+    for (position, chunk) in delta.chunks.iter().enumerate() {
+        let expected_index = u32::try_from(position).map_err(|_| {
+            QuicTransportError::Source("too many QUIC delta manifest chunks".to_string())
+        })?;
+        let is_final = position.saturating_add(1) == delta.chunks.len();
+        if chunk.index != expected_index
+            || chunk.entry_index != entry.index
+            || chunk.rel_path != entry.rel_path
+            || chunk.entry_offset != expected_offset
+            || chunk.stream_offset != expected_offset
+            || chunk.size_bytes == 0
+            || chunk.size_bytes > max_chunk_size
+            || (!is_final && chunk.size_bytes != max_chunk_size)
+        {
+            return Err(QuicTransportError::Source(format!(
+                "QUIC delta chunk {} has invalid index, path, offset, or size",
+                chunk.index
+            )));
+        }
+        let content_id = ContentId::new(quic_decode_delta_root(
+            &chunk.content_id_hex,
+            "QUIC delta content id",
+        )?);
+        planner_chunks.push(CasChunkRef {
+            index: chunk.index,
+            byte_offset: chunk.stream_offset,
+            size_bytes: chunk.size_bytes,
+            content_id,
+        });
+        expected_offset = expected_offset
+            .checked_add(chunk.size_bytes)
+            .ok_or_else(|| {
+                QuicTransportError::Source(
+                    "QUIC delta manifest chunk offsets overflow u64".to_string(),
+                )
+            })?;
+    }
+    if expected_offset != entry.size {
+        return Err(QuicTransportError::Source(format!(
+            "QUIC delta chunks cover {expected_offset} bytes, expected {}",
+            entry.size
+        )));
+    }
+    let planner =
+        PersistentChunkManifest::new(delta.tree_id.clone(), planner_chunks).map_err(|error| {
+            QuicTransportError::Source(format!("invalid QUIC delta manifest: {error}"))
+        })?;
+    let _ = quic_decode_delta_root(&delta.merkle_root_hex, "QUIC delta manifest Merkle root")?;
+    if planner.total_size_bytes != delta.total_size_bytes
+        || planner.merkle_root.to_hex() != delta.merkle_root_hex
+    {
+        return Err(QuicTransportError::Source(
+            "QUIC delta manifest Merkle root or total size mismatch".to_string(),
+        ));
+    }
+    json_frame(FrameType::ObjectManifest, manifest)?;
     Ok(())
 }
 
@@ -12182,6 +13141,7 @@ mod tests {
             source_stream: false,
             source_stream_id: None,
             total_bytes: 0,
+            delta_transfer_nonce: None,
         };
         let hello_frame = json_frame(FrameType::Handshake, &hello).expect("hello frame");
         assert_eq!(hello_frame.version(), ProtocolVersion::CURRENT);
@@ -12197,6 +13157,9 @@ mod tests {
             source_stream: false,
             source_stream_recv_window: None,
             reason: Some("unsupported protocol".to_string()),
+            delta_transfer_nonce: None,
+            delta_receiver_nonce: None,
+            delta_destination_root: None,
         };
         let ack_frame = json_frame(FrameType::HandshakeAck, &ack).expect("ack frame");
         assert_eq!(ack_frame.frame_type(), FrameType::HandshakeAck);
@@ -12235,6 +13198,437 @@ mod tests {
         assert_eq!(keepalive.version(), ProtocolVersion::CURRENT);
         assert_eq!(keepalive.frame_type(), FrameType::KeepAlive);
         assert!(keepalive.payload().is_empty());
+    }
+
+    fn delta_test_config() -> QuicConfig {
+        QuicConfig {
+            chunk_size: 4,
+            enable_delta: true,
+            metadata_policy: MetadataPolicy::portable(),
+            ..trusted_quic_config()
+        }
+        .with_delta_control_auth(SecurityContext::for_testing(0xD3_17_A0))
+    }
+
+    fn prepare_delta_test_source(
+        cx: &Cx,
+        root: &Path,
+        bytes: &[u8],
+    ) -> (PathBuf, QuicConfig, QuicPreparedSource) {
+        let source = root.join("payload.bin");
+        std::fs::write(&source, bytes).expect("write QUIC delta source");
+        let config = delta_test_config();
+        let prepared = block_on(prepare_source_manifest(cx, &source, &config))
+            .expect("prepare QUIC delta source");
+        (source, config, prepared)
+    }
+
+    fn delta_test_handshake(dest: &Path) -> QuicDeltaHandshakeContext {
+        let sender_nonce = TransferNonce::new([0x11; 32]);
+        let receiver_nonce = TransferNonce::new([0x22; 32]);
+        QuicDeltaHandshakeContext {
+            sender_nonce,
+            receiver_nonce,
+            destination_root: quic_delta_destination_root_commitment(
+                &SecurityContext::for_testing(0xD3_17_A0),
+                receiver_nonce,
+                dest,
+            )
+            .expect("bind delta destination root"),
+        }
+    }
+
+    #[test]
+    fn quic_delta_manifest_attaches_and_rejects_source_drift() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let original = b"abcdefghijklmnop";
+        let (source, config, prepared) = prepare_delta_test_source(&cx, temp.path(), original);
+        let delta = prepared
+            .manifest
+            .delta_manifest
+            .as_ref()
+            .expect("eligible source carries delta manifest");
+
+        assert_eq!(delta.chunk_size, 4);
+        assert_eq!(
+            delta.total_size_bytes,
+            u64::try_from(original.len()).unwrap_or(u64::MAX)
+        );
+        assert_eq!(delta.chunks.len(), 4);
+        assert!(delta.chunks.iter().all(|chunk| chunk.size_bytes == 4));
+        validate_quic_delta_manifest(&prepared.manifest).expect("delta manifest validates");
+        let transport_auth_only = QuicConfig {
+            chunk_size: 4,
+            enable_delta: true,
+            metadata_policy: MetadataPolicy::portable(),
+            ..trusted_quic_config()
+        };
+        let full_only = block_on(prepare_source_manifest(&cx, &source, &transport_auth_only))
+            .expect("prepare transport-auth-only source");
+        assert!(
+            full_only.manifest.delta_manifest.is_none(),
+            "server-authenticated TLS without a shared client key must not expose delta state"
+        );
+        let mut malformed_manifest = prepared.manifest.clone();
+        malformed_manifest
+            .delta_manifest
+            .as_mut()
+            .expect("delta manifest")
+            .chunks[0]
+            .size_bytes = 3;
+        assert!(validate_quic_delta_manifest(&malformed_manifest).is_err());
+        let mut too_many_chunks = prepared.manifest.clone();
+        let template = too_many_chunks
+            .delta_manifest
+            .as_ref()
+            .and_then(|delta| delta.chunks.first())
+            .expect("delta chunk")
+            .clone();
+        too_many_chunks
+            .delta_manifest
+            .as_mut()
+            .expect("delta manifest")
+            .chunks = vec![template; 4_097];
+        assert!(matches!(
+            validate_quic_delta_manifest(&too_many_chunks),
+            Err(QuicTransportError::Source(message)) if message.contains("too many chunks")
+        ));
+        block_on(validate_quic_prepared_delta_source_unchanged(
+            &cx, &prepared, &config,
+        ))
+        .expect("unchanged source revalidates");
+
+        std::fs::write(&source, b"ponmlkjihgfedcba").expect("mutate source at same length");
+        assert!(matches!(
+            block_on(validate_quic_prepared_delta_source_unchanged(
+                &cx, &prepared, &config
+            )),
+            Err(QuicTransportError::Source(message)) if message.contains("changed")
+        ));
+    }
+
+    #[test]
+    fn quic_delta_receiver_requests_noop_only_for_live_exact_destination() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_root = temp.path().join("source");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&source_root).expect("source dir");
+        std::fs::create_dir_all(&dest).expect("dest dir");
+        let original = b"abcdefghijklmnop";
+        let (_source, config, prepared) = prepare_delta_test_source(&cx, &source_root, original);
+        let destination = dest.join(&prepared.manifest.root_name);
+        std::fs::write(&destination, original).expect("write matching destination");
+        let session = derive_quic_delta_session(
+            delta_test_handshake(&dest),
+            "sender",
+            "receiver",
+            &prepared.manifest,
+        )
+        .expect("derive delta session");
+
+        let request = block_on(build_quic_receiver_delta_request(
+            &cx,
+            &dest,
+            &config,
+            session,
+            &prepared.manifest,
+        ))
+        .expect("build exact destination request");
+        assert_eq!(
+            validate_quic_delta_request(&request, session, &prepared.manifest)
+                .expect("validate exact destination request"),
+            DeltaWireMode::AlreadyInSync
+        );
+
+        std::fs::write(&destination, b"ponmlkjihgfedcba")
+            .expect("mutate destination at same length");
+        let changed = block_on(build_quic_receiver_delta_request(
+            &cx,
+            &dest,
+            &config,
+            session,
+            &prepared.manifest,
+        ))
+        .expect("changed destination safely falls back");
+        assert_eq!(
+            validate_quic_delta_request(&changed, session, &prepared.manifest)
+                .expect("validate full fallback"),
+            DeltaWireMode::FullObject
+        );
+
+        let cancelled = cancelled_test_cx();
+        assert!(matches!(
+            block_on(build_quic_receiver_delta_request(
+                &cancelled,
+                &dest,
+                &config,
+                session,
+                &prepared.manifest,
+            )),
+            Err(QuicTransportError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn quic_delta_bindings_reject_replay_and_noncanonical_payloads() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_source, _config, prepared) =
+            prepare_delta_test_source(&cx, temp.path(), b"abcdefghijklmnop");
+        let handshake = delta_test_handshake(temp.path());
+        let ack = QuicHelloAck {
+            accepted: true,
+            peer_id: "receiver".to_string(),
+            source_stream: false,
+            source_stream_recv_window: None,
+            reason: None,
+            delta_transfer_nonce: Some(handshake.sender_nonce),
+            delta_receiver_nonce: Some(handshake.receiver_nonce),
+            delta_destination_root: Some(handshake.destination_root),
+        };
+        assert_eq!(
+            validate_quic_delta_ack(Some(handshake.sender_nonce), &ack).expect("valid delta ack"),
+            Some(handshake)
+        );
+        let declined_ack = QuicHelloAck {
+            delta_transfer_nonce: None,
+            delta_receiver_nonce: None,
+            delta_destination_root: None,
+            ..ack.clone()
+        };
+        assert_eq!(
+            validate_quic_delta_ack(Some(handshake.sender_nonce), &declined_ack)
+                .expect("a receiver may decline the offered delta challenge"),
+            None
+        );
+        let mut partial_ack = ack;
+        partial_ack.delta_receiver_nonce = None;
+        assert!(validate_quic_delta_ack(Some(handshake.sender_nonce), &partial_ack).is_err());
+        let session =
+            derive_quic_delta_session(handshake, "sender", "receiver", &prepared.manifest)
+                .expect("derive delta session");
+        let control_auth = SecurityContext::for_testing(0xD3_17_A0);
+        let envelope =
+            make_quic_delta_manifest_envelope(&control_auth, session, &prepared.manifest)
+                .expect("authenticate receiver-challenged delta manifest");
+        json_frame(FrameType::ObjectManifest, &envelope)
+            .expect("authenticated delta manifest remains frame-bounded");
+        validate_quic_delta_manifest_envelope(&control_auth, session, &envelope)
+            .expect("valid live client proof");
+
+        let exact_root = temp.path().join("single-chunk");
+        std::fs::create_dir_all(&exact_root).expect("single-chunk source dir");
+        let (_source, _config, exact_prepared) =
+            prepare_delta_test_source(&cx, &exact_root, b"abcd");
+        let exact_session = derive_quic_delta_session(
+            delta_test_handshake(&exact_root),
+            "sender",
+            "receiver",
+            &exact_prepared.manifest,
+        )
+        .expect("derive single-chunk delta session");
+        let mut exact_tamper = make_quic_delta_manifest_envelope(
+            &control_auth,
+            exact_session,
+            &exact_prepared.manifest,
+        )
+        .expect("authenticate single-chunk manifest");
+        exact_tamper
+            .manifest
+            .delta_manifest
+            .as_mut()
+            .expect("single-chunk delta manifest")
+            .chunk_size = 8;
+        validate_quic_delta_manifest(&exact_tamper.manifest)
+            .expect("larger terminal chunk geometry remains semantically valid");
+        assert!(
+            validate_quic_delta_manifest_envelope(&control_auth, exact_session, &exact_tamper,)
+                .is_err(),
+            "the client tag must authenticate every typed manifest field"
+        );
+        let attacker = SecurityContext::for_testing(0xA7_7A_C0);
+        assert!(
+            validate_quic_delta_manifest_envelope(&attacker, session, &envelope).is_err(),
+            "a client without the shared key must not reach destination probing"
+        );
+        let permissive = SecurityContext::for_testing_with_mode(
+            0xD3_17_A0,
+            crate::security::AuthMode::Permissive,
+        );
+        assert!(
+            make_quic_delta_manifest_envelope(&permissive, session, &prepared.manifest).is_err()
+        );
+        let mut tampered_envelope = envelope.clone();
+        tampered_envelope.client_auth_tag[0] ^= 1;
+        assert!(
+            validate_quic_delta_manifest_envelope(&control_auth, session, &tampered_envelope)
+                .is_err()
+        );
+        let mut envelope_value = serde_json::to_value(&envelope).expect("envelope JSON");
+        envelope_value
+            .as_object_mut()
+            .expect("envelope object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<QuicDeltaManifestEnvelope>(envelope_value).is_err());
+        let mut nested_manifest_value =
+            serde_json::to_value(&envelope).expect("nested manifest JSON");
+        nested_manifest_value
+            .get_mut("manifest")
+            .and_then(|manifest| manifest.get_mut("entries"))
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|entries| entries.first_mut())
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("manifest entry object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<QuicDeltaManifestEnvelope>(nested_manifest_value).is_err()
+        );
+        let mut nested_metadata_value =
+            serde_json::to_value(&envelope).expect("nested metadata JSON");
+        nested_metadata_value
+            .get_mut("manifest")
+            .and_then(|manifest| manifest.get_mut("entries"))
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|entries| entries.first_mut())
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("manifest entry object")
+            .insert(
+                "metadata".to_string(),
+                serde_json::json!({"file_kind": "regular", "unexpected": true}),
+            );
+        assert!(
+            serde_json::from_value::<QuicDeltaManifestEnvelope>(nested_metadata_value).is_err()
+        );
+        let delta = prepared.manifest.delta_manifest.as_ref().expect("delta");
+        let request = make_quic_delta_request(
+            session,
+            &prepared.manifest,
+            DeltaObjectRequest {
+                mode: DeltaWireMode::AlreadyInSync,
+                fallback_reason: None,
+                sender_merkle_root_hex: delta.merkle_root_hex.clone(),
+                receiver_merkle_root_hex: Some(delta.merkle_root_hex.clone()),
+                missing_bytes: 0,
+                shared_chunks: u64::try_from(delta.chunks.len()).unwrap_or(u64::MAX),
+                stale_chunks: 0,
+                missing_chunks: Vec::new(),
+            },
+        );
+        assert_eq!(
+            validate_quic_delta_request(&request, session, &prepared.manifest)
+                .expect("valid request"),
+            DeltaWireMode::AlreadyInSync
+        );
+
+        let replay_session = derive_quic_delta_session(
+            QuicDeltaHandshakeContext {
+                receiver_nonce: TransferNonce::new([0x33; 32]),
+                ..handshake
+            },
+            "sender",
+            "receiver",
+            &prepared.manifest,
+        )
+        .expect("derive replay session");
+        assert!(
+            validate_quic_delta_manifest_envelope(&control_auth, replay_session, &envelope)
+                .is_err()
+        );
+        assert!(validate_quic_delta_request(&request, replay_session, &prepared.manifest).is_err());
+        let mut wrong_destination = request.clone();
+        wrong_destination.destination_root[0] ^= 1;
+        assert!(
+            validate_quic_delta_request(&wrong_destination, session, &prepared.manifest).is_err()
+        );
+        let mut wrong_transfer = request.clone();
+        wrong_transfer.transfer_id.push('0');
+        assert!(validate_quic_delta_request(&wrong_transfer, session, &prepared.manifest).is_err());
+        let mut wrong_sequence = request.clone();
+        wrong_sequence.control_seq = 9;
+        assert!(validate_quic_delta_request(&wrong_sequence, session, &prepared.manifest).is_err());
+        let mut malformed = request.clone();
+        malformed.request.missing_bytes = 1;
+        assert!(validate_quic_delta_request(&malformed, session, &prepared.manifest).is_err());
+
+        let mut value = serde_json::to_value(&request).expect("request JSON");
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<QuicDeltaObjectRequest>(value).is_err());
+        let mut nested_value = serde_json::to_value(&request).expect("nested request JSON");
+        nested_value
+            .get_mut("request")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("inner request object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<QuicDeltaObjectRequest>(nested_value).is_err());
+    }
+
+    #[test]
+    fn quic_delta_proof_requires_canonical_zero_byte_receipt() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_source, _config, prepared) =
+            prepare_delta_test_source(&cx, temp.path(), b"abcdefghijklmnop");
+        let session = derive_quic_delta_session(
+            delta_test_handshake(temp.path()),
+            "sender",
+            "receiver",
+            &prepared.manifest,
+        )
+        .expect("derive delta session");
+        let receipt = ReceiveReceipt {
+            committed: true,
+            bytes_received: 0,
+            files: 1,
+            sha_ok: true,
+            merkle_ok: true,
+            symbols_accepted: 0,
+            feedback_rounds: 0,
+            decode_count: 0,
+            decode_micros: 0,
+            reason: None,
+            committed_paths: vec!["/dest/payload.bin".to_string()],
+        };
+        let proof = make_quic_delta_proof(session, &prepared.manifest, receipt.clone());
+        assert_eq!(
+            validate_quic_delta_proof(proof.clone(), session, &prepared.manifest)
+                .expect("canonical proof"),
+            receipt
+        );
+
+        let mut wrong_session = proof.clone();
+        wrong_session.session_id = SessionId::from_digest([0x44; 32]);
+        assert!(validate_quic_delta_proof(wrong_session, session, &prepared.manifest).is_err());
+        let mut wrong_destination = proof.clone();
+        wrong_destination.destination_root[0] ^= 1;
+        assert!(validate_quic_delta_proof(wrong_destination, session, &prepared.manifest).is_err());
+        let mut wrong_transfer = proof.clone();
+        wrong_transfer.transfer_id.push('0');
+        assert!(validate_quic_delta_proof(wrong_transfer, session, &prepared.manifest).is_err());
+        let mut wrong_sequence = proof.clone();
+        wrong_sequence.control_seq = 9;
+        assert!(validate_quic_delta_proof(wrong_sequence, session, &prepared.manifest).is_err());
+        let mut outer_value = serde_json::to_value(&proof).expect("proof JSON");
+        outer_value
+            .as_object_mut()
+            .expect("proof object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<QuicDeltaProof>(outer_value).is_err());
+        let mut nested_value = serde_json::to_value(&proof).expect("proof receipt JSON");
+        nested_value
+            .get_mut("receipt")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("proof receipt object")
+            .insert("unexpected".to_string(), serde_json::json!(true));
+        assert!(serde_json::from_value::<QuicDeltaProof>(nested_value).is_err());
+
+        let mut noncanonical = proof;
+        noncanonical.receipt.decode_count = 1;
+        assert!(validate_quic_delta_proof(noncanonical, session, &prepared.manifest).is_err());
     }
 
     #[test]
@@ -15169,8 +16563,14 @@ mod tests {
     fn quic_control_handshake_accepts_clean_source_stream_id() {
         let config = trusted_quic_config();
         let source_stream = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
-        let hello =
-            sender_hello_with_source_stream("sender-peer", &config, false, Some(source_stream), 9);
+        let hello = sender_hello_with_source_stream(
+            "sender-peer",
+            &config,
+            false,
+            Some(source_stream),
+            9,
+            None,
+        );
 
         assert_eq!(
             source_stream_from_hello(&hello).expect("valid source stream"),
@@ -15195,6 +16595,7 @@ mod tests {
                 1,
             )),
             9,
+            None,
         );
 
         hello.source_stream = true;
@@ -15257,6 +16658,7 @@ mod tests {
             source_stream: false,
             source_stream_id: None,
             total_bytes: 0,
+            delta_transfer_nonce: None,
         };
         let frame = json_frame(FrameType::Handshake, &bad_hello).expect("bad hello frame");
         sender_control
@@ -15316,6 +16718,7 @@ mod tests {
             source_stream: false,
             source_stream_id: None,
             total_bytes: 0,
+            delta_transfer_nonce: None,
         };
 
         let reason = reject_hello_reason(&bad_hello, &config, false)
@@ -15362,6 +16765,7 @@ mod tests {
             source_stream: false,
             source_stream_id: None,
             total_bytes: 512 * 1024 * 1024,
+            delta_transfer_nonce: None,
         };
         assert!(
             reject_hello_reason(&hello, &config, false).is_none(),

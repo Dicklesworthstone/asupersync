@@ -1044,14 +1044,16 @@ fn trace_native_repair_accounting(
     );
 }
 
-async fn send_native_proof_until_close(
+async fn send_native_proof_until_close<T: serde::Serialize>(
     cx: &Cx,
     link: &mut QuicLink,
     control: &mut NativeQuicFrameTransport,
+    proof: &T,
     receipt: &ReceiveReceipt,
     config: &QuicConfig,
 ) -> Result<(), QuicTransportError> {
-    super::send_native_proof(cx, &mut link.conn, control, receipt)?;
+    let proof_frame = super::json_frame(FrameType::Proof, proof)?;
+    control.send(cx, &mut link.conn, &proof_frame)?;
     link.flush(cx).await?;
     let proof_frames = link.last_flushed_stream_frames();
 
@@ -3607,6 +3609,22 @@ impl QuicLink {
         self.last_flushed_stream_frames.clone()
     }
 
+    fn stream_frames_still_in_flight(&self, targets: &[SentControlStreamFrame]) -> bool {
+        self.in_flight_stream_frames
+            .values()
+            .flatten()
+            .any(|frame| {
+                targets.iter().any(|target| {
+                    if frame.stream != target.stream {
+                        return false;
+                    }
+                    let frame_end = frame.offset.saturating_add(frame.len);
+                    let target_end = target.offset.saturating_add(target.len);
+                    frame.offset < target_end && target.offset < frame_end
+                })
+            })
+    }
+
     fn record_received_source_stream_frames(&mut self, frames: &[QuicFrame]) {
         let Some(source_stream) = self.paced_source_stream else {
             return;
@@ -5155,6 +5173,46 @@ impl QuicLink {
             self.retransmit_stream_frames(cx, &retransmit_frames, reason)
                 .await?;
             last_retransmit = Instant::now();
+        }
+    }
+
+    async fn wait_for_stream_frames_acked(
+        &mut self,
+        cx: &Cx,
+        frames: &mut Vec<SentControlStreamFrame>,
+        operation: &'static str,
+        reason: &'static str,
+    ) -> Result<(), QuicTransportError> {
+        let started = Instant::now();
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if started.elapsed() >= self.idle_timeout {
+                return Err(QuicTransportError::Timeout {
+                    operation,
+                    timeout: self.idle_timeout,
+                });
+            }
+            self.flush(cx).await?;
+            if frames.is_empty() {
+                *frames = self.last_flushed_stream_frames();
+            }
+            let _ = self.pump_inbound_for(cx, NEEDMORE_PTO).await?;
+            let target_stream_pending = frames
+                .first()
+                .is_some_and(|frame| self.conn.has_pending_stream_frames_for(frame.stream));
+            if !frames.is_empty()
+                && !target_stream_pending
+                && !self.stream_frames_still_in_flight(frames)
+            {
+                return Ok(());
+            }
+
+            let retransmit_frames = self.drain_in_flight_stream_frames_for_retransmit();
+            if retransmit_frames.is_empty() {
+                continue;
+            }
+            self.retransmit_stream_frames(cx, &retransmit_frames, reason)
+                .await?;
         }
     }
 
@@ -7212,6 +7270,13 @@ async fn run_sender_session(
     let manifest = &prepared.manifest;
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
+    let delta_sender_nonce = if manifest.delta_manifest.is_some()
+        && super::quic_delta_control_auth_context(config).is_some()
+    {
+        Some(super::fresh_quic_delta_nonce(cx, b"sender", None)?)
+    } else {
+        None
+    };
 
     let mut control = NativeQuicFrameTransport::open(cx, &mut link.conn)?;
     let offered_source_stream =
@@ -7229,6 +7294,7 @@ async fn run_sender_session(
         symbol_auth_enabled,
         offered_source_stream,
         manifest.total_bytes,
+        delta_sender_nonce,
     )?;
     link.flush(cx).await?;
     let hello_frames = link.last_flushed_stream_frames();
@@ -7242,6 +7308,7 @@ async fn run_sender_session(
         )
         .await?;
     let ack = parse_hello_ack(&ack_frame)?;
+    let delta_handshake = super::validate_quic_delta_ack(delta_sender_nonce, &ack)?;
     let source_stream = match (offered_source_stream, ack.source_stream) {
         (Some(stream), true) => Some(stream),
         (None, true) => {
@@ -7262,8 +7329,109 @@ async fn run_sender_session(
         link.source_stream_send_window = Some(window);
     }
 
-    super::send_native_manifest(cx, &mut link.conn, &mut control, manifest)?;
+    let delta_session = delta_handshake
+        .map(|handshake| {
+            super::derive_quic_delta_session(handshake, peer_id, &ack.peer_id, manifest)
+        })
+        .transpose()?;
+    if let Some(session) = delta_session {
+        let context = super::quic_delta_control_auth_context(config).ok_or_else(|| {
+            QuicTransportError::Config(
+                "QUIC delta control requires a strict authentication context".to_string(),
+            )
+        })?;
+        let envelope = super::make_quic_delta_manifest_envelope(context, session, manifest)?;
+        let frame = super::json_frame(FrameType::ObjectManifest, &envelope)?;
+        control.send(cx, &mut link.conn, &frame)?;
+    } else {
+        let mut full_manifest;
+        let manifest = if manifest.delta_manifest.is_some() {
+            full_manifest = manifest.clone();
+            full_manifest.delta_manifest = None;
+            &full_manifest
+        } else {
+            manifest
+        };
+        super::send_native_manifest(cx, &mut link.conn, &mut control, manifest)?;
+    }
     link.flush(cx).await?;
+    let manifest_frames = link.last_flushed_stream_frames();
+    let mut accepted_delta_full_request = None;
+    if let Some(session) = delta_session {
+        let request_frame = loop {
+            let frame = link
+                .next_control_frame_with_stream_pto(
+                    cx,
+                    &mut control,
+                    "receive bound QUIC delta request",
+                    &manifest_frames,
+                    "delta_manifest_pto",
+                )
+                .await?;
+            match frame.frame_type() {
+                FrameType::ObjectRequest => break frame,
+                FrameType::KeepAlive => {}
+                got => {
+                    return Err(QuicTransportError::Unexpected {
+                        got,
+                        expected: "ObjectRequest | KeepAlive",
+                    });
+                }
+            }
+        };
+        let request = super::parse_json::<super::QuicDeltaObjectRequest>(&request_frame)?;
+        let request_mode = super::validate_quic_delta_request(&request, session, manifest)?;
+        // Emit the transport ACK before source preparation or revalidation can
+        // delay the receiver's request-delivery gate.
+        link.flush(cx).await?;
+        match request_mode {
+            super::DeltaWireMode::FullObject => accepted_delta_full_request = Some(request),
+            super::DeltaWireMode::AlreadyInSync => {
+                super::validate_quic_prepared_delta_source_unchanged(cx, prepared, config).await?;
+                send_native_object_complete_for_round(cx, &mut link.conn, &mut control, 0, 0)?;
+                link.flush(cx).await?;
+                let completion_frames = link.last_flushed_stream_frames();
+                let proof_frame = loop {
+                    let frame = link
+                        .next_control_frame_with_stream_pto(
+                            cx,
+                            &mut control,
+                            "receive bound QUIC delta proof",
+                            &completion_frames,
+                            "delta_object_complete_pto",
+                        )
+                        .await?;
+                    match frame.frame_type() {
+                        FrameType::Proof => break frame,
+                        FrameType::KeepAlive => {}
+                        got => {
+                            return Err(QuicTransportError::Unexpected {
+                                got,
+                                expected: "Proof | KeepAlive",
+                            });
+                        }
+                    }
+                };
+                let proof = super::parse_json::<super::QuicDeltaProof>(&proof_frame)?;
+                let receipt = super::validate_quic_delta_proof(proof, session, manifest)?;
+                super::send_native_close(cx, &mut link.conn, &mut control)?;
+                link.flush(cx).await?;
+                return Ok(SendReport {
+                    transfer_id: manifest.transfer_id.clone(),
+                    bytes_sent: 0,
+                    files: super::manifest_logical_files(manifest),
+                    symbols_sent: 0,
+                    feedback_rounds: 0,
+                    merkle_root_hex: manifest.merkle_root_hex.clone(),
+                    receipt,
+                    peer: link.peer,
+                });
+            }
+            super::DeltaWireMode::DeltaChunks => unreachable!(
+                "validate_quic_delta_request rejects missing-chunk mode in this rollout"
+            ),
+        }
+    }
     if let Some(source_stream) = source_stream {
         let previous_paced_source_stream = link.paced_source_stream.replace(source_stream);
         let source_pacing = link.source_stream_pacing_decision(config);
@@ -7415,6 +7583,17 @@ async fn run_sender_session(
                 QuicControlReply::Proof(super::parse_json::<ReceiveReceipt>(&reply_frame)?)
             }
             FrameType::ObjectRequest => {
+                if let Some(expected) = accepted_delta_full_request.as_ref()
+                    && let Ok(duplicate) =
+                        super::parse_json::<super::QuicDeltaObjectRequest>(&reply_frame)
+                {
+                    if &duplicate != expected {
+                        return Err(QuicTransportError::Integrity(
+                            "receiver changed its bound QUIC delta request".to_string(),
+                        ));
+                    }
+                    continue;
+                }
                 QuicControlReply::NeedMore(super::parse_json::<QuicNeedMore>(&reply_frame)?)
             }
             FrameType::KeepAlive => continue,
@@ -9239,6 +9418,34 @@ async fn run_receiver_session(
     let hello: QuicHello = super::parse_json(&hello_frame)?;
     let reason = super::reject_hello_reason(&hello, &config, symbol_auth_enabled);
     let accepted = reason.is_none();
+    let delta_handshake = if accepted
+        && config.enable_delta
+        && super::quic_delta_control_auth_context(&config).is_some()
+    {
+        match hello.delta_transfer_nonce {
+            Some(sender_nonce) => {
+                let receiver_nonce =
+                    super::fresh_quic_delta_nonce(cx, b"receiver", Some(sender_nonce))?;
+                Some(super::QuicDeltaHandshakeContext {
+                    sender_nonce,
+                    receiver_nonce,
+                    destination_root: super::quic_delta_destination_root_commitment(
+                        super::quic_delta_control_auth_context(&config).ok_or_else(|| {
+                            QuicTransportError::Config(
+                                "QUIC delta control requires a strict authentication context"
+                                    .to_string(),
+                            )
+                        })?,
+                        receiver_nonce,
+                        dest_dir,
+                    )?,
+                })
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     let accepted_source_stream = accepted
         && hello.source_stream
         && super::quic_native_source_stream_enabled(hello.total_bytes, &config, &link.conn);
@@ -9250,6 +9457,9 @@ async fn run_receiver_session(
         source_stream: accepted_source_stream,
         source_stream_recv_window,
         reason: reason.clone(),
+        delta_transfer_nonce: delta_handshake.map(|binding| binding.sender_nonce),
+        delta_receiver_nonce: delta_handshake.map(|binding| binding.receiver_nonce),
+        delta_destination_root: delta_handshake.map(|binding| binding.destination_root),
     };
     let ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
     control.send(cx, &mut link.conn, &ack_frame)?;
@@ -9317,9 +9527,32 @@ async fn run_receiver_session(
             }
         }
     };
-    let manifest: TransferManifest =
-        super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
-    super::validate_quic_manifest(&manifest, config)?;
+    let (manifest, delta_session) = if let Some(handshake) = delta_handshake {
+        let envelope: super::QuicDeltaManifestEnvelope = super::parse_json_frame(
+            &manifest_frame,
+            FrameType::ObjectManifest,
+            "authenticated QUIC delta ObjectManifest",
+        )?;
+        super::validate_quic_manifest(&envelope.manifest, config)?;
+        let session = super::derive_quic_delta_session(
+            handshake,
+            &hello.peer_id,
+            peer_id,
+            &envelope.manifest,
+        )?;
+        let context = super::quic_delta_control_auth_context(config).ok_or_else(|| {
+            QuicTransportError::Config(
+                "QUIC delta control requires a strict authentication context".to_string(),
+            )
+        })?;
+        super::validate_quic_delta_manifest_envelope(context, session, &envelope)?;
+        (envelope.manifest, Some(session))
+    } else {
+        let manifest: TransferManifest =
+            super::parse_json_frame(&manifest_frame, FrameType::ObjectManifest, "ObjectManifest")?;
+        super::validate_quic_manifest(&manifest, config)?;
+        (manifest, None)
+    };
     super::quic_progress(format_args!(
         "receiver: manifest transfer={} total_bytes={} entries={} symbol_size={} max_block_size={}",
         manifest.transfer_id,
@@ -9329,6 +9562,117 @@ async fn run_receiver_session(
         config.max_block_size
     ));
     link.flush(cx).await?;
+
+    let mut delta_full_request_frame = None;
+    if let Some(session) = delta_session {
+        let request =
+            super::build_quic_receiver_delta_request(cx, dest_dir, config, session, &manifest)
+                .await?;
+        let request_mode = super::validate_quic_delta_request(&request, session, &manifest)?;
+        let request_frame = super::json_frame(FrameType::ObjectRequest, &request)?;
+        control.send(cx, &mut link.conn, &request_frame)?;
+        link.flush(cx).await?;
+        let mut request_frames = link.last_flushed_stream_frames();
+        link.wait_for_stream_frames_acked(
+            cx,
+            &mut request_frames,
+            "confirm bound QUIC delta request delivery",
+            "delta_request_delivery_pto",
+        )
+        .await?;
+
+        match request_mode {
+            super::DeltaWireMode::FullObject => delta_full_request_frame = Some(request_frame),
+            super::DeltaWireMode::AlreadyInSync => {
+                let complete = loop {
+                    let frame = link
+                        .next_control_frame_with_stream_pto(
+                            cx,
+                            &mut control,
+                            "receive QUIC delta no-op completion",
+                            &request_frames,
+                            "delta_request_pto",
+                        )
+                        .await?;
+                    match frame.frame_type() {
+                        FrameType::ObjectComplete => {
+                            break super::parse_quic_round_complete(&frame)?;
+                        }
+                        FrameType::ObjectManifest => {
+                            if frame != manifest_frame {
+                                return Err(QuicTransportError::Integrity(
+                                    "sender changed the QUIC delta manifest after negotiation"
+                                        .to_string(),
+                                ));
+                            }
+                            control.send(cx, &mut link.conn, &request_frame)?;
+                            link.flush(cx).await?;
+                            request_frames = link.last_flushed_stream_frames();
+                        }
+                        FrameType::KeepAlive => {}
+                        got => {
+                            return Err(QuicTransportError::Unexpected {
+                                got,
+                                expected: "ObjectComplete | ObjectManifest | KeepAlive",
+                            });
+                        }
+                    }
+                };
+                if complete.round != 0 || complete.round_symbols_sent != 0 {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "QUIC delta no-op completion carried round={} symbols={}",
+                        complete.round, complete.round_symbols_sent
+                    )));
+                }
+                let revalidated = super::build_quic_receiver_delta_request(
+                    cx, dest_dir, config, session, &manifest,
+                )
+                .await?;
+                if super::validate_quic_delta_request(&revalidated, session, &manifest)?
+                    != super::DeltaWireMode::AlreadyInSync
+                {
+                    return Err(QuicTransportError::Integrity(
+                        "destination changed before QUIC delta no-op proof".to_string(),
+                    ));
+                }
+                let committed_path =
+                    super::quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+                let receipt = ReceiveReceipt {
+                    committed: true,
+                    bytes_received: 0,
+                    files: super::manifest_logical_files(&manifest),
+                    sha_ok: true,
+                    merkle_ok: true,
+                    symbols_accepted: 0,
+                    feedback_rounds: 0,
+                    decode_count: 0,
+                    decode_micros: 0,
+                    reason: None,
+                    committed_paths: vec![committed_path.display().to_string()],
+                };
+                let proof = super::make_quic_delta_proof(session, &manifest, receipt.clone());
+                send_native_proof_until_close(cx, link, &mut control, &proof, &receipt, config)
+                    .await?;
+                let _ = super::send_native_close(cx, &mut link.conn, &mut control);
+                let _ = link.flush(cx).await;
+                return Ok(ReceiveReport {
+                    transfer_id: manifest.transfer_id.clone(),
+                    bytes_received: 0,
+                    files: receipt.files,
+                    committed: true,
+                    symbols_accepted: 0,
+                    feedback_rounds: 0,
+                    decode_count: 0,
+                    decode_micros: 0,
+                    committed_paths: vec![committed_path],
+                    peer: link.peer,
+                });
+            }
+            super::DeltaWireMode::DeltaChunks => unreachable!(
+                "build_quic_receiver_delta_request never emits missing-chunk mode in this rollout"
+            ),
+        }
+    }
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
     super::prepare_quic_destination_root(dest_dir).await?;
@@ -9418,7 +9762,15 @@ async fn run_receiver_session(
             receipt.feedback_rounds = 0;
             receipt.decode_count = decode_stats.decode_count;
             receipt.decode_micros = decode_stats.decode_micros;
-            send_native_proof_until_close(cx, link, &mut control, &receipt, config).await?;
+            send_native_proof_until_close(
+                cx,
+                link,
+                &mut control,
+                &receipt,
+                &receipt,
+                config,
+            )
+            .await?;
             let _ = super::send_native_close(cx, &mut link.conn, &mut control);
             let _ = link.flush(cx).await;
             if !receipt.committed {
@@ -9584,6 +9936,23 @@ async fn run_receiver_session(
                             }
                             break;
                         }
+                        FrameType::ObjectManifest => {
+                            let Some(request_frame) = delta_full_request_frame.as_ref() else {
+                                return Err(QuicTransportError::Unexpected {
+                                    got: FrameType::ObjectManifest,
+                                    expected: "ObjectComplete | KeepAlive",
+                                });
+                            };
+                            if frame != manifest_frame {
+                                return Err(QuicTransportError::Integrity(
+                                    "sender changed the QUIC manifest while awaiting full-object data"
+                                        .to_string(),
+                                ));
+                            }
+                            control.send(cx, &mut link.conn, request_frame)?;
+                            link.flush(cx).await?;
+                            continue;
+                        }
                         FrameType::KeepAlive => {
                             send_and_flush_native_keep_alive(cx, link, &mut control).await?;
                             continue;
@@ -9591,7 +9960,7 @@ async fn run_receiver_session(
                         got => {
                             return Err(QuicTransportError::Unexpected {
                                 got,
-                                expected: "ObjectComplete | KeepAlive",
+                                expected: "ObjectComplete | ObjectManifest | KeepAlive",
                             });
                         }
                     }
@@ -9883,7 +10252,15 @@ async fn run_receiver_session(
         receipt.feedback_rounds = feedback_rounds;
         receipt.decode_count = decode_stats.decode_count;
         receipt.decode_micros = decode_stats.decode_micros;
-        send_native_proof_until_close(cx, link, &mut control, &receipt, config).await?;
+        send_native_proof_until_close(
+            cx,
+            link,
+            &mut control,
+            &receipt,
+            &receipt,
+            config,
+        )
+        .await?;
         let _ = super::send_native_close(cx, &mut link.conn, &mut control);
         let _ = link.flush(cx).await;
 
