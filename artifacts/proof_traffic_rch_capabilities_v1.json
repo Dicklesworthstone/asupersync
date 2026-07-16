@@ -3,7 +3,7 @@
   "bead_id": "asupersync-proof-traffic-control-kuyx64.1",
   "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
   "status": "contract_guarded",
-  "generated_at": "2026-06-15T05:08:00Z",
+  "generated_at": "2026-07-16T06:57:00Z",
   "source_of_truth": {
     "artifact": "artifacts/proof_traffic_rch_capabilities_v1.json",
     "operator_doc": "docs/proof_traffic_control.md",
@@ -15,21 +15,25 @@
     "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json"
   },
   "probe": {
-    "installed_rch_version": "1.0.41",
+    "installed_rch_version": "1.0.49",
     "commands": [
       {
-        "command": "rch status --jobs",
-        "observed_signal": "Version : 1.0.41"
+        "command": "rch --version",
+        "observed_at": "2026-07-16T06:57:00Z",
+        "observed_signal": "rch 1.0.49 (commit 40beb520c1f3)"
       },
       {
         "command": "rch exec --help",
+        "observed_at": "2026-07-16T06:57:00Z",
         "observed_signal": "Usage: rch exec [OPTIONS] <COMMAND>..."
       },
       {
         "command": "RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_joinset_spawn_fanout_example\" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --example spawn_fanout",
+        "observed_at": "2026-06-15T05:08:00Z",
         "observed_signal": "remote required; refusing local fallback (no worker assigned)"
       }
     ],
+    "freshness_note": "Installed version and exec-help capability evidence were refreshed on 2026-07-16; the remote-required refusal fixture remains the separately dated 2026-06-15 observation and is not claimed fresh.",
     "help_excerpt": [
       "Execute a compilation command on a remote worker",
       "Usage: rch exec [OPTIONS] <COMMAND>...",
@@ -59,7 +63,7 @@
         "--overlay-path",
         "--no-overlay"
       ],
-      "evidence": "rch exec --help for installed version 1.0.41 exposes no clean-overlay options."
+      "evidence": "rch exec --help for installed version 1.0.49 exposes no clean-overlay options."
     },
     "installed_help_json": {
       "supported": true,
@@ -72,7 +76,7 @@
       "severity": "yellow",
       "observed": "Clean-overlay runbooks document an overlay-scoped command shape with --base, --clean-overlay, and --overlay-path.",
       "current_installed_support": "unsupported",
-      "operator_action": "Fail closed to capability-drift receipt; do not emit a Cargo proof command that assumes peer dirt was excluded."
+      "operator_action": "Fail closed to capability-drift receipt; do not emit a Cargo proof command or claim peer dirt was excluded without supported capability evidence plus an admitted command and terminal execution evidence."
     },
     {
       "finding_id": "remote-required-refusal-is-not-proof",
@@ -106,6 +110,8 @@
     "target_dir",
     "selected_paths",
     "capability_probe_version",
+    "clean_overlay_supported",
+    "missing_flags",
     "capability_findings",
     "rch_worker_or_refusal",
     "retry_condition",

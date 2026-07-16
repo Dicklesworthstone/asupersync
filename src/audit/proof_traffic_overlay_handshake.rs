@@ -9,7 +9,9 @@
 use super::clean_overlay_planner::{
     CleanOverlayManifest, CleanOverlayRequest, ExcludedPath, ExclusionReason, plan_clean_overlay,
 };
-use super::overlay_proof_command::OverlayProofCommand;
+/// Installed clean-overlay capability evidence used by the proof-traffic handshake.
+pub use super::overlay_proof_command::CleanOverlayCapability as ProofTrafficOverlayCapability;
+use super::overlay_proof_command::{CLEAN_OVERLAY_CAPABILITY_BLOCKER, OverlayProofCommand};
 use super::proof_traffic_receipt::ProofTrafficDecision;
 use serde::{Deserialize, Serialize};
 
@@ -44,42 +46,11 @@ const NO_CLAIM_BOUNDARIES: &[&str] = &[
     "No local Cargo fallback approval.",
     "No peer-owned build cancellation authority.",
     "No permission to delete files, clean worktrees, create branches, or create worktrees.",
-    "No claim that peer dirt was excluded unless the installed RCH clean-overlay capability is supported.",
+    "No claim that peer dirt was excluded unless installed RCH clean-overlay capability evidence is supported and an admitted command completed with terminal execution evidence.",
 ];
 
-/// Installed RCH clean-overlay capability evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProofTrafficOverlayCapability {
-    /// Probe/version string, for example `rch-1.0.41-help`.
-    pub capability_probe_version: String,
-    /// Whether installed `rch exec` supports the clean-overlay flags.
-    pub clean_overlay_supported: bool,
-    /// Missing clean-overlay flags, sorted and de-duplicated.
-    pub missing_flags: Vec<String>,
-    /// Operator-facing capability findings, sorted and de-duplicated.
-    pub capability_findings: Vec<String>,
-}
-
-impl ProofTrafficOverlayCapability {
-    /// Construct installed capability evidence.
-    #[must_use]
-    pub fn new(
-        capability_probe_version: impl Into<String>,
-        clean_overlay_supported: bool,
-        missing_flags: Vec<String>,
-        capability_findings: Vec<String>,
-    ) -> Self {
-        Self {
-            capability_probe_version: capability_probe_version.into(),
-            clean_overlay_supported,
-            missing_flags: sorted_unique(missing_flags),
-            capability_findings: sorted_unique(capability_findings),
-        }
-    }
-}
-
 /// Input to the A3 clean-overlay handshake.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProofTrafficOverlayHandshakeInput {
     /// Stable receipt/gate id, usually the bead id.
     pub gate_id: String,
@@ -173,10 +144,10 @@ impl ProofTrafficOverlayHandshake {
             included_paths: manifest.included_paths.clone(),
             excluded_paths: manifest.excluded_paths.clone(),
             reservation_evidence: manifest.reservation_evidence.clone(),
-            capability_probe_version: input.capability.capability_probe_version.clone(),
-            clean_overlay_supported: input.capability.clean_overlay_supported,
-            missing_flags: input.capability.missing_flags.clone(),
-            capability_findings: input.capability.capability_findings.clone(),
+            capability_probe_version: input.capability.capability_probe_version().to_string(),
+            clean_overlay_supported: input.capability.supports_required_flags(),
+            missing_flags: input.capability.missing_flags().to_vec(),
+            capability_findings: input.capability.capability_findings().to_vec(),
             rendered_command,
             admitted,
             report_only: manifest.report_only,
@@ -275,6 +246,53 @@ impl ProofTrafficOverlayHandshake {
         out.push_str(if self.report_only { "true" } else { "false" });
         out.push_str("`\n- retry_condition: ");
         out.push_str(&self.retry_condition);
+        out.push_str("\n- selected_paths: `");
+        out.push_str(&self.selected_paths.join(","));
+        out.push_str("`\n- included_paths: `");
+        out.push_str(&self.included_paths.join(","));
+        out.push_str("`\n- excluded_paths: `");
+        out.push_str(
+            &self
+                .excluded_paths
+                .iter()
+                .map(|excluded| format!("{}:{}", excluded.path, exclusion_label(excluded.reason)))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        out.push_str("`\n- reservation_evidence: `");
+        out.push_str(&self.reservation_evidence.join(","));
+        out.push_str("`\n- missing_flags: `");
+        out.push_str(&self.missing_flags.join(","));
+        out.push_str("`\n- capability_findings: `");
+        out.push_str(&self.capability_findings.join(" | "));
+        out.push_str("`\n- rendered_command: `");
+        out.push_str(&self.rendered_command);
+        out.push_str("`\n- no_claim_boundaries: `");
+        out.push_str(&self.no_claim_boundaries.join(" | "));
+        out.push_str(
+            "`\n- terminal_execution_evidence: `none; pre-execution admission receipt only`",
+        );
+        out.push_str("\n- rch_worker_or_refusal: `");
+        out.push_str(if self.admitted {
+            "not recorded; pre-execution admission receipt only"
+        } else {
+            self.decision.label()
+        });
+        out.push_str("`\n- dirty_frontier: `");
+        out.push_str(
+            if self
+                .excluded_paths
+                .iter()
+                .any(|excluded| excluded.reason == ExclusionReason::PeerDirtyUnselected)
+            {
+                "peer-dirty observed; no command admitted and no exclusion claim"
+            } else if self.admitted {
+                "owned/clean selected frontier at admission; execution not attested"
+            } else {
+                "no peer-dirty exclusion claim; command not admitted"
+            },
+        );
+        out.push_str("`\n- rollback_action: `leave peer dirt unstaged; refresh evidence and rerun capability-gated handshake`");
         out.push_str("\n- local_cargo_fallback_allowed: `false`\n");
         out.push_str("- peer_build_cancellation_allowed: `false`\n");
         out.push_str("- branch_or_worktree_allowed: `false`\n");
@@ -286,11 +304,11 @@ fn classify(
     manifest: &CleanOverlayManifest,
     capability: &ProofTrafficOverlayCapability,
 ) -> ProofTrafficDecision {
+    if !capability.supports_required_flags() {
+        return ProofTrafficDecision::BlockedByCapabilityDrift;
+    }
     if manifest.report_only {
         return ProofTrafficDecision::ReportOnly;
-    }
-    if !capability.clean_overlay_supported {
-        return ProofTrafficDecision::BlockedByCapabilityDrift;
     }
     if manifest.blocked {
         return if manifest
@@ -314,15 +332,15 @@ fn rendered_command(
     target_dir: &str,
     capability: &ProofTrafficOverlayCapability,
 ) -> String {
+    if !capability.supports_required_flags() {
+        return CLEAN_OVERLAY_CAPABILITY_BLOCKER.to_string();
+    }
     if manifest.report_only {
         return "# REPORT-ONLY: clean-overlay handshake dry run; no proof command emitted"
             .to_string();
     }
-    if !capability.clean_overlay_supported {
-        return "# BLOCKED: installed RCH clean-overlay capability unsupported; no proof command emitted"
-            .to_string();
-    }
-    OverlayProofCommand::from_manifest_with_target(manifest, target_dir).rendered_command()
+    OverlayProofCommand::from_manifest_with_target(manifest, target_dir, capability)
+        .rendered_command()
 }
 
 fn retry_condition(
@@ -337,8 +355,13 @@ fn retry_condition(
         }
         ProofTrafficDecision::ReportOnly => "report-only; no proof command emitted".to_string(),
         ProofTrafficDecision::BlockedByCapabilityDrift => {
-            let missing = capability.missing_flags.join(",");
-            format!("rerun after installed RCH exposes clean-overlay flags [{missing}]")
+            if capability.capability_probe_version().is_empty() {
+                "rerun after capturing a fresh non-empty installed RCH capability probe version and rch exec --help output"
+                    .to_string()
+            } else {
+                let missing = capability.missing_flags().join(",");
+                format!("rerun after installed RCH exposes clean-overlay flags [{missing}]")
+            }
         }
         ProofTrafficDecision::BlockedByPeer => {
             "rerun after peer-dirty unselected paths are cleared or selected by their owner"
@@ -415,10 +438,4 @@ const fn exclusion_label(reason: ExclusionReason) -> &'static str {
         ExclusionReason::UnreservedSelection => "unreserved-selection",
         ExclusionReason::DeletedSelectionRefused => "deleted-selection-refused",
     }
-}
-
-fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
-    values.sort();
-    values.dedup();
-    values
 }

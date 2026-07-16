@@ -2853,8 +2853,8 @@
       "guarantee_ids": [
         "clean-overlay-proof-orchestration-contract"
       ],
-      "covers": "Clean-overlay proof-orchestration A4 operator runbook, when-to-use prerequisites, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty blocker receipts, non-destructive cleanup/rollback, Agent Mail and br comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries stay aligned with the A1-A3 lane surfaces.",
-      "explicit_not_covered": "Does not prove runtime correctness, broad workspace health, release readiness, performance improvement, live RCH fleet availability, permission to delete files or clean worktrees, or local Cargo fallback approval.",
+      "covers": "Clean-overlay proof-orchestration A4 operator-packet documentation and reference alignment: installed-capability admission and option-section parsing, when-to-use prerequisites, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty and capability-drift blocker receipts, receipt-only blocked reproduction, non-destructive cleanup/rollback, Agent Mail and br comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries remain path-pinned to the A1-A3 lane surfaces; referenced behavioral tests are separate evidence.",
+      "explicit_not_covered": "Does not prove behavioral correctness of the referenced parser, command builder, or handshake, runtime correctness, broad workspace health, release readiness, performance improvement, live RCH fleet availability, permission to delete files or clean worktrees, local Cargo fallback approval, or peer-dirt exclusion without supported installed capability evidence plus an admitted command and terminal execution evidence.",
       "expected_signal": "clean_overlay_proof_orchestration_contract tests pass",
       "source_paths": [
         "artifacts/clean_overlay_proof_orchestration_v1.json",
@@ -2866,17 +2866,21 @@
         "src/audit/blocker_receipt.rs",
         "src/audit/overlay_proof_command.rs",
         "tests/proof_orch_clean_overlay_e2e.rs",
+        "src/audit/proof_traffic_overlay_handshake.rs",
+        "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
         "tests/clean_overlay_proof_planner_contract.rs",
         "artifacts/proof_lane_manifest_v1.json",
         "artifacts/proof_status_snapshot_v1.json"
       ],
       "common_unrelated_blockers": [
         "peer-dirty working tree drift",
+        "installed RCH clean-overlay capability drift",
+        "missing installed capability probe identity",
         "operator runbook no-claim drift",
         "manifest projection golden drift",
         "proof-status row drift"
       ],
-      "escalation_notes": "Use this lane only for the A4 clean-overlay proof-orchestration operator packet. It cannot be cited as release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to delete files, or permission to use local Cargo fallback.",
+      "escalation_notes": "Use this lane only for the A4 clean-overlay proof-orchestration operator packet and its installed-capability gate. Unsupported or unidentified clients and blocked manifests emit receipts only. It cannot be cited as peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to delete files, or permission to use local Cargo fallback.",
       "proof_reuse_policy": {
         "cache_hits_allowed": true,
         "allowed_claim_scopes": [
@@ -2891,7 +2895,8 @@
           "runtime-correctness",
           "live-rch-fleet-availability",
           "performance-improvement",
-          "local-cargo-fallback"
+          "local-cargo-fallback",
+          "peer-dirt-exclusion-without-supported-admitted-terminal-receipt"
         ]
       }
     },
@@ -2906,7 +2911,7 @@
         "proof-traffic-final-signoff"
       ],
       "covers": "Proof-traffic A6 final signoff artifact, A1-A5 evidence aggregation, capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, proof manifest/status rows, README/AGENTS markers, no-local-fallback and no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries stay aligned.",
-      "explicit_not_covered": "Does not prove release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds.",
+      "explicit_not_covered": "Does not prove release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds.",
       "expected_signal": "proof_traffic_final_signoff_contract tests pass",
       "source_paths": [
         "artifacts/proof_traffic_final_signoff_v1.json",
@@ -2935,7 +2940,7 @@
         "proof-status row drift",
         "unrelated dirty tracker rows"
       ],
-      "escalation_notes": "Use this lane only for the scoped proof-traffic A6 operator packet. It cannot be cited as release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to cancel peer builds, permission to delete files, or permission to use local Cargo fallback.",
+      "escalation_notes": "Use this lane only for the scoped proof-traffic A6 operator packet. It cannot be cited as peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to cancel peer builds, permission to delete files, or permission to use local Cargo fallback.",
       "proof_reuse_policy": {
         "cache_hits_allowed": true,
         "allowed_claim_scopes": [
@@ -2951,7 +2956,8 @@
           "live-rch-fleet-availability",
           "performance-improvement",
           "local-cargo-fallback",
-          "peer-build-cancellation"
+          "peer-build-cancellation",
+          "peer-dirt-exclusion-without-supported-admitted-terminal-receipt"
         ]
       }
     }
@@ -3344,7 +3350,7 @@
     },
     {
       "guarantee_id": "clean-overlay-proof-orchestration-contract",
-      "description": "Clean-overlay proof-orchestration A4 operator runbook, when-to-use prerequisites, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty blocker receipts, non-destructive cleanup/rollback, Agent Mail and br comment handoff templates, manifest/status rows, README/AGENTS markers, and no-claim boundaries have a canonical verifier command.",
+      "description": "Clean-overlay proof-orchestration A4 operator-packet documentation and reference alignment for installed-capability admission, option-section parsing, receipt-only blocked reproduction, operator guidance, handoff templates, manifest/status rows, README/AGENTS markers, and no-claim boundaries has a canonical verifier command; referenced behavioral tests are separate evidence.",
       "lane_ids": [
         "clean-overlay-proof-orchestration-contract"
       ]

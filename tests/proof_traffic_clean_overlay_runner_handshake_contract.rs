@@ -28,6 +28,23 @@ const TARGET_DIR: &str = "${TMPDIR:-/tmp}/rch_target_proof_traffic_clean_overlay
 const SELECTED_DIRTY: &str = "src/audit/proof_traffic_overlay_handshake.rs";
 const SELECTED_UNTRACKED: &str = "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs";
 const POISON: &str = "src/peer_poison_would_not_compile.rs";
+const SUPPORTED_RCH_HELP: &str = r"
+Options:
+    -b, --base=<HEAD>
+    --clean-overlay
+    -o, --overlay-path=<PATH>
+    --no-overlay
+";
+const UNSUPPORTED_RCH_HELP: &str = r"
+Options:
+    -v, --verbose
+    -q, --quiet
+    Examples:
+    --base HEAD
+    --clean-overlay
+    --overlay-path PATH
+    --no-overlay
+";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -94,26 +111,11 @@ fn request(
 }
 
 fn supported_capability() -> ProofTrafficOverlayCapability {
-    ProofTrafficOverlayCapability::new(
-        "rch-1.0.99-help".to_string(),
-        true,
-        vec![],
-        vec!["clean-overlay flags supported".to_string()],
-    )
+    ProofTrafficOverlayCapability::from_rch_exec_help("rch-1.0.99-exec-help", SUPPORTED_RCH_HELP)
 }
 
 fn unsupported_capability() -> ProofTrafficOverlayCapability {
-    ProofTrafficOverlayCapability::new(
-        "rch-1.0.41-help".to_string(),
-        false,
-        vec![
-            "--base".to_string(),
-            "--clean-overlay".to_string(),
-            "--overlay-path".to_string(),
-            "--no-overlay".to_string(),
-        ],
-        vec!["installed rch exec help lacks clean-overlay flags".to_string()],
-    )
+    ProofTrafficOverlayCapability::from_rch_exec_help("rch-1.0.49-exec-help", UNSUPPORTED_RCH_HELP)
 }
 
 fn handshake(
@@ -247,6 +249,59 @@ fn unsupported_overlay_capability_blocks_command_emission() {
 }
 
 #[test]
+fn capability_help_probe_requires_option_declarations_not_example_mentions() {
+    let supported = supported_capability();
+    assert!(supported.clean_overlay_supported());
+    assert!(supported.missing_flags().is_empty());
+
+    let unsupported = unsupported_capability();
+    assert!(!unsupported.clean_overlay_supported());
+    assert_eq!(unsupported.missing_flags().len(), 4);
+    for flag in [
+        "--base",
+        "--clean-overlay",
+        "--overlay-path",
+        "--no-overlay",
+    ] {
+        assert!(
+            unsupported
+                .missing_flags()
+                .iter()
+                .any(|missing| missing == flag),
+            "example-only {flag} mention must not count as an option declaration"
+        );
+    }
+
+    let missing_probe_version =
+        ProofTrafficOverlayCapability::from_rch_exec_help("   ", SUPPORTED_RCH_HELP);
+    assert!(!missing_probe_version.supports_required_flags());
+    assert!(
+        missing_probe_version
+            .capability_findings()
+            .iter()
+            .any(|finding| finding.contains("probe version is missing"))
+    );
+
+    let receipt = handshake(
+        request(
+            vec![wte(SELECTED_DIRTY, PathChange::Modified)],
+            &[SELECTED_DIRTY],
+            vec![lease(SELECTED_DIRTY)],
+            false,
+        ),
+        missing_probe_version,
+    );
+    assert_eq!(
+        receipt.decision,
+        ProofTrafficDecision::BlockedByCapabilityDrift
+    );
+    assert!(receipt.missing_flags.is_empty());
+    assert!(receipt.retry_condition.contains("non-empty"));
+    assert!(receipt.retry_condition.contains("probe version"));
+    assert!(!receipt.retry_condition.contains("flags []"));
+}
+
+#[test]
 fn peer_poison_path_fails_closed_and_never_enters_admitted_command() {
     let receipt = handshake(
         request(
@@ -280,6 +335,11 @@ fn peer_poison_path_fails_closed_and_never_enters_admitted_command() {
         "poison peer path must not enter command: {}",
         receipt.rendered_command
     );
+    let handoff = receipt.agent_mail_body();
+    assert!(handoff.contains(
+        "dirty_frontier: `peer-dirty observed; no command admitted and no exclusion claim`"
+    ));
+    assert!(!handoff.contains("peer-dirty excluded"));
     assert_no_forbidden_command_surface(&receipt);
 }
 
@@ -322,7 +382,7 @@ fn report_only_mode_renders_exclusions_but_no_proof_command() {
             vec![lease(SELECTED_DIRTY)],
             true,
         ),
-        unsupported_capability(),
+        supported_capability(),
     );
 
     assert_eq!(receipt.decision, ProofTrafficDecision::ReportOnly);
@@ -339,6 +399,31 @@ fn report_only_mode_renders_exclusions_but_no_proof_command() {
     );
     assert!(report.contains("peer-dirty-unselected"));
     assert!(!receipt.rendered_command.to_lowercase().contains("cargo"));
+    assert_no_forbidden_command_surface(&receipt);
+}
+
+#[test]
+fn unsupported_capability_precedes_report_only_mode() {
+    let receipt = handshake(
+        request(
+            vec![wte(SELECTED_DIRTY, PathChange::Modified)],
+            &[SELECTED_DIRTY],
+            vec![lease(SELECTED_DIRTY)],
+            true,
+        ),
+        unsupported_capability(),
+    );
+
+    assert_eq!(
+        receipt.decision,
+        ProofTrafficDecision::BlockedByCapabilityDrift
+    );
+    assert!(receipt.report_only, "source planner mode remains recorded");
+    assert!(!receipt.admitted);
+    assert_eq!(
+        receipt.rendered_command,
+        "# BLOCKED: installed RCH clean-overlay capability unsupported; no proof command emitted"
+    );
     assert_no_forbidden_command_surface(&receipt);
 }
 
@@ -370,6 +455,10 @@ fn json_markdown_and_handoff_bodies_are_deterministic() {
     );
     assert_eq!(json["clean_overlay_supported"].as_bool(), Some(true));
     assert!(string_field(&json, "retry_condition").contains("none"));
+    assert!(receipt.no_claim_boundaries.iter().any(|boundary| {
+        boundary
+            == "No claim that peer dirt was excluded unless installed RCH clean-overlay capability evidence is supported and an admitted command completed with terminal execution evidence."
+    }));
 
     let markdown = receipt.render_markdown();
     assert_eq!(markdown, receipt.render_markdown());
@@ -387,7 +476,14 @@ fn json_markdown_and_handoff_bodies_are_deterministic() {
         "clean_overlay_supported",
         "missing_flags",
         "capability_findings",
+        "rendered_command",
+        "admitted",
+        "report_only",
         "retry_condition",
+        "terminal_execution_evidence",
+        "rch_worker_or_refusal",
+        "dirty_frontier",
+        "rollback_action",
         "no_claim_boundaries",
     ] {
         assert!(markdown.contains(field), "markdown missing {field}");
@@ -396,11 +492,40 @@ fn json_markdown_and_handoff_bodies_are_deterministic() {
     let agent_mail = receipt.agent_mail_body();
     let br_comment = receipt.br_comment_body();
     for body in [agent_mail, br_comment] {
-        assert!(body.contains("gate_id"));
-        assert!(body.contains("status"));
-        assert!(body.contains("clean_overlay_supported"));
+        for field in [
+            "gate_id",
+            "status",
+            "head_commit",
+            "command_intent",
+            "target_dir",
+            "selected_paths",
+            "included_paths",
+            "excluded_paths",
+            "reservation_evidence",
+            "rendered_command",
+            "capability_probe_version",
+            "clean_overlay_supported",
+            "missing_flags",
+            "capability_findings",
+            "admitted",
+            "report_only",
+            "retry_condition",
+            "terminal_execution_evidence",
+            "rch_worker_or_refusal",
+            "dirty_frontier",
+            "rollback_action",
+            "no_claim_boundaries",
+        ] {
+            assert!(body.contains(field), "handoff body missing {field}");
+        }
         assert!(body.contains("local_cargo_fallback_allowed: `false`"));
         assert!(body.contains("branch_or_worktree_allowed: `false`"));
+        assert!(
+            body.contains(
+                "terminal_execution_evidence: `none; pre-execution admission receipt only`"
+            )
+        );
+        assert!(body.contains("execution not attested"));
     }
 }
 
@@ -413,6 +538,29 @@ fn artifact_and_docs_pin_a3_contract_scope() {
     );
     assert_eq!(string_field(&artifact, "bead_id"), GATE_ID);
     assert_eq!(string_field(&artifact, "status"), "contract_guarded");
+    assert!(string_field(&artifact, "handoff_stage").contains("pre-execution admission receipt"));
+
+    let capability_rules = &artifact["capability_evidence_rules"];
+    assert_eq!(
+        capability_rules["nonempty_probe_version_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability_rules["required_flags_must_be_declared_in_options_section"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability_rules["prose_or_example_mentions_do_not_count"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability_rules["unsupported_capability_precedes_report_only"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        string_field(capability_rules, "unsupported_marker"),
+        "# BLOCKED: installed RCH clean-overlay capability unsupported; no proof command emitted"
+    );
 
     for path in [
         string_field(&artifact["source_of_truth"], "artifact"),
@@ -440,6 +588,32 @@ fn artifact_and_docs_pin_a3_contract_scope() {
         assert!(required.contains(fixture), "missing fixture {fixture}");
     }
 
+    let report_fields = string_set(&artifact, "required_report_fields");
+    for field in [
+        "capability_probe_version",
+        "clean_overlay_supported",
+        "missing_flags",
+        "capability_findings",
+        "rendered_command",
+        "admitted",
+        "report_only",
+        "terminal_execution_evidence",
+        "rch_worker_or_refusal",
+        "dirty_frontier",
+        "rollback_action",
+        "no_claim_boundaries",
+    ] {
+        assert!(
+            report_fields.contains(field),
+            "missing report field {field}"
+        );
+    }
+    assert!(
+        string_set(&artifact, "no_claim_boundaries").contains(
+            "No claim that peer dirt was excluded unless installed RCH clean-overlay capability evidence is supported and an admitted command completed with terminal execution evidence."
+        )
+    );
+
     let docs = read_repo_file(DOCS_PATH);
     for needle in [
         "Proof-Traffic A3 Clean-Overlay Handshake",
@@ -448,6 +622,9 @@ fn artifact_and_docs_pin_a3_contract_scope() {
         "blocked-by-capability-drift",
         "poison peer path",
         "exclusive self reservations",
+        "prose and example mentions do not count",
+        "terminal execution evidence",
+        "pre-execution admission receipts",
     ] {
         assert!(docs.contains(needle), "docs missing {needle}");
     }

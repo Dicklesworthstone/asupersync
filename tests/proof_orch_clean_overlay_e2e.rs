@@ -17,8 +17,10 @@
 //! test asserts the *mechanism* only and makes no broad runtime-correctness
 //! claim (AC5).
 //!
-//! Run as an integration test (the lib is linked in non-test mode), so these
-//! assertions are immune to peer `#[cfg(test)]` breakage in the shared tree:
+//! Run as an integration test only when ordinary RCH would receive a peer-clean
+//! input tree (the lib is linked in non-test mode), so these assertions are
+//! immune to peer `#[cfg(test)]` breakage. With peer dirt present, do not issue
+//! this ordinary RCH command; record the non-admitted receipt instead:
 //!
 //! ```text
 //! rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch_target_asupersync_test \
@@ -34,7 +36,9 @@ use asupersync::audit::clean_overlay_planner::{
     CleanOverlayManifest, CleanOverlayRequest, ExclusionReason, PathChange, ReservationLease,
     WorkingTreeEntry, plan_clean_overlay,
 };
-use asupersync::audit::overlay_proof_command::OverlayProofCommand;
+use asupersync::audit::overlay_proof_command::{
+    CLEAN_OVERLAY_CAPABILITY_BLOCKER, CleanOverlayCapability, OverlayProofCommand,
+};
 
 const HEAD: &str = "5ve2ao3c0ffee00000000000000000000000000a";
 const INTENT: &str = "cargo test --test slice_under_proof -- --nocapture";
@@ -43,6 +47,22 @@ const SELECTED_UNTRACKED: &str = "tests/proof_orch_clean_overlay_e2e_slice.rs";
 /// Unrelated peer path that would fail compilation if RCH synced it. The overlay
 /// mechanism must keep it out of the emitted command.
 const POISON: &str = "src/peer_poison_would_not_compile.rs";
+const SUPPORTED_RCH_HELP: &str = r"
+Options:
+    -b, --base=<HEAD>
+    --clean-overlay
+    -o, --overlay-path=<PATH>
+    --no-overlay
+";
+const UNSUPPORTED_RCH_HELP: &str = r"
+Options:
+    --verbose
+    Examples:
+    --base HEAD
+    --clean-overlay
+    --overlay-path PATH
+    --no-overlay
+";
 
 fn wte(path: &str, change: PathChange) -> WorkingTreeEntry {
     WorkingTreeEntry::new(path, change)
@@ -68,10 +88,25 @@ fn request(
     }
 }
 
-fn plan(request: &CleanOverlayRequest) -> (CleanOverlayManifest, OverlayProofCommand) {
+fn supported_capability() -> CleanOverlayCapability {
+    CleanOverlayCapability::from_rch_exec_help("rch-supported-exec-help", SUPPORTED_RCH_HELP)
+}
+
+fn unsupported_capability() -> CleanOverlayCapability {
+    CleanOverlayCapability::from_rch_exec_help("rch-unsupported-exec-help", UNSUPPORTED_RCH_HELP)
+}
+
+fn plan_with_capability(
+    request: &CleanOverlayRequest,
+    capability: &CleanOverlayCapability,
+) -> (CleanOverlayManifest, OverlayProofCommand) {
     let manifest = plan_clean_overlay(request);
-    let command = OverlayProofCommand::from_manifest(&manifest);
+    let command = OverlayProofCommand::from_manifest(&manifest, capability);
     (manifest, command)
+}
+
+fn plan(request: &CleanOverlayRequest) -> (CleanOverlayManifest, OverlayProofCommand) {
+    plan_with_capability(request, &supported_capability())
 }
 
 /// Invariants that must hold for *every* scenario, admitted or not (AC3, AC4,
@@ -93,12 +128,31 @@ fn assert_universal_invariants(command: &OverlayProofCommand) {
         command.rendered_command(),
         command.reproduction_command()
     );
-    // AC3 — the reproduction command is deterministic and RCH-routed.
-    assert!(
-        command.reproduction_command().contains("rch exec"),
-        "reproduction command must route through rch exec: {}",
-        command.reproduction_command()
-    );
+    // AC3 — only an admitted reproduction is executable and RCH-routed. Every
+    // refused, report-only, or unsupported state emits a receipt, because an
+    // ordinary RCH retry could sync the peer dirt that caused the refusal.
+    if command.admitted() {
+        assert!(
+            command.reproduction_command().contains("rch exec"),
+            "reproduction command must route through rch exec: {}",
+            command.reproduction_command()
+        );
+    } else {
+        let reproduction = command.reproduction_command();
+        assert!(reproduction.starts_with('#'));
+        assert!(!reproduction.to_ascii_lowercase().contains("cargo"));
+        for flag in [
+            "--base",
+            "--clean-overlay",
+            "--overlay-path",
+            "--no-overlay",
+        ] {
+            assert!(
+                !reproduction.contains(flag),
+                "non-admitted receipt leaked {flag}: {reproduction}"
+            );
+        }
+    }
     assert!(
         !command
             .reproduction_command()
@@ -111,11 +165,11 @@ fn assert_universal_invariants(command: &OverlayProofCommand) {
     // attesting broad workspace health.
     assert!(
         command
-            .no_claim_boundaries
+            .no_claim_boundaries()
             .iter()
             .any(|boundary| boundary.contains("no workspace-wide health claim")),
         "missing honest no-broad-health boundary: {:?}",
-        command.no_claim_boundaries
+        command.no_claim_boundaries()
     );
 }
 
@@ -128,12 +182,12 @@ fn scenario_clean_head_admits_selected_clean_path() {
     let (manifest, command) = plan(&request(vec![], &[SELECTED_DIRTY], vec![], false));
 
     assert!(!manifest.blocked, "clean HEAD must not block");
-    assert!(command.admitted, "clean-HEAD overlay must be admitted");
+    assert!(command.admitted(), "clean-HEAD overlay must be admitted");
     assert!(
-        command.excluded_paths.is_empty(),
+        command.excluded_paths().is_empty(),
         "no exclusions on a clean tree"
     );
-    assert_eq!(command.overlay_paths, vec![SELECTED_DIRTY.to_string()]);
+    assert_eq!(command.overlay_paths(), &[SELECTED_DIRTY.to_string()]);
 
     let rendered = command.rendered_command();
     assert!(
@@ -156,6 +210,65 @@ fn scenario_clean_head_admits_selected_clean_path() {
     assert_universal_invariants(&command);
 }
 
+#[test]
+fn unsupported_capability_blocks_before_any_overlay_command_is_rendered() {
+    let request = request(vec![], &[SELECTED_DIRTY], vec![], false);
+    let capability = unsupported_capability();
+    let (manifest, command) = plan_with_capability(&request, &capability);
+
+    assert!(
+        !manifest.blocked,
+        "path admission alone would allow this run"
+    );
+    assert!(!capability.clean_overlay_supported());
+    assert!(!command.admitted());
+    assert_eq!(command.rendered_command(), CLEAN_OVERLAY_CAPABILITY_BLOCKER);
+    assert_eq!(
+        command.reproduction_command(),
+        CLEAN_OVERLAY_CAPABILITY_BLOCKER
+    );
+    assert_eq!(command.missing_flags().len(), 4);
+    assert!(
+        command
+            .capability_findings()
+            .iter()
+            .any(|finding| finding.contains("lacks required clean-overlay flags"))
+    );
+
+    let surface = format!(
+        "{}\n{}",
+        command.rendered_command(),
+        command.reproduction_command()
+    );
+    assert!(!surface.to_ascii_lowercase().contains("cargo"));
+    assert!(!surface.contains(INTENT));
+    assert!(!surface.contains(SELECTED_DIRTY));
+    for flag in [
+        "--base",
+        "--clean-overlay",
+        "--overlay-path",
+        "--no-overlay",
+    ] {
+        assert!(!surface.contains(flag), "capability blocker leaked {flag}");
+    }
+
+    assert_universal_invariants(&command);
+
+    let report_only = request(vec![], &[SELECTED_DIRTY], vec![], true);
+    let (_, report_only_command) = plan_with_capability(&report_only, &capability);
+    assert!(report_only_command.report_only());
+    assert_eq!(
+        report_only_command.rendered_command(),
+        CLEAN_OVERLAY_CAPABILITY_BLOCKER,
+        "unsupported capability must win before report-only rendering"
+    );
+    assert_eq!(
+        report_only_command.reproduction_command(),
+        CLEAN_OVERLAY_CAPABILITY_BLOCKER
+    );
+    assert_universal_invariants(&report_only_command);
+}
+
 // ---------------------------------------------------------------------------
 // AC1.2 — selected dirty file inclusion: a reserved, selected dirty file is
 // overlaid and the run is admitted.
@@ -170,14 +283,17 @@ fn scenario_selected_dirty_file_included() {
     ));
 
     assert!(!manifest.blocked, "reserved selected dirt must not block");
-    assert!(command.admitted, "reserved selected dirt must be admitted");
-    assert_eq!(command.overlay_paths, vec![SELECTED_DIRTY.to_string()]);
+    assert!(
+        command.admitted(),
+        "reserved selected dirt must be admitted"
+    );
+    assert_eq!(command.overlay_paths(), &[SELECTED_DIRTY.to_string()]);
     assert!(
         command
-            .reservation_evidence
+            .reservation_evidence()
             .contains(&SELECTED_DIRTY.to_string()),
         "reservation evidence must justify the inclusion: {:?}",
-        command.reservation_evidence
+        command.reservation_evidence()
     );
 
     let rendered = command.rendered_command();
@@ -220,10 +336,10 @@ fn scenario_unrelated_dirty_file_excluded_and_fails_closed() {
         manifest.blocked,
         "peer dirt must fail an enforced run closed"
     );
-    assert!(!command.admitted, "blocked overlay must not be admitted");
+    assert!(!command.admitted(), "blocked overlay must not be admitted");
     assert_eq!(
         command
-            .excluded_paths
+            .excluded_paths()
             .iter()
             .find(|excluded| excluded.path == POISON)
             .map(|excluded| excluded.reason),
@@ -279,10 +395,10 @@ fn scenario_selected_untracked_file_included() {
         "reserved selected untracked file must not block"
     );
     assert!(
-        command.admitted,
+        command.admitted(),
         "reserved selected untracked file must be admitted"
     );
-    assert_eq!(command.overlay_paths, vec![SELECTED_UNTRACKED.to_string()]);
+    assert_eq!(command.overlay_paths(), &[SELECTED_UNTRACKED.to_string()]);
 
     let rendered = command.rendered_command();
     assert!(
@@ -311,10 +427,10 @@ fn scenario_unselected_untracked_file_refused() {
         manifest.blocked,
         "untracked peer file must fail an enforced run closed"
     );
-    assert!(!command.admitted, "refused overlay must not be admitted");
+    assert!(!command.admitted(), "refused overlay must not be admitted");
     assert_eq!(
         command
-            .excluded_paths
+            .excluded_paths()
             .iter()
             .find(|excluded| excluded.path == POISON)
             .map(|excluded| excluded.reason),
@@ -379,16 +495,18 @@ fn report_identifies_selection_exclusion_head_reservations_and_command() {
         report.contains("RCH-only; no local Cargo fallback"),
         "report must state the RCH-only lane"
     );
+    assert!(report.contains("Capability probe"));
+    assert!(report.contains("Clean-overlay capability supported: `true`"));
 
     assert_universal_invariants(&command);
 }
 
 // ---------------------------------------------------------------------------
-// AC3 — the failure reproduction command is deterministic and routes through
-// RCH (never a local Cargo fallback), for a blocked run.
+// AC3 — a blocked-run reproduction is a deterministic receipt only. Emitting
+// ordinary RCH here could sync the peer dirt that caused the refusal.
 // ---------------------------------------------------------------------------
 #[test]
-fn blocked_run_reproduction_is_deterministic_and_rch_routed() {
+fn blocked_run_reproduction_is_deterministic_and_non_executable() {
     let scenario = || {
         plan(&request(
             vec![wte(POISON, PathChange::Modified)],
@@ -400,20 +518,18 @@ fn blocked_run_reproduction_is_deterministic_and_rch_routed() {
     let (_m1, c1) = scenario();
     let (_m2, c2) = scenario();
 
-    assert!(!c1.admitted, "peer dirt must block");
+    assert!(!c1.admitted(), "peer dirt must block");
     // Determinism: identical inputs render identical commands.
     assert_eq!(c1.rendered_command(), c2.rendered_command());
     assert_eq!(c1.reproduction_command(), c2.reproduction_command());
 
     let repro = c1.reproduction_command();
     assert!(
-        repro.contains("rch exec"),
-        "repro must be RCH-routed: {repro}"
+        repro.starts_with("# BLOCKED"),
+        "blocked repro must be a receipt: {repro}"
     );
-    assert!(
-        repro.contains("proof_orch_clean_overlay_e2e"),
-        "blocked repro must re-run the focused E2E proof: {repro}"
-    );
+    assert!(!repro.contains("rch exec"));
+    assert!(!repro.to_ascii_lowercase().contains("cargo"));
     assert!(!c1.uses_local_cargo_fallback());
 
     assert_universal_invariants(&c1);
@@ -436,7 +552,7 @@ fn orchestration_surface_is_free_of_destructive_operations() {
         false,
     ));
 
-    assert!(command.admitted);
+    assert!(command.admitted());
     // The "orchestration" is the actual command surface (the command an operator
     // runs plus the reproduction command) — NOT the report prose, which
     // legitimately *disclaims* branches/worktrees/clones in the no-claim
@@ -489,14 +605,14 @@ fn proof_is_scoped_to_mechanism_only() {
     let report = command.render_report();
     assert!(
         command
-            .no_claim_boundaries
+            .no_claim_boundaries()
             .iter()
             .any(|b| b.contains("no workspace-wide health claim")),
         "boundaries must disclaim workspace-wide health"
     );
     assert!(
         command
-            .no_claim_boundaries
+            .no_claim_boundaries()
             .iter()
             .any(|b| b.contains("RCH-only")),
         "boundaries must record the RCH-only constraint"

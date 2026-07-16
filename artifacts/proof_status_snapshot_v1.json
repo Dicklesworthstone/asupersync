@@ -1064,7 +1064,7 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clean_overlay_proof_orchestration_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test clean_overlay_proof_orchestration_contract -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "Yellow-scoped clean-overlay proof-orchestration operator packet evidence only; does not prove broad workspace health, release readiness, runtime correctness outside the cited clean-overlay planner/blocker/overlay-command surfaces, performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval."
+      "notes": "Yellow-scoped clean-overlay proof-orchestration operator-packet documentation and reference-alignment evidence only. Unsupported or unidentified installed clients and blocked manifests are documented to emit receipts, not proof commands. This row does not prove behavioral correctness of the referenced parser, command builder, or handshake, peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, broad workspace health, release readiness, runtime correctness outside the cited surfaces, performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval."
     },
     {
       "claim_id": "proof-traffic-final-signoff",
@@ -1091,7 +1091,7 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_traffic_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_traffic_final_signoff_contract -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "Yellow-scoped proof-traffic A6 operator packet: cite it only for A1-A5 evidence aggregation, capability-drift gate, admission receipts, clean-overlay handshake, proof parking lot, blocked-loop e2e, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds."
+      "notes": "Yellow-scoped proof-traffic A6 operator packet: cite it only for A1-A5 evidence aggregation, capability-drift gate, admission receipts, clean-overlay handshake, proof parking lot, blocked-loop e2e, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds."
     }
   ],
   "proof_reuse_status_rows": [

@@ -99,6 +99,7 @@ fn required_no_claim_boundaries() -> BTreeSet<String> {
         "does_not_prove_runtime_correctness".to_owned(),
         "does_not_prove_performance_improvement".to_owned(),
         "does_not_prove_live_rch_fleet_availability".to_owned(),
+        "does_not_prove_peer_dirt_exclusion_without_supported_capability_admitted_command_and_terminal_execution_evidence".to_owned(),
         "does_not_approve_local_cargo_fallback".to_owned(),
         "does_not_grant_peer_build_cancellation_authority".to_owned(),
         "does_not_grant_file_deletion_or_branch_worktree_permission".to_owned(),
@@ -119,6 +120,10 @@ fn signoff_sources_child_rows_and_policy_are_bounded() {
     assert_eq!(
         signoff.get("status").and_then(Value::as_str),
         Some("contract_guarded")
+    );
+    assert_eq!(
+        signoff.get("revised_at").and_then(Value::as_str),
+        Some("2026-07-16T07:05:00Z")
     );
 
     for path in object(&signoff, "source_of_truth")
@@ -167,6 +172,16 @@ fn signoff_sources_child_rows_and_policy_are_bounded() {
             "child row must keep live RCH availability out of scope"
         );
     }
+
+    let a3 = children
+        .iter()
+        .find(|child| string(child, "row_id") == "A3-clean-overlay-handshake")
+        .expect("A3 child row");
+    assert!(string(a3, "current_interpretation").contains("pre-execution handshake"));
+    assert!(
+        string_set(a3, "no_claim_boundaries")
+            .contains("does_not_prove_peer_dirt_exclusion_without_terminal_execution_evidence")
+    );
 
     let freshness = object(&signoff, "freshness_policy");
     let freshness_value = Value::Object(freshness.clone());
@@ -300,6 +315,8 @@ fn manifest_projection_and_status_wire_final_signoff_lane() {
         "runtime correctness",
         "performance improvement",
         "live rch fleet availability",
+        "peer-dirt exclusion",
+        "admitted command and terminal execution evidence",
         "local cargo fallback",
         "permission to delete files",
         "permission to cancel peer builds",
@@ -325,6 +342,10 @@ fn manifest_projection_and_status_wire_final_signoff_lane() {
     assert!(
         string_set(&reuse_policy_value, "non_citeable_claim_scopes")
             .contains("peer-build-cancellation")
+    );
+    assert!(
+        string_set(&reuse_policy_value, "non_citeable_claim_scopes")
+            .contains("peer-dirt-exclusion-without-supported-admitted-terminal-receipt")
     );
 
     let guarantees = rows_by_id(&manifest, "guarantees", "guarantee_id");
@@ -370,6 +391,9 @@ fn manifest_projection_and_status_wire_final_signoff_lane() {
         BTreeSet::from([COMMAND.to_owned()])
     );
     assert!(row.get("blocked_frontier").is_some_and(Value::is_null));
+    assert!(string(row, "notes").contains(
+        "peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence"
+    ));
 }
 
 #[test]
@@ -407,6 +431,7 @@ fn docs_readme_agents_carry_exact_markers_and_boundaries() {
             "blocked-loop e2e",
             "no-local-fallback/no-peer-cancel",
             "dependency-cycle receipt/checklist",
+            "peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence",
             "release readiness",
             "broad workspace health",
             "runtime correctness",
@@ -436,6 +461,7 @@ fn docs_readme_agents_carry_exact_markers_and_boundaries() {
         "proof parking lot",
         "blocked-loop e2e",
         "No proof-traffic path authorizes local Cargo fallback or peer build cancellation.",
+        "does not prove peer-dirt exclusion without supported capability evidence, an admitted command, and terminal execution evidence",
         "br dep cycles",
         "no dependency cycles",
         "release readiness",

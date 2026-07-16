@@ -105,7 +105,16 @@ fn artifact_records_installed_rch_capabilities_and_drift() {
 
     assert_eq!(
         string_field(&artifact["probe"], "installed_rch_version"),
-        "1.0.41"
+        "1.0.49"
+    );
+    assert!(array(&artifact["probe"], "commands").iter().any(|command| {
+        command["command"].as_str() == Some("rch --version")
+            && command["observed_at"].as_str() == Some("2026-07-16T06:57:00Z")
+            && command["observed_signal"].as_str() == Some("rch 1.0.49 (commit 40beb520c1f3)")
+    }));
+    assert!(
+        string_field(&artifact["probe"], "freshness_note")
+            .contains("remote-required refusal fixture remains the separately dated 2026-06-15")
     );
 
     let clean_overlay = &artifact["capabilities"]["clean_overlay_flags"];
@@ -185,8 +194,22 @@ fn artifact_and_docs_fail_closed_on_unsupported_clean_overlay_flags() {
             "--clean-overlay",
             "--overlay-path",
             "--no-overlay",
+            "version `1.0.49`",
         ],
     );
+    let handoff_fields = docs
+        .split_once("## Required Handoff Fields")
+        .expect("required handoff section")
+        .1
+        .split_once("## Proof-Traffic A2")
+        .expect("next section after required handoff fields")
+        .0;
+    for field in ["`clean_overlay_supported`", "`missing_flags`"] {
+        assert!(
+            handoff_fields.contains(field),
+            "global handoff section missing {field}"
+        );
+    }
 
     let clean_overlay_documented = readme.contains(CLEAN_OVERLAY_RUNBOOK_PATH)
         && agents.contains(CLEAN_OVERLAY_RUNBOOK_PATH)
@@ -267,6 +290,8 @@ fn command_policy_and_no_claim_boundaries_are_explicit() {
         "target_dir",
         "selected_paths",
         "capability_probe_version",
+        "clean_overlay_supported",
+        "missing_flags",
         "capability_findings",
         "rch_worker_or_refusal",
         "retry_condition",
