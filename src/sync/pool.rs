@@ -963,14 +963,21 @@ where
         // Single-pass: check if already queued, update waker/register, and get position.
         let pos = if let Some(id) = *self.waiter_id {
             if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
-                let w = &mut state.waiters[idx];
-                let candidate = state_candidate
-                    .take()
-                    .expect("state waker candidate is available");
-                if w.waker.will_wake(cx.waker()) {
-                    retired_state_waker = Some(candidate);
-                } else {
-                    retired_state_waker = Some(std::mem::replace(&mut w.waker, candidate));
+                // An eligible waiter completes this internal future now and
+                // the outer acquire loop either detaches it on success or
+                // polls a fresh WaitForNotification before returning Pending.
+                // Keep its queued waker intact so successful dequeue performs
+                // the retirement, rather than refreshing it on this ready poll.
+                if idx >= available {
+                    let w = &mut state.waiters[idx];
+                    let candidate = state_candidate
+                        .take()
+                        .expect("state waker candidate is available");
+                    if w.waker.will_wake(cx.waker()) {
+                        retired_state_waker = Some(candidate);
+                    } else {
+                        retired_state_waker = Some(std::mem::replace(&mut w.waker, candidate));
+                    }
                 }
                 idx
             } else {
