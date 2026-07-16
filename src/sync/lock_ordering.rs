@@ -157,22 +157,62 @@ pub struct LockInfo {
     pub module: LockModule,
 }
 
+#[inline]
+fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|candidate| candidate.eq_ignore_ascii_case(needle))
+}
+
+#[inline]
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
 impl LockModule {
     /// Parse a lock module from a name or file path.
+    ///
+    /// Matching is allocation-free and ASCII-case-insensitive so module
+    /// enforcement cannot be bypassed by changing the spelling's case.
     pub fn from_name(name: &str) -> Self {
-        if name.contains("runtime") || name.contains("scheduler") {
+        if contains_ignore_ascii_case(name, "runtime")
+            || contains_ignore_ascii_case(name, "scheduler")
+        {
             LockModule::Runtime
-        } else if name.contains("sync") || name.starts_with("mutex") || name.starts_with("rwlock") {
+        } else if contains_ignore_ascii_case(name, "sync")
+            || starts_with_ignore_ascii_case(name, "mutex")
+            || starts_with_ignore_ascii_case(name, "rwlock")
+        {
             LockModule::Sync
-        } else if name.contains("cx") || name.contains("scope") || name.contains("macaroon") {
+        } else if contains_ignore_ascii_case(name, "cx")
+            || contains_ignore_ascii_case(name, "scope")
+            || contains_ignore_ascii_case(name, "macaroon")
+        {
             LockModule::Cx
-        } else if name.contains("cancel") || name.contains("progress") {
+        } else if contains_ignore_ascii_case(name, "cancel")
+            || contains_ignore_ascii_case(name, "progress")
+        {
             LockModule::Cancel
-        } else if name.contains("obligation") {
+        } else if contains_ignore_ascii_case(name, "obligation") {
             LockModule::Obligation
-        } else if name.contains("channel") || name.contains("mpsc") || name.contains("oneshot") {
+        } else if contains_ignore_ascii_case(name, "channel")
+            || contains_ignore_ascii_case(name, "mpsc")
+            || contains_ignore_ascii_case(name, "oneshot")
+        {
             LockModule::Channel
-        } else if name.contains("io") || name.contains("net") || name.contains("tcp") {
+        } else if contains_ignore_ascii_case(name, "io")
+            || contains_ignore_ascii_case(name, "net")
+            || contains_ignore_ascii_case(name, "tcp")
+        {
             LockModule::Io
         } else {
             LockModule::Other
@@ -1016,20 +1056,40 @@ mod tests {
 
     #[test]
     fn test_module_from_name() {
-        assert_eq!(
-            LockModule::from_name("runtime_scheduler"),
-            LockModule::Runtime
-        );
-        assert_eq!(LockModule::from_name("sync_mutex"), LockModule::Sync);
-        assert_eq!(LockModule::from_name("cx_scope"), LockModule::Cx);
-        assert_eq!(LockModule::from_name("cancel_protocol"), LockModule::Cancel);
-        assert_eq!(
-            LockModule::from_name("obligation_tracker"),
-            LockModule::Obligation
-        );
-        assert_eq!(LockModule::from_name("channel_mpsc"), LockModule::Channel);
-        assert_eq!(LockModule::from_name("io_tcp"), LockModule::Io);
-        assert_eq!(LockModule::from_name("unknown_module"), LockModule::Other);
+        for (expected, variants) in [
+            (LockModule::Runtime, ["runtime", "RuNtImE", "RUNTIME"]),
+            (LockModule::Runtime, ["scheduler", "ScHeDuLeR", "SCHEDULER"]),
+            (LockModule::Sync, ["sync", "SyNc", "SYNC"]),
+            (LockModule::Sync, ["mutex", "MuTeX", "MUTEX"]),
+            (LockModule::Sync, ["rwlock", "RwLoCk", "RWLOCK"]),
+            (LockModule::Cx, ["cx", "cX", "CX"]),
+            (LockModule::Cx, ["scope", "ScOpE", "SCOPE"]),
+            (LockModule::Cx, ["macaroon", "MaCaRoOn", "MACAROON"]),
+            (LockModule::Cancel, ["cancel", "CaNcEl", "CANCEL"]),
+            (LockModule::Cancel, ["progress", "PrOgReSs", "PROGRESS"]),
+            (
+                LockModule::Obligation,
+                ["obligation", "ObLiGaTiOn", "OBLIGATION"],
+            ),
+            (LockModule::Channel, ["channel", "ChAnNeL", "CHANNEL"]),
+            (LockModule::Channel, ["mpsc", "MpSc", "MPSC"]),
+            (LockModule::Channel, ["oneshot", "OnEsHoT", "ONESHOT"]),
+            (LockModule::Io, ["io", "Io", "IO"]),
+            (LockModule::Io, ["net", "NeT", "NET"]),
+            (LockModule::Io, ["tcp", "TcP", "TCP"]),
+            (
+                LockModule::Other,
+                ["widget_state", "WiDgEt_sTaTe", "WIDGET_STATE"],
+            ),
+        ] {
+            for name in variants {
+                assert_eq!(
+                    LockModule::from_name(name),
+                    expected,
+                    "module classification must ignore ASCII case for {name}"
+                );
+            }
+        }
     }
 
     #[test]

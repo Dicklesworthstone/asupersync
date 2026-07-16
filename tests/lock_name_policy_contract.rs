@@ -7,10 +7,14 @@
 
 #![allow(missing_docs)]
 
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use asupersync::sync::Mutex;
 use asupersync::sync::lock_ordering::{
     LockNamePolicy, LockRank, classify_lock_name, enforce_lock_name_policy, rank_for_lock_name,
     require_ranked_lock_name,
 };
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use asupersync::sync::lock_ordering::{clear_held_locks, current_held_locks, current_held_ranks};
 
 #[test]
 fn classify_ranks_known_hierarchy_locks() {
@@ -101,6 +105,47 @@ fn require_ranked_returns_rank_for_known_locks() {
     assert_eq!(
         enforce_lock_name_policy("config_main").rank(),
         Some(LockRank::Config)
+    );
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+#[test]
+fn uppercase_module_names_cannot_bypass_cancel_before_obligation_rule() {
+    clear_held_locks();
+    let cancel = Mutex::with_name("TASKS_CANCEL_STATE", ());
+    let obligation = Mutex::with_name("OBLIGATION_LEDGER", ());
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _cancel_guard = cancel.try_lock().expect("acquire cancel-ranked lock");
+        let _obligation_guard = obligation
+            .try_lock()
+            .expect("uppercase obligation acquisition must fail lock ordering");
+    }))
+    .expect_err("uppercase cancel-before-obligation acquisition must panic");
+
+    let held_locks = current_held_locks();
+    let held_ranks = current_held_ranks();
+    clear_held_locks();
+
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&'static str>().copied())
+        .unwrap_or("<non-string panic payload>");
+    assert!(
+        message.starts_with("[ASUP-E205]"),
+        "cross-module panic must start with ASUP-E205: {message}"
+    );
+    assert!(
+        message.contains("CROSS-MODULE DEADLOCK PREVENTION"),
+        "ascending ranks must reach the inferred cross-module rule: {message}"
+    );
+    assert!(
+        held_locks.is_empty(),
+        "unwinding must release uppercase lock tracking: {held_locks:?}"
+    );
+    assert!(
+        held_ranks.is_empty(),
+        "unwinding must release uppercase rank tracking: {held_ranks:?}"
     );
 }
 
