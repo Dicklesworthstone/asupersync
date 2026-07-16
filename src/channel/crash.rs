@@ -372,6 +372,8 @@ pub struct CrashSender<T> {
     controller: Arc<CrashController>,
     config: CrashConfig,
     rng: Mutex<ChaosRng>,
+    /// Serializes the non-awaiting exact-N commit decision and accounting.
+    send_commit: Mutex<()>,
     send_count: AtomicU64,
     evidence_sink: Arc<dyn EvidenceSink>,
 }
@@ -400,6 +402,7 @@ impl<T> CrashSender<T> {
             controller,
             config,
             rng: Mutex::new(rng),
+            send_commit: Mutex::new(()),
             send_count: AtomicU64::new(0),
             evidence_sink,
         }
@@ -416,7 +419,8 @@ impl<T> CrashSender<T> {
             .sends_attempted
             .fetch_add(1, Ordering::Relaxed);
 
-        // Check if already crashed.
+        // Fast-path checks preserve immediate rejection without queueing on
+        // capacity or the exact-N admission gate.
         if self.controller.is_crashed() {
             self.controller
                 .stats
@@ -484,14 +488,89 @@ impl<T> CrashSender<T> {
             }
         }
 
-        // Normal send.
-        self.inner.send(cx, value).await?;
-        self.send_count.fetch_add(1, Ordering::Relaxed);
-        self.controller
-            .stats
-            .sends_succeeded
-            .fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        // Reserve capacity before entering exact-N admission. A capacity wake
+        // may synchronously reenter this sender, so no admission permit may be
+        // held across the reserve await.
+        let permit = match self.inner.reserve(cx).await {
+            Ok(permit) => permit,
+            Err(SendError::Disconnected(())) => return Err(SendError::Disconnected(value)),
+            Err(SendError::Cancelled(())) => return Err(SendError::Cancelled(value)),
+            Err(SendError::Full(())) => return Err(SendError::Full(value)),
+        };
+
+        // The exact-N contract is defined in successful sends, so admission
+        // cannot be reserved with a pre-await counter increment. A short,
+        // non-poisoning commit mutex covers only the authoritative state
+        // recheck, non-awaiting inner commit, and counter update. Capacity
+        // waiting remains cancel-safe, and no callback runs under this mutex.
+        // Fault-disabled and probabilistic-only senders retain their concurrent
+        // fast path.
+        let send_guard = if self.config.crash_after_sends.is_some() {
+            Some(self.send_commit.lock())
+        } else {
+            None
+        };
+
+        // A concurrent admitted send or manual crash may have changed the
+        // authoritative state while this attempt waited for the gate. Release
+        // the gate before evidence callbacks, which may reenter this sender.
+        if self.controller.is_crashed() {
+            drop(send_guard);
+            drop(permit);
+            self.controller
+                .stats
+                .sends_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            emit_crash_evidence(
+                &self.evidence_sink,
+                self.controller.next_evidence_ts(),
+                "send_rejected_crashed",
+                0,
+            );
+            return Err(SendError::Disconnected(value));
+        }
+        if let Some(limit) = self.config.crash_after_sends
+            && self.send_count.load(Ordering::Relaxed) >= limit
+        {
+            drop(send_guard);
+            drop(permit);
+            let actually_crashed = self.controller.crash();
+            self.controller
+                .stats
+                .sends_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            let action = if actually_crashed {
+                "crash_after_sends"
+            } else {
+                "send_rejected_crashed"
+            };
+            emit_crash_evidence(
+                &self.evidence_sink,
+                self.controller.next_evidence_ts(),
+                action,
+                0,
+            );
+            return Err(SendError::Disconnected(value));
+        }
+
+        // Commit without invoking the receiver's arbitrary Waker until
+        // successful-send accounting is durable. This ensures a panicking
+        // receiver wake cannot under-count an already-visible message.
+        let (result, receiver_wake) = permit.try_send_deferred_wake(value);
+        if result.is_ok() {
+            self.send_count.fetch_add(1, Ordering::Relaxed);
+            self.controller
+                .stats
+                .sends_succeeded
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Release admission before invoking the arbitrary receiver callback.
+        // Reentry observes the already-committed count, while synchronous
+        // block-on reentry cannot park behind a permit held by this callback.
+        drop(send_guard);
+        receiver_wake.wake();
+        result
     }
 
     /// Returns a reference to the underlying sender.
@@ -514,6 +593,9 @@ impl<T> CrashSender<T> {
 
     /// Reset the send counter (used during cold restart).
     pub fn reset_send_count(&self) {
+        // Linearize cold-reset accounting with any exact-N commit already in
+        // progress. Capacity waits never hold this mutex.
+        let _guard = self.send_commit.lock();
         self.send_count.store(0, Ordering::Relaxed);
     }
 }
@@ -769,6 +851,182 @@ mod tests {
         for i in 0..5 {
             assert_eq!(rx.try_recv().unwrap(), i);
         }
+    }
+
+    #[test]
+    fn concurrent_sends_stop_at_exact_deterministic_limit() {
+        let config = CrashConfig::new(42).with_crash_after_sends(1);
+        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+            1,
+            config,
+            Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,
+        );
+        let cx_a = test_cx();
+        let cx_b = test_cx();
+        tx.inner()
+            .try_send(99)
+            .expect("sentinel must fill the inner channel");
+
+        let mut send_a = Box::pin(tx.send(&cx_a, 1));
+        let mut send_b = Box::pin(tx.send(&cx_b, 2));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(send_a.as_mut().poll(&mut task_cx).is_pending());
+        assert!(send_b.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(rx.try_recv(), Ok(99));
+        assert!(matches!(
+            send_a.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(rx.try_recv(), Ok(1));
+        assert!(matches!(
+            send_b.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::Disconnected(2)))
+        ));
+
+        assert!(rx.try_recv().is_err(), "only one wrapped send may commit");
+        assert_eq!(tx.send_count(), 1);
+        assert!(ctrl.is_crashed());
+        assert_eq!(
+            ctrl.stats().snapshot(),
+            CrashStatsSnapshot {
+                sends_attempted: 2,
+                sends_succeeded: 1,
+                sends_rejected: 1,
+                crashes: 1,
+                restarts: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn cancelled_pending_send_does_not_consume_send_budget() {
+        let config = CrashConfig::new(42).with_crash_after_sends(1);
+        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+            1,
+            config,
+            Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,
+        );
+        let cx_a = test_cx();
+        let cx_cancelled = test_cx();
+        tx.inner()
+            .try_send(99)
+            .expect("sentinel must fill the inner channel");
+
+        let mut send_a = Box::pin(tx.send(&cx_a, 1));
+        let mut cancelled = Box::pin(tx.send(&cx_cancelled, 2));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(send_a.as_mut().poll(&mut task_cx).is_pending());
+        assert!(cancelled.as_mut().poll(&mut task_cx).is_pending());
+        cx_cancelled.set_cancel_requested(true);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::Cancelled(2)))
+        ));
+
+        assert_eq!(rx.try_recv(), Ok(99));
+        assert!(matches!(
+            send_a.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(rx.try_recv(), Ok(1));
+        assert_eq!(tx.send_count(), 1);
+        assert!(!ctrl.is_crashed());
+        let stats = ctrl.stats().snapshot();
+        assert_eq!(stats.sends_attempted, 2);
+        assert_eq!(stats.sends_succeeded, 1);
+        assert_eq!(stats.sends_rejected, 0);
+    }
+
+    #[test]
+    fn disconnect_releases_exact_send_serialization_without_success() {
+        let config = CrashConfig::new(42).with_crash_after_sends(1);
+        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+            1,
+            config,
+            Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,
+        );
+        let cx_a = test_cx();
+        let cx_b = test_cx();
+        tx.inner()
+            .try_send(99)
+            .expect("sentinel must fill the inner channel");
+
+        let mut send_a = Box::pin(tx.send(&cx_a, 1));
+        let mut send_b = Box::pin(tx.send(&cx_b, 2));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(send_a.as_mut().poll(&mut task_cx).is_pending());
+        assert!(send_b.as_mut().poll(&mut task_cx).is_pending());
+
+        rx.close();
+        assert!(matches!(
+            send_a.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::Disconnected(1)))
+        ));
+        assert!(matches!(
+            send_b.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::Disconnected(2)))
+        ));
+        assert_eq!(rx.try_recv(), Ok(99), "close preserves queued messages");
+        assert_eq!(tx.send_count(), 0);
+        assert!(!ctrl.is_crashed());
+        let stats = ctrl.stats().snapshot();
+        assert_eq!(stats.sends_attempted, 2);
+        assert_eq!(stats.sends_succeeded, 0);
+        assert_eq!(stats.sends_rejected, 0);
+    }
+
+    #[test]
+    fn panicking_receiver_wake_preserves_commit_and_releases_mutex() {
+        struct PanicWake;
+
+        impl std::task::Wake for PanicWake {
+            fn wake(self: Arc<Self>) {
+                panic!("injected receiver wake panic");
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                panic!("injected receiver wake panic");
+            }
+        }
+
+        let config = CrashConfig::new(42).with_crash_after_sends(1);
+        let (tx, mut rx, ctrl, _) = make_crash_channel(config);
+        let recv_cx = test_cx();
+        let mut recv = Box::pin(rx.recv(&recv_cx));
+        let panic_waker = std::task::Waker::from(Arc::new(PanicWake));
+        let mut panic_cx = Context::from_waker(&panic_waker);
+        assert!(recv.as_mut().poll(&mut panic_cx).is_pending());
+
+        let send_cx = test_cx();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(tx.send(&send_cx, 7))
+        }));
+        assert!(panic.is_err(), "receiver Waker must inject an unwind");
+        drop(recv);
+
+        assert_eq!(
+            rx.try_recv(),
+            Ok(7),
+            "message committed before receiver wake"
+        );
+        assert_eq!(tx.send_count(), 1, "committed message counted before wake");
+        assert_eq!(ctrl.stats().snapshot().sends_succeeded, 1);
+
+        let next_cx = test_cx();
+        assert!(matches!(
+            block_on(tx.send(&next_cx, 8)),
+            Err(SendError::Disconnected(8))
+        ));
+        assert!(
+            ctrl.is_crashed(),
+            "released commit mutex admits the threshold check"
+        );
+        assert_eq!(tx.send_count(), 1);
     }
 
     // --- Restart limit exhaustion ---
