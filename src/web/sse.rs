@@ -225,9 +225,9 @@ pub enum StreamingSseError {
         /// Configured per-chunk maximum.
         max: usize,
     },
-    /// Emitting this chunk would exceed the per-response byte cap.
+    /// Emitting this event would exceed the per-response event-byte cap.
     TotalBytesExceeded {
-        /// Total bytes that would have been emitted.
+        /// Total event bytes that would have been emitted.
         actual: usize,
         /// Configured per-response maximum.
         max: usize,
@@ -248,7 +248,7 @@ impl fmt::Display for StreamingSseError {
             }
             Self::TotalBytesExceeded { actual, max } => write!(
                 f,
-                "streaming SSE response exceeds max total bytes ({actual} > {max})"
+                "streaming SSE events exceed max total bytes ({actual} > {max})"
             ),
             Self::Producer(message) => write!(f, "streaming SSE producer failed: {message}"),
         }
@@ -297,7 +297,7 @@ pub enum StreamingSseTransportStep {
     Sent {
         /// Bytes committed by this chunk.
         bytes: usize,
-        /// Total SSE bytes committed by the stream so far.
+        /// Total serialized SSE bytes produced by the stream so far.
         total_bytes: usize,
     },
     /// The SSE source completed and the HTTP/1 body sender was finished.
@@ -366,6 +366,9 @@ pub struct StreamingSse<S = VecSseSource> {
     source: S,
     max_event_bytes: usize,
     max_total_bytes: usize,
+    /// Event bytes serialized and charged against `max_total_bytes`.
+    event_bytes_emitted: usize,
+    /// All serialized bytes produced (events plus heartbeats).
     bytes_emitted: usize,
     heartbeat_comment: String,
     closed: bool,
@@ -393,6 +396,7 @@ impl<S: StreamingSseSource> StreamingSse<S> {
             source,
             max_event_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
             max_total_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
+            event_bytes_emitted: 0,
             bytes_emitted: 0,
             heartbeat_comment: "keep-alive".to_string(),
             closed: false,
@@ -416,7 +420,10 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         self
     }
 
-    /// Override the maximum total bytes emitted by this streaming response.
+    /// Override the maximum total event bytes emitted by this response.
+    ///
+    /// Server-authored heartbeat comments remain subject to
+    /// [`Self::max_event_bytes`] but do not consume this event-volume budget.
     #[must_use]
     pub fn max_total_bytes(mut self, max: usize) -> Self {
         self.max_total_bytes = max;
@@ -430,7 +437,10 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         self
     }
 
-    /// Return the number of serialized bytes emitted so far.
+    /// Return total serialized bytes produced by the chunk APIs so far.
+    ///
+    /// This includes both client-visible events and server-authored heartbeat
+    /// comments.
     #[must_use]
     pub const fn bytes_emitted(&self) -> usize {
         self.bytes_emitted
@@ -511,8 +521,9 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as
-    /// [`send_next_h1_chunk`](Self::send_next_h1_chunk).
+    /// Returns [`StreamingSseTransportError::Stream`] for cancellation or an
+    /// oversized heartbeat, and [`StreamingSseTransportError::Transport`] when
+    /// the HTTP/1 outgoing body rejects the write.
     pub async fn send_h1_heartbeat(
         &mut self,
         cx: &Cx,
@@ -540,8 +551,8 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     ///
     /// Returns [`StreamingSseError::Cancelled`] when `cx` has been cancelled,
     /// [`StreamingSseError::EventTooLarge`] when the next event exceeds
-    /// `max_event_bytes`, [`StreamingSseError::TotalBytesExceeded`] when the
-    /// stream would exceed `max_total_bytes`, or producer-specific errors from
+    /// `max_event_bytes`, [`StreamingSseError::TotalBytesExceeded`] when event
+    /// volume would exceed `max_total_bytes`, or producer-specific errors from
     /// the configured [`StreamingSseSource`].
     pub fn next_chunk(&mut self, cx: &Cx) -> Result<Option<Vec<u8>>, StreamingSseError> {
         if self.closed {
@@ -568,8 +579,10 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     ///
     /// # Errors
     ///
-    /// Returns the same cancellation and byte-limit errors as
-    /// [`next_chunk`](Self::next_chunk).
+    /// Returns [`StreamingSseError::Cancelled`] on cancellation and
+    /// [`StreamingSseError::EventTooLarge`] when the heartbeat exceeds the
+    /// per-chunk cap. Heartbeats do not consume `max_total_bytes` and therefore
+    /// do not return [`StreamingSseError::TotalBytesExceeded`].
     pub fn heartbeat_chunk(&mut self, cx: &Cx) -> Result<Vec<u8>, StreamingSseError> {
         // A completed stream has no heartbeat to emit; return empty so callers
         // never serialize a keep-alive into a finished channel (mirrors
@@ -579,7 +592,9 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         }
         self.checkpoint(cx)?;
         let heartbeat = SseEvent::default().comment(self.heartbeat_comment.clone());
-        self.serialize_event(&heartbeat)
+        let chunk = self.serialize_event_uncharged(&heartbeat)?;
+        self.bytes_emitted = self.bytes_emitted.saturating_add(chunk.len());
+        Ok(chunk)
     }
 
     fn checkpoint(&mut self, cx: &Cx) -> Result<(), StreamingSseError> {
@@ -613,15 +628,16 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         let chunk = self.serialize_event_uncharged(event)?;
         let chunk_len = chunk.len();
 
-        let next_total = self.bytes_emitted.saturating_add(chunk_len);
-        if next_total > self.max_total_bytes {
+        let next_event_total = self.event_bytes_emitted.saturating_add(chunk_len);
+        if next_event_total > self.max_total_bytes {
             return Err(StreamingSseError::TotalBytesExceeded {
-                actual: next_total,
+                actual: next_event_total,
                 max: self.max_total_bytes,
             });
         }
 
-        self.bytes_emitted = next_total;
+        self.event_bytes_emitted = next_event_total;
+        self.bytes_emitted = self.bytes_emitted.saturating_add(chunk_len);
         Ok(chunk)
     }
 
@@ -1197,6 +1213,63 @@ mod tests {
             std::str::from_utf8(&event).expect("utf8"),
             "data:payload\n\n"
         );
+        assert_eq!(stream.bytes_emitted(), heartbeat.len() + event.len());
+        assert_eq!(stream.event_bytes_emitted, event.len());
+    }
+
+    #[test]
+    fn streaming_sse_heartbeats_do_not_consume_event_byte_budget() {
+        let cx = Cx::for_testing();
+        let first_wire = "data:one\n\n";
+        let second_wire = "data:two\n\n";
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("one"),
+            SseEvent::default().data("two"),
+        ])
+        .heartbeat_comment("tick")
+        .max_total_bytes(first_wire.len());
+
+        let first_heartbeat = stream.heartbeat_chunk(&cx).expect("first heartbeat");
+        let second_heartbeat = stream.heartbeat_chunk(&cx).expect("second heartbeat");
+        let heartbeat_bytes = first_heartbeat.len() + second_heartbeat.len();
+        assert_eq!(stream.bytes_emitted(), heartbeat_bytes);
+        assert_eq!(stream.event_bytes_emitted, 0);
+
+        let first_event = stream
+            .next_chunk(&cx)
+            .expect("first event serialization")
+            .expect("first event present");
+        assert_eq!(first_event, first_wire.as_bytes());
+        assert_eq!(stream.event_bytes_emitted, first_wire.len());
+        assert_eq!(stream.bytes_emitted(), heartbeat_bytes + first_wire.len());
+
+        let error = stream
+            .next_chunk(&cx)
+            .expect_err("second event must exceed the event-only byte budget");
+        assert_eq!(
+            error,
+            StreamingSseError::TotalBytesExceeded {
+                actual: first_wire.len() + second_wire.len(),
+                max: first_wire.len(),
+            }
+        );
+        assert_eq!(stream.event_bytes_emitted, first_wire.len());
+        assert_eq!(stream.bytes_emitted(), heartbeat_bytes + first_wire.len());
+    }
+
+    #[test]
+    fn streaming_sse_heartbeat_still_respects_per_chunk_cap() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![SseEvent::default().data("pending")])
+            .heartbeat_comment("tick")
+            .max_event_bytes(6);
+
+        assert_eq!(
+            stream.heartbeat_chunk(&cx),
+            Err(StreamingSseError::EventTooLarge { actual: 7, max: 6 })
+        );
+        assert_eq!(stream.event_bytes_emitted, 0);
+        assert_eq!(stream.bytes_emitted(), 0);
     }
 
     #[test]
@@ -1416,7 +1489,14 @@ mod tests {
             b":tick\n\n"
         );
 
-        block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("event send");
+        let event = block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("event send");
+        assert_eq!(
+            event,
+            StreamingSseTransportStep::Sent {
+                bytes: "data:payload\n\n".len(),
+                total_bytes: ":tick\n\n".len() + "data:payload\n\n".len(),
+            }
+        );
         let event_frame = poll_body(&mut body)
             .expect("event frame")
             .expect("event frame ok");
