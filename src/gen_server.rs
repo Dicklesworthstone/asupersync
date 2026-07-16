@@ -1788,20 +1788,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let task_id = self.create_task_record(state)?;
         let actor_id = ActorId::from_task(task_id);
         let server_state = Arc::new(GenServerStateCell::new(ActorState::Created));
-
-        let _span = debug_span!(
-            "gen_server_spawn",
-            task_id = ?task_id,
-            region_id = ?self.region_id(),
-            mailbox_capacity = mailbox_capacity,
-        )
-        .entered();
-        debug!(
-            task_id = ?task_id,
-            region_id = ?self.region_id(),
-            mailbox_capacity = mailbox_capacity,
-            "gen_server spawned"
-        );
+        let region_id = self.region_id();
 
         let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
 
@@ -1809,6 +1796,16 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx_full.clone());
         }
+        let spawned_at = state
+            .timer_driver()
+            .map_or(state.now, crate::time::TimerDriverHandle::now);
+        let spawn_effects = state.prepare_task_spawn_effects(
+            task_id,
+            region_id,
+            self.budget(),
+            crate::runtime::state::TaskSpawnSource::Scope,
+            spawned_at,
+        );
 
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let state_for_task = Arc::clone(&server_state);
@@ -1820,10 +1817,31 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         };
 
         let wrapped = async move {
-            let result = CatchUnwind {
-                inner: Box::pin(run_gen_server_loop(server, child_cx, &mut cell)),
-            }
-            .await;
+            spawn_effects.dispatch();
+            let trace_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _span = debug_span!(
+                    "gen_server_spawn",
+                    task_id = ?task_id,
+                    region_id = ?region_id,
+                    mailbox_capacity = mailbox_capacity,
+                )
+                .entered();
+                debug!(
+                    task_id = ?task_id,
+                    region_id = ?region_id,
+                    mailbox_capacity = mailbox_capacity,
+                    "gen_server spawned"
+                );
+            }));
+            let result = match trace_result {
+                Ok(()) => {
+                    CatchUnwind {
+                        inner: Box::pin(run_gen_server_loop(server, child_cx, &mut cell)),
+                    }
+                    .await
+                }
+                Err(payload) => Err(payload),
+            };
             // Teardown result publication must not consult the child Cx: aborting
             // the server cancels that context before the final state is returned.
             // Publish Stopped before send_blocking wakes a waiting joiner.
@@ -1850,6 +1868,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                         }
                     }
                     let msg = crate::cx::scope::payload_to_string(&payload);
+                    std::mem::forget(payload);
                     let panic_payload = crate::types::PanicPayload::new(msg);
                     state_for_task.store(ActorState::Stopped);
                     let _ =
@@ -2853,7 +2872,7 @@ mod tests {
         let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
 
         let system_cx = runtime.state.create_system_cx();
-        let (client_task_id, mut client_handle, child_cx, result_tx) = runtime
+        let (client_task_id, mut client_handle, child_cx, result_tx, spawn_effects) = runtime
             .state
             .create_task_infrastructure::<Result<u64, CallError>>(
                 &system_cx,
@@ -2873,6 +2892,7 @@ mod tests {
         };
         let wrapped = {
             async move {
+                spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                     Ok(value) => {
                         let _ = result_tx.send_blocking(Ok(value));
@@ -3020,7 +3040,7 @@ mod tests {
         let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
 
         let system_cx = runtime.state.create_system_cx();
-        let (client_task_id, mut client_handle, child_cx, result_tx) = runtime
+        let (client_task_id, mut client_handle, child_cx, result_tx, spawn_effects) = runtime
             .state
             .create_task_infrastructure::<Result<(), CastError>>(
                 &system_cx,
@@ -3040,6 +3060,7 @@ mod tests {
         };
         let wrapped = {
             async move {
+                spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                     Ok(value) => {
                         let _ = result_tx.send_blocking(Ok(value));
@@ -5141,7 +5162,7 @@ mod tests {
         let result_1: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let result_1_clone = Arc::clone(&result_1);
         let system_cx = runtime.state.create_system_cx();
-        let (c1_id, _c1_handle, c1_child_cx, c1_result_tx) = runtime
+        let (c1_id, _c1_handle, c1_child_cx, c1_result_tx, c1_spawn_effects) = runtime
             .state
             .create_task_infrastructure::<()>(&system_cx, region, budget, false)
             .unwrap();
@@ -5154,6 +5175,7 @@ mod tests {
         };
         let c1_wrapped = {
             async move {
+                c1_spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: c1_fut }).await {
                     Ok(value) => {
                         let _ = c1_result_tx.send_blocking(Ok(value));
@@ -5178,7 +5200,7 @@ mod tests {
         // Client 2: sends a call that will queue behind client 1.
         let result_2: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let result_2_clone = Arc::clone(&result_2);
-        let (c2_id, _c2_handle, c2_child_cx, c2_result_tx) = runtime
+        let (c2_id, _c2_handle, c2_child_cx, c2_result_tx, c2_spawn_effects) = runtime
             .state
             .create_task_infrastructure::<()>(&system_cx, region, budget, false)
             .unwrap();
@@ -5191,6 +5213,7 @@ mod tests {
         };
         let c2_wrapped = {
             async move {
+                c2_spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: c2_fut }).await {
                     Ok(value) => {
                         let _ = c2_result_tx.send_blocking(Ok(value));
@@ -5306,7 +5329,7 @@ mod tests {
         let call_result_clone = Arc::clone(&call_result);
         let server_ref_for_call = handle.server_ref();
         let system_cx = runtime.state.create_system_cx();
-        let (client_id, _client, child_cx, result_tx) = runtime
+        let (client_id, _client, child_cx, result_tx, spawn_effects) = runtime
             .state
             .create_task_infrastructure::<()>(&system_cx, region, budget, false)
             .unwrap();
@@ -5319,6 +5342,7 @@ mod tests {
         };
         let wrapped = {
             async move {
+                spawn_effects.dispatch();
                 match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                     Ok(value) => {
                         let _ = result_tx.send_blocking(Ok(value));
@@ -5410,7 +5434,7 @@ mod tests {
                 let server_ref = handle.server_ref();
                 let results_clone = Arc::clone(&results);
                 let system_cx = runtime.state.create_system_cx();
-                let (cid, _ch, child_cx, result_tx) = runtime
+                let (cid, _ch, child_cx, result_tx, spawn_effects) = runtime
                     .state
                     .create_task_infrastructure::<()>(&system_cx, region, budget, false)
                     .unwrap();
@@ -5424,6 +5448,7 @@ mod tests {
                 };
                 let wrapped = {
                     async move {
+                        spawn_effects.dispatch();
                         match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
                             Ok(value) => {
                                 let _ = result_tx.send_blocking(Ok(value));

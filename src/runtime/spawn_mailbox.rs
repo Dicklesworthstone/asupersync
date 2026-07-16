@@ -258,11 +258,28 @@ impl AdmittedTask {
 /// Admission reserves the slot before mutating `RuntimeState`. Keeping the
 /// underlying [`OnceLock`] private prevents a second request from racing an
 /// external `set` between that preflight and identity publication.
-#[derive(Debug)]
 pub struct AdmittedTaskSlot {
     admitted: OnceLock<AdmittedTask>,
     reserved: AtomicBool,
-    cancel_gateway: Option<Arc<SpawnGateway>>,
+    cancel_gateway: Option<Weak<SpawnGateway>>,
+    /// Authoritative one-shot observer receipt for managed pre-admission
+    /// aborts. Every repeat abort command carries this slot, so whichever
+    /// consumer wins first-lane publication also wins this receipt.
+    spawn_effects: Mutex<SpawnEffectHandoff>,
+}
+
+struct SpawnEffectHandoff {
+    lane_published: bool,
+    effects: Option<crate::runtime::state::TaskSpawnEffects>,
+}
+
+impl SpawnEffectHandoff {
+    const fn new() -> Self {
+        Self {
+            lane_published: false,
+            effects: None,
+        }
+    }
 }
 
 impl AdmittedTaskSlot {
@@ -273,6 +290,7 @@ impl AdmittedTaskSlot {
             admitted: OnceLock::new(),
             reserved: AtomicBool::new(false),
             cancel_gateway: None,
+            spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
     }
 
@@ -282,7 +300,8 @@ impl AdmittedTaskSlot {
         Self {
             admitted: OnceLock::new(),
             reserved: AtomicBool::new(false),
-            cancel_gateway: Some(cancel_gateway),
+            cancel_gateway: Some(Arc::downgrade(&cancel_gateway)),
+            spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
     }
 
@@ -294,7 +313,64 @@ impl AdmittedTaskSlot {
     }
 
     pub(crate) fn cancel_gateway(&self) -> Option<Arc<SpawnGateway>> {
-        self.cancel_gateway.clone()
+        self.cancel_gateway.as_ref().and_then(Weak::upgrade)
+    }
+
+    fn install_spawn_effects(&self, spawn_effects: crate::runtime::state::TaskSpawnEffects) {
+        let mut slot = self.spawn_effects.lock();
+        debug_assert!(
+            slot.effects.is_none(),
+            "spawn observer receipt installed once"
+        );
+        debug_assert!(
+            !slot.lane_published,
+            "managed observer receipt precedes first-lane publication"
+        );
+        slot.effects = Some(spawn_effects);
+    }
+
+    pub(crate) fn publish_spawn_lane_and_take_effects(
+        &self,
+    ) -> Option<crate::runtime::state::TaskSpawnEffects> {
+        let mut slot = self.spawn_effects.lock();
+        slot.lane_published = true;
+        slot.effects.take()
+    }
+
+    fn mark_spawn_lane_published(&self) {
+        let mut slot = self.spawn_effects.lock();
+        slot.lane_published = true;
+        debug_assert!(
+            slot.effects.is_none(),
+            "ordinary admission must not install a delegated spawn observer receipt"
+        );
+    }
+
+    pub(crate) fn take_spawn_effects_if_lane_published(
+        &self,
+    ) -> Option<crate::runtime::state::TaskSpawnEffects> {
+        let mut slot = self.spawn_effects.lock();
+        if slot.lane_published {
+            slot.effects.take()
+        } else {
+            None
+        }
+    }
+
+    /// Retires an observer receipt whose managed command can no longer be
+    /// consumed because the runtime has shut down. No task lane became
+    /// executable, so dispatch would assert a false spawn observation; the
+    /// receipt's fail-closed `Drop` path contains arbitrary provider teardown.
+    pub(crate) fn abandon_unpublished_spawn_effects(&self) {
+        let effects = {
+            let mut slot = self.spawn_effects.lock();
+            if slot.lane_published {
+                None
+            } else {
+                slot.effects.take()
+            }
+        };
+        drop(effects);
     }
 
     /// Reserves this one-shot slot before admission mutates runtime state.
@@ -318,6 +394,20 @@ impl AdmittedTaskSlot {
             return Err(admitted);
         }
         self.admitted.set(admitted)
+    }
+}
+
+impl fmt::Debug for AdmittedTaskSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmittedTaskSlot")
+            .field("admitted", &self.admitted.get())
+            .field("reserved", &self.reserved.load(Ordering::Relaxed))
+            .field("has_cancel_gateway", &self.cancel_gateway.is_some())
+            .field("spawn_effect_handoff", &{
+                let slot = self.spawn_effects.lock();
+                (slot.lane_published, slot.effects.is_some())
+            })
+            .finish()
     }
 }
 
@@ -363,10 +453,42 @@ impl AdmissionPublication {
     /// invoked on that path. This crate-private closure is part of the
     /// scheduler boundary, not a user callback.
     /// Returned Wakers must be dispatched after scheduler locks are released.
+    #[cfg(test)]
     pub(crate) fn publish(
-        mut self,
+        self,
         publish_lane: impl FnOnce(Option<u8>),
     ) -> crate::types::task_context::CancelWakeEffects {
+        let (wakes, spawn_effects) = self.publish_inner(None, publish_lane);
+        debug_assert!(spawn_effects.is_none());
+        wakes
+    }
+
+    /// Publishes an admitted task together with its one-shot spawn observer.
+    ///
+    /// Ordinary admissions return the observer to the caller after the lane is
+    /// physically visible. A managed pre-admission abort installs the observer
+    /// in the authoritative admitted slot carried by every delegated cancel
+    /// command. Whichever consumer physically publishes the first cancel lane
+    /// atomically claims the observer before retained Wakers are dispatched.
+    pub(crate) fn publish_with_spawn_effects(
+        self,
+        spawn_effects: crate::runtime::state::TaskSpawnEffects,
+        publish_lane: impl FnOnce(Option<u8>),
+    ) -> (
+        crate::types::task_context::CancelWakeEffects,
+        Option<crate::runtime::state::TaskSpawnEffects>,
+    ) {
+        self.publish_inner(Some(spawn_effects), publish_lane)
+    }
+
+    fn publish_inner(
+        mut self,
+        mut spawn_effects: Option<crate::runtime::state::TaskSpawnEffects>,
+        publish_lane: impl FnOnce(Option<u8>),
+    ) -> (
+        crate::types::task_context::CancelWakeEffects,
+        Option<crate::runtime::state::TaskSpawnEffects>,
+    ) {
         let slot = self.slot.take();
         let admitted = slot.as_ref().and_then(|slot| slot.get());
 
@@ -377,20 +499,35 @@ impl AdmissionPublication {
             let cached = requested.write();
             let managed_command = cached.as_ref().and_then(|reason| {
                 let admitted = admitted?;
-                let gateway = slot.as_ref()?.cancel_gateway()?;
-                Some((admitted.task_id, gateway, reason.clone()))
+                let slot = slot.as_ref()?;
+                let gateway = slot.cancel_gateway()?;
+                Some((admitted.task_id, gateway, reason.clone(), Arc::clone(slot)))
             });
-            if let Some((task_id, gateway, reason)) = managed_command {
+            if let Some((task_id, gateway, reason, admitted_slot)) = managed_command {
                 let effective_reason = self.cx_inner.upgrade().map_or(reason.clone(), |inner| {
                     crate::runtime::task_handle::prepare_admitted_handle_cancel_state(
                         &inner, &reason,
                     )
                 });
-                if let Some(admitted) = admitted {
-                    admitted.mark_published();
+                if let Some(effects) = spawn_effects.take() {
+                    admitted_slot.install_spawn_effects(effects);
                 }
+                let observer_slot = Arc::clone(&admitted_slot);
+                let enqueued = gateway.enqueue_handle_cancel_with_admitted_slot_without_notify(
+                    task_id,
+                    effective_reason,
+                    admitted_slot,
+                );
+                // Keep the shared reason guard through identity publication
+                // and mailbox insertion. A racing abort is therefore either
+                // folded into `effective_reason` above or observes Published
+                // after this command exists and enqueues a stronger follow-up.
                 drop(cached);
-                let _ = gateway.enqueue_handle_cancel(task_id, effective_reason);
+                if enqueued {
+                    gateway.notify_handle_cancel();
+                } else {
+                    observer_slot.abandon_unpublished_spawn_effects();
+                }
                 crate::types::task_context::CancelWakeEffects::empty()
             } else {
                 let wakes = if let Some(inner) = self.cx_inner.upgrade() {
@@ -413,6 +550,9 @@ impl AdmissionPublication {
                 if let Some(admitted) = admitted {
                     admitted.mark_published();
                 }
+                if let Some(slot) = slot.as_ref() {
+                    slot.mark_spawn_lane_published();
+                }
                 drop(cached);
                 wakes
             }
@@ -430,13 +570,16 @@ impl AdmissionPublication {
             if let Some(admitted) = admitted {
                 admitted.mark_published();
             }
+            if let Some(slot) = slot.as_ref() {
+                slot.mark_spawn_lane_published();
+            }
             wakes
         };
         if let Some(slot) = slot.as_ref() {
             let retired = retire_pending_cancel_rendezvous(slot);
             drop(retired);
         }
-        cancel_wakes
+        (cancel_wakes, spawn_effects)
     }
 }
 
@@ -595,7 +738,18 @@ impl Future for LazyFactoryTask {
             let Some((factory, cx)) = self.factory.take() else {
                 return Poll::Ready(Outcome::Ok(()));
             };
-            self.inner = Some(factory(cx));
+            let factory_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| factory(cx)));
+            match factory_result {
+                Ok(inner) => self.inner = Some(inner),
+                Err(payload) => {
+                    let message = crate::cx::scope::payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    return Poll::Ready(Outcome::Panicked(crate::types::PanicPayload::new(
+                        message,
+                    )));
+                }
+            }
         }
         self.inner
             .as_mut()
@@ -649,7 +803,18 @@ impl Future for LocalLazyFactoryTask {
             let Some((factory, cx)) = self.factory.take() else {
                 return Poll::Ready(Outcome::Ok(()));
             };
-            self.inner = Some(factory(cx));
+            let factory_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| factory(cx)));
+            match factory_result {
+                Ok(inner) => self.inner = Some(inner),
+                Err(payload) => {
+                    let message = crate::cx::scope::payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    return Poll::Ready(Outcome::Panicked(crate::types::PanicPayload::new(
+                        message,
+                    )));
+                }
+            }
         }
         self.inner
             .as_mut()
@@ -1047,10 +1212,20 @@ impl fmt::Debug for SpawnRequest {
 /// with concurrent consumers each pop still returns the oldest *remaining*
 /// request, but the global drain order interleaves across consumers. See
 /// module docs for capacity, backpressure, and trace-ordering contracts.
-#[derive(Debug)]
 pub(crate) struct HandleCancelRequest {
     pub(crate) task_id: TaskId,
     pub(crate) reason: CancelReason,
+    pub(crate) admitted_slot: Option<Arc<AdmittedTaskSlot>>,
+}
+
+impl fmt::Debug for HandleCancelRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HandleCancelRequest")
+            .field("task_id", &self.task_id)
+            .field("reason", &self.reason)
+            .field("has_admitted_slot", &self.admitted_slot.is_some())
+            .finish()
+    }
 }
 
 /// Coalesces a drained command batch by canonical task identity while
@@ -1059,12 +1234,15 @@ pub(crate) fn coalesce_handle_cancel_requests(
     requests: Vec<HandleCancelRequest>,
 ) -> Vec<HandleCancelRequest> {
     let mut coalesced: Vec<HandleCancelRequest> = Vec::with_capacity(requests.len());
-    for request in requests {
+    for mut request in requests {
         if let Some(existing) = coalesced
             .iter_mut()
             .find(|existing| existing.task_id == request.task_id)
         {
             existing.reason.strengthen(&request.reason);
+            if existing.admitted_slot.is_none() {
+                existing.admitted_slot = request.admitted_slot.take();
+            }
         } else {
             coalesced.push(request);
         }
@@ -1156,8 +1334,24 @@ impl SpawnMailbox {
     }
 
     pub(crate) fn enqueue_handle_cancel(&self, task_id: TaskId, reason: CancelReason) {
-        self.handle_cancels
-            .push(HandleCancelRequest { task_id, reason });
+        self.handle_cancels.push(HandleCancelRequest {
+            task_id,
+            reason,
+            admitted_slot: None,
+        });
+    }
+
+    pub(crate) fn enqueue_handle_cancel_with_admitted_slot(
+        &self,
+        task_id: TaskId,
+        reason: CancelReason,
+        admitted_slot: Arc<AdmittedTaskSlot>,
+    ) {
+        self.handle_cancels.push(HandleCancelRequest {
+            task_id,
+            reason,
+            admitted_slot: Some(admitted_slot),
+        });
     }
 
     pub(crate) fn dequeue_handle_cancels_into(
@@ -1303,6 +1497,52 @@ impl SpawnGateway {
         }
         true
     }
+
+    pub(crate) fn enqueue_handle_cancel_with_admitted_slot(
+        &self,
+        task_id: TaskId,
+        reason: CancelReason,
+        admitted_slot: Arc<AdmittedTaskSlot>,
+    ) -> bool {
+        if !self.enqueue_handle_cancel_with_admitted_slot_without_notify(
+            task_id,
+            reason,
+            admitted_slot,
+        ) {
+            return false;
+        }
+        self.notify_handle_cancel();
+        true
+    }
+
+    fn enqueue_handle_cancel_with_admitted_slot_without_notify(
+        &self,
+        task_id: TaskId,
+        reason: CancelReason,
+        admitted_slot: Arc<AdmittedTaskSlot>,
+    ) -> bool {
+        let Some(_liveness_guard) = self.liveness_guard() else {
+            return false;
+        };
+        if let Some(admitted) = admitted_slot.get() {
+            // This store linearizes producer visibility with a command that is
+            // guaranteed to enter the mailbox while the liveness guard is held.
+            // If liveness has expired, the slot remains Pending and no task
+            // lane or observer is falsely published.
+            admitted.mark_published();
+        }
+        self.mailbox
+            .enqueue_handle_cancel_with_admitted_slot(task_id, reason, admitted_slot);
+        true
+    }
+
+    fn notify_handle_cancel(&self) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.notify)();
+        })) {
+            std::mem::forget(payload);
+        }
+    }
 }
 
 impl fmt::Debug for SpawnGateway {
@@ -1341,6 +1581,48 @@ mod tests {
 
     fn noop_task(id: TaskId) -> StoredTask {
         StoredTask::new_with_id(async { Outcome::Ok(()) }, id)
+    }
+
+    fn factory_test_cx() -> crate::cx::Cx {
+        crate::cx::Cx::new(
+            test_region(),
+            TaskId::from_arena(ArenaIndex::new(1, 1)),
+            Budget::INFINITE,
+        )
+    }
+
+    #[test]
+    fn lazy_send_factory_contains_synchronous_panic_on_first_poll() {
+        let mut task = LazyFactoryTask::new(
+            Box::new(|_| -> SpawnBoxFuture { panic!("send factory panic") }),
+            factory_test_cx(),
+        );
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+
+        match std::pin::Pin::new(&mut task).poll(&mut poll_cx) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                assert_eq!(payload.message(), "send factory panic");
+            }
+            other => panic!("synchronous send factory panic must be contained: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lazy_local_factory_contains_synchronous_panic_on_first_poll() {
+        let mut task = LocalLazyFactoryTask::new(
+            Box::new(|_| -> LocalSpawnBoxFuture { panic!("local factory panic") }),
+            factory_test_cx(),
+        );
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+
+        match std::pin::Pin::new(&mut task).poll(&mut poll_cx) {
+            Poll::Ready(Outcome::Panicked(payload)) => {
+                assert_eq!(payload.message(), "local factory panic");
+            }
+            other => panic!("synchronous local factory panic must be contained: {other:?}"),
+        }
     }
 
     struct AdmissionBoundaryWake {
@@ -2093,6 +2375,7 @@ mod tests {
             task_id,
             priority,
             cancel_publication,
+            spawn_effects,
         } = lab.state.admit_spawn_request(parts)
         else {
             panic!("expected admission to succeed");
@@ -2161,6 +2444,7 @@ mod tests {
             "replayed abort preserves RaceLost attribution"
         );
         drop(guard);
+        spawn_effects.dispatch();
         cancel_wakes.dispatch();
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(
@@ -2192,6 +2476,7 @@ mod tests {
         let SpawnAdmission::Admitted {
             task_id,
             cancel_publication,
+            spawn_effects,
             ..
         } = state.admit_spawn_request(parts)
         else {
@@ -2230,6 +2515,7 @@ mod tests {
             "cached timeout replay cannot weaken an existing shutdown"
         );
         drop(guard);
+        spawn_effects.dispatch();
         state_wakes.dispatch();
         publication_wakes.dispatch();
     }
@@ -2245,6 +2531,7 @@ mod tests {
         let SpawnAdmission::Admitted {
             task_id,
             cancel_publication,
+            spawn_effects,
             ..
         } = state.admit_spawn_request(parts)
         else {
@@ -2269,6 +2556,7 @@ mod tests {
                 "slotless publication also linearizes under the Cx write lock"
             );
         });
+        spawn_effects.dispatch();
         state_wakes.dispatch();
         publication_wakes.dispatch();
     }
@@ -2286,6 +2574,7 @@ mod tests {
         let SpawnAdmission::Admitted {
             task_id,
             cancel_publication,
+            spawn_effects,
             ..
         } = lab.state.admit_spawn_request(parts)
         else {
@@ -2348,6 +2637,7 @@ mod tests {
         assert!(admitted.get().is_some_and(AdmittedTask::is_published));
         published.store(true, Ordering::SeqCst);
         assert_eq!(publication_wakes.len(), 1);
+        spawn_effects.dispatch();
         publication_wakes.dispatch();
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(completed.load(Ordering::SeqCst));
@@ -2367,7 +2657,9 @@ mod tests {
         )
         .into_parts();
         let SpawnAdmission::Admitted {
-            cancel_publication, ..
+            cancel_publication,
+            spawn_effects,
+            ..
         } = state.admit_spawn_request(parts)
         else {
             panic!("expected admission");
@@ -2383,16 +2675,16 @@ mod tests {
             guard.cancel_reason = None;
         }
 
-        cancel_publication
-            .publish(|effective_priority| {
-                assert_eq!(
-                    effective_priority,
-                    Some(u8::MAX),
-                    "reasonless cancellation must fail closed, not inherit ready priority"
-                );
-                assert!(inner.try_write().is_none());
-            })
-            .dispatch();
+        let publication_wakes = cancel_publication.publish(|effective_priority| {
+            assert_eq!(
+                effective_priority,
+                Some(u8::MAX),
+                "reasonless cancellation must fail closed, not inherit ready priority"
+            );
+            assert!(inner.try_write().is_none());
+        });
+        spawn_effects.dispatch();
+        publication_wakes.dispatch();
     }
 
     /// Successful admission: provisional id replaced by a canonical arena
@@ -2420,6 +2712,7 @@ mod tests {
             task_id,
             priority,
             cancel_publication,
+            spawn_effects,
         } = admission
         else {
             panic!("expected admission to succeed");
@@ -2439,7 +2732,9 @@ mod tests {
             state.get_stored_future(task_id).is_some(),
             "future stored under the arena id"
         );
-        cancel_publication.publish(|_| {}).dispatch();
+        let cancel_wakes = cancel_publication.publish(|_| {});
+        spawn_effects.dispatch();
+        cancel_wakes.dispatch();
 
         let kinds: Vec<Kind> = state
             .trace_handle()
@@ -2579,8 +2874,14 @@ mod tests {
             for req in batch {
                 match state.admit_spawn_request(req.into_parts()) {
                     SpawnAdmission::Admitted {
-                        cancel_publication, ..
-                    } => cancel_publication.publish(|_| {}).dispatch(),
+                        cancel_publication,
+                        spawn_effects,
+                        ..
+                    } => {
+                        let cancel_wakes = cancel_publication.publish(|_| {});
+                        spawn_effects.dispatch();
+                        cancel_wakes.dispatch();
+                    }
                     SpawnAdmission::Denied { .. } => panic!("unexpected denial"),
                 }
             }
@@ -2706,6 +3007,7 @@ mod tests {
             task_id,
             priority,
             cancel_publication,
+            spawn_effects,
         } = admission
         else {
             panic!("expected admission");
@@ -2717,12 +3019,12 @@ mod tests {
         );
 
         // Schedule + run: factory fires on first poll, future completes.
-        cancel_publication
-            .publish(|cancel_priority| {
-                assert!(cancel_priority.is_none());
-                lab.scheduler.lock().schedule(task_id, priority);
-            })
-            .dispatch();
+        let cancel_wakes = cancel_publication.publish(|cancel_priority| {
+            assert!(cancel_priority.is_none());
+            lab.scheduler.lock().schedule(task_id, priority);
+        });
+        spawn_effects.dispatch();
+        cancel_wakes.dispatch();
         lab.run_until_quiescent();
         assert_eq!(ran.load(Ordering::SeqCst), 1, "factory ran exactly once");
         assert_eq!(completed.load(Ordering::SeqCst), 1, "task completed");
@@ -2747,6 +3049,7 @@ mod tests {
         let crate::runtime::state::SpawnAdmission::Admitted {
             task_id,
             cancel_publication,
+            spawn_effects,
             ..
         } = state.admit_spawn_request(parts)
         else {
@@ -2762,7 +3065,9 @@ mod tests {
             admitted.cx_inner.upgrade().is_some(),
             "cx weak handle is live while the task exists"
         );
-        cancel_publication.publish(|_| {}).dispatch();
+        let cancel_wakes = cancel_publication.publish(|_| {});
+        spawn_effects.dispatch();
+        cancel_wakes.dispatch();
     }
 
     #[test]
@@ -2903,7 +3208,7 @@ mod tests {
         let mut lab = LabRuntime::new(LabConfig::new(21));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let system_cx = lab.state.create_system_cx();
-        let (parent_tid, _handle, parent_cx, _result_tx) = lab
+        let (parent_tid, _handle, parent_cx, _result_tx, spawn_effects) = lab
             .state
             .create_task_infrastructure::<()>(&system_cx, root, Budget::new(), false)
             .expect("parent task");
@@ -2912,7 +3217,68 @@ mod tests {
             StoredTask::new_with_id(async { Outcome::Ok(()) }, parent_tid),
         );
         lab.scheduler.lock().schedule(parent_tid, 0);
+        spawn_effects.dispatch();
         (lab, parent_cx, root)
+    }
+
+    #[derive(Debug)]
+    struct PanickingChildEntropy;
+
+    impl crate::util::EntropySource for PanickingChildEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            dest.fill(0);
+        }
+
+        fn next_u64(&self) -> u64 {
+            0
+        }
+
+        fn fork(&self, _: TaskId) -> Arc<dyn crate::util::EntropySource> {
+            panic!("inherited entropy fork panic");
+        }
+
+        fn source_id(&self) -> &'static str {
+            "panicking-child"
+        }
+    }
+
+    #[derive(Debug)]
+    struct ParentEntropySeed;
+
+    impl crate::util::EntropySource for ParentEntropySeed {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            dest.fill(0);
+        }
+
+        fn next_u64(&self) -> u64 {
+            0
+        }
+
+        fn fork(&self, _: TaskId) -> Arc<dyn crate::util::EntropySource> {
+            Arc::new(PanickingChildEntropy)
+        }
+
+        fn source_id(&self) -> &'static str {
+            "parent-seed"
+        }
+    }
+
+    fn lab_with_panicking_parent_entropy() -> (LabRuntime, crate::cx::Cx) {
+        let mut lab = LabRuntime::new(LabConfig::new(22));
+        lab.state.set_entropy_source(Arc::new(ParentEntropySeed));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let system_cx = lab.state.create_system_cx();
+        let (parent_tid, _handle, parent_cx, _result_tx, spawn_effects) = lab
+            .state
+            .create_task_infrastructure::<()>(&system_cx, root, Budget::new(), false)
+            .expect("parent task");
+        lab.state.store_spawned_task(
+            parent_tid,
+            StoredTask::new_with_id(async { Outcome::Ok(()) }, parent_tid),
+        );
+        lab.scheduler.lock().schedule(parent_tid, 0);
+        spawn_effects.dispatch();
+        (lab, parent_cx)
     }
 
     /// Cx::spawn end to end under the lab: no RuntimeState at the call
@@ -2943,6 +3309,36 @@ mod tests {
             0,
             "credits balanced"
         );
+    }
+
+    #[test]
+    fn cx_spawn_synchronous_factory_panic_resolves_join_panicked() {
+        let (mut lab, parent_cx, _root) = lab_with_parent_cx();
+        let mut handle = parent_cx
+            .spawn(|_child| -> std::future::Ready<()> { panic!("synchronous send factory panic") })
+            .expect("cx.spawn enqueues the lazy factory");
+
+        match poll_join_with_lab(&mut lab, &parent_cx, &mut handle) {
+            Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
+                assert_eq!(payload.message(), "synchronous send factory panic");
+            }
+            other => panic!("synchronous send factory panic must reach the handle: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cx_spawn_inheritance_panic_resolves_join_panicked() {
+        let (mut lab, parent_cx) = lab_with_panicking_parent_entropy();
+        let mut handle = parent_cx
+            .spawn(|_child| async move { 7usize })
+            .expect("cx.spawn enqueues before inheritance runs");
+
+        match poll_join_with_lab(&mut lab, &parent_cx, &mut handle) {
+            Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
+                assert_eq!(payload.message(), "inherited entropy fork panic");
+            }
+            other => panic!("inheritance panic must reach the public handle: {other:?}"),
+        }
     }
 
     /// The shared `Cx::spawn` / `Cx::spawn_in` gateway path must emit the
@@ -3107,6 +3503,63 @@ mod tests {
             matches!(rx.try_recv(), Ok(Err(JoinError::Cancelled(_)))),
             "final mailbox drain must resolve the caller-visible handle"
         );
+    }
+
+    #[test]
+    fn expired_liveness_abandons_managed_pre_admission_spawn_observer() {
+        let metrics =
+            crate::runtime::state::spawn_observer_test_support::PanickingSpawnMetrics::new();
+        let mut state = crate::runtime::state::RuntimeState::new_with_metrics(metrics.clone());
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async {})
+            .expect("create unpublished task infrastructure");
+        let cx_inner = Arc::downgrade(
+            state
+                .task(task_id)
+                .and_then(|record| record.cx_inner.as_ref())
+                .expect("task context is linked before publication"),
+        );
+
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let liveness = Arc::new(());
+        let gateway = Arc::new(SpawnGateway::new(
+            Arc::clone(&mailbox),
+            Arc::new(|| {}),
+            None,
+            Arc::downgrade(&liveness),
+        ));
+        let admitted = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(gateway));
+        assert!(admitted.try_reserve());
+        admitted.publish_reserved(AdmittedTask::pending(task_id, cx_inner.clone()));
+        let pending_reason = register_pending_cancel_rendezvous(&admitted);
+        *pending_reason.write() = Some(CancelReason::race_loser());
+        let publication = AdmissionPublication::new(cx_inner, Some(Arc::clone(&admitted)));
+
+        drop(liveness);
+        let lane_published = Arc::new(AtomicBool::new(false));
+        let lane_published_in_callback = Arc::clone(&lane_published);
+        let (wakes, returned_spawn_effects) =
+            publication.publish_with_spawn_effects(spawn_effects, move |_| {
+                lane_published_in_callback.store(true, Ordering::SeqCst);
+            });
+
+        assert!(wakes.is_empty());
+        assert!(returned_spawn_effects.is_none());
+        assert!(!lane_published.load(Ordering::SeqCst));
+        assert!(
+            !admitted
+                .get()
+                .expect("identity remains inspectable")
+                .is_published(),
+            "expired liveness must not publish an identity without a command"
+        );
+        assert!(mailbox.handle_cancels_are_empty());
+        assert!(
+            admitted.spawn_effects.lock().effects.is_none(),
+            "an observer with no possible executable lane must be abandoned"
+        );
+        assert_eq!(metrics.spawn_attempts(), 0);
     }
 
     #[test]
@@ -3535,7 +3988,7 @@ mod tests {
             task_id,
             stored,
             cancel_publication,
-            ..
+            spawn_effects,
         } = admission
         else {
             panic!("expected local admission");
@@ -3554,15 +4007,15 @@ mod tests {
         );
 
         crate::runtime::local::store_local_task(task_id, stored);
-        cancel_publication
-            .publish(|cancel_priority| {
-                assert!(cancel_priority.is_none());
-                assert!(
-                    crate::runtime::scheduler::three_lane::schedule_local_task(task_id),
-                    "owner worker has local_ready TLS"
-                );
-            })
-            .dispatch();
+        let cancel_wakes = cancel_publication.publish(|cancel_priority| {
+            assert!(cancel_priority.is_none());
+            assert!(
+                crate::runtime::scheduler::three_lane::schedule_local_task(task_id),
+                "owner worker has local_ready TLS"
+            );
+        });
+        spawn_effects.dispatch();
+        cancel_wakes.dispatch();
         assert_eq!(
             local_ready.lock().pop_front(),
             Some(task_id),
@@ -3580,6 +4033,66 @@ mod tests {
         let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
         assert_eq!(result.expect("joined value"), 42);
         assert_eq!(cell.get(), 11, "non-Send future ran on owner thread");
+    }
+
+    #[test]
+    fn cx_spawn_local_synchronous_factory_panic_resolves_join_panicked() {
+        clear_local_spawn_lane_for_test();
+        let (mut lab, parent_cx, _root) = lab_with_parent_cx();
+        let local_ready = Arc::new(parking_lot::Mutex::new(
+            crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
+                std::collections::VecDeque::new(),
+            ),
+        ));
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _ready_guard =
+            crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
+
+        let mut handle = parent_cx
+            .spawn_local(|_child| -> std::future::Ready<()> {
+                panic!("synchronous local factory panic")
+            })
+            .expect("cx.spawn_local enqueues the lazy factory");
+        let mut requests = Vec::new();
+        assert_eq!(drain_local_spawn_lane(1, &mut requests), 1);
+        let crate::runtime::state::LocalSpawnAdmission::Admitted {
+            task_id,
+            stored,
+            cancel_publication,
+            spawn_effects,
+            ..
+        } = lab
+            .state
+            .admit_local_spawn_request(requests.pop().expect("local request"))
+        else {
+            panic!("expected local admission");
+        };
+        crate::runtime::local::store_local_task(task_id, stored);
+        let cancel_wakes = cancel_publication.publish(|cancel_priority| {
+            assert!(cancel_priority.is_none());
+            assert!(
+                crate::runtime::scheduler::three_lane::schedule_local_task(task_id),
+                "owner-local task must be physically published before first poll"
+            );
+        });
+        spawn_effects.dispatch();
+        cancel_wakes.dispatch();
+        assert_eq!(local_ready.lock().pop_front(), Some(task_id));
+
+        let mut local_task = crate::runtime::local::remove_local_task(task_id)
+            .expect("local task stored on owner thread");
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+        assert!(matches!(
+            local_task.poll(&mut poll_cx),
+            Poll::Ready(Outcome::Panicked(_))
+        ));
+        match poll_join_with_lab(&mut lab, &parent_cx, &mut handle) {
+            Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
+                assert_eq!(payload.message(), "synchronous local factory panic");
+            }
+            other => panic!("synchronous local factory panic must reach the handle: {other:?}"),
+        }
     }
 
     #[test]
@@ -3660,7 +4173,7 @@ mod tests {
             task_id,
             stored,
             cancel_publication,
-            ..
+            spawn_effects,
         } = lab.state.admit_local_spawn_request(request)
         else {
             panic!("expected local admission");
@@ -3708,10 +4221,15 @@ mod tests {
         expected_task
             .set(task_id)
             .expect("expected task id set once");
-        let cancel_wakes = cancel_publication.publish(|_| {
-            panic!("managed cached abort delegates its first lane to the command consumer")
-        });
+        let (cancel_wakes, returned_spawn_effects) = cancel_publication
+            .publish_with_spawn_effects(spawn_effects, |_| {
+                panic!("managed cached abort delegates its first lane to the command consumer")
+            });
         assert!(admitted_task.is_published());
+        assert!(
+            returned_spawn_effects.is_none(),
+            "managed cached abort leaves its spawn observer in the authoritative admission slot"
+        );
         assert_eq!(
             cancel_wakes.len(),
             0,
@@ -3751,25 +4269,52 @@ mod tests {
         );
         region_wakes.dispatch();
 
+        // A repeat abort after canonical identity publication may race the
+        // original delegated command on another worker. Both commands carry
+        // the same authoritative slot, so either consumer may win without
+        // losing or duplicating the observer receipt.
+        handle.abort_with_reason(CancelReason::race_loser());
+
         let mut commands = Vec::new();
         assert_eq!(
             lab.spawn_mailbox()
-                .dequeue_handle_cancels_into(1, &mut commands),
-            1,
-            "publication enqueues one canonical cancellation command"
+                .dequeue_handle_cancels_into(2, &mut commands),
+            2,
+            "initial publication and repeat abort each enqueue a canonical command"
         );
-        let command = commands.pop().expect("canonical command");
-        assert_eq!(command.task_id, task_id);
-        let (route, command_wakes) = lab
+        let winner = commands.pop().expect("winner command");
+        let loser = commands.pop().expect("loser command");
+        assert_eq!(winner.task_id, task_id);
+        assert_eq!(loser.task_id, task_id);
+        assert!(Arc::ptr_eq(
+            winner
+                .admitted_slot
+                .as_ref()
+                .expect("winner carries admission slot"),
+            loser
+                .admitted_slot
+                .as_ref()
+                .expect("loser carries admission slot")
+        ));
+
+        // Model two workers completing phase 1 before either publishes.
+        let (winner_route, winner_wakes) = lab
             .state
-            .cancel_task_for_handle(command.task_id, &command.reason)
+            .cancel_task_for_handle(winner.task_id, &winner.reason)
             .into_parts();
-        let route = route.expect("published local cancellation has a lane route");
+        let winner_route = winner_route.expect("winner has a lane route");
         assert!(
-            route.delegated_initial,
+            winner_route.delegated_initial,
             "cached abort retains delegated state until physical publication"
         );
-        assert!(command_wakes.is_empty());
+        let (loser_route, loser_wakes) = lab
+            .state
+            .cancel_task_for_handle(loser.task_id, &loser.reason)
+            .into_parts();
+        let loser_route = loser_route.expect("loser also snapshots delegated phase 1");
+        assert!(loser_route.delegated_initial);
+        assert!(winner_wakes.is_empty());
+        assert!(loser_wakes.is_empty());
         let (published_priority, publication_wakes) = lab
             .state
             .publish_handle_cancel_lane(task_id, |priority, is_local, pinned_worker| {
@@ -3785,9 +4330,35 @@ mod tests {
                 Some(priority)
             })
             .into_parts();
-        assert_eq!(published_priority, Some(route.priority));
-        command_wakes.dispatch();
+        assert_eq!(published_priority, Some(winner_route.priority));
+        winner
+            .admitted_slot
+            .as_ref()
+            .expect("delegated command carries the authoritative admission slot")
+            .publish_spawn_lane_and_take_effects()
+            .expect("admission slot owns the spawn observer")
+            .dispatch();
+
+        let (loser_publication, loser_publication_wakes) = lab
+            .state
+            .publish_handle_cancel_lane(task_id, |_, _, _| {
+                panic!("losing consumer must observe the already-published lane")
+            })
+            .into_parts();
+        assert!(loser_publication.is_none());
+        assert!(
+            loser
+                .admitted_slot
+                .as_ref()
+                .expect("loser carries admission slot")
+                .take_spawn_effects_if_lane_published()
+                .is_none(),
+            "the observer receipt is one-shot across racing consumers"
+        );
+        winner_wakes.dispatch();
+        loser_wakes.dispatch();
         publication_wakes.dispatch();
+        loser_publication_wakes.dispatch();
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(
             completed.load(Ordering::SeqCst),
@@ -3915,7 +4486,7 @@ mod tests {
         let mut lab = LabRuntime::new(LabConfig::new(21));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let system_cx = lab.state.create_system_cx();
-        let (parent_tid, _handle, parent_cx, _result_tx) = lab
+        let (parent_tid, _handle, parent_cx, _result_tx, spawn_effects) = lab
             .state
             .create_task_infrastructure::<()>(&system_cx, root, parent_budget, false)
             .expect("parent task");
@@ -3924,6 +4495,7 @@ mod tests {
             StoredTask::new_with_id(async { Outcome::Ok(()) }, parent_tid),
         );
         lab.scheduler.lock().schedule(parent_tid, 0);
+        spawn_effects.dispatch();
 
         let observed: Arc<std::sync::Mutex<Option<Budget>>> = Arc::new(std::sync::Mutex::new(None));
         let observed_in_closure = Arc::clone(&observed);
@@ -4097,7 +4669,7 @@ mod tests {
             task_id,
             mut stored,
             cancel_publication,
-            ..
+            spawn_effects,
         } = state.admit_local_spawn_request(request)
         else {
             panic!("admission must succeed for an open region");
@@ -4112,7 +4684,9 @@ mod tests {
             0,
             "factory deferred to first poll"
         );
-        cancel_publication.publish(|_| {}).dispatch();
+        let cancel_wakes = cancel_publication.publish(|_| {});
+        spawn_effects.dispatch();
+        cancel_wakes.dispatch();
 
         let waker = Waker::noop();
         let mut poll_cx = Context::from_waker(waker);

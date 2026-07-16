@@ -1050,20 +1050,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let task_id = self.create_task_record(state)?;
         let actor_id = ActorId::from_task(task_id);
         let actor_state = Arc::new(ActorStateCell::new(ActorState::Created));
-
-        let _span = debug_span!(
-            "actor_spawn",
-            task_id = ?task_id,
-            region_id = ?self.region_id(),
-            mailbox_capacity = mailbox_capacity,
-        )
-        .entered();
-        debug!(
-            task_id = ?task_id,
-            region_id = ?self.region_id(),
-            mailbox_capacity = mailbox_capacity,
-            "actor spawned"
-        );
+        let region_id = self.region_id();
 
         // Create child context
         let (_, child_cx) = self.build_child_task_cx(state, cx, task_id);
@@ -1073,6 +1060,16 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx.clone());
         }
+        let spawned_at = state
+            .timer_driver()
+            .map_or(state.now, crate::time::TimerDriverHandle::now);
+        let spawn_effects = state.prepare_task_spawn_effects(
+            task_id,
+            region_id,
+            self.budget(),
+            crate::runtime::state::TaskSpawnSource::Scope,
+            spawned_at,
+        );
 
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let state_for_task = Arc::clone(&actor_state);
@@ -1084,8 +1081,26 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         // Create the actor loop future
         let wrapped = async move {
+            spawn_effects.dispatch();
             let result = CatchUnwind {
-                inner: Box::pin(run_actor_loop(actor, child_cx, &mut cell)),
+                inner: Box::pin(async move {
+                    {
+                        let _span = debug_span!(
+                            "actor_spawn",
+                            task_id = ?task_id,
+                            region_id = ?region_id,
+                            mailbox_capacity = mailbox_capacity,
+                        )
+                        .entered();
+                        debug!(
+                            task_id = ?task_id,
+                            region_id = ?region_id,
+                            mailbox_capacity = mailbox_capacity,
+                            "actor spawned"
+                        );
+                    }
+                    run_actor_loop(actor, child_cx, &mut cell).await
+                }),
             }
             .await;
             state_for_task.store(ActorState::Stopped);
@@ -1096,6 +1111,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                 }
                 Err(payload) => {
                     let msg = crate::cx::scope::payload_to_string(&payload);
+                    std::mem::forget(payload);
                     let panic_payload = crate::types::PanicPayload::new(msg);
                     let _ =
                         result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
@@ -1156,25 +1172,12 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         use crate::supervision::Supervisor;
         use crate::tracing_compat::{debug, debug_span};
 
-        let actor = factory();
         let (msg_tx, msg_rx) = mpsc::channel::<A::Message>(mailbox_capacity);
         let (result_tx, result_rx) = oneshot::channel::<Result<A, JoinError>>();
         let task_id = self.create_task_record(state)?;
         let actor_id = ActorId::from_task(task_id);
         let actor_state = Arc::new(ActorStateCell::new(ActorState::Created));
-
-        let _span = debug_span!(
-            "supervised_actor_spawn",
-            task_id = ?task_id,
-            region_id = ?self.region_id(),
-            mailbox_capacity = mailbox_capacity,
-        )
-        .entered();
-        debug!(
-            task_id = ?task_id,
-            region_id = ?self.region_id(),
-            "supervised actor spawned"
-        );
+        let region_id = self.region_id();
 
         let (_, child_cx) = self.build_child_task_cx(state, cx, task_id);
 
@@ -1182,9 +1185,18 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx.clone());
         }
+        let spawned_at = state
+            .timer_driver()
+            .map_or(state.now, crate::time::TimerDriverHandle::now);
+        let spawn_effects = state.prepare_task_spawn_effects(
+            task_id,
+            region_id,
+            self.budget(),
+            crate::runtime::state::TaskSpawnSource::Scope,
+            spawned_at,
+        );
 
         let inner_weak = Arc::downgrade(&child_cx.inner);
-        let region_id = self.region_id();
         let state_for_task = Arc::clone(&actor_state);
 
         let mut cell = ActorCell {
@@ -1193,23 +1205,46 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         };
 
         let wrapped = async move {
+            spawn_effects.dispatch();
             let result = match (crate::cx::scope::CatchUnwind {
-                inner: Box::pin(run_supervised_loop(
-                    actor,
-                    &mut factory,
-                    child_cx,
-                    &mut cell,
-                    Supervisor::new(strategy),
-                    task_id,
-                    region_id,
-                )),
+                inner: Box::pin(async move {
+                    {
+                        let _span = debug_span!(
+                            "supervised_actor_spawn",
+                            task_id = ?task_id,
+                            region_id = ?region_id,
+                            mailbox_capacity = mailbox_capacity,
+                        )
+                        .entered();
+                        debug!(
+                            task_id = ?task_id,
+                            region_id = ?region_id,
+                            "supervised actor spawned"
+                        );
+                    }
+                    let actor = factory();
+                    run_supervised_loop(
+                        actor,
+                        &mut factory,
+                        child_cx,
+                        &mut cell,
+                        Supervisor::new(strategy),
+                        task_id,
+                        region_id,
+                    )
+                    .await
+                }),
             })
             .await
             {
                 Ok(result) => result,
-                Err(payload) => Err(JoinError::Panicked(crate::types::PanicPayload::new(
-                    crate::cx::scope::payload_to_string(&payload),
-                ))),
+                Err(payload) => {
+                    let message = crate::cx::scope::payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    Err(JoinError::Panicked(crate::types::PanicPayload::new(
+                        message,
+                    )))
+                }
             };
             state_for_task.store(ActorState::Stopped);
             let outcome = join_result_to_task_outcome(&result).map_err(|_| ());
@@ -2626,6 +2661,11 @@ mod tests {
                 8,
             )
             .expect("spawn supervised actor");
+        assert_eq!(
+            factory_calls.load(Ordering::Relaxed),
+            0,
+            "supervised actor factory must stay lazy until the stored task's first poll"
+        );
         handle.try_send(()).expect("queue panic message");
 
         let actor_ref = handle.sender();

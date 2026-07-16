@@ -2176,9 +2176,42 @@ impl ThreeLaneScheduler {
         let Some(collector) = &self.scheduler_evidence else {
             return;
         };
-        collector
-            .lock()
-            .record_task_enqueue(task, crate::time::wall_now().as_nanos());
+        let timestamp_ns = crate::time::wall_now().as_nanos();
+        collector.lock().record_task_enqueue(task, timestamp_ns);
+    }
+
+    /// Scheduler publication diagnostics and notifiers are observer boundaries.
+    /// Once a lane is physically visible, neither a hostile tracing subscriber
+    /// nor a fallible wake hook may unwind past the caller and strand the spawn
+    /// observer that must run next.
+    #[inline]
+    fn contain_publication_effect(effect: impl FnOnce()) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(effect)) {
+            std::mem::forget(payload);
+        }
+    }
+
+    #[inline]
+    fn finish_global_ready_publication(
+        &self,
+        task: TaskId,
+        priority: u8,
+        ready_count_before: usize,
+    ) {
+        let _ = priority;
+        Self::contain_publication_effect(|| self.record_scheduler_evidence_enqueue(task));
+        if self.global_queue_limit > 0 && ready_count_before >= self.global_queue_limit {
+            Self::contain_publication_effect(|| {
+                crate::tracing_compat::warn!(
+                    ?task,
+                    priority,
+                    limit = self.global_queue_limit,
+                    current = ready_count_before,
+                    "inject_ready: global ready queue at capacity, scheduling anyway"
+                );
+            });
+        }
+        Self::contain_publication_effect(|| self.wake_one());
     }
 
     fn scheduler_evidence_remote_steal_ratio_pct(&self) -> Option<u8> {
@@ -2339,15 +2372,19 @@ impl ThreeLaneScheduler {
                     }
                     local_guard.move_to_cancel_lane(task, priority);
                     drop(local_guard);
-                    self.record_scheduler_evidence_enqueue(task);
+                    Self::contain_publication_effect(|| {
+                        self.record_scheduler_evidence_enqueue(task);
+                    });
                     if let Some(parker) = self.parkers.get(worker_id) {
-                        parker.unpark();
+                        Self::contain_publication_effect(|| parker.unpark());
                     }
                     return;
                 }
             }
             if schedule_cancel_on_current_local(task, priority) {
-                self.record_scheduler_evidence_enqueue(task);
+                Self::contain_publication_effect(|| {
+                    self.record_scheduler_evidence_enqueue(task);
+                });
                 return;
             }
             // SAFETY: Local (!Send) tasks must only be polled on their owner
@@ -2358,10 +2395,12 @@ impl ThreeLaneScheduler {
                 false,
                 "Attempted to inject_cancel local task {task:?} without owner worker"
             );
-            error!(
-                ?task,
-                "inject_cancel: cannot route local task to owner worker, cancel skipped"
-            );
+            Self::contain_publication_effect(|| {
+                error!(
+                    ?task,
+                    "inject_cancel: cannot route local task to owner worker, cancel skipped"
+                );
+            });
             return;
         }
 
@@ -2388,8 +2427,8 @@ impl ThreeLaneScheduler {
             self.global.inject_cancel(task, priority);
         });
 
-        self.record_scheduler_evidence_enqueue(task);
-        self.wake_one();
+        Self::contain_publication_effect(|| self.record_scheduler_evidence_enqueue(task));
+        Self::contain_publication_effect(|| self.wake_one());
     }
 
     /// Injects a task into the timed lane for cross-thread wakeup.
@@ -2434,20 +2473,9 @@ impl ThreeLaneScheduler {
     /// join state and any obligations it owns.
     #[inline]
     fn inject_global_ready_checked(&self, task: TaskId, priority: u8) {
-        // The queue limit is diagnostic only; admission already succeeded.
-        if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
-            crate::tracing_compat::warn!(
-                ?task,
-                priority,
-                limit = self.global_queue_limit,
-                current = self.global.ready_count(),
-                "inject_ready: global ready queue at capacity, scheduling anyway"
-            );
-        }
-
+        let ready_count_before = self.global.ready_count();
         self.global.inject_ready(task, priority);
-        self.record_scheduler_evidence_enqueue(task);
-        self.wake_one();
+        self.finish_global_ready_publication(task, priority, ready_count_before);
     }
 
     /// Injects a task into the ready lane for cross-thread wakeup.
@@ -2465,26 +2493,28 @@ impl ThreeLaneScheduler {
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
         // Atomic check-and-inject: both the wake_state check and injection happen
         // under the same task table lock to prevent TOCTOU races.
-        let (injected, is_local) = self.with_task_table_ref(|tt| {
+        let (injected, is_local, ready_count_before) = self.with_task_table_ref(|tt| {
             match tt.task(task) {
                 Some(record) => {
                     let is_local = record.is_local();
                     if is_local {
                         // Local tasks cannot be globally injected
-                        (false, true)
+                        (false, true, 0)
                     } else if record.wake_state.notify() {
                         // Task state allows scheduling, inject while holding lock
-                        self.inject_global_ready_checked(task, priority);
-                        (true, false)
+                        let ready_count_before = self.global.ready_count();
+                        self.global.inject_ready(task, priority);
+                        (true, false, ready_count_before)
                     } else {
                         // Task already scheduled or completed, skip injection
-                        (false, false)
+                        (false, false, 0)
                     }
                 }
                 None => {
                     // Task record doesn't exist (e.g., in tests), allow injection
-                    self.inject_global_ready_checked(task, priority);
-                    (true, false)
+                    let ready_count_before = self.global.ready_count();
+                    self.global.inject_ready(task, priority);
+                    (true, false, ready_count_before)
                 }
             }
         });
@@ -2504,15 +2534,20 @@ impl ThreeLaneScheduler {
         }
 
         if injected {
-            trace!(
-                ?task,
-                priority, "inject_ready: task injected into global ready queue"
-            );
+            self.finish_global_ready_publication(task, priority, ready_count_before);
+            Self::contain_publication_effect(|| {
+                trace!(
+                    ?task,
+                    priority, "inject_ready: task injected into global ready queue"
+                );
+            });
         } else {
-            trace!(
-                ?task,
-                priority, "inject_ready: task NOT scheduled (should_schedule=false)"
-            );
+            Self::contain_publication_effect(|| {
+                trace!(
+                    ?task,
+                    priority, "inject_ready: task NOT scheduled (should_schedule=false)"
+                );
+            });
         }
     }
 
@@ -4848,18 +4883,24 @@ impl ThreeLaneWorker {
         }
 
         let requests = crate::runtime::spawn_mailbox::coalesce_handle_cancel_requests(requests);
-        let (tasks, delegated, immediate_wakes) = if self.task_table.is_some() {
-            let (tasks, delegated, mut immediate_wakes, new_requests) =
+        let (tasks, delegated, immediate_wakes, immediate_admitted_slots) = if self
+            .task_table
+            .is_some()
+        {
+            let (tasks, delegated, mut immediate_wakes, immediate_admitted_slots, new_requests) =
                 self.with_task_table(|tt| {
                     let mut tasks = Vec::with_capacity(requests.len());
                     let mut delegated = Vec::new();
                     let mut immediate_wakes = Vec::new();
+                    let mut immediate_admitted_slots = Vec::new();
                     let mut new_requests = Vec::new();
                     for request in requests {
                         let task_id = request.task_id;
+                        let reason = request.reason;
+                        let admitted_slot = request.admitted_slot;
                         let Some((effects, region_id, spawned_at)) =
                             tt.update_task(task_id, |record| {
-                                let effects = record.request_cancel_for_handle(&request.reason);
+                                let effects = record.request_cancel_for_handle(&reason);
                                 (effects, record.owner, record.created_at)
                             })
                         else {
@@ -4873,14 +4914,28 @@ impl ThreeLaneWorker {
                             Some(route) if route.delegated_initial => delegated.push((
                                 task_id,
                                 route.priority,
-                                request.reason,
+                                reason,
                                 task_wakes,
+                                admitted_slot,
                             )),
-                            Some(route) => tasks.push((task_id, route.priority, task_wakes)),
-                            None => immediate_wakes.push(task_wakes),
+                            Some(route) => {
+                                tasks.push((task_id, route.priority, task_wakes, admitted_slot));
+                            }
+                            None => {
+                                immediate_wakes.push(task_wakes);
+                                if let Some(admitted_slot) = admitted_slot {
+                                    immediate_admitted_slots.push(admitted_slot);
+                                }
+                            }
                         }
                     }
-                    (tasks, delegated, immediate_wakes, new_requests)
+                    (
+                        tasks,
+                        delegated,
+                        immediate_wakes,
+                        immediate_admitted_slots,
+                        new_requests,
+                    )
                 });
             if !new_requests.is_empty() {
                 let new_requests = new_requests
@@ -4911,7 +4966,7 @@ impl ThreeLaneWorker {
                     }
                 }
             }
-            (tasks, delegated, immediate_wakes)
+            (tasks, delegated, immediate_wakes, immediate_admitted_slots)
         } else {
             let mut state = self
                 .state
@@ -4920,26 +4975,49 @@ impl ThreeLaneWorker {
             let mut tasks = Vec::with_capacity(requests.len());
             let mut delegated = Vec::new();
             let mut immediate_wakes = Vec::new();
+            let mut immediate_admitted_slots = Vec::new();
             for request in requests {
                 let task_id = request.task_id;
-                let effects = state.cancel_task_for_handle(task_id, &request.reason);
+                let reason = request.reason;
+                let admitted_slot = request.admitted_slot;
+                let task_exists = state.task(task_id).is_some();
+                let effects = state.cancel_task_for_handle(task_id, &reason);
                 let (route, task_wakes) = effects.into_parts();
                 match route {
                     Some(route) if route.delegated_initial => {
-                        delegated.push((task_id, route.priority, request.reason, task_wakes))
+                        delegated.push((task_id, route.priority, reason, task_wakes, admitted_slot))
                     }
-                    Some(route) => tasks.push((task_id, route.priority, task_wakes)),
-                    None => immediate_wakes.push(task_wakes),
+                    Some(route) => {
+                        tasks.push((task_id, route.priority, task_wakes, admitted_slot));
+                    }
+                    None => {
+                        immediate_wakes.push(task_wakes);
+                        if task_exists && let Some(admitted_slot) = admitted_slot {
+                            immediate_admitted_slots.push(admitted_slot);
+                        }
+                    }
                 }
             }
             drop(state);
-            (tasks, delegated, immediate_wakes)
+            (tasks, delegated, immediate_wakes, immediate_admitted_slots)
         };
 
         let mut wakes_to_dispatch = immediate_wakes;
-        for (task_id, priority, task_wakes) in tasks {
+        let mut spawn_effects_to_dispatch =
+            Vec::with_capacity(immediate_admitted_slots.len() + tasks.len() + delegated.len());
+        for admitted_slot in immediate_admitted_slots {
+            if let Some(effects) = admitted_slot.take_spawn_effects_if_lane_published() {
+                spawn_effects_to_dispatch.push(effects);
+            }
+        }
+        for (task_id, priority, task_wakes, admitted_slot) in tasks {
             if self.publish_deferred_cancel_task(task_id, priority) {
                 wakes_to_dispatch.push(task_wakes);
+                if let Some(admitted_slot) = admitted_slot
+                    && let Some(effects) = admitted_slot.publish_spawn_lane_and_take_effects()
+                {
+                    spawn_effects_to_dispatch.push(effects);
+                }
             } else {
                 Self::emit_cancel_diagnostic(|| {
                     error!(
@@ -4958,7 +5036,7 @@ impl ThreeLaneWorker {
         // reason, inserts that lane without waking, and transitions to Published.
         // An already-awake worker may pop the queue entry, but it cannot remove
         // or poll the task until this record critical section completes.
-        for (task_id, requested_priority, reason, mut task_wakes) in delegated {
+        for (task_id, requested_priority, reason, mut task_wakes, admitted_slot) in delegated {
             let mut lane_error = None;
             let effects = if self.task_table.is_some() {
                 self.with_task_table(|tt| {
@@ -5007,9 +5085,15 @@ impl ThreeLaneWorker {
                 // effect merging/vector growth can unwind. Cx and TaskRecord
                 // are already authoritative, so an early worker is safe.
                 self.finish_deferred_cancel_lane_publication(task_id, publication);
+                let spawn_effects = admitted_slot
+                    .as_ref()
+                    .and_then(|slot| slot.publish_spawn_lane_and_take_effects());
                 debug_assert!(publication.priority >= requested_priority);
                 task_wakes.merge(publication_wakes);
                 wakes_to_dispatch.push(task_wakes);
+                if let Some(effects) = spawn_effects {
+                    spawn_effects_to_dispatch.push(effects);
+                }
                 continue;
             }
 
@@ -5039,7 +5123,11 @@ impl ThreeLaneWorker {
         }
 
         // Every callback-free lane publication above has completed before the
-        // first potentially hostile RawWaker callback or destructor runs.
+        // first potentially hostile spawn observer, RawWaker callback, or
+        // destructor runs. Spawn observers stay ahead of cancellation Wakers.
+        for effects in spawn_effects_to_dispatch {
+            effects.dispatch();
+        }
         for wakes in wakes_to_dispatch {
             wakes.dispatch();
         }
@@ -5186,6 +5274,7 @@ impl ThreeLaneWorker {
                 TaskId,
                 u8,
                 crate::runtime::spawn_mailbox::AdmissionPublication,
+                crate::runtime::state::TaskSpawnEffects,
             ); 16],
         > = SmallVec::new();
         let mut denied: SmallVec<
@@ -5205,8 +5294,9 @@ impl ThreeLaneWorker {
                         task_id,
                         priority,
                         cancel_publication,
+                        spawn_effects,
                     } => {
-                        admitted.push((task_id, priority, cancel_publication));
+                        admitted.push((task_id, priority, cancel_publication, spawn_effects));
                     }
                     crate::runtime::state::SpawnAdmission::Denied { parts, error } => {
                         denied.push((parts, error));
@@ -5221,15 +5311,26 @@ impl ThreeLaneWorker {
         let mut cancel_wakes = SmallVec::<
             [crate::types::task_context::CancelWakeEffects; SPAWN_ADMISSION_BATCH],
         >::new();
-        for (task_id, priority, publication) in admitted {
-            let wakes = publication.publish(|cancel_priority| {
-                if let Some(cancel_priority) = cancel_priority {
-                    self.global.inject_cancel(task_id, cancel_priority);
-                } else {
-                    self.global.inject_ready(task_id, priority);
-                }
-            });
+        let mut spawn_effects =
+            SmallVec::<[crate::runtime::state::TaskSpawnEffects; SPAWN_ADMISSION_BATCH]>::new();
+        for (task_id, priority, publication, effects) in admitted {
+            let (wakes, effects) =
+                publication.publish_with_spawn_effects(effects, |cancel_priority| {
+                    if let Some(cancel_priority) = cancel_priority {
+                        self.global.inject_cancel(task_id, cancel_priority);
+                    } else {
+                        self.global.inject_ready(task_id, priority);
+                    }
+                });
             cancel_wakes.push(wakes);
+            if let Some(effects) = effects {
+                spawn_effects.push(effects);
+            }
+        }
+        // Every task in the admitted batch is now executable. Spawn observers
+        // may reenter admission and must see the whole batch already published.
+        for effects in spawn_effects {
+            effects.dispatch();
         }
         for (parts, error) in denied {
             match error {
@@ -5275,6 +5376,7 @@ impl ThreeLaneWorker {
             u8,
             crate::runtime::stored_task::LocalStoredTask,
             crate::runtime::spawn_mailbox::AdmissionPublication,
+            crate::runtime::state::TaskSpawnEffects,
         )> = Vec::with_capacity(requests.len());
         let mut denied: SmallVec<
             [(
@@ -5294,6 +5396,7 @@ impl ThreeLaneWorker {
                         priority,
                         stored,
                         cancel_publication,
+                        spawn_effects,
                     } => {
                         // Admission already pinned the record to this
                         // worker (`admit_local_spawn_request` requires the
@@ -5302,7 +5405,13 @@ impl ThreeLaneWorker {
                         if let Some(record) = state.task_mut(task_id) {
                             record.wake_state.notify();
                         }
-                        admitted.push((task_id, priority, stored, cancel_publication));
+                        admitted.push((
+                            task_id,
+                            priority,
+                            stored,
+                            cancel_publication,
+                            spawn_effects,
+                        ));
                     }
                     crate::runtime::state::LocalSpawnAdmission::Denied { request, error } => {
                         denied.push((request, error));
@@ -5314,19 +5423,31 @@ impl ThreeLaneWorker {
         let mut cancel_wakes = SmallVec::<
             [crate::types::task_context::CancelWakeEffects; LOCAL_SPAWN_ADMISSION_BATCH],
         >::new();
-        for (task_id, _priority, stored, publication) in admitted {
+        let mut spawn_effects = SmallVec::<
+            [crate::runtime::state::TaskSpawnEffects; LOCAL_SPAWN_ADMISSION_BATCH],
+        >::new();
+        for (task_id, _priority, stored, publication, effects) in admitted {
             crate::runtime::local::store_local_task(task_id, stored);
-            let wakes = publication.publish(|cancel_priority| {
-                if let Some(cancel_priority) = cancel_priority {
-                    self.local.lock().schedule_cancel(task_id, cancel_priority);
-                } else {
-                    // This worker owns both the thread-local task slot and this
-                    // non-stealable queue. Publishing directly cannot take the
-                    // missing-TLS failure path of the generic helper.
-                    self.local_ready.lock().push_back(task_id);
-                }
-            });
+            let (wakes, effects) =
+                publication.publish_with_spawn_effects(effects, |cancel_priority| {
+                    if let Some(cancel_priority) = cancel_priority {
+                        self.local.lock().schedule_cancel(task_id, cancel_priority);
+                    } else {
+                        // This worker owns both the thread-local task slot and this
+                        // non-stealable queue. Publishing directly cannot take the
+                        // missing-TLS failure path of the generic helper.
+                        self.local_ready.lock().push_back(task_id);
+                    }
+                });
             cancel_wakes.push(wakes);
+            if let Some(effects) = effects {
+                spawn_effects.push(effects);
+            }
+        }
+        // All owner-local task slots and queues are visible before observers
+        // can reenter runtime or scheduler state.
+        for effects in spawn_effects {
+            effects.dispatch();
         }
         for (request, error) in denied {
             match error {
@@ -6678,8 +6799,11 @@ impl ThreeLaneWorker {
                             completion.into_waiters_and_retirements_without_observers();
                         let finalizers = state.drain_ready_async_finalizers();
                         self.worker.wake_dependents_locked(&state, waiters);
-                        self.worker.publish_ready_finalizers(finalizers);
+                        let finalizer_publication =
+                            self.worker.publish_ready_finalizers(finalizers);
                         drop(state);
+                        self.worker
+                            .finish_ready_finalizer_publication(finalizer_publication);
                         cancel_waker_retirements.retire();
                         ThreeLaneWorker::retire_detached_task_record(detached_record);
                     }));
@@ -6693,7 +6817,9 @@ impl ThreeLaneWorker {
             }
         }
 
-        trace!(task_id = ?task_id, worker_id = self.id, "executing task");
+        Self::emit_cancel_diagnostic(|| {
+            trace!(task_id = ?task_id, worker_id = self.id, "executing task");
+        });
 
         let (
             mut stored,
@@ -6922,75 +7048,89 @@ impl ThreeLaneWorker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let (completion_observer, cancel_wakes, detached_record) = if self
-                    .task_table
-                    .is_some()
-                {
-                    // The sharded table owns the authoritative record. Reconcile
-                    // the checkpoint receipt and terminal outcome there, then
-                    // detach the record before taking RuntimeState. This avoids
-                    // both the wrong-table completion bug and shard/state lock
-                    // nesting around validator, region, and observer work.
-                    let (cancel_ack, mut cancel_wakes, mut detached_record) =
-                        self.with_task_table(|tt| {
-                            let effects = Self::consume_cancel_ack_from_table(tt, task_id);
-                            let (cancel_ack, cancel_wakes) = effects.into_parts();
-                            let _ = tt.update_task(task_id, |record| {
-                                Self::complete_polled_record(
-                                    record,
-                                    task_outcome,
-                                    cancel_ack.is_some(),
-                                );
+                let (completion_observer, cancel_wakes, detached_record, finalizer_publication) =
+                    if self.task_table.is_some() {
+                        // The sharded table owns the authoritative record. Reconcile
+                        // the checkpoint receipt and terminal outcome there, then
+                        // detach the record before taking RuntimeState. This avoids
+                        // both the wrong-table completion bug and shard/state lock
+                        // nesting around validator, region, and observer work.
+                        let (cancel_ack, mut cancel_wakes, mut detached_record) = self
+                            .with_task_table(|tt| {
+                                let effects = Self::consume_cancel_ack_from_table(tt, task_id);
+                                let (cancel_ack, cancel_wakes) = effects.into_parts();
+                                let _ = tt.update_task(task_id, |record| {
+                                    Self::complete_polled_record(
+                                        record,
+                                        task_outcome,
+                                        cancel_ack.is_some(),
+                                    );
+                                });
+                                let detached_record = tt.remove_task(task_id);
+                                (cancel_ack, cancel_wakes, detached_record)
                             });
-                            let detached_record = tt.remove_task(task_id);
-                            (cancel_ack, cancel_wakes, detached_record)
-                        });
 
-                    let mut state = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Some(receipt) = cancel_ack.as_ref()
-                        && let Some(validation_result) = state
-                            .external_checkpoint_cancel_materialization_violation(
-                                task_id, receipt, true,
-                            )
-                    {
-                        cancel_wakes.push_cancel_protocol_violation(
-                            "external-shard checkpoint cancellation materialization",
-                            validation_result,
-                        );
-                    }
-                    let completion = match detached_record.as_mut() {
-                        Some(record) => state.task_completed_from_external_record(record),
-                        None => state.task_completed(task_id),
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(receipt) = cancel_ack.as_ref()
+                            && let Some(validation_result) = state
+                                .external_checkpoint_cancel_materialization_violation(
+                                    task_id, receipt, true,
+                                )
+                        {
+                            cancel_wakes.push_cancel_protocol_violation(
+                                "external-shard checkpoint cancellation materialization",
+                                validation_result,
+                            );
+                        }
+                        let completion = match detached_record.as_mut() {
+                            Some(record) => state.task_completed_from_external_record(record),
+                            None => state.task_completed(task_id),
+                        };
+                        let (waiters, completion_observer) = completion.into_parts();
+                        let finalizers = state.drain_ready_async_finalizers();
+                        self.wake_dependents_locked(&state, waiters);
+                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
+                        drop(state);
+                        (
+                            completion_observer,
+                            cancel_wakes,
+                            detached_record,
+                            finalizer_publication,
+                        )
+                    } else {
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let (cancel_ack, cancel_wakes) =
+                            Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
+                        let _ = state.update_task(task_id, |record| {
+                            Self::complete_polled_record(
+                                record,
+                                task_outcome,
+                                cancel_ack.is_some(),
+                            );
+                        });
+                        let (waiters, completion_observer) =
+                            state.task_completed(task_id).into_parts();
+                        let finalizers = state.drain_ready_async_finalizers();
+                        self.wake_dependents_locked(&state, waiters);
+                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
+                        drop(state);
+                        (
+                            completion_observer,
+                            cancel_wakes,
+                            None,
+                            finalizer_publication,
+                        )
                     };
-                    let (waiters, completion_observer) = completion.into_parts();
-                    let finalizers = state.drain_ready_async_finalizers();
-                    self.wake_dependents_locked(&state, waiters);
-                    self.publish_ready_finalizers(finalizers);
-                    drop(state);
-                    (completion_observer, cancel_wakes, detached_record)
-                } else {
-                    let mut state = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let (cancel_ack, cancel_wakes) =
-                        Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
-                    let _ = state.update_task(task_id, |record| {
-                        Self::complete_polled_record(record, task_outcome, cancel_ack.is_some());
-                    });
-                    let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
-                    let finalizers = state.drain_ready_async_finalizers();
-                    self.wake_dependents_locked(&state, waiters);
-                    self.publish_ready_finalizers(finalizers);
-                    drop(state);
-                    (completion_observer, cancel_wakes, None)
-                };
                 guard.completed = true;
                 wake_state.clear();
                 Self::retire_detached_task_record(detached_record);
+                self.finish_ready_finalizer_publication(finalizer_publication);
                 completion_observer.dispatch();
                 cancel_wakes.dispatch();
             }
@@ -7123,7 +7263,7 @@ impl ThreeLaneWorker {
                 std::mem::forget(payload);
                 let panic_payload = crate::types::outcome::PanicPayload::new(panic_message);
                 let panic_outcome = crate::types::Outcome::Panicked(panic_payload);
-                let (completion_observer, cancel_wakes, detached_record) =
+                let (completion_observer, cancel_wakes, detached_record, finalizer_publication) =
                     if self.task_table.is_some() {
                         let (cancel_ack, mut cancel_wakes, mut detached_record) = self
                             .with_task_table(|tt| {
@@ -7159,9 +7299,14 @@ impl ThreeLaneWorker {
                         let (waiters, completion_observer) = completion.into_parts();
                         let finalizers = state.drain_ready_async_finalizers();
                         self.wake_dependents_locked(&state, waiters);
-                        self.publish_ready_finalizers(finalizers);
+                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
                         drop(state);
-                        (completion_observer, cancel_wakes, detached_record)
+                        (
+                            completion_observer,
+                            cancel_wakes,
+                            detached_record,
+                            finalizer_publication,
+                        )
                     } else {
                         let mut state = self
                             .state
@@ -7178,13 +7323,19 @@ impl ThreeLaneWorker {
                             state.task_completed(task_id).into_parts();
                         let finalizers = state.drain_ready_async_finalizers();
                         self.wake_dependents_locked(&state, waiters);
-                        self.publish_ready_finalizers(finalizers);
+                        let finalizer_publication = self.publish_ready_finalizers(finalizers);
                         drop(state);
-                        (completion_observer, cancel_wakes, None)
+                        (
+                            completion_observer,
+                            cancel_wakes,
+                            None,
+                            finalizer_publication,
+                        )
                     };
                 guard.completed = true;
                 wake_state.clear();
                 Self::retire_detached_task_record(detached_record);
+                self.finish_ready_finalizer_publication(finalizer_publication);
                 completion_observer.dispatch();
                 cancel_wakes.dispatch();
             }
@@ -7197,18 +7348,43 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn publish_ready_finalizers(&self, finalizers: smallvec::SmallVec<[(TaskId, u8); 2]>) {
+    fn publish_ready_finalizers(
+        &self,
+        finalizers: smallvec::SmallVec<[(TaskId, u8, crate::runtime::state::TaskSpawnEffects); 2]>,
+    ) -> (
+        smallvec::SmallVec<[TaskId; 2]>,
+        smallvec::SmallVec<[crate::runtime::state::TaskSpawnEffects; 2]>,
+    ) {
         let finalizer_wakes = finalizers.len();
         if finalizer_wakes == 0 {
-            return;
+            return (smallvec::SmallVec::new(), smallvec::SmallVec::new());
         }
+        let mut tasks = smallvec::SmallVec::new();
+        let mut spawn_effects = smallvec::SmallVec::new();
         let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
-        for (finalizer_task, priority) in finalizers {
+        for (finalizer_task, priority, effects) in finalizers {
             self.global.inject_ready_uncounted(finalizer_task, priority);
-            self.record_scheduler_evidence_enqueue(finalizer_task);
             reservation.publish_one();
+            tasks.push(finalizer_task);
+            spawn_effects.push(effects);
         }
-        self.coordinator.wake_many(finalizer_wakes);
+        (tasks, spawn_effects)
+    }
+
+    fn finish_ready_finalizer_publication(
+        &self,
+        (tasks, spawn_effects): (
+            smallvec::SmallVec<[TaskId; 2]>,
+            smallvec::SmallVec<[crate::runtime::state::TaskSpawnEffects; 2]>,
+        ),
+    ) {
+        for &task in &tasks {
+            Self::emit_cancel_diagnostic(|| self.record_scheduler_evidence_enqueue(task));
+        }
+        Self::emit_cancel_diagnostic(|| self.coordinator.wake_many(tasks.len()));
+        for effects in spawn_effects {
+            effects.dispatch();
+        }
     }
 
     fn retire_detached_task_record(record: Option<crate::record::task::TaskRecord>) {
@@ -7236,7 +7412,8 @@ impl ThreeLaneWorker {
         if tasks.is_empty() {
             return false;
         }
-        self.publish_ready_finalizers(tasks);
+        let publication = self.publish_ready_finalizers(tasks);
+        self.finish_ready_finalizer_publication(publication);
         true
     }
 
@@ -13696,6 +13873,140 @@ mod tests {
                 "credit balanced"
             );
         }
+    }
+
+    #[test]
+    fn mailbox_spawn_observer_reenters_after_publication_and_panic_is_contained() {
+        use crate::runtime::state::spawn_observer_test_support::PanickingSpawnMetrics;
+
+        let metrics = PanickingSpawnMetrics::new();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let region = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .create_root_region(Budget::INFINITE);
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::new());
+        scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+        let mut worker = scheduler.take_workers().remove(0);
+
+        let provisional = mailbox.allocate_task_id();
+        mailbox.enqueue(
+            crate::runtime::spawn_mailbox::SpawnRequest::new(
+                provisional,
+                region,
+                Budget::INFINITE,
+                crate::runtime::stored_task::StoredTask::new_with_id(
+                    async { crate::types::Outcome::Ok(()) },
+                    provisional,
+                ),
+            ),
+            crate::types::Time::ZERO,
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.drain_spawn_admissions();
+        }));
+        assert!(result.is_ok(), "observer panic must not escape admission");
+
+        let admitted = worker
+            .global
+            .pop_ready()
+            .expect("admitted task must be globally runnable")
+            .task;
+        assert_eq!(metrics.spawn_attempts(), 1);
+        assert_eq!(metrics.reentry_successes(), 1);
+        assert_eq!(metrics.task_records_observed(), 1);
+        assert_eq!(metrics.stored_futures_observed(), 1);
+        assert_eq!(metrics.runnable_publications_observed(), 1);
+
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(runtime.task(admitted).is_some());
+        assert_eq!(runtime.task_spawn_observer_panic_count(), 1);
+    }
+
+    #[test]
+    fn local_spawn_observer_reenters_after_publication_and_panic_is_contained() {
+        use crate::runtime::state::spawn_observer_test_support::PanickingSpawnMetrics;
+
+        assert!(
+            crate::runtime::spawn_mailbox::local_spawn_lane_is_empty(),
+            "test requires a clean owner-local admission lane"
+        );
+
+        let metrics = PanickingSpawnMetrics::new();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+        let region = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .create_root_region(Budget::INFINITE);
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut worker = scheduler.take_workers().remove(0);
+        let _worker_guard = ScopedWorkerId::new(worker.id);
+        let _ready_guard = ScopedLocalReady::new(Arc::clone(&worker.local_ready));
+
+        let allocator = crate::runtime::spawn_mailbox::SpawnMailbox::new();
+        let provisional = allocator.allocate_task_id();
+        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn =
+            Box::new(|_| Box::pin(async { crate::types::Outcome::Ok(()) }));
+        crate::runtime::spawn_mailbox::enqueue_local_spawn(
+            crate::runtime::spawn_mailbox::LocalSpawnRequest {
+                task_id: provisional,
+                region,
+                budget: Budget::INFINITE,
+                factory,
+                on_unadmitted_cancel: None,
+                on_admission_error: None,
+                pending_reservation: None,
+                admitted_slot: None,
+            },
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.drain_local_spawn_admissions();
+        }));
+        assert!(result.is_ok(), "observer panic must not escape admission");
+
+        let admitted = worker
+            .local_ready
+            .lock()
+            .pop_front()
+            .expect("admitted task must be owner-local runnable");
+        let stored = crate::runtime::local::remove_local_task(admitted)
+            .expect("observer must run after local task storage");
+        assert_eq!(stored.task_id(), Some(admitted));
+
+        assert_eq!(metrics.spawn_attempts(), 1);
+        assert_eq!(metrics.reentry_successes(), 1);
+        assert_eq!(metrics.task_records_observed(), 1);
+        assert_eq!(
+            metrics.stored_futures_observed(),
+            0,
+            "local futures intentionally are not centrally stored"
+        );
+        assert_eq!(metrics.runnable_publications_observed(), 1);
+
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            runtime
+                .task(admitted)
+                .is_some_and(|record| record.is_local())
+        );
+        assert_eq!(runtime.task_spawn_observer_panic_count(), 1);
     }
 
     #[test]

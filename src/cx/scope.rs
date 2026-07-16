@@ -104,7 +104,6 @@ use crate::record::task::TaskState;
 use crate::runtime::resource_monitor::RegionPriority;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
-use crate::tracing_compat::{debug, debug_span};
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CapabilityBudgetRequirements, Outcome, PanicPayload,
     Policy, RegionId, TaskId,
@@ -427,31 +426,6 @@ impl<P: Policy> Scope<'_, P> {
         // Create task record
         let task_id = self.create_task_record(state)?;
 
-        // Trace task spawn event
-        let _span = debug_span!(
-            "task_spawn",
-            task_id = ?task_id,
-            region_id = ?self.region,
-            initial_state = "Created",
-            budget_deadline = ?self.budget.deadline,
-            budget_poll_quota = self.budget.poll_quota,
-            budget_cost_quota = ?self.budget.cost_quota,
-            budget_priority = self.budget.priority,
-            budget_source = "scope"
-        )
-        .entered();
-        debug!(
-            task_id = ?task_id,
-            region_id = ?self.region,
-            initial_state = "Created",
-            budget_deadline = ?self.budget.deadline,
-            budget_poll_quota = self.budget.poll_quota,
-            budget_cost_quota = ?self.budget.cost_quota,
-            budget_priority = self.budget.priority,
-            budget_source = "scope",
-            "task spawned"
-        );
-
         let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
 
         // Create the TaskHandle
@@ -463,6 +437,16 @@ impl<P: Policy> Scope<'_, P> {
             record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx_full.clone());
         }
+        let spawned_at = state
+            .timer_driver()
+            .map_or(state.now, crate::time::TimerDriverHandle::now);
+        let spawn_effects = state.prepare_task_spawn_effects(
+            task_id,
+            self.region,
+            self.budget,
+            crate::runtime::state::TaskSpawnSource::Scope,
+            spawned_at,
+        );
 
         // br-asupersync-qg5th0: result delivery through `tx.send_blocking`
         // (no Cx) instead of `tx.send(&cx_for_send, ...)`. The wrapped
@@ -475,47 +459,17 @@ impl<P: Policy> Scope<'_, P> {
         // Cx-cancel check the post-completion delivery is unconditional,
         // which is what consumers of `TaskHandle::join` expect.
 
-        // Instantiate the future with the child context.
-        // We use a guard to rollback task creation if the factory panics.
-        // This prevents zombie tasks (recorded but never started) which would
-        // cause the region to never close (deadlock).
-        let future = {
-            struct TaskCreationGuard<'a> {
-                state: &'a mut RuntimeState,
-                task_id: TaskId,
-                region_id: RegionId,
-                committed: bool,
-            }
-
-            impl Drop for TaskCreationGuard<'_> {
-                fn drop(&mut self) {
-                    if !self.committed {
-                        // Rollback task creation
-                        if let Some(region) = self.state.region_mut(self.region_id) {
-                            region.remove_task(self.task_id);
-                        }
-                        self.state.recycle_task(self.task_id);
-                    }
-                }
-            }
-
-            let mut guard = TaskCreationGuard {
-                state,
-                task_id,
-                region_id: self.region,
-                committed: false,
-            };
-
-            let fut = f(child_cx);
-            guard.committed = true;
-            fut
-        };
-
-        // Wrap the future to send its result through the channel
-        // We use CatchUnwind to ensure panics are propagated as JoinError::Panicked
-        // rather than silent channel closure (which looks like cancellation).
+        // Factory construction is intentionally inside the first poll. By then
+        // `spawn_registered` has stored this future, and no caller-owned state
+        // lock is held by the task executor. CatchUnwind covers both factory
+        // construction and the produced future, so a factory panic becomes the
+        // task's terminal outcome instead of orphaning a Created record.
         let wrapped = async move {
-            let result_result = CatchUnwind { inner: future }.await;
+            spawn_effects.dispatch();
+            let result_result = CatchUnwind {
+                inner: async move { f(child_cx).await },
+            }
+            .await;
             match result_result {
                 Ok(result) => {
                     let _ = tx.send_blocking(Ok(result));
@@ -523,6 +477,7 @@ impl<P: Policy> Scope<'_, P> {
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
+                    std::mem::forget(payload);
                     let panic_payload = PanicPayload::new(msg);
                     let _ = tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     crate::types::Outcome::Panicked(panic_payload)
@@ -1447,8 +1402,6 @@ impl<P: Policy> Scope<'_, P> {
             return Err(SpawnError::RegionNotFound(self.region));
         }
 
-        state.record_task_spawn(task_id, self.region);
-
         Ok(task_id)
     }
 
@@ -2272,6 +2225,49 @@ mod tests {
                 assert_eq!(p.message(), "oops");
             }
             res => unreachable!("Expected Panicked, got {res:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_registered_defers_synchronous_factory_panic_until_first_poll() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll};
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+        let factory_called = Arc::new(AtomicBool::new(false));
+        let factory_called_in_task = Arc::clone(&factory_called);
+
+        let mut handle = scope
+            .spawn_registered(&mut state, &cx, move |_| -> std::future::Ready<()> {
+                factory_called_in_task.store(true, Ordering::SeqCst);
+                panic!("synchronous scope factory panic");
+            })
+            .expect("factory construction must not run during registration");
+
+        assert!(
+            !factory_called.load(Ordering::SeqCst),
+            "scope factory must stay lazy until the stored task is polled"
+        );
+        let waker = std::task::Waker::noop().clone();
+        let mut poll_cx = Context::from_waker(&waker);
+        let stored = state
+            .get_stored_future(handle.task_id())
+            .expect("spawn_registered stores the lazy factory task");
+        assert!(matches!(
+            stored.poll(&mut poll_cx),
+            Poll::Ready(Outcome::Panicked(_))
+        ));
+        assert!(factory_called.load(Ordering::SeqCst));
+
+        let mut join = std::pin::pin!(handle.join(&cx));
+        match join.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(JoinError::Panicked(payload))) => {
+                assert_eq!(payload.message(), "synchronous scope factory panic");
+            }
+            other => panic!("synchronous factory panic must reach join: {other:?}"),
         }
     }
 

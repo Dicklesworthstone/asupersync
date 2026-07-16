@@ -28,7 +28,7 @@
 //! - `task_completed(task_id) -> TaskCompletionEffects`
 //! - `store_spawned_task(task_id, stored)`
 //! - `remove_stored_future(task_id) -> Option<StoredTask>`
-//! - `drain_ready_async_finalizers() -> SmallVec<[(TaskId, u8); 2]>`
+//! - `drain_ready_async_finalizers() -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]>`
 //! - `tasks_iter()` — iterator over `(ArenaIndex, &TaskRecord)`
 //!
 //! Plus one field access: `state.now: Time` at
@@ -58,7 +58,7 @@
 //!   br-asupersync-9kuias acceptance bar.
 
 use crate::record::task::TaskRecord;
-use crate::runtime::state::TaskCompletionEffects;
+use crate::runtime::state::{TaskCompletionEffects, TaskSpawnEffects};
 use crate::runtime::{RuntimeState, StoredTask};
 use crate::types::{TaskId, Time};
 use smallvec::SmallVec;
@@ -103,7 +103,7 @@ pub trait RuntimeStateBacking {
     /// Like `task_completed`, this can mutate across tables — finalizer
     /// completion may close a region. ShardedState implementations need
     /// the same B→A→C guard treatment.
-    fn drain_ready_async_finalizers(&mut self) -> SmallVec<[(TaskId, u8); 2]>;
+    fn drain_ready_async_finalizers(&mut self) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]>;
 
     /// Returns the runtime's current notion of time.
     ///
@@ -139,7 +139,7 @@ impl RuntimeStateBacking for RuntimeState {
     }
 
     #[inline]
-    fn drain_ready_async_finalizers(&mut self) -> SmallVec<[(TaskId, u8); 2]> {
+    fn drain_ready_async_finalizers(&mut self) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
         RuntimeState::drain_ready_async_finalizers(self)
     }
 
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn drain_ready_async_finalizers_via_trait_matches_direct() {
         let mut state = RuntimeState::new();
-        let trait_drained: SmallVec<[(TaskId, u8); 2]> =
+        let trait_drained: SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> =
             RuntimeStateBacking::drain_ready_async_finalizers(&mut state);
         assert!(trait_drained.is_empty());
         let direct_drained = state.drain_ready_async_finalizers();

@@ -4364,17 +4364,27 @@ where
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
         let factory: LocalSpawnFactoryFn = Box::new(move |admission_cx: Cx| {
-            let task_id = admission_cx.task_id();
-            let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
-                &parent,
-                task_id,
-                capability_budget,
-            );
-            let child_all = child.retype::<cap::All>();
-            let fut = f(child);
+            // Keep a context for terminal result delivery even if inheritance
+            // itself panics. Retyping only clones the admission-built handles;
+            // all user/reentrant hooks stay inside the caught future below.
+            let completion_cx = admission_cx.retype::<cap::All>();
             Box::pin(async move {
-                match (crate::cx::scope::CatchUnwind { inner: fut }).await {
-                    Ok(value) => {
+                match (crate::cx::scope::CatchUnwind {
+                    inner: async move {
+                        let task_id = admission_cx.task_id();
+                        let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
+                            &parent,
+                            task_id,
+                            capability_budget,
+                        );
+                        let child_all = child.retype::<cap::All>();
+                        let value = f(child).await;
+                        (value, child_all)
+                    },
+                })
+                .await
+                {
+                    Ok((value, child_all)) => {
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4385,16 +4395,18 @@ where
                         crate::types::Outcome::Ok(())
                     }
                     Err(payload) => {
-                        let panic_payload = crate::types::outcome::PanicPayload::new(
-                            crate::cx::scope::payload_to_string(&payload),
-                        );
+                        let message = crate::cx::scope::payload_to_string(&payload);
+                        std::mem::forget(payload);
+                        let panic_payload = crate::types::outcome::PanicPayload::new(message);
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .take()
                         {
-                            let _ = tx
-                                .send(&child_all, Err(JoinError::Panicked(panic_payload.clone())));
+                            let _ = tx.send(
+                                &completion_cx,
+                                Err(JoinError::Panicked(panic_payload.clone())),
+                            );
                         }
                         crate::types::Outcome::Panicked(panic_payload)
                     }
@@ -4488,17 +4500,27 @@ where
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
         let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
-            let task_id = admission_cx.task_id();
-            let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
-                &parent,
-                task_id,
-                capability_budget,
-            );
-            let child_all = child.retype::<cap::All>();
-            let fut = f(child);
+            // Keep a context for terminal result delivery even if inheritance
+            // itself panics. Retyping only clones the admission-built handles;
+            // all user/reentrant hooks stay inside the caught future below.
+            let completion_cx = admission_cx.retype::<cap::All>();
             Box::pin(async move {
-                match (crate::cx::scope::CatchUnwind { inner: fut }).await {
-                    Ok(value) => {
+                match (crate::cx::scope::CatchUnwind {
+                    inner: async move {
+                        let task_id = admission_cx.task_id();
+                        let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
+                            &parent,
+                            task_id,
+                            capability_budget,
+                        );
+                        let child_all = child.retype::<cap::All>();
+                        let value = f(child).await;
+                        (value, child_all)
+                    },
+                })
+                .await
+                {
+                    Ok((value, child_all)) => {
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4509,16 +4531,18 @@ where
                         crate::types::Outcome::Ok(())
                     }
                     Err(payload) => {
-                        let panic_payload = crate::types::outcome::PanicPayload::new(
-                            crate::cx::scope::payload_to_string(&payload),
-                        );
+                        let message = crate::cx::scope::payload_to_string(&payload);
+                        std::mem::forget(payload);
+                        let panic_payload = crate::types::outcome::PanicPayload::new(message);
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .take()
                         {
-                            let _ = tx
-                                .send(&child_all, Err(JoinError::Panicked(panic_payload.clone())));
+                            let _ = tx.send(
+                                &completion_cx,
+                                Err(JoinError::Panicked(panic_payload.clone())),
+                            );
                         }
                         crate::types::Outcome::Panicked(panic_payload)
                     }

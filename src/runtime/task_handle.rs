@@ -81,7 +81,7 @@ pub struct TaskHandle<T> {
 
 fn apply_or_defer_cancel_reason(
     fallback_task_id: TaskId,
-    admitted: Option<&crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
+    admitted: Option<&Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
     fallback_inner: &Weak<RwLock<CxInner>>,
     requested: &RwLock<Option<CancelReason>>,
     reason: &CancelReason,
@@ -101,7 +101,7 @@ fn apply_or_defer_cancel_reason(
         .expect("a cancellation cache contains its strongest reason")
         .clone();
 
-    let (task_id, inner, slot_gateway) = if let Some(slot) = admitted {
+    let (task_id, inner, slot_gateway, admitted_slot) = if let Some(slot) = admitted {
         let Some(admitted) = slot.get().filter(|task| task.is_published()) else {
             // Admission will replay the cache and own the initial cancel-lane
             // publication. Never enqueue a provisional identity.
@@ -110,12 +110,17 @@ fn apply_or_defer_cancel_reason(
         let Some(inner) = admitted.cx_inner.upgrade() else {
             return;
         };
-        (admitted.task_id, inner, slot.cancel_gateway())
+        (
+            admitted.task_id,
+            inner,
+            slot.cancel_gateway(),
+            Some(Arc::clone(slot)),
+        )
     } else {
         let Some(inner) = fallback_inner.upgrade() else {
             return;
         };
-        (fallback_task_id, inner, None)
+        (fallback_task_id, inner, None, None)
     };
 
     // Checkpoints observe cancellation immediately, but the caller/Drop stack
@@ -136,7 +141,15 @@ fn apply_or_defer_cancel_reason(
     };
     drop(cached);
     if should_enqueue && let Some(gateway) = gateway {
-        let _ = gateway.enqueue_handle_cancel(task_id, effective_reason);
+        if let Some(admitted_slot) = admitted_slot {
+            let _ = gateway.enqueue_handle_cancel_with_admitted_slot(
+                task_id,
+                effective_reason,
+                admitted_slot,
+            );
+        } else {
+            let _ = gateway.enqueue_handle_cancel(task_id, effective_reason);
+        }
     }
 }
 
@@ -352,7 +365,7 @@ impl<T> TaskHandle<T> {
             inner: receiver.recv_uninterruptible(),
             fallback_task_id: self.task_id,
             cx_inner,
-            admitted: self.admitted.as_deref(),
+            admitted: self.admitted.as_ref(),
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             drop_abort_defused: false,
@@ -389,7 +402,7 @@ impl<T> TaskHandle<T> {
             inner: receiver.recv_uninterruptible(),
             fallback_task_id: self.task_id,
             cx_inner,
-            admitted: self.admitted.as_deref(),
+            admitted: self.admitted.as_ref(),
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             drop_abort_defused: false,
@@ -451,7 +464,7 @@ impl<T> TaskHandle<T> {
     pub fn abort_with_reason(&self, reason: CancelReason) {
         apply_or_defer_cancel_reason(
             self.task_id,
-            self.admitted.as_deref(),
+            self.admitted.as_ref(),
             &self.inner,
             &self.requested_cancel_reason,
             &reason,
@@ -475,7 +488,7 @@ pub struct JoinFuture<'a, T> {
     inner: oneshot::RecvUninterruptibleFuture<'a, Result<T, JoinError>>,
     fallback_task_id: TaskId,
     cx_inner: Weak<RwLock<CxInner>>,
-    admitted: Option<&'a crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
+    admitted: Option<&'a Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
     requested_cancel_reason: &'a RwLock<Option<CancelReason>>,
     terminal_state: &'a mut bool,
     drop_abort_defused: bool,

@@ -1722,15 +1722,22 @@ impl LabRuntime {
                     task_id,
                     priority,
                     cancel_publication,
+                    spawn_effects,
                 } => {
-                    let cancel_wakes = cancel_publication.publish(|cancel_priority| {
-                        let mut scheduler = self.scheduler.lock();
-                        if let Some(cancel_priority) = cancel_priority {
-                            scheduler.schedule_cancel(task_id, cancel_priority);
-                        } else {
-                            scheduler.schedule(task_id, priority);
-                        }
-                    });
+                    let (cancel_wakes, spawn_effects) = cancel_publication
+                        .publish_with_spawn_effects(spawn_effects, |cancel_priority| {
+                            let mut scheduler = self.scheduler.lock();
+                            if let Some(cancel_priority) = cancel_priority {
+                                scheduler.schedule_cancel(task_id, cancel_priority);
+                            } else {
+                                scheduler.schedule(task_id, priority);
+                            }
+                        });
+                    // The closure-local scheduler guard is gone and the task's
+                    // runnable/cancel lane is visible before observer reentry.
+                    if let Some(spawn_effects) = spawn_effects {
+                        spawn_effects.dispatch();
+                    }
                     cancel_wakes.dispatch();
                 }
                 crate::runtime::state::SpawnAdmission::Denied { parts, error } => match error {
@@ -1765,21 +1772,38 @@ impl LabRuntime {
         }
 
         let requests = crate::runtime::spawn_mailbox::coalesce_handle_cancel_requests(requests);
-        // Annotate explicitly: the element type `(TaskId, u8)` is only pinned by
+        // Annotate explicitly: the task/priority prefix is only pinned by
         // `schedule_cancel(task_id, priority)` far below, which the current
         // nightly no longer back-infers through the `&mut tasks`/`&mut delegated`
         // shared `target` binding (E0282).
-        let mut tasks: Vec<(TaskId, u8)> = Vec::with_capacity(requests.len());
-        let mut delegated: Vec<(TaskId, u8)> = Vec::new();
+        let mut tasks: Vec<(
+            TaskId,
+            u8,
+            Option<Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
+        )> = Vec::with_capacity(requests.len());
+        let mut delegated: Vec<(
+            TaskId,
+            u8,
+            Option<Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
+        )> = Vec::new();
+        let mut spawn_effects_to_dispatch = Vec::with_capacity(requests.len());
         let mut wakes = crate::types::task_context::CancelWakeEffects::empty();
         for request in requests {
-            let effects = self
-                .state
-                .cancel_task_for_handle(request.task_id, &request.reason);
+            let task_id = request.task_id;
+            let reason = request.reason;
+            let admitted_slot = request.admitted_slot;
+            let task_exists = self.state.task(task_id).is_some();
+            let effects = self.state.cancel_task_for_handle(task_id, &reason);
             let (route, task_wakes) = effects.into_parts();
             wakes.merge(task_wakes);
 
             let Some(route) = route else {
+                if task_exists
+                    && let Some(admitted_slot) = admitted_slot
+                    && let Some(effects) = admitted_slot.take_spawn_effects_if_lane_published()
+                {
+                    spawn_effects_to_dispatch.push(effects);
+                }
                 continue;
             };
             let target = if route.delegated_initial {
@@ -1787,24 +1811,32 @@ impl LabRuntime {
             } else {
                 &mut tasks
             };
-            if let Some((_, queued_priority)) = target
+            if let Some((_, queued_priority, queued_slot)) = target
                 .iter_mut()
-                .find(|(task_id, _)| *task_id == request.task_id)
+                .find(|(queued_task_id, _, _)| *queued_task_id == task_id)
             {
                 *queued_priority = (*queued_priority).max(route.priority);
+                if queued_slot.is_none() {
+                    *queued_slot = admitted_slot;
+                }
             } else {
-                target.push((request.task_id, route.priority));
+                target.push((task_id, route.priority, admitted_slot));
             }
         }
 
         {
             let mut scheduler = self.scheduler.lock();
-            for &(task_id, priority) in &tasks {
+            for (task_id, priority, admitted_slot) in tasks {
                 scheduler.schedule_cancel(task_id, priority);
+                if let Some(admitted_slot) = admitted_slot
+                    && let Some(effects) = admitted_slot.publish_spawn_lane_and_take_effects()
+                {
+                    spawn_effects_to_dispatch.push(effects);
+                }
             }
         }
 
-        for (task_id, requested_priority) in delegated {
+        for (task_id, requested_priority, admitted_slot) in delegated {
             let scheduler = &self.scheduler;
             let (published_priority, task_wakes) = self
                 .state
@@ -1813,10 +1845,19 @@ impl LabRuntime {
                     Some(priority)
                 })
                 .into_parts();
-            wakes.merge(task_wakes);
             if let Some(published_priority) = published_priority {
+                let spawn_effects = admitted_slot
+                    .as_ref()
+                    .and_then(|slot| slot.publish_spawn_lane_and_take_effects());
                 debug_assert!(published_priority >= requested_priority);
+                if let Some(effects) = spawn_effects {
+                    spawn_effects_to_dispatch.push(effects);
+                }
             }
+            wakes.merge(task_wakes);
+        }
+        for effects in spawn_effects_to_dispatch {
+            effects.dispatch();
         }
         wakes.dispatch();
     }
@@ -2435,8 +2476,14 @@ impl LabRuntime {
             return;
         }
         let mut sched = self.scheduler.lock();
-        for (task_id, priority) in tasks {
+        let mut spawn_effects = Vec::with_capacity(tasks.len());
+        for (task_id, priority, effects) in tasks {
             sched.schedule(task_id, priority);
+            spawn_effects.push(effects);
+        }
+        drop(sched);
+        for effects in spawn_effects {
+            effects.dispatch();
         }
     }
 
@@ -2959,9 +3006,9 @@ where
     let root = runtime
         .state
         .create_root_region(crate::types::Budget::INFINITE);
-    let (task_id, mut handle) = runtime
+    let (task_id, mut handle, spawn_effects) = runtime
         .state
-        .create_task(root, crate::types::Budget::INFINITE, async move {
+        .create_task_with_deferred_spawn_effects(root, crate::types::Budget::INFINITE, async move {
             let cx = crate::cx::Cx::current()
                 .unwrap_or_else(|| panic!("lab task started without current Cx for seed {seed}"));
             task(cx).await
@@ -2971,6 +3018,7 @@ where
         .scheduler
         .lock()
         .schedule(task_id, crate::types::Budget::INFINITE.priority);
+    spawn_effects.dispatch();
 
     let report = runtime.run_until_quiescent_with_report();
     let output = handle
@@ -3012,9 +3060,9 @@ where
     let root = runtime
         .state
         .create_root_region(crate::types::Budget::INFINITE);
-    let (task_id, mut handle) = runtime
+    let (task_id, mut handle, spawn_effects) = runtime
         .state
-        .create_task(root, crate::types::Budget::INFINITE, async move {
+        .create_task_with_deferred_spawn_effects(root, crate::types::Budget::INFINITE, async move {
             let cx = crate::cx::Cx::current()
                 .unwrap_or_else(|| panic!("lab task started without current Cx for seed {seed}"));
             task(cx).await
@@ -3024,6 +3072,7 @@ where
         .scheduler
         .lock()
         .schedule(task_id, crate::types::Budget::INFINITE.priority);
+    spawn_effects.dispatch();
 
     let report = runtime.run_until_quiescent_with_report();
     let output = match handle.try_join() {
@@ -3215,10 +3264,8 @@ impl LabScheduler {
     /// Schedules a task in the ready lane on its assigned worker.
     pub fn schedule(&mut self, task: TaskId, priority: u8) {
         if !self.scheduled.insert(task) {
-            crate::tracing_compat::trace!("LabScheduler already scheduled {task:?}");
             return;
         }
-        crate::tracing_compat::trace!("LabScheduler scheduling {task:?}");
 
         let worker = self.assign_worker(task);
         self.workers[worker].schedule(task, priority);

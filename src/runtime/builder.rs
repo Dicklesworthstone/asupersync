@@ -4194,16 +4194,21 @@ impl RuntimeInner {
             return Ok(JoinHandle::new(join_state));
         }
 
-        let task_id = {
+        let (task_id, spawn_effects) = {
             let mut guard = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (task_id, _handle) = guard.create_task(self.root_region, Budget::new(), wrapped)?;
-            task_id
+            let (task_id, _handle, spawn_effects) = guard.create_task_with_deferred_spawn_effects(
+                self.root_region,
+                Budget::new(),
+                wrapped,
+            )?;
+            (task_id, spawn_effects)
         };
 
         self.scheduler.inject_ready(task_id, Budget::new().priority);
+        spawn_effects.dispatch();
 
         Ok(JoinHandle::new(join_state))
     }
@@ -4221,34 +4226,47 @@ impl RuntimeInner {
         use crate::runtime::StoredTask;
         use crate::types::Outcome;
 
-        let task_id = {
+        let (task_id, spawn_effects) = {
             let mut guard = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
             let system_cx = guard.create_system_cx();
-            let (task_id, _handle, cx, _result_tx) = guard.create_task_infrastructure::<()>(
-                &system_cx,
-                self.root_region,
-                Budget::new(),
-                false,
-            )?;
-
-            let future = f(cx);
+            let (task_id, _handle, cx, _result_tx, spawn_effects) = guard
+                .create_task_infrastructure::<()>(
+                    &system_cx,
+                    self.root_region,
+                    Budget::new(),
+                    false,
+                )?;
 
             let wrapped = async move {
-                future.await;
-                Outcome::Ok(())
+                // Both factory construction and future polling are inside the
+                // task-panic boundary. The factory therefore cannot orphan the
+                // already-published TaskRecord or unwind a state lock.
+                match (CatchUnwind {
+                    inner: async move { f(cx).await },
+                })
+                .await
+                {
+                    Ok(()) => Outcome::Ok(()),
+                    Err(payload) => {
+                        let message = crate::cx::scope::payload_to_string(&payload);
+                        std::mem::forget(payload);
+                        Outcome::Panicked(crate::types::PanicPayload::new(message))
+                    }
+                }
             };
 
             guard.store_spawned_task(task_id, StoredTask::new_with_id(wrapped, task_id));
             drop(guard);
 
-            task_id
+            (task_id, spawn_effects)
         };
 
         self.scheduler.inject_ready(task_id, Budget::new().priority);
+        spawn_effects.dispatch();
 
         Ok(())
     }
@@ -4299,6 +4317,14 @@ impl Drop for RuntimeInner {
         if let (Some(liveness), Some(mailbox)) = (spawn_liveness, gateway_mailbox) {
             while liveness.strong_count() > 0 {
                 std::thread::yield_now();
+            }
+            let mut cancelled = Vec::new();
+            while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
+                for request in cancelled.drain(..) {
+                    if let Some(slot) = request.admitted_slot {
+                        slot.abandon_unpublished_spawn_effects();
+                    }
+                }
             }
             while let Some(request) = mailbox.dequeue() {
                 request
@@ -5730,6 +5756,54 @@ mod tests {
         let result = runtime.block_on(handle);
         assert_eq!(result, 42);
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn spawn_with_cx_factory_reenters_after_publication_and_panic_does_not_kill_worker() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .spawn_admission(crate::runtime::config::SpawnAdmissionMode::Direct)
+            .build()
+            .expect("runtime build");
+        let state = Arc::clone(&runtime.inner.state);
+        let (observation_tx, observation_rx) = std::sync::mpsc::channel();
+
+        runtime
+            .handle()
+            .try_spawn_with_cx(move |cx| -> std::future::Ready<()> {
+                let observation = state.try_lock().ok().and_then(|runtime| {
+                    runtime.task(cx.task_id()).map(|record| {
+                        record
+                            .cx_inner
+                            .as_ref()
+                            .is_some_and(|inner| inner.read().runnable_publication.is_published())
+                    })
+                });
+                observation_tx
+                    .send(observation)
+                    .expect("report first-poll state");
+                panic!("synchronous spawn_with_cx factory panic");
+            })
+            .expect("task must publish before factory execution");
+
+        assert_eq!(
+            observation_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("factory should reach first poll"),
+            Some(true),
+            "factory must run outside the state lock after runnable publication"
+        );
+
+        let (alive_tx, alive_rx) = std::sync::mpsc::channel();
+        let heartbeat = runtime.handle().spawn(async move {
+            alive_tx.send(()).expect("worker heartbeat");
+        });
+        alive_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("contained factory panic must leave the worker alive");
+        runtime.block_on(heartbeat);
+        wait_for_runtime_quiescent(&runtime);
     }
 
     #[test]

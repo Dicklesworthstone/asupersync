@@ -390,14 +390,16 @@ impl Worker {
                     self.worker.scratch_local.set(local_waiters);
                     self.worker.scratch_global.set(global_waiters);
                     self.worker.scratch_foreign_wakers.set(foreign_wakers);
-                    for (finalizer_task, _) in finalizers {
-                        self.worker.global.push(finalizer_task);
-                    }
+                    self.worker.publish_ready_finalizers(finalizers);
                 }
             }
         }
 
-        trace!(task_id = ?task_id, worker_id = self.id, "executing task");
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            trace!(task_id = ?task_id, worker_id = self.id, "executing task");
+        })) {
+            std::mem::forget(payload);
+        }
 
         // Check local (thread-local) storage first — no lock required.
         // This saves a full lock round-trip for local tasks (the common
@@ -630,9 +632,7 @@ impl Worker {
                     self.global.push(*waiter);
                 }
                 self.local.push_many(&local_waiters);
-                for (finalizer_task, _) in finalizers {
-                    self.global.push(finalizer_task);
-                }
+                self.publish_ready_finalizers(finalizers);
                 guard.completed = true;
                 wake_state.clear();
                 completion_observer.dispatch();
@@ -751,9 +751,7 @@ impl Worker {
                     self.global.push(*waiter);
                 }
                 self.local.push_many(&local_waiters);
-                for (finalizer_task, _) in finalizers {
-                    self.global.push(finalizer_task);
-                }
+                self.publish_ready_finalizers(finalizers);
                 guard.completed = true;
                 wake_state.clear();
                 completion_observer.dispatch();
@@ -794,10 +792,23 @@ impl Worker {
         if tasks.is_empty() {
             return false;
         }
-        for (task_id, _) in tasks {
-            self.global.push(task_id);
-        }
+        self.publish_ready_finalizers(tasks);
         true
+    }
+
+    fn publish_ready_finalizers(
+        &self,
+        finalizers: smallvec::SmallVec<[(TaskId, u8, crate::runtime::state::TaskSpawnEffects); 2]>,
+    ) {
+        let mut spawn_effects =
+            smallvec::SmallVec::<[crate::runtime::state::TaskSpawnEffects; 2]>::new();
+        for (task_id, _priority, effects) in finalizers {
+            self.global.push(task_id);
+            spawn_effects.push(effects);
+        }
+        for effects in spawn_effects {
+            effects.dispatch();
+        }
     }
 
     #[inline]

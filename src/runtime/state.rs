@@ -42,7 +42,7 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, error, trace};
+use crate::tracing_compat::{debug, debug_span, error, trace};
 use crate::types::policy::PolicyAction;
 use crate::types::task_context::{
     CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
@@ -52,7 +52,7 @@ use crate::types::{
     CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, TaskId, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
-use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
+use crate::util::{Arena, ArenaIndex, DetEntropy, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
@@ -683,6 +683,186 @@ impl Drop for TaskCompletionObserver {
     }
 }
 
+/// Origin of a task-spawn observation.
+///
+/// This is deliberately narrower than a public spawn taxonomy. It only
+/// selects the diagnostic fields and whether admission also emits the
+/// mailbox/local `TaskAdmitted` trace event.
+#[derive(Clone, Copy)]
+pub(crate) enum TaskSpawnSource {
+    Direct,
+    Scope,
+    Mailbox,
+    Local,
+}
+
+impl TaskSpawnSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Scope => "scope",
+            Self::Mailbox => "mailbox",
+            Self::Local => "local",
+        }
+    }
+
+    const fn emits_admitted_trace(self) -> bool {
+        matches!(self, Self::Mailbox | Self::Local)
+    }
+}
+
+/// Owned one-shot task-spawn observer effects.
+///
+/// Creation and admission paths build this token while runtime state is
+/// locked, but must not dispatch it until the stored task and its executable
+/// lane are visible. Dispatch consumes the token, contains metrics/tracing
+/// panics, and retires the arbitrary metrics provider behind a separate unwind
+/// boundary. Legacy state-threaded paths that own no scheduler lane may place
+/// the token at the front of the stored future so first poll becomes the
+/// out-of-lock delivery boundary.
+#[must_use = "task spawn effects must be dispatched after executable publication"]
+pub struct TaskSpawnEffects {
+    payload: Option<TaskSpawnEffectsPayload>,
+    panic_count: Option<Arc<AtomicU64>>,
+}
+
+struct TaskSpawnEffectsPayload {
+    metrics: Arc<dyn MetricsProvider>,
+    trace: TraceBufferHandle,
+    task_id: TaskId,
+    region_id: RegionId,
+    spawned_at: Time,
+    logical_time: Option<LogicalTime>,
+    budget: Budget,
+    source: TaskSpawnSource,
+}
+
+impl TaskSpawnEffects {
+    fn new(
+        metrics: Arc<dyn MetricsProvider>,
+        trace: TraceBufferHandle,
+        task_id: TaskId,
+        region_id: RegionId,
+        spawned_at: Time,
+        logical_time: Option<LogicalTime>,
+        budget: Budget,
+        source: TaskSpawnSource,
+        panic_count: &Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            payload: Some(TaskSpawnEffectsPayload {
+                metrics,
+                trace,
+                task_id,
+                region_id,
+                spawned_at,
+                logical_time,
+                budget,
+                source,
+            }),
+            panic_count: Some(Arc::clone(panic_count)),
+        }
+    }
+
+    /// Delivers the spawn trace/metric/diagnostic once, outside runtime locks.
+    ///
+    /// The trace and metric preserve their historical order. Mailbox and local
+    /// admissions then emit `TaskAdmitted`; the publication diagnostic follows
+    /// last.
+    /// A panic skips the remaining callbacks rather than retrying and risking
+    /// duplicate spawn observations.
+    pub fn dispatch(mut self) {
+        let Some(panic_count) = self.panic_count.take() else {
+            return;
+        };
+        let Some(payload) = self.payload.take() else {
+            return;
+        };
+        let TaskSpawnEffectsPayload {
+            metrics,
+            trace,
+            task_id,
+            region_id,
+            spawned_at,
+            logical_time,
+            budget,
+            source,
+        } = payload;
+
+        let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            trace.record_event(|seq| {
+                let event = TraceEvent::spawn(seq, spawned_at, task_id, region_id);
+                match logical_time.clone() {
+                    Some(logical_time) => event.with_logical_time(logical_time),
+                    None => event,
+                }
+            });
+            metrics.task_spawned(region_id, task_id);
+            if source.emits_admitted_trace() {
+                trace.record_event(|seq| {
+                    let event = TraceEvent::task_admitted(seq, spawned_at, task_id, region_id);
+                    match logical_time {
+                        Some(logical_time) => event.with_logical_time(logical_time),
+                        None => event,
+                    }
+                });
+            }
+
+            let _span = debug_span!(
+                "task_spawn",
+                task_id = ?task_id,
+                region_id = ?region_id,
+                initial_state = "Created",
+                budget_deadline = ?budget.deadline,
+                budget_poll_quota = budget.poll_quota,
+                budget_cost_quota = ?budget.cost_quota,
+                budget_priority = budget.priority,
+                budget_source = source.as_str(),
+            )
+            .entered();
+            debug!(
+                task_id = ?task_id,
+                region_id = ?region_id,
+                initial_state = "Created",
+                poll_quota = budget.poll_quota,
+                budget_source = source.as_str(),
+                "task published for execution"
+            );
+            let _ = (budget, source.as_str());
+        }));
+        let callback_panicked = if let Err(payload) = callback_result {
+            // Panic payload destruction is an arbitrary user boundary too.
+            std::mem::forget(payload);
+            true
+        } else {
+            false
+        };
+        let retirement_panicked = if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(metrics)))
+        {
+            std::mem::forget(payload);
+            true
+        } else {
+            false
+        };
+        if callback_panicked || retirement_panicked {
+            panic_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for TaskSpawnEffects {
+    fn drop(&mut self) {
+        let Some(payload) = self.payload.take() else {
+            return;
+        };
+        // Abandonment can occur beneath a caller-owned runtime-state lock or
+        // during unwind. The payload may own the final Arc to an arbitrary
+        // metrics provider, so leak only this undispatched observer payload.
+        std::mem::forget(payload);
+    }
+}
+
 /// Outcome of [`RuntimeState::admit_spawn_request`].
 ///
 /// Not `Debug`: the denied arm carries the request parts, whose erased
@@ -700,6 +880,9 @@ pub enum SpawnAdmission {
         /// publishes the ready or cancel lane under the admission gate; the
         /// returned Wakers run only after scheduler locks are released.
         cancel_publication: crate::runtime::spawn_mailbox::AdmissionPublication,
+        /// One-shot spawn observer delivery, dispatched only after the task's
+        /// runnable lane has been physically published.
+        spawn_effects: TaskSpawnEffects,
     },
     /// The request was denied; the caller must resolve it after releasing
     /// the state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
@@ -734,6 +917,9 @@ pub enum LocalSpawnAdmission {
         /// then publish its callback-free runnable lane through this token and
         /// dispatch the returned Wakers after releasing scheduler locks.
         cancel_publication: crate::runtime::spawn_mailbox::AdmissionPublication,
+        /// One-shot spawn observer delivery, dispatched only after thread-local
+        /// storage and the owner-local runnable lane are both visible.
+        spawn_effects: TaskSpawnEffects,
     },
     /// Denied; the caller must resolve the request after releasing the
     /// state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
@@ -1109,6 +1295,9 @@ pub struct RuntimeState {
     /// Callback-free count of panics caught while dispatching the direct
     /// task-completion metrics/trace observer token.
     task_completion_observer_panics: Arc<AtomicU64>,
+    /// Callback-free count of panics caught while dispatching a one-shot task
+    /// spawn metrics/trace observer token.
+    task_spawn_observer_panics: Arc<AtomicU64>,
     /// I/O driver for reactor integration.
     ///
     /// When present, the runtime can wait on I/O events via the reactor.
@@ -1251,6 +1440,10 @@ impl std::fmt::Debug for RuntimeState {
                 "task_completion_observer_panics",
                 &self.task_completion_observer_panics.load(Ordering::Relaxed),
             )
+            .field(
+                "task_spawn_observer_panics",
+                &self.task_spawn_observer_panics.load(Ordering::Relaxed),
+            )
             .field("io_driver", &self.io_driver)
             .field("timer_driver", &self.timer_driver)
             .field("logical_clock_mode", &self.logical_clock_mode)
@@ -1338,6 +1531,7 @@ impl RuntimeState {
             trace: TraceBufferHandle::new(trace_capacity),
             metrics,
             task_completion_observer_panics: Arc::new(AtomicU64::new(0)),
+            task_spawn_observer_panics: Arc::new(AtomicU64::new(0)),
             io_driver: None,
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
@@ -1866,6 +2060,17 @@ impl RuntimeState {
     #[must_use]
     pub fn task_completion_observer_panic_count(&self) -> u64 {
         self.task_completion_observer_panics.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of task-spawn observer dispatches whose metrics
+    /// callback, tracing callback, or final provider destructor panicked.
+    ///
+    /// The counter is atomic and callback-free, so a hostile observer cannot
+    /// recursively trigger another observation while this value is updated.
+    #[inline]
+    #[must_use]
+    pub fn task_spawn_observer_panic_count(&self) -> u64 {
+        self.task_spawn_observer_panics.load(Ordering::Relaxed)
     }
 
     /// Sets the metrics provider for this runtime.
@@ -2700,6 +2905,7 @@ impl RuntimeState {
             crate::runtime::TaskHandle<T>,
             crate::cx::Cx,
             crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
+            TaskSpawnEffects,
         ),
         SpawnError,
     >
@@ -2827,21 +3033,13 @@ impl RuntimeState {
             record.set_cx(cx.clone());
         });
 
-        self.record_task_spawn(task_id, region);
-
-        // Trace task creation
-        debug!(
-            task_id = ?task_id,
-            region_id = ?region,
-            initial_state = "Created",
-            poll_quota = budget.poll_quota,
-            "task created via RuntimeState"
-        );
+        let spawn_effects =
+            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Direct, now);
 
         // Create the TaskHandle
         let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
 
-        Ok((task_id, handle, cx, result_tx))
+        Ok((task_id, handle, cx, result_tx, spawn_effects))
     }
 
     /// Creates a task and stores its future for polling.
@@ -2884,21 +3082,26 @@ impl RuntimeState {
 
         // Use system Cx for legacy compatibility - no authorization check
         let system_cx = self.create_system_cx();
-        let (task_id, handle, cx, result_tx) =
+        let (task_id, handle, cx, result_tx, spawn_effects) =
             self.create_task_infrastructure(&system_cx, region, budget, false)?;
 
         // Wrap the future to send the result through the channel. Panics must
         // surface as `JoinError::Panicked` rather than silently closing the
         // channel and looking like cancellation to the join handle.
         let wrapped_future = async move {
+            // This legacy state-threaded API does not own a scheduler lane.
+            // First poll proves the stored task was published and runs outside
+            // the caller's runtime-state lock.
+            spawn_effects.dispatch();
             match (CatchUnwind { inner: future }).await {
                 Ok(result) => {
                     let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
-                    let panic_payload =
-                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
                     let _ = result_tx.send(
                         &cx,
                         Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
@@ -2916,6 +3119,53 @@ impl RuntimeState {
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         Ok((task_id, handle))
+    }
+
+    /// Creates and stores a direct task while returning its one-shot spawn
+    /// effects to the caller.
+    ///
+    /// This is for runtime owners that also own the scheduler publication
+    /// boundary. They must inject the returned task into a ready/cancel lane,
+    /// release scheduler locks, and then dispatch the returned effects.
+    pub(crate) fn create_task_with_deferred_spawn_effects<F, T>(
+        &mut self,
+        region: RegionId,
+        budget: Budget,
+        future: F,
+    ) -> Result<(TaskId, crate::runtime::TaskHandle<T>, TaskSpawnEffects), SpawnError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use crate::runtime::task_handle::JoinError;
+
+        let system_cx = self.create_system_cx();
+        let (task_id, handle, cx, result_tx, spawn_effects) =
+            self.create_task_infrastructure(&system_cx, region, budget, false)?;
+        let wrapped_future = async move {
+            match (CatchUnwind { inner: future }).await {
+                Ok(result) => {
+                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
+                    crate::types::Outcome::Ok(())
+                }
+                Err(payload) => {
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
+                    let _ = result_tx.send(
+                        &cx,
+                        Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
+                    );
+                    crate::types::Outcome::Panicked(panic_payload)
+                }
+            }
+        };
+
+        self.tasks
+            .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+
+        Ok((task_id, handle, spawn_effects))
     }
 
     /// Admits one spawn-mailbox request into the runtime
@@ -3123,10 +3373,8 @@ impl RuntimeState {
         let cancel_publication =
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
-        self.record_task_spawn(task_id, region);
-        self.record_task_trace_event(task_id, |seq| {
-            TraceEvent::task_admitted(seq, now, task_id, region)
-        });
+        let spawn_effects =
+            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Mailbox, now);
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         // Successor state (task list + stored future) is visible; release
@@ -3137,6 +3385,7 @@ impl RuntimeState {
             task_id,
             priority: budget.priority,
             cancel_publication,
+            spawn_effects,
         }
     }
 
@@ -3203,10 +3452,8 @@ impl RuntimeState {
         let cancel_publication =
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
-        self.record_task_spawn(task_id, region);
-        self.record_task_trace_event(task_id, |seq| {
-            TraceEvent::task_admitted(seq, now, task_id, region)
-        });
+        let spawn_effects =
+            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Local, now);
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         // The task is already visible in the region's task list
@@ -3219,6 +3466,7 @@ impl RuntimeState {
             priority: budget.priority,
             stored,
             cancel_publication,
+            spawn_effects,
         }
     }
 
@@ -3262,21 +3510,23 @@ impl RuntimeState {
 
         self.verify_spawn_authorization(caller_cx, region)?;
 
-        let (task_id, handle, cx, result_tx) =
+        let (task_id, handle, cx, result_tx, spawn_effects) =
             self.create_task_infrastructure(caller_cx, region, budget, false)?;
 
         // Wrap the future to send the result through the channel. Panics must
         // surface as `JoinError::Panicked` rather than silently closing the
         // channel and looking like cancellation to the join handle.
         let wrapped_future = async move {
+            spawn_effects.dispatch();
             match (CatchUnwind { inner: future }).await {
                 Ok(result) => {
                     let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
-                    let panic_payload =
-                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
                     let _ = result_tx.send(
                         &cx,
                         Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
@@ -3339,10 +3589,25 @@ impl RuntimeState {
         });
     }
 
-    pub(crate) fn record_task_spawn(&self, task_id: TaskId, region: RegionId) {
-        let now = self.current_runtime_time();
-        self.record_task_trace_event(task_id, |seq| TraceEvent::spawn(seq, now, task_id, region));
-        self.metrics.task_spawned(region, task_id);
+    pub(crate) fn prepare_task_spawn_effects(
+        &self,
+        task_id: TaskId,
+        region: RegionId,
+        budget: Budget,
+        source: TaskSpawnSource,
+        spawned_at: Time,
+    ) -> TaskSpawnEffects {
+        TaskSpawnEffects::new(
+            Arc::clone(&self.metrics),
+            self.trace_handle(),
+            task_id,
+            region,
+            spawned_at,
+            self.logical_time_for_task(task_id),
+            budget,
+            source,
+            &self.task_spawn_observer_panics,
+        )
     }
 
     fn prepare_task_completion_observer(
@@ -4769,7 +5034,9 @@ impl RuntimeState {
     ///
     /// This runs sync finalizers inline and schedules at most one async
     /// finalizer per region (respecting the async barrier).
-    pub fn drain_ready_async_finalizers(&mut self) -> SmallVec<[(TaskId, u8); 2]> {
+    pub fn drain_ready_async_finalizers(
+        &mut self,
+    ) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
         if self.finalizing_regions.is_empty() {
             return SmallVec::new();
         }
@@ -4796,7 +5063,9 @@ impl RuntimeState {
                 continue;
             };
             match self.spawn_finalizer_task(region_id, finalizer_id, future) {
-                Ok((task_id, priority)) => scheduled.push((task_id, priority)),
+                Ok((task_id, priority, spawn_effects)) => {
+                    scheduled.push((task_id, priority, spawn_effects));
+                }
                 Err(future) => {
                     // Preserve the async barrier when task admission fails so
                     // the region cannot close with cleanup silently dropped.
@@ -4814,12 +5083,178 @@ impl RuntimeState {
         scheduled
     }
 
+    /// Executes failed-start async finalizers without promoting them to tasks.
+    ///
+    /// `CompiledApp::start` is a legacy state-threaded bootstrap API: on a
+    /// partial-start error it must synchronously retire the temporary region
+    /// tree before returning, but it owns no scheduler lane or post-lock
+    /// callback boundary. Creating a normal finalizer task here would either
+    /// emit its spawn observer before executable publication or execute an
+    /// observed task with no published lane. This narrow rollback path instead
+    /// preserves finalizer LIFO/accounting while polling the raw finalizer once.
+    /// A pending finalizer is fail-closed as cancelled, matching the old
+    /// bootstrap behavior that force-completed its one-poll task immediately.
+    pub(crate) fn drive_failed_start_async_finalizer_inline(
+        &mut self,
+        region_id: RegionId,
+    ) -> bool {
+        if self.active_async_finalizers.contains_key(&region_id) {
+            return false;
+        }
+        let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(region_id) else {
+            return false;
+        };
+        let Finalizer::Async(future) = finalizer else {
+            return false;
+        };
+
+        self.validate_live_region_protocol_transition(
+            region_id,
+            RegionEvent::FinalizerStarted,
+            "failed-start inline async finalizer",
+        );
+
+        let deadline = self
+            .current_runtime_time()
+            .saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
+        let cleanup_task = next_bootstrap_task_id();
+        let cleanup_budget = finalizer_budget().with_deadline(deadline);
+        let cleanup_cx = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Failed-start rollback is synchronous and one-poll only. Give it
+            // runtime time/trace context and deterministic rollback entropy,
+            // but deliberately no
+            // spawn gateway, pending-spawn counter, I/O driver, or blocking
+            // pool: work admitted through any of those handles could outlive
+            // this call or keep the closing subtree non-quiescent.
+            let entropy_seed = DetEntropy::mix_seed(
+                region_id
+                    .as_u64()
+                    .wrapping_add(finalizer_id.rotate_left(29)),
+            );
+            let entropy: Arc<dyn EntropySource> = Arc::new(DetEntropy::new(entropy_seed));
+            let logical_clock = self
+                .logical_clock_mode
+                .build_handle(self.timer_driver_handle());
+            let cx = crate::cx::Cx::new_with_drivers(
+                region_id,
+                cleanup_task,
+                cleanup_budget,
+                None,
+                None,
+                None,
+                self.timer_driver_handle(),
+                Some(entropy),
+            )
+            .with_logical_clock(logical_clock);
+            cx.set_trace_buffer(self.trace_handle());
+            cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+            cx
+        })) {
+            Ok(cx) => cx,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                {
+                    std::mem::forget(payload);
+                }
+                if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    region.record_close_outcome(Outcome::Panicked(
+                        crate::types::PanicPayload::new(message),
+                    ));
+                }
+                self.record_finalizer_run(finalizer_id);
+                return true;
+            }
+        };
+        let current_guard = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::cx::Cx::set_current(Some(cleanup_cx.clone()))
+        })) {
+            Ok(guard) => guard,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                {
+                    std::mem::forget(payload);
+                }
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(cleanup_cx)))
+                {
+                    std::mem::forget(payload);
+                }
+                if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    region.record_close_outcome(Outcome::Panicked(
+                        crate::types::PanicPayload::new(message),
+                    ));
+                }
+                self.record_finalizer_run(finalizer_id);
+                return true;
+            }
+        };
+        let mut masked = MaskedFinalizer::new(future, Arc::clone(&cleanup_cx.inner));
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+        let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::pin::Pin::new(&mut masked).poll(&mut poll_cx)
+        }));
+        let mut close_outcome: Outcome<(), Error> = match poll_result {
+            Ok(Poll::Ready(())) => Outcome::Ok(()),
+            Ok(Poll::Pending) => Outcome::Cancelled(CancelReason::shutdown()),
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(masked)))
+        {
+            let message = payload_to_string(&payload);
+            std::mem::forget(payload);
+            close_outcome = Outcome::Panicked(crate::types::PanicPayload::new(message));
+        }
+
+        let retirements = TaskCompletionRetirements::new({
+            let mut inner = cleanup_cx.inner.write();
+            inner.take_cancel_wakers()
+        });
+        // This state-threaded rollback path has no post-lock RawWaker
+        // retirement boundary. Abandon only those detached wake targets; the
+        // restricted cleanup Cx itself owns exclusively runtime-internal
+        // handles and can be retired here without retaining a mailbox/driver
+        // graph per failed start.
+        drop(retirements);
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(current_guard)))
+        {
+            let message = payload_to_string(&payload);
+            std::mem::forget(payload);
+            close_outcome = Outcome::Panicked(crate::types::PanicPayload::new(message));
+        }
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(cleanup_cx)))
+        {
+            let message = payload_to_string(&payload);
+            std::mem::forget(payload);
+            close_outcome = Outcome::Panicked(crate::types::PanicPayload::new(message));
+        }
+
+        if let Some(region) = self.regions.get(region_id.arena_index()) {
+            region.record_close_outcome(close_outcome);
+        }
+        self.record_finalizer_run(finalizer_id);
+        true
+    }
+
     fn spawn_finalizer_task(
         &mut self,
         region_id: RegionId,
         finalizer_id: u64,
         future: BoxedAsyncFinalizer,
-    ) -> Result<(TaskId, u8), BoxedAsyncFinalizer> {
+    ) -> Result<(TaskId, u8, TaskSpawnEffects), BoxedAsyncFinalizer> {
         // EDGE CASE VALIDATION: Check async finalizer barrier consistency before spawning
         // This prevents concurrent async finalizers from the same region, which violates LIFO ordering
         debug_assert!(
@@ -4853,7 +5288,7 @@ impl RuntimeState {
         );
 
         let system_cx = self.create_system_cx();
-        let Ok((task_id, _handle, cx, result_tx)) =
+        let Ok((task_id, _handle, cx, result_tx, spawn_effects)) =
             self.create_task_infrastructure::<()>(&system_cx, region_id, budget, true)
         else {
             // EDGE CASE VALIDATION: Log task creation failure for debugging
@@ -4875,8 +5310,9 @@ impl RuntimeState {
                     Outcome::Ok(())
                 }
                 Err(payload) => {
-                    let panic_payload =
-                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
                     let _ = result_tx.send(
                         &cx,
                         Err::<(), JoinError>(JoinError::Panicked(panic_payload.clone())),
@@ -4908,7 +5344,7 @@ impl RuntimeState {
             RegionEvent::FinalizerStarted,
             "async finalizer start",
         );
-        Ok((task_id, budget.priority))
+        Ok((task_id, budget.priority, spawn_effects))
     }
 
     // =========================================================================
@@ -7245,6 +7681,112 @@ pub(crate) mod completion_observer_test_support {
 }
 
 #[cfg(test)]
+pub(crate) mod spawn_observer_test_support {
+    use super::*;
+    use crate::sync::ContendedMutex;
+    use std::sync::{Mutex, Weak};
+
+    /// Reentrant, persistently panicking provider for spawn-publication tests.
+    pub struct PanickingSpawnMetrics {
+        state: Mutex<Option<Weak<ContendedMutex<RuntimeState>>>>,
+        spawn_attempts: AtomicUsize,
+        reentry_successes: AtomicUsize,
+        task_records_observed: AtomicUsize,
+        stored_futures_observed: AtomicUsize,
+        runnable_publications_observed: AtomicUsize,
+    }
+
+    impl PanickingSpawnMetrics {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(None),
+                spawn_attempts: AtomicUsize::new(0),
+                reentry_successes: AtomicUsize::new(0),
+                task_records_observed: AtomicUsize::new(0),
+                stored_futures_observed: AtomicUsize::new(0),
+                runnable_publications_observed: AtomicUsize::new(0),
+            })
+        }
+
+        pub(crate) fn attach_state(&self, state: &Arc<ContendedMutex<RuntimeState>>) {
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(state));
+        }
+
+        pub(crate) fn spawn_attempts(&self) -> usize {
+            self.spawn_attempts.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn reentry_successes(&self) -> usize {
+            self.reentry_successes.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn task_records_observed(&self) -> usize {
+            self.task_records_observed.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn stored_futures_observed(&self) -> usize {
+            self.stored_futures_observed.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn runnable_publications_observed(&self) -> usize {
+            self.runnable_publications_observed.load(Ordering::Relaxed)
+        }
+    }
+
+    impl MetricsProvider for PanickingSpawnMetrics {
+        fn task_spawned(&self, _: RegionId, task_id: TaskId) {
+            self.spawn_attempts.fetch_add(1, Ordering::Relaxed);
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if let Some(state) = state
+                && let Ok(mut runtime) = state.try_lock()
+            {
+                self.reentry_successes.fetch_add(1, Ordering::Relaxed);
+                if let Some(task) = runtime.task(task_id) {
+                    self.task_records_observed.fetch_add(1, Ordering::Relaxed);
+                    if task
+                        .cx_inner
+                        .as_ref()
+                        .is_some_and(|inner| inner.read().runnable_publication.is_published())
+                    {
+                        self.runnable_publications_observed
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if runtime.get_stored_future(task_id).is_some() {
+                    self.stored_futures_observed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            panic!("adversarial task-spawn metrics callback");
+        }
+
+        fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+        fn region_closed(&self, _: RegionId, _: Duration) {}
+        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+        fn deadline_exceeded(&self, _: RegionId) {}
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+        fn deadline_violation(&self, _: &str, _: Duration) {}
+        fn deadline_remaining(&self, _: &str, _: Duration) {}
+        fn checkpoint_interval(&self, _: &str, _: Duration) {}
+        fn task_stuck_detected(&self, _: &str) {}
+        fn obligation_created(&self, _: RegionId) {}
+        fn obligation_discharged(&self, _: RegionId) {}
+        fn obligation_leaked(&self, _: RegionId) {}
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 mod tests {
     use super::*;
@@ -7485,6 +8027,56 @@ mod tests {
     }
 
     #[test]
+    fn task_spawn_observer_sees_stored_task_and_contains_reentrant_panic() {
+        use super::spawn_observer_test_support::PanickingSpawnMetrics;
+
+        let metrics = PanickingSpawnMetrics::new();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+
+        let spawn_effects = {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let (task_id, _handle, spawn_effects) = runtime
+                .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async {})
+                .expect("create task");
+
+            assert_eq!(
+                metrics.spawn_attempts(),
+                0,
+                "task creation must not invoke spawn observers beneath the state lock"
+            );
+            assert!(runtime.task(task_id).is_some(), "task record is visible");
+            assert!(
+                runtime.get_stored_future(task_id).is_some(),
+                "stored future is visible before observer delivery"
+            );
+            spawn_effects
+        };
+
+        let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spawn_effects.dispatch();
+        }));
+        assert!(dispatched.is_ok(), "spawn observer panic must be contained");
+        assert_eq!(metrics.spawn_attempts(), 1);
+        assert_eq!(metrics.reentry_successes(), 1);
+        assert_eq!(metrics.task_records_observed(), 1);
+        assert_eq!(metrics.stored_futures_observed(), 1);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task_spawn_observer_panic_count(),
+            1
+        );
+    }
+
+    #[test]
     fn task_completion_observer_is_deferred_one_shot_and_reentrant() {
         use super::completion_observer_test_support::PanickingCompletionMetrics;
         use crate::sync::ContendedMutex;
@@ -7505,9 +8097,7 @@ mod tests {
                 let mut runtime = state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let (task_id, _handle) = runtime
-                    .create_task(root, Budget::INFINITE, async {})
-                    .expect("create task");
+                let task_id = insert_task(&mut runtime, root);
                 runtime
                     .task_mut(task_id)
                     .expect("task record")
@@ -7570,9 +8160,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -7614,9 +8202,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -7666,9 +8252,7 @@ mod tests {
                 let mut runtime = state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let (task_id, _handle) = runtime
-                    .create_task(root, Budget::INFINITE, async {})
-                    .expect("create task");
+                let task_id = insert_task(&mut runtime, root);
                 runtime
                     .task_mut(task_id)
                     .expect("task record")
@@ -7712,9 +8296,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -7761,9 +8343,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -9153,9 +9733,12 @@ mod tests {
         let mut state = RuntimeState::new_with_metrics(metrics.clone());
         let root = state.create_root_region(Budget::INFINITE);
 
-        let _ = state
-            .create_task(root, Budget::INFINITE, async { 1_u8 })
+        let (_task_id, _handle, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
+        // This focused state test models the publication owner immediately
+        // after the stored future becomes visible.
+        spawn_effects.dispatch();
         let reason = CancelReason::timeout();
         let effects = state.cancel_request(root, &reason, None);
         let (_tasks, wake_effects) = effects.into_parts();
@@ -12977,7 +13560,14 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
         let task = insert_task(&mut state, region);
-        state.record_task_spawn(task, region);
+        let spawn_effects = state.prepare_task_spawn_effects(
+            task,
+            region,
+            Budget::INFINITE,
+            TaskSpawnSource::Direct,
+            state.current_runtime_time(),
+        );
+        spawn_effects.dispatch();
 
         // Create obligation
         let _obl = state
