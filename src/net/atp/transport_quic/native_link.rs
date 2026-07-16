@@ -1066,7 +1066,7 @@ async fn send_native_proof_until_close<T: serde::Serialize>(
             match frame.frame_type() {
                 FrameType::Close => return Ok(()),
                 FrameType::KeepAlive | FrameType::ObjectComplete => continue,
-                FrameType::ObjectRequest => {
+                FrameType::ObjectRequest | FrameType::ObjectManifest => {
                     link.retransmit_stream_frames(cx, &proof_frames, "terminal_proof_request")
                         .await?;
                     continue;
@@ -1074,7 +1074,7 @@ async fn send_native_proof_until_close<T: serde::Serialize>(
                 got => {
                     return Err(QuicTransportError::Unexpected {
                         got,
-                        expected: "Close | KeepAlive | ObjectComplete | ObjectRequest",
+                        expected: "Close | KeepAlive | ObjectComplete | ObjectRequest | ObjectManifest",
                     });
                 }
             }
