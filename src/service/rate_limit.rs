@@ -179,7 +179,10 @@ impl RegisteredRateLimitWaker {
 
 #[inline]
 const fn max_bucket_tokens(rate: u64, zero_period: bool) -> u64 {
-    if zero_period { rate.max(1) } else { rate }
+    // `u64::max` (Ord::max) is not const-stable on the pinned nightly-2026-07-05
+    // (E0658 const_cmp); express the `rate.max(1)` clamp with plain const-legal
+    // comparison instead so the crate keeps building without an unstable feature.
+    if zero_period && rate < 1 { 1 } else { rate }
 }
 
 #[inline]

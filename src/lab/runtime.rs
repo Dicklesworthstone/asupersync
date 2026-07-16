@@ -1765,8 +1765,12 @@ impl LabRuntime {
         }
 
         let requests = crate::runtime::spawn_mailbox::coalesce_handle_cancel_requests(requests);
-        let mut tasks = Vec::with_capacity(requests.len());
-        let mut delegated = Vec::new();
+        // Annotate explicitly: the element type `(TaskId, u8)` is only pinned by
+        // `schedule_cancel(task_id, priority)` far below, which the current
+        // nightly no longer back-infers through the `&mut tasks`/`&mut delegated`
+        // shared `target` binding (E0282).
+        let mut tasks: Vec<(TaskId, u8)> = Vec::with_capacity(requests.len());
+        let mut delegated: Vec<(TaskId, u8)> = Vec::new();
         let mut wakes = crate::types::task_context::CancelWakeEffects::empty();
         for request in requests {
             let effects = self

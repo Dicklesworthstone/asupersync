@@ -1506,6 +1506,7 @@ mod tests {
     )]
     use super::*;
     use crate::error::{Error, ErrorKind};
+    use crate::types::task_context::CancelWaker;
     use crate::util::ArenaIndex;
     use serde_json::{Value, json};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -1673,7 +1674,7 @@ mod tests {
                 assert!(
                     record
                         .cancel_reason()
-                        .is_some_and(|reason| reason.is_kind(CancelKind::Shutdown)),
+                        .is_some_and(|reason| reason.is_kind(crate::types::CancelKind::Shutdown)),
                     "strongest prepublication reason remains authoritative"
                 );
 
@@ -2474,7 +2475,8 @@ mod tests {
             task(),
             Budget::INFINITE,
         )));
-        let cx = crate::cx::Cx::from_inner(Arc::clone(&inner));
+        let cx: crate::cx::Cx<crate::cx::cap::All> =
+            crate::cx::Cx::from_inner(Arc::clone(&inner));
         let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
         record.set_cx_inner(Arc::clone(&inner));
         record.start_running();

@@ -253,6 +253,12 @@ impl<T> WaiterChain<T> {
     }
 
     /// O(1) waker update by id. Returns whether the slot existed.
+    ///
+    /// Retained utility: not yet wired to a caller, but kept as the intended
+    /// O(1) in-place waker refresh for the slab. `#[allow(dead_code)]` keeps the
+    /// crate's `deny(dead_code)` gate green until a call site lands, without
+    /// discarding the method.
+    #[allow(dead_code)]
     pub(crate) fn update_waker(&mut self, id: WaiterId, new: &Waker) -> bool {
         let Some(&index) = self.positions.get(&id) else {
             return false;

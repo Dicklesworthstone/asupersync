@@ -444,7 +444,10 @@ mod tests {
 
         assert!(result.is_err());
         assert!(limit.get_ref().is_empty());
-        assert_eq!(limit.limit(), 3);
+        // `limit.limit()` resolves to the by-value `BufMut::limit(self, usize)`
+        // builder ahead of the inherent `Limit::limit(&self) -> usize` getter;
+        // call the getter via UFCS to read the configured limit unambiguously.
+        assert_eq!(Limit::limit(&limit), 3);
         crate::test_complete!("over_limit_append_panics_before_mutating_growable_inner");
     }
 

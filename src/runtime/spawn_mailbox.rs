@@ -2919,7 +2919,7 @@ mod tests {
     /// site, factory child runs, handle exposes the canonical arena id.
     #[test]
     fn cx_spawn_runs_child_without_runtime_state() {
-        let (mut lab, parent_cx, _root) = lab_with_parent_cx();
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_in_child = Arc::clone(&counter);
         let handle = parent_cx
@@ -3496,7 +3496,7 @@ mod tests {
             ),
         ));
         let local_scheduler = Arc::new(parking_lot::Mutex::new(
-            crate::runtime::scheduler::priority::PriorityScheduler::new(),
+            crate::runtime::scheduler::PriorityScheduler::new(),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
         let _scheduler_guard = crate::runtime::scheduler::three_lane::ScopedLocalScheduler::new(
@@ -3592,7 +3592,7 @@ mod tests {
             ),
         ));
         let local_scheduler = Arc::new(parking_lot::Mutex::new(
-            crate::runtime::scheduler::priority::PriorityScheduler::new(),
+            crate::runtime::scheduler::PriorityScheduler::new(),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
         let _scheduler_guard = crate::runtime::scheduler::three_lane::ScopedLocalScheduler::new(

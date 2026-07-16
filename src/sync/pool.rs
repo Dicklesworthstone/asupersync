@@ -6293,7 +6293,7 @@ mod tests {
             test_pool_time_now,
         );
         let cx = Cx::for_testing();
-        let mut resource =
+        let mut resource: PooledResource<PanicOnDropPoolResource> =
             futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
         assert_eq!(resource.id, 0, "the first resource must be the panic probe");
 
