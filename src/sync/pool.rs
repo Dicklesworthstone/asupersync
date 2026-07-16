@@ -1491,12 +1491,20 @@ where
         }
     }
 
+    /// Detach one return message from the receiver lock.
+    fn try_recv_return(&self) -> Result<PoolReturn<R>, mpsc::TryRecvError> {
+        let rx = self.return_rx.lock();
+        rx.try_recv()
+    }
+
     /// Process returned resources from the return channel.
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn process_returns(&self) {
-        let rx = self.return_rx.lock();
         let mut waiters_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
-        while let Ok(ret) = rx.try_recv() {
+        // Detach exactly one message from the receiver before inspecting its
+        // payload. A closed-pool Return may destroy arbitrary R state, and that
+        // destructor must never run while return_rx is locked.
+        while let Ok(ret) = self.try_recv_return() {
             match ret {
                 PoolReturn::Return {
                     resource,
@@ -1509,22 +1517,37 @@ where
                         metrics.record_released(hold_duration);
                     }
 
+                    // Declare the pending owner before the state guard. If the
+                    // injected clock or capacity reservation unwinds, the guard
+                    // unlocks before either this owner or `resource` is dropped.
+                    #[allow(clippy::needless_late_init)]
+                    let mut pending_idle: Option<IdleResource<R>>;
                     let mut state = self.state.lock();
                     state.active = state.active.saturating_sub(1);
 
-                    if !state.closed {
-                        state.idle.push_back(IdleResource {
-                            resource,
-                            idle_since: (self.time_getter)(),
-                            created_at,
-                        });
+                    if state.closed {
+                        drop(state);
+                        drop(resource);
+                        continue;
+                    }
 
-                        let total = state.active + state.idle.len() + state.creating;
-                        let available =
-                            state.idle.len() + self.config.max_size.saturating_sub(total);
-                        if available > 0 && available - 1 < state.waiters.len() {
-                            waiters_to_wake.push(state.waiters[available - 1].waker.clone_waker());
-                        }
+                    let idle_since = (self.time_getter)();
+                    pending_idle = Some(IdleResource {
+                        resource,
+                        idle_since,
+                        created_at,
+                    });
+                    state.idle.reserve(1);
+                    state.idle.push_back(
+                        pending_idle
+                            .take()
+                            .expect("return payload prepared before idle insertion"),
+                    );
+
+                    let total = state.active + state.idle.len() + state.creating;
+                    let available = state.idle.len() + self.config.max_size.saturating_sub(total);
+                    if available > 0 && available - 1 < state.waiters.len() {
+                        waiters_to_wake.push(state.waiters[available - 1].waker.clone_waker());
                     }
                     drop(state);
                 }
@@ -1548,7 +1571,6 @@ where
                 }
             }
         }
-        drop(rx);
 
         for waker in waiters_to_wake {
             waker.wake();
@@ -1557,79 +1579,114 @@ where
 
     /// Try to get an idle resource, returning its original creation time.
     fn try_get_idle(&self, waiter_id: Option<u64>) -> Option<(R, Instant)> {
-        let mut state = self.state.lock();
-
-        // Evict expired resources first and track eviction reasons for metrics
+        // Snapshot time before locking so an injected clock can neither reenter
+        // state nor strand a detached resource during unwind.
         let now = (self.time_getter)();
-        #[cfg(feature = "metrics")]
-        let mut idle_timeout_evictions = 0u64;
-        #[cfg(feature = "metrics")]
-        let mut max_lifetime_evictions = 0u64;
-
-        state.idle.retain(|idle| {
-            let idle_ok = now.saturating_duration_since(idle.idle_since) < self.config.idle_timeout;
-            let lifetime_ok =
-                now.saturating_duration_since(idle.created_at) < self.config.max_lifetime;
-
+        loop {
+            // This owner predates the state guard so unwind always unlocks
+            // before destroying any resource detached by the partition.
+            let mut retired_idle = Vec::new();
+            let mut state = self.state.lock();
             #[cfg(feature = "metrics")]
-            {
-                if !idle_ok {
-                    idle_timeout_evictions += 1;
-                } else if !lifetime_ok {
-                    max_lifetime_evictions += 1;
+            let mut idle_timeout_evictions = 0u64;
+            #[cfg(feature = "metrics")]
+            let mut max_lifetime_evictions = 0u64;
+
+            let idle_len = state.idle.len();
+            let mut expired_count = 0usize;
+            for idle in &state.idle {
+                let idle_ok =
+                    now.saturating_duration_since(idle.idle_since) < self.config.idle_timeout;
+                let lifetime_ok =
+                    now.saturating_duration_since(idle.created_at) < self.config.max_lifetime;
+
+                if !idle_ok || !lifetime_ok {
+                    expired_count += 1;
+
+                    #[cfg(feature = "metrics")]
+                    if !idle_ok {
+                        idle_timeout_evictions += 1;
+                    } else {
+                        max_lifetime_evictions += 1;
+                    }
                 }
             }
 
-            idle_ok && lifetime_ok
-        });
+            // Reserve before moving any R out of state. The fixed-length
+            // pop/requeue pass preserves survivor order and cannot grow either
+            // destination after this point.
+            retired_idle.reserve(expired_count);
+            if expired_count > 0 {
+                for _ in 0..idle_len {
+                    let idle = state
+                        .idle
+                        .pop_front()
+                        .expect("idle partition length captured under state lock");
+                    let idle_ok =
+                        now.saturating_duration_since(idle.idle_since) < self.config.idle_timeout;
+                    let lifetime_ok =
+                        now.saturating_duration_since(idle.created_at) < self.config.max_lifetime;
 
-        // Evictions don't increase `available` window, so we don't need to wake anyone.
-        // The slot is just converted from idle to can_create, so the currently
-        // authorized task will just create instead of reusing.
+                    if idle_ok && lifetime_ok {
+                        state.idle.push_back(idle);
+                    } else {
+                        retired_idle.push(idle);
+                    }
+                }
+                drop(state);
+                drop(retired_idle);
 
-        // Record eviction metrics
-        #[cfg(feature = "metrics")]
-        if let Some(ref metrics) = self.metrics {
-            for _ in 0..idle_timeout_evictions {
-                metrics.record_destroyed(DestroyReason::IdleTimeout);
+                // Match the previous retain-before-accounting order, but do
+                // the resource destruction and metrics work without state.
+                #[cfg(feature = "metrics")]
+                if let Some(ref metrics) = self.metrics {
+                    for _ in 0..idle_timeout_evictions {
+                        metrics.record_destroyed(DestroyReason::IdleTimeout);
+                    }
+                    for _ in 0..max_lifetime_evictions {
+                        metrics.record_destroyed(DestroyReason::MaxLifetime);
+                    }
+                }
+
+                // A destructor may have reentered the pool, so revalidate the
+                // queue and FIFO window before committing any checkout.
+                continue;
             }
-            for _ in 0..max_lifetime_evictions {
-                metrics.record_destroyed(DestroyReason::MaxLifetime);
-            }
-        }
 
-        let total = state.active + state.idle.len() + state.creating;
-        let available = state.idle.len() + self.config.max_size.saturating_sub(total);
+            // Evictions don't increase `available`: they convert an idle slot
+            // into creation capacity for the currently authorized task.
+            let total = state.active + state.idle.len() + state.creating;
+            let available = state.idle.len() + self.config.max_size.saturating_sub(total);
+            let pos = waiter_id.map_or_else(
+                || state.waiters.len(),
+                |id| {
+                    state
+                        .waiters
+                        .iter()
+                        .position(|w| w.id == id)
+                        .unwrap_or(state.waiters.len())
+                },
+            );
 
-        let pos = waiter_id.map_or_else(
-            || state.waiters.len(),
-            |id| {
-                state
-                    .waiters
-                    .iter()
-                    .position(|w| w.id == id)
-                    .unwrap_or(state.waiters.len())
-            },
-        );
-
-        let can_acquire = pos < available;
-
-        let result = if can_acquire {
-            if let Some(idle) = state.idle.pop_front() {
-                state.active += 1;
-                state.total_acquisitions += 1;
-                // Waiter is NOT removed here. It is removed in `acquire` upon success,
-                // or remains in queue if health check fails to preserve FIFO.
+            let result = if pos < available && !state.idle.is_empty() {
+                // Compute overflow-capable counters before detaching R.
+                let active = state.active + 1;
+                let total_acquisitions = state.total_acquisitions + 1;
+                let idle = state
+                    .idle
+                    .pop_front()
+                    .expect("non-empty idle queue checked under state lock");
+                state.active = active;
+                state.total_acquisitions = total_acquisitions;
+                // Waiter remains queued until acquire succeeds, or stays when
+                // a health check fails so FIFO position is preserved.
                 Some((idle.resource, idle.created_at))
             } else {
                 None
-            }
-        } else {
-            None
-        };
-        drop(state);
-
-        result
+            };
+            drop(state);
+            return result;
+        }
     }
 
     /// Reserve a creation slot under max-size accounting.
@@ -1709,6 +1766,9 @@ where
     /// Unlike `commit_create_slot`, this does NOT increment `active` or
     /// `total_acquisitions` — the resource goes straight to the idle queue.
     fn commit_create_slot_as_idle(&self, resource: R) {
+        // Keep the pending owner outside the state guard's drop scope.
+        #[allow(clippy::needless_late_init)]
+        let mut pending_idle: Option<IdleResource<R>>;
         let waker = {
             let mut state = self.state.lock();
             state.creating = state.creating.saturating_sub(1);
@@ -1721,11 +1781,17 @@ where
             }
 
             let now = (self.time_getter)();
-            state.idle.push_back(IdleResource {
+            pending_idle = Some(IdleResource {
                 resource,
                 idle_since: now,
                 created_at: now,
             });
+            state.idle.reserve(1);
+            state.idle.push_back(
+                pending_idle
+                    .take()
+                    .expect("warmup payload prepared before idle insertion"),
+            );
 
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
@@ -2222,27 +2288,20 @@ where
 
     fn close(&self) -> PoolFuture<'_, ()> {
         Box::pin(async move {
-            #[cfg(feature = "metrics")]
-            let idle_count: usize;
-
-            let waiters = {
+            let (waiters, idle_resources) = {
                 let mut state = self.state.lock();
                 state.closed = true;
                 self.closed.store(true, Ordering::Release);
 
-                // Drain waiters, then wake after releasing the state lock.
+                // Detach both destructor-capable queues, then notify/destroy
+                // only after releasing the state lock.
                 let waiters = std::mem::take(&mut state.waiters);
-
-                // Record how many idle resources we're clearing (only needed for metrics)
-                #[cfg(feature = "metrics")]
-                {
-                    idle_count = state.idle.len();
-                }
-
-                // Clear idle resources
-                state.idle.clear();
-                waiters
+                let idle_resources = std::mem::take(&mut state.idle);
+                (waiters, idle_resources)
             };
+
+            #[cfg(feature = "metrics")]
+            let idle_count = idle_resources.len();
 
             for waiter in waiters {
                 waiter.waker.clone_waker().wake();
@@ -2257,6 +2316,8 @@ where
                 }
                 self.update_metrics_gauges();
             }
+
+            drop(idle_resources);
         })
     }
 }
@@ -2809,6 +2870,73 @@ mod tests {
         );
     }
 
+    struct PoolResourceDropProbe {
+        on_drop: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl Drop for PoolResourceDropProbe {
+        fn drop(&mut self) {
+            (self.on_drop)();
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn pool_resource_probe_factory() -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        PoolResourceDropProbe,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(std::future::pending())
+    }
+
+    fn pool_resource_lock_probe<F>(
+        pool: &Arc<GenericPool<PoolResourceDropProbe, F>>,
+    ) -> (PoolResourceDropProbe, mpsc::Receiver<(bool, bool)>)
+    where
+        F: AsyncResourceFactory<Resource = PoolResourceDropProbe> + 'static,
+    {
+        let weak_pool = Arc::downgrade(pool);
+        let (tx, rx) = mpsc::channel();
+        let probe = PoolResourceDropProbe {
+            on_drop: Box::new(move || {
+                let Some(pool) = weak_pool.upgrade() else {
+                    let _ = tx.send((false, false));
+                    return;
+                };
+                let state_free = {
+                    let guard = pool.state.try_lock();
+                    let free = guard.is_some();
+                    drop(guard);
+                    free
+                };
+                let return_rx_free = {
+                    let guard = pool.return_rx.try_lock();
+                    let free = guard.is_some();
+                    drop(guard);
+                    free
+                };
+                let _ = tx.send((state_free, return_rx_free));
+            }),
+        };
+        (probe, rx)
+    }
+
+    fn assert_pool_resource_dropped_outside_locks(rx: &mpsc::Receiver<(bool, bool)>, path: &str) {
+        let observed = rx
+            .try_recv()
+            .unwrap_or_else(|error| panic!("{path} did not destroy its probe resource: {error}"));
+        assert_eq!(
+            observed,
+            (true, true),
+            "{path} destroyed a resource while a pool lock was held"
+        );
+    }
+
     #[test]
     fn pooled_resource_returns_on_drop() {
         init_test("pooled_resource_returns_on_drop");
@@ -3110,6 +3238,98 @@ mod tests {
         Box<dyn Future<Output = Result<u32, Box<dyn std::error::Error + Send + Sync>>> + Send>,
     > {
         Box::pin(async { Ok(42u32) })
+    }
+
+    #[test]
+    fn pool_idle_expiry_drops_resource_after_unlock() {
+        init_test("pool_idle_expiry_drops_resource_after_unlock");
+
+        let config = PoolConfig::with_max_size(1).idle_timeout(Duration::ZERO);
+        let pool = Arc::new(GenericPool::with_time_getter(
+            pool_resource_probe_factory,
+            config,
+            test_pool_time_now,
+        ));
+        let (resource, drop_rx) = pool_resource_lock_probe(&pool);
+        let now = test_pool_time_now();
+        {
+            let mut state = pool.state.lock();
+            state.idle.reserve(1);
+            state.idle.push_back(IdleResource {
+                resource,
+                idle_since: now,
+                created_at: now,
+            });
+        }
+
+        assert!(
+            pool.try_get_idle(None).is_none(),
+            "zero-timeout resource must be evicted"
+        );
+        assert_pool_resource_dropped_outside_locks(&drop_rx, "idle-timeout eviction");
+        crate::test_complete!("pool_idle_expiry_drops_resource_after_unlock");
+    }
+
+    #[test]
+    fn pool_close_drops_idle_resource_after_unlock() {
+        init_test("pool_close_drops_idle_resource_after_unlock");
+
+        let pool = Arc::new(GenericPool::with_time_getter(
+            pool_resource_probe_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        ));
+        let (resource, drop_rx) = pool_resource_lock_probe(&pool);
+        let now = test_pool_time_now();
+        {
+            let mut state = pool.state.lock();
+            state.idle.reserve(1);
+            state.idle.push_back(IdleResource {
+                resource,
+                idle_since: now,
+                created_at: now,
+            });
+        }
+
+        futures_lite::future::block_on(pool.close());
+        assert_pool_resource_dropped_outside_locks(&drop_rx, "pool close");
+        crate::test_complete!("pool_close_drops_idle_resource_after_unlock");
+    }
+
+    #[test]
+    fn pool_return_after_close_drops_resource_after_unlock() {
+        init_test("pool_return_after_close_drops_resource_after_unlock");
+
+        let pool = Arc::new(GenericPool::with_time_getter(
+            pool_resource_probe_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        ));
+        {
+            let mut state = pool.state.lock();
+            state.active = 1;
+        }
+        futures_lite::future::block_on(pool.close());
+
+        let (resource, drop_rx) = pool_resource_lock_probe(&pool);
+        let sent = pool
+            .return_tx
+            .send(PoolReturn::Return {
+                resource,
+                hold_duration: Duration::ZERO,
+                created_at: test_pool_time_now(),
+            })
+            .is_ok();
+        assert!(sent, "return channel remains connected after pool close");
+
+        pool.process_returns();
+        assert_eq!(
+            pool.state.lock().active,
+            0,
+            "return-after-close commits active accounting before destruction"
+        );
+        assert_pool_resource_dropped_outside_locks(&drop_rx, "return after close");
+        crate::test_complete!("pool_return_after_close_drops_resource_after_unlock");
     }
 
     #[test]
