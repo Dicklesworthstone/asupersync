@@ -135,7 +135,10 @@ pub struct BroadcastTelemetrySnapshot {
     pub lagged_receiver_count: Option<usize>,
     /// Cancel/abort events observed by the channel.
     pub cancellation_count: u64,
-    /// Whether this channel has reached a closed state.
+    /// Whether either endpoint class has closed.
+    ///
+    /// Retained ring entries may still be readable after the last sender drops;
+    /// `queued_messages` therefore need not be zero when this is `true`.
     pub closed: bool,
 }
 
@@ -285,12 +288,10 @@ impl<T> Channel<T> {
         let queued_messages = inner.buffer.len();
         let recv_waiter_count = inner.wakers.len();
         let lagged_receiver_count = inner.lagged_receiver_count();
-        let closed = receiver_count == 0 || (sender_count == 0 && queued_messages == 0);
+        let closed = receiver_count == 0 || sender_count == 0;
 
         let receiver_health = if receiver_count == 0 {
             "receiver_dropped"
-        } else if sender_count == 0 && queued_messages == 0 {
-            "sender_closed"
         } else if receiver_next_index.is_some_and(|next_index| next_index < inner.earliest_index())
         {
             "lagged"
@@ -298,6 +299,8 @@ impl<T> Channel<T> {
             .is_some_and(|next_index| inner.is_message_ready_for(next_index))
         {
             "value_ready"
+        } else if sender_count == 0 {
+            "sender_closed"
         } else if recv_waiter_count > 0 {
             "waiting"
         } else if receiver_next_index.is_some() {
@@ -2315,6 +2318,97 @@ mod tests {
         assert_eq!(closed.receiver_count, 0);
         assert!(closed.closed);
         crate::test_complete!("broadcast_telemetry_receiver_count");
+    }
+
+    #[test]
+    fn telemetry_unread_value_stays_ready_after_last_sender_drops() {
+        init_test("broadcast_telemetry_unread_after_sender_close");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(2);
+        tx.send(&cx, 11).expect("send");
+
+        let open = rx.telemetry_snapshot(11);
+        assert_eq!(open.queued_messages, 1);
+        assert_eq!(open.receiver_health, "value_ready");
+        assert!(!open.closed);
+
+        drop(tx);
+
+        let closed = rx.telemetry_snapshot(11);
+        assert_eq!(closed.queued_messages, 1);
+        assert_eq!(closed.receiver_health, "value_ready");
+        assert!(closed.closed);
+        assert_eq!(rx.try_recv(), Ok(11));
+        crate::test_complete!("broadcast_telemetry_unread_after_sender_close");
+    }
+
+    #[test]
+    fn telemetry_reports_sender_closed_after_receiver_drains_retained_value() {
+        init_test("broadcast_telemetry_drained_after_sender_close");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(2);
+        tx.send(&cx, 11).expect("send");
+        assert_eq!(rx.try_recv(), Ok(11));
+
+        let retained = rx.telemetry_snapshot(12);
+        assert_eq!(retained.queued_messages, 1);
+        assert_eq!(retained.receiver_health, "caught_up");
+        assert!(!retained.closed);
+
+        drop(tx);
+
+        let closed = rx.telemetry_snapshot(12);
+        assert_eq!(closed.queued_messages, 1);
+        assert_eq!(closed.receiver_health, "sender_closed");
+        assert!(closed.closed);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Closed));
+        crate::test_complete!("broadcast_telemetry_drained_after_sender_close");
+    }
+
+    #[test]
+    fn telemetry_preserves_lag_and_value_ready_transitions_after_sender_close() {
+        init_test("broadcast_telemetry_lagged_sender_close");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(2);
+        tx.send(&cx, 10).expect("send 1");
+        tx.send(&cx, 20).expect("send 2");
+        tx.send(&cx, 30).expect("send 3");
+        drop(tx);
+
+        let lagged = rx.telemetry_snapshot(13);
+        assert_eq!(lagged.queued_messages, 2);
+        assert_eq!(lagged.lagged_receiver_count, Some(1));
+        assert_eq!(lagged.receiver_health, "lagged");
+        assert!(lagged.closed);
+
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Lagged(1)));
+        let ready = rx.telemetry_snapshot(13);
+        assert_eq!(ready.receiver_health, "value_ready");
+        assert!(ready.closed);
+
+        assert_eq!(rx.try_recv(), Ok(20));
+        assert_eq!(rx.try_recv(), Ok(30));
+        let drained = rx.telemetry_snapshot(13);
+        assert_eq!(drained.queued_messages, 2);
+        assert_eq!(drained.receiver_health, "sender_closed");
+        assert!(drained.closed);
+        crate::test_complete!("broadcast_telemetry_lagged_sender_close");
+    }
+
+    #[test]
+    fn telemetry_receiver_drop_reports_closed_endpoint() {
+        init_test("broadcast_telemetry_receiver_drop_closed_endpoint");
+        let cx = test_cx();
+        let (tx, rx) = channel(2);
+        tx.send(&cx, 11).expect("send");
+        drop(rx);
+
+        let closed = tx.telemetry_snapshot(14);
+        assert_eq!(closed.queued_messages, 0);
+        assert_eq!(closed.receiver_count, 0);
+        assert_eq!(closed.receiver_health, "receiver_dropped");
+        assert!(closed.closed);
+        crate::test_complete!("broadcast_telemetry_receiver_drop_closed_endpoint");
     }
 
     #[test]
