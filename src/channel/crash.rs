@@ -591,11 +591,12 @@ impl<T> CrashSender<T> {
         self.send_count.load(Ordering::Relaxed)
     }
 
-    /// Reset the send counter (used during cold restart).
+    /// Reset the send counter during a quiescent cold restart.
+    ///
+    /// No send futures may be in flight. Controller restart and counter reset
+    /// remain separate operations; atomic cold-restart orchestration is outside
+    /// this sender's exact-N admission contract.
     pub fn reset_send_count(&self) {
-        // Linearize cold-reset accounting with any exact-N commit already in
-        // progress. Capacity waits never hold this mutex.
-        let _guard = self.send_commit.lock();
         self.send_count.store(0, Ordering::Relaxed);
     }
 }
