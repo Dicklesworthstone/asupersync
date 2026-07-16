@@ -22,12 +22,12 @@
 //! ```text
 //! KEY=$(atp rq-keygen)
 //! # on the receiver
-//! atp recv ./inbox --listen 0.0.0.0:8472 --transport rq --rq-auth-key-hex "$KEY"
+//! printf '%s\n' "$KEY" | atp recv ./inbox --listen 0.0.0.0:8472 --transport rq --rq-auth-key-stdin
 //! # on the sender
-//! atp send ./my-folder receiver-host:8472 --transport rq --streams 8 --rq-auth-key-hex "$KEY"
+//! printf '%s\n' "$KEY" | atp send ./my-folder receiver-host:8472 --transport rq --streams 8 --rq-auth-key-stdin
 //!
 //! # rsync-like remote bootstrap over SSH; bulk bytes still use ATP
-//! # and RQ symbol auth is generated/passed to the remote receiver.
+//! # and RQ symbol auth is generated and delivered over protected SSH stdin.
 //! atp send ./my-folder user@receiver:/srv/inbox --transport rq --prefer tailscale
 //! ```
 
@@ -77,12 +77,14 @@ use asupersync::net::atp::transport_tcp::{
     self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendReport, TransferConfig, TransportError,
 };
 use asupersync::runtime::RuntimeBuilder;
-use asupersync::security::{AUTH_KEY_SIZE, AuthKey, SecurityContext};
+use asupersync::security::{AUTH_KEY_SIZE, AuthKey, SecretString, SecurityContext};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 const RQ_AUTH_ENV: &str = "ATP_RQ_AUTH_KEY_HEX";
+const SSH_STDIN_CONFIG_CANARY_PATH: &str = "/__atp_ssh_stdin_preflight_canary__";
 const DELTA_STATE_DIR: &str = ".asupersync-atp-delta-v1";
 const DELTA_STATE_FILE: &str = "state.json";
 const DELTA_CHUNK_DIR: &str = "chunks";
@@ -249,7 +251,7 @@ enum PathPreference {
 enum RemoteShell {
     /// Probe for Windows OpenSSH and otherwise use a POSIX shell.
     Auto,
-    /// Quote argv and environment assignments for a POSIX shell.
+    /// Quote argv for a POSIX shell.
     Posix,
     /// Invoke Windows PowerShell through a UTF-16LE encoded command.
     Powershell,
@@ -386,6 +388,10 @@ struct SendArgs {
     /// with QUIC 1-RTT AEAD and ignore this per-symbol HMAC key.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
+    /// Read one 64-hex RQ authentication key line from local stdin.
+    /// This avoids exposing a caller-supplied key in this process's argv.
+    #[arg(long)]
+    rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     /// Direct QUIC/TLS transfers are already transport-authenticated.
     #[arg(long)]
@@ -487,6 +493,9 @@ struct RecvArgs {
     /// and ignore this per-symbol HMAC key.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
+    /// Read one 64-hex RQ authentication key line from stdin.
+    #[arg(long, hide = true)]
+    rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
@@ -546,6 +555,9 @@ struct BondDonateArgs {
     /// All bonded donors and the receiver must share the same key.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
+    /// Read one 64-hex RQ authentication key line from stdin.
+    #[arg(long, hide = true)]
+    rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
@@ -677,10 +689,14 @@ struct BondPullArgs {
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
     repair_overhead: f64,
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
-    /// Generated per-transfer when omitted and exported to the donors over
-    /// SSH (mirrors the `atp send` SSH bootstrap).
+    /// Generated per-transfer when omitted and delivered to the donors over
+    /// protected SSH stdin (mirrors the `atp send` SSH bootstrap).
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
+    /// Read one 64-hex RQ authentication key line from local stdin.
+    /// This avoids exposing a caller-supplied key in this process's argv.
+    #[arg(long)]
+    rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
@@ -709,6 +725,9 @@ struct BondDescriptorArgs {
     /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
+    /// Read one 64-hex RQ authentication key line from stdin.
+    #[arg(long, hide = true)]
+    rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
@@ -849,7 +868,7 @@ fn recv_listen_timeout(args: &RecvArgs) -> Result<Duration, String> {
     }
 }
 
-fn rq_config(
+fn rq_config_base(
     max_bytes: u64,
     symbol_size: u16,
     streams: usize,
@@ -857,13 +876,11 @@ fn rq_config(
     repair_overhead: f64,
     rq_round0_loss_pct: f64,
     tail_drain_ms: u64,
-    rq_auth_key_hex: Option<&str>,
-    rq_allow_unauthenticated_lab: bool,
 ) -> Result<RqConfig, String> {
     let max_block_size = normalize_max_block_size(symbol_size, max_block_size)?;
     let round0_loss_target = normalize_loss_pct(rq_round0_loss_pct, "--rq-round0-loss-pct")?;
     let tail_drain_ms = calibrated_rq_tail_drain_ms(round0_loss_target, tail_drain_ms);
-    let config = RqConfig {
+    Ok(RqConfig {
         symbol_size,
         udp_fanout: streams.max(1),
         max_block_size,
@@ -875,14 +892,45 @@ fn rq_config(
         max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
         round_tail_drain: Duration::from_millis(tail_drain_ms),
         ..RqConfig::default()
-    };
+    })
+}
+
+fn rq_config(
+    max_bytes: u64,
+    symbol_size: u16,
+    streams: usize,
+    max_block_size: usize,
+    repair_overhead: f64,
+    rq_round0_loss_pct: f64,
+    tail_drain_ms: u64,
+    rq_auth_key_hex: Option<&str>,
+    rq_allow_unauthenticated_lab: bool,
+) -> Result<RqConfig, String> {
+    let config = rq_config_base(
+        max_bytes,
+        symbol_size,
+        streams,
+        max_block_size,
+        repair_overhead,
+        rq_round0_loss_pct,
+        tail_drain_ms,
+    )?;
     let auth = resolve_rq_auth_choice(rq_auth_key_hex, rq_allow_unauthenticated_lab, false)?;
-    config_with_rq_auth(config, &auth)
+    Ok(config_with_rq_auth(config, &auth))
 }
 
 fn rq_send_config(args: &SendArgs) -> Result<RqConfig, String> {
+    let auth = resolve_rq_auth_choice(
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+        false,
+    )?;
+    rq_send_config_with_auth(args, &auth)
+}
+
+fn rq_send_config_with_auth(args: &SendArgs, auth: &RqAuthChoice) -> Result<RqConfig, String> {
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
-    rq_config(
+    let config = rq_config_base(
         args.max_bytes,
         symbol_size,
         args.streams,
@@ -890,9 +938,8 @@ fn rq_send_config(args: &SendArgs) -> Result<RqConfig, String> {
         args.repair_overhead,
         args.rq_round0_loss_pct,
         args.rq_tail_drain_ms,
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
-    )
+    )?;
+    Ok(config_with_rq_auth(config, auth))
 }
 
 fn normalize_max_block_size(symbol_size: u16, max_block_size: usize) -> Result<usize, String> {
@@ -1405,23 +1452,35 @@ fn quic_config_recv(
     Ok(cfg)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum RqAuthChoice {
-    KeyHex(String),
+    Key(AuthKey),
     UnauthenticatedLab,
 }
 
-fn configured_rq_auth_key(explicit_key_hex: Option<&str>) -> Option<String> {
-    explicit_key_hex
+impl std::fmt::Debug for RqAuthChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(_) => formatter.write_str("Key([REDACTED])"),
+            Self::UnauthenticatedLab => formatter.write_str("UnauthenticatedLab"),
+        }
+    }
+}
+
+fn configured_rq_auth_key(explicit_key_hex: Option<&str>) -> Option<SecretString> {
+    if let Some(key) = explicit_key_hex
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            env::var(RQ_AUTH_ENV)
-                .ok()
-                .map(|key| key.trim().to_string())
-                .filter(|key| !key.is_empty())
-        })
+    {
+        return Some(SecretString::new(key));
+    }
+    env::var(RQ_AUTH_ENV).ok().and_then(|key| {
+        if key.trim().is_empty() {
+            None
+        } else {
+            Some(SecretString::from_string(key))
+        }
+    })
 }
 
 fn resolve_rq_auth_choice(
@@ -1429,7 +1488,16 @@ fn resolve_rq_auth_choice(
     allow_unauthenticated_lab: bool,
     generate_if_missing: bool,
 ) -> Result<RqAuthChoice, String> {
-    let configured_key = configured_rq_auth_key(explicit_key_hex);
+    let explicit_key = explicit_key_hex.map(SecretString::new);
+    resolve_rq_auth_choice_owned(explicit_key, allow_unauthenticated_lab, generate_if_missing)
+}
+
+fn resolve_rq_auth_choice_owned(
+    explicit_key_hex: Option<SecretString>,
+    allow_unauthenticated_lab: bool,
+    generate_if_missing: bool,
+) -> Result<RqAuthChoice, String> {
+    let configured_key = explicit_key_hex.or_else(|| configured_rq_auth_key(None));
 
     if allow_unauthenticated_lab {
         if configured_key.is_some() {
@@ -1441,37 +1509,38 @@ fn resolve_rq_auth_choice(
     }
 
     if let Some(key_hex) = configured_key {
-        return normalize_rq_auth_key_hex(&key_hex).map(RqAuthChoice::KeyHex);
+        return auth_key_from_configured_hex(key_hex.as_str()).map(RqAuthChoice::Key);
     }
 
     if generate_if_missing {
-        return generate_rq_auth_key_hex().map(RqAuthChoice::KeyHex);
+        return generate_rq_auth_key().map(RqAuthChoice::Key);
     }
 
     Err(format!(
-        "RQ transport requires symbol authentication: pass --rq-auth-key-hex <64-hex>, \
-         set {RQ_AUTH_ENV}, use SSH bootstrap so atp can generate a per-transfer key, \
+        "RQ transport requires symbol authentication: read a key with --rq-auth-key-stdin, \
+         set {RQ_AUTH_ENV}, pass --rq-auth-key-hex <64-hex>, use SSH bootstrap so atp can generate a per-transfer key, \
          or explicitly pass --rq-allow-unauthenticated-lab for loopback/lab only"
     ))
 }
 
-fn config_with_rq_auth(config: RqConfig, auth: &RqAuthChoice) -> Result<RqConfig, String> {
+fn config_with_rq_auth(config: RqConfig, auth: &RqAuthChoice) -> RqConfig {
     match auth {
-        RqAuthChoice::KeyHex(key_hex) => {
-            let key = auth_key_from_hex(key_hex)?;
-            Ok(config.with_symbol_auth(SecurityContext::new(key)))
-        }
-        RqAuthChoice::UnauthenticatedLab => {
-            Ok(config.allow_unauthenticated_for_trusted_transport())
-        }
+        RqAuthChoice::Key(key) => config.with_symbol_auth(SecurityContext::new(key.clone())),
+        RqAuthChoice::UnauthenticatedLab => config.allow_unauthenticated_for_trusted_transport(),
     }
 }
 
+#[cfg(test)]
 fn normalize_rq_auth_key_hex(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     let key_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
     let _ = auth_key_from_hex(key_hex)?;
     Ok(key_hex.to_ascii_lowercase())
+}
+
+fn auth_key_from_configured_hex(raw: &str) -> Result<AuthKey, String> {
+    let trimmed = raw.trim();
+    auth_key_from_hex(trimmed.strip_prefix("0x").unwrap_or(trimmed))
 }
 
 fn auth_key_from_hex(key_hex: &str) -> Result<AuthKey, String> {
@@ -1486,20 +1555,120 @@ fn auth_key_from_hex(key_hex: &str) -> Result<AuthKey, String> {
     }
 
     let mut bytes = [0u8; AUTH_KEY_SIZE];
-    hex::decode_to_slice(key_hex, &mut bytes)
-        .map_err(|err| format!("decode RQ auth key hex: {err}"))?;
-    AuthKey::from_bytes(bytes).map_err(|err| format!("RQ auth key rejected: {err}"))
+    let result = hex::decode_to_slice(key_hex, &mut bytes)
+        .map_err(|err| format!("decode RQ auth key hex: {err}"))
+        .and_then(|()| {
+            AuthKey::from_bytes(bytes).map_err(|err| format!("RQ auth key rejected: {err}"))
+        });
+    bytes.zeroize();
+    result
 }
 
-fn generate_rq_auth_key_hex() -> Result<String, String> {
+fn generate_rq_auth_key() -> Result<AuthKey, String> {
     for _ in 0..128 {
         let mut bytes = [0u8; AUTH_KEY_SIZE];
-        getrandom::fill(&mut bytes).map_err(|err| format!("generate RQ auth key: {err}"))?;
-        if AuthKey::from_bytes(bytes).is_ok() {
-            return Ok(hex::encode(bytes));
+        if let Err(error) = getrandom::fill(&mut bytes) {
+            bytes.zeroize();
+            return Err(format!("generate RQ auth key: {error}"));
+        }
+        let candidate = AuthKey::from_bytes(bytes);
+        bytes.zeroize();
+        if let Ok(key) = candidate {
+            return Ok(key);
         }
     }
     Err("generated 128 candidate RQ auth keys, but all failed entropy validation".to_string())
+}
+
+fn generate_rq_auth_key_hex() -> Result<String, String> {
+    generate_rq_auth_key().map(|key| hex::encode(key.as_bytes()))
+}
+
+/// Read exactly one newline-terminated RQ key from a bounded secret channel.
+/// The temporary encoded bytes are zeroized before this function returns.
+fn read_rq_auth_key_stdin<R: BufRead>(reader: &mut R) -> Result<AuthKey, String> {
+    const HEX_BYTES: usize = AUTH_KEY_SIZE * 2;
+    let mut encoded = [0u8; HEX_BYTES + 3];
+    let mut used = 0;
+    let terminated = loop {
+        if used == encoded.len() {
+            break false;
+        }
+        match reader.fill_buf() {
+            Ok([]) => break false,
+            Ok(available) => {
+                let through_newline = available
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(available.len(), |index| index + 1);
+                let remaining = encoded.len().saturating_sub(used);
+                if through_newline > remaining {
+                    reader.consume(remaining);
+                    used += remaining;
+                    break false;
+                }
+                encoded[used..used + through_newline]
+                    .copy_from_slice(&available[..through_newline]);
+                reader.consume(through_newline);
+                used += through_newline;
+                if encoded[used - 1] == b'\n' {
+                    break true;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                encoded.zeroize();
+                return Err(format!("read RQ authentication key from stdin: {error}"));
+            }
+        }
+    };
+
+    let key_end = match (terminated, &encoded[..used]) {
+        (true, bytes) if bytes.len() == HEX_BYTES + 1 && bytes[HEX_BYTES] == b'\n' => {
+            Some(HEX_BYTES)
+        }
+        (true, bytes)
+            if bytes.len() == HEX_BYTES + 2
+                && bytes[HEX_BYTES] == b'\r'
+                && bytes[HEX_BYTES + 1] == b'\n' =>
+        {
+            Some(HEX_BYTES)
+        }
+        _ => None,
+    };
+    let result = key_end
+        .ok_or_else(|| {
+            format!(
+                "RQ authentication key stdin must contain exactly {HEX_BYTES} hex characters followed by a newline"
+            )
+        })
+        .and_then(|end| {
+            std::str::from_utf8(&encoded[..end])
+                .map_err(|_| "RQ authentication key stdin must be UTF-8 hex".to_string())
+                .and_then(auth_key_from_hex)
+        });
+    encoded.zeroize();
+    result
+}
+
+fn resolve_rq_auth_choice_with_stdin<R: BufRead>(
+    explicit_key_hex: Option<SecretString>,
+    allow_unauthenticated_lab: bool,
+    read_stdin: bool,
+    reader: &mut R,
+) -> Result<RqAuthChoice, String> {
+    if !read_stdin {
+        return resolve_rq_auth_choice_owned(explicit_key_hex, allow_unauthenticated_lab, false);
+    }
+    if explicit_key_hex.is_some() {
+        return Err("--rq-auth-key-stdin conflicts with --rq-auth-key-hex".to_string());
+    }
+    if allow_unauthenticated_lab {
+        return Err(
+            "--rq-auth-key-stdin conflicts with --rq-allow-unauthenticated-lab".to_string(),
+        );
+    }
+    read_rq_auth_key_stdin(reader).map(RqAuthChoice::Key)
 }
 
 fn build_runtime(workers: usize) -> Result<asupersync::runtime::Runtime, String> {
@@ -1636,7 +1805,7 @@ fn resolve(target: &str) -> Result<Vec<SocketAddr>, String> {
     }
 }
 
-fn run_send(args: SendArgs) -> Result<(), String> {
+fn run_send(mut args: SendArgs) -> Result<(), String> {
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
     validate_user_transfer_namespace(&args.source)?;
     // `--dry-run` computes the transfer plan from the source and prints it
@@ -1645,11 +1814,32 @@ fn run_send(args: SendArgs) -> Result<(), String> {
         return run_send_dry_run(&args);
     }
     validate_auto_security_policy(&args)?;
+    if args.rq_auth_key_stdin && args.transport != Transport::Rq {
+        return Err("--rq-auth-key-stdin is only valid with --transport rq".to_string());
+    }
+    let prepared_rq_auth = if args.rq_auth_key_stdin {
+        let stdin = std::io::stdin();
+        Some(resolve_rq_auth_choice_with_stdin(
+            args.rq_auth_key_hex.take().map(SecretString::from_string),
+            args.rq_allow_unauthenticated_lab,
+            true,
+            &mut stdin.lock(),
+        )?)
+    } else {
+        None
+    };
     match resolve(&args.target) {
-        Ok(addresses) => run_send_to_addrs(args, &addresses, true),
+        Ok(addresses) => {
+            let rq_config_override = prepared_rq_auth
+                .as_ref()
+                .map(|auth| rq_send_config_with_auth(&args, auth))
+                .transpose()?;
+            drop(prepared_rq_auth);
+            run_send_to_addrs(args, &addresses, true, rq_config_override)
+        }
         Err(resolve_error) => {
             if let Some(remote) = RemoteTarget::parse(&args.target) {
-                run_send_via_ssh(args, &remote)
+                run_send_via_ssh(args, &remote, prepared_rq_auth)
             } else {
                 Err(resolve_error)
             }
@@ -1741,10 +1931,17 @@ fn enforce_transfer_size(label: &str, total_bytes: u64, max_bytes: u64) -> Resul
 /// against the descriptor (per-entry SHA-256 + merkle root) before any symbol
 /// is sent, so a donor whose copy has drifted refuses instead of poisoning
 /// the bonded fountain.
-fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
+fn run_bond_donate(mut args: BondDonateArgs) -> Result<(), String> {
+    let stdin = std::io::stdin();
+    let rq_auth = resolve_rq_auth_choice_with_stdin(
+        args.rq_auth_key_hex.take().map(SecretString::from_string),
+        args.rq_allow_unauthenticated_lab,
+        args.rq_auth_key_stdin,
+        &mut stdin.lock(),
+    )?;
     let control_addrs = resolve(&args.to)?;
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
-    let config = rq_config(
+    let config = rq_config_base(
         args.max_bytes,
         symbol_size,
         DEFAULT_UDP_FANOUT,
@@ -1752,13 +1949,10 @@ fn run_bond_donate(args: BondDonateArgs) -> Result<(), String> {
         args.repair_overhead,
         0.0,
         DEFAULT_ROUND_TAIL_DRAIN_MS,
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
     )?;
-    let auth_key_id = bond_auth_key_id(
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
-    )?;
+    let config = config_with_rq_auth(config, &rq_auth);
+    let auth_key_id = bond_auth_key_id_for_choice(&rq_auth);
+    drop(rq_auth);
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
     let max_bytes = args.max_bytes;
@@ -1958,9 +2152,16 @@ async fn bond_recv_serve(
 
 /// Hidden helper backing `bond-pull`'s descriptor fetch: derive the bonded
 /// descriptor from local source bytes and print it as one JSON line on stdout.
-fn run_bond_descriptor(args: BondDescriptorArgs) -> Result<(), String> {
+fn run_bond_descriptor(mut args: BondDescriptorArgs) -> Result<(), String> {
+    let stdin = std::io::stdin();
+    let rq_auth = resolve_rq_auth_choice_with_stdin(
+        args.rq_auth_key_hex.take().map(SecretString::from_string),
+        args.rq_allow_unauthenticated_lab,
+        args.rq_auth_key_stdin,
+        &mut stdin.lock(),
+    )?;
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
-    let config = rq_config(
+    let config = rq_config_base(
         args.max_bytes,
         symbol_size,
         DEFAULT_UDP_FANOUT,
@@ -1968,13 +2169,10 @@ fn run_bond_descriptor(args: BondDescriptorArgs) -> Result<(), String> {
         DEFAULT_REPAIR_OVERHEAD,
         0.0,
         DEFAULT_ROUND_TAIL_DRAIN_MS,
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
     )?;
-    let auth_key_id = bond_auth_key_id(
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
-    )?;
+    let config = config_with_rq_auth(config, &rq_auth);
+    let auth_key_id = bond_auth_key_id_for_choice(&rq_auth);
+    drop(rq_auth);
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
     let max_bytes = args.max_bytes;
@@ -2103,13 +2301,32 @@ impl CapturedChildPipe {
     }
 }
 
-/// Spawn a thread that drains one child pipe into a shared log string.
-fn capture_child_pipe<R: Read + Send + 'static>(pipe: R) -> CapturedChildPipe {
+fn auth_key_hex_secret(key: Option<&AuthKey>) -> Option<SecretString> {
+    key.map(|key| SecretString::from_string(hex::encode(key.as_bytes())))
+}
+
+fn redact_captured_line(line: String, redaction: Option<&SecretString>) -> String {
+    let Some(secret) = redaction else {
+        return line;
+    };
+    let sensitive_line = SecretString::from_string(line);
+    sensitive_line
+        .as_str()
+        .replace(secret.as_str(), "[REDACTED]")
+}
+
+/// Spawn a thread that drains one child pipe into a shared, redacted log.
+fn capture_child_pipe<R: Read + Send + 'static>(
+    pipe: R,
+    redaction: Option<SecretString>,
+) -> CapturedChildPipe {
     let log = Arc::new(Mutex::new(String::new()));
     let log_for_thread = Arc::clone(&log);
     let reader = thread::spawn(move || {
         for line in BufReader::new(pipe).lines() {
-            let line = line.unwrap_or_else(|err| format!("<pipe read error: {err}>"));
+            let line = line
+                .map(|line| redact_captured_line(line, redaction.as_ref()))
+                .unwrap_or_else(|err| format!("<pipe read error: {err}>"));
             if let Ok(mut log) = log_for_thread.lock() {
                 log.push_str(&line);
                 log.push('\n');
@@ -2140,30 +2357,28 @@ fn bond_pull_fetch_descriptor(
     remote_shell: RemoteShell,
 ) -> Result<BondTransferDescriptor, String> {
     let argv = bond_pull_descriptor_argv(args);
-    let env_vars = match rq_auth {
-        RqAuthChoice::KeyHex(key_hex) => vec![(RQ_AUTH_ENV, key_hex.as_str())],
-        RqAuthChoice::UnauthenticatedLab => Vec::new(),
-    };
-    let remote_command = remote_shell_command(remote_shell, &env_vars, &argv)?;
+    let key = rq_auth_key(Some(rq_auth));
     let mut command = ssh_base_command(&args.ssh_options, host);
-    command
-        .arg(remote_command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let remote_command =
+        configure_remote_command(&mut command, &args.ssh_options, remote_shell, &argv, key)?;
+    preflight_ssh_secret_stdin(&args.ssh_options, host, &remote_command, key)?;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|err| format!("spawn ssh descriptor fetch on {host}: {err}"))?;
-    let mut stdout_log = child
+    write_remote_secret_stdin(&mut child, key, &format!("SSH descriptor fetch on {host}"))?;
+    let stdout_log = child
         .stdout
         .take()
-        .map(capture_child_pipe)
-        .ok_or_else(|| "ssh stdout pipe unavailable".to_string())?;
-    let mut stderr_log = child
+        .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
+    let stderr_log = child
         .stderr
         .take()
-        .map(capture_child_pipe)
-        .ok_or_else(|| "ssh stderr pipe unavailable".to_string())?;
+        .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
+    let (Some(mut stdout_log), Some(mut stderr_log)) = (stdout_log, stderr_log) else {
+        terminate_and_reap(&mut child);
+        return Err("ssh descriptor output pipe unavailable".to_string());
+    };
     let status = wait_child_timeout(
         &mut child,
         Duration::from_secs(args.descriptor_timeout_secs.max(1)),
@@ -2220,7 +2435,7 @@ fn probe_donor_tailnet_ipv4(
     let argv = ["tailscale".to_string(), "ip".to_string(), "-4".to_string()];
     let mut command = ssh_base_command(ssh_options, host);
     command
-        .arg(remote_shell_command(remote_shell, &[], &argv).ok()?)
+        .arg(remote_shell_command(remote_shell, &argv).ok()?)
         .stdin(Stdio::null());
     let output = command.output().ok()?;
     if !output.status.success() {
@@ -2288,11 +2503,19 @@ struct BondPullDonorLeg {
     choice: DonorPathChoice,
 }
 
+fn terminate_bond_pull_legs(legs: &mut [BondPullDonorLeg]) {
+    for leg in legs {
+        terminate_and_reap(&mut leg.child);
+        let _ = leg.stdout.finish();
+        let _ = leg.stderr.finish();
+    }
+}
+
 /// Orchestrate a bonded pull (z01bbr Phase F, the headline UX): fetch the
 /// agreed descriptor from the first donor, start the bonded receiver
 /// IN-PROCESS, then SSH-launch one `bond-donate` leg per donor host dialing
 /// the explicit control address, and wait for the fail-closed commit.
-fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
+fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
     let donors: Vec<String> = args
         .donors
         .iter()
@@ -2313,18 +2536,22 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
     bond_pull_control_advertise(args.advertise, args.listen, args.listen.port())?;
 
     // RQ symbol auth mirrors the `atp send` SSH bootstrap: use the configured
-    // key or generate a per-transfer one, and export it to every donor leg.
-    let rq_auth = resolve_rq_auth_choice(
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
-        true,
-    )?;
-    let (auth_key_hex, allow_lab) = match &rq_auth {
-        RqAuthChoice::KeyHex(key_hex) => (Some(key_hex.clone()), false),
-        RqAuthChoice::UnauthenticatedLab => (None, true),
+    // key or generate a per-transfer one, then deliver it to every donor over
+    // protected SSH stdin rather than a process argument.
+    let explicit_key = args.rq_auth_key_hex.take().map(SecretString::from_string);
+    let rq_auth = if args.rq_auth_key_stdin {
+        let stdin = std::io::stdin();
+        resolve_rq_auth_choice_with_stdin(
+            explicit_key,
+            args.rq_allow_unauthenticated_lab,
+            true,
+            &mut stdin.lock(),
+        )?
+    } else {
+        resolve_rq_auth_choice_owned(explicit_key, args.rq_allow_unauthenticated_lab, true)?
     };
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
-    let mut config = rq_config(
+    let config = rq_config_base(
         args.max_bytes,
         symbol_size,
         DEFAULT_UDP_FANOUT,
@@ -2332,9 +2559,8 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
         args.repair_overhead,
         0.0,
         DEFAULT_ROUND_TAIL_DRAIN_MS,
-        auth_key_hex.as_deref(),
-        allow_lab,
     )?;
+    let mut config = config_with_rq_auth(config, &rq_auth);
     config.accept_timeout = recv_accept_timeout(args.accept_timeout_secs)?;
     let chosen_fanout = config.udp_fanout.max(1);
 
@@ -2434,6 +2660,7 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
     // endpoint (per-donor, not a single shared control address).
     let mut legs: Vec<BondPullDonorLeg> = Vec::with_capacity(donor_specs.len());
     let mut spawn_error: Option<String> = None;
+    let key = rq_auth_key(Some(&rq_auth));
     for spec in &donor_specs {
         let host = &spec.host;
         // SSH-tunnel donors (UDP assumed blocked) would dial 127.0.0.1:<port>
@@ -2453,29 +2680,43 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
         }
         let dial = spec.choice.dial;
         let argv = bond_pull_donor_argv(&args, dial);
-        let env_vars = match &rq_auth {
-            RqAuthChoice::KeyHex(key_hex) => vec![(RQ_AUTH_ENV, key_hex.as_str())],
-            RqAuthChoice::UnauthenticatedLab => Vec::new(),
-        };
-        let remote_command = match remote_shell_command(spec.shell, &env_vars, &argv) {
-            Ok(command) => command,
-            Err(error) => {
-                spawn_error = Some(format!(
-                    "construct remote donor command for {host}: {error}"
-                ));
-                break;
-            }
-        };
         let mut command = ssh_base_command(&args.ssh_options, host);
-        command
-            .arg(remote_command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let remote_command =
+            match configure_remote_command(&mut command, &args.ssh_options, spec.shell, &argv, key)
+            {
+                Ok(remote_command) => remote_command,
+                Err(error) => {
+                    spawn_error = Some(format!(
+                        "construct remote donor command for {host}: {error}"
+                    ));
+                    break;
+                }
+            };
+        if let Err(error) =
+            preflight_ssh_secret_stdin(&args.ssh_options, host, &remote_command, key)
+        {
+            spawn_error = Some(error);
+            break;
+        }
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
         match command.spawn() {
             Ok(mut child) => {
-                let stdout = child.stdout.take().map(capture_child_pipe);
-                let stderr = child.stderr.take().map(capture_child_pipe);
+                if let Err(error) = write_remote_secret_stdin(
+                    &mut child,
+                    key,
+                    &format!("SSH donor bootstrap on {host}"),
+                ) {
+                    spawn_error = Some(error);
+                    break;
+                }
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|pipe| capture_child_pipe(pipe, auth_key_hex_secret(key)));
                 let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -2501,21 +2742,21 @@ fn run_bond_pull(args: BondPullArgs) -> Result<(), String> {
         }
     }
     if let Some(error) = spawn_error {
-        for leg in &mut legs {
-            let _ = leg.child.kill();
-            let _ = leg.child.wait();
-            let _ = leg.stdout.finish();
-            let _ = leg.stderr.finish();
-        }
+        terminate_bond_pull_legs(&mut legs);
         // The receiver thread fails closed on its own enrollment timeout; the
         // process exits with this error either way.
         return Err(error);
     }
+    drop(rq_auth);
 
     // The receiver returns exactly when the transfer commits or fails closed.
-    let receive_result = receiver_thread
-        .join()
-        .map_err(|_| "bonded receiver thread panicked".to_string())?;
+    let receive_result = match receiver_thread.join() {
+        Ok(result) => result,
+        Err(_) => {
+            terminate_bond_pull_legs(&mut legs);
+            return Err("bonded receiver thread panicked".to_string());
+        }
+    };
     if receive_result.is_err() {
         for leg in &mut legs {
             let _ = leg.child.kill();
@@ -2645,25 +2886,24 @@ async fn derive_bond_transfer_descriptor(
 /// descriptor and assignment.
 ///
 /// Every donor must derive the same id from the same key material regardless
-/// of whether the key arrived via `--rq-auth-key-hex` or the environment, so
-/// the id is a truncated SHA-256 fingerprint of the raw key bytes — never the
-/// key itself (descriptors and assignments may be logged or serialized for
-/// coordination).
+/// of whether the key arrived via protected stdin, `--rq-auth-key-hex`, or the
+/// environment, so the id is a truncated SHA-256 fingerprint of the raw key
+/// bytes — never the key itself (descriptors and assignments may be logged or
+/// serialized for coordination).
 fn bond_auth_key_id(
     explicit_key_hex: Option<&str>,
     allow_unauthenticated_lab: bool,
 ) -> Result<Option<String>, String> {
-    match resolve_rq_auth_choice(explicit_key_hex, allow_unauthenticated_lab, false)? {
-        RqAuthChoice::UnauthenticatedLab => Ok(None),
-        RqAuthChoice::KeyHex(key_hex) => {
-            let mut bytes = [0u8; AUTH_KEY_SIZE];
-            hex::decode_to_slice(&key_hex, &mut bytes)
-                .map_err(|err| format!("decode RQ auth key hex: {err}"))?;
-            let digest: [u8; 32] = Sha256::digest(bytes).into();
-            Ok(Some(format!(
-                "rq-auth-sha256:{}",
-                hex::encode(&digest[..8])
-            )))
+    let auth = resolve_rq_auth_choice(explicit_key_hex, allow_unauthenticated_lab, false)?;
+    Ok(bond_auth_key_id_for_choice(&auth))
+}
+
+fn bond_auth_key_id_for_choice(auth: &RqAuthChoice) -> Option<String> {
+    match auth {
+        RqAuthChoice::UnauthenticatedLab => None,
+        RqAuthChoice::Key(key) => {
+            let digest: [u8; 32] = Sha256::digest(key.as_bytes()).into();
+            Some(format!("rq-auth-sha256:{}", hex::encode(&digest[..8])))
         }
     }
 }
@@ -2793,6 +3033,7 @@ fn run_send_to_addrs(
     mut args: SendArgs,
     addresses: &[SocketAddr],
     use_direct_delta_probe: bool,
+    rq_config_override: Option<RqConfig>,
 ) -> Result<(), String> {
     let first_address = addresses
         .first()
@@ -2829,7 +3070,13 @@ fn run_send_to_addrs(
         run_send_auto_to_addrs(&runtime, &args, addresses)?
     } else {
         try_address_candidates(args.transport, addresses, |address| {
-            send_to_addr_with_transport(&runtime, &args, args.transport, address)
+            send_to_addr_with_transport(
+                &runtime,
+                &args,
+                args.transport,
+                address,
+                rq_config_override.as_ref(),
+            )
         })
         .map_err(|failure| failure.message)?
     };
@@ -3044,7 +3291,7 @@ fn run_send_auto_to_addrs(
     {
         eprintln!("[atp] transport selection: trying {}", transport.cli_arg());
         match try_address_candidates(transport, addresses, |address| {
-            send_to_addr_with_transport(runtime, args, transport, address)
+            send_to_addr_with_transport(runtime, args, transport, address, None)
         }) {
             Ok(report) => {
                 eprintln!(
@@ -3087,6 +3334,7 @@ fn send_to_addr_with_transport(
     args: &SendArgs,
     transport: Transport,
     addr: SocketAddr,
+    rq_config_override: Option<&RqConfig>,
 ) -> Result<serde_json::Value, SendTransportFailure> {
     let bwlimit_bps = normalize_bwlimit_bps(args.bwlimit_bps)?;
     if bwlimit_bps.is_some() && transport != Transport::Quic {
@@ -3151,7 +3399,10 @@ fn send_to_addr_with_transport(
             Ok(tcp_send_json(&report, Some(elapsed)))
         }
         Transport::Rq => {
-            let cfg = rq_send_config(args)?;
+            let cfg = match rq_config_override {
+                Some(config) => config.clone(),
+                None => rq_send_config(args)?,
+            };
             let chosen_fanout = cfg.udp_fanout.max(1);
             let start = Instant::now();
             let report = runtime
@@ -3298,7 +3549,11 @@ fn validate_ssh_bootstrap(
     Ok(())
 }
 
-fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), String> {
+fn run_send_via_ssh(
+    mut args: SendArgs,
+    remote: &RemoteTarget,
+    prepared_rq_auth: Option<RqAuthChoice>,
+) -> Result<(), String> {
     let remote_shell =
         resolve_remote_shell(args.remote_shell, &args.ssh_options, &remote.ssh_host)?;
     validate_ssh_bootstrap(remote_shell, &args, remote)?;
@@ -3315,20 +3570,24 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
 
     // RQ still needs a per-symbol HMAC key. Direct QUIC/TLS authenticates the
     // same symbol bytes with QUIC 1-RTT AEAD, so SSH bootstrap does not generate
-    // or export an RQ auth key for that transport.
+    // or deliver an RQ auth key for that transport.
     let rq_auth = if args.transport == Transport::Rq {
-        let auth = resolve_rq_auth_choice(
-            args.rq_auth_key_hex.as_deref(),
-            args.rq_allow_unauthenticated_lab,
-            true,
-        )?;
-        if let RqAuthChoice::KeyHex(key_hex) = &auth {
-            args.rq_auth_key_hex = Some(key_hex.clone());
+        match prepared_rq_auth {
+            Some(auth) => Some(auth),
+            None => Some(resolve_rq_auth_choice_owned(
+                args.rq_auth_key_hex.take().map(SecretString::from_string),
+                args.rq_allow_unauthenticated_lab,
+                true,
+            )?),
         }
-        Some(auth)
     } else {
+        debug_assert!(prepared_rq_auth.is_none());
         None
     };
+    let rq_config_override = rq_auth
+        .as_ref()
+        .map(|auth| rq_send_config_with_auth(&args, auth))
+        .transpose()?;
     if args.transport == Transport::Quic
         && (args.server_cert.is_none() || args.server_key.is_none())
     {
@@ -3374,15 +3633,17 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addresses = resolve(&data_target)?;
     let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref(), remote_shell)?;
+    let log_redaction = auth_key_hex_secret(rq_auth_key(rq_auth.as_ref()));
+    drop(rq_auth);
     let stderr_log = wait_for_remote_ready(
         &mut child,
         Duration::from_secs(args.ssh_ready_timeout_secs.max(1)),
+        log_redaction,
     )?;
 
-    let send_result = run_send_to_addrs(args, &addresses, false);
+    let send_result = run_send_to_addrs(args, &addresses, false, rq_config_override);
     if send_result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
+        terminate_and_reap(&mut child);
         return send_result;
     }
 
@@ -4185,7 +4446,7 @@ fn fetch_remote_delta_state(
     ];
     let mut command = ssh_command(args, &remote.ssh_host);
     command
-        .arg(remote_shell_command(remote_shell, &[], &argv)?)
+        .arg(remote_shell_command(remote_shell, &argv)?)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = command
@@ -6673,7 +6934,7 @@ fn probe_remote_tailscale_ipv4(
 ) -> Option<String> {
     let argv = ["tailscale".to_string(), "ip".to_string(), "-4".to_string()];
     let mut command = ssh_command(args, ssh_host);
-    command.arg(remote_shell_command(remote_shell, &[], &argv).ok()?);
+    command.arg(remote_shell_command(remote_shell, &argv).ok()?);
     let output = command.output().ok()?;
     if !output.status.success() {
         return None;
@@ -6743,49 +7004,83 @@ fn spawn_remote_receiver(
         }
     }
 
-    let env_vars = match rq_auth {
-        Some(RqAuthChoice::KeyHex(key_hex)) => vec![(RQ_AUTH_ENV, key_hex.as_str())],
-        _ => Vec::new(),
-    };
-    let remote_command = remote_shell_command(remote_shell, &env_vars, &argv)?;
+    let key = rq_auth_key(rq_auth);
     let mut command = ssh_command(args, &remote.ssh_host);
-    command
-        .arg(remote_command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    command
+    let remote_command =
+        configure_remote_command(&mut command, &args.ssh_options, remote_shell, &argv, key)?;
+    preflight_ssh_secret_stdin(&args.ssh_options, &remote.ssh_host, &remote_command, key)?;
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = command
         .spawn()
-        .map_err(|err| format!("spawn ssh receiver {}: {err}", remote.ssh_host))
+        .map_err(|err| format!("spawn ssh receiver {}: {err}", remote.ssh_host))?;
+    write_remote_secret_stdin(
+        &mut child,
+        key,
+        &format!("SSH receiver bootstrap on {}", remote.ssh_host),
+    )?;
+    Ok(child)
 }
 
 fn ssh_command(args: &SendArgs, ssh_host: &str) -> ProcessCommand {
     ssh_base_command(&args.ssh_options, ssh_host)
 }
 
-fn ssh_base_command(ssh_options: &[String], ssh_host: &str) -> ProcessCommand {
+fn ssh_options_command(ssh_options: &[String]) -> ProcessCommand {
     let mut command = ProcessCommand::new("ssh");
+    // The protected channel is stdin only. Never let a locally configured key
+    // leak into the ssh process environment or a matching SendEnv rule.
+    command.env_remove(RQ_AUTH_ENV);
     command
-        .arg("-T")
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
-        .arg("ConnectTimeout=15");
+        .arg("ConnectTimeout=15")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-o")
+        .arg("ControlPath=none")
+        .arg("-o")
+        .arg("ControlPersist=no")
+        .arg("-o")
+        .arg("ForwardX11=no")
+        .arg("-o")
+        .arg("PermitLocalCommand=no")
+        .arg("-o")
+        .arg("RequestTTY=no")
+        .arg("-o")
+        .arg("RemoteCommand=none");
     for option in ssh_options {
         command.arg(option);
     }
-    command.arg(ssh_host);
+    command
+}
+
+fn ssh_base_command(ssh_options: &[String], ssh_host: &str) -> ProcessCommand {
+    let mut command = ssh_options_command(ssh_options);
+    // Keep imperative transport invariants after raw user options. `-T`
+    // prevents a tty/escape filter; `-x` prevents a configured xauth helper
+    // from inheriting the protected stdin pipe before the remote session.
+    command
+        .arg("-T")
+        .arg("-x")
+        .arg("-S")
+        .arg("none")
+        .arg("--")
+        .arg(ssh_host);
     command
 }
 
 fn wait_for_remote_ready(
     child: &mut Child,
     timeout: Duration,
+    redaction: Option<SecretString>,
 ) -> Result<Arc<Mutex<String>>, String> {
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "ssh stderr pipe unavailable".to_string())?;
+    let Some(stderr) = child.stderr.take() else {
+        terminate_and_reap(child);
+        return Err("ssh stderr pipe unavailable".to_string());
+    };
     let stderr_log = Arc::new(Mutex::new(String::new()));
     let log_for_thread = Arc::clone(&stderr_log);
     let (ready_tx, ready_rx) = mpsc::channel::<bool>();
@@ -6793,7 +7088,9 @@ fn wait_for_remote_ready(
     thread::spawn(move || {
         let mut ready_sent = false;
         for line in BufReader::new(stderr).lines() {
-            let line = line.unwrap_or_else(|err| format!("<stderr read error: {err}>"));
+            let line = line
+                .map(|line| redact_captured_line(line, redaction.as_ref()))
+                .unwrap_or_else(|err| format!("<stderr read error: {err}>"));
             if let Ok(mut log) = log_for_thread.lock() {
                 log.push_str(&line);
                 log.push('\n');
@@ -6815,6 +7112,7 @@ fn wait_for_remote_ready(
                 .lock()
                 .map(|s| s.clone())
                 .unwrap_or_else(|_| "<stderr unavailable>".to_string());
+            terminate_and_reap(child);
             Err(format!(
                 "remote atp receiver exited before readiness; stderr: {}",
                 last_log_lines(&log, 8)
@@ -6829,9 +7127,15 @@ fn wait_for_remote_ready(
             ))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
+            terminate_and_reap(child);
             Err("remote atp readiness watcher disconnected".to_string())
         }
     }
+}
+
+fn terminate_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn wait_child_timeout(
@@ -6841,12 +7145,16 @@ fn wait_child_timeout(
 ) -> Result<ExitStatus, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
-            return Ok(status);
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                terminate_and_reap(child);
+                return Err(error.to_string());
+            }
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_and_reap(child);
             return Err(format!("{what} did not exit within {}s", timeout.as_secs()));
         }
         thread::sleep(Duration::from_millis(50));
@@ -6860,48 +7168,24 @@ fn shell_command(argv: &[String]) -> String {
         .join(" ")
 }
 
-fn shell_command_with_env(env_vars: &[(&str, &str)], argv: &[String]) -> String {
-    let mut parts = env_vars
-        .iter()
-        .map(|(name, value)| format!("{name}={}", shell_quote(value)))
-        .collect::<Vec<_>>();
-    parts.push(shell_command(argv));
-    parts.join(" ")
+fn powershell_utf8_expression(value: &str) -> String {
+    let encoded = STANDARD.encode(value.as_bytes());
+    format!("([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')))")
 }
 
-fn powershell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn powershell_encoded_command(
-    env_vars: &[(&str, &str)],
-    argv: &[String],
-) -> Result<String, String> {
+fn powershell_encoded_command(argv: &[String]) -> Result<String, String> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| "remote command argv must not be empty".to_string())?;
     let mut script = "$ErrorActionPreference='Stop';$utf8=New-Object System.Text.UTF8Encoding($false);[Console]::OutputEncoding=$utf8;$OutputEncoding=$utf8;".to_string();
-    for (name, value) in env_vars {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            return Err(format!("unsafe remote environment variable name: {name:?}"));
-        }
-        script.push_str("$env:");
-        script.push_str(name);
-        script.push('=');
-        script.push_str(&powershell_single_quote(value));
-        script.push(';');
-    }
     script.push_str("& ");
-    script.push_str(&powershell_single_quote(program));
+    script.push_str(&powershell_utf8_expression(program));
     for arg in args {
         script.push(' ');
-        script.push_str(&powershell_single_quote(arg));
+        script.push_str(&powershell_utf8_expression(arg));
     }
-    script.push_str("; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }");
+    script.push_str(";$atpExit=$LASTEXITCODE;");
+    script.push_str("if ($atpExit -ne 0) { exit $atpExit }");
 
     let mut utf16le = Vec::with_capacity(script.len().saturating_mul(2));
     for unit in script.encode_utf16() {
@@ -6922,18 +7206,388 @@ fn powershell_encoded_command(
     Ok(command)
 }
 
-fn remote_shell_command(
-    shell: RemoteShell,
-    env_vars: &[(&str, &str)],
-    argv: &[String],
-) -> Result<String, String> {
+fn remote_shell_command(shell: RemoteShell, argv: &[String]) -> Result<String, String> {
     match shell {
-        RemoteShell::Posix => Ok(shell_command_with_env(env_vars, argv)),
-        RemoteShell::Powershell => powershell_encoded_command(env_vars, argv),
+        RemoteShell::Posix => Ok(shell_command(argv)),
+        RemoteShell::Powershell => powershell_encoded_command(argv),
         RemoteShell::Auto => {
             Err("remote shell must be resolved before command construction".to_string())
         }
     }
+}
+
+fn rq_auth_key(rq_auth: Option<&RqAuthChoice>) -> Option<&AuthKey> {
+    match rq_auth {
+        Some(RqAuthChoice::Key(key)) => Some(key),
+        Some(RqAuthChoice::UnauthenticatedLab) | None => None,
+    }
+}
+
+fn ssh_path_targets_inherited_stdin(path: &str) -> bool {
+    let path = path
+        .trim()
+        .trim_matches(|character| matches!(character, '\'' | '"'))
+        .replace('\\', "/");
+    if path == "-" {
+        return true;
+    }
+
+    let home_relative = path.strip_prefix("~/").map(str::to_string);
+    let path = if let Some(home_relative) = home_relative {
+        match env::var("HOME") {
+            Ok(home) => format!("{home}/{home_relative}"),
+            Err(_) => path,
+        }
+    } else if path.starts_with('/') {
+        path
+    } else {
+        match env::current_dir() {
+            Ok(cwd) => format!("{}/{path}", cwd.display()),
+            Err(_) => path,
+        }
+    };
+
+    let absolute = path.starts_with('/');
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                let _ = components.pop();
+            }
+            component => components.push(component.to_ascii_lowercase()),
+        }
+    }
+    if !absolute {
+        return false;
+    }
+    matches!(
+        components.as_slice(),
+        [dev, stdin]
+            if dev == "dev" && stdin == "stdin"
+    ) || matches!(
+        components.as_slice(),
+        [dev, fd, zero]
+            if dev == "dev" && fd == "fd" && zero == "0"
+    ) || matches!(
+        components.as_slice(),
+        [proc, process, fd, zero]
+            if proc == "proc"
+                && matches!(process.as_str(), "self" | "thread-self" | "curproc")
+                && fd == "fd"
+                && zero == "0"
+    )
+}
+
+fn ssh_assignment_conflicts_with_secret_stdin(assignment: &str) -> bool {
+    let (name, raw_value) = assignment
+        .split_once('=')
+        .or_else(|| assignment.split_once(char::is_whitespace))
+        .unwrap_or((assignment, ""));
+    let name = name.trim().to_ascii_lowercase();
+    let contains_hash = raw_value.contains('#');
+    let mut tokens = raw_value.split_whitespace();
+    let value = tokens.next().unwrap_or_default().to_ascii_lowercase();
+    let has_extra_tokens = tokens.next().is_some();
+    match name.as_str() {
+        "batchmode" => contains_hash || has_extra_tokens || value != "yes",
+        "controlmaster" | "controlpersist" => contains_hash || has_extra_tokens || value != "no",
+        "controlpath" => contains_hash || has_extra_tokens || value != "none",
+        "forwardx11"
+        | "permitlocalcommand"
+        | "requesttty"
+        | "stdinnull"
+        | "forkafterauthentication" => contains_hash || has_extra_tokens || value != "no",
+        "sessiontype" => contains_hash || has_extra_tokens || value != "default",
+        "localcommand" | "remotecommand" => contains_hash || has_extra_tokens || value != "none",
+        "proxycommand" => raw_value.trim() == "-",
+        "include" => true,
+        "identityfile"
+        | "certificatefile"
+        | "userknownhostsfile"
+        | "globalknownhostsfile"
+        | "revokedhostkeys"
+        | "pkcs11provider"
+        | "securitykeyprovider"
+        | "xauthlocation" => raw_value
+            .split_whitespace()
+            .any(ssh_path_targets_inherited_stdin),
+        _ => false,
+    }
+}
+
+fn validate_ssh_secret_stdin_options(ssh_options: &[String]) -> Result<(), String> {
+    #[derive(Clone, Copy)]
+    enum PendingValue {
+        Generic,
+        Assignment,
+        SensitiveFile,
+    }
+
+    let mut pending = None;
+    for option in ssh_options {
+        let trimmed = option.trim();
+        if let Some(expected) = pending.take() {
+            let conflicts = match expected {
+                PendingValue::Generic => false,
+                PendingValue::Assignment => ssh_assignment_conflicts_with_secret_stdin(trimmed),
+                PendingValue::SensitiveFile => ssh_path_targets_inherited_stdin(trimmed),
+            };
+            if conflicts {
+                return Err(format!(
+                    "--ssh-option {trimmed:?} conflicts with protected SSH stdin delivery"
+                ));
+            }
+            continue;
+        }
+
+        let Some(cluster) = trimmed.strip_prefix('-') else {
+            return Err(format!(
+                "--ssh-option {trimmed:?} is an unexpected positional SSH argument"
+            ));
+        };
+        if cluster.is_empty() || cluster.starts_with('-') {
+            return Err(format!(
+                "--ssh-option {trimmed:?} cannot precede protected SSH stdin delivery"
+            ));
+        }
+
+        let first = cluster.chars().next().expect("non-empty SSH option");
+        if first == 'o' {
+            let assignment = cluster[1..].trim_start_matches('=').trim();
+            if assignment.is_empty() {
+                pending = Some(PendingValue::Assignment);
+            } else if ssh_assignment_conflicts_with_secret_stdin(assignment) {
+                return Err(format!(
+                    "--ssh-option {assignment:?} conflicts with protected SSH stdin delivery"
+                ));
+            }
+            continue;
+        }
+
+        // An alternate config can read fd 0 through Include before `ssh -G`
+        // and the real child see the same bytes. Secret-bearing sessions keep
+        // the normal trusted user/system config, but reject raw `-F` entirely.
+        if first == 'F' {
+            return Err(format!(
+                "--ssh-option {trimmed:?} cannot select an alternate config for protected SSH stdin delivery"
+            ));
+        }
+        if first == 'S' {
+            return Err(format!(
+                "--ssh-option {trimmed:?} cannot select a multiplex control socket for protected SSH stdin delivery"
+            ));
+        }
+        if matches!(first, 'E' | 'i' | 'I') {
+            let sensitive_file = &cluster[1..];
+            if sensitive_file.is_empty() {
+                pending = Some(PendingValue::SensitiveFile);
+            } else if ssh_path_targets_inherited_stdin(sensitive_file) {
+                return Err(format!(
+                    "--ssh-option {trimmed:?} reads the protected SSH stdin channel as a local SSH input"
+                ));
+            }
+            continue;
+        }
+
+        // Keep secret-bearing raw options structurally unambiguous: options
+        // that consume values may use an attached value or the next argv word;
+        // no-argument options may cluster only with other safe flags.
+        const TAKES_ARGUMENT: &str = "BbcDEeFIiJLlmPpRSWw";
+        if matches!(first, 'W' | 'O' | 'Q') {
+            return Err(format!(
+                "--ssh-option {trimmed:?} replaces the remote ATP session"
+            ));
+        }
+        if TAKES_ARGUMENT.contains(first) {
+            if cluster.len() == 1 {
+                pending = Some(PendingValue::Generic);
+            }
+            continue;
+        }
+        const SAFE_FLAGS: &str = "46AaCgKkqTvxy";
+        if !cluster.chars().all(|flag| SAFE_FLAGS.contains(flag)) {
+            return Err(format!(
+                "--ssh-option {trimmed:?} conflicts with protected SSH stdin delivery"
+            ));
+        }
+    }
+    if pending.is_some() {
+        return Err("--ssh-option is missing its required value".to_string());
+    }
+    Ok(())
+}
+
+/// Reject host-specific SSH configuration that would detach, discard, or
+/// divert the protected stdin channel. The effective-config probe runs before
+/// the secret-bearing child is spawned. Its stdin receives only a public,
+/// additive config canary so an `Include` that reads fd 0 is detectable; the
+/// key itself never enters this probe through argv, the environment, or stdin.
+fn preflight_ssh_secret_stdin(
+    ssh_options: &[String],
+    ssh_host: &str,
+    remote_command: &str,
+    key: Option<&AuthKey>,
+) -> Result<(), String> {
+    if key.is_none() {
+        return Ok(());
+    }
+    validate_ssh_secret_stdin_options(ssh_options)?;
+
+    let mut command = ssh_options_command(ssh_options);
+    // `-G` is kept after the exact user options and final imperative `-T`, but
+    // before the destination as required by ssh's option grammar. Supplying the
+    // exact eventual command after the destination is essential: otherwise
+    // `Match command` and `Match sessiontype` could hide a stdin-diverting rule
+    // from the probe. No connection is opened and the secret is never supplied.
+    command
+        .arg("-T")
+        .arg("-x")
+        .arg("-S")
+        .arg("none")
+        .arg("-G")
+        .arg("--")
+        .arg(ssh_host)
+        .arg(remote_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("inspect effective SSH config for {ssh_host}: {error}"))?;
+    let canary = format!("IdentityFile {SSH_STDIN_CONFIG_CANARY_PATH}\n");
+    let Some(mut stdin) = child.stdin.take() else {
+        terminate_and_reap(&mut child);
+        return Err("effective SSH config probe stdin pipe is unavailable".to_string());
+    };
+    let write_result = stdin.write_all(canary.as_bytes());
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for effective SSH config on {ssh_host}: {error}"))?;
+    if let Err(error) = write_result
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(format!(
+            "write effective SSH config canary for {ssh_host}: {error}"
+        ));
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "inspect effective SSH config for {ssh_host} failed ({}); stderr: {}",
+            output.status,
+            last_log_lines(&stderr, 8),
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    validate_ssh_secret_stdin_effective_config(&stdout, ssh_host)
+}
+
+fn validate_ssh_secret_stdin_effective_config(
+    effective_config: &str,
+    ssh_host: &str,
+) -> Result<(), String> {
+    for line in effective_config.lines() {
+        let line = line.trim();
+        let Some(split_at) = line.find(char::is_whitespace) else {
+            continue;
+        };
+        let name = line[..split_at].to_ascii_lowercase();
+        let value = line[split_at..].trim().to_ascii_lowercase();
+        let safe = match name.as_str() {
+            "batchmode" => value == "yes" || value == "true",
+            "controlmaster" | "controlpersist" => value == "no" || value == "false",
+            "controlpath" => value == "none",
+            "forwardx11" => value == "no" || value == "false",
+            "permitlocalcommand" => value == "no" || value == "false",
+            "requesttty" | "stdinnull" | "forkafterauthentication" => {
+                value == "no" || value == "false"
+            }
+            "sessiontype" => value == "default",
+            "localcommand" | "remotecommand" => value == "none",
+            "proxycommand" => value != "-",
+            "identityfile"
+            | "certificatefile"
+            | "userknownhostsfile"
+            | "globalknownhostsfile"
+            | "revokedhostkeys"
+            | "pkcs11provider"
+            | "securitykeyprovider"
+            | "xauthlocation" => !value.split_whitespace().any(|path| {
+                path.eq_ignore_ascii_case(SSH_STDIN_CONFIG_CANARY_PATH)
+                    || ssh_path_targets_inherited_stdin(path)
+            }),
+            _ => true,
+        };
+        if !safe {
+            return Err(format!(
+                "effective SSH config for {ssh_host} sets {name}={value:?}, which conflicts with protected SSH stdin delivery"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Attach a remote ATP command without ever formatting the secret as text.
+/// The only public protocol marker is a hidden flag telling ATP to read one
+/// bounded key line directly from its inherited stdin.
+fn configure_remote_command(
+    command: &mut ProcessCommand,
+    ssh_options: &[String],
+    remote_shell: RemoteShell,
+    argv: &[String],
+    key: Option<&AuthKey>,
+) -> Result<String, String> {
+    if key.is_some() {
+        validate_ssh_secret_stdin_options(ssh_options)?;
+    }
+    let mut argv = argv.to_vec();
+    if key.is_some() {
+        argv.push("--rq-auth-key-stdin".to_string());
+    }
+    let remote_command = remote_shell_command(remote_shell, &argv)?;
+    command.arg(&remote_command);
+    command.stdin(if key.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    Ok(remote_command)
+}
+
+/// Deliver one validated RQ key to a freshly spawned SSH child and close the
+/// pipe immediately. Any setup/write failure terminates and reaps the child;
+/// error text is deliberately derived only from public context and I/O state.
+fn write_remote_secret_stdin(
+    child: &mut Child,
+    key: Option<&AuthKey>,
+    context: &str,
+) -> Result<(), String> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = [0u8; AUTH_KEY_SIZE * 2 + 1];
+    for (index, byte) in key.as_bytes().iter().copied().enumerate() {
+        encoded[index * 2] = HEX[usize::from(byte >> 4)];
+        encoded[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
+    }
+    encoded[AUTH_KEY_SIZE * 2] = b'\n';
+
+    let result = match child.stdin.take() {
+        Some(mut stdin) => stdin
+            .write_all(&encoded)
+            .and_then(|()| stdin.flush())
+            .map_err(|error| format!("{context}: write SSH secret stdin: {error}")),
+        None => Err(format!("{context}: SSH secret stdin is unavailable")),
+    };
+    encoded.zeroize();
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 fn resolve_remote_shell(
@@ -6951,7 +7605,7 @@ fn resolve_remote_shell(
         "/c".to_string(),
         "echo ATP_WINDOWS_POWERSHELL".to_string(),
     ];
-    let probe = powershell_encoded_command(&[], &probe_argv)?;
+    let probe = powershell_encoded_command(&probe_argv)?;
     let mut command = ssh_base_command(ssh_options, ssh_host);
     command
         .arg(probe)
@@ -7532,12 +8186,26 @@ async fn create_receive_destination(dest: &Path) -> Result<(), String> {
     preflight_receive_destination(dest, "use receive destination").await
 }
 
-fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
+fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
     if args.transport == Transport::Auto {
         return Err(
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
         );
     }
+    if args.rq_auth_key_stdin && args.transport != Transport::Rq {
+        return Err("--rq-auth-key-stdin is only valid with --transport rq".to_string());
+    }
+    let mut rq_auth = if args.transport == Transport::Rq {
+        let stdin = std::io::stdin();
+        Some(resolve_rq_auth_choice_with_stdin(
+            args.rq_auth_key_hex.take().map(SecretString::from_string),
+            args.rq_allow_unauthenticated_lab,
+            args.rq_auth_key_stdin,
+            &mut stdin.lock(),
+        )?)
+    } else {
+        None
+    };
     let one_shot = args.once && !persistent;
     if args.transport == Transport::Quic && !one_shot && args.listen.port() == 0 {
         return Err(
@@ -7623,7 +8291,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
         }
         Transport::Rq => {
             let symbol_size = resolved_symbol_size(args.symbol_size, false);
-            let mut cfg = rq_config(
+            let cfg = rq_config_base(
                 args.max_bytes,
                 symbol_size,
                 1,
@@ -7631,9 +8299,12 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 args.repair_overhead,
                 args.rq_round0_loss_pct,
                 args.rq_tail_drain_ms,
-                args.rq_auth_key_hex.as_deref(),
-                args.rq_allow_unauthenticated_lab,
             )?;
+            let auth = rq_auth
+                .take()
+                .expect("RQ auth resolved before transport dispatch");
+            let mut cfg = config_with_rq_auth(cfg, &auth);
+            drop(auth);
             cfg.accept_timeout = recv_listen_timeout(&args)?;
             let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
@@ -8868,38 +9539,116 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     #[test]
     fn ssh_bootstrap_can_generate_transfer_local_auth_key() {
         match resolve_rq_auth_choice(None, false, true) {
-            Ok(RqAuthChoice::KeyHex(key_hex)) => {
-                assert_eq!(key_hex.len(), AUTH_KEY_SIZE * 2);
-                assert!(auth_key_from_hex(&key_hex).is_ok());
+            Ok(RqAuthChoice::Key(key)) => {
+                assert_eq!(key.as_bytes().len(), AUTH_KEY_SIZE);
+                assert_eq!(format!("{key:?}"), "AuthKey(<redacted>)");
             }
             other => panic!("expected generated key, got {other:?}"),
         }
     }
 
     #[test]
-    fn remote_env_shell_command_quotes_key_outside_argv() {
+    fn rq_auth_key_stdin_reader_accepts_lf_and_crlf() {
+        let expected = auth_key_from_hex(VALID_KEY_HEX).expect("valid key");
+        for suffix in ["\n", "\r\n"] {
+            let mut input = std::io::Cursor::new(format!("{VALID_KEY_HEX}{suffix}").into_bytes());
+            let actual = read_rq_auth_key_stdin(&mut input).expect("read bounded key line");
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn rq_auth_key_stdin_reader_stops_at_newline_without_waiting_for_eof() {
+        let line = format!("{VALID_KEY_HEX}\nbytes-that-belong-to-no-key");
+        let mut input = std::io::Cursor::new(line.into_bytes());
+        let actual = read_rq_auth_key_stdin(&mut input).expect("read first bounded key line");
+
+        assert_eq!(actual, auth_key_from_hex(VALID_KEY_HEX).expect("valid key"));
+        assert_eq!(
+            input.position(),
+            u64::try_from(AUTH_KEY_SIZE * 2 + 1).expect("key line length fits u64")
+        );
+    }
+
+    #[test]
+    fn rq_auth_key_stdin_reader_rejects_partial_extra_and_invalid_input_without_echo() {
+        for input in [
+            VALID_KEY_HEX.as_bytes().to_vec(),
+            format!("{VALID_KEY_HEX}x\n").into_bytes(),
+            format!("{}\n", "g".repeat(AUTH_KEY_SIZE * 2)).into_bytes(),
+        ] {
+            let mut input = std::io::Cursor::new(input);
+            let error = read_rq_auth_key_stdin(&mut input).expect_err("invalid stdin key");
+            assert!(!error.contains(VALID_KEY_HEX));
+        }
+    }
+
+    #[test]
+    fn rq_auth_key_stdin_flag_parses_without_key_material_in_argv() {
+        let cli = Cli::try_parse_from([
+            "atp",
+            "send",
+            "./source",
+            "receiver.example:/srv/in",
+            "--transport",
+            "rq",
+            "--rq-auth-key-stdin",
+        ])
+        .expect("parse protected local stdin key source");
+        let Command::Send(args) = cli.command else {
+            panic!("expected send command");
+        };
+        assert!(args.rq_auth_key_stdin);
+        assert!(args.rq_auth_key_hex.is_none());
+    }
+
+    #[test]
+    fn captured_remote_output_redacts_exact_stdin_key() {
+        let key = auth_key_from_hex(VALID_KEY_HEX).expect("valid key");
+        let redaction = auth_key_hex_secret(Some(&key)).expect("hex redaction token");
+        let redacted = redact_captured_line(
+            format!("remote wrapper echoed {VALID_KEY_HEX}"),
+            Some(&redaction),
+        );
+
+        assert_eq!(redacted, "remote wrapper echoed [REDACTED]");
+        assert!(!redacted.contains(VALID_KEY_HEX));
+    }
+
+    #[test]
+    fn posix_remote_command_uses_public_stdin_flag_without_embedding_key() {
+        let key = auth_key_from_hex(VALID_KEY_HEX).expect("valid key");
         let argv = vec![
             "atp".to_string(),
             "recv".to_string(),
             "/srv/in box".to_string(),
         ];
-        let command = shell_command_with_env(&[(RQ_AUTH_ENV, VALID_KEY_HEX)], &argv);
+        let mut command = ssh_base_command(&[], "receiver.example");
+        configure_remote_command(&mut command, &[], RemoteShell::Posix, &argv, Some(&key))
+            .expect("construct POSIX remote command");
+        assert!(
+            command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new(RQ_AUTH_ENV) && value.is_none()
+            })
+        );
+        let command = format!("{command:?}");
 
-        assert!(command.starts_with("ATP_RQ_AUTH_KEY_HEX='000102"));
-        assert!(command.contains("'atp' 'recv' '/srv/in box'"));
+        assert!(command.contains("--rq-auth-key-stdin"));
+        assert!(command.contains("/srv/in box"));
+        assert!(!command.contains(VALID_KEY_HEX));
         assert!(!command.contains("--rq-auth-key-hex"));
     }
 
     #[test]
-    fn windows_remote_command_is_utf16_encoded_and_injection_safe() {
-        let argv = vec![
+    fn windows_remote_command_base64_wraps_all_utf8_argv_without_interpolation() {
+        let argv = [
             r"C:\Program Files\ATP\atp.exe".to_string(),
             "recv".to_string(),
-            r"C:\incoming folder\O'Brien".to_string(),
+            "C:\\incoming folder\\O’Brien; Write-Error injected".to_string(),
             "unicode-λ".to_string(),
+            "--rq-auth-key-stdin".to_string(),
         ];
-        let command = powershell_encoded_command(&[(RQ_AUTH_ENV, VALID_KEY_HEX)], &argv)
-            .expect("encode PowerShell command");
+        let command = powershell_encoded_command(&argv).expect("encode PowerShell command");
         let encoded = command
             .split_whitespace()
             .last()
@@ -8913,11 +9662,294 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         let script = String::from_utf16(&units).expect("UTF-16LE PowerShell script");
 
         assert!(script.contains("[Console]::OutputEncoding=$utf8"));
-        assert!(script.contains("$env:ATP_RQ_AUTH_KEY_HEX='000102"));
-        assert!(script.contains("& 'C:\\Program Files\\ATP\\atp.exe' 'recv'"));
-        assert!(script.contains(r"'C:\incoming folder\O''Brien'"));
-        assert!(script.contains("'unicode-λ'"));
-        assert!(script.ends_with("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+        assert!(script.contains("[Convert]::FromBase64String"));
+        for arg in &argv {
+            assert!(script.contains(&STANDARD.encode(arg.as_bytes())));
+            assert!(!script.contains(arg));
+        }
+        assert!(!script.contains("$env:"));
+        assert!(!script.contains("Write-Error injected"));
+        assert!(!script.contains(VALID_KEY_HEX));
+        assert!(script.ends_with("if ($atpExit -ne 0) { exit $atpExit }"));
+    }
+
+    #[test]
+    fn rq_auth_debug_and_ssh_command_argv_redact_secret() {
+        let auth = RqAuthChoice::Key(auth_key_from_hex(VALID_KEY_HEX).expect("valid key"));
+        assert_eq!(format!("{auth:?}"), "Key([REDACTED])");
+
+        for shell in [RemoteShell::Posix, RemoteShell::Powershell] {
+            let argv = vec!["atp".to_string(), "recv".to_string(), "/srv/in".to_string()];
+            let mut command = ssh_base_command(&[], "receiver.example");
+            configure_remote_command(&mut command, &[], shell, &argv, rq_auth_key(Some(&auth)))
+                .expect("configure secret-bearing SSH command");
+            let command_args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(command_args.contains("--rq-auth-key-stdin"));
+            assert!(!command_args.contains(VALID_KEY_HEX));
+            assert!(!command_args.contains(RQ_AUTH_ENV));
+            assert!(!format!("{command:?}").contains(VALID_KEY_HEX));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_remote_secret_stdin_bootstrap_succeeds_and_closes_input() {
+        let key = auth_key_from_hex(VALID_KEY_HEX).expect("valid key");
+        let verify_script = format!(
+            "IFS= read -r line || exit 64; test \"${{#line}}\" -eq {} || exit 66; \
+             case \"$line\" in *[!0-9a-f]*) exit 67;; esac; \
+             if IFS= read -r unexpected; then exit 65; fi; printf ready",
+            AUTH_KEY_SIZE * 2,
+        );
+        let argv = vec!["sh".to_string(), "-c".to_string(), verify_script];
+        let mut command = ProcessCommand::new("sh");
+        command.arg("-c");
+        configure_remote_command(&mut command, &[], RemoteShell::Posix, &argv, Some(&key))
+            .expect("configure local bootstrap shell");
+        assert!(!format!("{command:?}").contains(VALID_KEY_HEX));
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn local bootstrap shell");
+        write_remote_secret_stdin(&mut child, Some(&key), "test bootstrap")
+            .expect("deliver secret through stdin");
+        let output = child.wait_with_output().expect("wait for bootstrap shell");
+
+        assert!(output.status.success(), "stderr: {:?}", output.stderr);
+        assert_eq!(output.stdout, b"ready");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(VALID_KEY_HEX));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_secret_stdin_errors_do_not_echo_secret() {
+        let key = auth_key_from_hex(VALID_KEY_HEX).expect("valid key");
+        let mut child = ProcessCommand::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn child without stdin pipe");
+
+        let error = write_remote_secret_stdin(&mut child, Some(&key), "synthetic bootstrap")
+            .expect_err("missing stdin pipe must fail");
+        assert!(!error.contains(VALID_KEY_HEX));
+    }
+
+    #[test]
+    fn ssh_secret_stdin_rejects_session_replacement_and_destination_shift_options() {
+        for options in [
+            vec!["-tt".to_string()],
+            vec!["-vt".to_string()],
+            vec!["-n".to_string()],
+            vec!["-f".to_string()],
+            vec!["-W".to_string(), "attacker.example:80".to_string()],
+            vec!["-Wattacker.example:80".to_string()],
+            vec!["-vWattacker.example:80".to_string()],
+            vec!["-Ocheck".to_string()],
+            vec!["-Qcipher".to_string()],
+            vec!["-N".to_string()],
+            vec!["-s".to_string()],
+            vec!["-G".to_string()],
+            vec!["-V".to_string()],
+            vec!["--".to_string()],
+            vec!["attacker.example".to_string()],
+            vec!["-o".to_string(), "StdinNull=yes".to_string()],
+            vec!["-oStdinNull=yes # comment".to_string()],
+            vec!["-oStdinNull=no # comment".to_string()],
+            vec!["-oForkAfterAuthentication=yes # comment".to_string()],
+            vec!["-oRequestTTY=force".to_string()],
+            vec!["-oSessionType=none".to_string()],
+            vec!["-oRemoteCommand=echo diverted".to_string()],
+            vec!["-oRemoteCommand=none#evil".to_string()],
+            vec!["-oPermitLocalCommand=yes".to_string()],
+            vec!["-oLocalCommand=cat".to_string()],
+            vec!["-oProxyCommand=-".to_string()],
+            vec!["-oBatchMode=no".to_string()],
+            vec!["-M".to_string()],
+            vec!["-S".to_string(), "/tmp/ssh-control".to_string()],
+            vec!["-S/tmp/ssh-control".to_string()],
+            vec!["-oControlMaster=auto".to_string()],
+            vec!["-oControlPath=/tmp/ssh-control".to_string()],
+            vec!["-oControlPersist=yes".to_string()],
+            vec!["-X".to_string()],
+            vec!["-Y".to_string()],
+            vec!["-oForwardX11=yes".to_string()],
+            vec!["-F".to_string(), "/tmp/ssh_config".to_string()],
+            vec!["-F/tmp/ssh_config".to_string()],
+            vec!["-i".to_string(), "/dev/stdin".to_string()],
+            vec!["-i/dev/fd/0".to_string()],
+            vec!["-E".to_string(), "/dev/stdin".to_string()],
+            vec!["-E/dev/fd/0".to_string()],
+            vec!["-oIdentityFile=/proc/self/fd/0".to_string()],
+            vec!["-oCertificateFile=/proc/thread-self/fd/0".to_string()],
+            vec!["-oUserKnownHostsFile=-".to_string()],
+            vec!["-oInclude=/dev/stdin".to_string()],
+            vec!["-I".to_string(), "/dev/stdin".to_string()],
+            vec!["-I/proc/self/fd/0".to_string()],
+            vec!["-oPKCS11Provider=/dev/fd/0".to_string()],
+            vec!["-oSecurityKeyProvider=/proc/self/fd/0".to_string()],
+            vec!["-oXAuthLocation=/dev/stdin".to_string()],
+            vec!["-p".to_string()],
+        ] {
+            assert!(
+                validate_ssh_secret_stdin_options(&options).is_err(),
+                "dangerous options accepted: {options:?}"
+            );
+        }
+
+        validate_ssh_secret_stdin_options(&[
+            "-v".to_string(),
+            "-p".to_string(),
+            "2222".to_string(),
+            "-o".to_string(),
+            "Compression=yes".to_string(),
+            "-p2223".to_string(),
+            "-Ptransfer-tag".to_string(),
+            "-vvT".to_string(),
+            "-oStdinNull=no".to_string(),
+            "-oForkAfterAuthentication=no".to_string(),
+            "-oSessionType=default".to_string(),
+            "-oRemoteCommand=none".to_string(),
+            "-oPermitLocalCommand=no".to_string(),
+            "-oLocalCommand=none".to_string(),
+            "-oBatchMode=yes".to_string(),
+            "-i~/.ssh/id_ed25519".to_string(),
+        ])
+        .expect("ordinary SSH options preserve protected stdin");
+    }
+
+    #[test]
+    fn ssh_secret_stdin_path_classifier_rejects_fd_zero_aliases() {
+        for path in [
+            "-",
+            "/dev/stdin",
+            "/dev/./fd/0",
+            "/tmp/../dev/stdin",
+            "/proc/self/fd/0",
+            "/proc/thread-self/fd/0",
+            "/proc/curproc/fd/0",
+            "'/dev/stdin'",
+        ] {
+            assert!(
+                ssh_path_targets_inherited_stdin(path),
+                "stdin alias accepted: {path:?}"
+            );
+        }
+        assert!(!ssh_path_targets_inherited_stdin(
+            "/home/operator/.ssh/id_ed25519"
+        ));
+    }
+
+    #[test]
+    fn ssh_secret_stdin_effective_config_rejects_host_specific_diversion() {
+        let safe_legacy = "batchmode yes\ncontrolmaster no\ncontrolpath none\n\
+                           controlpersist no\nforwardx11 no\npermitlocalcommand no\n\
+                           requesttty false\nremotecommand none\n";
+        validate_ssh_secret_stdin_effective_config(safe_legacy, "legacy.example")
+            .expect("older clients may omit newer default-safe keywords");
+
+        let safe_current = "batchmode yes\ncontrolmaster false\ncontrolpath none\n\
+                            controlpersist no\nforwardx11 false\npermitlocalcommand false\n\
+                            requesttty false\nstdinnull no\nforkafterauthentication no\n\
+                            sessiontype default\nremotecommand none\n\
+                            identityfile ~/.ssh/id_ed25519\n";
+        validate_ssh_secret_stdin_effective_config(safe_current, "current.example")
+            .expect("current default config preserves secret stdin");
+
+        for dangerous in [
+            "requesttty force\n",
+            "stdinnull yes\n",
+            "forkafterauthentication yes\n",
+            "sessiontype none\n",
+            "remotecommand echo diverted\n",
+            "permitlocalcommand yes\nlocalcommand cat > /tmp/key\n",
+            "localcommand cat > /tmp/key\n",
+            "controlmaster auto\n",
+            "controlpath /tmp/ssh-control\n",
+            "controlpersist yes\n",
+            "forwardx11 yes\n",
+            "proxycommand -\n",
+            "identityfile /dev/stdin\n",
+            "certificatefile /dev/fd/0\n",
+            "userknownhostsfile ~/.ssh/known_hosts /proc/self/fd/0\n",
+            "globalknownhostsfile /proc/thread-self/fd/0\n",
+            "revokedhostkeys -\n",
+            "pkcs11provider /dev/stdin\n",
+            "securitykeyprovider /proc/self/fd/0\n",
+            "xauthlocation /dev/stdin\n",
+            "identityfile /__atp_ssh_stdin_preflight_canary__\n",
+        ] {
+            let error = validate_ssh_secret_stdin_effective_config(dangerous, "bad.example")
+                .expect_err("dangerous effective SSH config must fail closed");
+            assert!(error.contains("protected SSH stdin delivery"));
+            assert!(!error.contains(VALID_KEY_HEX));
+        }
+    }
+
+    #[test]
+    fn ssh_config_probe_preserves_raw_options_and_scrubs_secret_environment() {
+        let options = ["-p".to_string(), "2222".to_string()];
+        let remote_command = "atp recv /srv/in --rq-auth-key-stdin";
+        let mut command = ssh_options_command(&options);
+        command
+            .arg("-T")
+            .arg("-x")
+            .arg("-S")
+            .arg("none")
+            .arg("-G")
+            .arg("--")
+            .arg("receiver.example")
+            .arg(remote_command);
+
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &args[args.len() - 10..],
+            [
+                "-p",
+                "2222",
+                "-T",
+                "-x",
+                "-S",
+                "none",
+                "-G",
+                "--",
+                "receiver.example",
+                remote_command,
+            ]
+        );
+        assert!(!args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "StdinNull=no" | "ForkAfterAuthentication=no" | "SessionType=default"
+            )
+        }));
+        assert!(
+            command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new(RQ_AUTH_ENV) && value.is_none()
+            })
+        );
+    }
+
+    #[test]
+    fn ssh_destination_is_option_terminated_for_send_and_bond_hosts() {
+        for hostile_host in [
+            "-oProxyCommand=cat",
+            "-F/dev/stdin",
+            "-S/tmp/foreign-master",
+        ] {
+            let command = ssh_base_command(&[], hostile_host);
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(&args[args.len() - 2..], ["--", hostile_host]);
+        }
     }
 
     #[test]
@@ -10477,6 +11509,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             max_block_size: MaxBlockSizeArg::Auto,
             repair_overhead: DEFAULT_REPAIR_OVERHEAD,
             rq_auth_key_hex: None,
+            rq_auth_key_stdin: false,
             rq_allow_unauthenticated_lab: true,
         }
     }
@@ -10590,7 +11623,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             !default_donor
                 .iter()
                 .any(|arg| arg.contains("--rq-auth-key-hex")),
-            "the auth key travels via {RQ_AUTH_ENV}, never argv"
+            "the auth key travels through protected SSH stdin, never argv"
         );
     }
 
@@ -10732,7 +11765,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         for argv in [&argv_a, &argv_b] {
             assert!(
                 !argv.iter().any(|a| a.contains("--rq-auth-key-hex")),
-                "auth key must travel via {RQ_AUTH_ENV}, never argv"
+                "auth key must travel through protected SSH stdin, never argv"
             );
         }
     }
