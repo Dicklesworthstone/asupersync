@@ -124,19 +124,48 @@ struct SemaphoreState {
 struct Waiter {
     id: u64,
     count: usize,
-    waker: Waker,
+    waker: Arc<RegisteredWaker>,
     prev: Option<usize>,
     next: Option<usize>,
 }
 
-#[inline]
-fn waiter_waker_if_runnable(state: &SemaphoreState, slot: usize) -> Option<Waker> {
-    let waiter = state.waiters.get(slot)?;
-    (state.permits >= waiter.count).then(|| waiter.waker.clone())
+/// Arc-owned executor waker registration stored beneath semaphore state.
+///
+/// Cloning an `Arc<RegisteredWaker>` while the mutex is held cannot invoke the
+/// user-provided RawWaker callbacks. Construction, wake dispatch, and final
+/// destruction are kept outside the mutex.
+#[derive(Debug)]
+struct RegisteredWaker {
+    waker: Waker,
+}
+
+impl RegisteredWaker {
+    #[inline]
+    fn new(waker: &Waker) -> Arc<Self> {
+        Arc::new(Self {
+            waker: waker.clone(),
+        })
+    }
+
+    #[inline]
+    fn will_wake(&self, waker: &Waker) -> bool {
+        self.waker.will_wake(waker)
+    }
+
+    #[inline]
+    fn wake_by_ref(&self) {
+        self.waker.wake_by_ref();
+    }
 }
 
 #[inline]
-fn front_waiter_waker_if_runnable(state: &SemaphoreState) -> Option<Waker> {
+fn waiter_waker_if_runnable(state: &SemaphoreState, slot: usize) -> Option<Arc<RegisteredWaker>> {
+    let waiter = state.waiters.get(slot)?;
+    (state.permits >= waiter.count).then(|| Arc::clone(&waiter.waker))
+}
+
+#[inline]
+fn front_waiter_waker_if_runnable(state: &SemaphoreState) -> Option<Arc<RegisteredWaker>> {
     state
         .waiter_head
         .and_then(|slot| waiter_waker_if_runnable(state, slot))
@@ -167,7 +196,11 @@ fn is_front_waiter(state: &SemaphoreState, handle: WaiterHandle) -> bool {
 }
 
 #[inline]
-fn enqueue_waiter(state: &mut SemaphoreState, count: usize, waker: Waker) -> WaiterHandle {
+fn enqueue_waiter(
+    state: &mut SemaphoreState,
+    count: usize,
+    waker: Arc<RegisteredWaker>,
+) -> WaiterHandle {
     let id = allocate_waiter_id(state);
     let prev = state.waiter_tail;
     let slot = state.waiters.insert(Waiter {
@@ -215,18 +248,16 @@ fn pop_front_waiter(state: &mut SemaphoreState) -> Option<Waiter> {
 fn remove_waiter_and_take_next_waker(
     state: &mut SemaphoreState,
     handle: WaiterHandle,
-) -> Option<Waker> {
+) -> (Option<Waiter>, Option<Arc<RegisteredWaker>>) {
     if is_front_waiter(state, handle) {
-        // Exception safety: clone the next waker before unlinking ourselves so
-        // Drop/cancel cleanup can retry if waker.clone() panics.
+        // Clone only the Arc-owned registration before unlinking. This keeps
+        // arbitrary RawWaker clone callbacks outside semaphore state.
         let next_waker = waiter_by_handle(state, handle)
             .and_then(|waiter| waiter.next)
             .and_then(|slot| waiter_waker_if_runnable(state, slot));
-        unlink_waiter(state, handle);
-        next_waker
+        (unlink_waiter(state, handle), next_waker)
     } else {
-        unlink_waiter(state, handle);
-        None
+        (unlink_waiter(state, handle), None)
     }
 }
 
@@ -336,7 +367,7 @@ impl Semaphore {
             std::mem::take(&mut state.waiters)
         };
         for (_, waiter) in taken {
-            waiter.waker.wake();
+            waiter.waker.wake_by_ref();
         }
     }
 
@@ -468,7 +499,7 @@ impl Semaphore {
         let waiter_to_wake = front_waiter_waker_if_runnable(&state);
         drop(state);
         if let Some(waiter) = waiter_to_wake {
-            waiter.wake();
+            waiter.wake_by_ref();
         }
     }
 }
@@ -484,16 +515,19 @@ pub struct AcquireFuture<'a, 'b, Caps = crate::cx::cap::All> {
 
 impl<Caps> Drop for AcquireFuture<'_, '_, Caps> {
     fn drop(&mut self) {
-        if let Some(waiter) = self.waiter {
-            let next_waker = {
+        if let Some(waiter) = self.waiter.take() {
+            let (retired_waiter, next_waker) = {
                 let mut state = self.semaphore.state.lock();
                 state.cancellation_count = state.cancellation_count.saturating_add(1);
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
                 remove_waiter_and_take_next_waker(&mut state, waiter)
             };
+            // A stored Waker may own a safe user-provided payload whose Drop
+            // re-enters the semaphore. Retire it only after releasing state.
+            drop(retired_waiter);
             if let Some(next) = next_waker {
-                next.wake();
+                next.wake_by_ref();
             }
         }
     }
@@ -521,7 +555,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
 
         if self.cx.checkpoint().is_err() {
             let waiter = self.waiter.take();
-            let next_waker = {
+            let (retired_waiter, next_waker) = {
                 let mut state = self.semaphore.state.lock();
                 state.cancellation_count = state.cancellation_count.saturating_add(1);
                 if let Some(waiter) = waiter {
@@ -529,103 +563,133 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                     // otherwise the signal (permits available) might be lost.
                     remove_waiter_and_take_next_waker(&mut state, waiter)
                 } else {
-                    None
+                    (None, None)
                 }
             };
-            if let Some(next) = next_waker {
-                next.wake();
-            }
             self.completed = true;
+            drop(retired_waiter);
+            if let Some(next) = next_waker {
+                next.wake_by_ref();
+            }
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
-        let mut state = self.semaphore.state.lock();
+        // Prepare a registration lazily. The uncontended acquisition path
+        // keeps its allocation-free behavior; only a poll that actually needs
+        // to enqueue or replace a waker releases state, clones the RawWaker,
+        // and retries the authoritative check.
+        let mut incoming_waker = None;
+        loop {
+            let mut state = self.semaphore.state.lock();
 
-        if state.closed {
-            if let Some(waiter) = self.waiter {
-                unlink_waiter(&mut state, waiter);
-            }
-            drop(state);
-            self.waiter = None;
-            self.completed = true;
-            return Poll::Ready(Err(AcquireError::Closed));
-        }
-
-        // FIFO fairness: only acquire if queue is empty or we are at the front.
-        // This prevents queue jumping where a new arrival grabs permits before
-        // earlier-waiting tasks get their turn.
-        let is_next_in_line = self.waiter.map_or(state.waiter_head.is_none(), |waiter| {
-            is_front_waiter(&state, waiter)
-        });
-
-        if is_next_in_line && state.permits >= self.count {
-            // Check lock ordering before acquisition (debug builds only)
-            if let Some(rank) = self.semaphore.rank {
-                lock_ordering::check_acquire(self.semaphore.name, rank);
+            if state.closed {
+                let retired_waiter = self
+                    .waiter
+                    .and_then(|waiter| unlink_waiter(&mut state, waiter));
+                drop(state);
+                self.waiter = None;
+                self.completed = true;
+                drop(retired_waiter);
+                drop(incoming_waker);
+                return Poll::Ready(Err(AcquireError::Closed));
             }
 
-            state.permits -= self.count;
-            self.semaphore
-                .permits_shadow
-                .store(state.permits, Ordering::Relaxed);
+            // FIFO fairness: only acquire if queue is empty or we are at the front.
+            // This prevents queue jumping where a new arrival grabs permits before
+            // earlier-waiting tasks get their turn.
+            let is_next_in_line = self.waiter.map_or(state.waiter_head.is_none(), |waiter| {
+                is_front_waiter(&state, waiter)
+            });
 
-            // Record lock acquisition for ordering tracking
-            if let Some(rank) = self.semaphore.rank {
-                lock_ordering::record_acquire(self.semaphore.name, rank);
-            }
-
-            // Optimization: Since we verified we are next in line, we are either
-            // at the front of the queue or the queue is empty. We can just pop
-            // the front instead of scanning the whole deque with retain (O(N)).
-            if let Some(waiter) = self.waiter {
-                debug_assert!(is_front_waiter(&state, waiter));
-                let removed = pop_front_waiter(&mut state);
-                debug_assert!(removed.is_some());
-            }
-
-            // Wake next waiter if there are still permits available.
-            // Without this, add_permits(N) where N satisfies multiple waiters
-            // would only wake the first, leaving others sleeping indefinitely.
-            let next_waker = front_waiter_waker_if_runnable(&state);
-            drop(state);
-            // Clear the waiter handle after releasing state guard to avoid borrow conflicts.
-            self.waiter = None;
-            self.completed = true;
-            if let Some(next) = next_waker {
-                next.wake();
-            }
-            return Poll::Ready(Ok(SemaphorePermit {
-                // br-asupersync-13jmt3: static description (see paired
-                // comment in try_acquire); count is exposed via
-                // SemaphorePermit.count.
-                obligation: reserve_permit_obligation(self.cx.region_id()),
-                semaphore: self.semaphore,
-                count: self.count,
-                release_lock_order_on_drop: true,
-            }));
-        }
-
-        if let Some(waiter) = self.waiter {
-            if let Some(existing) = waiter_by_handle_mut(&mut state, waiter) {
-                debug_assert_eq!(existing.count, self.count);
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
+            if is_next_in_line && state.permits >= self.count {
+                // Check lock ordering before acquisition (debug builds only)
+                if let Some(rank) = self.semaphore.rank {
+                    lock_ordering::check_acquire(self.semaphore.name, rank);
                 }
-            } else {
-                self.waiter = Some(enqueue_waiter(
-                    &mut state,
-                    self.count,
-                    context.waker().clone(),
-                ));
+
+                state.permits -= self.count;
+                self.semaphore
+                    .permits_shadow
+                    .store(state.permits, Ordering::Relaxed);
+
+                // Record lock acquisition for ordering tracking
+                if let Some(rank) = self.semaphore.rank {
+                    lock_ordering::record_acquire(self.semaphore.name, rank);
+                }
+
+                // Optimization: Since we verified we are next in line, we are either
+                // at the front of the queue or the queue is empty. We can just pop
+                // the front instead of scanning the whole deque with retain (O(N)).
+                let retired_waiter = if let Some(waiter) = self.waiter {
+                    debug_assert!(is_front_waiter(&state, waiter));
+                    let removed = pop_front_waiter(&mut state);
+                    debug_assert!(removed.is_some());
+                    removed
+                } else {
+                    None
+                };
+
+                // Wake next waiter if there are still permits available.
+                // Without this, add_permits(N) where N satisfies multiple waiters
+                // would only wake the first, leaving others sleeping indefinitely.
+                let next_waker = front_waiter_waker_if_runnable(&state);
+                drop(state);
+                // Clear the waiter handle after releasing state guard to avoid borrow conflicts.
+                self.waiter = None;
+                self.completed = true;
+                drop(retired_waiter);
+                drop(incoming_waker);
+                if let Some(next) = next_waker {
+                    next.wake_by_ref();
+                }
+                return Poll::Ready(Ok(SemaphorePermit {
+                    // br-asupersync-13jmt3: static description (see paired
+                    // comment in try_acquire); count is exposed via
+                    // SemaphorePermit.count.
+                    obligation: reserve_permit_obligation(self.cx.region_id()),
+                    semaphore: self.semaphore,
+                    count: self.count,
+                    release_lock_order_on_drop: true,
+                }));
             }
-        } else {
+
+            if let Some(waiter) = self.waiter
+                && let Some(existing) = waiter_by_handle_mut(&mut state, waiter)
+            {
+                debug_assert_eq!(existing.count, self.count);
+                if existing.waker.will_wake(context.waker()) {
+                    drop(state);
+                    drop(incoming_waker);
+                    return Poll::Pending;
+                }
+                if let Some(incoming) = incoming_waker.take() {
+                    let retired_waker = std::mem::replace(&mut existing.waker, incoming);
+                    drop(state);
+                    drop(retired_waker);
+                    return Poll::Pending;
+                }
+            }
+
+            if incoming_waker.is_none() {
+                drop(state);
+                incoming_waker = Some(RegisteredWaker::new(context.waker()));
+                continue;
+            }
+
+            // Reserve before transferring the prepared registration. If
+            // growth panics, the state guard unwinds before the still-local
+            // registration can run arbitrary RawWaker destruction.
+            state.waiters.reserve(1);
             self.waiter = Some(enqueue_waiter(
                 &mut state,
                 self.count,
-                context.waker().clone(),
+                incoming_waker
+                    .take()
+                    .expect("prepared semaphore Waker must be available"),
             ));
+            drop(state);
+            return Poll::Pending;
         }
-        Poll::Pending
     }
 }
 
@@ -891,16 +955,18 @@ impl OwnedAcquireFuture {
 
 impl<Caps> Drop for OwnedAcquireFuture<Caps> {
     fn drop(&mut self) {
-        if let Some(waiter) = self.waiter {
-            let next_waker = {
+        if let Some(waiter) = self.waiter.take() {
+            let (retired_waiter, next_waker) = {
                 let mut state = self.semaphore.state.lock();
                 state.cancellation_count = state.cancellation_count.saturating_add(1);
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
                 remove_waiter_and_take_next_waker(&mut state, waiter)
             };
+            // Keep arbitrary Waker payload destruction outside semaphore state.
+            drop(retired_waiter);
             if let Some(next) = next_waker {
-                next.wake();
+                next.wake_by_ref();
             }
         }
     }
@@ -928,7 +994,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
 
         if this.cx.as_ref().is_some_and(|cx| cx.checkpoint().is_err()) {
             let waiter = this.waiter.take();
-            let next_waker = {
+            let (retired_waiter, next_waker) = {
                 let mut state = this.semaphore.state.lock();
                 state.cancellation_count = state.cancellation_count.saturating_add(1);
                 if let Some(waiter) = waiter {
@@ -936,110 +1002,139 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                     // otherwise the signal (permits available) might be lost.
                     remove_waiter_and_take_next_waker(&mut state, waiter)
                 } else {
-                    None
+                    (None, None)
                 }
             };
-            if let Some(next) = next_waker {
-                next.wake();
-            }
             this.completed = true;
+            drop(retired_waiter);
+            if let Some(next) = next_waker {
+                next.wake_by_ref();
+            }
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
-        let mut state = this.semaphore.state.lock();
+        // Keep the uncontended path allocation-free. A registration is built
+        // only after an authoritative locked check proves that this poll must
+        // enqueue or replace a waker, then the state is rechecked before use.
+        let mut incoming_waker = None;
+        loop {
+            let mut state = this.semaphore.state.lock();
 
-        if state.closed {
-            if let Some(waiter) = this.waiter {
-                unlink_waiter(&mut state, waiter);
-            }
-            drop(state);
-            this.waiter = None;
-            this.completed = true;
-            return Poll::Ready(Err(AcquireError::Closed));
-        }
-
-        // FIFO fairness: only acquire if queue is empty or we are at the front.
-        let is_next_in_line = this.waiter.map_or(state.waiter_head.is_none(), |waiter| {
-            is_front_waiter(&state, waiter)
-        });
-
-        if is_next_in_line && state.permits >= this.count {
-            // Check lock ordering before acquisition (debug builds only)
-            if let Some(rank) = this.semaphore.rank {
-                lock_ordering::check_acquire(this.semaphore.name, rank);
+            if state.closed {
+                let retired_waiter = this
+                    .waiter
+                    .and_then(|waiter| unlink_waiter(&mut state, waiter));
+                drop(state);
+                this.waiter = None;
+                this.completed = true;
+                drop(retired_waiter);
+                drop(incoming_waker);
+                return Poll::Ready(Err(AcquireError::Closed));
             }
 
-            state.permits -= this.count;
-            this.semaphore
-                .permits_shadow
-                .store(state.permits, Ordering::Relaxed);
+            // FIFO fairness: only acquire if queue is empty or we are at the front.
+            let is_next_in_line = this.waiter.map_or(state.waiter_head.is_none(), |waiter| {
+                is_front_waiter(&state, waiter)
+            });
 
-            // Record lock acquisition for ordering tracking
-            if let Some(rank) = this.semaphore.rank {
-                lock_ordering::record_acquire(this.semaphore.name, rank);
-            }
-
-            // Optimization: O(1) removal instead of O(N) retain
-            if let Some(waiter) = this.waiter {
-                debug_assert!(is_front_waiter(&state, waiter));
-                let removed = pop_front_waiter(&mut state);
-                debug_assert!(removed.is_some());
-            }
-
-            // Wake next waiter if there are still permits available.
-            // Without this, add_permits(N) where N satisfies multiple waiters
-            // would only wake the first, leaving others sleeping indefinitely.
-            let next_waker = front_waiter_waker_if_runnable(&state);
-            drop(state);
-            // Prevent redundant Drop cleanup after releasing state guard.
-            this.waiter = None;
-            this.completed = true;
-            if let Some(next) = next_waker {
-                next.wake();
-            }
-            return Poll::Ready(Ok(OwnedSemaphorePermit {
-                // br-asupersync-13jmt3: static description (see paired
-                // comment in try_acquire); count is exposed via
-                // OwnedSemaphorePermit.count.
-                //
-                // When this future has no task-local `Cx` (the documented
-                // `new_uncancelable` host-boundary path, e.g. Service
-                // middleware polled outside a runtime task), there is no
-                // region to scope an obligation to. Skip the obligation
-                // rather than panicking — this mirrors the count==0 fast
-                // path (`obligation: None`). The permit still releases its
-                // count on drop, and an obligation that is never reserved
-                // cannot leak, so the no-leak invariant is preserved.
-                obligation: this
-                    .cx
-                    .as_ref()
-                    .and_then(|cx| reserve_permit_obligation(cx.region_id())),
-                semaphore: this.semaphore.clone(),
-                count: this.count,
-            }));
-        }
-
-        if let Some(waiter) = this.waiter {
-            if let Some(existing) = waiter_by_handle_mut(&mut state, waiter) {
-                debug_assert_eq!(existing.count, this.count);
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
+            if is_next_in_line && state.permits >= this.count {
+                // Check lock ordering before acquisition (debug builds only)
+                if let Some(rank) = this.semaphore.rank {
+                    lock_ordering::check_acquire(this.semaphore.name, rank);
                 }
-            } else {
-                this.waiter = Some(enqueue_waiter(
-                    &mut state,
-                    this.count,
-                    context.waker().clone(),
-                ));
+
+                state.permits -= this.count;
+                this.semaphore
+                    .permits_shadow
+                    .store(state.permits, Ordering::Relaxed);
+
+                // Record lock acquisition for ordering tracking
+                if let Some(rank) = this.semaphore.rank {
+                    lock_ordering::record_acquire(this.semaphore.name, rank);
+                }
+
+                // Optimization: O(1) removal instead of O(N) retain
+                let retired_waiter = if let Some(waiter) = this.waiter {
+                    debug_assert!(is_front_waiter(&state, waiter));
+                    let removed = pop_front_waiter(&mut state);
+                    debug_assert!(removed.is_some());
+                    removed
+                } else {
+                    None
+                };
+
+                // Wake next waiter if there are still permits available.
+                // Without this, add_permits(N) where N satisfies multiple waiters
+                // would only wake the first, leaving others sleeping indefinitely.
+                let next_waker = front_waiter_waker_if_runnable(&state);
+                drop(state);
+                // Prevent redundant Drop cleanup after releasing state guard.
+                this.waiter = None;
+                this.completed = true;
+                drop(retired_waiter);
+                drop(incoming_waker);
+                if let Some(next) = next_waker {
+                    next.wake_by_ref();
+                }
+                return Poll::Ready(Ok(OwnedSemaphorePermit {
+                    // br-asupersync-13jmt3: static description (see paired
+                    // comment in try_acquire); count is exposed via
+                    // OwnedSemaphorePermit.count.
+                    //
+                    // When this future has no task-local `Cx` (the documented
+                    // `new_uncancelable` host-boundary path, e.g. Service
+                    // middleware polled outside a runtime task), there is no
+                    // region to scope an obligation to. Skip the obligation
+                    // rather than panicking — this mirrors the count==0 fast
+                    // path (`obligation: None`). The permit still releases its
+                    // count on drop, and an obligation that is never reserved
+                    // cannot leak, so the no-leak invariant is preserved.
+                    obligation: this
+                        .cx
+                        .as_ref()
+                        .and_then(|cx| reserve_permit_obligation(cx.region_id())),
+                    semaphore: this.semaphore.clone(),
+                    count: this.count,
+                }));
             }
-        } else {
+
+            if let Some(waiter) = this.waiter
+                && let Some(existing) = waiter_by_handle_mut(&mut state, waiter)
+            {
+                debug_assert_eq!(existing.count, this.count);
+                if existing.waker.will_wake(context.waker()) {
+                    drop(state);
+                    drop(incoming_waker);
+                    return Poll::Pending;
+                }
+                if let Some(incoming) = incoming_waker.take() {
+                    let retired_waker = std::mem::replace(&mut existing.waker, incoming);
+                    drop(state);
+                    drop(retired_waker);
+                    return Poll::Pending;
+                }
+            }
+
+            if incoming_waker.is_none() {
+                drop(state);
+                incoming_waker = Some(RegisteredWaker::new(context.waker()));
+                continue;
+            }
+
+            // Reserve before transferring the prepared registration. If
+            // growth panics, the state guard unwinds before the still-local
+            // registration can run arbitrary RawWaker destruction.
+            state.waiters.reserve(1);
             this.waiter = Some(enqueue_waiter(
                 &mut state,
                 this.count,
-                context.waker().clone(),
+                incoming_waker
+                    .take()
+                    .expect("prepared semaphore Waker must be available"),
             ));
+            drop(state);
+            return Poll::Pending;
         }
-        Poll::Pending
     }
 }
 
@@ -1193,6 +1288,172 @@ mod tests {
             let _ = self.semaphore.available_permits();
             let _ = self.wake_tx.send(());
         }
+    }
+
+    #[derive(Debug)]
+    struct SemaphoreWakerDropProbe {
+        semaphore: std::sync::Weak<Semaphore>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+        unlocked_drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for SemaphoreWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for SemaphoreWakerDropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(semaphore) = self.semaphore.upgrade()
+                && semaphore.state.try_lock().is_some()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn semaphore_waker_drop_probe(
+        semaphore: &Arc<Semaphore>,
+    ) -> (
+        Waker,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(SemaphoreWakerDropProbe {
+            semaphore: Arc::downgrade(semaphore),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
+    }
+
+    fn assert_waker_retired_after_unlock(
+        drops: &std::sync::atomic::AtomicUsize,
+        unlocked_drops: &std::sync::atomic::AtomicUsize,
+    ) {
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelled_acquires_retire_wakers_after_unlock() {
+        init_test("cancelled_acquires_retire_wakers_after_unlock");
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let cx = test_cx();
+        let mut future = semaphore.acquire(&cx, 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        cx.set_cancel_requested(true);
+        assert!(matches!(
+            poll_once(&mut future),
+            Some(Err(AcquireError::Cancelled))
+        ));
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let cx = test_cx();
+        let cancel_handle = cx.clone();
+        let mut future = OwnedAcquireFuture::new(Arc::clone(&semaphore), cx, 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        cancel_handle.set_cancel_requested(true);
+        assert!(matches!(
+            poll_once(&mut future),
+            Some(Err(AcquireError::Cancelled))
+        ));
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+
+        crate::test_complete!("cancelled_acquires_retire_wakers_after_unlock");
+    }
+
+    #[test]
+    fn dropped_acquires_retire_wakers_after_unlock() {
+        init_test("dropped_acquires_retire_wakers_after_unlock");
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let cx = test_cx();
+        let mut future = semaphore.acquire(&cx, 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        drop(future);
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let mut future = OwnedAcquireFuture::new(Arc::clone(&semaphore), test_cx(), 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        drop(future);
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+
+        crate::test_complete!("dropped_acquires_retire_wakers_after_unlock");
+    }
+
+    #[test]
+    fn successful_acquires_retire_queued_wakers_after_unlock() {
+        init_test("successful_acquires_retire_queued_wakers_after_unlock");
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let cx = test_cx();
+        let mut future = semaphore.acquire(&cx, 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        semaphore.add_permits(1);
+        let permit = poll_once(&mut future)
+            .expect("borrowed acquire must complete")
+            .expect("borrowed acquire must succeed");
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+        drop(permit);
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let mut future = OwnedAcquireFuture::new(Arc::clone(&semaphore), test_cx(), 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        semaphore.add_permits(1);
+        let permit = poll_once(&mut future)
+            .expect("owned acquire must complete")
+            .expect("owned acquire must succeed");
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+        drop(permit);
+
+        crate::test_complete!("successful_acquires_retire_queued_wakers_after_unlock");
+    }
+
+    #[test]
+    fn acquire_waker_replacement_retires_old_waker_after_unlock() {
+        init_test("acquire_waker_replacement_retires_old_waker_after_unlock");
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let cx = test_cx();
+        let mut future = semaphore.acquire(&cx, 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        let replacement = Waker::noop().clone();
+        assert!(poll_once_with_waker(&mut future, &replacement).is_none());
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+        drop(future);
+
+        let semaphore = Arc::new(Semaphore::new(0));
+        let mut future = OwnedAcquireFuture::new(Arc::clone(&semaphore), test_cx(), 1);
+        let (waker, drops, unlocked_drops) = semaphore_waker_drop_probe(&semaphore);
+        assert!(poll_once_with_waker(&mut future, &waker).is_none());
+        drop(waker);
+        let replacement = Waker::noop().clone();
+        assert!(poll_once_with_waker(&mut future, &replacement).is_none());
+        assert_waker_retired_after_unlock(&drops, &unlocked_drops);
+        drop(future);
+
+        crate::test_complete!("acquire_waker_replacement_retires_old_waker_after_unlock");
     }
 
     fn acquire_blocking<'a>(
