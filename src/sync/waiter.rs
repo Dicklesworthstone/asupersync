@@ -23,7 +23,8 @@ use slab::Slab;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::BuildHasherDefault;
-use std::task::Waker;
+use std::sync::Arc;
+use std::task::{Wake, Waker};
 
 type PositionMap = HashMap<WaiterId, usize, BuildHasherDefault<DefaultHasher>>;
 
@@ -60,6 +61,26 @@ struct WaiterSlot<T> {
     pub(crate) tag: T,
     prev: Option<usize>,
     next: Option<usize>,
+}
+
+/// Known-safe relay used when a caller must notify every queued waiter while
+/// its own queue lock is held. Constructing and cloning this Arc-backed waker
+/// does not invoke the queued task's RawWaker vtable; delegation happens only
+/// when the returned relay is woken after the caller releases its lock.
+struct DeferredWake {
+    inner: Waker,
+}
+
+impl Wake for DeferredWake {
+    #[inline]
+    fn wake(self: Arc<Self>) {
+        self.inner.wake_by_ref();
+    }
+
+    #[inline]
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.inner.wake_by_ref();
+    }
 }
 
 impl<T> Default for WaiterChain<T> {
@@ -260,6 +281,33 @@ impl<T> WaiterChain<T> {
         wakers
     }
 
+    /// Return one forwarding waker per slot without cloning any queued task's
+    /// user-controlled RawWaker in this call.
+    ///
+    /// Each stored waker is moved into an Arc-backed relay. One relay waker
+    /// stays in the queue and one is returned to the caller. The caller may
+    /// therefore build the notification batch while holding its queue lock,
+    /// release that lock, and only then invoke user wake callbacks. Subsequent
+    /// replacement/removal must likewise retire the queued relay outside the
+    /// caller's lock so the original waker payload is destroyed there.
+    pub(crate) fn clone_wakers_deferred(&mut self) -> Vec<Waker> {
+        let mut wakers = Vec::with_capacity(self.len());
+        let mut current = self.head;
+        while let Some(index) = current {
+            let slot = &mut self.slots[index];
+            current = slot.next;
+
+            // The temporary noop has a known non-user vtable. Moving the
+            // original into DeferredWake prevents any user clone/drop callback
+            // from running while the caller still holds its queue lock.
+            let original = std::mem::replace(&mut slot.waker, Waker::noop().clone());
+            let relay = Arc::new(DeferredWake { inner: original });
+            slot.waker = Waker::from(Arc::clone(&relay));
+            wakers.push(Waker::from(relay));
+        }
+        wakers
+    }
+
     /// O(1) presence check.
     #[inline]
     #[allow(dead_code)]
@@ -297,10 +345,33 @@ impl WaiterChain<()> {
 #[cfg(test)]
 mod tests {
     use super::WaiterChain;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::Waker;
 
     fn noop_waker() -> Waker {
         Waker::noop().clone()
+    }
+
+    struct DeferredWakeProbe {
+        wakes: Arc<AtomicUsize>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl std::task::Wake for DeferredWakeProbe {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for DeferredWakeProbe {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -347,6 +418,34 @@ mod tests {
             Some((back, "back"))
         );
         assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn deferred_clone_forwards_wakes_and_retains_queue_identity() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let original = Waker::from(Arc::new(DeferredWakeProbe {
+            wakes: Arc::clone(&wakes),
+            dropped: Arc::clone(&dropped),
+        }));
+        let mut chain = WaiterChain::new();
+        let id = chain.push_back(original);
+
+        let outbound = chain.clone_wakers_deferred();
+        assert_eq!(outbound.len(), 1);
+        assert!(chain.contains(id));
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        outbound[0].wake_by_ref();
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        drop(outbound);
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        let queued = chain.remove(id).expect("relay remains queued");
+        queued.wake_by_ref();
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+        drop(queued);
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     #[test]

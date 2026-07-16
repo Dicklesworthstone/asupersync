@@ -374,10 +374,10 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn queued_waiter_wakers(state: &State) -> SmallVec<[Waker; 4]> {
+    fn queued_waiter_wakers(state: &mut State) -> SmallVec<[Waker; 4]> {
         let mut wakers = SmallVec::new();
-        wakers.extend(state.reader_waiters.clone_wakers());
-        wakers.extend(state.writer_queue.clone_wakers());
+        wakers.extend(state.reader_waiters.clone_wakers_deferred());
+        wakers.extend(state.writer_queue.clone_wakers_deferred());
         wakers
     }
 
@@ -474,7 +474,7 @@ impl<T> RwLock<T> {
             state.writer_active = false;
 
             if self.is_poisoned() {
-                let wakers = Self::queued_waiter_wakers(&state);
+                let wakers = Self::queued_waiter_wakers(&mut state);
                 drop(state);
                 (None, wakers)
             } else {
@@ -552,9 +552,13 @@ impl<T> RwLock<T> {
             return;
         };
 
+        // Declared before the state guard so unwinding always releases the
+        // guard before destroying a user-controlled RawWaker payload.
+        let retired_waker;
         let writer_waker = {
             let mut state = self.state.lock();
-            if state.reader_waiters.remove(waiter_id).is_some() {
+            retired_waker = state.reader_waiters.remove(waiter_id);
+            if retired_waker.is_some() {
                 None
             } else {
                 // We were granted the lock but never took the guard.
@@ -589,6 +593,7 @@ impl<T> RwLock<T> {
         if let Some(waker) = writer_waker {
             waker.wake();
         }
+        drop(retired_waker);
     }
 
     #[inline]
@@ -599,10 +604,14 @@ impl<T> RwLock<T> {
 
         let waiter_id = waiter_id.take();
         let poisoned = self.is_poisoned();
+        // Declared before the state guard so unwinding always releases the
+        // guard before destroying a user-controlled RawWaker payload.
+        let retired_waker;
         let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
-            let result = if let Some(waiter_id) = waiter_id {
-                if state.writer_queue.remove(waiter_id).is_some() {
+            retired_waker = waiter_id.and_then(|id| state.writer_queue.remove(id));
+            let result = if waiter_id.is_some() {
+                if retired_waker.is_some() {
                     state.writer_waiters = state.writer_waiters.saturating_sub(1);
                     if state.writer_waiters == 0 && !state.writer_active {
                         if poisoned {
@@ -627,7 +636,7 @@ impl<T> RwLock<T> {
                     }
 
                     if poisoned {
-                        let wakers = Self::queued_waiter_wakers(&state);
+                        let wakers = Self::queued_waiter_wakers(&mut state);
                         (None, wakers)
                     } else {
                         // See release_writer: the forced-reader turn only makes
@@ -693,6 +702,7 @@ impl<T> RwLock<T> {
         for waker in reader_wakers {
             waker.wake();
         }
+        drop(retired_waker);
     }
 
     #[cfg(test)]
@@ -726,66 +736,86 @@ impl<'a, T, Caps> Future for ReadFuture<'a, '_, T, Caps> {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = this.lock.state.lock();
+        let mut queued_waker = None;
+        loop {
+            let mut state = this.lock.state.lock();
 
-        if this.lock.is_poisoned() {
-            drop(state);
-            this.lock.abandon_read_waiter(&mut this.waiter_id);
-            this.completed = true;
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
-        if let Some(waiter_id) = this.waiter_id {
-            if state
-                .reader_waiters
-                .update_waker(waiter_id, context.waker())
-            {
+            if this.lock.is_poisoned() {
                 drop(state);
-                return Poll::Pending;
-            }
-            // Dequeued - we were pre-granted the lock by release_writer!
-            // `state.readers` was already incremented for us.
-
-            // Check and record lock acquisition for ordering tracking.
-            // Queued handoffs must enforce the same E->D->B->A->C
-            // ordering as immediate acquisition.
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(this.lock.name, rank);
+                this.lock.abandon_read_waiter(&mut this.waiter_id);
+                this.completed = true;
+                return Poll::Ready(Err(RwLockError::Poisoned));
             }
 
-            this.waiter_id = None;
+            if let Some(waiter_id) = this.waiter_id {
+                if queued_waker.is_none() {
+                    drop(state);
+                    queued_waker = Some(context.waker().clone());
+                    continue;
+                }
+
+                let new_waker = queued_waker.take().expect("queued read cloned a waker");
+                match state.reader_waiters.replace_waker(waiter_id, new_waker) {
+                    Ok(retired_waker) => {
+                        drop(state);
+                        drop(retired_waker);
+                        return Poll::Pending;
+                    }
+                    Err(unused_waker) => {
+                        // Dequeued - we were pre-granted the lock by release_writer!
+                        // `state.readers` was already incremented for us.
+
+                        drop(state);
+                        drop(unused_waker);
+
+                        // Check and record lock acquisition for ordering tracking.
+                        // Queued handoffs must enforce the same E->D->B->A->C
+                        // ordering as immediate acquisition.
+                        if let Some(rank) = this.lock.rank {
+                            lock_ordering::check_acquire(this.lock.name, rank);
+                            lock_ordering::record_acquire(this.lock.name, rank);
+                        }
+
+                        this.waiter_id = None;
+                        this.completed = true;
+                        return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
+                    }
+                }
+            }
+
+            if !state.writer_active && state.writer_waiters == 0 {
+                // Check lock ordering before acquisition (debug builds only)
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::check_acquire(this.lock.name, rank);
+                }
+
+                state.readers += 1;
+                drop(state);
+
+                // Record lock acquisition for ordering tracking
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::record_acquire(this.lock.name, rank);
+                }
+
+                this.completed = true;
+                return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
+            }
+
+            if queued_waker.is_none() {
+                drop(state);
+                queued_waker = Some(context.waker().clone());
+                continue;
+            }
+
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let waiter_id = state
+                .reader_waiters
+                .push_back_tagged(queued_waker.take().expect("queued read cloned a waker"), id);
             drop(state);
-            this.completed = true;
-            return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
+            this.waiter_id = Some(waiter_id);
+            return Poll::Pending;
         }
-
-        if !state.writer_active && state.writer_waiters == 0 {
-            // Check lock ordering before acquisition (debug builds only)
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-            }
-
-            state.readers += 1;
-            drop(state);
-
-            // Record lock acquisition for ordering tracking
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(this.lock.name, rank);
-            }
-
-            this.completed = true;
-            return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
-        }
-
-        let id = state.next_waiter_id;
-        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        let waiter_id = state
-            .reader_waiters
-            .push_back_tagged(context.waker().clone(), id);
-        drop(state);
-        this.waiter_id = Some(waiter_id);
-        Poll::Pending
     }
 }
 
@@ -820,76 +850,102 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = this.lock.state.lock();
+        let mut queued_waker = None;
+        loop {
+            let mut state = this.lock.state.lock();
 
-        if this.lock.is_poisoned() {
-            drop(state);
-            this.lock
-                .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
-            this.completed = true;
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
-        if let Some(waiter_id) = this.waiter_id {
-            if state.writer_queue.update_waker(waiter_id, context.waker()) {
+            if this.lock.is_poisoned() {
                 drop(state);
-                return Poll::Pending;
-            }
-            // Dequeued - we were pre-granted the lock!
-
-            // Check and record lock acquisition for ordering tracking.
-            // Queued handoffs must enforce the same E->D->B->A->C
-            // ordering as immediate acquisition.
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(this.lock.name, rank);
+                this.lock
+                    .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
+                this.completed = true;
+                return Poll::Ready(Err(RwLockError::Poisoned));
             }
 
-            this.waiter_id = None;
-            if this.counted {
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                this.counted = false;
+            if let Some(waiter_id) = this.waiter_id {
+                if queued_waker.is_none() {
+                    drop(state);
+                    queued_waker = Some(context.waker().clone());
+                    continue;
+                }
+
+                let new_waker = queued_waker.take().expect("queued write cloned a waker");
+                match state.writer_queue.replace_waker(waiter_id, new_waker) {
+                    Ok(retired_waker) => {
+                        drop(state);
+                        drop(retired_waker);
+                        return Poll::Pending;
+                    }
+                    Err(unused_waker) => {
+                        // Dequeued - we were pre-granted the lock!
+
+                        drop(state);
+                        drop(unused_waker);
+
+                        // Check and record lock acquisition for ordering tracking.
+                        // Queued handoffs must enforce the same E->D->B->A->C
+                        // ordering as immediate acquisition.
+                        if let Some(rank) = this.lock.rank {
+                            lock_ordering::check_acquire(this.lock.name, rank);
+                            lock_ordering::record_acquire(this.lock.name, rank);
+                        }
+
+                        let mut state = this.lock.state.lock();
+                        this.waiter_id = None;
+                        if this.counted {
+                            state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                            this.counted = false;
+                        }
+                        drop(state);
+                        this.completed = true;
+                        return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
+                    }
+                }
             }
+
+            let can_acquire =
+                !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
+
+            if can_acquire {
+                // Check lock ordering before acquisition (debug builds only)
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::check_acquire(this.lock.name, rank);
+                }
+
+                state.writer_active = true;
+                // Only count as waiting writer if we actually queue
+                drop(state);
+
+                // Record lock acquisition for ordering tracking
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::record_acquire(this.lock.name, rank);
+                }
+
+                this.completed = true;
+                return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
+            }
+
+            if queued_waker.is_none() {
+                drop(state);
+                queued_waker = Some(context.waker().clone());
+                continue;
+            }
+
+            // Only increment writer_waiters when we must actually queue.
+            if !this.counted {
+                state.writer_waiters += 1;
+                this.counted = true;
+            }
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let waiter_id = state.writer_queue.push_back_tagged(
+                queued_waker.take().expect("queued write cloned a waker"),
+                id,
+            );
             drop(state);
-            this.completed = true;
-            return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
+            this.waiter_id = Some(waiter_id);
+            return Poll::Pending;
         }
-
-        let can_acquire =
-            !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
-
-        if can_acquire {
-            // Check lock ordering before acquisition (debug builds only)
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-            }
-
-            state.writer_active = true;
-            // Only count as waiting writer if we actually queue
-            drop(state);
-
-            // Record lock acquisition for ordering tracking
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(this.lock.name, rank);
-            }
-
-            this.completed = true;
-            return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
-        }
-
-        // Only increment writer_waiters when we must actually queue
-        if !this.counted {
-            state.writer_waiters += 1;
-            this.counted = true;
-        }
-        let id = state.next_waiter_id;
-        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        let waiter_id = state
-            .writer_queue
-            .push_back_tagged(context.waker().clone(), id);
-        drop(state);
-        this.waiter_id = Some(waiter_id);
-        Poll::Pending
     }
 }
 
@@ -1240,70 +1296,95 @@ impl<T, Caps> Future for OwnedReadFuture<'_, T, Caps> {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = this.lock.state.lock();
+        let mut queued_waker = None;
+        loop {
+            let mut state = this.lock.state.lock();
 
-        if this.lock.is_poisoned() {
-            drop(state);
-            this.lock.abandon_read_waiter(&mut this.waiter_id);
-            this.completed = true;
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
-        if let Some(waiter_id) = this.waiter_id {
-            if state
-                .reader_waiters
-                .update_waker(waiter_id, context.waker())
-            {
+            if this.lock.is_poisoned() {
                 drop(state);
-                return Poll::Pending;
-            }
-            // Dequeued - we were pre-granted the lock by release_writer!
-            // `state.readers` was already incremented for us.
-
-            // Check and record lock acquisition for ordering tracking.
-            // Queued handoffs must enforce the same E->D->B->A->C
-            // ordering as immediate acquisition.
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(this.lock.name, rank);
+                this.lock.abandon_read_waiter(&mut this.waiter_id);
+                this.completed = true;
+                return Poll::Ready(Err(RwLockError::Poisoned));
             }
 
-            this.waiter_id = None;
+            if let Some(waiter_id) = this.waiter_id {
+                if queued_waker.is_none() {
+                    drop(state);
+                    queued_waker = Some(context.waker().clone());
+                    continue;
+                }
+
+                let new_waker = queued_waker
+                    .take()
+                    .expect("queued owned read cloned a waker");
+                match state.reader_waiters.replace_waker(waiter_id, new_waker) {
+                    Ok(retired_waker) => {
+                        drop(state);
+                        drop(retired_waker);
+                        return Poll::Pending;
+                    }
+                    Err(unused_waker) => {
+                        // Dequeued - we were pre-granted the lock by release_writer!
+                        // `state.readers` was already incremented for us.
+
+                        drop(state);
+                        drop(unused_waker);
+
+                        // Check and record lock acquisition for ordering tracking.
+                        // Queued handoffs must enforce the same E->D->B->A->C
+                        // ordering as immediate acquisition.
+                        if let Some(rank) = this.lock.rank {
+                            lock_ordering::check_acquire(this.lock.name, rank);
+                            lock_ordering::record_acquire(this.lock.name, rank);
+                        }
+
+                        this.waiter_id = None;
+                        this.completed = true;
+                        return Poll::Ready(Ok(OwnedRwLockReadGuard {
+                            lock: Arc::clone(&this.lock),
+                        }));
+                    }
+                }
+            }
+
+            if !state.writer_active && state.writer_waiters == 0 {
+                // Check lock ordering before acquisition (debug builds only)
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::check_acquire(this.lock.name, rank);
+                }
+
+                state.readers += 1;
+                drop(state);
+
+                // Record lock acquisition for ordering tracking
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::record_acquire(this.lock.name, rank);
+                }
+
+                this.completed = true;
+                return Poll::Ready(Ok(OwnedRwLockReadGuard {
+                    lock: Arc::clone(&this.lock),
+                }));
+            }
+
+            if queued_waker.is_none() {
+                drop(state);
+                queued_waker = Some(context.waker().clone());
+                continue;
+            }
+
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let waiter_id = state.reader_waiters.push_back_tagged(
+                queued_waker
+                    .take()
+                    .expect("queued owned read cloned a waker"),
+                id,
+            );
             drop(state);
-            this.completed = true;
-            return Poll::Ready(Ok(OwnedRwLockReadGuard {
-                lock: Arc::clone(&this.lock),
-            }));
+            this.waiter_id = Some(waiter_id);
+            return Poll::Pending;
         }
-
-        if !state.writer_active && state.writer_waiters == 0 {
-            // Check lock ordering before acquisition (debug builds only)
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-            }
-
-            state.readers += 1;
-            drop(state);
-
-            // Record lock acquisition for ordering tracking
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(this.lock.name, rank);
-            }
-
-            this.completed = true;
-            return Poll::Ready(Ok(OwnedRwLockReadGuard {
-                lock: Arc::clone(&this.lock),
-            }));
-        }
-
-        let id = state.next_waiter_id;
-        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        let waiter_id = state
-            .reader_waiters
-            .push_back_tagged(context.waker().clone(), id);
-        drop(state);
-        this.waiter_id = Some(waiter_id);
-        Poll::Pending
     }
 }
 
@@ -1339,81 +1420,111 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = this.lock.state.lock();
+        let mut queued_waker = None;
+        loop {
+            let mut state = this.lock.state.lock();
 
-        if this.lock.is_poisoned() {
-            drop(state);
-            this.lock
-                .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
-            this.completed = true;
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
-        if let Some(waiter_id) = this.waiter_id {
-            if state.writer_queue.update_waker(waiter_id, context.waker()) {
+            if this.lock.is_poisoned() {
                 drop(state);
-                return Poll::Pending;
-            }
-            // Dequeued - we were pre-granted the lock!
-
-            // Check and record lock acquisition for ordering tracking.
-            // Queued handoffs must enforce the same E->D->B->A->C
-            // ordering as immediate acquisition.
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-                lock_ordering::record_acquire(this.lock.name, rank);
+                this.lock
+                    .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
+                this.completed = true;
+                return Poll::Ready(Err(RwLockError::Poisoned));
             }
 
-            this.waiter_id = None;
-            if this.counted {
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                this.counted = false;
+            if let Some(waiter_id) = this.waiter_id {
+                if queued_waker.is_none() {
+                    drop(state);
+                    queued_waker = Some(context.waker().clone());
+                    continue;
+                }
+
+                let new_waker = queued_waker
+                    .take()
+                    .expect("queued owned write cloned a waker");
+                match state.writer_queue.replace_waker(waiter_id, new_waker) {
+                    Ok(retired_waker) => {
+                        drop(state);
+                        drop(retired_waker);
+                        return Poll::Pending;
+                    }
+                    Err(unused_waker) => {
+                        // Dequeued - we were pre-granted the lock!
+
+                        drop(state);
+                        drop(unused_waker);
+
+                        // Check and record lock acquisition for ordering tracking.
+                        // Queued handoffs must enforce the same E->D->B->A->C
+                        // ordering as immediate acquisition.
+                        if let Some(rank) = this.lock.rank {
+                            lock_ordering::check_acquire(this.lock.name, rank);
+                            lock_ordering::record_acquire(this.lock.name, rank);
+                        }
+
+                        let mut state = this.lock.state.lock();
+                        this.waiter_id = None;
+                        if this.counted {
+                            state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                            this.counted = false;
+                        }
+                        drop(state);
+                        this.completed = true;
+                        return Poll::Ready(Ok(OwnedRwLockWriteGuard {
+                            lock: Arc::clone(&this.lock),
+                        }));
+                    }
+                }
             }
+
+            let can_acquire =
+                !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
+
+            if can_acquire {
+                // Check lock ordering before acquisition (debug builds only)
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::check_acquire(this.lock.name, rank);
+                }
+
+                state.writer_active = true;
+                // Only count as waiting writer if we actually queue
+                drop(state);
+
+                // Record lock acquisition for ordering tracking
+                if let Some(rank) = this.lock.rank {
+                    lock_ordering::record_acquire(this.lock.name, rank);
+                }
+
+                this.completed = true;
+                return Poll::Ready(Ok(OwnedRwLockWriteGuard {
+                    lock: Arc::clone(&this.lock),
+                }));
+            }
+
+            if queued_waker.is_none() {
+                drop(state);
+                queued_waker = Some(context.waker().clone());
+                continue;
+            }
+
+            // Only increment writer_waiters when we must actually queue.
+            if !this.counted {
+                state.writer_waiters += 1;
+                this.counted = true;
+            }
+
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let waiter_id = state.writer_queue.push_back_tagged(
+                queued_waker
+                    .take()
+                    .expect("queued owned write cloned a waker"),
+                id,
+            );
             drop(state);
-            this.completed = true;
-            return Poll::Ready(Ok(OwnedRwLockWriteGuard {
-                lock: Arc::clone(&this.lock),
-            }));
+            this.waiter_id = Some(waiter_id);
+            return Poll::Pending;
         }
-
-        let can_acquire =
-            !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
-
-        if can_acquire {
-            // Check lock ordering before acquisition (debug builds only)
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::check_acquire(this.lock.name, rank);
-            }
-
-            state.writer_active = true;
-            // Only count as waiting writer if we actually queue
-            drop(state);
-
-            // Record lock acquisition for ordering tracking
-            if let Some(rank) = this.lock.rank {
-                lock_ordering::record_acquire(this.lock.name, rank);
-            }
-
-            this.completed = true;
-            return Poll::Ready(Ok(OwnedRwLockWriteGuard {
-                lock: Arc::clone(&this.lock),
-            }));
-        }
-
-        // Only increment writer_waiters when we must actually queue
-        if !this.counted {
-            state.writer_waiters += 1;
-            this.counted = true;
-        }
-
-        let id = state.next_waiter_id;
-        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        let waiter_id = state
-            .writer_queue
-            .push_back_tagged(context.waker().clone(), id);
-        drop(state);
-        this.waiter_id = Some(waiter_id);
-        Poll::Pending
     }
 }
 
@@ -1433,6 +1544,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use crate::util::ArenaIndex;
     use std::sync::Arc as StdArc;
+    use std::sync::Weak;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::thread;
 
@@ -1480,6 +1592,309 @@ mod tests {
             crate::types::TaskId::from_arena(ArenaIndex::new(0, slot)),
             crate::types::Budget::INFINITE,
         )
+    }
+
+    struct StateLockDropProbe {
+        lock: Weak<RwLock<()>>,
+        dropped: StdArc<AtomicBool>,
+        state_was_unlocked: StdArc<AtomicBool>,
+    }
+
+    impl std::task::Wake for StateLockDropProbe {
+        fn wake(self: StdArc<Self>) {}
+    }
+
+    impl Drop for StateLockDropProbe {
+        fn drop(&mut self) {
+            let state_was_unlocked = self
+                .lock
+                .upgrade()
+                .is_some_and(|lock| lock.state.try_lock().is_some());
+            self.state_was_unlocked
+                .store(state_was_unlocked, AtomicOrdering::SeqCst);
+            self.dropped.store(true, AtomicOrdering::SeqCst);
+        }
+    }
+
+    fn state_lock_drop_probe(
+        lock: &StdArc<RwLock<()>>,
+    ) -> (Waker, StdArc<AtomicBool>, StdArc<AtomicBool>) {
+        let dropped = StdArc::new(AtomicBool::new(false));
+        let state_was_unlocked = StdArc::new(AtomicBool::new(false));
+        let waker = Waker::from(StdArc::new(StateLockDropProbe {
+            lock: StdArc::downgrade(lock),
+            dropped: StdArc::clone(&dropped),
+            state_was_unlocked: StdArc::clone(&state_was_unlocked),
+        }));
+        (waker, dropped, state_was_unlocked)
+    }
+
+    fn poll_with_waker<T>(
+        future: &mut (impl Future<Output = T> + Unpin),
+        waker: &Waker,
+    ) -> Poll<T> {
+        let mut context = Context::from_waker(waker);
+        Pin::new(future).poll(&mut context)
+    }
+
+    fn assert_probe_retired_after_unlock(
+        dropped: &AtomicBool,
+        state_was_unlocked: &AtomicBool,
+        path: &str,
+    ) {
+        assert!(dropped.load(AtomicOrdering::SeqCst), "{path} probe dropped");
+        assert!(
+            state_was_unlocked.load(AtomicOrdering::SeqCst),
+            "{path} RawWaker owner must be destroyed after releasing rwlock state"
+        );
+    }
+
+    #[test]
+    fn borrowed_read_repoll_and_cancel_retire_wakers_after_unlock() {
+        let lock = StdArc::new(RwLock::new(()));
+        let cx = test_cx();
+        let holder = lock.try_write().expect("writer blocks readers");
+        let mut future = lock.read(&cx);
+        let (first_waker, first_dropped, first_unlocked) = state_lock_drop_probe(&lock);
+
+        assert!(poll_with_waker(&mut future, &first_waker).is_pending());
+        drop(first_waker);
+        assert!(!first_dropped.load(AtomicOrdering::SeqCst));
+        assert!(poll_with_waker(&mut future, Waker::noop()).is_pending());
+        assert_probe_retired_after_unlock(
+            &first_dropped,
+            &first_unlocked,
+            "borrowed read replacement",
+        );
+
+        let (cancel_waker, cancel_dropped, cancel_unlocked) = state_lock_drop_probe(&lock);
+        assert!(poll_with_waker(&mut future, &cancel_waker).is_pending());
+        drop(cancel_waker);
+        cx.set_cancel_requested(true);
+        assert!(matches!(
+            poll_with_waker(&mut future, Waker::noop()),
+            Poll::Ready(Err(RwLockError::Cancelled))
+        ));
+        assert_probe_retired_after_unlock(
+            &cancel_dropped,
+            &cancel_unlocked,
+            "borrowed read cancellation",
+        );
+        assert!(lock.debug_state().reader_waiters.is_empty());
+        drop(holder);
+    }
+
+    #[test]
+    fn borrowed_write_repoll_and_cancel_retire_wakers_after_unlock() {
+        let lock = StdArc::new(RwLock::new(()));
+        let cx = test_cx();
+        let holder = lock.try_read().expect("reader blocks writers");
+        let mut future = lock.write(&cx);
+        let (first_waker, first_dropped, first_unlocked) = state_lock_drop_probe(&lock);
+
+        assert!(poll_with_waker(&mut future, &first_waker).is_pending());
+        drop(first_waker);
+        assert!(!first_dropped.load(AtomicOrdering::SeqCst));
+        assert!(poll_with_waker(&mut future, Waker::noop()).is_pending());
+        assert_probe_retired_after_unlock(
+            &first_dropped,
+            &first_unlocked,
+            "borrowed write replacement",
+        );
+
+        let (cancel_waker, cancel_dropped, cancel_unlocked) = state_lock_drop_probe(&lock);
+        assert!(poll_with_waker(&mut future, &cancel_waker).is_pending());
+        drop(cancel_waker);
+        cx.set_cancel_requested(true);
+        assert!(matches!(
+            poll_with_waker(&mut future, Waker::noop()),
+            Poll::Ready(Err(RwLockError::Cancelled))
+        ));
+        assert_probe_retired_after_unlock(
+            &cancel_dropped,
+            &cancel_unlocked,
+            "borrowed write cancellation",
+        );
+        let state = lock.debug_state();
+        assert!(state.writer_queue.is_empty());
+        assert_eq!(state.writer_waiters, 0);
+        drop(holder);
+    }
+
+    #[test]
+    fn owned_read_repoll_and_cancel_retire_wakers_after_unlock() {
+        let lock = StdArc::new(RwLock::new(()));
+        let cx = test_cx();
+        let holder = lock.try_write().expect("writer blocks readers");
+        let mut future = OwnedRwLockReadGuard::read(StdArc::clone(&lock), &cx);
+        let (first_waker, first_dropped, first_unlocked) = state_lock_drop_probe(&lock);
+
+        assert!(poll_with_waker(&mut future, &first_waker).is_pending());
+        drop(first_waker);
+        assert!(!first_dropped.load(AtomicOrdering::SeqCst));
+        assert!(poll_with_waker(&mut future, Waker::noop()).is_pending());
+        assert_probe_retired_after_unlock(
+            &first_dropped,
+            &first_unlocked,
+            "owned read replacement",
+        );
+
+        let (cancel_waker, cancel_dropped, cancel_unlocked) = state_lock_drop_probe(&lock);
+        assert!(poll_with_waker(&mut future, &cancel_waker).is_pending());
+        drop(cancel_waker);
+        cx.set_cancel_requested(true);
+        assert!(matches!(
+            poll_with_waker(&mut future, Waker::noop()),
+            Poll::Ready(Err(RwLockError::Cancelled))
+        ));
+        assert_probe_retired_after_unlock(
+            &cancel_dropped,
+            &cancel_unlocked,
+            "owned read cancellation",
+        );
+        assert!(lock.debug_state().reader_waiters.is_empty());
+        drop(holder);
+    }
+
+    #[test]
+    fn owned_write_repoll_and_cancel_retire_wakers_after_unlock() {
+        let lock = StdArc::new(RwLock::new(()));
+        let cx = test_cx();
+        let holder = lock.try_read().expect("reader blocks writers");
+        let mut future = OwnedRwLockWriteGuard::write(StdArc::clone(&lock), &cx);
+        let (first_waker, first_dropped, first_unlocked) = state_lock_drop_probe(&lock);
+
+        assert!(poll_with_waker(&mut future, &first_waker).is_pending());
+        drop(first_waker);
+        assert!(!first_dropped.load(AtomicOrdering::SeqCst));
+        assert!(poll_with_waker(&mut future, Waker::noop()).is_pending());
+        assert_probe_retired_after_unlock(
+            &first_dropped,
+            &first_unlocked,
+            "owned write replacement",
+        );
+
+        let (cancel_waker, cancel_dropped, cancel_unlocked) = state_lock_drop_probe(&lock);
+        assert!(poll_with_waker(&mut future, &cancel_waker).is_pending());
+        drop(cancel_waker);
+        cx.set_cancel_requested(true);
+        assert!(matches!(
+            poll_with_waker(&mut future, Waker::noop()),
+            Poll::Ready(Err(RwLockError::Cancelled))
+        ));
+        assert_probe_retired_after_unlock(
+            &cancel_dropped,
+            &cancel_unlocked,
+            "owned write cancellation",
+        );
+        let state = lock.debug_state();
+        assert!(state.writer_queue.is_empty());
+        assert_eq!(state.writer_waiters, 0);
+        drop(holder);
+    }
+
+    #[test]
+    fn future_drop_matrix_retires_wakers_after_unlock() {
+        {
+            let lock = StdArc::new(RwLock::new(()));
+            let cx = test_cx();
+            let holder = lock.try_write().expect("writer blocks borrowed read");
+            let mut future = lock.read(&cx);
+            let (waker, dropped, unlocked) = state_lock_drop_probe(&lock);
+            assert!(poll_with_waker(&mut future, &waker).is_pending());
+            drop(waker);
+            drop(future);
+            assert_probe_retired_after_unlock(&dropped, &unlocked, "borrowed read drop");
+            assert!(lock.debug_state().reader_waiters.is_empty());
+            drop(holder);
+        }
+
+        {
+            let lock = StdArc::new(RwLock::new(()));
+            let cx = test_cx();
+            let holder = lock.try_read().expect("reader blocks borrowed write");
+            let mut future = lock.write(&cx);
+            let (waker, dropped, unlocked) = state_lock_drop_probe(&lock);
+            assert!(poll_with_waker(&mut future, &waker).is_pending());
+            drop(waker);
+            drop(future);
+            assert_probe_retired_after_unlock(&dropped, &unlocked, "borrowed write drop");
+            let state = lock.debug_state();
+            assert!(state.writer_queue.is_empty());
+            assert_eq!(state.writer_waiters, 0);
+            drop(holder);
+        }
+
+        {
+            let lock = StdArc::new(RwLock::new(()));
+            let cx = test_cx();
+            let holder = lock.try_write().expect("writer blocks owned read");
+            let mut future = OwnedRwLockReadGuard::read(StdArc::clone(&lock), &cx);
+            let (waker, dropped, unlocked) = state_lock_drop_probe(&lock);
+            assert!(poll_with_waker(&mut future, &waker).is_pending());
+            drop(waker);
+            drop(future);
+            assert_probe_retired_after_unlock(&dropped, &unlocked, "owned read drop");
+            assert!(lock.debug_state().reader_waiters.is_empty());
+            drop(holder);
+        }
+
+        {
+            let lock = StdArc::new(RwLock::new(()));
+            let cx = test_cx();
+            let holder = lock.try_read().expect("reader blocks owned write");
+            let mut future = OwnedRwLockWriteGuard::write(StdArc::clone(&lock), &cx);
+            let (waker, dropped, unlocked) = state_lock_drop_probe(&lock);
+            assert!(poll_with_waker(&mut future, &waker).is_pending());
+            drop(waker);
+            drop(future);
+            assert_probe_retired_after_unlock(&dropped, &unlocked, "owned write drop");
+            let state = lock.debug_state();
+            assert!(state.writer_queue.is_empty());
+            assert_eq!(state.writer_waiters, 0);
+            drop(holder);
+        }
+    }
+
+    #[test]
+    fn poisoned_release_defers_reader_and_writer_raw_wakers() {
+        let lock = StdArc::new(RwLock::new(()));
+        let read_cx = test_cx_with_slot(31);
+        let write_cx = test_cx_with_slot(32);
+        let holder = lock.try_write().expect("writer holds rwlock");
+        let mut read_future = lock.read(&read_cx);
+        let mut write_future = lock.write(&write_cx);
+        let (read_waker, read_dropped, read_unlocked) = state_lock_drop_probe(&lock);
+        let (write_waker, write_dropped, write_unlocked) = state_lock_drop_probe(&lock);
+
+        assert!(poll_with_waker(&mut read_future, &read_waker).is_pending());
+        assert!(poll_with_waker(&mut write_future, &write_waker).is_pending());
+        drop(read_waker);
+        drop(write_waker);
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _holder = holder;
+            panic!("poison rwlock while both waiter queues are populated");
+        }));
+        assert!(poisoned.is_err());
+        assert!(lock.is_poisoned());
+        assert!(!read_dropped.load(AtomicOrdering::SeqCst));
+        assert!(!write_dropped.load(AtomicOrdering::SeqCst));
+
+        assert!(matches!(
+            poll_with_waker(&mut read_future, Waker::noop()),
+            Poll::Ready(Err(RwLockError::Poisoned))
+        ));
+        assert!(matches!(
+            poll_with_waker(&mut write_future, Waker::noop()),
+            Poll::Ready(Err(RwLockError::Poisoned))
+        ));
+        assert_probe_retired_after_unlock(&read_dropped, &read_unlocked, "poisoned reader queue");
+        assert_probe_retired_after_unlock(&write_dropped, &write_unlocked, "poisoned writer queue");
+        let state = lock.debug_state();
+        assert!(state.reader_waiters.is_empty());
+        assert!(state.writer_queue.is_empty());
+        assert_eq!(state.writer_waiters, 0);
     }
 
     #[test]
