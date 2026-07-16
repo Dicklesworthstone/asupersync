@@ -7,10 +7,11 @@ use super::{Layer, Service};
 use crate::types::Time;
 use parking_lot::Mutex;
 use pin_project::pin_project;
+use slab::Slab;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
@@ -130,6 +131,128 @@ struct SharedRateLimitState {
     tokens: u64,
     /// Last time the bucket state was refilled.
     last_refill: Option<Time>,
+    /// Exhausted handles waiting for either a refund or the deadline refill.
+    waiters: Slab<RateLimitWaiter>,
+    /// Generation component for stable waiter handles across slab slot reuse.
+    next_waiter_id: u64,
+}
+
+#[derive(Debug)]
+struct RateLimitWaiter {
+    id: u64,
+    registration: Arc<RegisteredRateLimitWaker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RateLimitWaiterHandle {
+    slot: usize,
+    id: u64,
+}
+
+/// Arc-owned executor waker stored beneath the shared bucket mutex.
+///
+/// RawWaker clone, wake, and final destruction all happen after the mutex is
+/// released. Under-lock registry operations only move or clone this Arc.
+#[derive(Debug)]
+struct RegisteredRateLimitWaker {
+    waker: Waker,
+}
+
+impl RegisteredRateLimitWaker {
+    #[inline]
+    fn new(waker: &Waker) -> Arc<Self> {
+        Arc::new(Self {
+            waker: waker.clone(),
+        })
+    }
+
+    #[inline]
+    fn will_wake(&self, waker: &Waker) -> bool {
+        self.waker.will_wake(waker)
+    }
+
+    #[inline]
+    fn wake_by_ref(&self) {
+        self.waker.wake_by_ref();
+    }
+}
+
+#[inline]
+const fn max_bucket_tokens(rate: u64, zero_period: bool) -> u64 {
+    if zero_period { rate.max(1) } else { rate }
+}
+
+#[inline]
+fn waiter_by_handle(
+    state: &SharedRateLimitState,
+    handle: RateLimitWaiterHandle,
+) -> Option<&RateLimitWaiter> {
+    let waiter = state.waiters.get(handle.slot)?;
+    (waiter.id == handle.id).then_some(waiter)
+}
+
+#[inline]
+fn remove_waiter_locked(
+    state: &mut SharedRateLimitState,
+    handle: &mut Option<RateLimitWaiterHandle>,
+) -> Option<Arc<RegisteredRateLimitWaker>> {
+    let handle = handle.take()?;
+    waiter_by_handle(state, handle)?;
+    state
+        .waiters
+        .try_remove(handle.slot)
+        .map(|removed| removed.registration)
+}
+
+#[inline]
+fn restore_tokens_locked(
+    state: &mut SharedRateLimitState,
+    count: u64,
+    max_tokens: u64,
+) -> Slab<RateLimitWaiter> {
+    if count == 0 {
+        return Slab::new();
+    }
+    let was_empty = state.tokens == 0;
+    state.tokens = state.tokens.saturating_add(count).min(max_tokens);
+    if was_empty && state.tokens > 0 {
+        std::mem::take(&mut state.waiters)
+    } else {
+        Slab::new()
+    }
+}
+
+#[inline]
+fn retire_registration_after_unlock(registration: Option<Arc<RegisteredRateLimitWaker>>) {
+    let Some(registration) = registration else {
+        return;
+    };
+    if let Err(payload) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(registration)))
+    {
+        std::mem::forget(payload);
+    }
+}
+
+fn wake_waiters_after_unlock(waiters: Slab<RateLimitWaiter>) {
+    for (_, waiter) in waiters {
+        let registration = waiter.registration;
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registration.wake_by_ref();
+        })) {
+            std::mem::forget(payload);
+        }
+        retire_registration_after_unlock(Some(registration));
+    }
+}
+
+#[inline]
+fn restore_tokens_and_wake(state: &Arc<Mutex<SharedRateLimitState>>, count: u64, max_tokens: u64) {
+    let waiters = {
+        let mut state = state.lock();
+        restore_tokens_locked(&mut state, count, max_tokens)
+    };
+    wake_waiters_after_unlock(waiters);
 }
 
 impl<S: Clone> Clone for RateLimit<S> {
@@ -141,7 +264,10 @@ impl<S: Clone> Clone for RateLimit<S> {
             // Readiness reservations are handle-local and must not be inherited
             // by a fresh clone, or a clone can spend another handle's poll_ready
             // reservation without performing its own readiness check.
-            reservations: LocalReservationState::new(state, self.rate),
+            reservations: LocalReservationState::new(
+                state,
+                max_bucket_tokens(self.rate, self.period.is_zero()),
+            ),
             rate: self.rate,
             period: self.period,
             time_getter: self.time_getter,
@@ -163,11 +289,16 @@ impl<S> RateLimit<S> {
         let state = Arc::new(Mutex::new(SharedRateLimitState {
             tokens: rate, // Start with full bucket
             last_refill: None,
+            waiters: Slab::new(),
+            next_waiter_id: 0,
         }));
         Self {
             inner,
             state: Arc::clone(&state),
-            reservations: LocalReservationState::new(state, rate),
+            reservations: LocalReservationState::new(
+                state,
+                max_bucket_tokens(rate, period.is_zero()),
+            ),
             rate,
             period,
             time_getter: wall_clock_now,
@@ -186,11 +317,16 @@ impl<S> RateLimit<S> {
         let state = Arc::new(Mutex::new(SharedRateLimitState {
             tokens: rate,
             last_refill: None,
+            waiters: Slab::new(),
+            next_waiter_id: 0,
         }));
         Self {
             inner,
             state: Arc::clone(&state),
-            reservations: LocalReservationState::new(state, rate),
+            reservations: LocalReservationState::new(
+                state,
+                max_bucket_tokens(rate, period.is_zero()),
+            ),
             rate,
             period,
             time_getter,
@@ -296,8 +432,17 @@ impl<S> RateLimit<S> {
     /// Refills tokens based on elapsed time.
     #[cfg(test)]
     fn refill(&self, now: Time) {
-        let mut state = self.state.lock();
-        Self::refill_state_locked(&mut state, self.rate, self.period, now);
+        let waiters = {
+            let mut state = self.state.lock();
+            let was_empty = state.tokens == 0;
+            Self::refill_state_locked(&mut state, self.rate, self.period, now);
+            if was_empty && state.tokens > 0 {
+                std::mem::take(&mut state.waiters)
+            } else {
+                Slab::new()
+            }
+        };
+        wake_waiters_after_unlock(waiters);
     }
 
     /// Polls readiness with an explicit time value.
@@ -313,6 +458,7 @@ impl<S> RateLimit<S> {
         S: Service<Request>,
     {
         if self.reservations.reserved_tokens > 0 {
+            self.reservations.retire_waiter();
             let mut reservation_restore_guard = ExistingReservationGuard::new(
                 Arc::clone(&self.state),
                 &mut self.reservations.reserved_tokens,
@@ -334,59 +480,144 @@ impl<S> RateLimit<S> {
             };
         }
 
-        let next_deadline = {
-            let mut state = self.state.lock();
-            Self::refill_state_locked(&mut state, self.rate, self.period, now);
-            if state.tokens == 0 {
-                let next_deadline = state.last_refill.map(|last_refill| {
-                    let period_nanos = {
-                        let nanos = self.period.as_nanos();
-                        if nanos <= u128::from(u64::MAX) {
-                            nanos as u64
-                        } else {
-                            u64::MAX
-                        }
-                    };
-                    last_refill.saturating_add_nanos(period_nanos)
-                });
-                drop(state);
-                next_deadline
+        let period_nanos = {
+            let nanos = self.period.as_nanos();
+            if nanos <= u128::from(u64::MAX) {
+                nanos as u64
             } else {
-                state.tokens -= 1;
-                drop(state);
-                None
+                u64::MAX
             }
         };
+        // These values are declared before each lock guard so unwinding always
+        // releases the bucket mutex before a hostile RawWaker can be destroyed.
+        let mut incoming_waker: Option<Arc<RegisteredRateLimitWaker>> = None;
+        let mut retired_registration: Option<Arc<RegisteredRateLimitWaker>> = None;
+        let mut waiters_to_wake = Slab::new();
+        let (acquired_token, next_deadline) = loop {
+            let mut state = self.state.lock();
+            Self::refill_state_locked(&mut state, self.rate, self.period, now);
 
-        if next_deadline.is_some() {
-            // Wake up caller to retry later
+            if state.tokens > 0 {
+                retired_registration =
+                    remove_waiter_locked(&mut state, &mut self.reservations.waiter);
+                state.tokens -= 1;
+
+                // A refill can make more than one token runnable. Wake the
+                // remaining exhausted handles so capacity is not left idle.
+                if state.tokens > 0 {
+                    waiters_to_wake = std::mem::take(&mut state.waiters);
+                }
+                break (true, None);
+            }
+
+            let next_deadline = state
+                .last_refill
+                .map(|last_refill| last_refill.saturating_add_nanos(period_nanos));
+
+            if let Some(handle) = self.reservations.waiter {
+                if let Some(waiter) = waiter_by_handle(&state, handle) {
+                    if waiter.registration.will_wake(cx.waker()) {
+                        break (false, next_deadline);
+                    }
+
+                    if incoming_waker.is_some() {
+                        let waiter = state
+                            .waiters
+                            .get_mut(handle.slot)
+                            .expect("validated rate-limit waiter must remain registered");
+                        let incoming = incoming_waker
+                            .take()
+                            .expect("prepared rate-limit Waker must be available");
+                        retired_registration =
+                            Some(std::mem::replace(&mut waiter.registration, incoming));
+                        break (false, next_deadline);
+                    }
+                } else {
+                    // A refund or refill may have detached this registration
+                    // before its owner was polled again. The generation check
+                    // prevents a stale handle from removing a reused slot.
+                    self.reservations.waiter = None;
+                }
+            }
+
+            if incoming_waker.is_none() {
+                drop(state);
+                incoming_waker = Some(RegisteredRateLimitWaker::new(cx.waker()));
+                continue;
+            }
+
+            // Reserve before insertion and keep the prepared registration's
+            // Arc outside the mutex. Even if Slab insertion unexpectedly
+            // panics, its under-lock clone cannot be the final RawWaker owner.
+            state.waiters.reserve(1);
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let registration = incoming_waker
+                .as_ref()
+                .expect("prepared rate-limit Waker must be available");
+            let slot = state.waiters.insert(RateLimitWaiter {
+                id,
+                registration: Arc::clone(registration),
+            });
+            self.reservations.waiter = Some(RateLimitWaiterHandle { slot, id });
+            break (false, next_deadline);
+        };
+
+        // Once a token has been removed from the bucket, arm its refund before
+        // retiring any executor-owned state. In particular, dropping an old
+        // Sleep can run an arbitrary RawWaker destructor.
+        let mut token_restore_guard = if acquired_token {
+            Some(ReservedTokenGuard::new(
+                Arc::clone(&self.state),
+                self.rate,
+                self.period.is_zero(),
+                true,
+            ))
+        } else {
+            None
+        };
+
+        retire_registration_after_unlock(incoming_waker);
+        retire_registration_after_unlock(retired_registration);
+        wake_waiters_after_unlock(waiters_to_wake);
+
+        if !acquired_token {
             if let Some(next_deadline) = next_deadline {
                 let need_new_sleep = self
                     .sleep
                     .as_ref()
-                    .is_none_or(|s| s.deadline() != next_deadline);
+                    .is_none_or(|sleep| sleep.deadline() != next_deadline);
                 if need_new_sleep {
+                    drop(self.sleep.take());
                     self.sleep = Some(crate::time::Sleep::new(next_deadline));
                 }
 
-                if let Some(sleep) = &mut self.sleep {
-                    let _ = std::pin::Pin::new(sleep).poll(cx);
+                let timer_ready = self
+                    .sleep
+                    .as_mut()
+                    .is_some_and(|sleep| std::pin::Pin::new(sleep).poll(cx).is_ready());
+                if timer_ready {
+                    // `take` clears the field before arbitrary Waker
+                    // destruction, avoiding a second drop during unwinding.
+                    drop(self.sleep.take());
+                    cx.waker().wake_by_ref();
                 }
             } else {
+                // Defensive fallback for a malformed state whose exhausted
+                // bucket lacks a refill anchor.
                 cx.waker().wake_by_ref();
             }
             return Poll::Pending;
         }
 
-        self.sleep = None;
+        // Clear the field before running Sleep's Waker destructor. The armed
+        // token guard restores capacity if that destructor panics.
+        drop(self.sleep.take());
         let inner = &mut self.inner;
         let reserved_tokens = &mut self.reservations.reserved_tokens;
-        let mut token_restore_guard = ReservedTokenGuard::new(
-            Arc::clone(&self.state),
-            self.rate,
-            self.period.is_zero(),
-            true,
-        );
+        let token_restore_guard = token_restore_guard
+            .as_mut()
+            .expect("acquired rate-limit token must arm its refund guard");
 
         match inner.poll_ready(cx).map_err(RateLimitError::Inner) {
             Poll::Ready(Ok(())) => {
@@ -468,31 +699,43 @@ where
 struct LocalReservationState {
     state: Arc<Mutex<SharedRateLimitState>>,
     reserved_tokens: u64,
-    rate: u64,
+    max_tokens: u64,
+    waiter: Option<RateLimitWaiterHandle>,
 }
 
 impl LocalReservationState {
-    fn new(state: Arc<Mutex<SharedRateLimitState>>, rate: u64) -> Self {
+    fn new(state: Arc<Mutex<SharedRateLimitState>>, max_tokens: u64) -> Self {
         Self {
             state,
             reserved_tokens: 0,
-            rate,
+            max_tokens,
+            waiter: None,
         }
+    }
+
+    fn retire_waiter(&mut self) {
+        if self.waiter.is_none() {
+            return;
+        }
+
+        let retired = {
+            let mut state = self.state.lock();
+            remove_waiter_locked(&mut state, &mut self.waiter)
+        };
+        retire_registration_after_unlock(retired);
     }
 }
 
 impl Drop for LocalReservationState {
     fn drop(&mut self) {
-        if self.reserved_tokens == 0 {
-            return;
-        }
-
-        let mut state = self.state.lock();
-        let max_tokens = self.rate.max(1);
-        state.tokens = state
-            .tokens
-            .saturating_add(self.reserved_tokens)
-            .min(max_tokens);
+        let (retired, waiters) = {
+            let mut state = self.state.lock();
+            let retired = remove_waiter_locked(&mut state, &mut self.waiter);
+            let waiters = restore_tokens_locked(&mut state, self.reserved_tokens, self.max_tokens);
+            (retired, waiters)
+        };
+        retire_registration_after_unlock(retired);
+        wake_waiters_after_unlock(waiters);
     }
 }
 
@@ -526,13 +769,11 @@ impl ReservedTokenGuard {
 impl Drop for ReservedTokenGuard {
     fn drop(&mut self) {
         if self.armed {
-            let mut state = self.state.lock();
-            let max_tokens = if self.zero_period {
-                self.rate.max(1)
-            } else {
-                self.rate
-            };
-            state.tokens = state.tokens.saturating_add(1).min(max_tokens);
+            restore_tokens_and_wake(
+                &self.state,
+                1,
+                max_bucket_tokens(self.rate, self.zero_period),
+            );
         }
     }
 }
@@ -571,13 +812,11 @@ impl Drop for ExistingReservationGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             *self.reserved_tokens = self.reserved_tokens.saturating_sub(1);
-            let mut state = self.state.lock();
-            let max_tokens = if self.zero_period {
-                self.rate.max(1)
-            } else {
-                self.rate
-            };
-            state.tokens = state.tokens.saturating_add(1).min(max_tokens);
+            restore_tokens_and_wake(
+                &self.state,
+                1,
+                max_bucket_tokens(self.rate, self.zero_period),
+            );
         }
     }
 }
@@ -687,9 +926,9 @@ mod tests {
     )]
     use super::*;
     use std::future::ready;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::Waker;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Weak};
+    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -698,6 +937,105 @@ mod tests {
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
+    }
+
+    struct ReentrantRateLimitWaker {
+        state: Weak<Mutex<SharedRateLimitState>>,
+        wakes: Arc<AtomicUsize>,
+        unlocked_wakes: Arc<AtomicUsize>,
+    }
+
+    impl Wake for ReentrantRateLimitWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            if let Some(state) = self.state.upgrade()
+                && state.try_lock().is_some()
+            {
+                self.unlocked_wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn reentrant_rate_limit_waker(
+        state: &Arc<Mutex<SharedRateLimitState>>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let unlocked_wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(ReentrantRateLimitWaker {
+            state: Arc::downgrade(state),
+            wakes: Arc::clone(&wakes),
+            unlocked_wakes: Arc::clone(&unlocked_wakes),
+        }));
+        (waker, wakes, unlocked_wakes)
+    }
+
+    struct RateLimitWakerDropProbe {
+        state: Weak<Mutex<SharedRateLimitState>>,
+        drops: Arc<AtomicUsize>,
+        unlocked_drops: Arc<AtomicUsize>,
+    }
+
+    impl Wake for RateLimitWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for RateLimitWakerDropProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if let Some(state) = self.state.upgrade()
+                && state.try_lock().is_some()
+            {
+                self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn rate_limit_waker_drop_probe(
+        state: &Arc<Mutex<SharedRateLimitState>>,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(RateLimitWakerDropProbe {
+            state: Arc::downgrade(state),
+            drops: Arc::clone(&drops),
+            unlocked_drops: Arc::clone(&unlocked_drops),
+        }));
+        (waker, drops, unlocked_drops)
+    }
+
+    struct PanickingRateLimitWaker {
+        wakes: Arc<AtomicUsize>,
+    }
+
+    impl Wake for PanickingRateLimitWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            panic!("hostile rate-limit wake");
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            panic!("hostile rate-limit wake-by-ref");
+        }
+    }
+
+    struct PanickingDropRateLimitWaker {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Wake for PanickingDropRateLimitWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for PanickingDropRateLimitWaker {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            panic!("hostile rate-limit Waker destructor");
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -814,6 +1152,10 @@ mod tests {
         Time::from_nanos(TEST_NOW.with(std::cell::Cell::get))
     }
 
+    fn ready_sleep_time() -> Time {
+        Time::from_nanos(u64::MAX)
+    }
+
     fn set_test_time(t: u64) {
         TEST_NOW.with(|now| now.set(t));
     }
@@ -822,6 +1164,23 @@ mod tests {
         let mut state = svc.state.lock();
         state.tokens = tokens;
         state.last_refill = last_refill;
+    }
+
+    fn install_test_waiter<S>(svc: &mut RateLimit<S>, waker: &Waker) -> RateLimitWaiterHandle {
+        let registration = RegisteredRateLimitWaker::new(waker);
+        let handle = {
+            let mut state = svc.state.lock();
+            state.waiters.reserve(1);
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            let slot = state.waiters.insert(RateLimitWaiter {
+                id,
+                registration: Arc::clone(&registration),
+            });
+            RateLimitWaiterHandle { slot, id }
+        };
+        svc.reservations.waiter = Some(handle);
+        handle
     }
 
     #[test]
@@ -1105,7 +1464,13 @@ mod tests {
     #[test]
     fn reserved_poll_ready_error_restores_token_and_clears_reservation() {
         init_test("reserved_poll_ready_error_restores_token_and_clears_reservation");
-        let mut svc = RateLimit::new(ReadyThenErrorService::default(), 1, Duration::from_secs(1));
+        let mut svc = RateLimit::with_time_getter(
+            ReadyThenErrorService::default(),
+            1,
+            Duration::MAX,
+            test_time,
+        );
+        let mut blocked = svc.clone();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1123,6 +1488,14 @@ mod tests {
             "reserved after first ready",
             1,
             svc.reserved_tokens()
+        );
+
+        let (blocked_waker, wakes, unlocked_wakes) = reentrant_rate_limit_waker(&blocked.state);
+        let mut blocked_cx = Context::from_waker(&blocked_waker);
+        assert!(
+            blocked
+                .poll_ready_with_time::<()>(Time::ZERO, &mut blocked_cx)
+                .is_pending()
         );
 
         let second = svc.poll_ready_with_time::<()>(Time::ZERO, &mut cx);
@@ -1143,6 +1516,18 @@ mod tests {
             0,
             svc.reserved_tokens()
         );
+        crate::assert_with_log!(
+            wakes.load(Ordering::SeqCst) == 1,
+            "reserved-path error wakes exhausted clone",
+            1,
+            wakes.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            unlocked_wakes.load(Ordering::SeqCst) == 1,
+            "reserved-path error wakes after unlock",
+            1,
+            unlocked_wakes.load(Ordering::SeqCst)
+        );
 
         let mut future = svc.call(());
         let result = Pin::new(&mut future).poll(&mut cx);
@@ -1153,13 +1538,18 @@ mod tests {
             true,
             not_ready
         );
+        assert!(matches!(
+            blocked.poll_ready_with_time::<()>(Time::ZERO, &mut blocked_cx),
+            Poll::Ready(Ok(()))
+        ));
         crate::test_complete!("reserved_poll_ready_error_restores_token_and_clears_reservation");
     }
 
     #[test]
     fn poll_ready_with_time_reserved_token_restores_on_call_panic() {
         init_test("poll_ready_with_time_reserved_token_restores_on_call_panic");
-        let mut svc = RateLimit::new(PanicOnCallService, 1, Duration::from_secs(1));
+        let mut svc = RateLimit::with_time_getter(PanicOnCallService, 1, Duration::MAX, test_time);
+        let mut blocked = svc.clone();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1179,6 +1569,14 @@ mod tests {
             svc.reserved_tokens()
         );
 
+        let (blocked_waker, wakes, unlocked_wakes) = reentrant_rate_limit_waker(&blocked.state);
+        let mut blocked_cx = Context::from_waker(&blocked_waker);
+        assert!(
+            blocked
+                .poll_ready_with_time::<()>(Time::ZERO, &mut blocked_cx)
+                .is_pending()
+        );
+
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _future = svc.call(());
         }));
@@ -1190,6 +1588,22 @@ mod tests {
             1,
             svc.available_tokens()
         );
+        crate::assert_with_log!(
+            wakes.load(Ordering::SeqCst) == 1,
+            "call panic refund wakes exhausted clone",
+            1,
+            wakes.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            unlocked_wakes.load(Ordering::SeqCst) == 1,
+            "call panic refund wakes after unlock",
+            1,
+            unlocked_wakes.load(Ordering::SeqCst)
+        );
+        assert!(matches!(
+            blocked.poll_ready_with_time::<()>(Time::ZERO, &mut blocked_cx),
+            Poll::Ready(Ok(()))
+        ));
         crate::test_complete!("poll_ready_with_time_reserved_token_restores_on_call_panic");
     }
 
@@ -1414,41 +1828,281 @@ mod tests {
     }
 
     #[test]
-    fn dropping_clone_restores_shared_reserved_token() {
-        init_test("dropping_clone_restores_shared_reserved_token");
-        let mut svc = RateLimit::new(EchoService, 1, Duration::from_secs(1));
-        let mut cloned = svc.clone();
-        let waker = noop_waker();
+    fn expired_sleep_rewakes_instead_of_swallowing_readiness() {
+        init_test("expired_sleep_rewakes_instead_of_swallowing_readiness");
+        let mut svc = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
+        set_bucket_state(&svc, 0, Some(Time::ZERO));
+        let (waker, wakes, unlocked_wakes) = reentrant_rate_limit_waker(&svc.state);
         let mut cx = Context::from_waker(&waker);
 
-        let ready = svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
+        // First install the shared waiter with a far-future fallback timer.
+        assert!(
+            svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx)
+                .is_pending()
+        );
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+
+        // Deterministically substitute the same-deadline Sleep in its ready
+        // state. The poll must not swallow that readiness or retain a completed
+        // future that would panic on repoll.
+        drop(svc.sleep.take());
+        svc.sleep = Some(crate::time::Sleep::with_time_getter(
+            Time::from_nanos(u64::MAX),
+            ready_sleep_time,
+        ));
+        assert!(
+            svc.poll_ready_with_time::<i32>(Time::ZERO, &mut cx)
+                .is_pending()
+        );
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(unlocked_wakes.load(Ordering::SeqCst), 1);
+        assert!(svc.sleep.is_none());
+
+        assert!(matches!(
+            svc.poll_ready_with_time::<i32>(Time::from_nanos(u64::MAX), &mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        crate::test_complete!("expired_sleep_rewakes_instead_of_swallowing_readiness");
+    }
+
+    #[test]
+    fn dropping_clone_wakes_exhausted_peer_without_time_advance() {
+        init_test("dropping_clone_wakes_exhausted_peer_without_time_advance");
+        let mut holder = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
+        let mut blocked = holder.clone();
+
+        let holder_waker = noop_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+        let ready = holder.poll_ready_with_time::<i32>(Time::ZERO, &mut holder_cx);
         let ready_ok = matches!(ready, Poll::Ready(Ok(())));
-        crate::assert_with_log!(ready_ok, "original ready", true, ready_ok);
+        crate::assert_with_log!(ready_ok, "holder reserves sole token", true, ready_ok);
+
+        let (blocked_waker, wakes, unlocked_wakes) = reentrant_rate_limit_waker(&blocked.state);
+        let mut blocked_cx = Context::from_waker(&blocked_waker);
+        let pending = blocked.poll_ready_with_time::<i32>(Time::ZERO, &mut blocked_cx);
         crate::assert_with_log!(
-            cloned.available_tokens() == 0,
-            "clone sees depleted bucket before drop",
-            0,
-            cloned.available_tokens()
+            pending.is_pending(),
+            "peer parks while bucket is empty",
+            true,
+            pending.is_pending()
+        );
+        crate::assert_with_log!(
+            blocked.state.lock().waiters.len() == 1,
+            "one shared waiter registered",
+            1,
+            blocked.state.lock().waiters.len()
         );
 
-        drop(svc);
+        drop(holder);
 
         crate::assert_with_log!(
-            cloned.available_tokens() == 1,
+            wakes.load(Ordering::SeqCst) == 1,
+            "refund wakes parked peer exactly once",
+            1,
+            wakes.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            unlocked_wakes.load(Ordering::SeqCst) == 1,
+            "wake callback runs after bucket unlock",
+            1,
+            unlocked_wakes.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            blocked.available_tokens() == 1,
             "drop restores shared token",
             1,
-            cloned.available_tokens()
+            blocked.available_tokens()
+        );
+        crate::assert_with_log!(
+            blocked.state.lock().waiters.is_empty(),
+            "refund atomically detaches waiters",
+            true,
+            blocked.state.lock().waiters.is_empty()
         );
 
-        let clone_ready = cloned.poll_ready_with_time::<i32>(Time::ZERO, &mut cx);
-        let clone_ready_ok = matches!(clone_ready, Poll::Ready(Ok(())));
+        let ready = blocked.poll_ready_with_time::<i32>(Time::ZERO, &mut blocked_cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
         crate::assert_with_log!(
-            clone_ready_ok,
-            "clone ready after drop",
+            ready_ok,
+            "woken peer acquires without time advance",
             true,
-            clone_ready_ok
+            ready_ok
         );
-        crate::test_complete!("dropping_clone_restores_shared_reserved_token");
+        crate::test_complete!("dropping_clone_wakes_exhausted_peer_without_time_advance");
+    }
+
+    #[test]
+    fn exhausted_waiter_registration_deduplicates_and_replaces_in_place() {
+        init_test("exhausted_waiter_registration_deduplicates_and_replaces_in_place");
+        let mut holder = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
+        let mut blocked = holder.clone();
+        let holder_waker = noop_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+        assert!(matches!(
+            holder.poll_ready_with_time::<i32>(Time::ZERO, &mut holder_cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        let state = Arc::clone(&blocked.state);
+        let (first_waker, _, _) = reentrant_rate_limit_waker(&state);
+        let first_handle;
+        {
+            let mut cx = Context::from_waker(&first_waker);
+            assert!(
+                blocked
+                    .poll_ready_with_time::<i32>(Time::ZERO, &mut cx)
+                    .is_pending()
+            );
+            first_handle = blocked
+                .reservations
+                .waiter
+                .expect("pending poll must install a waiter");
+            assert!(
+                blocked
+                    .poll_ready_with_time::<i32>(Time::ZERO, &mut cx)
+                    .is_pending()
+            );
+            assert_eq!(blocked.reservations.waiter, Some(first_handle));
+            let state = state.lock();
+            assert_eq!(state.waiters.len(), 1);
+            assert_eq!(state.next_waiter_id, 1);
+        }
+
+        let (replacement_waker, _, _) = reentrant_rate_limit_waker(&state);
+        {
+            let mut cx = Context::from_waker(&replacement_waker);
+            assert!(
+                blocked
+                    .poll_ready_with_time::<i32>(Time::ZERO, &mut cx)
+                    .is_pending()
+            );
+        }
+        assert_eq!(blocked.reservations.waiter, Some(first_handle));
+        {
+            let state = state.lock();
+            assert_eq!(state.waiters.len(), 1);
+            assert_eq!(state.next_waiter_id, 1);
+            assert!(
+                waiter_by_handle(&state, first_handle)
+                    .expect("replacement must preserve the waiter handle")
+                    .registration
+                    .will_wake(&replacement_waker)
+            );
+        }
+        drop(blocked);
+        assert!(state.lock().waiters.is_empty());
+        drop(holder);
+        crate::test_complete!("exhausted_waiter_registration_deduplicates_and_replaces_in_place");
+    }
+
+    #[test]
+    fn waiter_replacement_retires_final_waker_after_unlock() {
+        init_test("waiter_replacement_retires_final_waker_after_unlock");
+        let mut blocked = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
+        set_bucket_state(&blocked, 0, Some(Time::ZERO));
+        let state = Arc::clone(&blocked.state);
+        let (first_waker, first_drops, first_unlocked_drops) = rate_limit_waker_drop_probe(&state);
+        let handle = install_test_waiter(&mut blocked, &first_waker);
+        drop(first_waker);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 0);
+
+        let replacement_waker = noop_waker();
+        let mut cx = Context::from_waker(&replacement_waker);
+        assert!(
+            blocked
+                .poll_ready_with_time::<i32>(Time::ZERO, &mut cx)
+                .is_pending()
+        );
+        assert_eq!(blocked.reservations.waiter, Some(handle));
+        assert_eq!(state.lock().waiters.len(), 1);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(first_unlocked_drops.load(Ordering::SeqCst), 1);
+        crate::test_complete!("waiter_replacement_retires_final_waker_after_unlock");
+    }
+
+    #[test]
+    fn panicking_waiter_does_not_suppress_other_refund_wakes() {
+        init_test("panicking_waiter_does_not_suppress_other_refund_wakes");
+        let mut holder = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
+        let mut hostile = holder.clone();
+        let mut healthy = holder.clone();
+        let holder_waker = noop_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+        assert!(matches!(
+            holder.poll_ready_with_time::<i32>(Time::ZERO, &mut holder_cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        let hostile_wakes = Arc::new(AtomicUsize::new(0));
+        let hostile_waker = Waker::from(Arc::new(PanickingRateLimitWaker {
+            wakes: Arc::clone(&hostile_wakes),
+        }));
+        let mut hostile_cx = Context::from_waker(&hostile_waker);
+        assert!(
+            hostile
+                .poll_ready_with_time::<i32>(Time::ZERO, &mut hostile_cx)
+                .is_pending()
+        );
+
+        let (healthy_waker, healthy_wakes, healthy_unlocked_wakes) =
+            reentrant_rate_limit_waker(&healthy.state);
+        let mut healthy_cx = Context::from_waker(&healthy_waker);
+        assert!(
+            healthy
+                .poll_ready_with_time::<i32>(Time::ZERO, &mut healthy_cx)
+                .is_pending()
+        );
+        assert_eq!(healthy.state.lock().waiters.len(), 2);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(holder)));
+        assert!(result.is_ok());
+        assert_eq!(hostile_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(healthy_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(healthy_unlocked_wakes.load(Ordering::SeqCst), 1);
+        assert!(healthy.state.lock().waiters.is_empty());
+
+        // One woken peer spends the refunded token. The other peer's stale
+        // handle must re-register without removing the reused slab slot, then
+        // receive the next zero-to-positive refund.
+        assert!(matches!(
+            healthy.poll_ready_with_time::<i32>(Time::ZERO, &mut healthy_cx),
+            Poll::Ready(Ok(()))
+        ));
+        let (retry_waker, retry_wakes, retry_unlocked_wakes) =
+            reentrant_rate_limit_waker(&hostile.state);
+        let mut retry_cx = Context::from_waker(&retry_waker);
+        assert!(
+            hostile
+                .poll_ready_with_time::<i32>(Time::ZERO, &mut retry_cx)
+                .is_pending()
+        );
+        assert_eq!(hostile.state.lock().waiters.len(), 1);
+        drop(healthy);
+        assert_eq!(retry_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(retry_unlocked_wakes.load(Ordering::SeqCst), 1);
+        assert!(hostile.state.lock().waiters.is_empty());
+        crate::test_complete!("panicking_waiter_does_not_suppress_other_refund_wakes");
+    }
+
+    #[test]
+    fn dropping_waiter_contains_panicking_registry_waker_destructor() {
+        init_test("dropping_waiter_contains_panicking_registry_waker_destructor");
+        let mut blocked = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
+        set_bucket_state(&blocked, 0, Some(Time::ZERO));
+        let state = Arc::clone(&blocked.state);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let hostile_waker = Waker::from(Arc::new(PanickingDropRateLimitWaker {
+            drops: Arc::clone(&drops),
+        }));
+        install_test_waiter(&mut blocked, &hostile_waker);
+        drop(hostile_waker);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(blocked)));
+        assert!(result.is_ok());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(state.lock().waiters.is_empty());
+        crate::test_complete!("dropping_waiter_contains_panicking_registry_waker_destructor");
     }
 
     #[test]
@@ -1457,6 +2111,8 @@ mod tests {
         let state = Arc::new(Mutex::new(SharedRateLimitState {
             tokens: 1,
             last_refill: Some(Time::ZERO),
+            waiters: Slab::new(),
+            next_waiter_id: 0,
         }));
 
         {
@@ -1620,7 +2276,6 @@ mod tests {
     }
 
     struct TrackWaker(Arc<AtomicBool>);
-    use std::task::Wake;
     impl Wake for TrackWaker {
         fn wake(self: Arc<Self>) {
             self.0.store(true, Ordering::SeqCst);
@@ -1644,9 +2299,9 @@ mod tests {
         let waker: Waker = Arc::new(TrackWaker(woken)).into();
         let mut cx = Context::from_waker(&waker);
 
-        // Create a rate limiter with 1 token, custom time getter.
-        let mut svc =
-            RateLimit::with_time_getter(EchoService, 1, Duration::from_secs(1), test_time);
+        // Use a far-future deadline so this test observes registration rather
+        // than the separate immediately-ready Sleep path.
+        let mut svc = RateLimit::with_time_getter(EchoService, 1, Duration::MAX, test_time);
 
         // Set time to 0, consume the single token via poll_ready + call.
         set_test_time(0);
