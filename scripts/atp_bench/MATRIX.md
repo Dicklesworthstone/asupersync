@@ -72,16 +72,17 @@ results. The current harness does not rewrite or delete old artifacts, and its
 Bash overwrite-and-unset cleanup is best effort rather than cryptographic heap
 zeroization.
 
-The resume key includes `cell_profile`, stable `case_id`, git HEAD, SHA success,
-stream count, and the exact transport/control authentication postures. Within a
-profile-compatible result file, stale git or posture rows are rerun. Failed and
-stale attempts remain in append-only results for diagnosis; the acceptance
-report selects the current case/git identity, rejects malformed `status=ok`
-rows, and requires exactly one accepted attempt per planned cell. Profile-
-specific default result files and a mixed-or-missing-profile preflight prevent
-unchanged-object acceptance rows from entering `score_matrix.py` medians. This
-does not make old `.time` artifacts safe to share; the retention warning above
-still applies.
+The resume key includes `cell_profile`, stable `case_id`, git HEAD, the verified
+binary and attested-archive SHA-256 digests, producer workflow run/attempt, SHA
+success, stream count, and the exact transport/control authentication postures.
+Within a profile-compatible result file, stale git, artifact, or posture rows
+are rerun. Failed and stale attempts remain in append-only results for
+diagnosis; the acceptance report selects the current case/git/artifact identity,
+rejects malformed `status=ok` rows, and requires exactly one accepted attempt
+per planned cell. Profile-specific default result files and a mixed-or-missing-
+profile preflight prevent unchanged-object acceptance rows from entering
+`score_matrix.py` medians. This does not make old `.time` artifacts safe to
+share; the retention warning above still applies.
 
 rsync is always `-aW --inplace --no-compress` (whole-file, in-place, no `-z` on
 incompressible payloads), and over ssh uses `-c aes128-gcm@openssh.com`. This is
@@ -97,8 +98,63 @@ also receives the fresh control key through protected stdin. That key proves
 sender possession over the session-bound manifest; the subsequent bound
 request and proof remain authenticated by TLS.
 
+Execute mode for this profile refuses an unbound local binary. It requires the
+commit-bound packet emitted by the `commit-bound-atp-binary` job in
+`.github/workflows/atp-proof-lanes.yml` for the checkout's exact `main` HEAD.
+Dry-run planning does not require the packet. The producer uses a clean
+`ubuntu-24.04` checkout, the pinned project toolchain, an explicit
+`x86_64-unknown-linux-gnu` release target, and a run-unique archive. GitHub signs
+that archive with a SLSA provenance attestation; the uploaded packet retains an
+offline bundle so verification does not depend on root's GitHub credentials.
+
+Download the successful commit-bound job artifact for the exact source SHA,
+then extract only the executable from its attested archive:
+
 ```bash
-sudo env BIN=/tmp/atp_bench/atp ATP_MATRIX_TIMEOUT=90 \
+set -euo pipefail
+SOURCE_SHA=$(git rev-parse HEAD)
+RUN_ID=$(gh run list --workflow atp-proof-lanes.yml --branch main --event push \
+  --commit "$SOURCE_SHA" --limit 1 \
+  --json databaseId --jq '.[0].databaseId')
+ARTIFACT_PREFIX="atp-linux-x86_64-$SOURCE_SHA-$RUN_ID-"
+ARTIFACT=$(gh api --paginate \
+  "repos/Dicklesworthstone/asupersync/actions/runs/$RUN_ID/artifacts?per_page=100" \
+  --jq '.artifacts[] | select(.expired == false) | .name' \
+  | awk -v prefix="$ARTIFACT_PREFIX" 'index($0, prefix) == 1' \
+  | sort -t- -k6,6n | tail -n1)
+test -n "$ARTIFACT"
+RUN_ATTEMPT="${ARTIFACT##*-}"
+case "$RUN_ATTEMPT" in (*[!0-9]*|'') false ;; esac
+PACKET="/tmp/atp-commit-bound-$SOURCE_SHA-$RUN_ID-$RUN_ATTEMPT"
+mkdir "$PACKET"
+gh run download "$RUN_ID" --name "$ARTIFACT" --dir "$PACKET"
+
+ARCHIVE="$PACKET/$ARTIFACT.tar.gz"
+ARCHIVE_SHA256="$ARCHIVE.sha256"
+PROVENANCE="$PACKET/provenance.json"
+ATTESTATION_BUNDLE="$PACKET/attestation-bundle-$SOURCE_SHA-$RUN_ID-$RUN_ATTEMPT.jsonl"
+tar --extract --gzip --keep-old-files --directory "$PACKET" \
+  --file "$ARCHIVE" atp-linux-x86_64
+BIN="$PACKET/atp-linux-x86_64"
+```
+
+The matrix gate reruns all verification itself before any output directory,
+workload, namespace, or netem mutation. It verifies the exact outer checksum,
+the offline GitHub attestation identity/ref/SHA, the archive's exact regular-file
+member set, embedded-versus-standalone provenance equality, source SHA and tree,
+Cargo.lock, target/ABI metadata, inner binary checksum/size, the extracted
+binary's bytes and permissions, and the binary's recorded `--version` output.
+The embedded provenance is authoritative; the standalone copy must match it
+byte-for-byte. It also requires the exact canonical cell-runner command and
+checks that both matrix scripts match that same source commit before entering
+the privileged path.
+
+```bash
+sudo env BIN="$BIN" ATP_MATRIX_TIMEOUT=90 \
+  ATP_MATRIX_BINARY_ARCHIVE="$ARCHIVE" \
+  ATP_MATRIX_BINARY_ARCHIVE_SHA256="$ARCHIVE_SHA256" \
+  ATP_MATRIX_BINARY_PROVENANCE="$PROVENANCE" \
+  ATP_MATRIX_BINARY_ATTESTATION_BUNDLE="$ATTESTATION_BUNDLE" \
   bash scripts/atp_bench/matrix_bench.sh \
     --cell-profile authenticated-delta-unchanged-v1 \
     --execute --generate-workloads \
@@ -130,7 +186,10 @@ successfully, payload counters remain zero, and the destination remains
 unchanged. Recorded wall time and wire bytes are diagnostic only. It does not
 prove zero total wire traffic, throughput or bandwidth improvement, rsync
 superiority/inferiority, changed-chunk reuse, `DeltaChunks`, tree/rename
-behavior, lossy-link resilience, or broad transport correctness.
+behavior, lossy-link resilience, broad transport correctness, release
+readiness, broad workspace health, reproducible builds, or privileged-execution
+safety. The attestation authenticates the archive and producer identity; it is
+not any of those broader claims.
 
 ## Score
 

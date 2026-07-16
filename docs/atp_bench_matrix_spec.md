@@ -88,13 +88,14 @@ unchanged. Isolated veth accounting must satisfy
 `0 < control_wire_bytes < source_bytes`; zero ATP payload does not mean zero
 authenticated-control or TLS wire traffic.
 
-Profile, stable case ID, git HEAD, SHA success, stream count, and both auth
-postures participate in resume matching. Default artifact names are profile-
-specific, and explicit result files containing another or missing profile are
-rejected. Failed and stale attempts remain available in append-only results;
-the current plan requires exactly one fully accepted row for each current
-case/git identity and rejects malformed successful rows. These rows must never
-enter `score_matrix.py`.
+Profile, stable case ID, git HEAD, full verified binary/archive SHA-256 digests,
+producer workflow run/attempt, SHA success, stream count, and both auth postures
+participate in resume matching. Default artifact names are profile-specific,
+and explicit result files containing another or missing profile are rejected.
+Failed and stale attempts remain available in append-only results; the current
+plan requires exactly one fully accepted row for each current
+case/git/artifact identity and rejects malformed successful rows. These rows
+must never enter `score_matrix.py`.
 
 This profile proves only that an identical pre-seeded single file negotiates
 `AlreadyInSync` over authenticated framed control, both endpoints close
@@ -102,12 +103,43 @@ successfully, payload counters remain zero, and the destination remains
 unchanged. Recorded wall time and wire bytes are diagnostic only. It does not
 prove zero total wire traffic, throughput or bandwidth improvement, rsync
 superiority/inferiority, changed-chunk reuse, `DeltaChunks`, tree/rename
-behavior, lossy-link resilience, or broad transport correctness.
+behavior, lossy-link resilience, broad transport correctness, release
+readiness, broad workspace health, reproducible builds, or privileged-execution
+safety.
+
+Real execute-mode evidence for this profile must use the commit-bound ATP packet
+produced by the `commit-bound-atp-binary` GitHub Actions job for the checkout's
+exact `main` HEAD. The packet contains a run-unique x86_64 GNU release archive,
+an outer checksum, a byte-identical standalone copy of the archive's embedded
+provenance, and an offline GitHub SLSA attestation bundle. Before creating an
+output directory, generating a workload, changing namespaces/netem, or starting
+a cell, `matrix_bench.sh` must fail closed unless all of the following bind to
+the current checkout and passed executable:
+
+- the outer archive checksum and signed GitHub attestation, including exact
+  repository, signer workflow, `refs/heads/main`, source SHA, and hosted-runner
+  posture;
+- the exact three regular archive members, authoritative embedded provenance,
+  clean source SHA/tree, locked build command, Cargo.lock digest, explicit
+  `x86_64-unknown-linux-gnu` target, Linux/X64 producer, and ELF64 x86-64 ABI;
+- the inner checksum, recorded binary size/digest/version, and the passed
+  executable's bytes, group/world-nonwritable permissions, and successful
+  `--version` probe;
+- the exact canonical `run_matrix_cell.sh` command and checked-in bytes of both
+  matrix scripts at the same source commit.
+
+Dry-run planning remains artifact-free. Checksum or filename matching without
+the signed archive attestation is not admissible execution evidence. The
+producer manifest explicitly makes no performance, matrix-execution, broad
+workspace-health, release-readiness, runtime-correctness, reproducible-build,
+consumer-verification, or privileged-execution-safety claim.
 
 ## Output
 - `JSONL`: one row per (workload, regime, method, rep): all metrics above + explicit
   `cell_profile`, stable `case_id`, `auth_posture`,
-  `delta_control_auth_posture`, binary sha prefix, netem params, and git HEAD.
+  `delta_control_auth_posture`, netem params, and git HEAD. Authenticated-delta
+  rows additionally carry the full verified binary/archive SHA-256 digests and
+  producer workflow run/attempt.
   Acceptance rows additionally require `delta_mode_observed`,
   `delta_acceptance_ok`, exact sender/receiver payload and symbol counters,
   `control_wire_bytes`, `payload_file_identity_unchanged`, and

@@ -755,8 +755,12 @@ run_cell_strict fixture failing_cell
     assert!(matrix_doc.contains("Authenticated unchanged-object delta acceptance"));
     assert!(matrix_doc.contains("Profile-specific default result files"));
     assert!(matrix_doc.contains("does not prove zero total wire traffic"));
+    assert!(matrix_doc.contains("commit-bound-atp-binary"));
+    assert!(matrix_doc.contains("offline GitHub attestation identity/ref/SHA"));
     assert!(matrix_spec.contains("authenticated-delta-unchanged-v1"));
     assert!(matrix_spec.contains("These rows must never enter `score_matrix.py`"));
+    assert!(matrix_spec.contains("Checksum or filename matching without"));
+    assert!(matrix_spec.contains("signed archive attestation is not admissible"));
     for legacy_name in [
         "send.time",
         "recv.time",
@@ -1296,6 +1300,10 @@ fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
         assert_eq!(row["cell_profile"], "authenticated-delta-unchanged-v1");
         assert_eq!(row["delta_mode_expected"], "already_in_sync");
         assert_eq!(row["performance_claim"], false);
+        assert!(row["artifact_binary_sha256"].is_null());
+        assert!(row["artifact_archive_sha256"].is_null());
+        assert!(row["artifact_workflow_run_id"].is_null());
+        assert!(row["artifact_workflow_run_attempt"].is_null());
         let expected_delta_posture = match row["method"].as_str().unwrap() {
             "atp-rq-auth" => "rq-framed-control-hmac-sha256-v1",
             "atp-quic-tls13" => "quic-tls13-session-bound-manifest-hmac-sha256-v1",
@@ -1354,6 +1362,39 @@ fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
         .expect("reject oversized delta profile");
     assert!(!rejected_5g.status.success());
 
+    let missing_packet_out = root.join("missing_commit_bound_packet");
+    let missing_packet = Command::new(&planner)
+        .args([
+            "--cell-profile",
+            "authenticated-delta-unchanged-v1",
+            "--out",
+            missing_packet_out.to_str().unwrap(),
+            "--execute",
+            "--workloads",
+            "5M",
+            "--regimes",
+            "perfect",
+            "--tiers",
+            "auth",
+            "--reps",
+            "1",
+            "--run-cell-command",
+            "true",
+        ])
+        .env_remove("BIN")
+        .env_remove("ATP_MATRIX_BINARY_ARCHIVE")
+        .env_remove("ATP_MATRIX_BINARY_ARCHIVE_SHA256")
+        .env_remove("ATP_MATRIX_BINARY_PROVENANCE")
+        .env_remove("ATP_MATRIX_BINARY_ATTESTATION_BUNDLE")
+        .output()
+        .expect("reject missing commit-bound ATP packet");
+    assert_eq!(missing_packet.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing_packet.stderr).contains("execute mode requires BIN"));
+    assert!(
+        !missing_packet_out.exists(),
+        "artifact rejection must happen before creating the output directory"
+    );
+
     let mixed_results = root.join("mixed_results.jsonl");
     write_file(
         &mixed_results,
@@ -1385,7 +1426,7 @@ fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
     let accepted_resume = root.join("accepted_resume.jsonl");
     write_file(
         &accepted_resume,
-        r#"{"cell_profile":"authenticated-delta-unchanged-v1","case_id":"authenticated-delta-unchanged-v1:5M:perfect:auth:atp-rq-auth:s1:r1","git_head":"fixture-git","workload":"5M","regime":"perfect","crypto_tier":"auth","method":"atp-rq-auth","auth_posture":"rq-symbol-hmac-v1","delta_control_auth_posture":"rq-framed-control-hmac-sha256-v1","rep":1,"atp_rq_streams":1,"size_bytes":5242880,"sha_ok":true,"timed_out":false,"status_code":0,"status":"ok","delta_mode_observed":"already_in_sync","delta_acceptance_ok":true,"sender_payload_bytes":0,"sender_symbols":0,"receiver_payload_bytes":0,"receiver_symbols":0,"feedback_rounds":0,"control_wire_bytes":1024,"payload_file_identity_unchanged":true,"performance_claim":false}
+        r#"{"cell_profile":"authenticated-delta-unchanged-v1","case_id":"authenticated-delta-unchanged-v1:5M:perfect:auth:atp-rq-auth:s1:r1","git_head":"fixture-git","artifact_binary_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifact_archive_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","artifact_workflow_run_id":"123456","artifact_workflow_run_attempt":"1","workload":"5M","regime":"perfect","crypto_tier":"auth","method":"atp-rq-auth","auth_posture":"rq-symbol-hmac-v1","delta_control_auth_posture":"rq-framed-control-hmac-sha256-v1","rep":1,"atp_rq_streams":1,"size_bytes":5242880,"sha_ok":true,"timed_out":false,"status_code":0,"status":"ok","delta_mode_observed":"already_in_sync","delta_acceptance_ok":true,"sender_payload_bytes":0,"sender_symbols":0,"receiver_payload_bytes":0,"receiver_symbols":0,"feedback_rounds":0,"control_wire_bytes":1024,"payload_file_identity_unchanged":true,"performance_claim":false}
 "#,
     );
     let rejected_resume = root.join("rejected_resume.jsonl");
@@ -1419,11 +1460,32 @@ cell_done 5M perfect auth atp-rq-auth 1 1 \
             )
             .env("MATRIX_PLAN_PATH", &planner)
             .env("RESULTS_JSONL", path)
+            .env(
+                "ATP_MATRIX_VERIFIED_BINARY_SHA256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .env(
+                "ATP_MATRIX_VERIFIED_ARCHIVE_SHA256",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .env("ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ID", "123456")
+            .env("ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ATTEMPT", "1")
             .output()
             .expect("run authenticated delta resume fixture")
     };
     assert!(resume_probe(&accepted_resume).status.success());
     assert_eq!(resume_probe(&rejected_resume).status.code(), Some(1));
+    let wrong_artifact_resume = root.join("wrong_artifact_resume.jsonl");
+    write_file(
+        &wrong_artifact_resume,
+        &std::fs::read_to_string(&accepted_resume)
+            .expect("read accepted resume fixture")
+            .replace(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
+    );
+    assert_eq!(resume_probe(&wrong_artifact_resume).status.code(), Some(1));
 
     let rq_sender = root.join("rq_sender.jsonl");
     let rq_receiver = root.join("rq_receiver.jsonl");
@@ -1479,19 +1541,30 @@ fi
         String::from_utf8_lossy(&verifier.stderr)
     );
 
+    let mut report_plan_row = delta_rows[0].clone();
+    report_plan_row["artifact_binary_sha256"] =
+        serde_json::json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    report_plan_row["artifact_archive_sha256"] =
+        serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    report_plan_row["artifact_workflow_run_id"] = serde_json::json!("123456");
+    report_plan_row["artifact_workflow_run_attempt"] = serde_json::json!("1");
     let report_plan = root.join("report_plan.jsonl");
     write_file(
         &report_plan,
         &format!(
             "{}\n",
-            serde_json::to_string(&delta_rows[0]).expect("serialize report plan row")
+            serde_json::to_string(&report_plan_row).expect("serialize report plan row")
         ),
     );
-    let plan_row = &delta_rows[0];
+    let plan_row = &report_plan_row;
     let accepted_attempt = serde_json::json!({
         "cell_profile": plan_row["cell_profile"].clone(),
         "case_id": plan_row["case_id"].clone(),
         "git_head": plan_row["git_head"].clone(),
+        "artifact_binary_sha256": plan_row["artifact_binary_sha256"].clone(),
+        "artifact_archive_sha256": plan_row["artifact_archive_sha256"].clone(),
+        "artifact_workflow_run_id": plan_row["artifact_workflow_run_id"].clone(),
+        "artifact_workflow_run_attempt": plan_row["artifact_workflow_run_attempt"].clone(),
         "workload": plan_row["workload"].clone(),
         "regime": plan_row["regime"].clone(),
         "crypto_tier": plan_row["crypto_tier"].clone(),
@@ -1560,8 +1633,129 @@ write_authenticated_delta_report
     assert!(
         std::fs::read_to_string(report_path)
             .expect("read authenticated delta acceptance report")
-            .contains("Functional protocol evidence only")
+            .contains("Verified ATP binary SHA-256")
     );
+}
+
+#[test]
+fn commit_bound_atp_artifact_producer_and_matrix_gate_are_fail_closed() {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/atp-proof-lanes.yml"))
+            .expect("read ATP proof workflow");
+    let planner = std::fs::read_to_string(repo_root().join("scripts/atp_bench/matrix_bench.sh"))
+        .expect("read ATP matrix planner");
+    let runner = std::fs::read_to_string(repo_root().join("scripts/atp_bench/run_matrix_cell.sh"))
+        .expect("read ATP matrix cell runner");
+
+    for required in [
+        "commit-bound-atp-binary:",
+        "runs-on: ubuntu-24.04",
+        "attestations: write",
+        "id-token: write",
+        "ATP_BUILD_TARGET: x86_64-unknown-linux-gnu",
+        "targets: x86_64-unknown-linux-gnu",
+        "--target \"$ATP_BUILD_TARGET\"",
+        "id: package",
+        "actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373",
+        "subject-path: ${{ steps.package.outputs.archive }}",
+        "attestation-bundle-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jsonl",
+        "atp-linux-x86_64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+        "\"archive_attestation_required\": True",
+        "\"consumer_verification\": False",
+        "\"privileged_execution_safety\": False",
+        "\"release_readiness\": False",
+        "\"reproducible_build\": False",
+        "\"runtime_correctness\": False",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "commit-bound ATP producer must retain {required}"
+        );
+    }
+    for required in [
+        "ATP_MATRIX_VERIFIED_BINARY_SHA256",
+        "ATP_MATRIX_VERIFIED_ARCHIVE_SHA256",
+        "ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ID",
+        "ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ATTEMPT",
+        "/usr/bin/sha256sum -- \"$BIN\"",
+        "BIN no longer matches the verified commit-bound binary",
+        "ARTIFACT_BINARY_SHA256=\"\"",
+        "\"artifact_binary_sha256\"",
+        "\"artifact_archive_sha256\"",
+        "\"artifact_workflow_run_id\"",
+        "\"artifact_workflow_run_attempt\"",
+    ] {
+        assert!(
+            runner.contains(required),
+            "commit-bound ATP cell runner must retain {required}"
+        );
+    }
+    assert!(!workflow.contains("@master"));
+
+    for required in [
+        "ATP_MATRIX_BINARY_ARCHIVE",
+        "ATP_MATRIX_BINARY_ARCHIVE_SHA256",
+        "ATP_MATRIX_BINARY_PROVENANCE",
+        "ATP_MATRIX_BINARY_ATTESTATION_BUNDLE",
+        "ATP_MATRIX_VERIFIED_BINARY_SHA256",
+        "ATP_MATRIX_VERIFIED_ARCHIVE_SHA256",
+        "ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ID",
+        "ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ATTEMPT",
+        "unset ATP_MATRIX_VERIFIED_BINARY_SHA256 ATP_MATRIX_VERIFIED_ARCHIVE_SHA256",
+        "/usr/bin/gh attestation verify",
+        "--repo Dicklesworthstone/asupersync",
+        "--signer-workflow Dicklesworthstone/asupersync/.github/workflows/atp-proof-lanes.yml",
+        "--source-digest \"${git}\"",
+        "--source-ref refs/heads/main",
+        "--predicate-type https://slsa.dev/provenance/v1",
+        "--deny-self-hosted-runners",
+        "expected_members = [\"atp-linux-x86_64\", \"provenance.json\", \"SHA256SUMS\"]",
+        "object_pairs_hook=reject_duplicate_keys",
+        "external_provenance == embedded_provenance",
+        "source.get(\"git_tree\") == git_tree",
+        "f\"{git_sha}:Cargo.lock\"",
+        "little-endian ELF64 EM_X86_64",
+        "BIN is group- or world-writable",
+        "actual_version=\"$(\"${binary}\" --version)\"",
+        "requires the canonical run_matrix_cell.sh command",
+        "requires checked-in, unmodified matrix runner scripts",
+        "--execute produced no result rows",
+    ] {
+        assert!(
+            planner.contains(required),
+            "commit-bound ATP consumer must retain {required}"
+        );
+    }
+
+    let main = planner
+        .split_once("main() {")
+        .expect("matrix planner main")
+        .1;
+    let results_gate = main
+        .find("validate_results_profile")
+        .expect("result profile gate in main");
+    let artifact_gate = main
+        .find("verify_commit_bound_atp_binary \"${git}\"")
+        .expect("commit-bound artifact gate in main");
+    let output_write = main
+        .find("mkdir -p \"${OUT_DIR}\"")
+        .expect("matrix output creation in main");
+    let plan_write = main
+        .find(": >\"${PLAN_JSONL}\"")
+        .expect("matrix plan truncation in main");
+    let workload_write = main
+        .find("generate_workload \"${workload}\"")
+        .expect("matrix workload generation in main");
+    let netem_mutation = main
+        .find("apply_netem_for_regime \"${regime}\"")
+        .expect("matrix netem mutation in main");
+    assert!(results_gate < artifact_gate);
+    for mutation in [output_write, plan_write, workload_write, netem_mutation] {
+        assert!(
+            artifact_gate < mutation,
+            "commit-bound artifact verification must precede matrix mutations"
+        );
+    }
 }
 
 #[test]

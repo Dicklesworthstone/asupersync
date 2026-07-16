@@ -48,6 +48,8 @@ fi
 #   ATP_MATRIX_WORKLOAD ATP_MATRIX_WORKLOAD_PATH ATP_MATRIX_REGIME
 #   ATP_MATRIX_TIER ATP_MATRIX_METHOD ATP_MATRIX_REP ATP_MATRIX_STREAMS ATP_MATRIX_RESULTS
 #   ATP_MATRIX_NETEM_JSON ATP_MATRIX_RUN_ID ATP_MATRIX_GIT_HEAD ATP_MATRIX_CELL_PROFILE
+#   ATP_MATRIX_VERIFIED_BINARY_SHA256 ATP_MATRIX_VERIFIED_ARCHIVE_SHA256
+#   ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ID ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ATTEMPT
 # Tunables (env): BIN, WORKERS, STREAMS, SYMBOL_SIZE, MAX_BLOCK_SIZE, MAX_BYTES,
 #   HOST_IP, NS_IP, CIDR, ATP_MATRIX_TIMEOUT,
 #   RSS_SAMPLE_INTERVAL, REMOTE_USER, SSH_KEY, RECEIVER_READY_SLEEP, CELL_TMP.
@@ -73,11 +75,28 @@ NETEM_JSON="$ATP_MATRIX_NETEM_JSON"
 RUN_ID="${ATP_MATRIX_RUN_ID:-adhoc}"
 GIT_HEAD="${ATP_MATRIX_GIT_HEAD:-unknown}"
 CELL_PROFILE="${ATP_MATRIX_CELL_PROFILE:-whole-object-scorecard-v1}"
+ARTIFACT_BINARY_SHA256="${ATP_MATRIX_VERIFIED_BINARY_SHA256:-}"
+ARTIFACT_ARCHIVE_SHA256="${ATP_MATRIX_VERIFIED_ARCHIVE_SHA256:-}"
+ARTIFACT_WORKFLOW_RUN_ID="${ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ID:-}"
+ARTIFACT_WORKFLOW_RUN_ATTEMPT="${ATP_MATRIX_VERIFIED_WORKFLOW_RUN_ATTEMPT:-}"
 case "$CELL_PROFILE" in
     whole-object-scorecard-v1)
         DELTA_CONTROL_AUTH_POSTURE=none
+        ARTIFACT_BINARY_SHA256=""
+        ARTIFACT_ARCHIVE_SHA256=""
+        ARTIFACT_WORKFLOW_RUN_ID=""
+        ARTIFACT_WORKFLOW_RUN_ATTEMPT=""
         ;;
     authenticated-delta-unchanged-v1)
+        [[ "$ARTIFACT_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "$CELL_PROFILE requires a verified binary SHA-256" >&2; exit 2; }
+        [[ "$ARTIFACT_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "$CELL_PROFILE requires a verified archive SHA-256" >&2; exit 2; }
+        [[ "$ARTIFACT_WORKFLOW_RUN_ID" =~ ^[0-9]+$ ]] \
+            || { echo "$CELL_PROFILE requires a verified workflow run ID" >&2; exit 2; }
+        [[ "$ARTIFACT_WORKFLOW_RUN_ATTEMPT" =~ ^[0-9]+$ \
+            && "$ARTIFACT_WORKFLOW_RUN_ATTEMPT" -ge 1 ]] \
+            || { echo "$CELL_PROFILE requires a verified workflow run attempt" >&2; exit 2; }
         if [ ! -f "$WL_PATH" ] || [ -L "$WL_PATH" ] || [ ! -s "$WL_PATH" ]; then
             echo "$CELL_PROFILE requires a nonempty non-symlink regular-file workload" >&2
             exit 2
@@ -133,6 +152,12 @@ log() { printf '%s [cell %s/%s/%s/%s rep=%s] %s\n' \
 
 [ "$(id -u)" = "0" ] || { echo "run_matrix_cell.sh needs root (netns/tc)" >&2; exit 1; }
 [ -x "$BIN" ] || { echo "BIN not executable: $BIN" >&2; exit 1; }
+if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ]; then
+    ACTUAL_BINARY_SHA256="$(/usr/bin/sha256sum -- "$BIN")"
+    ACTUAL_BINARY_SHA256="${ACTUAL_BINARY_SHA256%% *}"
+    [ "$ACTUAL_BINARY_SHA256" = "$ARTIFACT_BINARY_SHA256" ] \
+        || { echo "BIN no longer matches the verified commit-bound binary" >&2; exit 2; }
+fi
 
 ATTEMPT_ID="${BASHPID}"
 SUFFIX="$(printf '%s-%s-%s-%s-%s-%s-%s-%s-%s' "$RUN_ID" "$CELL_PROFILE" "$WORKLOAD" "$REGIME" "$TIER" "$METHOD" "$STREAMS" "$REP" "$ATTEMPT_ID" | cksum | awk '{ print substr($1,1,6) }')"
@@ -795,6 +820,8 @@ ROW_DST="$DST_SHA" ROW_SHA_OK="$SHA_OK" ROW_TO="$TIMED_OUT" ROW_SC="${STATUS_COD
 ROW_STATUS="$STATUS" ROW_CASE="$CASE_DIR" ROW_CTX="${S_CTX:-0}" ROW_ESTPKT="${EST_DGRAMS:-0}" \
 ROW_STREAMS="${STREAMS:-0}" ROW_AUTH="$AUTH_POSTURE" ROW_PROFILE="$CELL_PROFILE" \
 ROW_CASE_ID="$CASE_ID" ROW_DELTA_AUTH="$DELTA_CONTROL_AUTH_POSTURE" \
+ROW_ARTIFACT_BINARY_SHA="$ARTIFACT_BINARY_SHA256" ROW_ARTIFACT_ARCHIVE_SHA="$ARTIFACT_ARCHIVE_SHA256" \
+ROW_ARTIFACT_RUN_ID="$ARTIFACT_WORKFLOW_RUN_ID" ROW_ARTIFACT_RUN_ATTEMPT="$ARTIFACT_WORKFLOW_RUN_ATTEMPT" \
 ROW_DELTA_OK="$DELTA_ACCEPTANCE_OK" ROW_DELTA_MODE="$DELTA_MODE_OBSERVED" \
 ROW_CONTROL_WIRE="$CONTROL_WIRE_BYTES" ROW_SENDER_PAYLOAD="$SENDER_PAYLOAD_BYTES" \
 ROW_SENDER_SYMBOLS="$SENDER_SYMBOLS" ROW_RECEIVER_PAYLOAD="$RECEIVER_PAYLOAD_BYTES" \
@@ -828,6 +855,10 @@ row = {
     "case_id": e("ROW_CASE_ID", ""),
     "run_id": e("ROW_RUN_ID", "adhoc"),
     "git_head": e("ROW_GIT", "unknown"),
+    "artifact_binary_sha256": e("ROW_ARTIFACT_BINARY_SHA") or None,
+    "artifact_archive_sha256": e("ROW_ARTIFACT_ARCHIVE_SHA") or None,
+    "artifact_workflow_run_id": e("ROW_ARTIFACT_RUN_ID") or None,
+    "artifact_workflow_run_attempt": e("ROW_ARTIFACT_RUN_ATTEMPT") or None,
     "workload": e("ROW_WL", ""),
     "workload_kind": e("ROW_KIND", ""),
     "size_bytes": num("ROW_SIZE"),
