@@ -179,7 +179,13 @@ impl RegisteredRateLimitWaker {
 
 #[inline]
 const fn max_bucket_tokens(rate: u64, zero_period: bool) -> u64 {
-    if zero_period { rate.max(1) } else { rate }
+    // `Ord::max` is only conditionally const (E0658 on some pinned
+    // nightlies / feature configurations); the branch is identical.
+    if zero_period {
+        if rate == 0 { 1 } else { rate }
+    } else {
+        rate
+    }
 }
 
 #[inline]

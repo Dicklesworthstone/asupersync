@@ -1765,8 +1765,12 @@ impl LabRuntime {
         }
 
         let requests = crate::runtime::spawn_mailbox::coalesce_handle_cancel_requests(requests);
-        let mut tasks = Vec::with_capacity(requests.len());
-        let mut delegated = Vec::new();
+        // Concrete annotations: the only element uses are a `push` and a
+        // two-field closure pattern, which is not enough for inference
+        // in every downstream feature configuration (E0282 when built
+        // as a path dependency of FrankenSQLite).
+        let mut tasks: Vec<(TaskId, u8)> = Vec::with_capacity(requests.len());
+        let mut delegated: Vec<(TaskId, u8)> = Vec::new();
         let mut wakes = crate::types::task_context::CancelWakeEffects::empty();
         for request in requests {
             let effects = self

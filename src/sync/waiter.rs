@@ -253,6 +253,10 @@ impl<T> WaiterChain<T> {
     }
 
     /// O(1) waker update by id. Returns whether the slot existed.
+    // Consumed only by feature-gated callers; a downstream feature set
+    // (FrankenSQLite's) compiles this module without them, and the
+    // crate denies dead_code.
+    #[allow(dead_code)]
     pub(crate) fn update_waker(&mut self, id: WaiterId, new: &Waker) -> bool {
         let Some(&index) = self.positions.get(&id) else {
             return false;
