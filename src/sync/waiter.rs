@@ -83,6 +83,49 @@ impl Wake for DeferredWake {
     }
 }
 
+/// A stored task waker whose clone path is a known `Arc` operation.
+///
+/// The caller must still retire this value outside any internal lock: dropping
+/// the final relay owner also drops the original task waker.
+pub(crate) struct DeferredWaker {
+    relay: Arc<DeferredWake>,
+}
+
+impl DeferredWaker {
+    /// Wrap an already-owned task waker in the known relay representation.
+    pub(crate) fn new(waker: Waker) -> Self {
+        Self {
+            relay: Arc::new(DeferredWake { inner: waker }),
+        }
+    }
+
+    /// Whether the original task waker targets the same task as `other`.
+    pub(crate) fn will_wake(&self, other: &Waker) -> bool {
+        self.relay.inner.will_wake(other)
+    }
+
+    /// Produce a wake handle without invoking the original RawWaker's clone
+    /// callback. The returned handle must be woken or retired after unlock.
+    pub(crate) fn clone_waker(&self) -> Waker {
+        Waker::from(Arc::clone(&self.relay))
+    }
+}
+
+/// Clone a stored waker through a known Arc-backed relay without invoking the
+/// stored task's RawWaker clone/drop callbacks in this call.
+///
+/// The original waker is moved behind the relay, one relay owner replaces the
+/// slot, and a second relay owner is returned. Callers may use this while
+/// holding an internal queue lock, then release that lock before waking or
+/// retiring the returned owner. They must also retire later slot replacements
+/// or removals outside the same lock.
+pub(crate) fn clone_waker_deferred(slot: &mut Waker) -> Waker {
+    let original = std::mem::replace(slot, Waker::noop().clone());
+    let relay = DeferredWaker::new(original);
+    *slot = relay.clone_waker();
+    relay.clone_waker()
+}
+
 impl<T> Default for WaiterChain<T> {
     fn default() -> Self {
         Self::new()
@@ -297,13 +340,7 @@ impl<T> WaiterChain<T> {
             let slot = &mut self.slots[index];
             current = slot.next;
 
-            // The temporary noop has a known non-user vtable. Moving the
-            // original into DeferredWake prevents any user clone/drop callback
-            // from running while the caller still holds its queue lock.
-            let original = std::mem::replace(&mut slot.waker, Waker::noop().clone());
-            let relay = Arc::new(DeferredWake { inner: original });
-            slot.waker = Waker::from(Arc::clone(&relay));
-            wakers.push(Waker::from(relay));
+            wakers.push(clone_waker_deferred(&mut slot.waker));
         }
         wakers
     }

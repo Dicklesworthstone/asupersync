@@ -215,6 +215,8 @@ use smallvec::SmallVec;
 
 use crate::cx::Cx;
 
+use super::waiter::DeferredWaker;
+
 fn wall_clock_now() -> Instant {
     Instant::now()
 }
@@ -228,7 +230,7 @@ pub type PoolReturnSender<R> = mpsc::Sender<PoolReturn<R>>;
 /// Receiver used to observe resources returning to a pool.
 pub type PoolReturnReceiver<R> = mpsc::Receiver<PoolReturn<R>>;
 
-type ReturnWakerEntry = (u64, Waker);
+type ReturnWakerEntry = (u64, DeferredWaker);
 type ReturnWakerList = SmallVec<[ReturnWakerEntry; 4]>;
 type ReturnWakers = Arc<PoolMutex<ReturnWakerList>>;
 
@@ -610,7 +612,7 @@ impl<R> PooledResource<R> {
         if let Some(ref wakers) = self.return_wakers {
             let waker = {
                 let lock = wakers.lock();
-                lock.first().map(|(_, waker)| waker.clone())
+                lock.first().map(|(_, waker)| waker.clone_waker())
             };
             if let Some(waker) = waker {
                 waker.wake();
@@ -862,7 +864,31 @@ struct IdleResource<R> {
 /// A waiter for a resource.
 struct PoolWaiter {
     id: u64,
-    waker: std::task::Waker,
+    waker: DeferredWaker,
+}
+
+/// Queue-owned wake state detached from pool locks and ready for retirement.
+struct DetachedPoolWakers {
+    state_waker: Option<DeferredWaker>,
+    return_waker: Option<DeferredWaker>,
+    next_dispatcher: Option<Waker>,
+}
+
+impl DetachedPoolWakers {
+    /// Preserve the return-dispatch baton before retiring task-owned state.
+    /// If waking panics, the detached relay owners unwind outside pool locks.
+    fn retire(self) {
+        let Self {
+            state_waker,
+            return_waker,
+            next_dispatcher,
+        } = self;
+        if let Some(next) = next_dispatcher {
+            next.wake();
+        }
+        drop(state_waker);
+        drop(return_waker);
+    }
 }
 
 /// Internal state for the generic pool.
@@ -914,6 +940,11 @@ where
 
         self.pool.process_returns();
 
+        // Construct both queue candidates before either queue lock is held.
+        // A task-provided RawWaker may run user code from clone/drop callbacks.
+        let mut state_candidate = Some(DeferredWaker::new(cx.waker().clone()));
+        let mut return_candidate = Some(DeferredWaker::new(cx.waker().clone()));
+        let mut retired_state_waker = None;
         let mut state = self.pool.state.lock();
 
         if state.closed {
@@ -933,16 +964,24 @@ where
         let pos = if let Some(id) = *self.waiter_id {
             if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
                 let w = &mut state.waiters[idx];
-                if !w.waker.will_wake(cx.waker()) {
-                    w.waker.clone_from(cx.waker());
+                let candidate = state_candidate
+                    .take()
+                    .expect("state waker candidate is available");
+                if w.waker.will_wake(cx.waker()) {
+                    retired_state_waker = Some(candidate);
+                } else {
+                    retired_state_waker = Some(std::mem::replace(&mut w.waker, candidate));
                 }
                 idx
             } else {
                 // Was removed by try_get_idle but health check failed.
                 // Re-register at the FRONT to preserve FIFO fairness.
+                state.waiters.reserve(1);
                 state.waiters.push_front(PoolWaiter {
                     id,
-                    waker: cx.waker().clone(),
+                    waker: state_candidate
+                        .take()
+                        .expect("state waker candidate is available"),
                 });
                 0
             }
@@ -950,9 +989,12 @@ where
             let id = state.next_waiter_id;
             state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
             let idx = state.waiters.len();
+            state.waiters.reserve(1);
             state.waiters.push_back(PoolWaiter {
                 id,
-                waker: cx.waker().clone(),
+                waker: state_candidate
+                    .take()
+                    .expect("state waker candidate is available"),
             });
             *self.waiter_id = Some(id);
             idx
@@ -963,19 +1005,49 @@ where
 
         if pos < available {
             self.completed = true;
+            drop(retired_state_waker);
+            drop(state_candidate);
+            drop(return_candidate);
             return Poll::Ready(());
         }
 
         // Also register in the return_wakers list
+        let mut retired_return_waker = None;
         {
             let mut wakers = self.pool.return_wakers.lock();
             if let Some((_, existing)) = wakers.iter_mut().find(|(wid, _)| *wid == id) {
-                if !existing.will_wake(cx.waker()) {
-                    existing.clone_from(cx.waker());
+                let candidate = return_candidate
+                    .take()
+                    .expect("return waker candidate is available");
+                if existing.will_wake(cx.waker()) {
+                    retired_return_waker = Some(candidate);
+                } else {
+                    retired_return_waker = Some(std::mem::replace(existing, candidate));
                 }
             } else {
-                wakers.push((id, cx.waker().clone()));
+                wakers.reserve(1);
+                wakers.push((
+                    id,
+                    return_candidate
+                        .take()
+                        .expect("return waker candidate is available"),
+                ));
             }
+        }
+
+        // `close` drains the state queue. If it raced the gap between the
+        // state registration and the return-dispatch registration, no later
+        // state wake remains for us. Observe the monotone close flag here;
+        // any close after this check still finds the state registration.
+        let closed_after_registration = self.pool.closed.load(Ordering::Acquire);
+        drop(retired_state_waker);
+        drop(retired_return_waker);
+        drop(state_candidate);
+        drop(return_candidate);
+
+        if closed_after_registration {
+            self.completed = true;
+            return Poll::Ready(());
         }
 
         // Process returns again to close the race condition:
@@ -1003,10 +1075,11 @@ where
             // marginal wake here, a cancellation shifts a later waiter into
             // eligibility without waking it, stranding it (with an idle resource
             // free) until `acquire_timeout`. Mirrors WaiterCleanup::drop. (br)
-            let marginal_waker: Option<std::task::Waker> = {
+            let mut retired_state_waker = None;
+            let marginal_waker: Option<Waker> = {
                 let mut state = self.pool.state.lock();
                 if let Some(p) = state.waiters.iter().position(|w| w.id == id) {
-                    state.waiters.remove(p);
+                    retired_state_waker = state.waiters.remove(p).map(|waiter| waiter.waker);
                     if state.closed {
                         None
                     } else {
@@ -1019,7 +1092,7 @@ where
                                 .max_size
                                 .saturating_sub(total_including_creating);
                         if p < available && available > 0 && available - 1 < state.waiters.len() {
-                            Some(state.waiters[available - 1].waker.clone())
+                            Some(state.waiters[available - 1].waker.clone_waker())
                         } else {
                             None
                         }
@@ -1028,10 +1101,6 @@ where
                     None
                 }
             };
-            if let Some(w) = marginal_waker {
-                w.wake();
-            }
-
             // Remove from return_wakers list. If we were the dispatcher (the
             // first entry, which `notify_return_wakers` wakes to drain the
             // return channel via `process_returns`), hand the dispatcher role
@@ -1039,16 +1108,17 @@ where
             // this cancellation — which already woke us — would sit undrained
             // in the channel and the remaining waiters would never wake
             // (lost wakeup). (br-asupersync-dq5g7a)
-            let mut wakers = self.pool.return_wakers.lock();
-            if let Some(idx) = wakers.iter().position(|(wid, _)| *wid == id) {
-                let was_dispatcher = idx == 0;
-                wakers.remove(idx);
-                if was_dispatcher && let Some((_, next)) = wakers.first() {
-                    let next = next.clone();
-                    drop(wakers);
-                    next.wake();
-                }
+            let (retired_return_waker, next_dispatcher) = self.pool.detach_return_waker(id);
+
+            if let Some(waker) = marginal_waker {
+                waker.wake();
             }
+            DetachedPoolWakers {
+                state_waker: retired_state_waker,
+                return_waker: retired_return_waker,
+                next_dispatcher,
+            }
+            .retire();
         }
     }
 }
@@ -1074,6 +1144,11 @@ where
     }
 }
 
+/// The synchronous state mutation that precedes arming a slot reservation.
+struct CreateSlotClaim {
+    retired_waker: Option<DeferredWaker>,
+}
+
 /// Reservation for an in-flight resource creation slot.
 ///
 /// This ensures pool capacity accounting remains correct across async suspend
@@ -1094,14 +1169,15 @@ where
     F: AsyncResourceFactory<Resource = R>,
 {
     fn try_reserve(pool: &'a GenericPool<R, F>, waiter_id: Option<u64>) -> Option<Self> {
-        if pool.reserve_create_slot(waiter_id) {
-            Some(Self {
-                pool,
-                committed: false,
-            })
-        } else {
-            None
-        }
+        let CreateSlotClaim { retired_waker } = pool.reserve_create_slot(waiter_id)?;
+        let reservation = Self {
+            pool,
+            committed: false,
+        };
+        // Arm the accounting guard before retiring user-provided wake state.
+        // If that destructor panics, unwinding releases the reserved slot.
+        drop(retired_waker);
+        Some(reservation)
     }
 
     fn commit(mut self) -> bool {
@@ -1391,7 +1467,7 @@ where
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
             if available > 0 && available - 1 < state.waiters.len() {
-                Some(state.waiters[available - 1].waker.clone())
+                Some(state.waiters[available - 1].waker.clone_waker())
             } else {
                 None
             }
@@ -1440,7 +1516,7 @@ where
                         let available =
                             state.idle.len() + self.config.max_size.saturating_sub(total);
                         if available > 0 && available - 1 < state.waiters.len() {
-                            waiters_to_wake.push(state.waiters[available - 1].waker.clone());
+                            waiters_to_wake.push(state.waiters[available - 1].waker.clone_waker());
                         }
                     }
                     drop(state);
@@ -1459,7 +1535,7 @@ where
                     let total = state.active + state.idle.len() + state.creating;
                     let available = state.idle.len() + self.config.max_size.saturating_sub(total);
                     if available > 0 && available - 1 < state.waiters.len() {
-                        waiters_to_wake.push(state.waiters[available - 1].waker.clone());
+                        waiters_to_wake.push(state.waiters[available - 1].waker.clone_waker());
                     }
                     drop(state);
                 }
@@ -1550,11 +1626,11 @@ where
     }
 
     /// Reserve a creation slot under max-size accounting.
-    fn reserve_create_slot(&self, waiter_id: Option<u64>) -> bool {
+    fn reserve_create_slot(&self, waiter_id: Option<u64>) -> Option<CreateSlotClaim> {
         let mut state = self.state.lock();
         let total = state.active + state.idle.len() + state.creating;
         if state.closed || total >= self.config.max_size {
-            return false;
+            return None;
         }
 
         let available = state.idle.len() + self.config.max_size.saturating_sub(total);
@@ -1570,14 +1646,19 @@ where
         );
 
         if pos >= available {
-            return false;
+            return None;
         }
 
         state.creating += 1;
-        if waiter_id.is_some() && pos < state.waiters.len() {
-            state.waiters.remove(pos);
-        }
-        true
+        let retired_waker = (waiter_id.is_some() && pos < state.waiters.len()).then(|| {
+            state
+                .waiters
+                .remove(pos)
+                .expect("waiter position was validated")
+                .waker
+        });
+        drop(state);
+        Some(CreateSlotClaim { retired_waker })
     }
 
     /// Release an uncommitted creation slot and notify one waiter.
@@ -1588,7 +1669,7 @@ where
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
             if available > 0 && available - 1 < state.waiters.len() {
-                Some(state.waiters[available - 1].waker.clone())
+                Some(state.waiters[available - 1].waker.clone_waker())
             } else {
                 None
             }
@@ -1642,7 +1723,7 @@ where
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
             if available > 0 && available - 1 < state.waiters.len() {
-                Some(state.waiters[available - 1].waker.clone())
+                Some(state.waiters[available - 1].waker.clone_waker())
             } else {
                 None
             }
@@ -1683,10 +1764,46 @@ where
         }
     }
 
-    /// Remove a waiter by ID.
-    fn remove_waiter(&self, id: u64) {
+    /// Detach a waiter by ID without retiring its task waker under the lock.
+    fn detach_waiter(&self, id: u64) -> Option<DeferredWaker> {
         let mut state = self.state.lock();
-        state.waiters.retain(|w| w.id != id);
+        state
+            .waiters
+            .iter()
+            .position(|waiter| waiter.id == id)
+            .and_then(|position| state.waiters.remove(position))
+            .map(|waiter| waiter.waker)
+    }
+
+    /// Detach a return-dispatch waiter and preserve the dispatcher baton.
+    fn detach_return_waker(&self, id: u64) -> (Option<DeferredWaker>, Option<Waker>) {
+        let mut retired_waker = None;
+        let next_dispatcher = {
+            let mut wakers = self.return_wakers.lock();
+            if let Some(position) = wakers.iter().position(|(waiter_id, _)| *waiter_id == id) {
+                let was_dispatcher = position == 0;
+                retired_waker = Some(wakers.remove(position).1);
+                if was_dispatcher {
+                    wakers.first().map(|(_, next)| next.clone_waker())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        (retired_waker, next_dispatcher)
+    }
+
+    /// Detach both registrations for one acquire before running user code.
+    fn detach_waiter_registrations(&self, id: u64) -> DetachedPoolWakers {
+        let state_waker = self.detach_waiter(id);
+        let (return_waker, next_dispatcher) = self.detach_return_waker(id);
+        DetachedPoolWakers {
+            state_waker,
+            return_waker,
+            next_dispatcher,
+        }
     }
 
     /// Record elapsed wait time for blocked acquires.
@@ -1761,41 +1878,52 @@ where
             {
                 fn drop(&mut self) {
                     if let Some(id) = self.waiter_id {
-                        let mut state = self.pool.state.lock();
-                        let pos = state.waiters.iter().position(|w| w.id == id);
-                        if let Some(p) = pos {
-                            state.waiters.remove(p);
-                        }
+                        let mut retired_state_waker = None;
+                        let marginal_waker = {
+                            let mut state = self.pool.state.lock();
+                            let pos = state.waiters.iter().position(|w| w.id == id);
+                            if let Some(p) = pos {
+                                retired_state_waker =
+                                    state.waiters.remove(p).map(|waiter| waiter.waker);
+                            }
 
-                        let waker: Option<std::task::Waker> = if state.closed {
-                            None
-                        } else {
-                            let total_including_creating =
-                                state.active + state.idle.len() + state.creating;
-                            let available = state.idle.len()
-                                + self
-                                    .pool
-                                    .config
-                                    .max_size
-                                    .saturating_sub(total_including_creating);
+                            if state.closed {
+                                None
+                            } else {
+                                let total_including_creating =
+                                    state.active + state.idle.len() + state.creating;
+                                let available = state.idle.len()
+                                    + self
+                                        .pool
+                                        .config
+                                        .max_size
+                                        .saturating_sub(total_including_creating);
 
-                            pos.and_then(|p| {
-                                if p < available
-                                    && available > 0
-                                    && available - 1 < state.waiters.len()
-                                {
-                                    Some(state.waiters[available - 1].waker.clone())
-                                } else {
-                                    None
-                                }
-                            })
+                                pos.and_then(|p| {
+                                    if p < available
+                                        && available > 0
+                                        && available - 1 < state.waiters.len()
+                                    {
+                                        Some(state.waiters[available - 1].waker.clone_waker())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            }
                         };
-                        drop(state);
 
-                        if let Some(w) = waker {
+                        let (retired_return_waker, next_dispatcher) =
+                            self.pool.detach_return_waker(id);
+
+                        if let Some(w) = marginal_waker {
                             w.wake();
                         }
-                        self.pool.return_wakers.lock().retain(|(wid, _)| *wid != id);
+                        DetachedPoolWakers {
+                            state_waker: retired_state_waker,
+                            return_waker: retired_return_waker,
+                            next_dispatcher,
+                        }
+                        .retire();
                     }
                     self.pool.process_returns();
                 }
@@ -1846,10 +1974,10 @@ where
                         continue;
                     }
 
-                    let id = cleanup.waiter_id.take();
-                    if let Some(id) = id {
-                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
-                        self.remove_waiter(id);
+                    if let Some(id) = cleanup.waiter_id {
+                        let detached = self.detach_waiter_registrations(id);
+                        cleanup.waiter_id = None;
+                        detached.retire();
                     }
 
                     let acquire_duration =
@@ -1875,10 +2003,10 @@ where
                 if let Some(create_slot) =
                     CreateSlotReservation::try_reserve(self, cleanup.waiter_id)
                 {
-                    let id = cleanup.waiter_id.take();
-                    if let Some(id) = id {
-                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
-                        self.remove_waiter(id);
+                    if let Some(id) = cleanup.waiter_id {
+                        let detached = self.detach_waiter_registrations(id);
+                        cleanup.waiter_id = None;
+                        detached.retire();
                     }
 
                     let now = get_now();
@@ -2096,8 +2224,7 @@ where
                 self.closed.store(true, Ordering::Release);
 
                 // Drain waiters, then wake after releasing the state lock.
-                let waiters: SmallVec<[Waker; 4]> =
-                    state.waiters.drain(..).map(|waiter| waiter.waker).collect();
+                let waiters = std::mem::take(&mut state.waiters);
 
                 // Record how many idle resources we're clearing (only needed for metrics)
                 #[cfg(feature = "metrics")]
@@ -2110,8 +2237,8 @@ where
                 waiters
             };
 
-            for waker in waiters {
-                waker.wake();
+            for waiter in waiters {
+                waiter.waker.clone_waker().wake();
             }
 
             // Record destroyed metrics for all cleared idle resources
@@ -2615,6 +2742,66 @@ mod tests {
         }
     }
 
+    struct PoolWakerDropProbe {
+        on_drop: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl Wake for PoolWakerDropProbe {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    impl Drop for PoolWakerDropProbe {
+        fn drop(&mut self) {
+            (self.on_drop)();
+        }
+    }
+
+    fn deferred_pool_lock_probe<R, F>(
+        pool: &Arc<GenericPool<R, F>>,
+    ) -> (DeferredWaker, mpsc::Receiver<(bool, bool)>)
+    where
+        R: Send + 'static,
+        F: AsyncResourceFactory<Resource = R> + 'static,
+    {
+        let weak_pool = Arc::downgrade(pool);
+        let (tx, rx) = mpsc::channel();
+        let probe = PoolWakerDropProbe {
+            on_drop: Box::new(move || {
+                let Some(pool) = weak_pool.upgrade() else {
+                    let _ = tx.send((false, false));
+                    return;
+                };
+                let state_free = {
+                    let guard = pool.state.try_lock();
+                    let free = guard.is_some();
+                    drop(guard);
+                    free
+                };
+                let return_wakers_free = {
+                    let guard = pool.return_wakers.try_lock();
+                    let free = guard.is_some();
+                    drop(guard);
+                    free
+                };
+                let _ = tx.send((state_free, return_wakers_free));
+            }),
+        };
+        (DeferredWaker::new(Waker::from(Arc::new(probe))), rx)
+    }
+
+    fn assert_pool_waker_retired_outside_locks(rx: &mpsc::Receiver<(bool, bool)>, path: &str) {
+        let observed = rx
+            .try_recv()
+            .unwrap_or_else(|error| panic!("{path} did not retire its probe waker: {error}"));
+        assert_eq!(
+            observed,
+            (true, true),
+            "{path} retired a task waker while a pool lock was held"
+        );
+    }
+
     #[test]
     fn pooled_resource_returns_on_drop() {
         init_test("pooled_resource_returns_on_drop");
@@ -2773,7 +2960,7 @@ mod tests {
                 tx: probe_tx,
             });
             let mut wakers = return_wakers.lock();
-            wakers.push((1, Waker::from(probe)));
+            wakers.push((1, DeferredWaker::new(Waker::from(probe))));
         }
 
         let pooled =
@@ -2916,6 +3103,196 @@ mod tests {
         Box<dyn Future<Output = Result<u32, Box<dyn std::error::Error + Send + Sync>>> + Send>,
     > {
         Box::pin(async { Ok(42u32) })
+    }
+
+    #[test]
+    fn pool_wait_notification_cancellation_retires_both_wakers_after_unlock() {
+        init_test("pool_wait_notification_cancellation_retires_both_wakers_after_unlock");
+
+        let pool = Arc::new(GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+        ));
+        let (state_probe, state_rx) = deferred_pool_lock_probe(&pool);
+        let (return_probe, return_rx) = deferred_pool_lock_probe(&pool);
+        let waiter_id_value = 17;
+
+        {
+            let mut state = pool.state.lock();
+            state.active = 1;
+            state.waiters.reserve(1);
+            state.waiters.push_back(PoolWaiter {
+                id: waiter_id_value,
+                waker: state_probe,
+            });
+        }
+        {
+            let mut wakers = pool.return_wakers.lock();
+            wakers.reserve(1);
+            wakers.push((waiter_id_value, return_probe));
+        }
+
+        let cx = Cx::for_testing();
+        let mut waiter_id = Some(waiter_id_value);
+        drop(WaitForNotification {
+            pool: pool.as_ref(),
+            waiter_id: &mut waiter_id,
+            cx: &cx,
+            completed: false,
+        });
+
+        assert_pool_waker_retired_outside_locks(&state_rx, "cancelled state registration");
+        assert_pool_waker_retired_outside_locks(&return_rx, "cancelled return registration");
+        crate::test_complete!(
+            "pool_wait_notification_cancellation_retires_both_wakers_after_unlock"
+        );
+    }
+
+    #[test]
+    fn pool_wait_notification_repoll_retires_changed_wakers_after_unlock() {
+        init_test("pool_wait_notification_repoll_retires_changed_wakers_after_unlock");
+
+        let pool = Arc::new(GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+        ));
+        let (state_probe, state_rx) = deferred_pool_lock_probe(&pool);
+        let (return_probe, return_rx) = deferred_pool_lock_probe(&pool);
+        let waiter_id_value = 23;
+
+        {
+            let mut state = pool.state.lock();
+            state.active = 1;
+            state.waiters.reserve(1);
+            state.waiters.push_back(PoolWaiter {
+                id: waiter_id_value,
+                waker: state_probe,
+            });
+        }
+        {
+            let mut wakers = pool.return_wakers.lock();
+            wakers.reserve(1);
+            wakers.push((waiter_id_value, return_probe));
+        }
+
+        let cx = Cx::for_testing();
+        let mut waiter_id = Some(waiter_id_value);
+        let mut wait = WaitForNotification {
+            pool: pool.as_ref(),
+            waiter_id: &mut waiter_id,
+            cx: &cx,
+            completed: false,
+        };
+        let task_waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&task_waker);
+        assert!(Pin::new(&mut wait).poll(&mut task_cx).is_pending());
+
+        assert_pool_waker_retired_outside_locks(&state_rx, "changed state registration");
+        assert_pool_waker_retired_outside_locks(&return_rx, "changed return registration");
+        drop(wait);
+        crate::test_complete!("pool_wait_notification_repoll_retires_changed_wakers_after_unlock");
+    }
+
+    #[test]
+    fn pool_successful_dequeue_retires_both_wakers_after_unlock() {
+        init_test("pool_successful_dequeue_retires_both_wakers_after_unlock");
+
+        let pool = Arc::new(GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+        ));
+        let cx = Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
+        let task_waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&task_waker);
+        let mut waiter = pool.acquire(&cx);
+        assert!(waiter.as_mut().poll(&mut task_cx).is_pending());
+
+        let waiter_id = pool
+            .state
+            .lock()
+            .waiters
+            .front()
+            .expect("pending acquire registered in state queue")
+            .id;
+        let (state_probe, state_rx) = deferred_pool_lock_probe(&pool);
+        let (return_probe, return_rx) = deferred_pool_lock_probe(&pool);
+
+        let retired_state_waker = {
+            let mut state = pool.state.lock();
+            let entry = state
+                .waiters
+                .iter_mut()
+                .find(|entry| entry.id == waiter_id)
+                .expect("state registration");
+            std::mem::replace(&mut entry.waker, state_probe)
+        };
+        drop(retired_state_waker);
+        let retired_return_waker = {
+            let mut wakers = pool.return_wakers.lock();
+            let entry = wakers
+                .iter_mut()
+                .find(|(id, _)| *id == waiter_id)
+                .expect("return registration");
+            std::mem::replace(&mut entry.1, return_probe)
+        };
+        drop(retired_return_waker);
+
+        held.return_to_pool();
+        let resource = match waiter.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(resource)) => resource,
+            Poll::Ready(Err(error)) => panic!("waiter failed after resource return: {error}"),
+            Poll::Pending => panic!("returned resource did not satisfy the queued waiter"),
+        };
+        drop(waiter);
+
+        assert_pool_waker_retired_outside_locks(&state_rx, "successful state dequeue");
+        assert_pool_waker_retired_outside_locks(&return_rx, "successful return dequeue");
+        resource.return_to_pool();
+        crate::test_complete!("pool_successful_dequeue_retires_both_wakers_after_unlock");
+    }
+
+    #[test]
+    fn pool_waiter_cleanup_retires_return_waker_after_unlock() {
+        init_test("pool_waiter_cleanup_retires_return_waker_after_unlock");
+
+        let pool = Arc::new(GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+        ));
+        let cx = Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
+        let task_waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&task_waker);
+        let mut waiter = pool.acquire(&cx);
+        assert!(waiter.as_mut().poll(&mut task_cx).is_pending());
+
+        let waiter_id = pool
+            .state
+            .lock()
+            .waiters
+            .front()
+            .expect("pending acquire registered in state queue")
+            .id;
+        let (return_probe, return_rx) = deferred_pool_lock_probe(&pool);
+        let retired_return_waker = {
+            let mut wakers = pool.return_wakers.lock();
+            let entry = wakers
+                .iter_mut()
+                .find(|(id, _)| *id == waiter_id)
+                .expect("return registration");
+            std::mem::replace(&mut entry.1, return_probe)
+        };
+        drop(retired_return_waker);
+
+        cx.set_cancel_requested(true);
+        let result = waiter.as_mut().poll(&mut task_cx);
+        assert!(matches!(result, Poll::Ready(Err(PoolError::Cancelled))));
+        drop(waiter);
+
+        assert_pool_waker_retired_outside_locks(&return_rx, "WaiterCleanup return removal");
+        held.return_to_pool();
+        crate::test_complete!("pool_waiter_cleanup_retires_return_waker_after_unlock");
     }
 
     struct TimeoutAfterNSuccessesFactory {
