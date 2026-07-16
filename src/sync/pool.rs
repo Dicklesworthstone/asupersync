@@ -598,11 +598,16 @@ impl<R> PooledResource<R> {
         }
 
         let hold_duration = self.held_duration();
-        self.resource.take();
+        // Commit the logical discard before destroying arbitrary resource
+        // state. `R::drop` may unwind; the pool must already know that its
+        // active slot is reusable, and blocked acquirers must already have
+        // been notified, before that destructor runs.
+        let discarded = self.resource.take();
         let _ = self.return_tx.send(PoolReturn::Discard { hold_duration });
         self.return_obligation.discharge();
         // Wake pool waiters — a discard frees a creation slot.
         self.notify_return_wakers();
+        drop(discarded);
     }
 
     /// Wake the first registered pool waiter to act as a dispatcher.
@@ -2880,6 +2885,23 @@ mod tests {
         }
     }
 
+    struct PanicOnDropPoolResource {
+        id: usize,
+        panic_on_drop: bool,
+        drop_attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for PanicOnDropPoolResource {
+        fn drop(&mut self) {
+            self.drop_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                !self.panic_on_drop,
+                "intentional pooled-resource destructor panic"
+            );
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     fn pool_resource_probe_factory() -> Pin<
         Box<
@@ -3154,6 +3176,45 @@ mod tests {
         }
 
         crate::test_complete!("pooled_resource_discard_hold_duration_uses_time_getter");
+    }
+
+    #[test]
+    fn pooled_resource_discard_commits_before_resource_drop_panics() {
+        init_test("pooled_resource_discard_commits_before_resource_drop_panics");
+        let (tx, rx) = mpsc::channel();
+        let drop_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pooled = PooledResource::new_with_time_getter(
+            PanicOnDropPoolResource {
+                id: 0,
+                panic_on_drop: true,
+                drop_attempts: Arc::clone(&drop_attempts),
+            },
+            tx,
+            test_pool_time_now,
+        );
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pooled.discard();
+        }));
+        assert!(
+            panic_result.is_err(),
+            "discard must propagate the resource destructor panic"
+        );
+        assert_eq!(
+            drop_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the discarded resource must be destroyed exactly once"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(PoolReturn::Discard { .. })),
+            "discard accounting must be queued before the destructor unwinds"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a panicking discard must enqueue exactly one accounting message"
+        );
+
+        crate::test_complete!("pooled_resource_discard_commits_before_resource_drop_panics");
     }
 
     #[test]
@@ -5891,6 +5952,87 @@ mod tests {
         );
 
         crate::test_complete!("metamorphic_cancelled_waiter_preserves_reuse_identity");
+    }
+
+    fn assert_panicking_resource_discard_releases_capacity(release_via_broken_drop: bool) {
+        let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let drop_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory = {
+            let created = Arc::clone(&created);
+            let drop_attempts = Arc::clone(&drop_attempts);
+            move || {
+                let id = created.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let resource = PanicOnDropPoolResource {
+                    id,
+                    panic_on_drop: id == 0,
+                    drop_attempts: Arc::clone(&drop_attempts),
+                };
+                Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(resource) })
+                    as Pin<Box<dyn Future<Output = _> + Send>>
+            }
+        };
+        let pool = GenericPool::with_time_getter(
+            factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        );
+        let cx = Cx::for_testing();
+        let mut resource =
+            futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
+        assert_eq!(resource.id, 0, "the first resource must be the panic probe");
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if release_via_broken_drop {
+                resource.mark_broken();
+                drop(resource);
+            } else {
+                resource.discard();
+            }
+        }));
+        assert!(
+            panic_result.is_err(),
+            "the first resource destructor must unwind"
+        );
+        assert_eq!(
+            drop_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the panicking resource must have one drop attempt"
+        );
+
+        let after_discard = pool.stats();
+        assert_eq!(
+            after_discard.active, 0,
+            "a panicking resource destructor must not leak active capacity"
+        );
+        assert_eq!(
+            after_discard.total, 0,
+            "a panicking resource destructor must leave the discarded slot reusable"
+        );
+
+        let replacement = futures_lite::future::block_on(pool.acquire(&cx))
+            .expect("reacquire after panicking discard");
+        assert_eq!(replacement.id, 1, "reacquire must create a replacement");
+        assert_eq!(
+            pool.stats().active,
+            1,
+            "the replacement must occupy the recovered slot"
+        );
+        replacement.return_to_pool();
+
+        let final_stats = pool.stats();
+        assert_eq!(final_stats.active, 0, "the replacement must return cleanly");
+        assert_eq!(final_stats.idle, 1, "the replacement must remain reusable");
+        assert_eq!(final_stats.total, 1, "the pool must stay within max_size");
+    }
+
+    #[test]
+    fn pool_panicking_discard_drop_releases_capacity() {
+        init_test("pool_panicking_discard_drop_releases_capacity");
+
+        assert_panicking_resource_discard_releases_capacity(false);
+        assert_panicking_resource_discard_releases_capacity(true);
+
+        crate::test_complete!("pool_panicking_discard_drop_releases_capacity");
     }
 
     #[test]
