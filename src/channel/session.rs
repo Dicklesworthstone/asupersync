@@ -18,6 +18,8 @@
 //!       │                                     └── abort()  ──► AbortedProof
 //!       │                                     └── (drop)   ──► PANIC!
 //!       │
+//!       ├── try_reserve(&cx) ─► TrackedPermit (or immediate error)
+//!       │
 //!       └── send(&cx, v)  ──► CommittedProof (convenience: reserve + send)
 //! ```
 //!
@@ -52,14 +54,6 @@ use crate::cx::Cx;
 use crate::obligation::graded::{AbortedProof, CommittedProof, ObligationToken, SendPermit};
 use crate::types::RegionId;
 
-fn reserve_tracked_send_obligation(description: &'static str) -> ObligationToken<SendPermit> {
-    if let Some(cx) = crate::cx::Cx::current() {
-        reserve_tracked_send_obligation_for_region(description, cx.region_id())
-    } else {
-        reserve_tracked_send_obligation_without_current(description)
-    }
-}
-
 fn reserve_tracked_send_obligation_for_region(
     description: &'static str,
     region: RegionId,
@@ -70,24 +64,6 @@ fn reserve_tracked_send_obligation_for_region(
     }
 
     ObligationToken::<SendPermit>::reserve(description, region)
-}
-
-#[cfg(any(test, feature = "test-internals"))]
-fn reserve_tracked_send_obligation_without_current(
-    description: &'static str,
-) -> ObligationToken<SendPermit> {
-    ObligationToken::<SendPermit>::reserve_test(description)
-}
-
-#[cfg(not(any(test, feature = "test-internals")))]
-fn reserve_tracked_send_obligation_without_current(
-    description: &'static str,
-) -> ObligationToken<SendPermit> {
-    panic!(
-        "Cannot create tracked permit outside of task context: obligation \
-         tokens require region scoping to prevent leaks. Use async reserve() \
-         with a Cx when outside unit-test code. Description: {description}"
-    )
 }
 
 /// Redacted telemetry for one underlying channel inside a session wrapper.
@@ -224,10 +200,19 @@ impl<T> TrackedSender<T> {
         Ok(TrackedPermit { permit, obligation })
     }
 
-    /// Non-blocking reserve attempt.
-    pub fn try_reserve(&self) -> Result<TrackedPermit<'_, T>, mpsc::SendError<()>> {
+    /// Non-blocking reserve attempt scoped to the supplied context.
+    ///
+    /// Cancellation is checked before channel capacity is acquired. This
+    /// method never consults ambient task context, so synchronous production
+    /// code can use it with an explicit, non-root task [`Cx`].
+    pub fn try_reserve(&self, cx: &Cx) -> Result<TrackedPermit<'_, T>, mpsc::SendError<()>> {
+        if cx.checkpoint().is_err() {
+            return Err(mpsc::SendError::Cancelled(()));
+        }
+
         let permit = self.inner.try_reserve()?;
-        let obligation = reserve_tracked_send_obligation("TrackedPermit(mpsc)");
+        let obligation =
+            reserve_tracked_send_obligation_for_region("TrackedPermit(mpsc)", cx.region_id());
         Ok(TrackedPermit { permit, obligation })
     }
 
@@ -621,7 +606,7 @@ mod tests {
         let cx = test_cx();
         let (tx, mut rx) = tracked_channel::<i32>(10);
 
-        let permit = tx.try_reserve().expect("try_reserve failed");
+        let permit = tx.try_reserve(&cx).expect("try_reserve failed");
         let proof = permit.send(7).unwrap();
 
         crate::assert_with_log!(
@@ -635,6 +620,37 @@ mod tests {
         crate::assert_with_log!(value == 7, "recv value", 7, value);
 
         crate::test_complete!("tracked_mpsc_try_reserve_send");
+    }
+
+    #[test]
+    fn tracked_mpsc_try_reserve_rejects_pre_cancelled_context() {
+        init_test("tracked_mpsc_try_reserve_rejects_pre_cancelled_context");
+        let cancelled_cx = test_cx();
+        cancelled_cx.cancel_with(
+            crate::types::CancelKind::User,
+            Some("cancel before tracked try_reserve"),
+        );
+        let (tx, mut rx) = tracked_channel::<i32>(1);
+        let before = tx.telemetry_snapshot(7);
+
+        assert!(matches!(
+            tx.try_reserve(&cancelled_cx),
+            Err(mpsc::SendError::Cancelled(()))
+        ));
+        assert_eq!(rx.try_recv(), Err(mpsc::RecvError::Empty));
+        assert_eq!(tx.telemetry_snapshot(7), before);
+
+        let active_cx = test_cx();
+        let permit = tx
+            .try_reserve(&active_cx)
+            .expect("cancelled attempt must leave capacity intact");
+        permit.send(11).expect("active explicit context commits");
+        assert_eq!(
+            block_on(rx.recv(&active_cx)).expect("committed value is available"),
+            11
+        );
+
+        crate::test_complete!("tracked_mpsc_try_reserve_rejects_pre_cancelled_context");
     }
 
     // 5. Full oneshot reserve + send + recv with proof
@@ -816,8 +832,9 @@ mod tests {
 
     #[test]
     fn tracked_permit_debug() {
+        let cx = test_cx();
         let (tx, _rx) = tracked_channel::<i32>(10);
-        let permit = tx.try_reserve().expect("reserve");
+        let permit = tx.try_reserve(&cx).expect("reserve");
         let dbg = format!("{permit:?}");
         assert!(dbg.contains("TrackedPermit"));
         let _ = permit.abort();
@@ -1280,7 +1297,7 @@ mod tests {
         let permit2 = block_on(tx.reserve(&cx)).expect("permit 2");
 
         // Try to reserve more (should fail)
-        let should_fail = tx.try_reserve();
+        let should_fail = tx.try_reserve(&cx);
         crate::assert_with_log!(
             should_fail.is_err(),
             "capacity pressure blocks new reservations",
@@ -1290,12 +1307,12 @@ mod tests {
 
         // Free one slot via abort, reserve again
         let _aborted = permit1.abort();
-        let permit3 = tx.try_reserve().expect("permit after abort");
+        let permit3 = tx.try_reserve(&cx).expect("permit after abort");
 
         // Free another slot via send, reserve again
         let _committed = permit2.send(100).expect("send");
         let _received = block_on(rx.recv(&cx)).expect("recv");
-        let permit4 = tx.try_reserve().expect("permit after send");
+        let permit4 = tx.try_reserve(&cx).expect("permit after send");
 
         // Both newly acquired permits should behave identically
         let _committed3 = permit3.send(200).expect("send 3");
@@ -1405,8 +1422,8 @@ mod tests {
         );
 
         // Both closed channels should behave identically
-        let reserve1 = tx1.try_reserve();
-        let reserve2_before_close = tx2.try_reserve();
+        let reserve1 = tx1.try_reserve(&cx);
+        let reserve2_before_close = tx2.try_reserve(&cx);
 
         crate::assert_with_log!(
             reserve1.is_err(),
