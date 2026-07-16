@@ -47,7 +47,7 @@ fi
 # Inputs (exported by matrix_bench.sh's run_cell):
 #   ATP_MATRIX_WORKLOAD ATP_MATRIX_WORKLOAD_PATH ATP_MATRIX_REGIME
 #   ATP_MATRIX_TIER ATP_MATRIX_METHOD ATP_MATRIX_REP ATP_MATRIX_STREAMS ATP_MATRIX_RESULTS
-#   ATP_MATRIX_NETEM_JSON ATP_MATRIX_RUN_ID ATP_MATRIX_GIT_HEAD
+#   ATP_MATRIX_NETEM_JSON ATP_MATRIX_RUN_ID ATP_MATRIX_GIT_HEAD ATP_MATRIX_CELL_PROFILE
 # Tunables (env): BIN, WORKERS, STREAMS, SYMBOL_SIZE, MAX_BLOCK_SIZE, MAX_BYTES,
 #   HOST_IP, NS_IP, CIDR, ATP_MATRIX_TIMEOUT,
 #   RSS_SAMPLE_INTERVAL, REMOTE_USER, SSH_KEY, RECEIVER_READY_SLEEP, CELL_TMP.
@@ -72,6 +72,26 @@ RESULTS="$ATP_MATRIX_RESULTS"
 NETEM_JSON="$ATP_MATRIX_NETEM_JSON"
 RUN_ID="${ATP_MATRIX_RUN_ID:-adhoc}"
 GIT_HEAD="${ATP_MATRIX_GIT_HEAD:-unknown}"
+CELL_PROFILE="${ATP_MATRIX_CELL_PROFILE:-whole-object-scorecard-v1}"
+case "$CELL_PROFILE" in
+    whole-object-scorecard-v1)
+        DELTA_CONTROL_AUTH_POSTURE=none
+        ;;
+    authenticated-delta-unchanged-v1)
+        if [ ! -f "$WL_PATH" ] || [ -L "$WL_PATH" ] || [ ! -s "$WL_PATH" ]; then
+            echo "$CELL_PROFILE requires a nonempty non-symlink regular-file workload" >&2
+            exit 2
+        fi
+        [ "$(stat -c%s "$WL_PATH")" -le 524288000 ] \
+            || { echo "$CELL_PROFILE caps inputs at 500M to stay within both 4096-chunk manifests" >&2; exit 2; }
+        case "$TIER/$METHOD" in
+            auth/atp-rq-auth)         DELTA_CONTROL_AUTH_POSTURE=rq-framed-control-hmac-sha256-v1 ;;
+            encrypted/atp-quic-tls13) DELTA_CONTROL_AUTH_POSTURE=quic-tls13-session-bound-manifest-hmac-sha256-v1 ;;
+            *) echo "$CELL_PROFILE does not admit $TIER/$METHOD" >&2; exit 2 ;;
+        esac
+        ;;
+    *) echo "unknown ATP_MATRIX_CELL_PROFILE: $CELL_PROFILE" >&2; exit 2 ;;
+esac
 case "$METHOD" in
     atp-rq-lab)             AUTH_POSTURE=rq-lab-unauthenticated-v1 ;;
     atp-rq-auth)            AUTH_POSTURE=rq-symbol-hmac-v1 ;;
@@ -85,6 +105,7 @@ BIN="${BIN:-/tmp/atp_bench/atp}"
 WORKERS="${WORKERS:-4}"
 STREAMS="${STREAMS:-1}"
 STREAMS="${ATP_MATRIX_STREAMS:-$STREAMS}"
+CASE_ID="${ATP_MATRIX_CASE_ID:-${CELL_PROFILE}:${WORKLOAD}:${REGIME}:${TIER}:${METHOD}:s${STREAMS}:r${REP}}"
 SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
 MAX_BLOCK_SIZE="${ATP_MATRIX_MAX_BLOCK_SIZE:-${MAX_BLOCK_SIZE:-auto}}"
 MAX_BYTES="${MAX_BYTES:-6442450944}"
@@ -113,13 +134,23 @@ log() { printf '%s [cell %s/%s/%s/%s rep=%s] %s\n' \
 [ "$(id -u)" = "0" ] || { echo "run_matrix_cell.sh needs root (netns/tc)" >&2; exit 1; }
 [ -x "$BIN" ] || { echo "BIN not executable: $BIN" >&2; exit 1; }
 
-SUFFIX="$(printf '%s-%s-%s' "$RUN_ID" "$METHOD" "$REP" | cksum | awk '{ print substr($1,1,6) }')"
+ATTEMPT_ID="${BASHPID}"
+SUFFIX="$(printf '%s-%s-%s-%s-%s-%s-%s-%s-%s' "$RUN_ID" "$CELL_PROFILE" "$WORKLOAD" "$REGIME" "$TIER" "$METHOD" "$STREAMS" "$REP" "$ATTEMPT_ID" | cksum | awk '{ print substr($1,1,6) }')"
 NS="atpc${SUFFIX}"
 IF_HOST="vch${SUFFIX}"
 IF_NS="vcn${SUFFIX}"
 PORT=$(( 40000 + ($(printf '%s' "$SUFFIX" | cksum | awk '{print $1}') % 20000) ))
-CASE_DIR="${CELL_TMP}/${WORKLOAD}/${REGIME}/${TIER}/${METHOD}/rep${REP}"
+CASE_DIR="${CELL_TMP}/${CELL_PROFILE}/${WORKLOAD}/${REGIME}/${TIER}/${METHOD}/streams${STREAMS}/rep${REP}/attempt-${ATTEMPT_ID}"
 RSYNCD_PID=""
+DELTA_ACCEPTANCE_OK=false
+DELTA_MODE_OBSERVED=not_applicable
+CONTROL_WIRE_BYTES=0
+SENDER_PAYLOAD_BYTES=-1
+SENDER_SYMBOLS=-1
+RECEIVER_PAYLOAD_BYTES=-1
+RECEIVER_SYMBOLS=-1
+DELTA_FEEDBACK_ROUNDS=-1
+PAYLOAD_FILE_IDENTITY_UNCHANGED=false
 
 clear_rq_auth_secret() {
     set +x
@@ -184,6 +215,114 @@ extract_metric() {
         | grep -E '^[0-9]+$' || true
 }
 sha256_file() { if [ -f "$1" ]; then sha256sum "$1" | awk '{print $1}'; else printf 'missing'; fi; }
+payload_identity_stamp() { stat -c '%d:%i:%s:%f:%u:%g:%y' "$1"; }
+link_wire_bytes() {
+    local tx rx
+    tx="$(ip netns exec "$NS" cat "/sys/class/net/${IF_NS}/statistics/tx_bytes")"
+    rx="$(ip netns exec "$NS" cat "/sys/class/net/${IF_NS}/statistics/rx_bytes")"
+    [[ "$tx" =~ ^[0-9]+$ && "$rx" =~ ^[0-9]+$ ]] \
+        || { echo "invalid netns wire counters: tx=$tx rx=$rx" >&2; return 2; }
+    printf '%s' "$((tx + rx))"
+}
+
+verify_authenticated_delta_unchanged() {
+    local sender_log="$1" receiver_log="$2" transport="$3" sender_status="$4" receiver_status="$5"
+    local source_bytes="$6" wire_bytes="$7" before_stamp="$8" after_stamp="$9"
+    python3 - "$sender_log" "$receiver_log" "$transport" "$sender_status" "$receiver_status" \
+        "$source_bytes" "$wire_bytes" "$before_stamp" "$after_stamp" <<'PY'
+import json
+import sys
+
+(
+    sender_path,
+    receiver_path,
+    transport,
+    sender_status,
+    receiver_status,
+    source_bytes,
+    wire_bytes,
+    before_stamp,
+    after_stamp,
+) = sys.argv[1:10]
+sender_status = int(sender_status)
+receiver_status = int(receiver_status)
+source_bytes = int(source_bytes)
+wire_bytes = int(wire_bytes)
+
+if sender_status != 0 or receiver_status != 0:
+    raise SystemExit(
+        f"authenticated delta processes must both exit zero; sender={sender_status} receiver={receiver_status}"
+    )
+
+def report(path, event):
+    matches = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if candidate.get("event") == event:
+                matches.append(candidate)
+    if len(matches) != 1:
+        raise SystemExit(f"expected exactly one {event} JSON report in {path}, got {len(matches)}")
+    return matches[0]
+
+sender = report(sender_path, "atp_send")
+receiver = report(receiver_path, "atp_receive")
+expected_sender = {
+    "transport": transport,
+    "committed": True,
+    "files": 1,
+    "sha_ok": True,
+    "merkle_ok": True,
+    "bytes_sent": 0,
+    "symbols_sent": 0,
+    "feedback_rounds": 0,
+}
+expected_receiver = {
+    "transport": transport,
+    "committed": True,
+    "files": 1,
+    "bytes_received": 0,
+    "symbols_accepted": 0,
+    "feedback_rounds": 0,
+}
+for key, expected in expected_sender.items():
+    if sender.get(key) != expected:
+        raise SystemExit(f"sender {key}: expected {expected!r}, got {sender.get(key)!r}")
+for key, expected in expected_receiver.items():
+    if receiver.get(key) != expected:
+        raise SystemExit(f"receiver {key}: expected {expected!r}, got {receiver.get(key)!r}")
+
+transfer_id = sender.get("transfer_id")
+if not transfer_id or receiver.get("transfer_id") != transfer_id:
+    raise SystemExit("sender/receiver transfer_id is empty or mismatched")
+for key in ("bytes", "symbols_sent", "symbols_accepted", "feedback_rounds"):
+    if sender.get("metrics", {}).get(key) != 0:
+        raise SystemExit(f"sender metrics.{key} is not zero")
+for key in ("bytes", "symbols_accepted", "feedback_rounds"):
+    if receiver.get("metrics", {}).get(key) != 0:
+        raise SystemExit(f"receiver metrics.{key} is not zero")
+if transport == "quic":
+    for report_name, value in (("sender", sender), ("receiver", receiver)):
+        for key in ("decode_count", "decode_micros"):
+            if value.get("metrics", {}).get(key) != 0:
+                raise SystemExit(f"{report_name} metrics.{key} is not zero")
+    for key in ("decode_count", "decode_micros"):
+        if receiver.get(key) != 0:
+            raise SystemExit(f"receiver {key} is not zero")
+if before_stamp != after_stamp:
+    raise SystemExit("destination payload identity or metadata changed during authenticated no-op")
+if not 0 < wire_bytes < source_bytes:
+    raise SystemExit(
+        f"authenticated control wire bytes must satisfy 0 < wire < source size; "
+        f"wire={wire_bytes} source={source_bytes}"
+    )
+
+print("0 0 0 0 0")
+PY
+}
 
 # Canonical tree digest: sha256 over sorted "relpath:perfilesha" set.
 tree_digest() {
@@ -326,6 +465,7 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
     local r_tag="atprecv-${SUFFIX}" s_tag="atpsend-${SUFFIX}"
     local r_stop="$CASE_DIR/r_stop" r_out="$CASE_DIR/r_rss" s_stop="$CASE_DIR/s_stop" s_out="$CASE_DIR/s_rss"
     local -a auth_recv=() auth_send=() block_args=() delta_args=() tls_recv=() tls_send=() rq_loss_args=()
+    local protected_auth_stdin=false
     local sym="$SYMBOL_SIZE"
     # "auto" means let atp pick its built-in (auto-bound) block size — the CLI
     # flag parses strictly as a number, so omit it rather than passing "auto"
@@ -333,10 +473,11 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
     if [ "$MAX_BLOCK_SIZE" != "auto" ]; then
         block_args=(--max-block-size "$MAX_BLOCK_SIZE")
     fi
-    # Matrix cells are whole-object scorecard transfers, not re-sync delta cells.
-    # Disable the receiver-state sidecar probe so netns route issues cannot add
-    # fallback noise to wall-time or obscure the transport under test.
-    delta_args=(--no-delta)
+    if [ "$CELL_PROFILE" = "whole-object-scorecard-v1" ]; then
+        # Headline cells remain whole-object scorecard transfers. The separate
+        # authenticated-delta profile owns live receiver-state negotiation.
+        delta_args=(--no-delta)
+    fi
     case "$mode" in
         lab)
             auth_recv=(--rq-allow-unauthenticated-lab)
@@ -348,10 +489,17 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
             ensure_rq_auth_secret
             auth_recv=(--rq-auth-key-stdin)
             auth_send=(--rq-auth-key-stdin)
+            protected_auth_stdin=true
             ;;
         tls)
             [ "$transport" = "quic" ] \
                 || { echo "TLS transport-auth mode requires the quic transport" >&2; return 2; }
+            if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ]; then
+                ensure_rq_auth_secret
+                auth_recv=(--rq-auth-key-stdin)
+                auth_send=(--rq-auth-key-stdin)
+                protected_auth_stdin=true
+            fi
             ;;
         *)
             echo "unknown ATP auth mode: $mode" >&2
@@ -384,9 +532,23 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
         # atp-internal framing detail and does not affect the rsync-ssh comparison,
         # so the encrypted tier stays apples-to-apples. (z0v7ri encrypted-tier fix.)
         if [ "$sym" -gt 1141 ]; then sym=1141; fi
-        # QUIC TLS 1.3 authenticates every symbol datagram at the transport
-        # layer. RQ key flags are intentionally absent here: ATP ignores the
-        # legacy hex flag on QUIC and rejects the protected stdin flag.
+        # Whole-object QUIC needs only TLS. The authenticated-delta profile also
+        # supplies the protected control key used to authorize live destination
+        # inspection; the key is not a replacement for TLS transport security.
+    fi
+
+    local payload
+    payload="$recv_dir/$(basename "$WL_PATH")"
+    local delta_stamp_before="not_applicable"
+    if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ]; then
+        if [ -e "$payload" ] || [ -L "$payload" ]; then
+            echo "delta acceptance destination already exists: $payload" >&2
+            return 2
+        fi
+        cp --preserve=mode,ownership,timestamps -- "$WL_PATH" "$payload"
+        [ "$(sha256_file "$WL_PATH")" = "$(sha256_file "$payload")" ] \
+            || { echo "delta acceptance preseed SHA mismatch" >&2; return 2; }
+        delta_stamp_before="$(payload_identity_stamp "$payload")"
     fi
 
     local extra_send=()
@@ -414,7 +576,7 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
         "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}"
     )
     set +e
-    if [ "$mode" = "key" ]; then
+    if [ "$protected_auth_stdin" = "true" ]; then
         send_rq_auth_secret | "${recv_cmd[@]}" >"$rl" 2>"$rt" &
     else
         "${recv_cmd[@]}" >"$rl" 2>"$rt" &
@@ -423,14 +585,17 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
     sample_rss "$r_tag" "$r_stop" "$r_out" & local r_samp=$!
     sleep "$RECEIVER_READY_SLEEP"
     sample_rss "$s_tag" "$s_stop" "$s_out" & local s_samp=$!
-    local start finish ss rs; TIMED_OUT=false
+    local start finish ss rs wire_before=0 wire_after=0; TIMED_OUT=false
+    if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ]; then
+        wire_before="$(link_wire_bytes)"
+    fi
     start="$(now_s)"
     local -a send_cmd=(
         ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX "$BIN" send "$WL_PATH" "${HOST_IP}:${PORT}"
         --transport "$transport" --symbol-size "$sym" --peer-id "$s_tag" --max-bytes "$MAX_BYTES"
         "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}"
     )
-    if [ "$mode" = "key" ]; then
+    if [ "$protected_auth_stdin" = "true" ]; then
         send_rq_auth_secret | "${send_cmd[@]}" >"$sl" 2>"$st"
     else
         "${send_cmd[@]}" >"$sl" 2>"$st"
@@ -438,6 +603,29 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
     ss=$?; [ "$ss" = "124" ] && TIMED_OUT=true
     if [ "$ss" != "0" ] && kill -0 "$recv_pid" 2>/dev/null; then kill "$recv_pid" 2>/dev/null || true; fi
     wait "$recv_pid"; rs=$?; [ "$rs" = "124" ] && TIMED_OUT=true
+    if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ]; then
+        local delta_stamp_after validation="" validation_status=0
+        wire_after="$(link_wire_bytes)"
+        [ "$wire_after" -ge "$wire_before" ] \
+            || { echo "netns wire counters regressed: before=$wire_before after=$wire_after" >&2; validation_status=2; }
+        CONTROL_WIRE_BYTES=$((wire_after - wire_before))
+        delta_stamp_after="$(payload_identity_stamp "$payload")"
+        if [ "$delta_stamp_before" = "$delta_stamp_after" ]; then
+            PAYLOAD_FILE_IDENTITY_UNCHANGED=true
+        fi
+        if [ "$validation_status" = "0" ]; then
+            validation="$(verify_authenticated_delta_unchanged \
+                "$sl" "$rl" "$transport" "$ss" "$rs" "$(stat -c%s "$WL_PATH")" \
+                "$CONTROL_WIRE_BYTES" "$delta_stamp_before" "$delta_stamp_after")"
+            validation_status=$?
+        fi
+        if [ "$validation_status" = "0" ]; then
+            read -r SENDER_PAYLOAD_BYTES SENDER_SYMBOLS RECEIVER_PAYLOAD_BYTES \
+                RECEIVER_SYMBOLS DELTA_FEEDBACK_ROUNDS <<<"$validation"
+            DELTA_ACCEPTANCE_OK=true
+            DELTA_MODE_OBSERVED=already_in_sync
+        fi
+    fi
     clear_rq_auth_secret
     finish="$(now_s)"
     touch "$r_stop" "$s_stop"; wait "$r_samp" "$s_samp" 2>/dev/null || true
@@ -449,8 +637,15 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
     CPU="$(cpu_pct_from_time "$st")"
     S_CTX="$(ctx_switches_from_time "$st")"
     ROUNDS="$(extract_metric feedback_rounds "$sl" "$rl" "$st" "$rt")"
+    if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ]; then
+        ROUNDS="$DELTA_FEEDBACK_ROUNDS"
+    fi
     STATUS_CODE=$((ss + rs))
-    DEST="$recv_dir/$(basename "$WL_PATH")"
+    if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ] \
+        && [ "$DELTA_ACCEPTANCE_OK" != "true" ] && [ "$STATUS_CODE" = "0" ]; then
+        STATUS_CODE=1
+    fi
+    DEST="$payload"
 }
 
 run_rsync() {  # $1=transport: daemon|ssh
@@ -555,7 +750,12 @@ fi
 # lossy-link delivery from being discarded as a failure, while staying fail-closed:
 # a timeout, or any non-zero exit WITHOUT verified data, is still not "ok".
 STATUS="ok"
-if [ "$TIMED_OUT" = "true" ]; then STATUS="timeout"
+if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ]; then
+    if [ "$TIMED_OUT" = "true" ]; then STATUS="timeout"
+    elif [ "${STATUS_CODE:-1}" != "0" ] || [ "$DELTA_ACCEPTANCE_OK" != "true" ]; then STATUS="error"
+    elif [ "$SHA_OK" != "true" ]; then STATUS="sha_mismatch"
+    fi
+elif [ "$TIMED_OUT" = "true" ]; then STATUS="timeout"
 elif [ "$SHA_OK" != "true" ]; then
     if [ "${STATUS_CODE:-1}" != "0" ]; then STATUS="error"; else STATUS="sha_mismatch"; fi
 fi
@@ -573,7 +773,8 @@ fi
 EST_DGRAMS=0
 case "$METHOD" in
     atp-*)
-        if [ "${SIZE_BYTES:-0}" -gt 0 ] && [ "${SYMBOL_SIZE:-0}" -gt 0 ]; then
+        if [ "$CELL_PROFILE" = "whole-object-scorecard-v1" ] \
+            && [ "${SIZE_BYTES:-0}" -gt 0 ] && [ "${SYMBOL_SIZE:-0}" -gt 0 ]; then
             EST_DGRAMS=$(( (SIZE_BYTES + SYMBOL_SIZE - 1) / SYMBOL_SIZE ))
         fi
         ;;
@@ -592,7 +793,12 @@ ROW_AVG="${AVG_RSS_KB:-0}" ROW_SP="${S_PEAK:-0}" ROW_RP="${R_PEAK:-0}" ROW_SA="$
 ROW_RA="${R_AVG:-0}" ROW_CPU="${CPU:-0}" ROW_ROUNDS="${ROUNDS:-0}" ROW_SRC="$SRC_SHA" \
 ROW_DST="$DST_SHA" ROW_SHA_OK="$SHA_OK" ROW_TO="$TIMED_OUT" ROW_SC="${STATUS_CODE:-1}" \
 ROW_STATUS="$STATUS" ROW_CASE="$CASE_DIR" ROW_CTX="${S_CTX:-0}" ROW_ESTPKT="${EST_DGRAMS:-0}" \
-ROW_STREAMS="${STREAMS:-0}" ROW_AUTH="$AUTH_POSTURE" \
+ROW_STREAMS="${STREAMS:-0}" ROW_AUTH="$AUTH_POSTURE" ROW_PROFILE="$CELL_PROFILE" \
+ROW_CASE_ID="$CASE_ID" ROW_DELTA_AUTH="$DELTA_CONTROL_AUTH_POSTURE" \
+ROW_DELTA_OK="$DELTA_ACCEPTANCE_OK" ROW_DELTA_MODE="$DELTA_MODE_OBSERVED" \
+ROW_CONTROL_WIRE="$CONTROL_WIRE_BYTES" ROW_SENDER_PAYLOAD="$SENDER_PAYLOAD_BYTES" \
+ROW_SENDER_SYMBOLS="$SENDER_SYMBOLS" ROW_RECEIVER_PAYLOAD="$RECEIVER_PAYLOAD_BYTES" \
+ROW_RECEIVER_SYMBOLS="$RECEIVER_SYMBOLS" ROW_IDENTITY_UNCHANGED="$PAYLOAD_FILE_IDENTITY_UNCHANGED" \
 python3 - >>"$RESULTS" <<'PY'
 import json, os
 
@@ -618,6 +824,8 @@ def jobj(name, default):
 e = os.environ.get
 row = {
     "schema": "atp-bench-matrix-result-v1",
+    "cell_profile": e("ROW_PROFILE", "whole-object-scorecard-v1"),
+    "case_id": e("ROW_CASE_ID", ""),
     "run_id": e("ROW_RUN_ID", "adhoc"),
     "git_head": e("ROW_GIT", "unknown"),
     "workload": e("ROW_WL", ""),
@@ -627,6 +835,7 @@ row = {
     "crypto_tier": e("ROW_TIER", ""),
     "method": e("ROW_METHOD", ""),
     "auth_posture": e("ROW_AUTH", ""),
+    "delta_control_auth_posture": e("ROW_DELTA_AUTH", "none"),
     "rep": num("ROW_REP"),
     "netem": jobj("ROW_NETEM", {}),
     "wall_s": num("ROW_WALL"),
@@ -647,7 +856,19 @@ row = {
     "status_code": num("ROW_SC", 1),
     "status": e("ROW_STATUS", "error"),
     "case_dir": e("ROW_CASE", ""),
+    "performance_claim": e("ROW_PROFILE", "") == "whole-object-scorecard-v1",
 }
+if row["cell_profile"] == "authenticated-delta-unchanged-v1":
+    row.update({
+        "delta_mode_observed": e("ROW_DELTA_MODE", "unverified"),
+        "delta_acceptance_ok": e("ROW_DELTA_OK", "false") == "true",
+        "sender_payload_bytes": num("ROW_SENDER_PAYLOAD", -1),
+        "sender_symbols": num("ROW_SENDER_SYMBOLS", -1),
+        "receiver_payload_bytes": num("ROW_RECEIVER_PAYLOAD", -1),
+        "receiver_symbols": num("ROW_RECEIVER_SYMBOLS", -1),
+        "control_wire_bytes": num("ROW_CONTROL_WIRE", 0),
+        "payload_file_identity_unchanged": e("ROW_IDENTITY_UNCHANGED", "false") == "true",
+    })
 if row["method"].startswith("atp-rq-"):
     row["atp_rq_streams"] = num("ROW_STREAMS", 0)
     row["stream_count"] = row["atp_rq_streams"]
@@ -655,3 +876,6 @@ print(json.dumps(row, sort_keys=True, separators=(",", ":")))
 PY
 
 log "DONE wall=${WALL:-?}s status=${STATUS} sha_ok=${SHA_OK} rounds=${ROUNDS:-?} peak_rss_kb=${PEAK_RSS_KB:-?} streams=${STREAMS:-n/a}"
+if [ "$CELL_PROFILE" = "authenticated-delta-unchanged-v1" ] && [ "$STATUS" != "ok" ]; then
+    exit 1
+fi

@@ -56,8 +56,12 @@ transfer and gives the receiver and sender one copy each through
 `--rq-auth-key-stdin`. The key never enters a process argument, environment,
 `/usr/bin/time` command record, or result artifact. The old `RQ_AUTH_KEY_HEX`
 and `ATP_RQ_AUTH_KEY_HEX` environment inputs are rejected. QUIC cells do not
-receive an RQ key: TLS 1.3 already authenticates every symbol datagram at the
-transport layer.
+receive an RQ key in the default whole-object scorecard: TLS 1.3 already
+authenticates every symbol datagram at the transport layer. The separate
+authenticated-delta profile below keeps TLS and additionally delivers a fresh
+protected key to both QUIC endpoints. The key HMAC-authenticates the sender's
+session-bound manifest proof; TLS 1.3 authenticates and encrypts the bound
+request/proof frames that authorize live receiver-state inspection.
 
 This protection applies to newly produced artifacts. Older retained matrix-cell
 `send.time` / `recv.time`, fleet receiver `recv_time.txt`, and sender
@@ -68,19 +72,65 @@ results. The current harness does not rewrite or delete old artifacts, and its
 Bash overwrite-and-unset cleanup is best effort rather than cryptographic heap
 zeroization.
 
-The resume key now includes an explicit auth-posture gate for
-`atp-quic-tls13`. A completed row is reusable only when it carries
-`"auth_posture":"quic-tls13-transport-aead-v1"`; older rows without that field
-are rerun. This deliberately avoids conflating historical per-symbol-HMAC and
-transport-AEAD implementations under the same method label. Because results are
-append-only, `score_matrix.py` also quarantines missing or mismatched QUIC
-posture rows before median grouping and reports them under auth-posture
-exclusions. This does not make old `.time` artifacts safe to share; the
-retention warning above still applies.
+The resume key includes `cell_profile`, stable `case_id`, git HEAD, SHA success,
+stream count, and the exact transport/control authentication postures. Within a
+profile-compatible result file, stale git or posture rows are rerun. Failed and
+stale attempts remain in append-only results for diagnosis; the acceptance
+report selects the current case/git identity, rejects malformed `status=ok`
+rows, and requires exactly one accepted attempt per planned cell. Profile-
+specific default result files and a mixed-or-missing-profile preflight prevent
+unchanged-object acceptance rows from entering `score_matrix.py` medians. This
+does not make old `.time` artifacts safe to share; the retention warning above
+still applies.
 
 rsync is always `-aW --inplace --no-compress` (whole-file, in-place, no `-z` on
 incompressible payloads), and over ssh uses `-c aes128-gcm@openssh.com`. This is
 the toughest-possible rsync, per the integrity standard.
+
+## Authenticated unchanged-object delta acceptance (not scored)
+
+This separate profile runs exactly the strict RQ and QUIC ATP methods against a
+locally pre-seeded, byte-identical regular file. The preseed is outside the
+timed interval. The measured transfer leaves delta enabled and must negotiate
+`AlreadyInSync` on the live framed control connection. QUIC retains TLS 1.3 and
+also receives the fresh control key through protected stdin. That key proves
+sender possession over the session-bound manifest; the subsequent bound
+request and proof remain authenticated by TLS.
+
+```bash
+sudo env BIN=/tmp/atp_bench/atp ATP_MATRIX_TIMEOUT=90 \
+  bash scripts/atp_bench/matrix_bench.sh \
+    --cell-profile authenticated-delta-unchanged-v1 \
+    --execute --generate-workloads \
+    --workloads 5M \
+    --regimes perfect \
+    --tiers auth,encrypted \
+    --reps 1 \
+    --fail-on-mismatch \
+    --run-cell-command 'bash scripts/atp_bench/run_matrix_cell.sh'
+```
+
+The profile rejects trees, symlinks, empty files, `5G`, nocrypto, rsync, and all
+other methods. It accepts only flat workloads through `500M`, which remain
+within both transports' 4,096-chunk manifest bound. Each endpoint must exit zero
+naturally; sender/receiver transfer IDs must match; commit, SHA, and Merkle bits
+must pass; top-level and nested payload/symbol/feedback counters must all be
+zero; QUIC decode counters must be zero; and the destination file's device,
+inode, size, mode, owner, and mtime must remain unchanged. The isolated veth
+counter must show `0 < control_wire_bytes < source_bytes`: authenticated control
+and TLS still use wire bytes, while ATP payload counters remain zero.
+
+Results go to `authenticated_delta_unchanged_results.jsonl` by default and are
+validated into `authenticated_delta_unchanged_acceptance.md`; never append them
+to headline results or pass them to `score_matrix.py`.
+
+This profile proves only that an identical pre-seeded single file negotiates
+`AlreadyInSync` over authenticated framed control, both endpoints close
+successfully, payload counters remain zero, and the destination remains
+unchanged. Recorded wall time and wire bytes are diagnostic only. It does not
+prove zero total wire traffic, throughput or bandwidth improvement, rsync
+superiority/inferiority, changed-chunk reuse, `DeltaChunks`, tree/rename
+behavior, lossy-link resilience, or broad transport correctness.
 
 ## Score
 

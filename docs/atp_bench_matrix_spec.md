@@ -62,10 +62,57 @@ Apply netem on BOTH veth ends (symmetric). Use `netem ... rate <r>` (or tbf) for
   result artifacts. [needs AUTH-1]
 - `encrypted`: atp-quic (TLS-1.3) vs rsync over ssh. [needs QUIC.1; full encryption parity]
 
+## Authenticated unchanged-object delta acceptance profile
+
+`authenticated-delta-unchanged-v1` is an acceptance lane outside the ATP-vs-
+rsync scorecard. It admits only one nonempty, non-symlink regular file through
+`500M`, `auth/atp-rq-auth`, and `encrypted/atp-quic-tls13`. The 5G and tree
+workloads, nocrypto, rsync, and every other method are rejected. The size cap
+keeps both RQ and QUIC manifests below the 4,096-chunk protocol bound.
+
+The runner copies the exact source file and portable metadata into the receiver
+destination before timing, then performs one measured identical-source transfer
+with delta enabled. RQ uses its fresh protected-stdin key. QUIC retains TLS 1.3
+transport protection and additionally receives a fresh protected-stdin key for
+the session-bound manifest proof; TLS protects the bound request/proof frames.
+The primary `auth_posture` continues to describe transport/symbol security;
+`delta_control_auth_posture` describes the combined TLS/session/HMAC receiver-
+state authorization.
+
+Acceptance is fail-closed and requires exactly one sender and receiver JSON
+report, the expected transport, nonempty matching transfer IDs, zero endpoint
+statuses, `committed=true`, `files=1`, sender SHA/Merkle success, zero top-level
+and nested payload/symbol/feedback counters, and zero QUIC decode counters. The
+destination SHA and its device/inode/size/mode/owner/mtime stamp must remain
+unchanged. Isolated veth accounting must satisfy
+`0 < control_wire_bytes < source_bytes`; zero ATP payload does not mean zero
+authenticated-control or TLS wire traffic.
+
+Profile, stable case ID, git HEAD, SHA success, stream count, and both auth
+postures participate in resume matching. Default artifact names are profile-
+specific, and explicit result files containing another or missing profile are
+rejected. Failed and stale attempts remain available in append-only results;
+the current plan requires exactly one fully accepted row for each current
+case/git identity and rejects malformed successful rows. These rows must never
+enter `score_matrix.py`.
+
+This profile proves only that an identical pre-seeded single file negotiates
+`AlreadyInSync` over authenticated framed control, both endpoints close
+successfully, payload counters remain zero, and the destination remains
+unchanged. Recorded wall time and wire bytes are diagnostic only. It does not
+prove zero total wire traffic, throughput or bandwidth improvement, rsync
+superiority/inferiority, changed-chunk reuse, `DeltaChunks`, tree/rename
+behavior, lossy-link resilience, or broad transport correctness.
+
 ## Output
 - `JSONL`: one row per (workload, regime, method, rep): all metrics above + explicit
-  `auth_posture` + binary sha prefix + netem params + git HEAD. (artifacts/ is gitignored → write
-  under a tracked path or attach to ledger.)
+  `cell_profile`, stable `case_id`, `auth_posture`,
+  `delta_control_auth_posture`, binary sha prefix, netem params, and git HEAD.
+  Acceptance rows additionally require `delta_mode_observed`,
+  `delta_acceptance_ok`, exact sender/receiver payload and symbol counters,
+  `control_wire_bytes`, `payload_file_identity_unchanged`, and
+  `performance_claim:false`. (artifacts/ is gitignored → write under a tracked
+  path or attach to ledger.)
 - `score_matrix.py`: JSONL → per-cell median + cv + atp/rsync wall & RSS ratios + per-regime geomean
   + a markdown scorecard. Missing/mismatched current QUIC auth postures are quarantined before
   median grouping. Headline = atp-vs-rsync ONLY.

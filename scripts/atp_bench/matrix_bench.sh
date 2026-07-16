@@ -35,6 +35,10 @@ TIERS="nocrypto,auth,encrypted"
 STREAMS_SWEEP="1"
 METHODS_FILTER=""
 FAIL_ON_MISMATCH=0
+CELL_PROFILE="whole-object-scorecard-v1"
+WORK_DIR_EXPLICIT=0
+RESULTS_EXPLICIT=0
+REPS_EXPLICIT=0
 
 usage() {
   cat <<'USAGE'
@@ -55,6 +59,8 @@ Options:
   --regimes CSV             regime list
   --tiers CSV               crypto tier list
   --methods CSV             method allowlist after tier expansion
+  --cell-profile PROFILE    whole-object-scorecard-v1 (default) or
+                            authenticated-delta-unchanged-v1
   --streams CSV             ATP-RQ stream counts to sweep (default: 1)
   --reps N                  default reps per method/cell
   --fail-on-mismatch        exit non-zero if score_matrix finds any failed row
@@ -64,7 +70,7 @@ Execution env for --run-cell-command:
   ATP_MATRIX_WORKLOAD, ATP_MATRIX_WORKLOAD_PATH, ATP_MATRIX_REGIME,
   ATP_MATRIX_TIER, ATP_MATRIX_METHOD, ATP_MATRIX_REP, ATP_MATRIX_RESULTS,
   ATP_MATRIX_STREAMS, ATP_MATRIX_NETEM_JSON, ATP_MATRIX_RUN_ID,
-  ATP_MATRIX_GIT_HEAD.
+  ATP_MATRIX_GIT_HEAD, ATP_MATRIX_CELL_PROFILE.
 USAGE
 }
 
@@ -93,18 +99,24 @@ while [[ $# -gt 0 ]]; do
       ;;
     --out)
       OUT_DIR="${2:?missing directory}"
-      WORK_DIR="${OUT_DIR}/workloads"
-      RESULTS_JSONL="${OUT_DIR}/results.jsonl"
+      if [[ "${WORK_DIR_EXPLICIT}" -eq 0 ]]; then
+        WORK_DIR="${OUT_DIR}/workloads"
+      fi
+      if [[ "${RESULTS_EXPLICIT}" -eq 0 ]]; then
+        RESULTS_JSONL="${OUT_DIR}/results.jsonl"
+      fi
       PLAN_JSONL="${OUT_DIR}/plan.jsonl"
       REPORT_MD="${OUT_DIR}/scorecard.md"
       shift 2
       ;;
     --work-dir)
       WORK_DIR="${2:?missing directory}"
+      WORK_DIR_EXPLICIT=1
       shift 2
       ;;
     --results)
       RESULTS_JSONL="${2:?missing path}"
+      RESULTS_EXPLICIT=1
       shift 2
       ;;
     --workloads)
@@ -123,12 +135,17 @@ while [[ $# -gt 0 ]]; do
       METHODS_FILTER="${2:?missing CSV}"
       shift 2
       ;;
+    --cell-profile)
+      CELL_PROFILE="${2:?missing profile}"
+      shift 2
+      ;;
     --streams)
       STREAMS_SWEEP="${2:?missing CSV}"
       shift 2
       ;;
     --reps)
       REPS_DEFAULT="${2:?missing reps}"
+      REPS_EXPLICIT=1
       shift 2
       ;;
     --fail-on-mismatch)
@@ -147,9 +164,29 @@ done
 
 [[ "${REPS_DEFAULT}" =~ ^[0-9]+$ ]] || die "--reps must be an integer"
 [[ "${REPS_DEFAULT}" -ge 1 ]] || die "--reps must be >= 1"
+case "${CELL_PROFILE}" in
+  whole-object-scorecard-v1|authenticated-delta-unchanged-v1) ;;
+  *) die "unknown --cell-profile: ${CELL_PROFILE}" ;;
+esac
+if [[ "${CELL_PROFILE}" == "authenticated-delta-unchanged-v1" ]]; then
+  if [[ "${REPS_EXPLICIT}" -eq 0 ]]; then
+    REPS_DEFAULT=1
+  fi
+  if [[ "${RESULTS_EXPLICIT}" -eq 0 ]]; then
+    RESULTS_JSONL="${OUT_DIR}/authenticated_delta_unchanged_results.jsonl"
+  fi
+  PLAN_JSONL="${OUT_DIR}/authenticated_delta_unchanged_plan.jsonl"
+  REPORT_MD="${OUT_DIR}/authenticated_delta_unchanged_acceptance.md"
+fi
 
 method_uses_stream_sweep() {
   [[ "$1" == atp-rq-* ]]
+}
+
+cell_case_id() {
+  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" streams="$6"
+  printf '%s:%s:%s:%s:%s:s%s:r%s' \
+    "${CELL_PROFILE}" "${workload}" "${regime}" "${tier}" "${method}" "${streams}" "${rep}"
 }
 
 validate_streams() {
@@ -223,6 +260,14 @@ netem_json() {
 
 methods_for_tier() {
   local tier="$1"
+  if [[ "${CELL_PROFILE}" == "authenticated-delta-unchanged-v1" ]]; then
+    case "${tier}" in
+      auth)      printf '%s\n' "atp-rq-auth" ;;
+      encrypted) printf '%s\n' "atp-quic-tls13" ;;
+      *) die "${CELL_PROFILE} supports only auth and encrypted tiers" ;;
+    esac
+    return
+  fi
   case "${tier}" in
     nocrypto)
       printf '%s\n' "atp-rq-lab" "rsyncd"
@@ -250,10 +295,24 @@ auth_posture_for_method() {
   esac
 }
 
+delta_control_auth_posture_for_method() {
+  if [[ "${CELL_PROFILE}" != "authenticated-delta-unchanged-v1" ]]; then
+    printf '%s' 'none'
+    return
+  fi
+  case "$1" in
+    atp-rq-auth)    printf '%s' 'rq-framed-control-hmac-sha256-v1' ;;
+    atp-quic-tls13) printf '%s' 'quic-tls13-session-bound-manifest-hmac-sha256-v1' ;;
+    *) die "method $1 is not admitted by ${CELL_PROFILE}" ;;
+  esac
+}
+
 reps_for_cell() {
   local workload="$1"
   local regime="$2"
-  if [[ "${workload}" == "5G" && "${regime}" == "broken" ]]; then
+  if [[ "${CELL_PROFILE}" == "authenticated-delta-unchanged-v1" ]]; then
+    printf '%s' "${REPS_DEFAULT}"
+  elif [[ "${workload}" == "5G" && "${regime}" == "broken" ]]; then
     printf '1'
   elif [[ "${workload}" == "500K" || "${workload}" == "tree_small" ]]; then
     if [[ "${REPS_DEFAULT}" -lt 5 ]]; then
@@ -345,18 +404,84 @@ generate_workload() {
   esac
 }
 
-cell_done() {
-  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" streams="$6"
-  [[ -f "${RESULTS_JSONL}" ]] || return 1
-  python3 - "$RESULTS_JSONL" "$workload" "$regime" "$tier" "$method" "$rep" "$streams" <<'PY'
+validate_profile_dimensions() {
+  local -n workloads_ref="$1"
+  local -n tiers_ref="$2"
+  [[ "${CELL_PROFILE}" == "authenticated-delta-unchanged-v1" ]] || return 0
+
+  local value
+  for value in "${workloads_ref[@]}"; do
+    case "${value}" in
+      500K|5M|50M|500M) ;;
+      *) die "${CELL_PROFILE} requires a nonempty flat-file workload, not ${value}" ;;
+    esac
+  done
+  for value in "${tiers_ref[@]}"; do
+    case "${value}" in
+      auth|encrypted) ;;
+      *) die "${CELL_PROFILE} supports only auth and encrypted tiers, not ${value}" ;;
+    esac
+  done
+  if [[ -n "${METHODS_FILTER}" ]]; then
+    local filtered_methods
+    split_csv "${METHODS_FILTER}" filtered_methods
+    for value in "${filtered_methods[@]}"; do
+      case "${value}" in
+        atp-rq-auth|atp-quic-tls13) ;;
+        *) die "${CELL_PROFILE} does not admit method ${value}" ;;
+      esac
+    done
+  fi
+}
+
+validate_results_profile() {
+  [[ -f "${RESULTS_JSONL}" ]] || return 0
+  python3 - "${RESULTS_JSONL}" "${CELL_PROFILE}" <<'PY'
 import json
 import sys
 
-path, workload, regime, tier, method, rep, streams = sys.argv[1:8]
+path, expected = sys.argv[1:3]
+with open(path, encoding="utf-8") as handle:
+    for line_number, line in enumerate(handle, 1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        actual = row.get("cell_profile")
+        if actual != expected:
+            raise SystemExit(
+                f"{path}:{line_number}: cell_profile {actual!r} does not match {expected!r}"
+            )
+PY
+}
+
+cell_done() {
+  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" streams="$6" case_id="$7" git="$8"
+  [[ -f "${RESULTS_JSONL}" ]] || return 1
+  local expected_auth_posture
+  expected_auth_posture="$(auth_posture_for_method "${method}")"
+  local expected_delta_control_auth_posture
+  expected_delta_control_auth_posture="$(delta_control_auth_posture_for_method "${method}")"
+  python3 - "$RESULTS_JSONL" "$workload" "$regime" "$tier" "$method" "$rep" "$streams" \
+    "${CELL_PROFILE}" "${expected_auth_posture}" "${expected_delta_control_auth_posture}" \
+    "$case_id" "$git" <<'PY'
+import json
+import sys
+
+(
+    path,
+    workload,
+    regime,
+    tier,
+    method,
+    rep,
+    streams,
+    profile,
+    expected_auth_posture,
+    expected_delta_control_auth_posture,
+    case_id,
+    git,
+) = sys.argv[1:13]
 requires_stream_match = method.startswith("atp-rq-")
-expected_auth_posture = (
-    "quic-tls13-transport-aead-v1" if method == "atp-quic-tls13" else None
-)
 with open(path, encoding="utf-8") as fh:
     for line in fh:
         if not line.strip():
@@ -366,18 +491,34 @@ with open(path, encoding="utf-8") as fh:
         stream_match = not requires_stream_match or (
             row_streams is not None and str(row_streams) == streams
         )
-        auth_posture_match = (
-            expected_auth_posture is None
-            or row.get("auth_posture") == expected_auth_posture
+        acceptance_match = profile != "authenticated-delta-unchanged-v1" or (
+            row.get("delta_acceptance_ok") is True
+            and row.get("delta_mode_observed") == "already_in_sync"
+            and row.get("delta_control_auth_posture") == expected_delta_control_auth_posture
+            and row.get("performance_claim") is False
+            and row.get("status_code") == 0
+            and row.get("timed_out") is False
+            and row.get("sender_payload_bytes") == 0
+            and row.get("sender_symbols") == 0
+            and row.get("receiver_payload_bytes") == 0
+            and row.get("receiver_symbols") == 0
+            and row.get("feedback_rounds") == 0
+            and row.get("payload_file_identity_unchanged") is True
+            and 0 < int(row.get("control_wire_bytes", 0)) < int(row.get("size_bytes", 0))
         )
         if (
-            str(row.get("workload")) == workload
+            row.get("cell_profile") == profile
+            and row.get("case_id") == case_id
+            and row.get("git_head") == git
+            and str(row.get("workload")) == workload
+            and row.get("sha_ok") is True
             and str(row.get("regime")) == regime
             and str(row.get("crypto_tier", row.get("tier"))) == tier
             and str(row.get("method")) == method
             and str(row.get("rep")) == rep
             and stream_match
-            and auth_posture_match
+            and row.get("auth_posture") == expected_auth_posture
+            and acceptance_match
             and str(row.get("status", "ok")).lower() == "ok"
         ):
             raise SystemExit(0)
@@ -386,16 +527,20 @@ PY
 }
 
 write_plan_row() {
-  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7" streams="$8"
+  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7" streams="$8" case_id="$9"
   local netem
   netem="$(netem_json "${regime}")"
   local auth_posture
   auth_posture="$(auth_posture_for_method "${method}")"
+  local delta_control_auth_posture
+  delta_control_auth_posture="$(delta_control_auth_posture_for_method "${method}")"
   local atp_streams_json="null"
   if method_uses_stream_sweep "${method}"; then
     atp_streams_json="${streams}"
   fi
-  printf '{"schema":"atp-bench-matrix-plan-v1","run_id":%s,"git_head":%s,"workload":%s,"workload_path":%s,"regime":%s,"crypto_tier":%s,"method":%s,"auth_posture":%s,"rep":%s,"stream_count":%s,"atp_rq_streams":%s,"netem":%s}\n' \
+  printf '{"schema":"atp-bench-matrix-plan-v1","cell_profile":%s,"case_id":%s,"run_id":%s,"git_head":%s,"workload":%s,"workload_path":%s,"regime":%s,"crypto_tier":%s,"method":%s,"auth_posture":%s,"delta_control_auth_posture":%s,"delta_mode_expected":%s,"performance_claim":%s,"rep":%s,"stream_count":%s,"atp_rq_streams":%s,"netem":%s}\n' \
+    "$(json_escape "${CELL_PROFILE}")" \
+    "$(json_escape "${case_id}")" \
     "$(json_escape "${RUN_ID}")" \
     "$(json_escape "${git}")" \
     "$(json_escape "${workload}")" \
@@ -404,6 +549,9 @@ write_plan_row() {
     "$(json_escape "${tier}")" \
     "$(json_escape "${method}")" \
     "$(json_escape "${auth_posture}")" \
+    "$(json_escape "${delta_control_auth_posture}")" \
+    "$(json_escape "$([[ "${CELL_PROFILE}" == "authenticated-delta-unchanged-v1" ]] && printf already_in_sync || printf disabled)")" \
+    "$([[ "${CELL_PROFILE}" == "whole-object-scorecard-v1" ]] && printf true || printf false)" \
     "${rep}" \
     "${streams}" \
     "${atp_streams_json}" \
@@ -437,8 +585,8 @@ PY
 }
 
 run_cell() {
-  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7" streams="$8"
-  if cell_done "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${streams}"; then
+  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7" streams="$8" case_id="$9"
+  if cell_done "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${streams}" "${case_id}" "${git}"; then
     printf 'skip existing %s %s %s %s streams=%s rep=%s\n' "${workload}" "${regime}" "${tier}" "${method}" "${streams}" "${rep}" >&2
     return
   fi
@@ -455,7 +603,130 @@ run_cell() {
   ATP_MATRIX_NETEM_JSON="$(netem_json "${regime}")"
   export ATP_MATRIX_RUN_ID="${RUN_ID}"
   export ATP_MATRIX_GIT_HEAD="${git}"
+  export ATP_MATRIX_CELL_PROFILE="${CELL_PROFILE}"
+  export ATP_MATRIX_CASE_ID="${case_id}"
   bash -c "${RUN_CELL_CMD}"
+}
+
+write_authenticated_delta_report() {
+  python3 - "${PLAN_JSONL}" "${RESULTS_JSONL}" "${REPORT_MD}" "${CELL_PROFILE}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+plan_path, results_path, report_path, profile = sys.argv[1:5]
+
+def rows(path):
+    with open(path, encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+def plan_key(row):
+    return (row.get("case_id"), row.get("git_head"))
+
+def display_key(row):
+    method = str(row.get("method"))
+    streams = row.get("atp_rq_streams", row.get("stream_count", 1))
+    if not method.startswith("atp-rq-"):
+        streams = 1
+    return (
+        str(row.get("workload")),
+        str(row.get("regime")),
+        str(row.get("crypto_tier")),
+        method,
+        int(row.get("rep", 0)),
+        int(streams),
+    )
+
+planned = rows(plan_path)
+results = rows(results_path)
+if not planned:
+    raise SystemExit("authenticated delta acceptance plan is empty")
+planned_keys = [plan_key(row) for row in planned]
+if any(not case_id or not git_head for case_id, git_head in planned_keys):
+    raise SystemExit("authenticated delta plan contains an empty case_id or git_head")
+if len(set(planned_keys)) != len(planned_keys):
+    raise SystemExit("authenticated delta plan contains duplicate case/git identities")
+
+expected_posture = {
+    "atp-rq-auth": "rq-symbol-hmac-v1",
+    "atp-quic-tls13": "quic-tls13-transport-aead-v1",
+}
+expected_delta_posture = {
+    "atp-rq-auth": "rq-framed-control-hmac-sha256-v1",
+    "atp-quic-tls13": "quic-tls13-session-bound-manifest-hmac-sha256-v1",
+}
+accepted_rows = []
+for planned_row in planned:
+    identity = plan_key(planned_row)
+    candidates = [row for row in results if plan_key(row) == identity]
+    accepted = []
+    for row in candidates:
+        method = row.get("method")
+        try:
+            control_wire_ok = (
+                0 < int(row.get("control_wire_bytes", 0)) < int(row.get("size_bytes", 0))
+            )
+        except (TypeError, ValueError):
+            control_wire_ok = False
+        checks = {
+            "cell_profile": row.get("cell_profile") == profile,
+            "workload": row.get("workload") == planned_row.get("workload"),
+            "regime": row.get("regime") == planned_row.get("regime"),
+            "crypto_tier": row.get("crypto_tier") == planned_row.get("crypto_tier"),
+            "method": method == planned_row.get("method") and method in expected_posture,
+            "rep": row.get("rep") == planned_row.get("rep"),
+            "stream_count": display_key(row) == display_key(planned_row),
+            "auth_posture": row.get("auth_posture") == expected_posture.get(method),
+            "delta_control_auth_posture": row.get("delta_control_auth_posture") == expected_delta_posture.get(method),
+            "status": row.get("status") == "ok",
+            "status_code": row.get("status_code") == 0,
+            "timed_out": row.get("timed_out") is False,
+            "sha_ok": row.get("sha_ok") is True,
+            "delta_acceptance_ok": row.get("delta_acceptance_ok") is True,
+            "delta_mode_observed": row.get("delta_mode_observed") == "already_in_sync",
+            "sender_payload_bytes": row.get("sender_payload_bytes") == 0,
+            "sender_symbols": row.get("sender_symbols") == 0,
+            "receiver_payload_bytes": row.get("receiver_payload_bytes") == 0,
+            "receiver_symbols": row.get("receiver_symbols") == 0,
+            "feedback_rounds": row.get("feedback_rounds") == 0,
+            "payload_file_identity_unchanged": row.get("payload_file_identity_unchanged") is True,
+            "performance_claim": row.get("performance_claim") is False,
+            "control_wire_bytes": control_wire_ok,
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        if not failed:
+            accepted.append(row)
+        elif row.get("status") == "ok":
+            raise SystemExit(
+                f"authenticated delta cell {identity!r} has malformed ok row: {', '.join(failed)}"
+            )
+    if len(accepted) != 1:
+        raise SystemExit(
+            f"authenticated delta cell {identity!r} requires exactly one accepted row; "
+            f"found {len(accepted)} among {len(candidates)} attempts"
+        )
+    accepted_rows.append(accepted[0])
+
+lines = [
+    "# Authenticated delta unchanged acceptance",
+    "",
+    "Functional protocol evidence only. This report makes no throughput or ATP-vs-rsync claim.",
+    "",
+    "| workload | regime | tier | method | control wire bytes | accepted |",
+    "|---|---|---|---|---:|---|",
+]
+for row in sorted(accepted_rows, key=display_key):
+    lines.append(
+        f"| {row['workload']} | {row['regime']} | {row['crypto_tier']} | "
+        f"{row['method']} | {row['control_wire_bytes']} | yes |"
+    )
+lines.extend([
+    "",
+    "No-claim: this packet does not prove changed-chunk delivery, throughput improvement,",
+    "broad workspace health, release readiness, or live RCH fleet availability.",
+])
+Path(report_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
 }
 
 main() {
@@ -465,11 +736,16 @@ main() {
   split_csv "${TIERS}" tiers
   split_csv "${STREAMS_SWEEP}" streams
   validate_streams streams
+  validate_profile_dimensions workloads tiers
 
   mkdir -p "${OUT_DIR}"
   : >"${PLAN_JSONL}"
+  if [[ "${DRY_RUN}" -eq 0 ]]; then
+    validate_results_profile
+  fi
   local git
   git="$(git_head)"
+  local planned_cells=0
 
   for workload in "${workloads[@]}"; do
     local path
@@ -478,7 +754,9 @@ main() {
       generate_workload "${workload}"
     fi
     for regime in "${regimes[@]}"; do
-      apply_netem_for_regime "${regime}"
+      if [[ "${DRY_RUN}" -eq 0 ]]; then
+        apply_netem_for_regime "${regime}"
+      fi
       for tier in "${tiers[@]}"; do
         mapfile -t methods < <(methods_for_tier "${tier}")
         local reps
@@ -495,9 +773,14 @@ main() {
           local stream_count
           for stream_count in "${method_streams[@]}"; do
             for ((rep = 1; rep <= reps; rep++)); do
-              write_plan_row "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${path}" "${git}" "${stream_count}" >>"${PLAN_JSONL}"
+              local case_id
+              case_id="$(cell_case_id "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${stream_count}")"
+              planned_cells=$((planned_cells + 1))
+              write_plan_row "${workload}" "${regime}" "${tier}" "${method}" "${rep}" \
+                "${path}" "${git}" "${stream_count}" "${case_id}" >>"${PLAN_JSONL}"
               if [[ "${DRY_RUN}" -eq 0 ]]; then
-                run_cell "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${path}" "${git}" "${stream_count}"
+                run_cell "${workload}" "${regime}" "${tier}" "${method}" "${rep}" \
+                  "${path}" "${git}" "${stream_count}" "${case_id}"
               fi
             done
           done
@@ -506,12 +789,18 @@ main() {
     done
   done
 
+  [[ "${planned_cells}" -gt 0 ]] || die "selection produced no matrix cells"
+
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     cat "${PLAN_JSONL}"
   elif [[ -f "${RESULTS_JSONL}" ]]; then
-    python3 "${SCRIPT_DIR}/score_matrix.py" "${RESULTS_JSONL}" --out-md "${REPORT_MD}"
-    if [[ "${FAIL_ON_MISMATCH}" -eq 1 ]]; then
-      python3 "${SCRIPT_DIR}/score_matrix.py" "${RESULTS_JSONL}" --fail-on-mismatch
+    if [[ "${CELL_PROFILE}" == "authenticated-delta-unchanged-v1" ]]; then
+      write_authenticated_delta_report
+    else
+      python3 "${SCRIPT_DIR}/score_matrix.py" "${RESULTS_JSONL}" --out-md "${REPORT_MD}"
+      if [[ "${FAIL_ON_MISMATCH}" -eq 1 ]]; then
+        python3 "${SCRIPT_DIR}/score_matrix.py" "${RESULTS_JSONL}" --fail-on-mismatch
+      fi
     fi
   fi
 }

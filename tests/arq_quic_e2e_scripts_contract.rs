@@ -396,8 +396,8 @@ fn atp_bench_rq_auth_keys_use_protected_stdin_only() {
     let matrix_plan =
         std::fs::read_to_string(scripts.join("matrix_bench.sh")).expect("read atp matrix planner");
     let resync_path = scripts.join("resync_bench.sh");
-    let resync = std::fs::read_to_string(&resync_path)
-        .expect("read authenticated resync benchmark runner");
+    let resync =
+        std::fs::read_to_string(&resync_path).expect("read authenticated resync benchmark runner");
     let run_one_path = scripts.join("run_one.sh");
     let run_one = std::fs::read_to_string(&run_one_path).expect("read sender run helper");
     let score_matrix_path = scripts.join("score_matrix.py");
@@ -692,8 +692,46 @@ run_cell_strict fixture failing_cell
     assert_eq!(
         run_matrix.matches("send_rq_auth_secret |").count(),
         2,
-        "matrix runner must feed exactly the authenticated RQ receiver and sender"
+        "matrix runner must reuse exactly two protected receiver/sender pipelines"
     );
+    for required in [
+        "whole-object-scorecard-v1",
+        "authenticated-delta-unchanged-v1",
+        "protected_auth_stdin",
+        "verify_authenticated_delta_unchanged",
+        "payload_identity_stamp",
+        "link_wire_bytes",
+        "ROW_PROFILE=\"$CELL_PROFILE\"",
+        "ROW_DELTA_AUTH=\"$DELTA_CONTROL_AUTH_POSTURE\"",
+        "\"delta_acceptance_ok\"",
+        "\"control_wire_bytes\"",
+        "\"payload_file_identity_unchanged\"",
+        "\"performance_claim\"",
+    ] {
+        assert!(
+            run_matrix.contains(required),
+            "matrix cell runner must retain {required}"
+        );
+    }
+    assert!(run_matrix.contains("delta_args=(--no-delta)"));
+    assert!(run_matrix.contains("if [ \"$protected_auth_stdin\" = \"true\" ]"));
+    assert!(run_matrix.contains("tls_recv=(--server-cert"));
+    for required in [
+        "--cell-profile",
+        "ATP_MATRIX_CELL_PROFILE",
+        "ATP_MATRIX_CASE_ID",
+        "cell_profile",
+        "case_id",
+        "delta_control_auth_posture",
+        "delta_mode_expected",
+        "performance_claim",
+        "write_authenticated_delta_report",
+    ] {
+        assert!(
+            matrix_plan.contains(required),
+            "matrix planner must retain {required}"
+        );
+    }
 
     assert!(run_one.contains("mpstat -P ALL 1 </dev/null"));
     assert!(run_one.contains("perf stat -e task-clock true </dev/null"));
@@ -714,8 +752,11 @@ run_cell_strict fixture failing_cell
     assert!(matrix_doc.contains("environment inputs are rejected"));
     assert!(readme.contains("neither rewrites nor deletes existing artifacts"));
     assert!(matrix_doc.contains("does not rewrite or delete old artifacts"));
-    assert!(matrix_doc.contains("resume key now includes an explicit auth-posture gate"));
-    assert!(matrix_doc.contains("older rows without that field"));
+    assert!(matrix_doc.contains("Authenticated unchanged-object delta acceptance"));
+    assert!(matrix_doc.contains("Profile-specific default result files"));
+    assert!(matrix_doc.contains("does not prove zero total wire traffic"));
+    assert!(matrix_spec.contains("authenticated-delta-unchanged-v1"));
+    assert!(matrix_spec.contains("These rows must never enter `score_matrix.py`"));
     for legacy_name in [
         "send.time",
         "recv.time",
@@ -1139,7 +1180,7 @@ expect_reject "stdin canary" INCLUDE_OPTS unused-include.invalid "printf ready"
     let current_resume_fixture = unique_tmp("auth_posture_resume_current").with_extension("jsonl");
     write_file(
         &current_resume_fixture,
-        r#"{"workload":"500K","regime":"perfect","crypto_tier":"encrypted","method":"atp-quic-tls13","auth_posture":"quic-tls13-transport-aead-v1","rep":1,"status":"ok"}
+        r#"{"cell_profile":"whole-object-scorecard-v1","case_id":"whole-object-scorecard-v1:500K:perfect:encrypted:atp-quic-tls13:s1:r1","git_head":"fixture-git","workload":"500K","regime":"perfect","crypto_tier":"encrypted","method":"atp-quic-tls13","auth_posture":"quic-tls13-transport-aead-v1","delta_control_auth_posture":"none","rep":1,"sha_ok":true,"status":"ok"}
 "#,
     );
     let run_resume_probe = |results_jsonl: &Path| {
@@ -1148,11 +1189,17 @@ expect_reject "stdin canary" INCLUDE_OPTS unused-include.invalid "printf ready"
             .arg(
                 r#"
 set -euo pipefail
+CELL_PROFILE=whole-object-scorecard-v1
+source <(awk '/^auth_posture_for_method\(\)/,/^reps_for_cell\(\)/ {
+    if ($0 ~ /^reps_for_cell/) exit
+    print
+}' "$MATRIX_PLAN_PATH")
 source <(awk '/^cell_done\(\)/,/^write_plan_row\(\)/ {
     if ($0 ~ /^write_plan_row/) exit
     print
 }' "$MATRIX_PLAN_PATH")
-cell_done 500K perfect encrypted atp-quic-tls13 1 1
+cell_done 500K perfect encrypted atp-quic-tls13 1 1 \
+    whole-object-scorecard-v1:500K:perfect:encrypted:atp-quic-tls13:s1:r1 fixture-git
 "#,
             )
             .env("MATRIX_PLAN_PATH", scripts.join("matrix_bench.sh"))
@@ -1201,6 +1248,319 @@ cell_done 500K perfect encrypted atp-quic-tls13 1 1
             && mixed_scorecard.contains("quic-tls13-transport-aead-v1")
             && !mixed_scorecard.contains("| 2.750 |"),
         "legacy QUIC row was not quarantined before scoring: {mixed_scorecard}"
+    );
+}
+
+#[test]
+fn authenticated_delta_matrix_profile_is_isolated_and_fail_closed() {
+    let scripts = repo_root().join("scripts/atp_bench");
+    let planner = scripts.join("matrix_bench.sh");
+    let runner = scripts.join("run_matrix_cell.sh");
+    let root = unique_tmp("authenticated_delta_matrix_profile");
+
+    let delta_plan = Command::new(&planner)
+        .args([
+            "--cell-profile",
+            "authenticated-delta-unchanged-v1",
+            "--out",
+            root.join("delta").to_str().unwrap(),
+            "--workloads",
+            "5M",
+            "--regimes",
+            "perfect",
+            "--tiers",
+            "auth,encrypted",
+            "--reps",
+            "1",
+        ])
+        .output()
+        .expect("plan authenticated delta cells");
+    assert!(
+        delta_plan.status.success(),
+        "delta planner failed: {}",
+        String::from_utf8_lossy(&delta_plan.stderr)
+    );
+    let delta_rows = String::from_utf8_lossy(&delta_plan.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("delta plan row JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(delta_rows.len(), 2);
+    assert_eq!(
+        delta_rows
+            .iter()
+            .map(|row| row["method"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["atp-quic-tls13", "atp-rq-auth"])
+    );
+    for row in &delta_rows {
+        assert_eq!(row["cell_profile"], "authenticated-delta-unchanged-v1");
+        assert_eq!(row["delta_mode_expected"], "already_in_sync");
+        assert_eq!(row["performance_claim"], false);
+        let expected_delta_posture = match row["method"].as_str().unwrap() {
+            "atp-rq-auth" => "rq-framed-control-hmac-sha256-v1",
+            "atp-quic-tls13" => "quic-tls13-session-bound-manifest-hmac-sha256-v1",
+            method => panic!("unexpected authenticated delta method {method}"),
+        };
+        assert_eq!(row["delta_control_auth_posture"], expected_delta_posture);
+        assert!(
+            row["case_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("authenticated-delta-unchanged-v1:"))
+        );
+    }
+
+    let default_plan = Command::new(&planner)
+        .args([
+            "--out",
+            root.join("default").to_str().unwrap(),
+            "--workloads",
+            "5M",
+            "--regimes",
+            "perfect",
+            "--tiers",
+            "auth,encrypted",
+            "--reps",
+            "1",
+        ])
+        .output()
+        .expect("plan default matrix cells");
+    assert!(default_plan.status.success());
+    let default_rows = String::from_utf8_lossy(&default_plan.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("default plan row JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(default_rows.len(), 4);
+    assert!(default_rows.iter().all(|row| {
+        row["cell_profile"] == "whole-object-scorecard-v1"
+            && row["delta_mode_expected"] == "disabled"
+            && row["delta_control_auth_posture"] == "none"
+            && row["performance_claim"] == true
+    }));
+
+    let rejected_5g = Command::new(&planner)
+        .args([
+            "--cell-profile",
+            "authenticated-delta-unchanged-v1",
+            "--out",
+            root.join("reject_5g").to_str().unwrap(),
+            "--workloads",
+            "5G",
+            "--regimes",
+            "perfect",
+            "--tiers",
+            "auth,encrypted",
+        ])
+        .output()
+        .expect("reject oversized delta profile");
+    assert!(!rejected_5g.status.success());
+
+    let mixed_results = root.join("mixed_results.jsonl");
+    write_file(
+        &mixed_results,
+        r#"{"cell_profile":"whole-object-scorecard-v1","status":"ok"}
+"#,
+    );
+    let mixed_profile = Command::new(&planner)
+        .args([
+            "--cell-profile",
+            "authenticated-delta-unchanged-v1",
+            "--out",
+            root.join("mixed").to_str().unwrap(),
+            "--results",
+            mixed_results.to_str().unwrap(),
+            "--execute",
+            "--workloads",
+            "5M",
+            "--regimes",
+            "perfect",
+            "--tiers",
+            "auth,encrypted",
+            "--run-cell-command",
+            "true",
+        ])
+        .output()
+        .expect("reject mixed profile results");
+    assert!(!mixed_profile.status.success());
+
+    let accepted_resume = root.join("accepted_resume.jsonl");
+    write_file(
+        &accepted_resume,
+        r#"{"cell_profile":"authenticated-delta-unchanged-v1","case_id":"authenticated-delta-unchanged-v1:5M:perfect:auth:atp-rq-auth:s1:r1","git_head":"fixture-git","workload":"5M","regime":"perfect","crypto_tier":"auth","method":"atp-rq-auth","auth_posture":"rq-symbol-hmac-v1","delta_control_auth_posture":"rq-framed-control-hmac-sha256-v1","rep":1,"atp_rq_streams":1,"size_bytes":5242880,"sha_ok":true,"timed_out":false,"status_code":0,"status":"ok","delta_mode_observed":"already_in_sync","delta_acceptance_ok":true,"sender_payload_bytes":0,"sender_symbols":0,"receiver_payload_bytes":0,"receiver_symbols":0,"feedback_rounds":0,"control_wire_bytes":1024,"payload_file_identity_unchanged":true,"performance_claim":false}
+"#,
+    );
+    let rejected_resume = root.join("rejected_resume.jsonl");
+    write_file(
+        &rejected_resume,
+        &std::fs::read_to_string(&accepted_resume)
+            .expect("read accepted resume fixture")
+            .replace(
+                r#""delta_acceptance_ok":true"#,
+                r#""delta_acceptance_ok":false"#,
+            ),
+    );
+    let resume_probe = |path: &Path| {
+        Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"
+set -euo pipefail
+CELL_PROFILE=authenticated-delta-unchanged-v1
+source <(awk '/^auth_posture_for_method\(\)/,/^reps_for_cell\(\)/ {
+    if ($0 ~ /^reps_for_cell/) exit
+    print
+}' "$MATRIX_PLAN_PATH")
+source <(awk '/^cell_done\(\)/,/^write_plan_row\(\)/ {
+    if ($0 ~ /^write_plan_row/) exit
+    print
+}' "$MATRIX_PLAN_PATH")
+cell_done 5M perfect auth atp-rq-auth 1 1 \
+    authenticated-delta-unchanged-v1:5M:perfect:auth:atp-rq-auth:s1:r1 fixture-git
+"#,
+            )
+            .env("MATRIX_PLAN_PATH", &planner)
+            .env("RESULTS_JSONL", path)
+            .output()
+            .expect("run authenticated delta resume fixture")
+    };
+    assert!(resume_probe(&accepted_resume).status.success());
+    assert_eq!(resume_probe(&rejected_resume).status.code(), Some(1));
+
+    let rq_sender = root.join("rq_sender.jsonl");
+    let rq_receiver = root.join("rq_receiver.jsonl");
+    let quic_sender = root.join("quic_sender.jsonl");
+    let quic_receiver = root.join("quic_receiver.jsonl");
+    write_file(
+        &rq_sender,
+        r#"{"event":"atp_send","transport":"rq","transfer_id":"rq-1","committed":true,"files":1,"sha_ok":true,"merkle_ok":true,"bytes_sent":0,"symbols_sent":0,"feedback_rounds":0,"metrics":{"bytes":0,"symbols_sent":0,"symbols_accepted":0,"feedback_rounds":0}}
+"#,
+    );
+    write_file(
+        &rq_receiver,
+        r#"{"event":"atp_receive","transport":"rq","transfer_id":"rq-1","committed":true,"files":1,"bytes_received":0,"symbols_accepted":0,"feedback_rounds":0,"metrics":{"bytes":0,"symbols_accepted":0,"feedback_rounds":0}}
+"#,
+    );
+    write_file(
+        &quic_sender,
+        r#"{"event":"atp_send","transport":"quic","transfer_id":"quic-1","committed":true,"files":1,"sha_ok":true,"merkle_ok":true,"bytes_sent":0,"symbols_sent":0,"feedback_rounds":0,"metrics":{"bytes":0,"symbols_sent":0,"symbols_accepted":0,"feedback_rounds":0,"decode_count":0,"decode_micros":0}}
+"#,
+    );
+    write_file(
+        &quic_receiver,
+        r#"{"event":"atp_receive","transport":"quic","transfer_id":"quic-1","committed":true,"files":1,"bytes_received":0,"symbols_accepted":0,"feedback_rounds":0,"decode_count":0,"decode_micros":0,"metrics":{"bytes":0,"symbols_accepted":0,"feedback_rounds":0,"decode_count":0,"decode_micros":0}}
+"#,
+    );
+    let verifier = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+source <(awk '/^verify_authenticated_delta_unchanged\(\)/,/^# Canonical tree digest/ {
+    if ($0 ~ /^# Canonical tree digest/) exit
+    print
+}' "$RUNNER_PATH")
+[[ "$(verify_authenticated_delta_unchanged "$RQ_S" "$RQ_R" rq 0 0 5242880 1024 same same)" == "0 0 0 0 0" ]]
+[[ "$(verify_authenticated_delta_unchanged "$QUIC_S" "$QUIC_R" quic 0 0 5242880 1024 same same)" == "0 0 0 0 0" ]]
+if verify_authenticated_delta_unchanged "$RQ_S" "$RQ_R" rq 0 0 5242880 5242880 same same; then
+    echo "full-object wire fixture unexpectedly passed" >&2
+    exit 1
+fi
+"#,
+        )
+        .env("RUNNER_PATH", &runner)
+        .env("RQ_S", &rq_sender)
+        .env("RQ_R", &rq_receiver)
+        .env("QUIC_S", &quic_sender)
+        .env("QUIC_R", &quic_receiver)
+        .output()
+        .expect("run authenticated delta report verifier fixtures");
+    assert!(
+        verifier.status.success(),
+        "authenticated delta verifier fixtures failed: {}",
+        String::from_utf8_lossy(&verifier.stderr)
+    );
+
+    let report_plan = root.join("report_plan.jsonl");
+    write_file(
+        &report_plan,
+        &format!(
+            "{}\n",
+            serde_json::to_string(&delta_rows[0]).expect("serialize report plan row")
+        ),
+    );
+    let plan_row = &delta_rows[0];
+    let accepted_attempt = serde_json::json!({
+        "cell_profile": plan_row["cell_profile"].clone(),
+        "case_id": plan_row["case_id"].clone(),
+        "git_head": plan_row["git_head"].clone(),
+        "workload": plan_row["workload"].clone(),
+        "regime": plan_row["regime"].clone(),
+        "crypto_tier": plan_row["crypto_tier"].clone(),
+        "method": plan_row["method"].clone(),
+        "auth_posture": plan_row["auth_posture"].clone(),
+        "delta_control_auth_posture": plan_row["delta_control_auth_posture"].clone(),
+        "rep": plan_row["rep"].clone(),
+        "atp_rq_streams": plan_row["atp_rq_streams"].clone(),
+        "size_bytes": 5_242_880,
+        "sha_ok": true,
+        "timed_out": false,
+        "status_code": 0,
+        "status": "ok",
+        "delta_mode_observed": "already_in_sync",
+        "delta_acceptance_ok": true,
+        "sender_payload_bytes": 0,
+        "sender_symbols": 0,
+        "receiver_payload_bytes": 0,
+        "receiver_symbols": 0,
+        "feedback_rounds": 0,
+        "control_wire_bytes": 1024,
+        "payload_file_identity_unchanged": true,
+        "performance_claim": false,
+    });
+    let mut failed_attempt = accepted_attempt.clone();
+    failed_attempt["status"] = serde_json::json!("error");
+    failed_attempt["status_code"] = serde_json::json!(1);
+    failed_attempt["delta_acceptance_ok"] = serde_json::json!(false);
+    let mut stale_attempt = accepted_attempt.clone();
+    stale_attempt["git_head"] = serde_json::json!("stale-git");
+    let report_results = root.join("report_results.jsonl");
+    write_file(
+        &report_results,
+        &format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&failed_attempt).expect("serialize failed attempt"),
+            serde_json::to_string(&stale_attempt).expect("serialize stale attempt"),
+            serde_json::to_string(&accepted_attempt).expect("serialize accepted attempt")
+        ),
+    );
+    let report_path = root.join("acceptance.md");
+    let report = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+CELL_PROFILE=authenticated-delta-unchanged-v1
+source <(awk '/^write_authenticated_delta_report\(\)/,/^main\(\)/ {
+    if ($0 ~ /^main\(\)/) exit
+    print
+}' "$MATRIX_PLAN_PATH")
+write_authenticated_delta_report
+"#,
+        )
+        .env("MATRIX_PLAN_PATH", &planner)
+        .env("PLAN_JSONL", &report_plan)
+        .env("RESULTS_JSONL", &report_results)
+        .env("REPORT_MD", &report_path)
+        .output()
+        .expect("aggregate retried authenticated delta result");
+    assert!(
+        report.status.success(),
+        "authenticated delta retry report failed: {}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(report_path)
+            .expect("read authenticated delta acceptance report")
+            .contains("Functional protocol evidence only")
     );
 }
 
