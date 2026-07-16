@@ -103,7 +103,7 @@ impl<R, D> FramedRead<R, D> {
             decoder,
             buffer: BytesMut::with_capacity(capacity),
             eof: false,
-            read_state: ReadState::NeedsDecode,
+            read_state: ReadState::NeedsRead,
             max_buffer_len: DEFAULT_MAX_BUFFER_LEN,
             poisoned: false,
         }
@@ -432,6 +432,28 @@ mod tests {
         }
     }
 
+    struct MultiFrameOnEof {
+        next: usize,
+    }
+
+    impl Decoder for MultiFrameOnEof {
+        type Item = usize;
+        type Error = io::Error;
+
+        fn decode(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            unreachable!("ordinary decode must not run before or between EOF frames")
+        }
+
+        fn decode_eof(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            if self.next == 4 {
+                return Ok(None);
+            }
+            let item = self.next;
+            self.next += 1;
+            Ok(Some(item))
+        }
+    }
+
     struct OneByteReader {
         data: Vec<u8>,
         pos: usize,
@@ -532,6 +554,25 @@ mod tests {
 
         let poll = Pin::new(&mut framed).poll_next(&mut cx);
         assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_read_drains_multiple_frames_from_immediate_eof() {
+        let reader = SliceReader::new(b"");
+        let mut framed = FramedRead::new(reader, MultiFrameOnEof { next: 0 });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for expected in 0..4 {
+            assert!(matches!(
+                Pin::new(&mut framed).poll_next(&mut cx),
+                Poll::Ready(Some(Ok(item))) if item == expected
+            ));
+        }
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
     }
 
     #[test]
@@ -687,8 +728,8 @@ mod tests {
             let decode_lengths = decode_lengths
                 .lock()
                 .expect("decode-length recorder mutex poisoned");
-            assert_eq!(decode_lengths.len(), wire.len() + 1);
-            assert_eq!(decode_lengths.first(), Some(&0));
+            assert_eq!(decode_lengths.len(), wire.len());
+            assert_eq!(decode_lengths.first(), Some(&1));
             assert_eq!(decode_lengths.last(), Some(&wire.len()));
             assert!(
                 decode_lengths.windows(2).all(|pair| pair[0] < pair[1]),
@@ -738,7 +779,7 @@ mod tests {
         let decode_lengths = decode_lengths
             .lock()
             .expect("decode-length recorder mutex poisoned");
-        let expected_lengths = (0..=wire.len()).collect::<Vec<_>>();
+        let expected_lengths = (1..=wire.len()).collect::<Vec<_>>();
         assert_eq!(decode_lengths.as_slice(), expected_lengths.as_slice());
     }
 

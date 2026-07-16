@@ -20,6 +20,13 @@ pub trait Decoder {
 
     /// Called when EOF is reached.
     ///
+    /// Framed transports call this repeatedly after each `Ok(Some(item))`
+    /// until it returns `Ok(None)` or an error. Once EOF is observed, they do
+    /// not interpose a separate call to [`Self::decode`] between these calls.
+    /// Implementations that emit multiple final frames must advance their
+    /// buffered or internal state on each call and eventually return
+    /// `Ok(None)`.
+    ///
     /// By default, this attempts one last decode and then errors if any
     /// bytes remain but no full frame can be produced.
     fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
