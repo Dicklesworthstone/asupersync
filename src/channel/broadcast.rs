@@ -159,11 +159,22 @@ struct Shared<T> {
     cancellation_count: u64,
 }
 
-#[derive(Debug)]
 struct Slot<T> {
-    msg: T,
+    /// Shared ownership lets receivers retain a message while cloning `T`
+    /// outside the channel-wide mutex. The per-message mutex preserves the
+    /// channel's `T: Send + Clone` contract without adding a `T: Sync` bound.
+    msg: Arc<Mutex<T>>,
     /// The cumulative index of this message.
     index: u64,
+}
+
+impl<T> std::fmt::Debug for Slot<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Slot")
+            .field("msg", &"<redacted>")
+            .field("index", &self.index)
+            .finish()
+    }
 }
 
 /// Shared wrapper.
@@ -486,6 +497,12 @@ pub struct SendPermit<'a, T> {
     sender: &'a Sender<T>,
 }
 
+enum FinalLivenessAction {
+    Normal,
+    #[cfg(test)]
+    ForceZeroReceivers,
+}
+
 impl<T: Clone> SendPermit<'_, T> {
     /// Builds an opt-in redacted telemetry snapshot.
     #[must_use]
@@ -502,12 +519,25 @@ impl<T: Clone> SendPermit<'_, T> {
     /// and leaves channel state unchanged.
     #[inline]
     pub fn send(self, msg: T) -> usize {
+        self.send_impl(msg, FinalLivenessAction::Normal)
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn send_forcing_zero_at_final_liveness(self, msg: T) -> usize {
+        self.send_impl(msg, FinalLivenessAction::ForceZeroReceivers)
+    }
+
+    #[inline]
+    fn send_impl(self, msg: T, final_liveness_action: FinalLivenessAction) -> usize {
         let mut inner = self.sender.channel.inner.lock();
 
         // Re-check receiver liveness under the same lock used for commit.
         // This closes the race where the last receiver drops while a sender
         // is waiting to acquire `inner`.
         if self.sender.channel.receiver_count.load(Ordering::Acquire) == 0 {
+            drop(inner);
+            drop(msg);
             return 0;
         }
 
@@ -518,16 +548,27 @@ impl<T: Clone> SendPermit<'_, T> {
         };
 
         let index = inner.total_sent;
-        inner.buffer.push_back(Slot { msg, index });
+        inner.buffer.push_back(Slot {
+            msg: Arc::new(Mutex::new(msg)),
+            index,
+        });
 
         // Snapshot receiver liveness before unlocking so late subscribers are
         // never counted for a message that committed before they existed.
-        let live_receivers = self.sender.channel.receiver_count.load(Ordering::Acquire);
+        let live_receivers = match final_liveness_action {
+            FinalLivenessAction::Normal => {
+                self.sender.channel.receiver_count.load(Ordering::Acquire)
+            }
+            #[cfg(test)]
+            FinalLivenessAction::ForceZeroReceivers => 0,
+        };
         if live_receivers == 0 {
-            let _ = inner.buffer.pop_back();
+            let rolled_back = inner.buffer.pop_back();
             if let Some(slot) = popped {
                 inner.buffer.push_front(slot);
             }
+            drop(inner);
+            drop(rolled_back);
             return 0;
         }
 
@@ -607,8 +648,20 @@ impl<T: Clone> Receiver<T> {
         let delta = self.next_index.saturating_sub(earliest);
         if let Ok(offset) = usize::try_from(delta) {
             if let Some(slot) = inner.buffer.get(offset) {
-                let msg = slot.msg.clone();
-                self.next_index += 1;
+                let msg = Arc::clone(&slot.msg);
+                let index = slot.index;
+                drop(inner);
+
+                // `T::clone` is arbitrary user code and may block, panic, or
+                // re-enter the channel. The retained Arc keeps this exact
+                // message alive if a concurrent send evicts its ring slot.
+                // A per-message mutex serializes clones for `T: !Sync`
+                // without holding the channel-wide mutex.
+                let msg = msg.lock().clone();
+
+                let mut inner = self.channel.inner.lock();
+                debug_assert_eq!(self.next_index, index);
+                self.next_index = index + 1;
                 inner.update_receiver_cursor(self.receiver_token, self.next_index);
                 return Ok(msg);
             }
@@ -675,8 +728,17 @@ impl<T: Clone> Receiver<T> {
         let delta = self.next_index.saturating_sub(earliest);
         if let Ok(offset) = usize::try_from(delta) {
             if let Some(slot) = inner.buffer.get(offset) {
-                let msg = slot.msg.clone();
-                self.next_index += 1;
+                let msg = Arc::clone(&slot.msg);
+                let index = slot.index;
+                drop(inner);
+
+                // Clone user data only after releasing the shared mutex. The
+                // cursor remains unchanged if cloning unwinds.
+                let msg = msg.lock().clone();
+
+                let mut inner = self.channel.inner.lock();
+                debug_assert_eq!(self.next_index, index);
+                self.next_index = index + 1;
                 inner.update_receiver_cursor(self.receiver_token, self.next_index);
                 if let Some(token) = waiter.take() {
                     inner.wakers.remove(token);
@@ -941,6 +1003,146 @@ mod tests {
             if let Some(rx) = release_rx {
                 let _ = rx.recv();
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CloneReentryMsg {
+        value: i32,
+        request_tx: std::sync::mpsc::SyncSender<()>,
+        response_rx: Arc<StdMutex<std::sync::mpsc::Receiver<usize>>>,
+    }
+
+    impl Clone for CloneReentryMsg {
+        fn clone(&self) -> Self {
+            self.request_tx
+                .send(())
+                .expect("request Sender::len re-entry");
+            let observed_len = self
+                .response_rx
+                .lock()
+                .expect("response receiver mutex poisoned")
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("Sender::len re-entry blocked on the broadcast mutex");
+            assert_eq!(observed_len, 1);
+            Self {
+                value: self.value,
+                request_tx: self.request_tx.clone(),
+                response_rx: Arc::clone(&self.response_rx),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicOnceCloneMsg {
+        value: i32,
+        clone_attempts: Arc<AtomicUsize>,
+    }
+
+    impl Clone for PanicOnceCloneMsg {
+        fn clone(&self) -> Self {
+            if self.clone_attempts.fetch_add(1, AtomicOrdering::AcqRel) == 0 {
+                panic!("intentional first clone panic");
+            }
+            Self {
+                value: self.value,
+                clone_attempts: Arc::clone(&self.clone_attempts),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CloneBlocker {
+        entered_tx: std::sync::mpsc::SyncSender<()>,
+        release_rx: StdMutex<Option<std::sync::mpsc::Receiver<()>>>,
+        armed: AtomicUsize,
+    }
+
+    impl CloneBlocker {
+        fn new() -> (
+            Arc<Self>,
+            std::sync::mpsc::Receiver<()>,
+            std::sync::mpsc::SyncSender<()>,
+        ) {
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            (
+                Arc::new(Self {
+                    entered_tx,
+                    release_rx: StdMutex::new(Some(release_rx)),
+                    armed: AtomicUsize::new(1),
+                }),
+                entered_rx,
+                release_tx,
+            )
+        }
+
+        fn block_once(&self) {
+            if self
+                .armed
+                .compare_exchange(1, 0, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+                .is_err()
+            {
+                return;
+            }
+            self.entered_tx.send(()).expect("clone entered signal");
+            let release_rx = self
+                .release_rx
+                .lock()
+                .expect("clone release mutex poisoned")
+                .take();
+            if let Some(rx) = release_rx {
+                rx.recv().expect("clone release signal");
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CloneGateMsg {
+        value: i32,
+        blocker: Option<Arc<CloneBlocker>>,
+    }
+
+    impl Clone for CloneGateMsg {
+        fn clone(&self) -> Self {
+            if let Some(blocker) = &self.blocker {
+                blocker.block_once();
+            }
+            Self {
+                value: self.value,
+                blocker: self.blocker.as_ref().map(Arc::clone),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct DropReentryMsg {
+        request_tx: Option<std::sync::mpsc::SyncSender<()>>,
+        response_rx: Arc<StdMutex<std::sync::mpsc::Receiver<usize>>>,
+    }
+
+    impl Clone for DropReentryMsg {
+        fn clone(&self) -> Self {
+            Self {
+                request_tx: None,
+                response_rx: Arc::clone(&self.response_rx),
+            }
+        }
+    }
+
+    impl Drop for DropReentryMsg {
+        fn drop(&mut self) {
+            let Some(request_tx) = self.request_tx.take() else {
+                return;
+            };
+            request_tx.send(()).expect("request Sender::len from Drop");
+            let observed_len = self
+                .response_rx
+                .lock()
+                .expect("drop response receiver mutex poisoned")
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("Sender::len from Drop blocked on the broadcast mutex");
+            assert_eq!(observed_len, 0);
         }
     }
 
@@ -1881,6 +2083,239 @@ mod tests {
         );
 
         crate::test_complete!("permit_send_after_last_receiver_drop_is_noop");
+    }
+
+    #[test]
+    fn try_recv_clones_message_outside_lock_and_allows_sender_reentry() {
+        init_test("try_recv_clones_message_outside_lock_and_allows_sender_reentry");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<CloneReentryMsg>(1);
+        let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
+        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+        let response_rx = Arc::new(StdMutex::new(response_rx));
+
+        let reentrant_tx = tx.clone();
+        let reentry = std::thread::spawn(move || {
+            request_rx.recv().expect("clone re-entry request");
+            let len = reentrant_tx.len();
+            response_tx.send(len).expect("clone re-entry response");
+        });
+
+        tx.send(
+            &cx,
+            CloneReentryMsg {
+                value: 17,
+                request_tx,
+                response_rx,
+            },
+        )
+        .expect("send failed");
+
+        let received = rx.try_recv().expect("try_recv failed");
+        reentry.join().expect("Sender::len re-entry panicked");
+        crate::assert_with_log!(
+            received.value == 17,
+            "try_recv returns message after clone re-entry",
+            17,
+            received.value
+        );
+
+        crate::test_complete!("try_recv_clones_message_outside_lock_and_allows_sender_reentry");
+    }
+
+    #[test]
+    fn retained_payload_preserves_send_only_type_contract() {
+        init_test("retained_payload_preserves_send_only_type_contract");
+
+        #[derive(Clone)]
+        struct SendButNotSync(std::cell::Cell<u8>);
+
+        fn assert_send_sync<T: Send + Sync>() {}
+        fn assert_send<T: Send>() {}
+
+        assert_send_sync::<Sender<SendButNotSync>>();
+        assert_send::<Receiver<SendButNotSync>>();
+
+        let value = SendButNotSync(std::cell::Cell::new(7));
+        crate::assert_with_log!(
+            value.0.get() == 7,
+            "send-only fixture remains usable",
+            7,
+            value.0.get()
+        );
+        crate::test_complete!("retained_payload_preserves_send_only_type_contract");
+    }
+
+    #[test]
+    fn recv_clone_panic_preserves_receiver_cursor() {
+        init_test("recv_clone_panic_preserves_receiver_cursor");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<PanicOnceCloneMsg>(1);
+        let clone_attempts = Arc::new(AtomicUsize::new(0));
+        tx.send(
+            &cx,
+            PanicOnceCloneMsg {
+                value: 23,
+                clone_attempts: Arc::clone(&clone_attempts),
+            },
+        )
+        .expect("send failed");
+
+        let first =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| block_on(rx.recv(&cx))));
+        crate::assert_with_log!(first.is_err(), "first clone panics", true, first.is_err());
+
+        let recorded_cursor = {
+            let inner = tx.channel.inner.lock();
+            inner.receiver_cursors.get(rx.receiver_token).copied()
+        };
+        crate::assert_with_log!(
+            rx.next_index == 0 && recorded_cursor == Some(0),
+            "clone panic leaves receiver cursor unchanged",
+            "next_index=0, recorded=Some(0)",
+            format!("next_index={}, recorded={recorded_cursor:?}", rx.next_index)
+        );
+
+        let received = block_on(rx.recv(&cx)).expect("retry after clone panic failed");
+        crate::assert_with_log!(
+            received.value == 23 && rx.next_index == 1,
+            "retry delivers the same retained message",
+            "value=23, next_index=1",
+            format!("value={}, next_index={}", received.value, rx.next_index)
+        );
+
+        crate::test_complete!("recv_clone_panic_preserves_receiver_cursor");
+    }
+
+    #[test]
+    fn recv_retains_message_across_eviction_during_out_of_lock_clone() {
+        init_test("recv_retains_message_across_eviction_during_out_of_lock_clone");
+        let cx = test_cx();
+        let (tx, rx) = channel::<CloneGateMsg>(1);
+        let (blocker, clone_entered_rx, clone_release_tx) = CloneBlocker::new();
+        tx.send(
+            &cx,
+            CloneGateMsg {
+                value: 1,
+                blocker: Some(blocker),
+            },
+        )
+        .expect("initial send failed");
+
+        let (recv_done_tx, recv_done_rx) = std::sync::mpsc::sync_channel(1);
+        let recv_handle = std::thread::spawn(move || {
+            let cx = test_cx();
+            let mut rx = rx;
+            let result = block_on(rx.recv(&cx)).map(|msg| msg.value);
+            recv_done_tx
+                .send((rx, result))
+                .expect("receive completion send");
+        });
+
+        clone_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("message clone did not reach blocking point");
+
+        let tx_thread = tx.clone();
+        let (send_done_tx, send_done_rx) = std::sync::mpsc::sync_channel(1);
+        let send_handle = std::thread::spawn(move || {
+            let cx = test_cx();
+            let result = tx_thread.send(
+                &cx,
+                CloneGateMsg {
+                    value: 2,
+                    blocker: None,
+                },
+            );
+            send_done_tx.send(result).expect("send completion signal");
+        });
+
+        let send_before_clone_release = send_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .ok();
+        let send_completed_before_clone_release = send_before_clone_release.is_some();
+        clone_release_tx.send(()).expect("release blocked clone");
+        let send_result = match send_before_clone_release {
+            Some(result) => result,
+            None => send_done_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("send remained blocked after clone release"),
+        };
+
+        send_handle.join().expect("sender thread panicked");
+        let (mut rx, first_result) = recv_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("receive remained blocked after clone release");
+        recv_handle.join().expect("receiver thread panicked");
+
+        crate::assert_with_log!(
+            send_completed_before_clone_release,
+            "concurrent eviction completes while Clone is blocked",
+            true,
+            send_completed_before_clone_release
+        );
+        crate::assert_with_log!(
+            matches!(&send_result, Ok(1)) && first_result == Ok(1),
+            "evicted retained message is delivered",
+            "send=Ok(1), recv=Ok(1)",
+            format!("send={send_result:?}, recv={first_result:?}")
+        );
+
+        let second = rx.try_recv().map(|msg| msg.value);
+        crate::assert_with_log!(
+            second == Ok(2),
+            "receiver continues with concurrently committed message",
+            "Ok(2)",
+            format!("{second:?}")
+        );
+
+        crate::test_complete!("recv_retains_message_across_eviction_during_out_of_lock_clone");
+    }
+
+    #[test]
+    fn send_rollback_drops_uncommitted_message_outside_lock() {
+        init_test("send_rollback_drops_uncommitted_message_outside_lock");
+        let cx = test_cx();
+        let (tx, rx) = channel::<DropReentryMsg>(1);
+        let permit = tx.reserve(&cx).expect("reserve failed");
+        let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
+        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+
+        let reentrant_tx = tx.clone();
+        let reentry = std::thread::spawn(move || {
+            request_rx.recv().expect("drop re-entry request");
+            let len = reentrant_tx.len();
+            response_tx.send(len).expect("drop re-entry response");
+        });
+
+        let delivered = permit.send_forcing_zero_at_final_liveness(DropReentryMsg {
+            request_tx: Some(request_tx),
+            response_rx: Arc::new(StdMutex::new(response_rx)),
+        });
+        reentry.join().expect("Sender::len from Drop panicked");
+
+        crate::assert_with_log!(
+            delivered == 0,
+            "send rolls back after final receiver snapshot reaches zero",
+            0usize,
+            delivered
+        );
+        let inner = tx.channel.inner.lock();
+        crate::assert_with_log!(
+            inner.total_sent == 0 && inner.buffer.is_empty(),
+            "rollback restores channel state",
+            "total_sent=0, buffer empty",
+            format!(
+                "total_sent={}, buffer_len={}",
+                inner.total_sent,
+                inner.buffer.len()
+            )
+        );
+        drop(inner);
+
+        drop(rx);
+
+        crate::test_complete!("send_rollback_drops_uncommitted_message_outside_lock");
     }
 
     // --- Audit tests (SapphireHill, 2026-02-15) ---
