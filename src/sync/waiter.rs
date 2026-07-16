@@ -207,6 +207,30 @@ impl<T> WaiterChain<T> {
         }
     }
 
+    /// Replace a queued waiter's waker without destroying either waker in this
+    /// call. The returned `Ok` value is the waker the caller must retire: it is
+    /// the previous queued waker when the identity changed, or `new` when both
+    /// wakers target the same task. `Err(new)` means the waiter was absent.
+    ///
+    /// Callers that protect the chain with a lock can therefore move all
+    /// user-controlled `RawWaker` destruction outside that lock.
+    pub(crate) fn replace_waker(&mut self, id: WaiterId, new: Waker) -> Result<Waker, Waker> {
+        let Some(&index) = self.positions.get(&id) else {
+            return Err(new);
+        };
+        let Some(slot) = self.slots.get_mut(index) else {
+            return Err(new);
+        };
+        if slot.id != id {
+            return Err(new);
+        }
+        if slot.waker.will_wake(&new) {
+            Ok(new)
+        } else {
+            Ok(std::mem::replace(&mut slot.waker, new))
+        }
+    }
+
     /// Returns the waker of the first element, if any.
     #[inline]
     #[allow(dead_code)]

@@ -395,15 +395,15 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
     #[inline]
     fn cleanup_waiter(&mut self) {
         if let Some(waiter_id) = self.waiter_id.take() {
-            let waker_to_wake = {
+            let (waker_to_wake, retired_waker) = {
                 let mut state = self.mutex.state.lock();
 
                 if state.granted_waiter == Some(waiter_id) {
                     state.granted_waiter = None;
                     if !state.locked {
-                        Self::grant_next_waiter(&mut state)
+                        (Self::grant_next_waiter(&mut state), None)
                     } else {
-                        None
+                        (None, None)
                     }
                 } else {
                     // br-asupersync-wlf0xh: O(1) head-check + remove.
@@ -414,19 +414,24 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
                     // chain whether we are the front in O(1) and remove
                     // by id in O(1).
                     let is_head = state.waiters.front_id() == Some(waiter_id);
-                    let _removed = state.waiters.remove(waiter_id);
+                    let retired_waker = state.waiters.remove(waiter_id);
 
-                    if !state.locked && state.granted_waiter.is_none() && is_head {
-                        Self::grant_next_waiter(&mut state)
-                    } else {
-                        None
-                    }
+                    let waker_to_wake =
+                        if !state.locked && state.granted_waiter.is_none() && is_head {
+                            Self::grant_next_waiter(&mut state)
+                        } else {
+                            None
+                        };
+                    (waker_to_wake, retired_waker)
                 }
             };
 
             if let Some(waker) = waker_to_wake {
                 waker.wake();
             }
+            // A RawWaker destructor may run arbitrary user code. Retire the
+            // removed queue owner only after the state guard is gone.
+            drop(retired_waker);
         }
     }
 }
@@ -454,92 +459,122 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
             return Poll::Ready(Err(LockError::TimedOut(deadline)));
         }
 
-        let mut state = self.mutex.state.lock();
+        // Lazily clone only on the contended path, and always before acquiring
+        // the state lock. RawWaker::clone is user-controlled and may re-enter
+        // this mutex.
+        let mut queued_waker = None;
 
-        if self.mutex.is_poisoned() {
-            self.completed = true;
-            drop(state);
-            self.cleanup_waiter();
-            return Poll::Ready(Err(LockError::Poisoned));
-        }
+        loop {
+            let mut state = self.mutex.state.lock();
 
-        if let Some(waiter_id) = self.waiter_id {
-            if state.granted_waiter == Some(waiter_id) {
-                if !state.locked {
-                    // Check lock ordering before acquisition (debug builds only)
-                    if let Some(rank) = self.mutex.rank {
-                        lock_ordering::check_acquire(self.mutex.name, rank);
+            if self.mutex.is_poisoned() {
+                self.completed = true;
+                drop(state);
+                self.cleanup_waiter();
+                return Poll::Ready(Err(LockError::Poisoned));
+            }
+
+            if let Some(waiter_id) = self.waiter_id {
+                if state.granted_waiter == Some(waiter_id) {
+                    if !state.locked {
+                        // Check lock ordering before acquisition (debug builds only)
+                        if let Some(rank) = self.mutex.rank {
+                            lock_ordering::check_acquire(self.mutex.name, rank);
+                        }
+
+                        state.granted_waiter = None;
+                        state.locked = true;
+                        self.waiter_id = None;
+                        self.completed = true;
+
+                        // Record lock acquisition for ordering tracking
+                        if let Some(rank) = self.mutex.rank {
+                            lock_ordering::record_acquire(self.mutex.name, rank);
+                        }
+
+                        return Poll::Ready(Ok(MutexGuard {
+                            mutex: self.mutex,
+                            _not_send: PhantomData,
+                        }));
                     }
 
+                    if queued_waker.is_none() {
+                        drop(state);
+                        queued_waker = Some(context.waker().clone());
+                        continue;
+                    }
+
+                    // Another caller stole the lock before we resumed. Re-register
+                    // ourselves at the front to preserve our turn.
+                    // br-asupersync-wlf0xh: O(1) re-register via slab.push_front;
+                    // the slab assigns the new id without a monotonic counter.
                     state.granted_waiter = None;
-                    state.locked = true;
-                    self.waiter_id = None;
-                    self.completed = true;
+                    let new_id = state.waiters.push_front_tagged(
+                        queued_waker.take().expect("contended path cloned a waker"),
+                        (),
+                    );
+                    drop(state);
+                    self.waiter_id = Some(new_id);
+                    return Poll::Pending;
+                }
+            }
 
-                    // Record lock acquisition for ordering tracking
-                    if let Some(rank) = self.mutex.rank {
-                        lock_ordering::record_acquire(self.mutex.name, rank);
-                    }
-
-                    return Poll::Ready(Ok(MutexGuard {
-                        mutex: self.mutex,
-                        _not_send: PhantomData,
-                    }));
+            if !state.locked && state.granted_waiter.is_none() && self.waiter_id.is_none() {
+                // Check lock ordering before acquisition (debug builds only)
+                if let Some(rank) = self.mutex.rank {
+                    lock_ordering::check_acquire(self.mutex.name, rank);
                 }
 
-                // Another caller stole the lock before we resumed. Re-register
-                // ourselves at the front to preserve our turn.
-                // br-asupersync-wlf0xh: O(1) re-register via slab.push_front;
-                // the slab assigns the new id without a monotonic counter.
-                state.granted_waiter = None;
-                let new_id = state.waiters.push_front_tagged(context.waker().clone(), ());
+                // Acquire lock immediately only when nobody else already owns the turn.
+                state.locked = true;
+                self.completed = true;
+
+                // Record lock acquisition for ordering tracking
+                if let Some(rank) = self.mutex.rank {
+                    lock_ordering::record_acquire(self.mutex.name, rank);
+                }
+
+                return Poll::Ready(Ok(MutexGuard {
+                    mutex: self.mutex,
+                    _not_send: PhantomData,
+                }));
+            }
+
+            if queued_waker.is_none() {
                 drop(state);
-                self.waiter_id = Some(new_id);
-                return Poll::Pending;
-            }
-        }
-
-        if !state.locked && state.granted_waiter.is_none() && self.waiter_id.is_none() {
-            // Check lock ordering before acquisition (debug builds only)
-            if let Some(rank) = self.mutex.rank {
-                lock_ordering::check_acquire(self.mutex.name, rank);
+                queued_waker = Some(context.waker().clone());
+                continue;
             }
 
-            // Acquire lock immediately only when nobody else already owns the turn.
-            state.locked = true;
-            self.completed = true;
-
-            // Record lock acquisition for ordering tracking
-            if let Some(rank) = self.mutex.rank {
-                lock_ordering::record_acquire(self.mutex.name, rank);
-            }
-
-            return Poll::Ready(Ok(MutexGuard {
-                mutex: self.mutex,
-                _not_send: PhantomData,
-            }));
-        }
-
-        // Register waiter or update existing waker. We must update the waker
-        // when it changes because some executors provide different wakers on
-        // each poll - failing to update would cause the task to never be woken.
-        // br-asupersync-wlf0xh: contains() and update_waker() are O(1)
-        // via slab.contains / slab.get_mut; the previous code did an
-        // O(N) iter_mut().find().
-        if let Some(waiter_id) = self.waiter_id {
-            if state.waiters.update_waker(waiter_id, context.waker()) {
-                // Still queued — waker updated in place.
+            // Register waiter or update existing waker. We must update the waker
+            // when it changes because some executors provide different wakers on
+            // each poll - failing to update would cause the task to never be woken.
+            // The owned replacement API returns the retired waker so its destructor
+            // runs only after the state lock is released.
+            let retired_waker = if let Some(waiter_id) = self.waiter_id {
+                let new_waker = queued_waker.take().expect("contended path cloned a waker");
+                match state.waiters.replace_waker(waiter_id, new_waker) {
+                    Ok(retired_waker) => Some(retired_waker),
+                    Err(new_waker) => {
+                        // Was dequeued earlier but is no longer the granted waiter.
+                        // Re-register at the FRONT to preserve FIFO fairness.
+                        let new_id = state.waiters.push_front_tagged(new_waker, ());
+                        self.waiter_id = Some(new_id);
+                        None
+                    }
+                }
             } else {
-                // Was dequeued earlier but is no longer the granted waiter.
-                // Re-register at the FRONT to preserve FIFO fairness.
-                let new_id = state.waiters.push_front_tagged(context.waker().clone(), ());
-                self.waiter_id = Some(new_id);
-            }
-        } else {
-            let id = state.waiters.push_back_tagged(context.waker().clone(), ());
-            self.waiter_id = Some(id);
+                let id = state.waiters.push_back_tagged(
+                    queued_waker.take().expect("contended path cloned a waker"),
+                    (),
+                );
+                self.waiter_id = Some(id);
+                None
+            };
+            drop(state);
+            drop(retired_waker);
+            break;
         }
-        drop(state);
 
         if let Some(deadline) = self.poll_deadline_sleep(context) {
             self.completed = true;
@@ -968,6 +1003,7 @@ mod tests {
     use crate::{RegionId, TaskId};
     use futures_lite::future::block_on;
     use serde_json::Value;
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
@@ -1032,6 +1068,217 @@ mod tests {
     fn lock_blocking<'a, T>(mutex: &'a Mutex<T>, cx: &Cx) -> MutexGuard<'a, T> {
         let mut fut = mutex.lock(cx);
         poll_until_ready(&mut fut).expect("lock failed")
+    }
+
+    struct StateLockDropProbe {
+        mutex: Arc<Mutex<()>>,
+        dropped: Arc<AtomicBool>,
+        state_was_unlocked: Arc<AtomicBool>,
+    }
+
+    impl std::task::Wake for StateLockDropProbe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for StateLockDropProbe {
+        fn drop(&mut self) {
+            let state_was_unlocked = self.mutex.state.try_lock().is_some();
+            self.state_was_unlocked
+                .store(state_was_unlocked, Ordering::SeqCst);
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn state_lock_drop_probe(mutex: &Arc<Mutex<()>>) -> (Waker, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let state_was_unlocked = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(StateLockDropProbe {
+            mutex: Arc::clone(mutex),
+            dropped: Arc::clone(&dropped),
+            state_was_unlocked: Arc::clone(&state_was_unlocked),
+        }));
+        (waker, dropped, state_was_unlocked)
+    }
+
+    #[test]
+    fn queued_waker_removal_retires_after_state_unlock() {
+        let mutex = Arc::new(Mutex::new(()));
+        let cx = test_cx();
+        let holder = mutex.try_lock().expect("holder acquires mutex");
+        let (probe_waker, dropped, state_was_unlocked) = state_lock_drop_probe(&mutex);
+        let mut waiter = Box::pin(mutex.lock(&cx));
+
+        {
+            let mut context = Context::from_waker(&probe_waker);
+            assert!(waiter.as_mut().poll(&mut context).is_pending());
+        }
+        drop(probe_waker);
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        drop(waiter);
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            state_was_unlocked.load(Ordering::SeqCst),
+            "queued RawWaker owner must be destroyed after releasing mutex state"
+        );
+        drop(holder);
+    }
+
+    #[test]
+    fn queued_waker_replacement_retires_after_state_unlock() {
+        let mutex = Arc::new(Mutex::new(()));
+        let cx = test_cx();
+        let holder = mutex.try_lock().expect("holder acquires mutex");
+        let (probe_waker, dropped, state_was_unlocked) = state_lock_drop_probe(&mutex);
+        let mut waiter = Box::pin(mutex.lock(&cx));
+
+        {
+            let mut context = Context::from_waker(&probe_waker);
+            assert!(waiter.as_mut().poll(&mut context).is_pending());
+        }
+        drop(probe_waker);
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        {
+            let mut replacement_context = Context::from_waker(Waker::noop());
+            assert!(waiter.as_mut().poll(&mut replacement_context).is_pending());
+        }
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            state_was_unlocked.load(Ordering::SeqCst),
+            "replaced RawWaker owner must be destroyed after releasing mutex state"
+        );
+        drop(waiter);
+        drop(holder);
+    }
+
+    #[test]
+    fn cancelled_queued_waker_retires_after_state_unlock() {
+        let mutex = Arc::new(Mutex::new(()));
+        let cancel_cx = test_cx();
+        let holder = mutex.try_lock().expect("holder acquires mutex");
+        let (probe_waker, dropped, state_was_unlocked) = state_lock_drop_probe(&mutex);
+        let mut waiter = Box::pin(mutex.lock(&cancel_cx));
+
+        {
+            let mut context = Context::from_waker(&probe_waker);
+            assert!(waiter.as_mut().poll(&mut context).is_pending());
+        }
+        drop(probe_waker);
+        cancel_cx.set_cancel_requested(true);
+
+        let result = {
+            let mut context = Context::from_waker(Waker::noop());
+            waiter.as_mut().poll(&mut context)
+        };
+
+        assert!(matches!(result, Poll::Ready(Err(LockError::Cancelled))));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            state_was_unlocked.load(Ordering::SeqCst),
+            "cancelled RawWaker owner must be destroyed after releasing mutex state"
+        );
+        assert_eq!(mutex.waiters(), 0);
+        drop(holder);
+    }
+
+    #[test]
+    fn timed_out_queued_waker_retires_after_state_unlock() {
+        let mutex = Arc::new(Mutex::new(()));
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = test_cx_with_timer(timer.clone());
+        let holder = mutex.try_lock().expect("holder acquires mutex");
+        let mut waiter = Box::pin(mutex.lock_until(&cx, Time::from_millis(10)));
+
+        {
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(waiter.as_mut().poll(&mut context).is_pending());
+        }
+
+        // Keep the deadline Sleep registered with its noop waker while making
+        // the mutex queue's waker owner unique. This isolates the destructor
+        // observation to timeout cleanup of the queued waiter.
+        let (probe_waker, dropped, state_was_unlocked) = state_lock_drop_probe(&mutex);
+        let waiter_id = waiter
+            .as_ref()
+            .get_ref()
+            .waiter_id
+            .expect("deadline waiter is queued");
+        let queued_probe_waker = probe_waker.clone();
+        let retired_waker = {
+            let mut state = mutex.state.lock();
+            state
+                .waiters
+                .replace_waker(waiter_id, queued_probe_waker)
+                .expect("deadline waiter remains queued")
+        };
+        drop(retired_waker);
+        drop(probe_waker);
+        clock.advance(Time::from_millis(10).as_nanos());
+        let _ = timer.process_timers();
+
+        let result = {
+            let mut context = Context::from_waker(Waker::noop());
+            waiter.as_mut().poll(&mut context)
+        };
+
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(LockError::TimedOut(deadline)))
+                if deadline == Time::from_millis(10)
+        ));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            state_was_unlocked.load(Ordering::SeqCst),
+            "timed-out RawWaker owner must be destroyed after releasing mutex state"
+        );
+        assert_eq!(mutex.waiters(), 0);
+        drop(holder);
+    }
+
+    #[test]
+    fn stolen_grant_requeue_retires_after_state_unlock() {
+        let mutex = Arc::new(Mutex::new(()));
+        let cx = test_cx();
+        let holder = mutex.try_lock().expect("holder acquires mutex");
+        let mut waiter = Box::pin(mutex.lock(&cx));
+
+        {
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(waiter.as_mut().poll(&mut context).is_pending());
+        }
+
+        // Deterministically model the narrow race handled by the requeue path:
+        // this waiter owns the grant, but the mutex is locked again before it
+        // observes that grant.
+        let granted_waker = {
+            let mut state = mutex.state.lock();
+            let (waiter_id, waker, ()) = state.waiters.pop_front().expect("queued waiter");
+            state.granted_waiter = Some(waiter_id);
+            waker
+        };
+        drop(granted_waker);
+
+        let (probe_waker, dropped, state_was_unlocked) = state_lock_drop_probe(&mutex);
+        {
+            let mut context = Context::from_waker(&probe_waker);
+            assert!(waiter.as_mut().poll(&mut context).is_pending());
+        }
+        drop(probe_waker);
+        assert_eq!(mutex.waiters(), 1);
+
+        drop(waiter);
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            state_was_unlocked.load(Ordering::SeqCst),
+            "requeued RawWaker owner must be destroyed after releasing mutex state"
+        );
+        assert_eq!(mutex.waiters(), 0);
+        drop(holder);
     }
 
     #[test]
