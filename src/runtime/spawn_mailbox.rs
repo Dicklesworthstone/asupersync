@@ -2373,7 +2373,7 @@ mod tests {
             .into_parts();
         let SpawnAdmission::Admitted {
             task_id,
-            priority,
+            priority: _,
             cancel_publication,
             spawn_effects,
         } = lab.state.admit_spawn_request(parts)
@@ -3986,6 +3986,7 @@ mod tests {
         let admission = lab.state.admit_local_spawn_request(request);
         let crate::runtime::state::LocalSpawnAdmission::Admitted {
             task_id,
+            priority: _,
             stored,
             cancel_publication,
             spawn_effects,
@@ -4171,6 +4172,7 @@ mod tests {
 
         let crate::runtime::state::LocalSpawnAdmission::Admitted {
             task_id,
+            priority: _,
             stored,
             cancel_publication,
             spawn_effects,
@@ -4339,7 +4341,10 @@ mod tests {
             .expect("admission slot owns the spawn observer")
             .dispatch();
 
-        let (loser_publication, loser_publication_wakes) = lab
+        // The losing consumer's closure never runs (the lane is already
+        // published), so `panic!`'s `!` return leaves the publication payload
+        // type unconstrained; annotate it to match the winner's `Option<u8>`.
+        let (loser_publication, loser_publication_wakes): (Option<u8>, _) = lab
             .state
             .publish_handle_cancel_lane(task_id, |_, _, _| {
                 panic!("losing consumer must observe the already-published lane")
@@ -4667,6 +4672,7 @@ mod tests {
 
         let crate::runtime::state::LocalSpawnAdmission::Admitted {
             task_id,
+            priority: _,
             mut stored,
             cancel_publication,
             spawn_effects,
