@@ -93,93 +93,153 @@ mod inner {
         }
 
         fn record_acquire(&self, wait_ns: u64, contended: bool) {
-            self.acquisitions.fetch_add(1, Ordering::Relaxed);
-            self.wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
-            Self::update_max(&self.max_wait_ns, wait_ns);
-
-            // Bound sample collection to prevent memory leak
+            // All wait-domain counters are mutated while holding the
+            // wait_samples lock, which is the single coherence boundary shared
+            // with snapshot() and reset() (uqm6ex). Updating the atomics and the
+            // sample population under one lock makes each acquisition an atomic
+            // (count, sum, max, samples) transition, so a reader can never
+            // observe a percentile above the max or a nonzero count with an
+            // empty sample set.
             let mut samples = self
                 .wait_samples
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if samples.len() >= MAX_SAMPLES {
-                // Remove oldest samples to maintain bound (FIFO eviction)
-                samples.drain(0..MAX_SAMPLES / 4);
-            }
-            samples.push(wait_ns);
-
+            self.acquisitions.fetch_add(1, Ordering::Relaxed);
+            self.wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
+            Self::update_max(&self.max_wait_ns, wait_ns);
             if contended {
                 self.contentions.fetch_add(1, Ordering::Relaxed);
             }
+
+            // Bound sample collection to prevent memory leak.
+            if samples.len() >= MAX_SAMPLES {
+                // Remove oldest samples to maintain bound (FIFO eviction).
+                samples.drain(0..MAX_SAMPLES / 4);
+            }
+            samples.push(wait_ns);
         }
 
         fn record_hold(&self, hold_ns: u64) {
-            self.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
-            Self::update_max(&self.max_hold_ns, hold_ns);
-
-            // Bound sample collection to prevent memory leak
+            // Hold-domain counters share the hold_samples lock as their
+            // coherence boundary (uqm6ex); see record_acquire for the rationale.
             let mut samples = self
                 .hold_samples
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            self.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
+            Self::update_max(&self.max_hold_ns, hold_ns);
+
+            // Bound sample collection to prevent memory leak.
             if samples.len() >= MAX_SAMPLES {
-                // Remove oldest samples to maintain bound (FIFO eviction)
+                // Remove oldest samples to maintain bound (FIFO eviction).
                 samples.drain(0..MAX_SAMPLES / 4);
             }
             samples.push(hold_ns);
         }
 
-        fn quantile(samples: &Mutex<Vec<u64>>, numerator: usize, denominator: usize) -> u64 {
-            let mut values = samples
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            if values.is_empty() {
+        /// Computes an exact percentile from an already-sorted (ascending),
+        /// frozen sample population. Both percentiles for a domain are computed
+        /// from the *same* frozen population, so `p95 <= p999` holds by
+        /// construction because the rank is monotonic in the numerator/
+        /// denominator ratio (uqm6ex).
+        fn percentile_from_sorted(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
+            if sorted.is_empty() {
                 return 0;
             }
-
-            values.sort_unstable();
-            let last_index = values.len() - 1;
+            let last_index = sorted.len() - 1;
             let rank = last_index
                 .saturating_mul(numerator)
                 .saturating_add(denominator / 2)
                 / denominator;
-            values[rank.min(last_index)]
+            sorted[rank.min(last_index)]
         }
 
         fn snapshot(&self, name: &'static str) -> LockMetricsSnapshot {
+            // Freeze each domain's population once, under the same lock that
+            // record_*/reset use, so the counters and the samples are read as a
+            // single coherent tuple. Both percentiles are derived from that one
+            // frozen population and the max is read inside the same critical
+            // section, guaranteeing p95 <= p999 <= max (uqm6ex). The clone is
+            // taken under the lock but sorted after releasing it to keep the
+            // critical section short.
+            let acquisitions;
+            let contentions;
+            let wait_ns;
+            let max_wait_ns;
+            let mut wait_frozen;
+            {
+                let samples = self
+                    .wait_samples
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                acquisitions = self.acquisitions.load(Ordering::Relaxed);
+                contentions = self.contentions.load(Ordering::Relaxed);
+                wait_ns = self.wait_ns.load(Ordering::Relaxed);
+                max_wait_ns = self.max_wait_ns.load(Ordering::Relaxed);
+                wait_frozen = samples.clone();
+            }
+            wait_frozen.sort_unstable();
+            let p95_wait_ns = Self::percentile_from_sorted(&wait_frozen, 95, 100);
+            let p999_wait_ns = Self::percentile_from_sorted(&wait_frozen, 999, 1000);
+
+            let hold_ns;
+            let max_hold_ns;
+            let mut hold_frozen;
+            {
+                let samples = self
+                    .hold_samples
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                hold_ns = self.hold_ns.load(Ordering::Relaxed);
+                max_hold_ns = self.max_hold_ns.load(Ordering::Relaxed);
+                hold_frozen = samples.clone();
+            }
+            hold_frozen.sort_unstable();
+            let p95_hold_ns = Self::percentile_from_sorted(&hold_frozen, 95, 100);
+            let p999_hold_ns = Self::percentile_from_sorted(&hold_frozen, 999, 1000);
+
             LockMetricsSnapshot {
                 name,
-                acquisitions: self.acquisitions.load(Ordering::Relaxed),
-                contentions: self.contentions.load(Ordering::Relaxed),
-                wait_ns: self.wait_ns.load(Ordering::Relaxed),
-                hold_ns: self.hold_ns.load(Ordering::Relaxed),
-                max_wait_ns: self.max_wait_ns.load(Ordering::Relaxed),
-                max_hold_ns: self.max_hold_ns.load(Ordering::Relaxed),
-                p95_wait_ns: Self::quantile(&self.wait_samples, 95, 100),
-                p999_wait_ns: Self::quantile(&self.wait_samples, 999, 1000),
-                p95_hold_ns: Self::quantile(&self.hold_samples, 95, 100),
-                p999_hold_ns: Self::quantile(&self.hold_samples, 999, 1000),
+                acquisitions,
+                contentions,
+                wait_ns,
+                hold_ns,
+                max_wait_ns,
+                max_hold_ns,
+                p95_wait_ns,
+                p999_wait_ns,
+                p95_hold_ns,
+                p999_hold_ns,
                 instrumentation_mode: "opt_in_lock_metrics",
             }
         }
 
         fn reset(&self) {
-            // Use sequential consistency to ensure atomic reset from reader perspective
-            self.acquisitions.store(0, Ordering::SeqCst);
-            self.contentions.store(0, Ordering::SeqCst);
-            self.wait_ns.store(0, Ordering::SeqCst);
-            self.hold_ns.store(0, Ordering::SeqCst);
-            self.max_wait_ns.store(0, Ordering::SeqCst);
-            self.max_hold_ns.store(0, Ordering::SeqCst);
-            self.wait_samples
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clear();
-            self.hold_samples
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clear();
+            // Reset each domain under its sample lock so a concurrent recorder
+            // cannot interleave between zeroing the counters and clearing the
+            // samples (uqm6ex). Because record_*/snapshot use the same lock,
+            // the store+clear pair is observed atomically; Relaxed ordering
+            // suffices since the Mutex provides the happens-before edges.
+            {
+                let mut samples = self
+                    .wait_samples
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                self.acquisitions.store(0, Ordering::Relaxed);
+                self.contentions.store(0, Ordering::Relaxed);
+                self.wait_ns.store(0, Ordering::Relaxed);
+                self.max_wait_ns.store(0, Ordering::Relaxed);
+                samples.clear();
+            }
+            {
+                let mut samples = self
+                    .hold_samples
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                self.hold_ns.store(0, Ordering::Relaxed);
+                self.max_hold_ns.store(0, Ordering::Relaxed);
+                samples.clear();
+            }
         }
     }
 
@@ -942,6 +1002,126 @@ mod tests {
             snap.p999_hold_ns <= snap.max_hold_ns
         );
         crate::test_complete!("metrics_snapshot_reports_tail_latencies");
+    }
+
+    /// Regression for uqm6ex: every snapshot must observe a coherent
+    /// `p95 <= p999 <= max` tuple for both the wait and hold domains, even
+    /// while recorders and resets run concurrently. Before the fix, snapshot()
+    /// cloned each population separately per percentile and read the max
+    /// outside the sample lock, so an interleaved record could yield
+    /// `p95 > p999` and a torn reset could zero the max while a larger sample
+    /// survived (`p999 > max`).
+    #[cfg(feature = "lock-metrics")]
+    #[test]
+    fn metrics_snapshot_and_reset_coherent_under_concurrency() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
+
+        init_test("metrics_snapshot_and_reset_coherent_under_concurrency");
+        let m = Arc::new(ContendedMutex::new("tasks", 0u64));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Four recorders hammer the lock: each acquire records a wait sample and
+        // each guard drop records a hold sample.
+        let mut recorders = Vec::new();
+        for _ in 0..4 {
+            let m = Arc::clone(&m);
+            let stop = Arc::clone(&stop);
+            recorders.push(thread::spawn(move || {
+                while !stop.load(AtOrd::Relaxed) {
+                    let mut guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *guard = guard.wrapping_add(1);
+                    drop(guard);
+                }
+            }));
+        }
+
+        // A resetter periodically clears the metrics, exercising the store+clear
+        // atomicity of reset() against the recorders and the snapshotter.
+        let resetter = {
+            let m = Arc::clone(&m);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let mut i = 0u32;
+                while !stop.load(AtOrd::Relaxed) {
+                    i = i.wrapping_add(1);
+                    if i.is_multiple_of(64) {
+                        m.reset_metrics();
+                    }
+                    std::hint::spin_loop();
+                }
+            })
+        };
+
+        // Snapshot repeatedly and assert coherence on every read.
+        for _ in 0..2000 {
+            let snap = m.snapshot();
+            crate::assert_with_log!(
+                snap.p95_wait_ns <= snap.p999_wait_ns,
+                "p95_wait <= p999_wait under concurrency",
+                true,
+                snap.p95_wait_ns <= snap.p999_wait_ns
+            );
+            crate::assert_with_log!(
+                snap.p999_wait_ns <= snap.max_wait_ns,
+                "p999_wait <= max_wait under concurrency",
+                true,
+                snap.p999_wait_ns <= snap.max_wait_ns
+            );
+            crate::assert_with_log!(
+                snap.p95_hold_ns <= snap.p999_hold_ns,
+                "p95_hold <= p999_hold under concurrency",
+                true,
+                snap.p95_hold_ns <= snap.p999_hold_ns
+            );
+            crate::assert_with_log!(
+                snap.p999_hold_ns <= snap.max_hold_ns,
+                "p999_hold <= max_hold under concurrency",
+                true,
+                snap.p999_hold_ns <= snap.max_hold_ns
+            );
+        }
+
+        stop.store(true, AtOrd::Relaxed);
+        for h in recorders {
+            let _ = h.join();
+        }
+        let _ = resetter.join();
+
+        // Linearizable reset: with recorders quiesced, a final reset zeroes
+        // every counter and clears both sample populations coherently.
+        m.reset_metrics();
+        let snap = m.snapshot();
+        crate::assert_with_log!(
+            snap.acquisitions == 0,
+            "reset zeroes acquisitions",
+            0u64,
+            snap.acquisitions
+        );
+        crate::assert_with_log!(
+            snap.max_wait_ns == 0,
+            "reset zeroes max_wait_ns",
+            0u64,
+            snap.max_wait_ns
+        );
+        crate::assert_with_log!(
+            snap.max_hold_ns == 0,
+            "reset zeroes max_hold_ns",
+            0u64,
+            snap.max_hold_ns
+        );
+        crate::assert_with_log!(
+            snap.p999_wait_ns == 0,
+            "reset clears wait samples",
+            0u64,
+            snap.p999_wait_ns
+        );
+        crate::assert_with_log!(
+            snap.p999_hold_ns == 0,
+            "reset clears hold samples",
+            0u64,
+            snap.p999_hold_ns
+        );
+        crate::test_complete!("metrics_snapshot_and_reset_coherent_under_concurrency");
     }
 
     #[test]
