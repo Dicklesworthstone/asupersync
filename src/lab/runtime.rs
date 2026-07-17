@@ -3850,7 +3850,7 @@ mod tests {
         runtime.scheduler.lock().schedule(task_id, 0);
 
         let canceller = std::thread::spawn(move || {
-            let mut handle = handle;
+            let handle = handle;
             entered.wait();
             handle.abort_with_reason(CancelReason::race_loser());
             abort_done.wait();
@@ -4070,15 +4070,18 @@ mod tests {
         assert_eq!(runtime.run_until_quiescent(), 1);
         let canonical = handle.task_id();
         assert_ne!(canonical, provisional);
-        assert!(matches!(
-            &runtime.state.task(canonical).expect("task record").state,
-            TaskState::Completed(Outcome::Cancelled(reason))
-                if reason.is_kind(CancelKind::RaceLost)
-        ));
+        assert!(
+            runtime.state.task(canonical).is_none(),
+            "quiescent completion retires the canonical task record"
+        );
         assert!(handle.is_finished());
         assert!(runtime.spawn_mailbox.is_empty());
         assert!(runtime.is_quiescent());
-        let _ = handle.try_join().expect("task result is available");
+        assert!(matches!(
+            handle.try_join(),
+            Err(crate::runtime::JoinError::Cancelled(reason))
+                if reason.is_kind(CancelKind::RaceLost)
+        ));
         crate::test_complete!(
             "managed_pre_admission_abort_transitions_task_record_before_first_poll"
         );

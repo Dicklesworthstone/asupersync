@@ -42,7 +42,7 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, debug_span, error, trace};
+use crate::tracing_compat::{debug, debug_span, trace};
 use crate::types::policy::PolicyAction;
 use crate::types::task_context::{
     CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
@@ -4987,7 +4987,7 @@ impl RuntimeState {
                 );
             }
 
-            self.record_finalizer_run(finalizer_id);
+            self.record_finalizer_run(owner, finalizer_id);
         }
 
         // Abort any pending obligations held by this task to prevent
@@ -5098,6 +5098,13 @@ impl RuntimeState {
         &mut self,
         region_id: RegionId,
     ) -> bool {
+        if self
+            .regions
+            .get(region_id.arena_index())
+            .is_none_or(|region| region.state() != crate::record::region::RegionState::Finalizing)
+        {
+            return false;
+        }
         if self.active_async_finalizers.contains_key(&region_id) {
             return false;
         }
@@ -5164,7 +5171,7 @@ impl RuntimeState {
                         crate::types::PanicPayload::new(message),
                     ));
                 }
-                self.record_finalizer_run(finalizer_id);
+                self.record_finalizer_run(region_id, finalizer_id);
                 return true;
             }
         };
@@ -5190,7 +5197,7 @@ impl RuntimeState {
                         crate::types::PanicPayload::new(message),
                     ));
                 }
-                self.record_finalizer_run(finalizer_id);
+                self.record_finalizer_run(region_id, finalizer_id);
                 return true;
             }
         };
@@ -5200,7 +5207,7 @@ impl RuntimeState {
         let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             std::pin::Pin::new(&mut masked).poll(&mut poll_cx)
         }));
-        let mut close_outcome: Outcome<(), Error> = match poll_result {
+        let polled_outcome: Outcome<(), Error> = match poll_result {
             Ok(Poll::Ready(())) => Outcome::Ok(()),
             Ok(Poll::Pending) => Outcome::Cancelled(CancelReason::shutdown()),
             Err(payload) => {
@@ -5209,13 +5216,16 @@ impl RuntimeState {
                 Outcome::Panicked(crate::types::PanicPayload::new(message))
             }
         };
-        if let Err(payload) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(masked)))
-        {
-            let message = payload_to_string(&payload);
-            std::mem::forget(payload);
-            close_outcome = Outcome::Panicked(crate::types::PanicPayload::new(message));
-        }
+        let close_outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(masked);
+        })) {
+            Ok(()) => polled_outcome,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
 
         let retirements = TaskCompletionRetirements::new({
             let mut inner = cleanup_cx.inner.write();
@@ -5227,25 +5237,31 @@ impl RuntimeState {
         // handles and can be retired here without retaining a mailbox/driver
         // graph per failed start.
         drop(retirements);
-        if let Err(payload) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(current_guard)))
-        {
-            let message = payload_to_string(&payload);
-            std::mem::forget(payload);
-            close_outcome = Outcome::Panicked(crate::types::PanicPayload::new(message));
-        }
-        if let Err(payload) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(cleanup_cx)))
-        {
-            let message = payload_to_string(&payload);
-            std::mem::forget(payload);
-            close_outcome = Outcome::Panicked(crate::types::PanicPayload::new(message));
-        }
+        let close_outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(current_guard);
+        })) {
+            Ok(()) => close_outcome,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
+        let close_outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(cleanup_cx);
+        })) {
+            Ok(()) => close_outcome,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
 
         if let Some(region) = self.regions.get(region_id.arena_index()) {
             region.record_close_outcome(close_outcome);
         }
-        self.record_finalizer_run(finalizer_id);
+        self.record_finalizer_run(region_id, finalizer_id);
         true
     }
 
@@ -5476,7 +5492,12 @@ impl RuntimeState {
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
     }
 
-    fn record_finalizer_run(&mut self, id: u64) {
+    fn record_finalizer_run(&mut self, region: RegionId, id: u64) {
+        self.validate_live_region_protocol_transition(
+            region,
+            RegionEvent::FinalizerCompleted,
+            "finalizer completion",
+        );
         let now = self.current_runtime_time();
         self.finalizer_history
             .push(FinalizerHistoryEvent::Ran { id, time: now });
@@ -5671,7 +5692,7 @@ impl RuntimeState {
                         );
                     }
 
-                    self.record_finalizer_run(finalizer_id);
+                    self.record_finalizer_run(region_id, finalizer_id);
                 }
                 Finalizer::Async(_) => {
                     // VALIDATION GAP FIX: Validate async finalizers also respect state transitions
@@ -5844,9 +5865,19 @@ impl RuntimeState {
                             created_at: region.created_at,
                             validation_level: CancelValidationLevel::Basic,
                         };
+                        // Child draining is not a region-protocol event: that
+                        // validator intentionally has no child-count state.
+                        // Project cancellation or normal close exactly once,
+                        // here at the runtime's actual finalization boundary.
+                        let finalization_event =
+                            region
+                                .cancel_reason()
+                                .map_or(RegionEvent::RequestClose, |reason| RegionEvent::Cancel {
+                                    reason: reason.to_string(),
+                                });
                         let validation_result = self.validate_region_protocol_transition(
                             region_id,
-                            RegionEvent::RequestClose, // Use RequestClose for finalization
+                            finalization_event,
                             &context,
                         );
                         if matches!(
@@ -5891,34 +5922,10 @@ impl RuntimeState {
                     if region.child_count() > 0
                         && region.state() == crate::record::region::RegionState::Closing
                     {
-                        // Validate protocol transition to Draining
-                        let context = RegionContext {
-                            region_id,
-                            parent_region: region.parent,
-                            created_at: region.created_at,
-                            validation_level: CancelValidationLevel::Basic,
-                        };
-                        let validation_result = self.validate_region_protocol_transition(
-                            region_id,
-                            RegionEvent::Cancel {
-                                reason: "draining children".to_string(),
-                            },
-                            &context,
-                        );
-                        if matches!(
-                            validation_result,
-                            TransitionResult::Invalid { .. }
-                                | TransitionResult::InvariantViolation { .. }
-                        ) {
-                            log_cancel_protocol_violation(
-                                "region drain transition",
-                                &validation_result,
-                            );
-                            // Protocol violation detected - invalidate region snapshot cache
-                            self.read_biased_draining_region_snapshot.invalidate();
-                            // Continue with transition but log violation
-                        }
-
+                        // RegionStateMachine has no child-count dimension, so
+                        // keep this runtime-only transition out of its event
+                        // projection. Finalization above emits the eventual
+                        // Cancel or RequestClose after every child has closed.
                         let old_state = region.state();
                         region.begin_drain();
                         let new_state = region.state();
@@ -5982,55 +5989,43 @@ impl RuntimeState {
 
                     // Check if we can complete close
                     if self.can_region_complete_close(region_id) {
-                        // Validate protocol transition to Closed
+                        // Every registered finalizer emits its own completion
+                        // transition when it actually retires. Closing a region
+                        // before that accounting reaches Finalized is a protocol
+                        // invariant violation, not an implicit extra completion.
                         let closed = {
                             let Some(region) = self.regions.get(region_id.arena_index()) else {
                                 break;
                             };
-                            let context = RegionContext {
-                                region_id,
-                                parent_region: region.parent,
-                                created_at: region.created_at,
-                                validation_level: CancelValidationLevel::Basic,
-                            };
-                            // An empty region (no draining tasks, no running
-                            // finalizers) is driven straight to the validator's
-                            // terminal `Finalized` state by the earlier
-                            // `RequestClose`/`Cancel` transition in this same
-                            // close progression. In that case the close-complete
-                            // step must NOT re-issue `FinalizerCompleted`: the
-                            // region is already finalized, and feeding a further
-                            // event to the terminal state would (correctly) be
-                            // rejected by the validator, registering a spurious
-                            // protocol violation. Only validate the
-                            // `FinalizerCompleted` transition when the validator
-                            // has not already reached `Finalized`.
-                            let already_finalized =
-                                matches!(
-                                self.cancel_protocol_validator
-                                    .lock()
-                                    .region_state(region_id),
-                                Some(crate::cancel::protocol_state_machines::RegionState::Finalized)
-                            );
-                            if !already_finalized {
-                                let validation_result = self.validate_region_protocol_transition(
-                                    region_id,
-                                    RegionEvent::FinalizerCompleted, // Use FinalizerCompleted for close
-                                    &context,
+                            let validation_result = {
+                                let mut validator = self.cancel_protocol_validator.lock();
+                                let validator_state = validator.region_state(region_id).cloned();
+                                let already_finalized = matches!(
+                                    validator_state,
+                                    Some(
+                                        crate::cancel::protocol_state_machines::RegionState::Finalized
+                                    )
                                 );
-                                if matches!(
-                                    validation_result,
-                                    TransitionResult::Invalid { .. }
-                                        | TransitionResult::InvariantViolation { .. }
-                                ) {
-                                    log_cancel_protocol_violation(
-                                        "region close completion",
-                                        &validation_result,
-                                    );
-                                    // Protocol violation detected - invalidate region snapshot cache
-                                    self.read_biased_draining_region_snapshot.invalidate();
-                                    // Continue with transition but log violation
+                                if already_finalized {
+                                    TransitionResult::Valid
+                                } else {
+                                    validator.record_region_invariant_violation_without_logging(
+                                        region_id,
+                                        "runtime region close requires terminal finalizer accounting",
+                                        format!("validator state at close: {validator_state:?}"),
+                                    )
                                 }
+                            };
+                            if matches!(
+                                validation_result,
+                                TransitionResult::Invalid { .. }
+                                    | TransitionResult::InvariantViolation { .. }
+                            ) {
+                                log_cancel_protocol_violation(
+                                    "region close completion",
+                                    &validation_result,
+                                );
+                                self.read_biased_draining_region_snapshot.invalidate();
                             }
 
                             let old_state = region.state();
@@ -8858,7 +8853,7 @@ mod tests {
                         if g.cancel_waker_registry_closed {
                             None
                         } else {
-                            std::mem::replace(&mut g.cancel_waker, Some(cancel_waker))
+                            g.cancel_waker.replace(cancel_waker)
                         }
                     };
                     drop(retired);
@@ -8904,6 +8899,7 @@ mod tests {
             unlocked_drops: Arc<AtomicUsize>,
         }
 
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for DropProbe {
             fn wake(self: Arc<Self>) {}
         }
@@ -8970,6 +8966,7 @@ mod tests {
             drops: Arc<AtomicUsize>,
         }
 
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for DropProbe {
             fn wake(self: Arc<Self>) {}
         }
@@ -9818,9 +9815,12 @@ mod tests {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
 
-        let _ = state
-            .create_task(root, Budget::INFINITE, async { 1_u8 })
+        let (_, _, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
+        // This focused state fixture models the executable-lane publication
+        // boundary before releasing the deferred observer effects.
+        spawn_effects.dispatch();
 
         let events = state.trace.snapshot();
         let spawn_event = events
@@ -9919,9 +9919,12 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
 
-        let (task_id, _handle) = state
-            .create_task(region, Budget::INFINITE, async { 42 })
+        let (task_id, _handle, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async { 42 })
             .expect("task create");
+        // Preserve the snapshot's published-task contract: spawn observers
+        // become visible only after the fixture models lane publication.
+        spawn_effects.dispatch();
 
         let obl_idx = state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
@@ -10001,9 +10004,10 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
 
-        let (task_id, _handle) = state
-            .create_task(region, Budget::INFINITE, async { 42 })
+        let (task_id, _handle, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async { 42 })
             .expect("task create");
+        spawn_effects.dispatch();
 
         let obligation_idx = state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
@@ -11535,12 +11539,20 @@ mod tests {
 
         {
             let validator = runtime.state.cancel_protocol_validator().lock();
+            let (regions, tasks, ..) = validator.stats();
             crate::assert_with_log!(
-                validator.region_state(region).cloned() == Some(ValidatorRegionState::Finalized),
-                "validator saw finalizer completion",
-                "Finalized",
+                validator.region_state(region).is_none(),
+                "closed region validator retired",
+                true,
                 format!("{:?}", validator.region_state(region))
             );
+            crate::assert_with_log!(
+                regions == 0,
+                "closed region validator count",
+                0usize,
+                regions
+            );
+            crate::assert_with_log!(tasks == 0, "retired task validator count", 0usize, tasks);
             crate::assert_with_log!(
                 validator.violation_count() == 0,
                 "no completion violations",
@@ -11552,6 +11564,106 @@ mod tests {
         crate::test_complete!(
             "lab_runtime_validator_tracks_async_finalizer_registration_start_and_completion"
         );
+    }
+
+    #[test]
+    fn runtime_validator_counts_each_sync_finalizer_completion() {
+        init_test("runtime_validator_counts_each_sync_finalizer_completion");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let first_order = Arc::clone(&order);
+        let second_order = Arc::clone(&order);
+        assert!(state.register_sync_finalizer(region, move || first_order.lock().push(1)));
+        assert!(state.register_sync_finalizer(region, move || second_order.lock().push(2)));
+
+        let region_record = state.region(region).expect("region missing");
+        assert!(region_record.begin_close(None));
+        state.advance_region_state(region);
+
+        assert_eq!(
+            *order.lock(),
+            vec![2, 1],
+            "finalizers execute in LIFO order"
+        );
+        assert!(state.region(region).is_none(), "closed root is retired");
+        let validator = state.cancel_protocol_validator().lock();
+        let (regions, .., violations) = validator.stats();
+        assert!(validator.region_state(region).is_none());
+        assert_eq!(regions, 0);
+        assert_eq!(violations, 0);
+        crate::test_complete!("runtime_validator_counts_each_sync_finalizer_completion");
+    }
+
+    #[test]
+    fn runtime_validator_counts_mixed_finalizer_completions() {
+        use crate::cancel::protocol_state_machines::RegionState as ValidatorRegionState;
+
+        init_test("runtime_validator_counts_mixed_finalizer_completions");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let sync_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sync_ran_in_finalizer = Arc::clone(&sync_ran);
+
+        assert!(state.register_sync_finalizer(region, move || {
+            sync_ran_in_finalizer.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        assert!(state.register_async_finalizer(region, async {}));
+        assert!(state.register_async_finalizer(region, async {}));
+
+        let region_record = state.region(region).expect("region missing");
+        assert!(region_record.begin_close(None));
+        state.advance_region_state(region);
+
+        let first = state.drain_ready_async_finalizers();
+        assert_eq!(first.len(), 1);
+        let first_task = first[0].0;
+        state
+            .task_mut(first_task)
+            .expect("first async finalizer task missing")
+            .complete(Outcome::Ok(()));
+        let _waiters = state
+            .task_completed(first_task)
+            .into_waiters_without_observers();
+
+        {
+            let validator = state.cancel_protocol_validator().lock();
+            assert_eq!(
+                validator.region_state(region),
+                Some(&ValidatorRegionState::Finalizing {
+                    running_finalizers: 2,
+                })
+            );
+            assert_eq!(validator.violation_count(), 0);
+        }
+
+        let second = state.drain_ready_async_finalizers();
+        assert_eq!(second.len(), 1);
+        let second_task = second[0].0;
+        state
+            .task_mut(second_task)
+            .expect("second async finalizer task missing")
+            .complete(Outcome::Ok(()));
+        let _waiters = state
+            .task_completed(second_task)
+            .into_waiters_without_observers();
+
+        assert!(sync_ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(state.region(region).is_none(), "closed root is retired");
+        let ran_ids: Vec<_> = state
+            .finalizer_history
+            .iter()
+            .filter_map(|event| match event {
+                FinalizerHistoryEvent::Ran { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ran_ids, vec![2, 1, 0]);
+        let validator = state.cancel_protocol_validator().lock();
+        assert!(validator.region_state(region).is_none());
+        assert_eq!(validator.violation_count(), 0);
+        crate::test_complete!("runtime_validator_counts_mixed_finalizer_completions");
     }
 
     #[test]
@@ -11594,11 +11706,18 @@ mod tests {
 
         {
             let validator = state.cancel_protocol_validator().lock();
+            let (regions, ..) = validator.stats();
             crate::assert_with_log!(
-                validator.region_state(child).cloned() == Some(ValidatorRegionState::Finalized),
-                "child region finalized in validator",
-                "Finalized",
+                validator.region_state(child).is_none(),
+                "closed child validator retired",
+                true,
                 format!("{:?}", validator.region_state(child))
+            );
+            crate::assert_with_log!(
+                regions == 1,
+                "only open root validator remains",
+                1usize,
+                regions
             );
             crate::assert_with_log!(
                 validator.violation_count() == 0,
@@ -13345,6 +13464,20 @@ mod tests {
             cancelled
         );
 
+        {
+            let validator = runtime.state.cancel_protocol_validator().lock();
+            let cancel_requested = matches!(
+                validator.task_state(task_id),
+                Some(crate::cancel::protocol_state_machines::TaskState::CancelRequested)
+            );
+            crate::assert_with_log!(
+                cancel_requested,
+                "validator should observe RequestCancel before retirement",
+                true,
+                cancel_requested
+            );
+        }
+
         runtime
             .scheduler
             .lock()
@@ -13353,16 +13486,15 @@ mod tests {
         runtime.run_until_quiescent();
 
         let validator = runtime.state.cancel_protocol_validator().lock();
-        let validator_cancelled = matches!(
-            validator.task_state(task_id),
-            Some(crate::cancel::protocol_state_machines::TaskState::Cancelled)
-        );
+        let (_, tasks, ..) = validator.stats();
+        let validator_retired = validator.task_state(task_id).is_none();
         crate::assert_with_log!(
-            validator_cancelled,
-            "validator should observe RequestCancel -> DrainComplete",
+            validator_retired,
+            "terminal task validator should be retired",
             true,
-            validator_cancelled
+            validator_retired
         );
+        crate::assert_with_log!(tasks == 0, "retired task validator count", 0usize, tasks);
         crate::assert_with_log!(
             validator.violation_count() == 0,
             "validator should not record protocol violations",

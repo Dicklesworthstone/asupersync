@@ -1053,28 +1053,33 @@ fn install_swarm_replay_workload(
         for task_index in 0..knobs.tasks_per_region {
             let blocking_units = knobs.blocking_units;
             let messages_per_task = knobs.messages_per_task;
-            let (task, _) = runtime
+            let (task, _, spawn_effects) = runtime
                 .state
-                .create_task(region, crate::types::Budget::INFINITE, async move {
-                    let mut digest = ((region_index as u64) << 32)
-                        ^ (task_index as u64)
-                        ^ messages_per_task as u64;
-                    for unit in 0..blocking_units {
-                        digest = digest
-                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                            .wrapping_add(unit as u64);
-                        if unit % 2 == 0 {
+                .create_task_with_deferred_spawn_effects(
+                    region,
+                    crate::types::Budget::INFINITE,
+                    async move {
+                        let mut digest = ((region_index as u64) << 32)
+                            ^ (task_index as u64)
+                            ^ messages_per_task as u64;
+                        for unit in 0..blocking_units {
+                            digest = digest
+                                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                                .wrapping_add(unit as u64);
+                            if unit % 2 == 0 {
+                                crate::runtime::yield_now::yield_now().await;
+                            }
+                        }
+                        for _ in 0..=((region_index + task_index) % 2) {
                             crate::runtime::yield_now::yield_now().await;
                         }
-                    }
-                    for _ in 0..=((region_index + task_index) % 2) {
-                        crate::runtime::yield_now::yield_now().await;
-                    }
-                    digest
-                })
+                        digest
+                    },
+                )
                 .expect("create swarm task");
             let priority = (((region_index + 1) * 11 + task_index * 5) % 10) as u8;
             runtime.scheduler.lock().schedule(task, priority);
+            spawn_effects.dispatch();
             tasks_created += 1;
         }
     }

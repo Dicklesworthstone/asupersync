@@ -33,7 +33,7 @@ use crate::supervision::{
     ChildSpec, CompiledSupervisor, RestartPolicy, StartTieBreak, SupervisorBuilder,
     SupervisorCompileError, SupervisorHandle, SupervisorSpawnError,
 };
-use crate::types::{Budget, CancelKind, CancelReason, RegionId, TaskId};
+use crate::types::{Budget, CancelKind, CancelReason, RegionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -2182,7 +2182,7 @@ mod tests {
     use crate::runtime::SpawnError;
     use crate::runtime::state::RuntimeState;
     use crate::supervision::{ChildSpec, NameRegistrationPolicy, SupervisionStrategy};
-    use crate::types::Budget;
+    use crate::types::{Budget, TaskId};
     use serde_json::{Value, json};
     use std::sync::Arc;
 
@@ -3164,6 +3164,11 @@ mod tests {
                 .map(crate::record::RegionRecord::child_count),
             Some(0),
             "parent root should not retain leaked app descendants"
+        );
+        assert_eq!(
+            state.cancel_protocol_validator().lock().violation_count(),
+            0,
+            "failed-start finalization should stay validator-aligned"
         );
 
         crate::test_complete!("app_start_spawn_failure_drains_async_finalizers");

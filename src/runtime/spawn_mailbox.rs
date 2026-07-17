@@ -3511,16 +3511,6 @@ mod tests {
             crate::runtime::state::spawn_observer_test_support::PanickingSpawnMetrics::new();
         let mut state = crate::runtime::state::RuntimeState::new_with_metrics(metrics.clone());
         let root = state.create_root_region(Budget::INFINITE);
-        let (task_id, _handle, spawn_effects) = state
-            .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async {})
-            .expect("create unpublished task infrastructure");
-        let cx_inner = Arc::downgrade(
-            state
-                .task(task_id)
-                .and_then(|record| record.cx_inner.as_ref())
-                .expect("task context is linked before publication"),
-        );
-
         let mailbox = Arc::new(SpawnMailbox::new());
         let liveness = Arc::new(());
         let gateway = Arc::new(SpawnGateway::new(
@@ -3529,12 +3519,23 @@ mod tests {
             None,
             Arc::downgrade(&liveness),
         ));
-        let admitted = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(gateway));
-        assert!(admitted.try_reserve());
-        admitted.publish_reserved(AdmittedTask::pending(task_id, cx_inner.clone()));
+        let admitted = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
+            &gateway,
+        )));
+        let provisional = mailbox.allocate_task_id();
+        let parts = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
+            .with_admitted_slot(Arc::clone(&admitted))
+            .into_parts();
+        let SpawnAdmission::Admitted {
+            cancel_publication: publication,
+            spawn_effects,
+            ..
+        } = state.admit_spawn_request(parts)
+        else {
+            panic!("expected admission to remain unpublished");
+        };
         let pending_reason = register_pending_cancel_rendezvous(&admitted);
         *pending_reason.write() = Some(CancelReason::race_loser());
-        let publication = AdmissionPublication::new(cx_inner, Some(Arc::clone(&admitted)));
 
         drop(liveness);
         let lane_published = Arc::new(AtomicBool::new(false));
