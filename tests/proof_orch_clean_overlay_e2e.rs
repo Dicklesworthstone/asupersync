@@ -212,9 +212,9 @@ fn scenario_clean_head_admits_selected_clean_path() {
 
 #[test]
 fn unsupported_capability_blocks_before_any_overlay_command_is_rendered() {
-    let request = request(vec![], &[SELECTED_DIRTY], vec![], false);
+    let unsupported_request = request(vec![], &[SELECTED_DIRTY], vec![], false);
     let capability = unsupported_capability();
-    let (manifest, command) = plan_with_capability(&request, &capability);
+    let (manifest, command) = plan_with_capability(&unsupported_request, &capability);
 
     assert!(
         !manifest.blocked,

@@ -2042,6 +2042,7 @@ mod tests {
         unlocked_drops: Arc<AtomicUsize>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl std::task::Wake for ReentrantWatchWakerDrop {
         fn wake(self: Arc<Self>) {}
     }

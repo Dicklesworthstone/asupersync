@@ -2938,6 +2938,7 @@ mod tests {
         on_drop: Box<dyn Fn() + Send + Sync>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for PoolWakerDropProbe {
         fn wake(self: Arc<Self>) {}
 

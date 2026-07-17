@@ -14764,7 +14764,7 @@ mod tests {
         good_handle.abort_with_reason(CancelReason::shutdown());
         let bad_reason = CancelReason::shutdown();
         bad_handle.abort_with_reason(bad_reason.clone());
-        let mut worker = scheduler.take_workers().remove(0);
+        let worker = scheduler.take_workers().remove(0);
 
         worker.drain_handle_cancel_requests();
 

@@ -435,7 +435,7 @@ fn atp_bench_rq_auth_keys_use_protected_stdin_only() {
         }
     }
 
-    assert!(resync.contains("CHANGES=\"${CHANGES:-0pct}\""));
+    assert!(resync.contains(concat!("CHANGES=\"$", "{", "CHANGES:-0pct", "}\"")));
     assert!(resync.contains("ATP_TRANSPORT must be rq"));
     assert!(resync.contains("ensure_rq_auth_secret"));
     assert_eq!(

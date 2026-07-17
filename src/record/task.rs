@@ -2475,8 +2475,7 @@ mod tests {
             task(),
             Budget::INFINITE,
         )));
-        let cx: crate::cx::Cx<crate::cx::cap::All> =
-            crate::cx::Cx::from_inner(Arc::clone(&inner));
+        let cx: crate::cx::Cx<crate::cx::cap::All> = crate::cx::Cx::from_inner(Arc::clone(&inner));
         let mut record = TaskRecord::new(task(), region(), Budget::INFINITE);
         record.set_cx_inner(Arc::clone(&inner));
         record.start_running();
@@ -2612,6 +2611,7 @@ mod tests {
             drops_under_outer_lock: Arc<AtomicUsize>,
         }
 
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for DropProbe {
             fn wake(self: Arc<Self>) {}
         }

@@ -982,6 +982,7 @@ mod tests {
         unlocked_drops: Arc<AtomicUsize>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for RateLimitWakerDropProbe {
         fn wake(self: Arc<Self>) {}
     }
@@ -1030,6 +1031,7 @@ mod tests {
         drops: Arc<AtomicUsize>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for PanickingDropRateLimitWaker {
         fn wake(self: Arc<Self>) {}
     }

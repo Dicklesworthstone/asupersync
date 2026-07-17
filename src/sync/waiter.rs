@@ -87,26 +87,26 @@ impl Wake for DeferredWake {
 ///
 /// The caller must still retire this value outside any internal lock: dropping
 /// the final relay owner also drops the original task waker.
-pub(crate) struct DeferredWaker {
+pub(super) struct DeferredWaker {
     relay: Arc<DeferredWake>,
 }
 
 impl DeferredWaker {
     /// Wrap an already-owned task waker in the known relay representation.
-    pub(crate) fn new(waker: Waker) -> Self {
+    pub(super) fn new(waker: Waker) -> Self {
         Self {
             relay: Arc::new(DeferredWake { inner: waker }),
         }
     }
 
     /// Whether the original task waker targets the same task as `other`.
-    pub(crate) fn will_wake(&self, other: &Waker) -> bool {
+    pub(super) fn will_wake(&self, other: &Waker) -> bool {
         self.relay.inner.will_wake(other)
     }
 
     /// Produce a wake handle without invoking the original RawWaker's clone
     /// callback. The returned handle must be woken or retired after unlock.
-    pub(crate) fn clone_waker(&self) -> Waker {
+    pub(super) fn clone_waker(&self) -> Waker {
         Waker::from(Arc::clone(&self.relay))
     }
 }
@@ -119,7 +119,7 @@ impl DeferredWaker {
 /// holding an internal queue lock, then release that lock before waking or
 /// retiring the returned owner. They must also retire later slot replacements
 /// or removals outside the same lock.
-pub(crate) fn clone_waker_deferred(slot: &mut Waker) -> Waker {
+fn clone_waker_deferred(slot: &mut Waker) -> Waker {
     let original = std::mem::replace(slot, Waker::noop().clone());
     let relay = DeferredWaker::new(original);
     *slot = relay.clone_waker();

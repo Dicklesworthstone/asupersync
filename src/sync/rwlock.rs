@@ -1606,6 +1606,7 @@ mod tests {
         state_was_unlocked: StdArc<AtomicBool>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl std::task::Wake for StateLockDropProbe {
         fn wake(self: StdArc<Self>) {}
     }
@@ -5269,7 +5270,9 @@ mod metamorphic_tests {
         let regions_writer = regions
             .try_write()
             .expect("regions write (valid order, first)");
-        let tasks_writer = tasks.try_write().expect("tasks write (valid order, second)");
+        let tasks_writer = tasks
+            .try_write()
+            .expect("tasks write (valid order, second)");
 
         // (1) try_read unavailable (writer active) -> Locked, not panic.
         let read_locked = matches!(regions.try_read(), Err(TryReadError::Locked));

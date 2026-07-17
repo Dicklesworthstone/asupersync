@@ -6736,7 +6736,7 @@ fn validate_quic_delta_ack(
         ack.delta_destination_root,
     );
     match (offered, response) {
-        (None, (None, None, None)) | (Some(_), (None, None, None)) => Ok(None),
+        (None | Some(_), (None, None, None)) => Ok(None),
         (None, _) => Err(QuicTransportError::HandshakeRejected(
             "receiver returned unsolicited QUIC delta binding fields".to_string(),
         )),

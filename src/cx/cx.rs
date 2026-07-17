@@ -1304,7 +1304,7 @@ impl<Caps> Cx<Caps> {
         mut self,
         gateway: Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
     ) -> Self {
-        self.inner.write().cancel_gateway = gateway.clone();
+        self.inner.write().cancel_gateway.clone_from(&gateway);
         Arc::make_mut(&mut self.handles).spawn_gateway = gateway;
         self
     }
