@@ -1084,6 +1084,7 @@ mod tests {
         state_was_unlocked: Arc<AtomicBool>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl std::task::Wake for StateLockDropProbe {
         fn wake(self: Arc<Self>) {}
     }
@@ -3915,253 +3916,90 @@ mod tests {
 
     #[test]
     fn audit_mutex_lock_cancel_cascade_prompt_detection() {
-        // Audit: Mutex::lock() under cancel cascade: when a task is awaiting Mutex::lock()
-        // and parent region is cancelled, does the task observe Err(Cancelled) within ~1
-        // quantum (correct: prompt) or only on next held-lock release (incorrect: arbitrary
-        // delay)? Per asupersync semantics.
-
         init_test("audit_mutex_lock_cancel_cascade_prompt_detection");
 
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-        use std::time::{Duration, Instant};
-
         println!("⚡ CANCEL CASCADE PROMPT DETECTION AUDIT");
-        println!("  - Target: Verify lock() observes cancellation within ~1 quantum");
-        println!("  - Correct: Immediate cancel detection on each poll");
-        println!("  - Incorrect: Only detects cancel on lock release");
-        println!("  - Expected: cx.checkpoint() called FIRST in LockFuture::poll");
-        println!();
-
-        // Phase 1: Verify cancellation detection architecture
-        println!("📋 IMPLEMENTATION VERIFICATION:");
-        println!("  - LockFuture::poll() call order:");
-        println!("    1. cx.checkpoint() - CANCEL CHECK (line 470) ✅");
-        println!("    2. Lock acquisition logic");
-        println!("    3. Waiter registration");
-        println!("  - Cancel check happens BEFORE lock state check");
-        println!("  - cleanup_waiter() called on cancellation");
-
-        // Phase 2: Test immediate cancel detection (no lock holder)
-        println!();
-        println!("🔬 IMMEDIATE CANCEL DETECTION TEST:");
+        println!("  - Target: observe cancellation on the next lock-future poll");
+        println!("  - Oracle: exact poll and waiter-state transitions, not wall time");
 
         let mutex = Arc::new(Mutex::new(42i32));
-        let immediate_cancelled = block_on(async {
-            let cx = test_cx();
-            // Cancel context immediately
-            cx.set_cancel_requested(true);
-
-            // Attempt to lock - should fail immediately
-            let start = Instant::now();
-            let result = mutex.lock(&cx).await;
-            let duration = start.elapsed();
-
-            (
-                matches!(result, Err(LockError::Cancelled)),
-                format!("{result:?}"),
-                duration,
-            )
-        });
-
-        crate::assert_with_log!(
-            immediate_cancelled.0,
-            "Immediate cancel should return Cancelled error",
-            "Err(Cancelled)",
-            immediate_cancelled.1
+        let immediate_cx = test_cx();
+        immediate_cx.set_cancel_requested(true);
+        let mut immediate = mutex.lock(&immediate_cx);
+        let immediate_result = poll_once(&mut immediate).expect("cancelled lock poll is ready");
+        assert!(matches!(immediate_result, Err(LockError::Cancelled)));
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "immediate cancellation queues no waiter"
         );
-
-        crate::assert_with_log!(
-            immediate_cancelled.2 < Duration::from_millis(1),
-            "Immediate cancel detection should be very fast",
-            "< 1ms",
-            format!("{:.3}ms", immediate_cancelled.2.as_secs_f64() * 1000.0)
-        );
-
-        println!(
-            "  - Immediate cancel: detected in {:.1}μs ✅",
-            immediate_cancelled.2.as_nanos() as f64 / 1000.0
-        );
-
-        // Phase 3: Test cancel cascade while waiting for held lock
-        println!();
-        println!("🔒 CANCEL CASCADE DURING WAIT TEST:");
 
         let cascade_mutex = Arc::new(Mutex::new(100u32));
-        let barrier = Arc::new(Barrier::new(3)); // holder + waiter + coordinator
-        let cancel_detected = Arc::new(AtomicBool::new(false));
+        let holder_cx = test_cx();
+        let mut holder = cascade_mutex.lock(&holder_cx);
+        let holder_guard = poll_once(&mut holder)
+            .expect("uncontended holder poll is ready")
+            .expect("holder acquires mutex");
 
-        // Lock holder thread - holds lock for extended period
-        let holder_mutex = Arc::clone(&cascade_mutex);
-        let holder_barrier = Arc::clone(&barrier);
-        let holder_handle = thread::spawn(move || {
-            let cx = test_cx();
-            block_on(async {
-                let _guard = holder_mutex
-                    .lock(&cx)
-                    .await
-                    .expect("Holder should acquire lock");
+        let waiter_cx = test_cx();
+        let mut waiter = cascade_mutex.lock(&waiter_cx);
+        assert!(poll_once(&mut waiter).is_none(), "held mutex queues waiter");
+        assert_eq!(cascade_mutex.waiters(), 1);
 
-                // Signal that lock is held
-                holder_barrier.wait();
-
-                // Hold lock for significant time (simulating long critical section)
-                thread::sleep(Duration::from_millis(100));
-
-                println!("  - Lock holder: releasing after 100ms");
-                // Guard drops here, releasing lock
-            });
-        });
-
-        // Waiter thread - waits for lock then gets cancelled
-        let waiter_mutex = Arc::clone(&cascade_mutex);
-        let waiter_barrier = Arc::clone(&barrier);
-        let waiter_cancel_detected = Arc::clone(&cancel_detected);
-
-        let waiter_handle = thread::spawn(move || {
-            let cx = test_cx();
-            block_on(async {
-                // Wait for holder to acquire lock
-                waiter_barrier.wait();
-
-                // Brief delay to ensure lock is held
-                thread::sleep(Duration::from_millis(10));
-
-                println!("  - Waiter: starting lock() on held mutex");
-
-                // Start lock attempt (will wait because lock is held)
-                let lock_future = waiter_mutex.lock(&cx);
-
-                // Let it wait briefly, then cancel
-                thread::sleep(Duration::from_millis(20));
-                println!("  - Waiter: triggering cancellation after 20ms wait");
-
-                let cancel_start = Instant::now();
-                cx.set_cancel_requested(true);
-
-                // Complete lock attempt - should detect cancel promptly
-                let result = lock_future.await;
-                let cancel_duration = cancel_start.elapsed();
-
-                // Record results
-                waiter_cancel_detected.store(true, Ordering::Release);
-
-                println!(
-                    "  - Waiter: cancel detected in {:.1}μs",
-                    cancel_duration.as_nanos() as f64 / 1000.0
-                );
-
-                (
-                    matches!(result, Err(LockError::Cancelled)),
-                    format!("{result:?}"),
-                    cancel_duration,
-                )
-            })
-        });
-
-        // Coordinate the test
-        barrier.wait();
-
-        // Wait for completion
-        holder_handle.join().expect("Holder should complete");
-        let waiter_result = waiter_handle.join().expect("Waiter should complete");
-
-        // Phase 4: Verify prompt cancel cascade detection
-        crate::assert_with_log!(
-            waiter_result.0,
-            "Waiter should observe Cancelled error",
-            "Err(Cancelled)",
-            waiter_result.1
+        waiter_cx.set_cancel_requested(true);
+        let waiter_result = poll_once(&mut waiter).expect("cancel is observed on the next poll");
+        assert!(matches!(waiter_result, Err(LockError::Cancelled)));
+        assert_eq!(cascade_mutex.waiters(), 0, "cancel removes queued waiter");
+        assert!(
+            matches!(cascade_mutex.try_lock(), Err(TryLockError::Locked)),
+            "cancellation resolves without waiting for holder release"
+        );
+        drop(holder_guard);
+        drop(
+            cascade_mutex
+                .try_lock()
+                .expect("cancel cleanup leaves no grant residue"),
         );
 
-        let cancel_detection_duration = waiter_result.2;
+        const STRESS_ITERATIONS: usize = 50;
+        let stress_mutex = Arc::new(Mutex::new(()));
+        let stress_holder_cx = test_cx();
+        let mut stress_holder = stress_mutex.lock(&stress_holder_cx);
+        let stress_guard = poll_once(&mut stress_holder)
+            .expect("stress holder poll is ready")
+            .expect("stress holder acquires mutex");
 
-        // Cancel detection should be prompt (within a few milliseconds)
-        crate::assert_with_log!(
-            cancel_detection_duration < Duration::from_millis(5),
-            "Cancel cascade should be detected within ~1 quantum (~5ms)",
-            "< 5ms",
-            format!("{:.3}ms", cancel_detection_duration.as_secs_f64() * 1000.0)
-        );
-
-        crate::assert_with_log!(
-            cancel_detected.load(Ordering::Acquire),
-            "Cancel detection should be recorded",
-            true,
-            cancel_detected.load(Ordering::Acquire)
-        );
-
-        // Phase 5: Stress test rapid cancel detection
-        println!();
-        println!("🚀 RAPID CANCEL DETECTION STRESS TEST:");
-
-        let stress_iterations = 50;
-        let prompt_cancels = Arc::new(AtomicU32::new(0));
-
-        for iteration in 0..stress_iterations {
-            let stress_mutex = Arc::new(Mutex::new(iteration));
-            let prompt_cancels_iter = Arc::clone(&prompt_cancels);
-
-            let _stress_result = block_on(async {
-                let cx = test_cx();
-                let cancel_start = Instant::now();
-
-                // Cancel immediately
-                cx.set_cancel_requested(true);
-
-                let result = stress_mutex.lock(&cx).await;
-                let detection_time = cancel_start.elapsed();
-
-                if matches!(result, Err(LockError::Cancelled))
-                    && detection_time < Duration::from_millis(1)
-                {
-                    prompt_cancels_iter.fetch_add(1, Ordering::Relaxed);
-                }
-
-                (matches!(result, Err(LockError::Cancelled)), detection_time)
-            });
+        let waiter_cxs: Vec<_> = (0..STRESS_ITERATIONS).map(|_| test_cx()).collect();
+        let mut waiters: Vec<_> = waiter_cxs.iter().map(|cx| stress_mutex.lock(cx)).collect();
+        for lock in &mut waiters {
+            assert!(poll_once(lock).is_none());
         }
+        assert_eq!(stress_mutex.waiters(), STRESS_ITERATIONS);
 
-        let final_prompt_cancels = prompt_cancels.load(Ordering::Acquire);
-        let prompt_percentage = (final_prompt_cancels as f64 / stress_iterations as f64) * 100.0;
-
-        println!("  - Stress iterations: {}", stress_iterations);
-        println!(
-            "  - Prompt cancels: {}/{} ({:.1}%)",
-            final_prompt_cancels, stress_iterations, prompt_percentage
+        for cx in &waiter_cxs {
+            cx.set_cancel_requested(true);
+        }
+        for (cancelled, lock) in waiters.iter_mut().rev().enumerate() {
+            let result = poll_once(lock).expect("cancelled waiter is ready on next poll");
+            assert!(matches!(result, Err(LockError::Cancelled)));
+            assert_eq!(
+                stress_mutex.waiters(),
+                STRESS_ITERATIONS - cancelled - 1,
+                "reverse-order waiter cleanup is exact"
+            );
+        }
+        assert!(
+            stress_mutex.is_locked(),
+            "holder remains live during cleanup"
+        );
+        drop(stress_guard);
+        drop(
+            stress_mutex
+                .try_lock()
+                .expect("stress cleanup leaves no grant residue"),
         );
 
-        crate::assert_with_log!(
-            prompt_percentage >= 95.0,
-            "At least 95% of cancels should be prompt",
-            ">= 95%",
-            format!("{:.1}%", prompt_percentage)
-        );
-
-        // Phase 6: Final verification
-        println!();
-        println!("✅ SOUND: Cancel cascade detection is prompt");
-        println!("  - Immediate cancel: < 1ms detection ✅");
-        println!("  - Cascade cancel: detected within 1 quantum ✅");
-        println!("  - Architecture: cx.checkpoint() called FIRST in poll ✅");
-        println!("  - Cleanup: waiter properly removed on cancel ✅");
-        println!(
-            "  - Stress test: {:.1}% prompt cancellation ✅",
-            prompt_percentage
-        );
-        println!();
-        println!("  - Implementation correctness:");
-        println!("    • LockFuture::poll() checks cancellation FIRST ✅");
-        println!("    • No arbitrary delays waiting for lock release ✅");
-        println!("    • cleanup_waiter() properly removes waiters ✅");
-        println!("    • Cancel responsiveness: ~1 quantum (not lock-dependent) ✅");
-        println!();
-        println!("  - Asupersync semantics compliance:");
-        println!("    • Cancel cascades are prompt, not deferred ✅");
-        println!("    • Structured concurrency: parent cancel → child cancel ✅");
-        println!("    • No lock-holder dependency for cancel detection ✅");
-        println!("    • Cancellation protocol: request → drain (immediate) ✅");
+        println!("✅ SOUND: {STRESS_ITERATIONS} queued waiters cancelled on their next poll");
 
         crate::test_complete!("audit_mutex_lock_cancel_cascade_prompt_detection");
     }

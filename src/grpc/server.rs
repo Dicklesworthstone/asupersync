@@ -6159,9 +6159,10 @@ mod tests {
 
             let server = Server::builder().build();
 
-            // Create request with very short deadline
+            // Leave enough time for the handler's first poll even when this
+            // test runs inside the heavily concurrent all-target proof lane.
             let mut metadata = Metadata::new();
-            metadata.insert("grpc-timeout", "10m"); // 10 milliseconds
+            metadata.insert("grpc-timeout", "1S");
             let request = Request::with_metadata(Bytes::from_static(b"test"), metadata);
 
             let handler_completed = Arc::new(AtomicBool::new(false));
@@ -6173,7 +6174,7 @@ mod tests {
                 // Once a handler enters a blocking operation, async timeout
                 // races cannot preempt the thread. Cooperative handlers are
                 // covered by `audit_deadline_enforcement_works_for_async_operations`.
-                std::thread::sleep(Duration::from_millis(25));
+                std::thread::sleep(Duration::from_millis(1_250));
 
                 handler_completed_clone.store(true, Ordering::Relaxed);
                 Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
@@ -6192,7 +6193,7 @@ mod tests {
                 "EXPECTED: Blocking handlers cannot be cancelled by async timeouts"
             );
             assert!(
-                start_time.elapsed() > Duration::from_millis(10),
+                start_time.elapsed() > Duration::from_secs(1),
                 "Handler ran past deadline due to blocking operation"
             );
 
@@ -6210,9 +6211,10 @@ mod tests {
 
             let server = Server::builder().build();
 
-            // Create request with short deadline
+            // Leave enough time for the handler's first poll under concurrent
+            // remote test load, then keep it pending past the deadline.
             let mut metadata = Metadata::new();
-            metadata.insert("grpc-timeout", "5m"); // 5 milliseconds
+            metadata.insert("grpc-timeout", "1S");
             let request = Request::with_metadata(Bytes::from_static(b"test"), metadata);
 
             let handler_started = Arc::new(AtomicBool::new(false));
@@ -6224,7 +6226,7 @@ mod tests {
             let result = block_on(server.dispatch_unary(request, move |req| async move {
                 handler_started_clone.store(true, Ordering::Relaxed);
 
-                // Cooperative async wait that remains pending past the 5ms
+                // Cooperative async wait that remains pending past the 1s
                 // grpc-timeout budget, giving dispatch_unary's timeout race a
                 // deterministic cancellation point. A finite sleep can become
                 // ready alongside the timeout under scheduler delay; this path

@@ -975,7 +975,8 @@ mod tests {
         drop(waker);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 
-        assert!(poll_with_waker(&mut notified, Waker::noop()).is_pending());
+        let replacement_waker = fresh_waker();
+        assert!(poll_with_waker(&mut notified, &replacement_waker).is_pending());
 
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
@@ -989,7 +990,7 @@ mod tests {
                 waiters.entries[index]
                     .waker
                     .as_ref()
-                    .is_some_and(|queued| queued.will_wake(Waker::noop()))
+                    .is_some_and(|queued| queued.will_wake(&replacement_waker))
             );
         }
 
