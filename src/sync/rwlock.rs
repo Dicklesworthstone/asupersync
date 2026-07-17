@@ -311,11 +311,6 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn try_acquire_read_state(&self) -> Result<(), TryReadError> {
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = self.rank {
-            lock_ordering::check_acquire(self.name, rank);
-        }
-
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
@@ -323,6 +318,14 @@ impl<T> RwLock<T> {
 
         if state.writer_active || state.writer_waiters > 0 {
             return Err(TryReadError::Locked);
+        }
+
+        // Enforce lock ordering only on the success path, under the state guard
+        // and immediately before the transition, mirroring the async read
+        // acquisition. A failed try_read must return Err rather than panic with
+        // ASUP-E205 or record a phantom acquisition edge (br-asupersync-1dydby).
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
         }
 
         state.readers += 1;
@@ -338,11 +341,6 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn try_acquire_write_state(&self) -> Result<(), TryWriteError> {
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = self.rank {
-            lock_ordering::check_acquire(self.name, rank);
-        }
-
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryWriteError::Poisoned);
@@ -350,6 +348,14 @@ impl<T> RwLock<T> {
 
         if state.writer_active || state.readers > 0 || state.writer_waiters > 0 {
             return Err(TryWriteError::Locked);
+        }
+
+        // Enforce lock ordering only on the success path, under the state guard
+        // and immediately before the transition, mirroring the async write
+        // acquisition. A failed try_write must return Err rather than panic with
+        // ASUP-E205 or record a phantom acquisition edge (br-asupersync-1dydby).
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
         }
 
         state.writer_active = true;
@@ -5242,5 +5248,88 @@ mod metamorphic_tests {
         assert_eq!(state.writer_waiters, 0);
         assert!(!state.writer_active);
         crate::test_complete!("queued_write_handoff_checks_lock_order_before_recording_grant");
+    }
+
+    /// br-asupersync-1dydby: nonblocking `try_read`/`try_write` calls that fail
+    /// eligibility (a writer is active) must return their `Err` variant, not
+    /// panic ASUP-E205 or record a phantom acquisition edge, even when the
+    /// caller holds a higher-ranked (Tasks) lock. An *available* lower-ranked
+    /// acquisition must still enforce the ordering panic.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn failed_try_read_write_returns_err_without_false_lock_order_panic() {
+        init_test("failed_try_read_write_returns_err_without_false_lock_order_panic");
+        crate::sync::lock_ordering::clear_held_locks();
+
+        // Acquire Regions(30) then Tasks(40) -- valid ascending order -- so the
+        // caller legitimately holds the higher-ranked Tasks lock. A held writer
+        // on `regions` makes both nonblocking views unavailable.
+        let regions = RwLock::with_name("regions_table", 0u32);
+        let tasks = RwLock::with_name("tasks_queue", 0u32);
+        let regions_writer = regions
+            .try_write()
+            .expect("regions write (valid order, first)");
+        let tasks_writer = tasks.try_write().expect("tasks write (valid order, second)");
+
+        // (1) try_read unavailable (writer active) -> Locked, not panic.
+        let read_locked = matches!(regions.try_read(), Err(TryReadError::Locked));
+        crate::assert_with_log!(
+            read_locked,
+            "unavailable lower-ranked try_read returns Locked, not ASUP-E205",
+            true,
+            read_locked
+        );
+
+        // (2) try_write unavailable (writer active) -> Locked, not panic.
+        let write_locked = matches!(regions.try_write(), Err(TryWriteError::Locked));
+        crate::assert_with_log!(
+            write_locked,
+            "unavailable lower-ranked try_write returns Locked, not ASUP-E205",
+            true,
+            write_locked
+        );
+
+        // (3) Available read + violation -> must still panic ASUP-E205.
+        let avail_read = RwLock::with_name("regions_table", 0u32);
+        let read_enforced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = avail_read.try_read();
+        }))
+        .is_err();
+        crate::assert_with_log!(
+            read_enforced,
+            "available lower-ranked try_read still enforces ordering panic",
+            true,
+            read_enforced
+        );
+
+        // (4) Available write + violation -> must still panic ASUP-E205.
+        let avail_write = RwLock::with_name("regions_table", 0u32);
+        let write_enforced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = avail_write.try_write();
+        }))
+        .is_err();
+        crate::assert_with_log!(
+            write_enforced,
+            "available lower-ranked try_write still enforces ordering panic",
+            true,
+            write_enforced
+        );
+
+        drop(tasks_writer);
+        drop(regions_writer);
+        crate::sync::lock_ordering::clear_held_locks();
+
+        // The rejected acquisitions must not have mutated state or recorded an
+        // edge: with the higher-ranked locks released, they acquire cleanly.
+        let read_clean = avail_read.try_read().is_ok();
+        let write_clean = avail_write.try_write().is_ok();
+        crate::assert_with_log!(
+            read_clean && write_clean,
+            "rejected try_read/try_write left the locks acquirable (no phantom state)",
+            true,
+            read_clean && write_clean
+        );
+        crate::sync::lock_ordering::clear_held_locks();
+        crate::test_complete!("failed_try_read_write_returns_err_without_false_lock_order_panic");
     }
 }

@@ -237,17 +237,21 @@ impl<T> Mutex<T> {
     /// ```
     #[inline]
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = self.rank {
-            lock_ordering::check_acquire(self.name, rank);
-        }
-
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryLockError::Poisoned);
         }
         if state.locked || state.granted_waiter.is_some() || !state.waiters.is_empty() {
             return Err(TryLockError::Locked);
+        }
+
+        // Enforce lock ordering only on the success path, under the state guard
+        // and immediately before the transition, mirroring the async
+        // acquisition path. A failed try_lock must return Err rather than panic
+        // with ASUP-E205 or record a phantom acquisition edge
+        // (br-asupersync-1dydby).
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
         }
 
         state.locked = true;
@@ -804,11 +808,6 @@ impl<T> OwnedMutexGuard<T> {
     /// Tries to acquire the mutex without waiting.
     #[inline]
     pub fn try_lock(mutex: Arc<Mutex<T>>) -> Result<Self, TryLockError> {
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = mutex.rank {
-            lock_ordering::check_acquire(mutex.name, rank);
-        }
-
         {
             let mut state = mutex.state.lock();
             if mutex.is_poisoned() {
@@ -817,6 +816,15 @@ impl<T> OwnedMutexGuard<T> {
             if state.locked || state.granted_waiter.is_some() || !state.waiters.is_empty() {
                 return Err(TryLockError::Locked);
             }
+
+            // Enforce lock ordering only on the success path, under the state
+            // guard and immediately before the transition. A failed try_lock
+            // must return Err rather than panic with ASUP-E205 or record a
+            // phantom acquisition edge (br-asupersync-1dydby).
+            if let Some(rank) = mutex.rank {
+                lock_ordering::check_acquire(mutex.name, rank);
+            }
+
             state.locked = true;
         }
 
@@ -1355,6 +1363,82 @@ mod tests {
         let is_locked = matches!(result, Err(TryLockError::Locked));
         crate::assert_with_log!(is_locked, "should be locked", true, is_locked);
         crate::test_complete!("test_mutex_try_lock_fail");
+    }
+
+    /// br-asupersync-1dydby: a `try_lock` that fails eligibility (already locked
+    /// or poisoned) must return its `Err` variant, not panic ASUP-E205 or record
+    /// a phantom acquisition edge, even when the caller already holds a
+    /// higher-ranked (Tasks) lock. An *available* lower-ranked acquisition must
+    /// still enforce the ordering panic.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn failed_try_lock_returns_err_without_false_lock_order_panic() {
+        init_test("failed_try_lock_returns_err_without_false_lock_order_panic");
+        lock_ordering::clear_held_locks();
+
+        // Acquire Regions(30) then Tasks(40) -- a valid ascending order -- so the
+        // caller legitimately holds the higher-ranked Tasks lock.
+        let regions = Mutex::with_name("regions_table", 0u32);
+        let tasks = Mutex::with_name("tasks_queue", 0u32);
+        let regions_guard = regions
+            .try_lock()
+            .expect("regions acquires first (valid order)");
+        let tasks_guard = tasks
+            .try_lock()
+            .expect("tasks acquires second (valid order)");
+
+        // (1) Unavailable: `regions` is already locked. A nonblocking retry must
+        // return Locked, not panic -- the eligibility check precedes the order
+        // check now.
+        let locked = matches!(regions.try_lock(), Err(TryLockError::Locked));
+        crate::assert_with_log!(
+            locked,
+            "unavailable lower-ranked try_lock returns Locked, not ASUP-E205",
+            true,
+            locked
+        );
+
+        // (2) Poisoned: a separate poisoned Regions mutex must return Poisoned,
+        // not panic, while Tasks is held.
+        let poisoned = Mutex::with_name("regions_table", 0u32);
+        poisoned.poison_for_testing();
+        let is_poisoned = matches!(poisoned.try_lock(), Err(TryLockError::Poisoned));
+        crate::assert_with_log!(
+            is_poisoned,
+            "poisoned lower-ranked try_lock returns Poisoned, not ASUP-E205",
+            true,
+            is_poisoned
+        );
+
+        // (3) Available: acquiring a fresh, available Regions lock while holding
+        // Tasks IS a backwards ordering violation and must still panic ASUP-E205.
+        let available = Mutex::with_name("regions_table", 0u32);
+        let enforced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = available.try_lock();
+        }))
+        .is_err();
+        crate::assert_with_log!(
+            enforced,
+            "available lower-ranked try_lock still enforces ordering panic",
+            true,
+            enforced
+        );
+
+        drop(tasks_guard);
+        drop(regions_guard);
+        lock_ordering::clear_held_locks();
+
+        // The rejected acquisition must not have mutated state or recorded an
+        // edge: with the higher-ranked locks released, it acquires cleanly.
+        let reacquired = available.try_lock().is_ok();
+        crate::assert_with_log!(
+            reacquired,
+            "rejected try_lock left the lock acquirable (no phantom state)",
+            true,
+            reacquired
+        );
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("failed_try_lock_returns_err_without_false_lock_order_panic");
     }
 
     #[test]
