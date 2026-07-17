@@ -5183,10 +5183,10 @@ impl QuicLink {
         operation: &'static str,
         reason: &'static str,
     ) -> Result<(), QuicTransportError> {
-        let started = Instant::now();
+        let deadline = cx.now() + self.idle_timeout;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            if started.elapsed() >= self.idle_timeout {
+            if cx.now() >= deadline {
                 return Err(QuicTransportError::Timeout {
                     operation,
                     timeout: self.idle_timeout,
