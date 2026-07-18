@@ -24,7 +24,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_LOG: info
-  RUST_TOOLCHAIN: nightly-2026-02-05
+  # Keep in sync with rust-toolchain.toml (issue #53: CI must exercise the
+  # same pinned nightly that local/rch/downstream builds resolve).
+  RUST_TOOLCHAIN: nightly-2026-07-05
   RCH_BIN: ./scripts/rch_ci_fallback.sh
 
 jobs:
