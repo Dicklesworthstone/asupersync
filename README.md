@@ -1296,8 +1296,8 @@ Asupersync has formal semantics backing its engineering.
 | **Outcomes** | Severity lattice: `Ok < Err < Cancelled < Panicked` | Monotone aggregation, no "recovery" from worse states |
 | **Concurrency** | Near-semiring: `join (⊗)` and `race (⊕)` with laws | Lawful rewrites, DAG optimization |
 | **Budgets** | Tropical semiring: `(ℝ∪{∞}, min, +)` | Critical path computation, budget propagation |
-| **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
-| **Traces** | Mazurkiewicz equivalence (partial orders) | Optimal DPOR, stable replay |
+| **Obligations** | Linear-logic discipline: resources resolved exactly once (Rust is affine, so enforcement is `#[must_use]` + runtime leak detection, not purely static) | Leaked obligations are loudly detected at region close instead of silently dropped |
+| **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Completeness theorem: sufficient budgets guarantee termination |
 | **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption control without fairness blind spots |
 | **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that cancellation drain reaches quiescence |
