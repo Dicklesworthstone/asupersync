@@ -207,7 +207,9 @@ Two traces are equivalent (`~`) when they are related by a finite sequence of ad
 Asupersync’s “observational equivalence” (`≃`) is intended to respect this quotient:
 we care about equivalence classes (partial orders), not raw interleavings.
 
-This is the semantic backbone for “optimal DPOR” and stable trace replay (§8).
+This is the semantic backbone for the **optimal-DPOR design target** and stable
+trace replay (§8). It does not by itself establish that the current explorer
+implements an optimal-DPOR algorithm.
 
 ### 1.9 Linear resources (obligations) as a discipline
 
@@ -1649,10 +1651,19 @@ spawned = completed
   TaskCompleted{t1} ∈ trace ∧ TaskCompleted{t2} ∈ trace
 ```
 
-### 8.1 Schedule exploration: optimal DPOR (one trace per equivalence class)
+### 8.1 Schedule exploration target: optimal DPOR (one trace per equivalence class)
 
 Because `≃` quotients by independence, the right exploration target is **one execution per Mazurkiewicz trace** (not per interleaving).
 This is exactly what *optimal DPOR* algorithms achieve.
+
+Current implementation boundary: `src/lab/explorer.rs` detects races in a
+completed trace and hashes the parent seed plus race positions to select a new
+deterministic run. It does not restore the exact prefix at a backtracking state
+and force the alternative enabled event. Its sleep-set structure deduplicates
+observed race patterns rather than implementing a conventional state-indexed
+DPOR sleep set. The shipped explorer is therefore DPOR-style, race-informed
+schedule fuzzing with trace-class telemetry; one execution per reachable class
+remains a design target, not a current completeness guarantee.
 
 At a high level:
 
@@ -1660,7 +1671,9 @@ At a high level:
 * when a dependent reordering is discovered, add a backtrack point,
 * use source sets / sleep sets / wakeup trees to avoid redundant schedules.
 
-Result: exploration cost becomes proportional to the number of equivalence classes, not factorial in the number of steps.
+Target result for a complete implementation: exploration cost becomes
+proportional to the number of equivalence classes, not factorial in the number
+of steps.
 
 ### 8.2 Static complement: abstract interpretation for obligation leaks
 

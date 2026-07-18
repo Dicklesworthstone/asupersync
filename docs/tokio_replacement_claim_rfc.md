@@ -6,28 +6,29 @@
 **Date**: 2026-03-04
 **RFC Version**: 1.0.0
 **Status**: DRAFT
-**Purpose**: Compile the canonical replacement-claim RFC establishing that
-asupersync provides a comprehensive, evidence-backed replacement for the
-Tokio async runtime ecosystem, with explicit scope, known limitations,
-governance decisions, and sign-off record.
+**Purpose**: Compile a proposed replacement-claim RFC, with explicit scope,
+known limitations, governance decisions, and sign-off criteria. This draft does
+not establish that asupersync is a comprehensive Tokio-ecosystem replacement.
 
 ---
 
 ## 1. Executive Summary
 
-The asupersync runtime provides a **77.4% full-parity** replacement for the
-Tokio async ecosystem across 84 capability entries spanning 13 capability
-domains. The replacement preserves all 5 core invariants (INV-1 through INV-5)
-and adds structured concurrency guarantees absent from Tokio.
+The draft internal capability matrix classifies **77.4%** of 84 capability entries as
+"Full" across 13 capability domains. Those classifications are an internal
+inventory, not an independently reproduced parity result, and must not be read
+as proof that the runtime replaces the Tokio ecosystem. The invariant rows
+refer to properties of the abstract model and scoped runtime evidence; they do
+not establish a refinement proof for every production surface.
 
-Key metrics:
+Draft inventory metrics (not independent validation results):
 - **65 Full** parity capabilities (77.4%)
 - **9 Partial** parity capabilities (10.7%)
 - **7 Adapter** bridge capabilities (8.3%)
 - **3 Unsupported** capabilities (3.6%)
 - **10 known limitations** (0 Critical, 2 High, 5 Medium, 3 Low)
-- **6 migration lab archetypes** validated with friction KPIs
-- **12 benchmark suites** with baseline-vs-replacement comparison
+- **6 migration lab archetypes** defined with friction KPIs
+- **12 benchmark-suite definitions** for baseline-vs-replacement comparison
 - **16 incident classes** with response playbooks and detection rules
 
 ### 1.1 Evidence Status Caveat (calibration)
@@ -54,7 +55,8 @@ accordingly:
 
 ### 2.1 Replacement Claim Boundary
 
-This RFC claims Tokio-ecosystem replacement across the following tracks:
+This RFC proposes the following claim boundary for future validation and
+sign-off; it does not certify these tracks today:
 
 | Track | Domain | Claim Level |
 |-------|--------|------------|
@@ -73,8 +75,8 @@ This RFC claims Tokio-ecosystem replacement across the following tracks:
 
 ### 2.3 Prerequisites
 
-| Bead | Description | Status |
-|------|-------------|--------|
+| Bead | Description | Tracker status (not execution evidence) |
+|------|-------------|-----------------------------------------|
 | `asupersync-2oh2u.11.11` | Diagnostics UX hardening | CLOSED |
 | `asupersync-2oh2u.10.9` | Readiness gate aggregator | CLOSED |
 | `asupersync-2oh2u.11.12` | Operator enablement pack | CLOSED |
@@ -134,14 +136,14 @@ governance board approval per decision thresholds (2/3 majority for deprecation,
 
 ### 4.2 E2E Script Evidence
 
-| Campaign | Bead | Description | Result |
-|----------|------|-------------|--------|
-| VC-01 | T9.7 | Functional parity per track | PASS |
-| VC-02 | T9.7 | Performance baseline comparison | PASS |
-| VC-03 | T9.7 | 7-day reliability soak | PASS |
-| VC-04 | T9.7 | Migration friction assessment | PASS |
-| VC-05 | T9.7 | Operability drill execution | PASS |
-| VC-06 | T9.7 | Ecosystem interop validation | PASS |
+| Campaign | Bead | Description | Evidence status |
+|----------|------|-------------|-----------------|
+| VC-01 | T9.7 | Functional parity per track | UNVERIFIED — internal lane reported PASS; no linked raw pack |
+| VC-02 | T9.7 | Performance baseline comparison | UNVERIFIED — internal lane reported PASS; no linked raw pack |
+| VC-03 | T9.7 | 7-day reliability soak | UNVERIFIED — internal lane reported PASS; no linked raw pack |
+| VC-04 | T9.7 | Migration friction assessment | UNVERIFIED — internal lane reported PASS; no linked raw pack |
+| VC-05 | T9.7 | Operability drill execution | UNVERIFIED — internal lane reported PASS; no linked raw pack |
+| VC-06 | T9.7 | Ecosystem interop validation | UNVERIFIED — internal lane reported PASS; no linked raw pack |
 
 ### 4.3 Structured-Log Evidence
 
@@ -152,9 +154,11 @@ Log quality is enforced by:
 
 ### 4.4 Benchmark Evidence
 
-12 benchmark suites (BM-01..BM-12) covering all tracks with comparison
-verdicts: BETTER (>5% improvement), EQUIVALENT (±5%), ACCEPTABLE (5-20% regression),
-REGRESSION (>20%), INCOMPATIBLE.
+The validation plan defines 12 benchmark suites (BM-01..BM-12) and the
+following comparison verdict vocabulary: BETTER (>5% improvement), EQUIVALENT
+(±5%), ACCEPTABLE (5-20% regression), REGRESSION (>20%), INCOMPATIBLE. This
+section defines the evaluation scheme; it does not record reproduced benchmark
+results.
 
 ---
 
@@ -266,7 +270,9 @@ drill report schema (drill-report-v1).
 
 ## 9. Invariant Preservation
 
-All replacement surfaces preserve the 5 core invariants:
+The draft maps replacement surfaces to five abstract-model invariants. The Lean
+theorems prove properties of that model; the table is not a proof that every
+Rust implementation surface refines it:
 
 | Invariant | ID | Status | Formal Proof |
 |-----------|-----|--------|-------------|
@@ -276,8 +282,10 @@ All replacement surfaces preserve the 5 core invariants:
 | No obligation leaks | INV-4 | Preserved | Lean theorem (SEM-06.9) |
 | Outcome severity lattice | INV-5 | Preserved | Lean theorem (SEM-06.8) |
 
-All 6 core invariants are **FULLY_PROVEN** (6/6) with 170 Lean theorems,
-136 traceability rows, and 122 distinct theorems covering 22/22 constructors.
+The proof inventory labels six abstract-model invariant rows `FULLY_PROVEN`
+(6/6), with 170 Lean theorems, 136 traceability rows, and 122 distinct theorems
+covering 22/22 model constructors. That label does not mean the production Rust
+runtime is fully formally verified.
 
 ---
 

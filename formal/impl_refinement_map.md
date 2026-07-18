@@ -87,7 +87,7 @@ Current witnesses: `tests/scheduler_lane_fairness.rs::test_steal_only_from_ready
 | `CANCEL-DRAIN` (Cancelling → Finalizing) | `RuntimeState::can_region_finalize` (`src/runtime/state.rs:2421`) gate; per-task transition inside `task_completed` for Cancelling tasks | Implemented | |
 | `CANCEL-FINALIZE` | `task_completed` (`src/runtime/state.rs:2446`) records `Completed(Cancelled(_))`; `MaskedFinalizer` (`src/runtime/state.rs:176`) runs locally | Implemented | |
 | Idempotence (3.2.2) | `strengthen` is associative/commutative/idempotent in `src/types/cancel.rs`; replayed `cancel_request` only tightens | Implemented | Tested in `tests/cancel_idempotence.rs` and `lab/oracle/cancellation_protocol.rs`. |
-| Bounded cleanup (3.2.3) | `cleanup_budget` propagation in `RuntimeState::cancel_request`; finalizer time bound via `FINALIZER_TIME_BUDGET_NANOS` (`src/record/finalizer.rs:23`) | Implemented | |
+| Bounded cleanup (3.2.3) | `cleanup_budget` propagation in `RuntimeState::cancel_request`; finalizer time bound via `FINALIZER_TIME_BUDGET_NANOS` (`src/record/finalizer.rs:23`) | Partial | Mechanisms are implemented, but the theorem assumes cooperative checkpoints, sufficient budgets, and terminating finalizers; arbitrary futures and foreign calls have no universal bound. |
 | Canonical automaton (3.2.5) | Codified by `TaskState` discriminants + transitions in `state.rs`; `state_verifier.rs` validates legal transitions | Implemented | `src/runtime/state_verifier.rs:StateTransitionVerifier`. |
 
 ### 3.3 Region lifecycle
@@ -196,7 +196,7 @@ Current witnesses: `tests/scheduler_lane_fairness.rs::test_steal_only_from_ready
 | `all_finalizers_ran` | `src/lab/oracle/finalizer.rs` |
 | `quiescence_on_close` | `src/lab/oracle/quiescence.rs` |
 | `losers_always_drained` | `src/lab/oracle/loser_drain.rs` |
-| 8.1 optimal DPOR | `src/trace/dpor.rs` (source/sleep/wakeup sets) |
+| 8.1 optimal DPOR target | Partial — `src/trace/dpor.rs` and `src/lab/explorer.rs` implement race/backtrack analysis, derived-seed exploration, and observed trace-class deduplication; exact-prefix backtracking, forced alternative transitions, conventional state-indexed sleep/wakeup sets, and completeness are not implemented. |
 | 8.2 static obligation leak analysis | `src/obligation/leak_check.rs` (sound abstract tracker) |
 | 8.3 trace certificate | `src/plan/certificate.rs`; serialized form in `src/trace/integrity.rs` |
 

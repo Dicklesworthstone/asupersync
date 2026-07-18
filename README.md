@@ -29,17 +29,27 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 
 ## TL;DR
 
-**The Problem**: Rust's async ecosystem gives you *tools* but not *guarantees*. Cancellation silently drops data. Spawned tasks can orphan. Cleanup is best-effort. Testing concurrent code is non-deterministic. You write correct code by convention, and discover bugs in production.
+**The Problem**: Conventional executor APIs leave important lifecycle contracts
+to composition and discipline. Cancellation can abandon partial effects,
+detached tasks can outlive their owner, cleanup may be best-effort, and schedule
+dependent failures can be difficult to reproduce.
 
-**The Solution**: Asupersync is an async runtime where **correctness is structural, not conventional**. Tasks are owned by regions that close to quiescence. Cancellation is a protocol with bounded cleanup. Runtime-managed effects require capabilities, with host-boundary exceptions documented explicitly. The lab runtime makes concurrency deterministic and replayable.
+**The Solution**: Asupersync makes its core task-ownership and runtime-tracked
+effect contracts **structural rather than conventional**. Tasks are owned by
+regions that close to quiescence. Cancellation is an explicit
+request → drain → finalize protocol, with budgeted bounds on covered,
+cooperative paths; non-cooperative code and foreign calls do not acquire a
+universal shutdown bound. Runtime-managed effects require capabilities, with
+host-boundary exceptions documented explicitly. The lab runtime makes
+controlled schedules deterministic and replayable.
 
 ### Why Asupersync?
 
 | Guarantee | What It Means |
 |-----------|---------------|
 | **No orphan tasks** | Every spawned task is owned by a region; region close waits for all children |
-| **Cancel-correctness** | Cancellation is request → drain → finalize, never silent data loss |
-| **Bounded cleanup** | Cleanup budgets are *sufficient conditions*, not hopes |
+| **Cancel-correctness** | Covered primitives use request → drain → finalize and publish their partial-effect boundaries; this is not a blanket guarantee for arbitrary I/O or adapters |
+| **Scoped cleanup bounds** | Budgets are sufficient conditions only where a concrete responsiveness bound is published; non-cooperative work can still delay quiescence indefinitely |
 | **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
 | **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
 | **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
@@ -97,7 +107,7 @@ async fn worker_b(cx: &Cx) -> Outcome<(), Error> {
 
 // Lab runtime: deterministic testing uses explicit run reports.
 #[test]
-fn test_cancellation_is_bounded() {
+fn test_cancellation_protocol_invariants() {
     let mut lab = LabRuntime::new(LabConfig::new(42));
 
     // Enqueue work into `lab.state` / `lab.scheduler`, then drive to quiescence.
@@ -311,7 +321,7 @@ The lab runtime provides:
 - **Virtual time**: sleeps complete instantly, time is controlled
 - **Deterministic scheduling**: same seed → same execution
 - **Trace capture/replay**: debug production issues locally
-- **Schedule exploration**: DPOR-class coverage of interleavings
+- **Schedule exploration**: race-guided deterministic seed exploration with Mazurkiewicz/Foata trace-class deduplication
 
 Concurrency bugs become reproducible test failures.
 
@@ -323,9 +333,11 @@ Asupersync deliberately uses mathematically rigorous machinery where it buys rea
 
 ### Formal Semantics and Lean-Checked Core Invariants
 
-The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) and a Lean project (`formal/lean/Asupersync.lean`) that checks the six non-negotiable runtime invariants recorded in `formal/lean/coverage/invariant_status_inventory.json`: structured concurrency single-owner, region-close quiescence, cancellation protocol, race loser drain, obligation no leaks, and no ambient authority.
+The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) and a Lean project (`formal/lean/Asupersync.lean`) that checks six invariants of that abstract model, recorded in `formal/lean/coverage/invariant_status_inventory.json`: structured concurrency single-owner, region-close quiescence, cancellation protocol, race loser drain, obligation no leaks, and no ambient authority.
 
-The proof posture is exact: these are Lean-checked core invariants with theorem and executable-test linkage. This is not a blanket mechanized proof of every adapter, protocol implementation, platform backend, or distributed runtime transport path. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
+The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
+
+Some checked artifacts retain the legacy marker `Lean-checked core invariants cover the six non-negotiable runtime invariants`. In this README that phrase means coverage of the six abstract-model rows only; it does not assert a Rust refinement proof.
 
 The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
 
@@ -416,9 +428,11 @@ Why it helps: structural degradation is detected before hard deadlock/disconnect
 
 ### DPOR-Style Schedule Exploration (Mazurkiewicz Traces, Foata Fingerprints)
 
-The Lab runtime includes a DPOR-style schedule explorer (`src/lab/explorer.rs`) that treats executions as traces modulo commutation of independent events (Mazurkiewicz equivalence). Instead of "run it 10,000 times and pray", it tracks coverage by equivalence class fingerprints and can prioritize exploration based on trace topology.
+The Lab runtime includes a DPOR-style schedule explorer (`src/lab/explorer.rs`) that treats executions as traces modulo commutation of independent events (Mazurkiewicz equivalence). Instead of a blind seed sweep, it tracks observed equivalence-class fingerprints and uses detected races to prioritize derived deterministic seeds. It does not restore an exact execution prefix and force an alternative enabled transition, so the observed class count is a campaign metric rather than a completeness guarantee.
 
-Result: deterministic, replayable concurrency debugging with *coverage semantics* rather than vibes.
+Result: deterministic, replayable, race-informed schedule fuzzing with explicit
+coverage telemetry. It is useful bug-finding machinery, not certified DPOR
+coverage of every reachable equivalence class.
 
 ### Anytime-Valid Invariant Monitoring via e-processes
 
@@ -461,19 +475,21 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
 | Feature | Asupersync | async-std | smol |
 |---------|------------|-----------|------|
 | **Structured concurrency** | ✅ Enforced | ❌ Manual | ❌ Manual |
-| **Cancel-correctness** | ✅ Protocol | ⚠️ Drop-based | ⚠️ Drop-based |
+| **Cancel-correctness** | ⚠️ Protocol on covered surfaces; adapter boundaries are lane-scoped | ⚠️ Drop-based | ⚠️ Drop-based |
 | **No orphan tasks** | ✅ Guaranteed | ❌ spawn detaches | ❌ spawn detaches |
-| **Bounded cleanup** | ✅ Budgeted | ❌ Best-effort | ❌ Best-effort |
+| **Bounded cleanup** | ⚠️ Published cooperative-path bounds only | ❌ Best-effort | ❌ Best-effort |
 | **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools |
-| **Obligation tracking** | ✅ Linear tokens | ❌ None | ❌ None |
+| **Obligation tracking** | ✅ Runtime-tracked affine tokens with leak detection | ❌ None | ❌ None |
 | **Ecosystem** | ✅ Broad support-class-scoped built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed primitives; adapter lanes stay explicitly bounded) | ⚠️ Medium | ⚠️ Small |
-| **Maturity** | ✅ Feature-complete runtime surface, actively hardened | ✅ Production | ✅ Production |
+| **Maturity** | ⚠️ Experimental, pre-1.0, actively hardened; broad replacement is not independently established | ✅ Production | ✅ Production |
 
-**When to use Asupersync:**
-- Systems that want a broad, integrated async stack without pulling in Tokio
-- Systems where cancel-correctness is non-negotiable (financial, medical, infrastructure)
-- Projects that need deterministic concurrency testing
-- Distributed systems with structured shutdown requirements
+**When to evaluate Asupersync:**
+- Internal or experimental systems that can validate every selected adapter and
+  cancellation boundary against their own workload
+- Projects that benefit from region ownership, runtime-visible obligations, and
+  deterministic schedule reproduction
+- Research and migration prototypes comparing structured shutdown behavior
+  against established runtimes
 
 **When to consider alternatives:**
 - You need strict drop-in compatibility with libraries that are hard-wired to Tokio runtime traits
@@ -1273,8 +1289,8 @@ deterministic lab runtime.
 ### Why Spork Is Strictly Stronger
 
 - Determinism: the lab runtime makes OTP-style debugging reproducible (seeded schedules, trace capture/replay, schedule exploration).
-- Cancel-correctness: cancellation is a protocol (request -> drain -> finalize), so OTP-style shutdown has explicit budgets and bounded cleanup.
-- No silent leaks: regions cannot close with live children or unresolved obligations (permits/acks/leases), so "forgot to reply" and "stale name" become structural failures (or test-oracle failures), not production mysteries.
+- Cancel-correctness: cancellation is a protocol (request -> drain -> finalize), so covered OTP-style shutdown paths carry explicit budgets and can publish concrete cleanup bounds; non-cooperative paths retain the no-universal-bound caveat above.
+- No silent leaks for runtime-tracked obligations: regions cannot close with live children or unresolved registered permits/acks/leases, so "forgot to reply" and "stale name" become runtime or test-oracle failures instead of silent success.
 
 ### Where To Look In The Repo
 
@@ -1309,7 +1325,7 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 
 ## "Alien Artifact" Quality Algorithms
 
-Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it buys real guarantees (determinism, cancel-correctness, bounded cleanup, and reproducible concurrency debugging). The mechanisms below exist in the codebase today, but their support posture is not uniform:
+Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it supports concrete, scoped claims such as controlled-schedule determinism, covered-surface cancel-correctness, published cleanup bounds, and reproducible concurrency debugging. The mechanisms below exist in the codebase today, but their support posture is not uniform:
 
 | Mechanism | Current status |
 |-----------|----------------|
@@ -1791,10 +1807,10 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: dynamic QPACK field-section/table, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling are supported in the native opt-in state machine. Static-only remains the default, and this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
-| DPOR schedule exploration | ✅ Implemented |
+| DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab baseline plus production TCP loopback RemoteRuntime lifecycle proof shipped; deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
-| Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
+| Formal methods (TLA+ export + Lean-checked model-invariant coverage) | ⚠️ Partial implementation (Lean checks six abstract-model invariants; no production-Rust refinement proof or blanket adapter/protocol proof) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |
 | Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported |
@@ -1826,7 +1842,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 native core with default static-only QPACK plus opt-in dynamic field-section context; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete for live per-actor supervision (`src/actor.rs` drives restart-on-failure with backoff/intensity); the Spork `CompiledSupervisor` tree computes restart *plans* but its tree-level live restart loop is pending (`asupersync-8y37kz.2` / `asupersync-u2vgjg`) |
 | **Phase 4** | Distributed structured concurrency | ✅ Core primitives complete; production remote network adapters remain support-class scoped |
-| **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean-checked core invariants exist; broader adapter/protocol/runtime refinement proof remains active and lane-specific) |
+| **Phase 5** | Schedule exploration + formal tooling | ⚠️ Partial (DPOR-style race-guided seed exploration, TLA+ export, and Lean-checked model invariants exist; exact-prefix DPOR and a production-Rust-to-model refinement proof do not) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |
 
 ---
