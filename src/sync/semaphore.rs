@@ -426,11 +426,6 @@ impl Semaphore {
             });
         }
 
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = self.rank {
-            lock_ordering::check_acquire(self.name, rank);
-        }
-
         let mut state = self.state.lock();
         let result = if state.closed {
             Err(TryAcquireError)
@@ -438,6 +433,15 @@ impl Semaphore {
             // Strict FIFO
             Err(TryAcquireError)
         } else if state.permits >= count {
+            // Enforce lock ordering only on the success path, under the state
+            // guard and immediately before the transition, mirroring the async
+            // acquisition path. A failed try_acquire (closed, FIFO-blocked, or
+            // insufficient permits) must return Err rather than panic ASUP-E205
+            // or record a phantom acquisition edge (br-asupersync-btp04i).
+            if let Some(rank) = self.rank {
+                lock_ordering::check_acquire(self.name, rank);
+            }
+
             state.permits -= count;
             // Relaxed: permits_shadow is an advisory fast-path hint. A stale
             // read in available_permits() just skips the fast path or causes a
@@ -2514,6 +2518,98 @@ mod tests {
             after_drop.is_ok()
         );
         crate::test_complete!("owned_try_acquire_keeps_lock_order_until_owned_drop");
+    }
+
+    /// br-asupersync-btp04i: a synchronous `try_acquire` that fails eligibility
+    /// (closed, FIFO-blocked, or insufficient permits) must return
+    /// Err(TryAcquireError), not panic ASUP-E205 or record a phantom
+    /// acquisition edge, even when the caller already holds a higher-ranked
+    /// (Tasks) permit. An *available* lower-ranked acquisition must still
+    /// enforce the ordering panic.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn failed_try_acquire_returns_err_without_false_lock_order_panic() {
+        init_test("failed_try_acquire_returns_err_without_false_lock_order_panic");
+        lock_ordering::clear_held_locks();
+
+        // Hold a higher-ranked Tasks permit for the duration of the failing
+        // lower-ranked (Regions) tries.
+        let tasks = Semaphore::with_name("tasks", 1);
+        let tasks_permit = tasks.try_acquire(1).expect("tasks permit acquires");
+
+        // (1) Insufficient permits: a Regions semaphore with none available.
+        let empty = Semaphore::with_name("regions_table", 0);
+        let unavailable = empty.try_acquire(1).is_err();
+        crate::assert_with_log!(
+            unavailable,
+            "unavailable lower-ranked try_acquire returns Err, not ASUP-E205",
+            true,
+            unavailable
+        );
+
+        // (2) Closed: a closed Regions semaphore rejects without panicking.
+        let closed = Semaphore::with_name("regions_table", 5);
+        closed.close();
+        let closed_err = closed.try_acquire(1).is_err();
+        crate::assert_with_log!(
+            closed_err,
+            "closed lower-ranked try_acquire returns Err, not ASUP-E205",
+            true,
+            closed_err
+        );
+
+        // (3) FIFO-blocked: a queued waiter fronts the Regions semaphore even
+        // though a permit is now available; the try must yield to FIFO, not
+        // panic.
+        let fifo = Semaphore::with_name("regions_table", 0);
+        let cx = test_cx();
+        let mut waiter = fifo.acquire(&cx, 1);
+        let parked = poll_once(&mut waiter).is_none();
+        crate::assert_with_log!(
+            parked,
+            "waiter parks on the empty Regions semaphore",
+            true,
+            parked
+        );
+        fifo.add_permits(1);
+        let fifo_blocked = fifo.try_acquire(1).is_err();
+        crate::assert_with_log!(
+            fifo_blocked,
+            "FIFO-blocked lower-ranked try_acquire returns Err, not ASUP-E205",
+            true,
+            fifo_blocked
+        );
+        drop(waiter);
+
+        // (4) Available: acquiring from a fresh, available Regions semaphore
+        // while holding Tasks IS a backwards ordering violation and must still
+        // panic ASUP-E205.
+        let available = Semaphore::with_name("regions_table", 1);
+        let enforced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = available.try_acquire(1);
+        }))
+        .is_err();
+        crate::assert_with_log!(
+            enforced,
+            "available lower-ranked try_acquire still enforces ordering panic",
+            true,
+            enforced
+        );
+
+        drop(tasks_permit);
+        lock_ordering::clear_held_locks();
+
+        // The rejected acquisition must not have consumed a permit or recorded
+        // an edge: with Tasks released, it acquires cleanly.
+        let reacquired = available.try_acquire(1).is_ok();
+        crate::assert_with_log!(
+            reacquired,
+            "rejected try_acquire left the permit available (no phantom state)",
+            true,
+            reacquired
+        );
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("failed_try_acquire_returns_err_without_false_lock_order_panic");
     }
 
     #[test]
