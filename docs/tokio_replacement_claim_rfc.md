@@ -30,6 +30,24 @@ Key metrics:
 - **12 benchmark suites** with baseline-vs-replacement comparison
 - **16 incident classes** with response playbooks and detection rules
 
+### 1.1 Evidence Status Caveat (calibration)
+
+This RFC is a **DRAFT claim document, not an externally validated certification**
+(see asupersync issue #54). Readers should weigh the campaign results below
+accordingly:
+
+- The validation-campaign results in §4.2 (VC-01..VC-06, including the 7-day
+  reliability soak) are **self-reported by the internal agent campaign lane**.
+  The companion document `tokio_external_validation_benchmark_packs.md` defines
+  the campaign **methodology and evidence-pack requirements**; this RFC does not
+  link raw, independently archived evidence packs for those runs.
+- The CI enforcement suite (`tests/tokio_replacement_claim_rfc_enforcement.rs`)
+  verifies this document's **structure and required content**, not that any
+  campaign executed or that its raw data exists.
+- Independent reproduction gates remain open in §10: the 14-day soak test and
+  the external validation campaign are **Pending**, and the replacement claim
+  should not be treated as established until they complete.
+
 ---
 
 ## 2. Scope
