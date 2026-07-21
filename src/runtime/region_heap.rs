@@ -840,7 +840,10 @@ mod tests {
 
         // A fresh alloc reuses the same slot but with an advanced generation.
         let fresh = heap.alloc(99u32);
-        assert_eq!(stale.index, fresh.index, "slot index is reused after reclaim");
+        assert_eq!(
+            stale.index, fresh.index,
+            "slot index is reused after reclaim"
+        );
         assert_ne!(
             stale.generation, fresh.generation,
             "generation must advance across reclaim to keep stale handles closed"

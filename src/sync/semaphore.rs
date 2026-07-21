@@ -373,9 +373,11 @@ impl Semaphore {
         // payload propagates and no second panic is raised mid-unwind.
         let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         for (_, waiter) in taken {
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                waiter.waker.wake_by_ref();
-            })) {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    waiter.waker.wake_by_ref();
+                }))
+            {
                 if first_panic.is_none() {
                     first_panic = Some(payload);
                 }

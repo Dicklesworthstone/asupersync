@@ -857,8 +857,16 @@ impl LabRuntime {
             lab_reactor,
             spawn_mailbox,
             _spawn_liveness: spawn_liveness,
-            seen_io_tokens: DetHashSet::default(),
-            scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
+            // GH#55: derive lab hashing from the lab seed rather than
+            // `Default::default()`, which is randomly seeded in builds
+            // without `test-internals` and breaks lab determinism.
+            seen_io_tokens: DetHashSet::with_hasher(
+                crate::util::det_hash::DetBuildHasher::with_seed(config.seed),
+            ),
+            scheduler: Arc::new(Mutex::new(LabScheduler::new(
+                config.worker_count,
+                config.seed,
+            ))),
             config,
             rng,
             virtual_time: Time::ZERO,
@@ -3208,15 +3216,19 @@ pub struct LabScheduler {
 }
 
 impl LabScheduler {
-    fn new(worker_count: usize) -> Self {
+    fn new(worker_count: usize, seed: u64) -> Self {
         let count = if worker_count == 0 { 1 } else { worker_count };
         let cancel_streak_limit = DEFAULT_LAB_CANCEL_STREAK_LIMIT.max(1);
+        // GH#55: seed-derived hashing keeps `scheduled` iteration (and thus
+        // every schedule-order decision that flows through it) identical for
+        // identical lab seeds, regardless of the `test-internals` feature.
+        let build_hasher = crate::util::det_hash::DetBuildHasher::with_seed(seed);
         Self {
             workers: (0..count)
                 .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
                 .collect(),
-            scheduled: DetHashSet::default(),
-            pending_spurious_wakes: DetHashMap::default(),
+            scheduled: DetHashSet::with_hasher(build_hasher.clone()),
+            pending_spurious_wakes: DetHashMap::with_hasher(build_hasher),
             assignments: Vec::new(),
             next_worker: 0,
             cancel_streak: vec![0; count],
@@ -4452,7 +4464,7 @@ mod tests {
     #[test]
     fn lab_scheduler_pop_for_worker_respects_timed_deadlines() {
         init_test("lab_scheduler_pop_for_worker_respects_timed_deadlines");
-        let mut scheduler = LabScheduler::new(1);
+        let mut scheduler = LabScheduler::new(1, 0);
         let timed = TaskId::from_arena(ArenaIndex::new(1, 0));
         let ready = TaskId::from_arena(ArenaIndex::new(2, 0));
 
@@ -4489,7 +4501,7 @@ mod tests {
     #[test]
     fn lab_scheduler_steal_for_worker_only_steals_ready_tasks() {
         init_test("lab_scheduler_steal_for_worker_only_steals_ready_tasks");
-        let mut scheduler = LabScheduler::new(2);
+        let mut scheduler = LabScheduler::new(2, 0);
         let cancel = TaskId::from_arena(ArenaIndex::new(10, 0));
         let timed = TaskId::from_arena(ArenaIndex::new(11, 0));
         let ready = TaskId::from_arena(ArenaIndex::new(12, 0));
@@ -4536,7 +4548,7 @@ mod tests {
     #[test]
     fn lab_scheduler_spurious_wakes_do_not_collapse_duplicates() {
         init_test("lab_scheduler_spurious_wakes_do_not_collapse_duplicates");
-        let mut scheduler = LabScheduler::new(1);
+        let mut scheduler = LabScheduler::new(1, 0);
         let task = TaskId::from_arena(ArenaIndex::new(13, 0));
 
         scheduler.inject_spurious_wakes(task, 42, 3);
@@ -4585,7 +4597,7 @@ mod tests {
     #[test]
     fn lab_scheduler_forget_task_clears_pending_spurious_wakes() {
         init_test("lab_scheduler_forget_task_clears_pending_spurious_wakes");
-        let mut scheduler = LabScheduler::new(1);
+        let mut scheduler = LabScheduler::new(1, 0);
         let task = TaskId::from_arena(ArenaIndex::new(14, 0));
 
         scheduler.inject_spurious_wakes(task, 42, 3);
@@ -4625,7 +4637,7 @@ mod tests {
     #[test]
     fn lab_scheduler_steal_preserves_pending_spurious_wakes() {
         init_test("lab_scheduler_steal_preserves_pending_spurious_wakes");
-        let mut scheduler = LabScheduler::new(2);
+        let mut scheduler = LabScheduler::new(2, 0);
         let task = TaskId::from_arena(ArenaIndex::new(15, 0));
 
         scheduler.inject_spurious_wakes(task, 42, 3);
