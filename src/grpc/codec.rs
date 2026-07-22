@@ -9,7 +9,7 @@ use crate::bytes::{BufMut, Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use std::fmt;
 
-use super::status::GrpcError;
+use super::status::{GrpcError, Status};
 
 // Re-export from parent module (single source of truth).
 pub use super::DEFAULT_MAX_MESSAGE_SIZE;
@@ -327,6 +327,87 @@ pub fn gzip_frame_decompress(input: Bytes, max_size: usize) -> Result<Bytes, Grp
     Ok(Bytes::from(output))
 }
 
+/// Per-call cumulative decoded-body meter for inbound gRPC messages.
+///
+/// The meter is intentionally attached to the per-call [`FramedCodec`]
+/// created by the server. That keeps client-streaming accounting scoped to
+/// one RPC and ensures every successfully decoded message is charged exactly
+/// once before it can be delivered to a handler.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestBodyMeter {
+    cap: Option<usize>,
+    accumulated: usize,
+    overflowed: bool,
+}
+
+impl RequestBodyMeter {
+    /// Construct a new meter with the configured cap.
+    ///
+    /// `cap = None` disables enforcement while retaining saturating
+    /// diagnostic accounting.
+    #[must_use]
+    pub const fn new(cap: Option<usize>) -> Self {
+        Self {
+            cap,
+            accumulated: 0,
+            overflowed: false,
+        }
+    }
+
+    /// Accumulated decoded payload bytes for this call.
+    #[must_use]
+    pub const fn bytes_accumulated(&self) -> usize {
+        self.accumulated
+    }
+
+    /// Configured cap (`None` means unlimited).
+    #[must_use]
+    pub const fn cap(&self) -> Option<usize> {
+        self.cap
+    }
+
+    /// Charge one successfully decoded message to this call.
+    ///
+    /// Arithmetic overflow fails closed when a cap is configured. Without a
+    /// cap, accounting saturates at `usize::MAX` and decoding remains enabled.
+    pub fn record_message_bytes(&mut self, bytes: usize) -> Result<(), Status> {
+        let Some(cap) = self.cap else {
+            self.accumulated = self.accumulated.saturating_add(bytes);
+            return Ok(());
+        };
+
+        if self.overflowed {
+            return Err(Status::resource_exhausted(format!(
+                "request body exceeds max_request_body_bytes: a prior byte-total overflow \
+                 remains > {cap} bytes (aggregate of all decoded messages on this call; \
+                 see ServerConfig::max_request_body_bytes)"
+            )));
+        }
+
+        let previous = self.accumulated;
+        let Some(actual) = previous.checked_add(bytes) else {
+            self.accumulated = usize::MAX;
+            self.overflowed = true;
+            return Err(Status::resource_exhausted(format!(
+                "request body exceeds max_request_body_bytes: byte total overflow after \
+                 {previous} + {bytes}, which is > {cap} bytes \
+                 (aggregate of all decoded messages on this call; \
+                 see ServerConfig::max_request_body_bytes)"
+            )));
+        };
+
+        self.accumulated = actual;
+        if actual > cap {
+            return Err(Status::resource_exhausted(format!(
+                "request body exceeds max_request_body_bytes: {actual} bytes > {cap} bytes \
+                 (aggregate of all decoded messages on this call; \
+                 see ServerConfig::max_request_body_bytes)"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// A codec that wraps another codec with gRPC framing.
 pub struct FramedCodec<C> {
     /// The inner codec for message serialization.
@@ -341,6 +422,8 @@ pub struct FramedCodec<C> {
     decompressor: Option<FrameDecompressor>,
     /// Once a decode-side protocol or payload error occurs, fail closed.
     poisoned: bool,
+    /// Per-call aggregate accounting for successfully decoded request bodies.
+    request_body_meter: RequestBodyMeter,
 }
 
 impl<C: fmt::Debug> fmt::Debug for FramedCodec<C> {
@@ -352,6 +435,7 @@ impl<C: fmt::Debug> fmt::Debug for FramedCodec<C> {
             .field("has_compressor", &self.compressor.is_some())
             .field("has_decompressor", &self.decompressor.is_some())
             .field("poisoned", &self.poisoned)
+            .field("request_body_meter", &self.request_body_meter)
             .finish()
     }
 }
@@ -388,7 +472,25 @@ impl<C: Codec> FramedCodec<C> {
             compressor: None,
             decompressor: None,
             poisoned: false,
+            request_body_meter: RequestBodyMeter::new(None),
         }
+    }
+
+    /// Configure the aggregate decoded-body limit for this call.
+    ///
+    /// The codec charges the decompressed payload length after the inner
+    /// message decoder succeeds. The first message that pushes the cumulative
+    /// total above `cap` is not delivered and poisons the request stream.
+    #[must_use]
+    pub fn with_request_body_limit(mut self, cap: Option<usize>) -> Self {
+        self.request_body_meter = RequestBodyMeter::new(cap);
+        self
+    }
+
+    /// Return this call's aggregate decoded-body meter.
+    #[must_use]
+    pub const fn request_body_meter(&self) -> &RequestBodyMeter {
+        &self.request_body_meter
     }
 
     /// Set optional frame-level compressor and decompressor hooks.
@@ -603,10 +705,15 @@ impl<C: Codec> FramedCodec<C> {
         };
 
         // Deserialize the message
+        let decoded_len = data.len();
         let decoded = match self.inner.decode(&data).map_err(C::map_decode_error) {
             Ok(decoded) => decoded,
             Err(error) => return self.poison_decode_stream(src, error),
         };
+
+        if let Err(status) = self.request_body_meter.record_message_bytes(decoded_len) {
+            return self.poison_decode_stream(src, GrpcError::Status(status));
+        }
 
         Ok(Some(decoded))
     }

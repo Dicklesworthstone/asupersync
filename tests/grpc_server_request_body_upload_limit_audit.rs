@@ -16,18 +16,17 @@
 //!          `ConnectionState` helper path, but that wrapped dispatch has no
 //!          production callsite today.
 //!       3. Per-message LPM body cap
-//!          (`max_recv_message_size`, default 4 MiB) configures
-//!          `Server::framed_codec`; the helper has no current production
-//!          transport callsite.
+//!          (`max_recv_message_size`, default 4 MiB) configures the same
+//!          per-call `Server::framed_codec` used for aggregate accounting.
 //!       4. Stream buffer cap (MAX_STREAM_BUFFERED = 1024
 //!          items) is live on standalone `StreamingRequest` instances, but
 //!          this audit does not prove an H2 transport feeds that queue.
 //!       5. `stream_idle_timeout` configures a cleanup helper. Cleanup runs
 //!          when explicitly invoked (and during later stream admission), not
 //!          from a demonstrated periodic production sweep.
-//!       6. `max_request_body_bytes` (opt-in) configures a
-//!          RequestBodyMeter, but the built-in dispatch/streaming paths
-//!          do not currently instantiate it automatically.
+//!       6. `max_request_body_bytes` (opt-in) configures the
+//!          RequestBodyMeter owned by each server-created codec; direct unary
+//!          dispatch also enforces it before user code runs.
 //!
 //! Audit findings:
 //!
@@ -45,15 +44,14 @@
 //!       stored values yields 400 GiB, but that arithmetic is not a live
 //!       per-connection bound unless all three controls share a wired path.
 //!
-//!   (e) **Per-call aggregate helper is opt-in and not yet wired.**
-//!       The `max_request_body_bytes` setting and `RequestBodyMeter`
-//!       provide the ingredients for a decoded-byte ceiling. An adapter
-//!       must explicitly construct and call the meter; configuring the
-//!       field alone is not a built-in upload defense today.
+//!   (e) **Per-call aggregate enforcement is opt-in and wired.**
+//!       The `max_request_body_bytes` setting is bound to every codec created
+//!       through `Server::framed_codec`; `None` remains unlimited.
 //!
-//! Regression tests below pin configuration/helper behavior only. They
-//! deliberately make no H2 transport, aggregate-memory, or production
-//! enforcement claim.
+//! Regression tests below pin configuration and queue behavior. The actual
+//! decoded-message enforcement is exercised in
+//! `grpc_server_aggregate_cap_end_to_end_audit`; no live-socket or HPACK claim
+//! follows from these tests.
 
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::StreamingRequest;
@@ -169,8 +167,8 @@ fn default_stream_idle_timeout_is_60s() {
 
 #[test]
 fn aggregate_request_body_meter_configuration_is_available_and_opt_in() {
-    // Pin (e): the aggregate meter configuration exists and remains opt-in.
-    // This structural test does not claim that built-in transport uses it.
+    // Pin (e): the aggregate meter configuration remains opt-in and is bound
+    // to the server-created per-call codec.
     let default_config = ServerConfig::default();
     assert_eq!(default_config.max_request_body_bytes, None);
 
@@ -179,6 +177,14 @@ fn aggregate_request_body_meter_configuration_is_available_and_opt_in() {
         server.config().max_request_body_bytes,
         Some(4096),
         "builder must expose the per-call RequestBodyMeter configuration",
+    );
+    assert_eq!(
+        server
+            .framed_codec(asupersync::grpc::IdentityCodec)
+            .request_body_meter()
+            .cap(),
+        Some(4096),
+        "server-created codecs must inherit the aggregate request limit",
     );
 }
 

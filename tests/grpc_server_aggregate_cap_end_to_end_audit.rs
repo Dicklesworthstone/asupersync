@@ -13,20 +13,17 @@
 //!   (a) **Layered cap interaction**: a single call subject to
 //!       BOTH per-message cap (max_recv_message_size) AND
 //!       aggregate cap (max_request_body_bytes) is rejected
-//!       by whichever fires FIRST. Tested: a 256 KiB
-//!       per-message cap + 1 MiB aggregate cap rejects after
-//!       FOUR messages of 256 KiB (1 MiB total) on the FIFTH
-//!       record_message_bytes(256K).
+//!       by whichever fires FIRST. The server-created codec now owns the
+//!       aggregate meter and charges real decoded LPM payloads.
 //!
 //!   (b) **Aggregate cap + None per-message cap**: when the
 //!       per-message cap is generous (4 MiB) but aggregate
 //!       cap is tight (256 KiB), the aggregate cap fires
 //!       FIRST — the very first 256 KiB+1 message rejects.
 //!
-//!   (c) **Adapter integration pattern**: simulated transport
-//!       adapter that loops over decoded messages, calling
-//!       record_message_bytes after each. Pins the documented
-//!       wiring contract.
+//!   (c) **Production codec integration**: `Server::framed_codec` binds one
+//!       meter to each call. Reusing that codec for client streaming counts
+//!       every decoded message and fails closed before over-cap delivery.
 //!
 //!   (d) **Cap independent of per-message cap**: a server
 //!       configured with per-message 4 MiB and aggregate
@@ -42,9 +39,137 @@
 //! Regression tests below pin (a)-(e) at the public API
 //! surface.
 
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::grpc::server::RequestBodyMeter;
 use asupersync::grpc::status::Code;
-use asupersync::grpc::{ServerBuilder, ServerConfig};
+use asupersync::grpc::{FramedCodec, GrpcError, IdentityCodec, ServerBuilder, ServerConfig};
+
+fn encode_identity_frames(payloads: &[Bytes]) -> BytesMut {
+    let mut encoder = FramedCodec::new(IdentityCodec);
+    let mut wire = BytesMut::new();
+    for payload in payloads {
+        encoder
+            .encode_message(payload, &mut wire)
+            .expect("identity request frame must encode");
+    }
+    wire
+}
+
+#[test]
+fn server_codec_enforces_client_streaming_aggregate_at_decode_boundary() {
+    let server = ServerBuilder::new()
+        .max_recv_message_size(16)
+        .max_request_body_bytes(7)
+        .build();
+    let mut decoder = server.framed_codec(IdentityCodec);
+    let mut wire = encode_identity_frames(&[
+        Bytes::from_static(b"abc"),
+        Bytes::from_static(b"defg"),
+        Bytes::from_static(b"h"),
+    ]);
+
+    assert_eq!(
+        decoder.decode_message(&mut wire).expect("first decode"),
+        Some(Bytes::from_static(b"abc"))
+    );
+    assert_eq!(
+        decoder.decode_message(&mut wire).expect("at-cap decode"),
+        Some(Bytes::from_static(b"defg"))
+    );
+    assert_eq!(decoder.request_body_meter().bytes_accumulated(), 7);
+
+    let error = decoder
+        .decode_message(&mut wire)
+        .expect_err("cap-plus-one message must reject before delivery");
+    let GrpcError::Status(status) = error else {
+        panic!("aggregate body rejection must preserve its typed status")
+    };
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert!(status.message().contains("8 bytes > 7 bytes"));
+    assert_eq!(decoder.request_body_meter().bytes_accumulated(), 8);
+    assert!(decoder.is_poisoned(), "over-cap stream must fail closed");
+    assert!(wire.is_empty(), "buffered later frames must be discarded");
+}
+
+#[test]
+fn server_codecs_keep_aggregate_state_per_call() {
+    let server = ServerBuilder::new().max_request_body_bytes(4).build();
+    let payload = Bytes::from_static(b"four");
+    let mut first = server.framed_codec(IdentityCodec);
+    let mut second = server.framed_codec(IdentityCodec);
+
+    for decoder in [&mut first, &mut second] {
+        let mut wire = encode_identity_frames(std::slice::from_ref(&payload));
+        assert_eq!(
+            decoder.decode_message(&mut wire).expect("per-call decode"),
+            Some(payload.clone())
+        );
+        assert_eq!(decoder.request_body_meter().bytes_accumulated(), 4);
+    }
+}
+
+#[test]
+fn partial_frame_polls_charge_one_successful_decode_exactly_once() {
+    let server = ServerBuilder::new().max_request_body_bytes(3).build();
+    let mut decoder = server.framed_codec(IdentityCodec);
+    let mut complete = encode_identity_frames(&[Bytes::from_static(b"abc")]);
+    let mut partial = complete.split_to(4);
+
+    assert_eq!(
+        decoder
+            .decode_message(&mut partial)
+            .expect("partial prefix is not an error"),
+        None
+    );
+    assert_eq!(decoder.request_body_meter().bytes_accumulated(), 0);
+
+    partial.extend_from_slice(&complete);
+    assert_eq!(
+        decoder
+            .decode_message(&mut partial)
+            .expect("completed frame"),
+        Some(Bytes::from_static(b"abc"))
+    );
+    assert_eq!(decoder.request_body_meter().bytes_accumulated(), 3);
+    assert_eq!(
+        decoder.decode_message(&mut partial).expect("empty buffer"),
+        None
+    );
+    assert_eq!(decoder.request_body_meter().bytes_accumulated(), 3);
+}
+
+fn collapse_frame(_input: Bytes) -> Result<Bytes, GrpcError> {
+    Ok(Bytes::from_static(b"x"))
+}
+
+fn expand_frame(_input: Bytes, _max_size: usize) -> Result<Bytes, GrpcError> {
+    Ok(Bytes::from_static(b"decoded"))
+}
+
+#[test]
+fn aggregate_limit_counts_decompressed_payload_not_wire_size() {
+    let server = ServerBuilder::new().max_request_body_bytes(6).build();
+    let mut encoder =
+        FramedCodec::new(IdentityCodec).with_frame_codec(collapse_frame, expand_frame);
+    let mut wire = BytesMut::new();
+    encoder
+        .encode_message(&Bytes::from_static(b"ignored"), &mut wire)
+        .expect("compressed request frame must encode");
+    assert_eq!(wire.len(), 6, "wire is five-byte prefix plus one byte");
+
+    let mut decoder = server
+        .framed_codec(IdentityCodec)
+        .with_frame_codec(collapse_frame, expand_frame);
+    let error = decoder
+        .decode_message(&mut wire)
+        .expect_err("seven decompressed bytes must exceed the six-byte cap");
+    let GrpcError::Status(status) = error else {
+        panic!("decoded-body rejection must preserve ResourceExhausted")
+    };
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert!(status.message().contains("7 bytes > 6 bytes"));
+    assert_eq!(decoder.request_body_meter().bytes_accumulated(), 7);
+}
 
 #[test]
 fn aggregate_cap_fires_after_n_under_cap_messages() {

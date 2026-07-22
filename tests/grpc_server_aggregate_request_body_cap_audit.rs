@@ -1,10 +1,10 @@
 //! Audit + regression test for `src/grpc/server.rs` aggregate
 //! request-body meter seam (tick #204, follow-up to tick #203).
 //!
-//! Operator's question: "verify aggregate request-body cap (P3
-//! fix)." The configuration and helper exist, but source inspection
-//! shows that the built-in dispatch/streaming paths do not instantiate
-//! the meter. This audit therefore does not claim live enforcement.
+//! Operator's question: "verify aggregate request-body cap (P3 fix)."
+//! `Server::framed_codec` now binds a meter to every decoded request stream,
+//! while `dispatch_unary` applies the same limit to already-decoded direct
+//! adapters before interceptors or handlers run.
 //!
 //! Audit context: the older audit multiplied the configured per-message
 //! value by the standalone queue capacity and described the 4 GiB product
@@ -13,18 +13,19 @@
 //! value, and the stream queue. They are independent configuration/helper
 //! values; their arithmetic product is not transport proof.
 //!
-//! Helper seam: `ServerConfig::max_request_body_bytes: Option<usize>`
-//! plus `RequestBodyMeter`, which an integrating transport adapter can
-//! instantiate per call and increment after each message decode.
+//! Enforcement seam: `ServerConfig::max_request_body_bytes: Option<usize>`
+//! plus the `RequestBodyMeter` owned by each `Server::framed_codec` result.
+//! Direct unary dispatch independently applies the same configured ceiling to
+//! its already-decoded body.
 //!
 //! Audit findings:
 //!
 //!   (a) **`max_request_body_bytes` defaults to None** — pre-helper
 //!       behavior preserved; opt-in configuration.
 //!   (b) **`ServerBuilder::max_request_body_bytes(size)`** stores
-//!       the caller-created meter limit.
+//!       the per-call meter limit.
 //!   (c) **`RequestBodyMeter::from_config(&config)`** configures a
-//!       caller-created meter from the server config.
+//!       standalone meter from the server config.
 //!   (d) **`record_message_bytes(n)`** accumulates and rejects
 //!       at `total > cap` with `Status::resource_exhausted`.
 //!   (e) **None-cap meter records but never rejects** — preserves
@@ -35,18 +36,56 @@
 //!       cap, diagnostic accounting saturates instead of wrapping.
 //!   (g) **Error message includes both actual and cap** for SRE
 //!       diagnostics.
-//!   (h) **Per-call instance** — adapters that maintain a
-//!       meter per stream don't accidentally share state.
-//!   (i) **Built-in enforcement remains unwired.** `dispatch_unary`
-//!       and the current streaming transport do not construct or call
-//!       `RequestBodyMeter`; setting the builder field alone therefore
-//!       does not impose a live aggregate body limit.
+//!   (h) **Per-call instance** — server-created codecs don't accidentally
+//!       share meter state.
+//!   (i) **Production enforcement is wired.** Server-created codecs own a
+//!       per-call meter, and direct unary dispatch rejects an over-cap decoded
+//!       body before user code runs.
 //!
-//! Regression tests below pin the configuration/helper behavior only.
+//! Regression tests below pin both the meter arithmetic and live unary
+//! dispatch enforcement.
 
+use asupersync::bytes::Bytes;
 use asupersync::grpc::server::RequestBodyMeter;
 use asupersync::grpc::status::Code;
-use asupersync::grpc::{ServerBuilder, ServerConfig};
+use asupersync::grpc::{Request, Response, ServerBuilder, ServerConfig};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[test]
+fn direct_unary_dispatch_rejects_over_cap_before_handler() {
+    let server = ServerBuilder::new().max_request_body_bytes(3).build();
+    let handler_called = Arc::new(AtomicBool::new(false));
+    let called = Arc::clone(&handler_called);
+
+    let result = futures_lite::future::block_on(server.dispatch_unary(
+        Request::new(Bytes::from_static(b"four")),
+        move |_request| {
+            called.store(true, Ordering::SeqCst);
+            async { Ok(Response::new(Bytes::new())) }
+        },
+    ));
+
+    let status = result.expect_err("four decoded bytes must exceed a three-byte cap");
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert!(status.message().contains("4 bytes > 3 bytes"));
+    assert!(
+        !handler_called.load(Ordering::SeqCst),
+        "aggregate rejection must precede user dispatch"
+    );
+}
+
+#[test]
+fn direct_unary_dispatch_preserves_none_semantics() {
+    let server = ServerBuilder::new().build();
+    let response = futures_lite::future::block_on(server.dispatch_unary(
+        Request::new(Bytes::from_static(b"unlimited")),
+        |request| async move { Ok(Response::new(request.into_inner())) },
+    ))
+    .expect("None aggregate cap must preserve existing direct dispatch");
+
+    assert_eq!(response.into_inner(), Bytes::from_static(b"unlimited"));
+}
 
 #[test]
 fn default_server_config_has_no_aggregate_meter_limit() {
@@ -73,8 +112,8 @@ fn server_builder_max_request_body_bytes_sets_meter_limit() {
 
 #[test]
 fn request_body_meter_from_config_inherits_cap() {
-    // Pin (c): from_config initializes a caller-created meter from the
-    // configured limit. It does not prove transport integration.
+    // Pin (c): from_config initializes a standalone meter from the configured
+    // limit; server-created codecs use the same meter type internally.
     let server = ServerBuilder::new()
         .max_request_body_bytes(1024 * 1024)
         .build();

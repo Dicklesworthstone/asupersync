@@ -13,6 +13,7 @@ use crate::bytes::Bytes;
 use crate::cx::{Cx, cap};
 
 use super::client::CompressionEncoding;
+pub use super::codec::RequestBodyMeter;
 use super::codec::{Codec, FramedCodec};
 use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
@@ -378,33 +379,24 @@ pub struct ServerConfig {
     /// Supplied to codecs created through [`Server::framed_codec`]
     /// (see [`Self::max_recv_message_size`] for the integration boundary).
     pub max_send_message_size: usize,
-    /// Optional aggregate-bytes limit supplied to a per-call
-    /// [`RequestBodyMeter`] (sum across decoded messages on a
-    /// client-streaming or unary call).
+    /// Optional aggregate decoded-body limit for a unary or
+    /// client-streaming call.
     ///
-    /// `None` = no limit in a caller-created meter (preserves pre-fix behavior; the
-    /// per-message [`Self::max_recv_message_size`] cap and the
-    /// `MAX_STREAM_BUFFERED` per-stream item count remain the decoded-message
-    /// size/count bounds).
-    /// `Some(cap)` = [`RequestBodyMeter::from_config`] initializes a
-    /// meter with this limit. Transport adapters that instantiate the
-    /// meter and record every decoded message reject the call with
-    /// `Status::resource_exhausted` once the total exceeds `cap`.
-    /// The built-in unary dispatch and streaming transport do not yet
-    /// instantiate this helper automatically, so setting this field alone
-    /// is configuration, not a production enforcement guarantee.
+    /// `None` preserves the pre-fix unlimited aggregate behavior. `Some(cap)`
+    /// configures the per-call [`RequestBodyMeter`] attached by
+    /// [`Server::framed_codec`]. Every successfully decoded, decompressed
+    /// request message is charged exactly once; the first message that pushes
+    /// the total above `cap` is rejected with `Status::resource_exhausted` and
+    /// poisons the request stream before delivery.
     ///
-    /// Defaults to `None`. Transport integrators that want a per-call
-    /// decoded-byte ceiling set this explicitly and wire the meter at the
-    /// decode boundary. The limit is
-    /// independent of the per-message
+    /// Defaults to `None`. The limit is independent of the per-message
     /// cap — a 256 KiB per-message cap with a 4 MiB aggregate
     /// cap means each message ≤ 256 KiB AND total bytes across
     /// all messages on the call ≤ 4 MiB.
     ///
     /// The configuration and helper seam originated in the tick #203
-    /// follow-up (br-asupersync-woj18e); transport wiring remains a
-    /// separate requirement.
+    /// follow-up (br-asupersync-woj18e); production decode wiring is
+    /// br-asupersync-s5e129.
     pub max_request_body_bytes: Option<usize>,
     /// Initial connection-window value stored for a transport adapter.
     /// The built-in server currently has no automatic H2 settings bridge for
@@ -712,109 +704,11 @@ pub fn enforce_metadata_size_limit(
     Ok(())
 }
 
-/// Per-call cumulative-bytes meter for the aggregate request-body
-/// upload cap (br-asupersync-woj18e).
-///
-/// To enforce the configured limit, a transport adapter that decodes a
-/// stream of LPM messages into a `StreamingRequest` must instantiate one
-/// `RequestBodyMeter` per call (configured from
-/// [`ServerConfig::max_request_body_bytes`]) and call
-/// [`Self::record_message_bytes`] after each successful message decode.
-/// The built-in dispatch/streaming paths do not currently perform this
-/// integration automatically. When an adapter does integrate the meter,
-/// the first message that pushes the cumulative total past the limit returns
-/// `Err(Status::resource_exhausted(...))` — the adapter then
-/// surfaces the rejection to the call.
-///
-/// `None` cap = no enforcement (the meter records but never rejects). This is
-/// the default. Integrators must both configure a limit via
-/// [`ServerBuilder::max_request_body_bytes`] and call the meter from their
-/// decode path.
-#[derive(Debug, Clone, Copy)]
-pub struct RequestBodyMeter {
-    cap: Option<usize>,
-    accumulated: usize,
-    overflowed: bool,
-}
-
 impl RequestBodyMeter {
-    /// Construct a new meter with the configured cap.
-    ///
-    /// `cap = None` disables enforcement (calls to
-    /// `record_message_bytes` always succeed).
-    #[must_use]
-    pub fn new(cap: Option<usize>) -> Self {
-        Self {
-            cap,
-            accumulated: 0,
-            overflowed: false,
-        }
-    }
-
     /// Construct a meter from a [`ServerConfig`].
     #[must_use]
     pub fn from_config(config: &ServerConfig) -> Self {
         Self::new(config.max_request_body_bytes)
-    }
-
-    /// Accumulated bytes across all messages recorded so far.
-    #[must_use]
-    pub fn bytes_accumulated(&self) -> usize {
-        self.accumulated
-    }
-
-    /// Configured cap (None = disabled).
-    #[must_use]
-    pub fn cap(&self) -> Option<usize> {
-        self.cap
-    }
-
-    /// Record `bytes` decoded from the next message in the call.
-    ///
-    /// Returns `Ok(())` if the cumulative total stays within the
-    /// configured cap (or if the cap is `None`). Returns
-    /// `Err(Status::resource_exhausted(...))` if the cumulative
-    /// total exceeds the cap — the adapter MUST surface this
-    /// rejection to the call.
-    ///
-    /// With a configured cap, arithmetic overflow fails closed with
-    /// `ResourceExhausted`; without a cap, accounting saturates at
-    /// `usize::MAX`. In neither mode can the counter wrap to a smaller value.
-    pub fn record_message_bytes(&mut self, bytes: usize) -> Result<(), Status> {
-        let Some(cap) = self.cap else {
-            self.accumulated = self.accumulated.saturating_add(bytes);
-            return Ok(());
-        };
-
-        if self.overflowed {
-            return Err(Status::resource_exhausted(format!(
-                "request body exceeds max_request_body_bytes: a prior byte-total overflow \
-                 remains > {cap} bytes (aggregate of all decoded messages on this call; \
-                 see ServerConfig::max_request_body_bytes)"
-            )));
-        }
-
-        let previous = self.accumulated;
-        let Some(actual) = previous.checked_add(bytes) else {
-            self.accumulated = usize::MAX;
-            self.overflowed = true;
-            return Err(Status::resource_exhausted(format!(
-                "request body exceeds max_request_body_bytes: byte total overflow after \
-                 {previous} + {bytes}, which is > {cap} bytes \
-                 (aggregate of all decoded messages on this call; \
-                 see ServerConfig::max_request_body_bytes)"
-            )));
-        };
-
-        self.accumulated = actual;
-        if actual > cap {
-            return Err(Status::resource_exhausted(format!(
-                "request body exceeds max_request_body_bytes: {actual} bytes > {cap} bytes \
-                 (aggregate of all decoded messages on this call; \
-                 see ServerConfig::max_request_body_bytes)"
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -823,10 +717,9 @@ impl Default for ServerConfig {
         Self {
             max_recv_message_size: 4 * 1024 * 1024, // 4 MB
             max_send_message_size: 4 * 1024 * 1024, // 4 MB
-            // Default None preserves pre-fix behavior. Transport integrators
-            // who want a per-call decoded-byte ceiling configure this field via
-            // ServerBuilder::max_request_body_bytes and wire a RequestBodyMeter
-            // at the decode boundary (br-asupersync-woj18e).
+            // Default None preserves pre-fix behavior. Server::framed_codec
+            // wires configured limits into a per-call RequestBodyMeter at the
+            // decoded-message boundary (br-asupersync-s5e129).
             max_request_body_bytes: None,
             initial_connection_window_size: 1024 * 1024,
             initial_stream_window_size: 1024 * 1024,
@@ -959,14 +852,12 @@ impl ServerBuilder {
         self
     }
 
-    /// Configure the aggregate-bytes limit used by a per-call
-    /// [`RequestBodyMeter`] (sum across decoded messages).
+    /// Configure the aggregate decoded-body limit for each inbound call.
     ///
-    /// See [`ServerConfig::max_request_body_bytes`] for the full
-    /// contract and current transport-integration boundary. `None` (the
-    /// default) means the helper has no limit. This setter does not by itself
-    /// wire the meter into built-in dispatch or streaming paths.
-    /// (br-asupersync-woj18e)
+    /// [`Server::framed_codec`] binds this value to the codec's per-call
+    /// [`RequestBodyMeter`], so unary and client-streaming decoders enforce
+    /// the same cumulative byte ceiling. `None` (the default) is unlimited.
+    /// (br-asupersync-woj18e, br-asupersync-s5e129)
     #[must_use]
     pub fn max_request_body_bytes(mut self, size: usize) -> Self {
         self.config.max_request_body_bytes = Some(size);
@@ -1189,14 +1080,13 @@ impl Server {
         &self.config
     }
 
-    /// Construct a per-call [`FramedCodec`] wired with the server's
-    /// configured `max_send_message_size` and `max_recv_message_size`.
+    /// Construct a per-call [`FramedCodec`] wired with the server's message
+    /// size limits and aggregate decoded request-body limit.
     ///
-    /// This helper provides the seam a transport adapter must call when
-    /// constructing the codec for a dispatched call. The built-in transport
-    /// does not currently invoke it automatically; an adapter that constructs
-    /// `FramedCodec` directly can still inherit the codec's own
-    /// `DEFAULT_MAX_MESSAGE_SIZE` (4 MiB) instead of these stored values.
+    /// The returned codec owns one [`RequestBodyMeter`] for the call. Reusing
+    /// it across a client-streaming request charges each successfully decoded,
+    /// decompressed message exactly once. Constructing `FramedCodec` directly
+    /// intentionally does not inherit server policy.
     ///
     /// The compression hooks remain the adapter's responsibility:
     /// the adapter parses `grpc-encoding` from request metadata,
@@ -1212,6 +1102,7 @@ impl Server {
             self.config.max_send_message_size,
             self.config.max_recv_message_size,
         )
+        .with_request_body_limit(self.config.max_request_body_bytes)
     }
 
     /// Get the registered services.
@@ -1327,6 +1218,15 @@ impl Server {
         // (interceptor chain not invoked in production). Now the cap
         // is the FIRST gate before any per-request work.
         enforce_metadata_size_limit(request.metadata(), self.config.max_metadata_size)?;
+
+        // br-asupersync-s5e129: direct dispatch receives an already-decoded
+        // unary body, so enforce the same configured aggregate limit before
+        // any interceptor or handler sees it. Transport paths constructed via
+        // Server::framed_codec already enforce at the decompressed message
+        // boundary; this gate prevents direct dispatch adapters from silently
+        // bypassing the policy.
+        RequestBodyMeter::from_config(&self.config)
+            .record_message_bytes(request.get_ref().len())?;
 
         // ── Phase 1: request-side chain (registration order). ────────
         // The first error short-circuits without invoking the
