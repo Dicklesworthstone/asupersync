@@ -10,6 +10,7 @@ use super::subject::{
 };
 use crate::distributed::{RegionBridge, RegionSnapshot, SnapshotError};
 use crate::remote::NodeId;
+use crate::security::AuthKey;
 use crate::supervision::{RestartConfig, SupervisionStrategy};
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
@@ -878,13 +879,14 @@ impl FederationBridge {
         &mut self,
         bridge: &mut RegionBridge,
         now: Time,
+        snapshot_auth_key: &AuthKey,
     ) -> Result<ReplicationTransfer, FederationError> {
         let config = self
             .replication_config("export_replication_transfer")?
             .clone();
         self.ensure_not_closed("export_replication_transfer")?;
 
-        let snapshot = bridge.create_snapshot(now);
+        let snapshot = bridge.create_authenticated_snapshot(now, snapshot_auth_key);
         let transfer = ReplicationTransfer {
             sequence: snapshot.sequence,
             ordering_guarantee: config.ordering_guarantee,
@@ -952,11 +954,13 @@ impl FederationBridge {
         &mut self,
         bridge: &mut RegionBridge,
         transfer: &ReplicationTransfer,
+        snapshot_auth_key: &AuthKey,
     ) -> Result<RegionSnapshot, FederationError> {
         self.replication_config("apply_replication_transfer")?;
         self.ensure_not_closed("apply_replication_transfer")?;
 
-        let snapshot = RegionSnapshot::from_bytes(&transfer.snapshot_bytes)?;
+        let snapshot =
+            RegionSnapshot::from_bytes_with_key(&transfer.snapshot_bytes, snapshot_auth_key)?;
         if snapshot.sequence != transfer.sequence {
             return Err(FederationError::ReplicationTransferSequenceMismatch {
                 expected: transfer.sequence,
@@ -2244,6 +2248,10 @@ mod tests {
         RegionId::from_arena(ArenaIndex::new(n, 0))
     }
 
+    fn snapshot_auth_key() -> AuthKey {
+        AuthKey::from_seed(0xFEDE_A710)
+    }
+
     fn task_id(n: u32) -> TaskId {
         TaskId::from_arena(ArenaIndex::new(n, 0))
     }
@@ -3254,15 +3262,16 @@ mod tests {
         let mut source = RegionBridge::new_local(region, None, Budget::new());
         source.add_task(task_id(11)).unwrap();
         source.add_child(region_id(12)).unwrap();
+        let snapshot_auth_key = snapshot_auth_key();
 
         let transfer = federation
-            .export_replication_transfer(&mut source, Time::from_secs(1))
+            .export_replication_transfer(&mut source, Time::from_secs(1), &snapshot_auth_key)
             .unwrap();
         assert_eq!(transfer.sequence, 1);
 
         let mut target = RegionBridge::new_local(region, None, Budget::new());
         let applied = federation
-            .apply_replication_transfer(&mut target, &transfer)
+            .apply_replication_transfer(&mut target, &transfer, &snapshot_auth_key)
             .unwrap();
         assert_eq!(applied.sequence, 1);
         assert_eq!(target.local().task_ids(), vec![task_id(11)]);
@@ -3347,15 +3356,16 @@ mod tests {
         let region = region_id(20);
         let mut source = RegionBridge::new_local(region, None, Budget::new());
         source.add_task(task_id(21)).unwrap();
+        let snapshot_auth_key = snapshot_auth_key();
 
         let mut transfer = federation
-            .export_replication_transfer(&mut source, Time::from_secs(2))
+            .export_replication_transfer(&mut source, Time::from_secs(2), &snapshot_auth_key)
             .unwrap();
         transfer.sequence += 1;
 
         let mut target = RegionBridge::new_local(region, None, Budget::new());
         let err = federation
-            .apply_replication_transfer(&mut target, &transfer)
+            .apply_replication_transfer(&mut target, &transfer, &snapshot_auth_key)
             .unwrap_err();
         assert_eq!(
             err,
@@ -3364,6 +3374,43 @@ mod tests {
                 actual: 1,
             }
         );
+    }
+
+    #[test]
+    fn replication_bridge_rejects_forged_snapshot_with_recomputed_hash() {
+        let mut federation = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+
+        let region = region_id(30);
+        let mut source = RegionBridge::new_local(region, None, Budget::new());
+        source.add_task(task_id(31)).unwrap();
+        let snapshot_auth_key = snapshot_auth_key();
+        let mut transfer = federation
+            .export_replication_transfer(&mut source, Time::from_secs(3), &snapshot_auth_key)
+            .unwrap();
+
+        let mut forged = RegionSnapshot::from_bytes(&transfer.snapshot_bytes).unwrap();
+        forged.tasks.clear();
+        forged.metadata = b"attacker-controlled state".to_vec();
+        forged.sign(&AuthKey::from_seed(0xBAD0_CAFE));
+        transfer.snapshot_hash = forged.content_hash().to_hex();
+        transfer.snapshot_bytes = forged.to_bytes();
+
+        let mut target = RegionBridge::new_local(region, None, Budget::new());
+        let err = federation
+            .apply_replication_transfer(&mut target, &transfer, &snapshot_auth_key)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FederationError::SnapshotDecode(SnapshotError::AuthenticationFailed)
+        ));
+        assert!(target.local().task_ids().is_empty());
     }
 
     #[test]

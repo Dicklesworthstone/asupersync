@@ -16,9 +16,9 @@ use crate::RejectReason;
 use crate::combinator::retry::RetryPolicy;
 use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
 use crate::error::{Error, ErrorKind};
-use crate::security::AuthenticatedSymbol;
 use crate::security::SecurityContext;
 use crate::security::tag::AuthenticationTag;
+use crate::security::{AuthKey, AuthenticatedSymbol};
 use crate::types::symbol::{ObjectParams, Symbol};
 use crate::types::{RegionId, Time};
 use std::collections::{HashMap, HashSet};
@@ -459,6 +459,12 @@ pub struct RecoveryDecodingConfig {
     /// every supplied symbol against this context rather than trusting a carried
     /// `verified` bit from an earlier boundary.
     pub auth_context: Option<SecurityContext>,
+    /// Key used to authenticate the reconstructed snapshot payload.
+    ///
+    /// This is independent of symbol authentication: even deployments that
+    /// deliberately disable per-symbol verification must authenticate the
+    /// reconstructed state before applying it.
+    pub snapshot_auth_key: Option<AuthKey>,
     /// Maximum decode attempts before failure.
     pub max_decode_attempts: u32,
     /// Whether to attempt partial decode.
@@ -472,6 +478,7 @@ impl Default for RecoveryDecodingConfig {
             // pipeline rejects every symbol instead of trusting carried bits.
             verify_integrity: true,
             auth_context: None,
+            snapshot_auth_key: None,
             max_decode_attempts: 3,
             allow_partial_decode: false,
         }
@@ -635,9 +642,14 @@ impl StateDecoder {
     /// Convenience: decode and deserialize directly to [`RegionSnapshot`].
     pub fn decode_snapshot(&mut self, params: &ObjectParams) -> Result<RegionSnapshot, Error> {
         let data = self.decode(params)?;
-        RegionSnapshot::from_bytes(&data).map_err(|e| {
+        let snapshot_auth_key = self.config.snapshot_auth_key.as_ref().ok_or_else(|| {
             Error::new(ErrorKind::DecodingFailed)
-                .with_message(format!("snapshot deserialization failed: {e}"))
+                .with_message("snapshot authentication key is required for recovery")
+        })?;
+        RegionSnapshot::from_bytes_with_key(&data, snapshot_auth_key).map_err(|e| {
+            Error::new(ErrorKind::DecodingFailed).with_message(format!(
+                "snapshot authentication or deserialization failed: {e}"
+            ))
         })
     }
 }
@@ -1244,6 +1256,7 @@ mod tests {
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
             verify_integrity: true,
             auth_context: Some(ctx.clone()),
+            snapshot_auth_key: Some(snapshot_auth_key()),
             ..Default::default()
         });
 
@@ -1295,6 +1308,51 @@ mod tests {
 
         let err = decoder.decode_snapshot(&encoded.params).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InsufficientSymbols);
+    }
+
+    #[test]
+    fn decoder_rejects_reconstructed_snapshot_without_authentication_key() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+            verify_integrity: false,
+            ..Default::default()
+        });
+        for symbol in &encoded.symbols {
+            decoder
+                .add_symbol(&AuthenticatedSymbol::new_verified(
+                    symbol.clone(),
+                    AuthenticationTag::zero(),
+                ))
+                .unwrap();
+        }
+
+        let err = decoder.decode_snapshot(&encoded.params).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DecodingFailed);
+        assert!(err.to_string().contains("authentication key is required"));
+    }
+
+    #[test]
+    fn decoder_rejects_reconstructed_snapshot_signed_by_wrong_key() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+            verify_integrity: false,
+            snapshot_auth_key: Some(AuthKey::from_seed(0xBAD0_CAFE)),
+            ..Default::default()
+        });
+        for symbol in &encoded.symbols {
+            decoder
+                .add_symbol(&AuthenticatedSymbol::new_verified(
+                    symbol.clone(),
+                    AuthenticationTag::zero(),
+                ))
+                .unwrap();
+        }
+
+        let err = decoder.decode_snapshot(&encoded.params).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DecodingFailed);
+        assert!(err.to_string().contains("snapshot authentication failed"));
     }
 
     #[test]
@@ -1359,10 +1417,7 @@ mod tests {
         // Use verify_integrity: false for test since we used zero tags
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         let result = orchestrator
@@ -1415,10 +1470,7 @@ mod tests {
 
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         let result = orchestrator.recover_from_symbols(
@@ -1463,10 +1515,7 @@ mod tests {
 
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         let result = orchestrator.recover_from_symbols(
@@ -1533,10 +1582,7 @@ mod tests {
 
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         let result = orchestrator
@@ -1578,10 +1624,7 @@ mod tests {
         };
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         let err = orchestrator
@@ -1617,10 +1660,7 @@ mod tests {
         };
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         let err = orchestrator
@@ -1656,10 +1696,7 @@ mod tests {
         };
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         let err = orchestrator
@@ -1704,6 +1741,11 @@ mod tests {
             metadata: vec![],
             auth_tag: AuthenticationTag::zero(),
         }
+        .signed(&snapshot_auth_key())
+    }
+
+    fn snapshot_auth_key() -> AuthKey {
+        AuthKey::from_seed(0x5A5A_5A5A)
     }
 
     fn encode_test_snapshot(snapshot: &RegionSnapshot) -> EncodedState {
@@ -1713,7 +1755,8 @@ mod tests {
             ..Default::default()
         };
         let mut enc = StateEncoder::new(config, DetRng::new(42));
-        enc.encode(snapshot, Time::ZERO).unwrap()
+        let snapshot = snapshot.clone().signed(&snapshot_auth_key());
+        enc.encode(&snapshot, Time::ZERO).unwrap()
     }
 
     fn encode_multi_block_test_snapshot(snapshot: &RegionSnapshot) -> EncodedState {
@@ -1724,7 +1767,8 @@ mod tests {
             ..Default::default()
         };
         let mut enc = StateEncoder::new(config, DetRng::new(42));
-        let encoded = enc.encode(snapshot, Time::ZERO).unwrap();
+        let snapshot = snapshot.clone().signed(&snapshot_auth_key());
+        let encoded = enc.encode(&snapshot, Time::ZERO).unwrap();
         assert!(
             encoded.params.source_blocks > 1,
             "test snapshot should span multiple source blocks"
@@ -1735,6 +1779,7 @@ mod tests {
     fn unauthenticated_fixture_decoding_config() -> RecoveryDecodingConfig {
         RecoveryDecodingConfig {
             verify_integrity: false,
+            snapshot_auth_key: Some(snapshot_auth_key()),
             ..RecoveryDecodingConfig::default()
         }
     }
@@ -2102,10 +2147,7 @@ mod tests {
 
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         // First attempt succeeds with valid symbols.
@@ -2495,10 +2537,7 @@ mod tests {
 
         let mut orchestrator = RecoveryOrchestrator::new(
             RecoveryConfig::default(),
-            RecoveryDecodingConfig {
-                verify_integrity: false,
-                ..Default::default()
-            },
+            unauthenticated_fixture_decoding_config(),
         );
 
         orchestrator.cancel("operator abort");
@@ -2533,7 +2572,8 @@ mod tests {
             region_id: RegionId::new_for_test(99, 0),
             sequence: 42,
             ..create_test_snapshot()
-        };
+        }
+        .signed(&snapshot_auth_key());
         let encoded2 = encode_test_snapshot(&snapshot2);
 
         let mut decoder = StateDecoder::new(unauthenticated_fixture_decoding_config());

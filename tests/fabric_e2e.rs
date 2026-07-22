@@ -39,6 +39,7 @@ use asupersync::messaging::{
 use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::remote::NodeId;
 use asupersync::runtime::yield_now;
+use asupersync::security::AuthKey;
 use asupersync::test_logging::{TestHarness, TestReportAggregator, TestSummary};
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use serde::Serialize;
@@ -998,8 +999,13 @@ fn run_mirror_source_drain(seed: u64) -> MirrorSourceDrainOutcome {
                 source
                     .add_task(TaskId::new_for_test(71, 0))
                     .expect("source task");
+                let snapshot_auth_key = AuthKey::from_seed(0xFAB1_CE70);
                 let transfer = federation
-                    .export_replication_transfer(&mut source, Time::from_secs(1))
+                    .export_replication_transfer(
+                        &mut source,
+                        Time::from_secs(1),
+                        &snapshot_auth_key,
+                    )
                     .expect("export transfer");
                 push_log(
                     &log,
@@ -1023,7 +1029,7 @@ fn run_mirror_source_drain(seed: u64) -> MirrorSourceDrainOutcome {
                 let mut target =
                     RegionBridge::new_local(RegionId::new_for_test(70, 0), None, Budget::new());
                 let snapshot = federation
-                    .apply_replication_transfer(&mut target, &transfer)
+                    .apply_replication_transfer(&mut target, &transfer, &snapshot_auth_key)
                     .expect("apply transfer");
                 push_log(
                     &log,

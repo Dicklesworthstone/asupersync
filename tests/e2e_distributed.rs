@@ -28,7 +28,7 @@ use asupersync::record::distributed_region::{
 };
 use asupersync::record::region::RegionState;
 use asupersync::remote::NodeId;
-use asupersync::security::{AuthenticationTag, SecurityContext};
+use asupersync::security::{AuthKey, AuthenticationTag, SecurityContext};
 use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::budget::Budget;
 use asupersync::types::{Outcome, RegionId, Symbol, TaskId, Time};
@@ -78,6 +78,11 @@ fn make_region_snapshot() -> RegionSnapshot {
         metadata: vec![0xCA, 0xFE, 0xBA, 0xBE],
         auth_tag: AuthenticationTag::zero(),
     }
+    .signed(&snapshot_auth_key())
+}
+
+fn snapshot_auth_key() -> AuthKey {
+    AuthKey::from_seed(0xD157_5A5A)
 }
 
 fn encode_snapshot(snapshot: &RegionSnapshot) -> EncodedState {
@@ -481,6 +486,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         RecoveryConfig::default(),
         RecoveryDecodingConfig {
             auth_context: Some(recovery_context),
+            snapshot_auth_key: Some(snapshot_auth_key()),
             ..RecoveryDecodingConfig::default()
         },
     );
@@ -686,7 +692,9 @@ fn e2e_bridge_upgrade_snapshot_close() {
     );
 
     test_section!("Snapshot after upgrade");
-    let snap_after = bridge.create_snapshot(Time::from_secs(12));
+    let snap_after = bridge
+        .create_snapshot(Time::from_secs(12))
+        .signed(&snapshot_auth_key());
     assert!(snap_after.sequence > snap_before.sequence);
     assert_eq!(snap_after.tasks.len(), snap_before.tasks.len());
     assert_eq!(snap_after.children.len(), snap_before.children.len());
@@ -696,6 +704,7 @@ fn e2e_bridge_upgrade_snapshot_close() {
     let recovery_context = SecurityContext::for_testing(0xD157_0001);
     let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
         auth_context: Some(recovery_context.clone()),
+        snapshot_auth_key: Some(snapshot_auth_key()),
         ..RecoveryDecodingConfig::default()
     });
     for sym in &encoded.symbols {
@@ -822,6 +831,7 @@ fn e2e_recover_source_only() {
         RecoveryConfig::default(),
         RecoveryDecodingConfig {
             auth_context: Some(recovery_context),
+            snapshot_auth_key: Some(snapshot_auth_key()),
             ..RecoveryDecodingConfig::default()
         },
     );
