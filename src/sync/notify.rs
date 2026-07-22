@@ -448,9 +448,24 @@ impl Notify {
             wakers
         };
 
-        // Wake all.
+        // Wake all. Isolate each detached wake so one hostile safe Waker cannot
+        // strand the later waiters: they have already had their wakers taken and
+        // their generation advanced under the lock, so they can only re-poll to
+        // Ready if they are actually woken (br-asupersync-cnl0jn). Retain the
+        // first panic, finish the fanout, then resume it once so exactly one
+        // payload propagates.
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         for waker in wakers {
-            waker.wake();
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                waker.wake();
+            })) {
+                if first_panic.is_none() {
+                    first_panic = Some(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -906,6 +921,20 @@ mod tests {
         }))
     }
 
+    /// A hostile-but-safe Waker that panics on wake, used to prove the broadcast
+    /// fanout isolates one panicking peer from the others.
+    struct PanickingWaker;
+
+    impl std::task::Wake for PanickingWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("hostile notify waker panics on wake");
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("hostile notify waker panics on wake");
+        }
+    }
+
     fn poll_with_waker<F>(fut: &mut F, waker: &Waker) -> Poll<F::Output>
     where
         F: Future + Unpin,
@@ -1084,6 +1113,44 @@ mod tests {
         drop(notified);
         assert_eq!(notify.waiter_count(), 0);
         crate::test_complete!("notified_reuses_full_inline_hole_without_spilling");
+    }
+
+    /// br-asupersync-cnl0jn: notify_waiters detaches every matching waiter (takes
+    /// its waker and advances its generation) under the mutex, then wakes them.
+    /// A first safe Waker panic must not strand the later waiters -- they can
+    /// only re-poll to Ready if actually woken. The later waiter must be woken,
+    /// the first panic resumed once, and both futures then poll Ready.
+    #[test]
+    fn notify_waiters_wake_panic_still_notifies_peers_then_resumes() {
+        init_test("notify_waiters_wake_panic_still_notifies_peers_then_resumes");
+        let notify = Notify::new();
+        let mut fut_a = notify.notified();
+        let mut fut_b = notify.notified();
+
+        // A registers a panicking Waker; B registers a counting Waker.
+        let panic_waker = Waker::from(Arc::new(PanickingWaker));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let count_waker = CountingWaker::from_counter(Arc::clone(&counter));
+
+        let a_parked = poll_with_waker(&mut fut_a, &panic_waker).is_pending();
+        let b_parked = poll_with_waker(&mut fut_b, &count_waker).is_pending();
+        assert!(a_parked, "waiter A parks");
+        assert!(b_parked, "waiter B parks");
+
+        // Broadcast: A's Waker panics, but B must still be woken; the first panic
+        // then propagates.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify.notify_waiters()));
+        assert!(result.is_err(), "notify_waiters resumes the wake panic");
+        assert!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "later waiter B still woken despite earlier panic"
+        );
+
+        // Both futures now observe the notification and poll Ready.
+        assert!(poll_once(&mut fut_a).is_ready(), "waiter A polls Ready");
+        assert!(poll_once(&mut fut_b).is_ready(), "waiter B polls Ready");
+        crate::test_complete!("notify_waiters_wake_panic_still_notifies_peers_then_resumes");
     }
 
     fn broadcast_with_middle_hole_signature(
