@@ -1700,7 +1700,9 @@ mod tests {
 
         // Call that panics
         let result = catch_unwind(AssertUnwindSafe(|| {
-            bh.call(now, || -> Result<(), &str> { panic!("intentional test panic") })
+            bh.call(now, || -> Result<(), &str> {
+                panic!("intentional test panic")
+            })
         }));
 
         // Should have panicked

@@ -1724,7 +1724,12 @@ mod tests {
 
         // First poll registers a clamped timer at the 7-day horizon.
         let first = Pin::new(&mut sleep).poll(&mut task_cx);
-        crate::assert_with_log!(first.is_pending(), "first poll pending", true, first.is_pending());
+        crate::assert_with_log!(
+            first.is_pending(),
+            "first poll pending",
+            true,
+            first.is_pending()
+        );
         crate::assert_with_log!(
             timer.pending_count() == 1,
             "clamped timer registered",
@@ -1767,7 +1772,12 @@ mod tests {
         clock.set(Time::from_secs(DEADLINE_SECS));
         let _ = timer.process_timers();
         let done = Pin::new(&mut sleep).poll(&mut task_cx);
-        crate::assert_with_log!(done.is_ready(), "ready at the true deadline", true, done.is_ready());
+        crate::assert_with_log!(
+            done.is_ready(),
+            "ready at the true deadline",
+            true,
+            done.is_ready()
+        );
 
         crate::test_complete!("sleep_beyond_max_horizon_re_registers_and_does_not_fire_early");
     }
