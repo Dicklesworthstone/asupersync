@@ -379,6 +379,40 @@ impl<T> RwLock<T> {
         SmallVec::from_vec(state.reader_waiters.drain())
     }
 
+    /// Wakes a released batch of waiters -- an optional writer baton followed by
+    /// the eligible readers -- with per-wake panic isolation, so one hostile
+    /// safe Waker cannot strand the peers whose reader slots were already
+    /// reserved under the state lock (br-asupersync-dkubr0). The first panic is
+    /// retained, the fanout completes, then it is resumed once -- unless this
+    /// runs inside an existing unwind (a guard Drop during a panic), where the
+    /// wakes have already been delivered and resuming would abort, so the
+    /// payload is dropped instead.
+    fn wake_released_waiters(writer_waker: Option<Waker>, reader_wakers: SmallVec<[Waker; 4]>) {
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        let mut isolate = |waker: Waker| {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                waker.wake();
+            })) && first_panic.is_none()
+            {
+                first_panic = Some(payload);
+            }
+        };
+        if let Some(waker) = writer_waker {
+            isolate(waker);
+        }
+        for waker in reader_wakers {
+            isolate(waker);
+        }
+        drop(isolate);
+        if let Some(payload) = first_panic {
+            if std::thread::panicking() {
+                drop(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
     #[inline]
     fn queued_waiter_wakers(state: &mut State) -> SmallVec<[Waker; 4]> {
         let mut wakers = SmallVec::new();
@@ -544,12 +578,7 @@ impl<T> RwLock<T> {
                 }
             }
         };
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        Self::wake_released_waiters(writer_waker, reader_wakers);
     }
 
     #[inline]
@@ -702,12 +731,7 @@ impl<T> RwLock<T> {
 
         *counted = false;
 
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        Self::wake_released_waiters(writer_waker, reader_wakers);
         drop(retired_waker);
     }
 
@@ -1088,9 +1112,7 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
         };
 
         // Wake readers outside the lock
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        RwLock::<T>::wake_released_waiters(None, reader_wakers);
 
         read_guard
     }
@@ -1271,9 +1293,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
         };
 
         // Wake readers outside the lock
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        RwLock::<T>::wake_released_waiters(None, reader_wakers);
 
         read_guard
     }
@@ -1654,6 +1674,77 @@ mod tests {
             state_was_unlocked.load(AtomicOrdering::SeqCst),
             "{path} RawWaker owner must be destroyed after releasing rwlock state"
         );
+    }
+
+    /// br-asupersync-dkubr0: releasing a write lock pregrants a batch of eligible
+    /// reader waiters (their reader slots are reserved under the state lock) and
+    /// then wakes them. A first safe reader Waker panic must not strand the later
+    /// pregranted readers -- they must still be woken, the write-drop panic is
+    /// resumed once, both readers then complete, and after they release the lock
+    /// is writable again with zero readers.
+    #[test]
+    fn write_release_reader_fanout_panic_still_wakes_peers_then_resumes() {
+        struct PanicWaker;
+        impl std::task::Wake for PanicWaker {
+            fn wake(self: StdArc<Self>) {
+                panic!("hostile reader waker panics on wake");
+            }
+            fn wake_by_ref(self: &StdArc<Self>) {
+                panic!("hostile reader waker panics on wake");
+            }
+        }
+        struct CountWaker(StdArc<std::sync::atomic::AtomicUsize>);
+        impl std::task::Wake for CountWaker {
+            fn wake(self: StdArc<Self>) {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            fn wake_by_ref(self: &StdArc<Self>) {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+
+        init_test("write_release_reader_fanout_panic_still_wakes_peers_then_resumes");
+        // Unknown lock name -> no rank -> no lock-order interference.
+        let lock = RwLock::with_name("reader_fanout", 0u32);
+        let cx = test_cx();
+
+        // An active writer blocks readers.
+        let writer = lock.try_write().expect("writer acquires");
+
+        // Two readers park behind the writer; the first carries a panicking Waker.
+        let mut r1 = lock.read(&cx);
+        let mut r2 = lock.read(&cx);
+        let panic_waker = Waker::from(StdArc::new(PanicWaker));
+        let counter = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_waker = Waker::from(StdArc::new(CountWaker(StdArc::clone(&counter))));
+        assert!(poll_with_waker(&mut r1, &panic_waker).is_pending(), "r1 parks");
+        assert!(poll_with_waker(&mut r2, &count_waker).is_pending(), "r2 parks");
+
+        // Dropping the writer pregrants both readers and wakes them; r1's Waker
+        // panics, but r2 must still be woken, then the panic is resumed out of
+        // the guard drop.
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(writer)));
+        assert!(
+            dropped.is_err(),
+            "write-release reader fanout resumes the panic"
+        );
+        assert!(
+            counter.load(AtomicOrdering::SeqCst) >= 1,
+            "later reader still woken despite earlier panic"
+        );
+
+        // Both readers were pregranted, so they complete on the next poll without
+        // re-incrementing the reader count.
+        let g1 = poll_once(&mut r1).expect("r1 ready").expect("r1 read guard");
+        let g2 = poll_once(&mut r2).expect("r2 ready").expect("r2 read guard");
+        assert_eq!(lock.debug_state().readers, 2, "both readers active");
+        drop(g1);
+        drop(g2);
+
+        // With both readers released, zero readers remain and a writer acquires.
+        assert_eq!(lock.debug_state().readers, 0, "no readers after release");
+        assert!(lock.try_write().is_ok(), "lock writable after fanout");
+        crate::test_complete!("write_release_reader_fanout_panic_still_wakes_peers_then_resumes");
     }
 
     #[test]
