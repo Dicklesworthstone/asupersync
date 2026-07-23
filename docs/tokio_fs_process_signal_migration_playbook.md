@@ -97,7 +97,7 @@ use asupersync::fs::{BufReader, BufWriter};
 
 3. **Error types**: I/O errors are `std::io::Error`, identical to Tokio.
 
-4. **Cancel safety**: All file operations are cancel-safe. Dropping a future mid-operation discards partial results without corruption.
+4. **Cancellation contract**: Blocking file operations use soft cancellation. Dropping a started future discards its result, not necessarily its effects. Owned cursor operations (`seek`, `rewind`, `stream_position`, and `read_into_vec`) serialize completion through a per-file gate, so immediate reuse cannot overtake the started syscall; they are ordered but not rollback-safe. `read_into_vec` may consume bytes and lose its owned buffer. Create, truncate, write, sync, and path-mutating operations require operation-specific reasoning and carry no blanket rollback guarantee.
 
 5. **No `fs::hard_link`**: Use `std::fs::hard_link` via `spawn_blocking` if needed.
 

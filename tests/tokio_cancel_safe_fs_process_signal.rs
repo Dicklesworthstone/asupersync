@@ -1,8 +1,8 @@
 #![allow(unsafe_code)]
 //! Contract tests for [T3.6] Cancellation-Safe Integration: FS, Process, Signal
 //!
-//! Proves that cross-module cancellation across filesystem, process, and signal
-//! flows produces no leaked obligations, no zombie processes, and no lost signals.
+//! Checks the scoped cancellation contracts across filesystem, process, and
+//! signal flows, including ordered (non-rollback) File cursor completion.
 //!
 //! Categories:
 //! - FC-01..FC-05: FS cancel-safety
@@ -11,7 +11,13 @@
 //! - IC-01..IC-06: Cross-module integration
 //! - CT-01..CT-04: Contract artifact validation
 
+#[cfg(feature = "test-internals")]
+use asupersync::fs::{File, FileCursorOperationProbe};
 use asupersync::process::{Command, Stdio};
+#[cfg(feature = "test-internals")]
+use std::sync::Arc;
+#[cfg(feature = "test-internals")]
+use std::time::Duration;
 
 mod common {
     pub const DOC_MD: &str = include_str!("../docs/tokio_cancel_safe_fs_process_signal.md");
@@ -144,16 +150,78 @@ fn assert_process_not_running_after_drop(pid: u32, context: &str) {
 // ── FC: FS Cancel-Safety ─────────────────────────────────────────────
 
 #[test]
-fn fc_01_file_write_cancel_no_partial_state() {
-    // Write a file, then overwrite it — cancellation of overwrite leaves original
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("cancel_test.txt");
-    std::fs::write(&path, b"original").expect("write original");
+fn fc_01_started_file_cursor_operation_completes_before_reuse() {
+    #[cfg(feature = "test-internals")]
+    {
+        futures_lite::future::block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("cursor_soft_cancel.txt");
+            std::fs::write(&path, b"abcdef").expect("write fixture");
 
-    // Simulate "cancelled write" by writing partial data then verifying
-    // the original is still intact if we read before overwrite completes
-    let content = std::fs::read(&path).expect("read");
-    assert_eq!(content, b"original");
+            let mut file = File::open(&path).await.expect("open fixture");
+            let probe = Arc::new(FileCursorOperationProbe::new());
+            file.install_cursor_operation_probe_for_test(Arc::clone(&probe));
+
+            let mut cancelled_read = Box::pin(file.read_into_vec(vec![0_u8; 2]));
+            assert!(
+                futures_lite::future::poll_once(cancelled_read.as_mut())
+                    .await
+                    .is_none(),
+                "probe must hold the started read pending"
+            );
+            if !probe.wait_until_first_blocked(Duration::from_secs(5)) {
+                probe.release_first();
+                panic!("read must actually start and acquire the cursor gate");
+            }
+            drop(cancelled_read);
+
+            let mut reuse = Box::pin(file.stream_position());
+            assert!(
+                futures_lite::future::poll_once(reuse.as_mut())
+                    .await
+                    .is_none(),
+                "immediate reuse must wait for the started read"
+            );
+            if !probe.wait_for_arrivals(2, Duration::from_secs(5)) {
+                probe.release_first();
+                panic!("replacement operation must reach the cursor gate");
+            }
+            assert_eq!(
+                probe.acquisition_count(),
+                1,
+                "replacement operation must not overtake the cancelled read"
+            );
+
+            probe.release_first();
+            assert_eq!(
+                reuse.await.expect("replacement stream_position"),
+                2,
+                "the started read may commit, but must commit before reuse"
+            );
+            assert_eq!(probe.acquisition_count(), 2);
+            assert_eq!(
+                file.stream_position()
+                    .await
+                    .expect("stable cursor position"),
+                2,
+                "no late cursor mutation may occur after reuse completes"
+            );
+        });
+    }
+
+    #[cfg(not(feature = "test-internals"))]
+    {
+        let j = common::json();
+        let required = j
+            .get("proof_requirements")
+            .and_then(|requirements| requirements.get("required_features"))
+            .and_then(serde_json::Value::as_array)
+            .expect("proof_requirements.required_features");
+        assert!(
+            required.iter().any(|feature| feature == "test-internals"),
+            "the deterministic started-operation proof must fail closed without its feature"
+        );
+    }
 }
 
 #[test]
@@ -466,6 +534,40 @@ fn ct_03_all_invariants_proven() {
             .unwrap_or("");
         assert_eq!(verdict, "PROVEN");
     }
+
+    let file_invariant = invariants
+        .iter()
+        .find(|invariant| {
+            invariant.get("id").and_then(serde_json::Value::as_str) == Some("INV-CS-1")
+        })
+        .expect("INV-CS-1");
+    assert!(
+        file_invariant
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|description| {
+                description.contains("completes before subsequent cursor access")
+                    && description.contains("not rolled back")
+            }),
+        "File cancellation invariant must state ordered, non-rollback completion"
+    );
+
+    let file_module = j
+        .get("modules_tested")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|modules| {
+            modules.iter().find(|module| {
+                module.get("module").and_then(serde_json::Value::as_str) == Some("src/fs/file.rs")
+            })
+        })
+        .expect("src/fs/file.rs module row");
+    assert_eq!(
+        file_module
+            .get("rollback_safe")
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "artifact must fail closed on rollback claims"
+    );
 }
 
 #[test]
@@ -489,5 +591,22 @@ fn ct_04_summary_verdict() {
             .get("total_tests")
             .and_then(serde_json::Value::as_u64),
         Some(24)
+    );
+
+    let required_features = j
+        .get("proof_requirements")
+        .and_then(|requirements| requirements.get("required_features"))
+        .and_then(serde_json::Value::as_array)
+        .expect("proof_requirements.required_features");
+    assert!(
+        required_features
+            .iter()
+            .any(|feature| feature == "test-internals")
+    );
+    assert_eq!(
+        j.get("proof_requirements")
+            .and_then(|requirements| requirements.get("behavioral_test"))
+            .and_then(serde_json::Value::as_str),
+        Some("fc_01_started_file_cursor_operation_completes_before_reuse")
     );
 }

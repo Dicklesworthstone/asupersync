@@ -6,12 +6,15 @@
 //!
 //! # Cancel Safety
 //!
-//! - `File::open`, `File::create`: Cancel-safe (no partial state)
-//! - Read operations: Cancel-safe (partial data discarded by caller)
+//! - `File::open`: A started open may complete; its discarded handle is closed
+//! - `File::create`/`create_new`: A started call may still create or truncate
+//! - Poll-based read/write/seek operations: one synchronous syscall per poll
+//! - Owned cursor operations: soft-cancelled syscalls may still commit, but a
+//!   per-file completion gate prevents later cursor access from overtaking them
 //! - Write operations: Use `WritePermit` for cancel-safe writes, or accept
 //!   potential partial writes on cancellation
-//! - `sync_all`, `sync_data`: Cancel-safe (atomic completion)
-//! - Seek: Cancel-safe (atomic completion)
+//! - `sync_all`, `sync_data`: A started sync may finish after its future drops
+//! - Owned seek/read cancellation is ordered, not rollback-safe
 //!
 //! # Example
 //!
@@ -60,6 +63,9 @@ pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
 pub use dir::{create_dir, create_dir_all, remove_dir, remove_dir_all};
 pub use file::File;
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub use file::FileCursorOperationProbe;
 pub use lines::Lines;
 pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
