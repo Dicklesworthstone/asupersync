@@ -1909,7 +1909,7 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check_ol11aa3 ca
 
 | Gate | Direct-main trigger | Direct-main enforcement | PR workflow enforcement | Required artifact |
 |------|---------------------|-------------------------|-------------------------|-------------------|
-| Baseline benchmarks | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` benchmark command from the signoff contract and compare against `artifacts/baseline.json`. | **CI-blocking** for PRs. Fails if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
+| Baseline benchmarks | Every substantive direct-main change before commit/push | Run the canonical `methodology_baselines` command from the signoff contract. Its post-benchmark gate compares every tracked p50 against `artifacts/baseline.json` at a fixed **5%** threshold in the same remote process. | **CI-blocking** for PRs. Fails if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
 | Flamegraph | Direct-main changes under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | Generate and commit `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`. Pressure-control work that cites `scheduler_tail_pressure` uses this artifact only as attribution for the `methodology_baselines` scheduler-adjacent rows, not as a throughput or regression-closure claim. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`; PR lane: `artifacts/flamegraphs/pr-<N>.svg`. |
 | Golden checksums | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` golden benchmark and integration test commands. | **CI-blocking** for PRs. Fails on any `[GOLDEN] MISMATCH` or failing `golden_outputs` integration test. | `artifacts/golden_checksums.json` when intentionally updated. |
 | Proof notes | Direct-main changes under `src/obligation/` or `src/safety/`, or any changed `.rs` file containing an `unsafe { ... }` block | Commit `artifacts/proof_notes/main-<bead-or-short-sha>.md` and validate it is substantive. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/proof_notes/main-<bead-or-short-sha>.md`; PR lane: `artifacts/proof_notes/pr-<N>.md`. |
@@ -1918,22 +1918,22 @@ The PR workflow `summary` job (`needs: [baseline-gate, flamegraph-gate, golden-c
 
 ### Direct-main preflight commands
 
-Run only the gates that apply to the files you are landing. All cargo work stays behind `rch exec --` and is scoped to the `asupersync` crate:
+Run only the gates that apply to the files you are landing. All cargo work stays behind strict `RCH_REQUIRE_REMOTE=1 rch exec --` execution, has no local fallback, and is scoped to the `asupersync` crate. The Phase 6 baseline bench maps Criterion's live `median.point_estimate` to the tracked `p50_ns` after measurement in the same remote process, fails closed when any tracked row is missing, duplicated, malformed, or more than 5% slower, and leaves newly added candidate rows outside the gate until they are deliberately added to `artifacts/baseline.json`:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines cargo bench -p asupersync --bench methodology_baselines --features test-internals -- --noplot
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines ASUPERSYNC_PHASE6_BASELINE=artifacts/baseline.json ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT=5 cargo bench -p asupersync --bench methodology_baselines --features test-internals,criterion-benches -- --noplot
 ```
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals -- --noplot
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals,criterion-benches -- --noplot
 ```
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -p asupersync --test golden_outputs --features test-internals -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -j 4 -p asupersync --test golden_outputs --features test-internals -- --nocapture
 ```
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_flamegraph cargo flamegraph --package asupersync --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_flamegraph cargo flamegraph --package asupersync --freq 997 --features test-internals,criterion-benches --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg
 ```
 
 ```bash

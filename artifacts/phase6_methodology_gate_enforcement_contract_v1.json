@@ -1,6 +1,7 @@
 {
   "contract_version": "phase6-methodology-gate-enforcement-contract-v1",
   "bead_id": "asupersync-rckg8s",
+  "repair_bead_id": "asupersync-phase6-direct-main-benchmark-gate-drift-3kn86z",
   "signoff_date": "2026-05-04",
   "description": "Phase 6 methodology gate enforcement split for the main-only repository workflow.",
   "source_of_truth": {
@@ -39,7 +40,22 @@
       "gate_id": "baseline-benchmarks",
       "trigger": "Every substantive direct-main change before commit or push.",
       "status": "local_enforced",
-      "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines cargo bench -p asupersync --bench methodology_baselines --features test-internals -- --noplot",
+      "rch_command": "RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines ASUPERSYNC_PHASE6_BASELINE=artifacts/baseline.json ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT=5 cargo bench -p asupersync --bench methodology_baselines --features test-internals,criterion-benches -- --noplot",
+      "comparison_contract": {
+        "runner": "benches/methodology_baselines.rs post-benchmark gate",
+        "execution_boundary": "same_remote_benchmark_process",
+        "tracked_baseline": "artifacts/baseline.json",
+        "tracked_schema_version": "1.0.0",
+        "candidate_schema_version": "criterion-0.8-estimates",
+        "candidate_metric": "median.point_estimate",
+        "tracked_metric": "p50_ns",
+        "max_regression_pct": 5,
+        "threshold_semantics": "fail_when_strictly_greater",
+        "missing_tracked_candidate_row": "fail_closed",
+        "duplicate_or_invalid_row": "fail_closed",
+        "untracked_candidate_row": "ignore_until_tracked",
+        "no_local_fallback": true
+      },
       "artifact_locations": [
         "artifacts/baseline.json",
         "target/criterion/"
@@ -49,7 +65,7 @@
       "gate_id": "golden-checksums-bench",
       "trigger": "Every substantive direct-main change before commit or push.",
       "status": "local_enforced",
-      "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals -- --noplot",
+      "rch_command": "RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals,criterion-benches -- --noplot",
       "artifact_locations": [
         "artifacts/golden_checksums.json"
       ]
@@ -58,7 +74,7 @@
       "gate_id": "golden-checksums-test",
       "trigger": "Every substantive direct-main change before commit or push.",
       "status": "local_enforced",
-      "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -p asupersync --test golden_outputs --features test-internals -- --nocapture",
+      "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -j 4 -p asupersync --test golden_outputs --features test-internals -- --nocapture",
       "artifact_locations": [
         "artifacts/golden_checksums.json",
         "tests/golden_outputs.rs"
@@ -68,7 +84,7 @@
       "gate_id": "flamegraph",
       "trigger": "Direct-main changes under src/runtime/scheduler/, src/channel/, src/obligation/, src/cancel/, or src/sync/.",
       "status": "local_enforced_when_triggered",
-      "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_flamegraph cargo flamegraph --package asupersync --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
+      "rch_command": "RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_flamegraph cargo flamegraph --package asupersync --freq 997 --features test-internals,criterion-benches --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
       "artifact_locations": [
         "artifacts/flamegraphs/main-<bead-or-short-sha>.svg"
       ],
