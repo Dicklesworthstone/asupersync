@@ -7809,6 +7809,79 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    #[cfg(feature = "tracing-integration")]
+    #[derive(Default)]
+    struct EpochSubscriberAudit {
+        panics: AtomicUsize,
+        runtime_state_reentries: AtomicUsize,
+        published_tasks_observed: AtomicUsize,
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    struct EpochMessageVisitor {
+        is_epoch_event: bool,
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    impl tracing::field::Visit for EpochMessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.is_epoch_event = format!("{value:?}").contains("epoch_");
+            }
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.is_epoch_event = value.contains("epoch_");
+            }
+        }
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    struct PanickingEpochLayer {
+        state: Weak<ContendedMutex<RuntimeState>>,
+        audit: Arc<EpochSubscriberAudit>,
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    impl<S> tracing_subscriber::Layer<S> for PanickingEpochLayer
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = EpochMessageVisitor {
+                is_epoch_event: false,
+            };
+            event.record(&mut visitor);
+            if !visitor.is_epoch_event {
+                return;
+            }
+
+            if let Some(state) = self.state.upgrade()
+                && let Ok(runtime) = state.try_lock()
+            {
+                self.audit
+                    .runtime_state_reentries
+                    .fetch_add(1, Ordering::Relaxed);
+                if runtime.tasks_iter().any(|(_, task)| {
+                    task.cx_inner
+                        .as_ref()
+                        .is_some_and(|inner| inner.read().runnable_publication.is_published())
+                }) {
+                    self.audit
+                        .published_tasks_observed
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            self.audit.panics.fetch_add(1, Ordering::Relaxed);
+            panic!("adversarial epoch subscriber"); // ubs:ignore -- hostile subscriber fixture
+        }
+    }
+
     const GLOBAL_READY_CONTENTION_CONTRACT_JSON: &str =
         include_str!("../../../artifacts/scheduler_global_ready_contention_smoke_contract_v1.json");
     const GLOBAL_READY_CONTENTION_RUNNER_SCRIPT: &str =
@@ -16931,6 +17004,214 @@ mod tests {
             "both completed tasks must be unlinked"
         );
         assert_eq!(runtime.task_completion_observer_panic_count(), 2);
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn epoch_telemetry_subscriber_panics_do_not_kill_three_lane_worker() {
+        use tracing_subscriber::prelude::*;
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut runtime = RuntimeState::new();
+        let root = runtime.create_root_region(Budget::INFINITE);
+        let first_ran = Arc::clone(&ran);
+        let (first, _first_handle) = runtime
+            .create_task(root, Budget::INFINITE, async move {
+                first_ran.fetch_add(1, Ordering::Relaxed);
+            })
+            .expect("first task create");
+        let second_ran = Arc::clone(&ran);
+        let (second, _second_handle) = runtime
+            .create_task(root, Budget::INFINITE, async move {
+                second_ran.fetch_add(1, Ordering::Relaxed);
+            })
+            .expect("second task create");
+        let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = scheduler.workers.first_mut().expect("worker");
+        let audit = Arc::new(EpochSubscriberAudit::default());
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(PanickingEpochLayer {
+                state: Arc::downgrade(&state),
+                audit: Arc::clone(&audit),
+            });
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker.execute(first);
+                }))
+                .is_ok(),
+                "epoch subscriber panic must not escape the first dispatch"
+            );
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker.execute(second);
+                }))
+                .is_ok(),
+                "the same worker must survive for a second task"
+            );
+        });
+
+        assert_eq!(ran.load(Ordering::Relaxed), 2);
+        assert!(
+            audit.panics.load(Ordering::Relaxed) >= 2,
+            "spawn and completion epoch dispatches must exercise the hostile subscriber"
+        );
+        assert!(
+            audit.runtime_state_reentries.load(Ordering::Relaxed) >= 2,
+            "epoch callbacks must run after the outer RuntimeState lock is released"
+        );
+        let runtime = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(runtime.task(first).is_none());
+        assert!(runtime.task(second).is_none());
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn epoch_telemetry_mailbox_admission_dispatches_after_publication_and_unlock() {
+        use tracing_subscriber::prelude::*;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let region = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .create_root_region(Budget::INFINITE);
+        let setup_telemetry = {
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_epoch_telemetry()
+        };
+        setup_telemetry.dispatch();
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::new());
+        scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+        let mut worker = scheduler.take_workers().remove(0);
+
+        let provisional = mailbox.allocate_task_id();
+        mailbox.enqueue(
+            crate::runtime::spawn_mailbox::SpawnRequest::new(
+                provisional,
+                region,
+                Budget::INFINITE,
+                crate::runtime::stored_task::StoredTask::new_with_id(
+                    async { crate::types::Outcome::Ok(()) },
+                    provisional,
+                ),
+            ),
+            crate::types::Time::ZERO,
+        );
+
+        let audit = Arc::new(EpochSubscriberAudit::default());
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(PanickingEpochLayer {
+                state: Arc::downgrade(&state),
+                audit: Arc::clone(&audit),
+            });
+        let result = tracing::subscriber::with_default(subscriber, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.drain_spawn_admissions();
+            }))
+        });
+        assert!(result.is_ok(), "epoch subscriber panic must stay contained");
+
+        let admitted = worker
+            .global
+            .pop_ready()
+            .expect("admitted task must be globally runnable")
+            .task;
+        assert!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task(admitted)
+                .is_some()
+        );
+        assert_eq!(audit.panics.load(Ordering::Relaxed), 1);
+        assert_eq!(audit.runtime_state_reentries.load(Ordering::Relaxed), 1);
+        assert_eq!(audit.published_tasks_observed.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn epoch_telemetry_local_admission_dispatches_after_publication_and_unlock() {
+        use tracing_subscriber::prelude::*;
+
+        assert!(
+            crate::runtime::spawn_mailbox::local_spawn_lane_is_empty(),
+            "test requires a clean owner-local admission lane"
+        );
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let region = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .create_root_region(Budget::INFINITE);
+        let setup_telemetry = {
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_epoch_telemetry()
+        };
+        setup_telemetry.dispatch();
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut worker = scheduler.take_workers().remove(0);
+        let _worker_guard = ScopedWorkerId::new(worker.id);
+        let _ready_guard = ScopedLocalReady::new(Arc::clone(&worker.local_ready));
+
+        let allocator = crate::runtime::spawn_mailbox::SpawnMailbox::new();
+        let provisional = allocator.allocate_task_id();
+        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn =
+            Box::new(|_| Box::pin(async { crate::types::Outcome::Ok(()) }));
+        crate::runtime::spawn_mailbox::enqueue_local_spawn(
+            crate::runtime::spawn_mailbox::LocalSpawnRequest {
+                task_id: provisional,
+                region,
+                budget: Budget::INFINITE,
+                factory,
+                on_unadmitted_cancel: None,
+                on_admission_error: None,
+                pending_reservation: None,
+                admitted_slot: None,
+            },
+        );
+
+        let audit = Arc::new(EpochSubscriberAudit::default());
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(PanickingEpochLayer {
+                state: Arc::downgrade(&state),
+                audit: Arc::clone(&audit),
+            });
+        let result = tracing::subscriber::with_default(subscriber, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.drain_local_spawn_admissions();
+            }))
+        });
+        assert!(result.is_ok(), "epoch subscriber panic must stay contained");
+
+        let admitted = worker
+            .local_ready
+            .lock()
+            .pop_front()
+            .expect("admitted task must be owner-local runnable");
+        let stored = crate::runtime::local::remove_local_task(admitted)
+            .expect("admitted task must be stored before telemetry dispatch");
+        assert_eq!(stored.task_id(), Some(admitted));
+        assert!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task(admitted)
+                .is_some_and(|record| record.is_local())
+        );
+        assert_eq!(audit.panics.load(Ordering::Relaxed), 1);
+        assert_eq!(audit.runtime_state_reentries.load(Ordering::Relaxed), 1);
+        assert_eq!(audit.published_tasks_observed.load(Ordering::Relaxed), 1);
     }
 
     fn first_adaptive_epoch_metrics_after_optional_idle_probe(

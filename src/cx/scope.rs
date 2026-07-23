@@ -1402,6 +1402,7 @@ impl<P: Policy> Scope<'_, P> {
             return Err(SpawnError::RegionNotFound(self.region));
         }
 
+        state.notify_runtime_epoch_advance(crate::runtime::epoch_tracker::ModuleId::TaskTable);
         Ok(task_id)
     }
 

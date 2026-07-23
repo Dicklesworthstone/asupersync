@@ -39,6 +39,7 @@ use crate::epoch::EpochId;
 use crate::tracing_compat::{debug, error, info, warn};
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
+use crossbeam_queue::ArrayQueue;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -46,6 +47,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 type TimeGetter = Arc<dyn Fn() -> Time + Send + Sync>;
+
+const DEFAULT_TELEMETRY_CAPACITY: usize = 1024;
+const DEFAULT_TELEMETRY_DRAIN_LIMIT: usize = 64;
 
 /// Identifier for runtime modules that participate in epoch transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -237,6 +241,480 @@ struct EpochTransitionRecord {
     transition_count: u64,
 }
 
+/// Callback-free counters for the bounded epoch telemetry outbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochTelemetryStatistics {
+    /// Receipts waiting for an explicit out-of-lock dispatch point.
+    pub pending: usize,
+    /// Maximum number of receipts retained by the outbox.
+    pub capacity: usize,
+    /// Receipts dropped because the bounded outbox was full.
+    pub overflow_count: u64,
+    /// One-shot dispatches that contained a tracing subscriber panic.
+    pub dispatch_panic_count: u64,
+    /// Receipts successfully emitted before a dispatch completed or panicked.
+    pub emitted_count: u64,
+}
+
+struct EpochTelemetryOutbox {
+    receipts: ArrayQueue<EpochTelemetryReceipt>,
+    overflow_count: AtomicU64,
+    dispatch_panic_count: AtomicU64,
+    emitted_count: AtomicU64,
+}
+
+impl EpochTelemetryOutbox {
+    fn new(capacity: usize) -> Self {
+        Self {
+            receipts: ArrayQueue::new(capacity.max(1)),
+            overflow_count: AtomicU64::new(0),
+            dispatch_panic_count: AtomicU64::new(0),
+            emitted_count: AtomicU64::new(0),
+        }
+    }
+
+    fn push(&self, receipt: EpochTelemetryReceipt) {
+        if self.receipts.push(receipt).is_err() {
+            self.overflow_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn drain(self: &Arc<Self>, limit: usize) -> EpochTelemetryDispatch {
+        let mut receipts = Vec::with_capacity(limit.min(self.receipts.len()));
+        for _ in 0..limit {
+            let Some(receipt) = self.receipts.pop() else {
+                break;
+            };
+            receipts.push(receipt);
+        }
+        EpochTelemetryDispatch {
+            receipts,
+            outbox: Arc::clone(self),
+        }
+    }
+
+    fn statistics(&self) -> EpochTelemetryStatistics {
+        EpochTelemetryStatistics {
+            pending: self.receipts.len(),
+            capacity: self.receipts.capacity(),
+            overflow_count: self.overflow_count.load(Ordering::Relaxed),
+            dispatch_panic_count: self.dispatch_panic_count.load(Ordering::Relaxed),
+            emitted_count: self.emitted_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum EpochTelemetryReceipt {
+    TransitionDuplicate {
+        module: ModuleId,
+        current_epoch: EpochId,
+        reported_from_epoch: EpochId,
+        reported_to_epoch: EpochId,
+        transition_time_ns: u64,
+    },
+    TransitionIgnored {
+        module: ModuleId,
+        current_epoch: EpochId,
+        reported_from_epoch: EpochId,
+        reported_to_epoch: EpochId,
+        transition_time_ns: u64,
+        sync_status: &'static str,
+    },
+    Transition {
+        module: ModuleId,
+        old_epoch: EpochId,
+        new_epoch: EpochId,
+        transition_time_ns: u64,
+        sync_status: &'static str,
+        correlation_id: u64,
+        transition_count: u64,
+        transition_latency_ns: u64,
+    },
+    TransitionLatency {
+        module: ModuleId,
+        transition_latency_ns: u64,
+        correlation_id: u64,
+        threshold_ns: u64,
+    },
+    ConsistencyCheckLatency {
+        correlation_id: u64,
+        processing_latency_ns: u64,
+    },
+    TransitionStartIgnored {
+        module: ModuleId,
+        current_epoch: EpochId,
+        reported_from_epoch: EpochId,
+        transition_time_ns: u64,
+    },
+    Violation {
+        violation: EpochConsistencyViolation,
+        violation_id: u64,
+        strict_ordering: bool,
+        slow_transition_threshold_ns: u64,
+    },
+    ViolationBufferTrimmed {
+        violations_trimmed: usize,
+        max_violations: usize,
+    },
+    TrackerState {
+        total_modules: usize,
+        total_transitions: u64,
+        violation_count: usize,
+        strict_ordering: bool,
+        max_epoch_skew_allowed: u64,
+        slow_transition_threshold_ns: u64,
+    },
+    ModuleState {
+        module: ModuleId,
+        current_epoch: EpochId,
+        transition_count: u64,
+        last_transition_time_ns: u64,
+        is_transitioning: bool,
+    },
+    RecentViolation {
+        violation_index: usize,
+        violation: EpochConsistencyViolation,
+    },
+    EnabledChanged {
+        enabled: bool,
+    },
+    ThresholdUpdated {
+        old_threshold_ns: u64,
+        new_threshold_ns: u64,
+    },
+}
+
+impl EpochTelemetryReceipt {
+    #[allow(unused_variables)]
+    fn emit(self) {
+        match self {
+            Self::TransitionDuplicate {
+                module,
+                current_epoch,
+                reported_from_epoch,
+                reported_to_epoch,
+                transition_time_ns,
+            } => {
+                debug!(
+                    module_id = %module,
+                    current_epoch = %current_epoch,
+                    reported_from_epoch = %reported_from_epoch,
+                    reported_to_epoch = %reported_to_epoch,
+                    transition_time_ns,
+                    "epoch_transition_duplicate_ignored"
+                );
+            }
+            Self::TransitionIgnored {
+                module,
+                current_epoch,
+                reported_from_epoch,
+                reported_to_epoch,
+                transition_time_ns,
+                sync_status,
+            } => {
+                debug!(
+                    module_id = %module,
+                    current_epoch = %current_epoch,
+                    reported_from_epoch = %reported_from_epoch,
+                    reported_to_epoch = %reported_to_epoch,
+                    transition_time_ns,
+                    sync_status,
+                    "epoch_transition_ignored"
+                );
+            }
+            Self::Transition {
+                module,
+                old_epoch,
+                new_epoch,
+                transition_time_ns,
+                sync_status,
+                correlation_id,
+                transition_count,
+                transition_latency_ns,
+            } => {
+                info!(
+                    module_id = %module,
+                    old_epoch = %old_epoch,
+                    new_epoch = %new_epoch,
+                    transition_time_ns,
+                    sync_status,
+                    correlation_id,
+                    transition_count,
+                    transition_latency_ns,
+                    "epoch_transition"
+                );
+            }
+            Self::TransitionLatency {
+                module,
+                transition_latency_ns,
+                correlation_id,
+                threshold_ns,
+            } => {
+                debug!(
+                    module_id = %module,
+                    transition_latency_ns,
+                    correlation_id,
+                    threshold_ns,
+                    "epoch_transition_latency"
+                );
+            }
+            Self::ConsistencyCheckLatency {
+                correlation_id,
+                processing_latency_ns,
+            } => {
+                debug!(
+                    correlation_id,
+                    processing_latency_ns, "epoch_consistency_check_latency"
+                );
+            }
+            Self::TransitionStartIgnored {
+                module,
+                current_epoch,
+                reported_from_epoch,
+                transition_time_ns,
+            } => {
+                debug!(
+                    module_id = %module,
+                    current_epoch = %current_epoch,
+                    reported_from_epoch = %reported_from_epoch,
+                    transition_time_ns,
+                    "epoch_transition_start_ignored"
+                );
+            }
+            Self::Violation {
+                violation,
+                violation_id,
+                strict_ordering,
+                slow_transition_threshold_ns,
+            } => emit_violation(
+                &violation,
+                violation_id,
+                strict_ordering,
+                slow_transition_threshold_ns,
+            ),
+            Self::ViolationBufferTrimmed {
+                violations_trimmed,
+                max_violations,
+            } => {
+                warn!(
+                    violations_trimmed,
+                    max_violations, "epoch_violation_buffer_trimmed"
+                );
+            }
+            Self::TrackerState {
+                total_modules,
+                total_transitions,
+                violation_count,
+                strict_ordering,
+                max_epoch_skew_allowed,
+                slow_transition_threshold_ns,
+            } => {
+                info!(
+                    total_modules,
+                    total_transitions,
+                    violation_count,
+                    consistency_level = if strict_ordering { "strict" } else { "relaxed" },
+                    max_epoch_skew_allowed,
+                    slow_transition_threshold_ns,
+                    "epoch_tracker_state"
+                );
+            }
+            Self::ModuleState {
+                module,
+                current_epoch,
+                transition_count,
+                last_transition_time_ns,
+                is_transitioning,
+            } => {
+                debug!(
+                    module_id = %module,
+                    current_epoch = %current_epoch,
+                    transition_count,
+                    last_transition_time_ns,
+                    is_transitioning,
+                    "module_epoch_state"
+                );
+            }
+            Self::RecentViolation {
+                violation_index,
+                violation,
+            } => {
+                debug!(
+                    violation_index,
+                    violation_type = violation_kind(&violation),
+                    violation_summary = %violation,
+                    "recent_epoch_violation"
+                );
+            }
+            Self::EnabledChanged { enabled } => {
+                info!(enabled, "epoch_tracker_enabled_changed");
+            }
+            Self::ThresholdUpdated {
+                old_threshold_ns,
+                new_threshold_ns,
+            } => {
+                info!(
+                    old_threshold_ns,
+                    new_threshold_ns, "epoch_tracker_threshold_updated"
+                );
+            }
+        }
+    }
+}
+
+/// Owned one-shot epoch telemetry drained from the tracker outbox.
+///
+/// Callers must dispatch this only after publishing the corresponding runtime
+/// mutation and releasing runtime/tracker locks. A subscriber panic aborts the
+/// remainder of this batch, is counted without tracing, and is never retried.
+#[must_use = "epoch telemetry must be dispatched after publication and outside locks"]
+pub struct EpochTelemetryDispatch {
+    receipts: Vec<EpochTelemetryReceipt>,
+    outbox: Arc<EpochTelemetryOutbox>,
+}
+
+impl EpochTelemetryDispatch {
+    /// Returns whether this bounded drain contained no receipts.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.receipts.is_empty()
+    }
+
+    /// Emits this batch once while containing subscriber `enabled`/`on_event`
+    /// panics across the entire batch.
+    pub fn dispatch(self) {
+        let Self { receipts, outbox } = self;
+        let mut emitted = 0u64;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for receipt in receipts {
+                receipt.emit();
+                emitted = emitted.saturating_add(1);
+            }
+        }));
+        if emitted != 0 {
+            outbox.emitted_count.fetch_add(emitted, Ordering::Relaxed);
+        }
+        if let Err(payload) = result {
+            // ubs:ignore -- the subscriber controls this payload's destructor;
+            // leaking it prevents a second panic while containment is active.
+            std::mem::forget(payload);
+            outbox.dispatch_panic_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+fn violation_kind(violation: &EpochConsistencyViolation) -> &'static str {
+    match violation {
+        EpochConsistencyViolation::ModuleDesync { .. } => "module_desync",
+        EpochConsistencyViolation::SlowTransition { .. } => "slow_transition",
+        EpochConsistencyViolation::MissingTransition { .. } => "missing_transition",
+        EpochConsistencyViolation::AdvancementOrderViolation { .. } => {
+            "advancement_order_violation"
+        }
+    }
+}
+
+#[allow(unused_variables)]
+fn emit_violation(
+    violation: &EpochConsistencyViolation,
+    violation_id: u64,
+    strict_ordering: bool,
+    slow_transition_threshold_ns: u64,
+) {
+    match violation {
+        EpochConsistencyViolation::ModuleDesync {
+            modules,
+            detected_at,
+            max_skew,
+        } => {
+            let affected_modules: Vec<String> = modules
+                .iter()
+                .map(|(module, epoch)| format!("{module}@{epoch}"))
+                .collect();
+            debug!(
+                violation_type = "module_desync",
+                affected_modules = ?affected_modules,
+                epoch_skew = max_skew,
+                consistency_level = if strict_ordering { "strict" } else { "relaxed" },
+                correlation_id = violation_id,
+                detected_at_ns = detected_at.as_nanos(),
+                replay_command = %format!("epoch-tracker-replay --violation-id {} --type module_desync", violation_id),
+                "epoch_consistency_violation"
+            );
+        }
+        EpochConsistencyViolation::SlowTransition {
+            module,
+            from_epoch,
+            to_epoch,
+            started_at,
+            detected_at,
+            duration_ns,
+        } => {
+            error!(
+                violation_type = "slow_transition",
+                affected_modules = ?[format!("{}@{}->{}", module, from_epoch, to_epoch)],
+                epoch_skew = 0u64,
+                consistency_level = if strict_ordering { "strict" } else { "relaxed" },
+                correlation_id = violation_id,
+                module_id = %module,
+                transition_duration_ns = duration_ns,
+                threshold_ns = slow_transition_threshold_ns,
+                started_at_ns = started_at.as_nanos(),
+                detected_at_ns = detected_at.as_nanos(),
+                replay_command = %format!("epoch-tracker-replay --violation-id {} --type slow_transition --module {}", violation_id, module),
+                "epoch_consistency_violation"
+            );
+        }
+        EpochConsistencyViolation::MissingTransition {
+            module,
+            expected_epoch,
+            actual_epoch,
+            detected_at,
+        } => {
+            let epoch_skew = actual_epoch.distance(*expected_epoch);
+            error!(
+                violation_type = "missing_transition",
+                affected_modules = ?[format!("{}@{}", module, actual_epoch)],
+                epoch_skew,
+                consistency_level = if strict_ordering { "strict" } else { "relaxed" },
+                correlation_id = violation_id,
+                module_id = %module,
+                expected_epoch = %expected_epoch,
+                actual_epoch = %actual_epoch,
+                detected_at_ns = detected_at.as_nanos(),
+                replay_command = %format!("epoch-tracker-replay --violation-id {} --type missing_transition --module {} --expected-epoch {} --actual-epoch {}", violation_id, module, expected_epoch, actual_epoch),
+                "epoch_consistency_violation"
+            );
+        }
+        EpochConsistencyViolation::AdvancementOrderViolation {
+            module,
+            advanced_to,
+            dependency_module,
+            dependency_epoch,
+            detected_at,
+        } => {
+            let epoch_skew = advanced_to.distance(*dependency_epoch);
+            error!(
+                violation_type = "advancement_order_violation",
+                affected_modules = ?[format!("{}@{}", module, advanced_to), format!("{}@{}", dependency_module, dependency_epoch)],
+                epoch_skew,
+                consistency_level = if strict_ordering { "strict" } else { "relaxed" },
+                correlation_id = violation_id,
+                violating_module = %module,
+                advanced_to = %advanced_to,
+                dependency_module = %dependency_module,
+                dependency_epoch = %dependency_epoch,
+                detected_at_ns = detected_at.as_nanos(),
+                replay_command = %format!("epoch-tracker-replay --violation-id {} --type order_violation --module {} --dependency-module {}", violation_id, module, dependency_module),
+                "epoch_consistency_violation"
+            );
+        }
+    }
+}
+
 /// Configuration for epoch consistency checking.
 #[derive(Debug, Clone)]
 pub struct EpochConsistencyConfig {
@@ -317,6 +795,8 @@ pub struct EpochConsistencyTracker {
     violations: RwLock<Vec<EpochConsistencyViolation>>,
     /// Maximum number of violations to retain.
     max_violations: usize,
+    /// Bounded callback-free receipts awaiting an explicit safe dispatch.
+    telemetry: Arc<EpochTelemetryOutbox>,
 }
 
 impl EpochConsistencyTracker {
@@ -339,6 +819,18 @@ impl EpochConsistencyTracker {
         config: EpochConsistencyConfig,
         time_getter: TimeGetter,
     ) -> Self {
+        Self::with_config_time_getter_and_telemetry_capacity(
+            config,
+            time_getter,
+            DEFAULT_TELEMETRY_CAPACITY,
+        )
+    }
+
+    fn with_config_time_getter_and_telemetry_capacity(
+        config: EpochConsistencyConfig,
+        time_getter: TimeGetter,
+        telemetry_capacity: usize,
+    ) -> Self {
         Self {
             config,
             time_getter,
@@ -346,7 +838,26 @@ impl EpochConsistencyTracker {
             global_transition_count: AtomicU64::new(0),
             violations: RwLock::new(Vec::new()),
             max_violations: 1000, // Bounded to prevent memory growth
+            telemetry: Arc::new(EpochTelemetryOutbox::new(telemetry_capacity)),
         }
+    }
+
+    fn enqueue_telemetry(&self, receipt: EpochTelemetryReceipt) {
+        self.telemetry.push(receipt);
+    }
+
+    /// Drains a bounded batch for delivery after the corresponding runtime
+    /// mutation is published and all runtime/tracker locks are released.
+    #[must_use]
+    pub fn drain_telemetry(&self) -> EpochTelemetryDispatch {
+        self.telemetry.drain(DEFAULT_TELEMETRY_DRAIN_LIMIT)
+    }
+
+    /// Returns callback-free outbox counters without emitting telemetry.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_statistics(&self) -> EpochTelemetryStatistics {
+        self.telemetry.statistics()
     }
 
     /// Notifies the tracker of an epoch transition for a module.
@@ -380,14 +891,13 @@ impl EpochConsistencyTracker {
                 .prev()
                 .is_some_and(|expected_from| expected_from == from_epoch);
         if exact_duplicate_completion {
-            debug!(
-                module_id = %module,
-                current_epoch = %record.current_epoch,
-                reported_from_epoch = %from_epoch,
-                reported_to_epoch = %to_epoch,
-                transition_time_ns = now.as_nanos(),
-                "epoch_transition_duplicate_ignored"
-            );
+            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionDuplicate {
+                module,
+                current_epoch: record.current_epoch,
+                reported_from_epoch: from_epoch,
+                reported_to_epoch: to_epoch,
+                transition_time_ns: now.as_nanos(),
+            });
             return;
         }
 
@@ -427,17 +937,15 @@ impl EpochConsistencyTracker {
             self.record_violation(violation);
             ("violated", to_epoch.is_after(record.current_epoch))
         };
-        let _ = sync_status;
         if !should_update {
-            debug!(
-                module_id = %module,
-                current_epoch = %record.current_epoch,
-                reported_from_epoch = %from_epoch,
-                reported_to_epoch = %to_epoch,
-                transition_time_ns = now.as_nanos(),
-                sync_status = sync_status,
-                "epoch_transition_ignored"
-            );
+            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionIgnored {
+                module,
+                current_epoch: record.current_epoch,
+                reported_from_epoch: from_epoch,
+                reported_to_epoch: to_epoch,
+                transition_time_ns: now.as_nanos(),
+                sync_status,
+            });
             return;
         }
 
@@ -455,28 +963,25 @@ impl EpochConsistencyTracker {
         // Increment global counter
         self.global_transition_count.fetch_add(1, Ordering::Relaxed);
 
-        // Structured logging: Each epoch transition logged with module_id, old_epoch, new_epoch, transition_time, sync_status
-        info!(
-            module_id = %module,
-            old_epoch = %from_epoch,
-            new_epoch = %to_epoch,
-            transition_time_ns = now.as_nanos(),
-            sync_status = sync_status,
-            correlation_id = correlation_id,
-            transition_count = record.transition_count,
-            transition_latency_ns = transition_latency_ns,
-            "epoch_transition"
-        );
+        self.enqueue_telemetry(EpochTelemetryReceipt::Transition {
+            module,
+            old_epoch: from_epoch,
+            new_epoch: to_epoch,
+            transition_time_ns: now.as_nanos(),
+            sync_status,
+            correlation_id,
+            transition_count: record.transition_count,
+            transition_latency_ns,
+        });
 
         // Log performance metrics for epoch transition latency
         if transition_latency_ns > 0 {
-            debug!(
-                module_id = %module,
-                transition_latency_ns = transition_latency_ns,
-                correlation_id = correlation_id,
-                threshold_ns = self.config.slow_transition_threshold_ns,
-                "epoch_transition_latency"
-            );
+            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionLatency {
+                module,
+                transition_latency_ns,
+                correlation_id,
+                threshold_ns: self.config.slow_transition_threshold_ns,
+            });
         }
 
         // Check for consistency violations after this transition
@@ -485,12 +990,10 @@ impl EpochConsistencyTracker {
         self.check_consistency_internal(now);
         let processing_latency = processing_start.elapsed().as_nanos() as u64;
 
-        // Log consistency check performance
-        debug!(
-            correlation_id = correlation_id,
-            processing_latency_ns = processing_latency,
-            "epoch_consistency_check_latency"
-        );
+        self.enqueue_telemetry(EpochTelemetryReceipt::ConsistencyCheckLatency {
+            correlation_id,
+            processing_latency_ns: processing_latency,
+        });
     }
 
     /// Notifies the tracker that a module is starting an epoch transition.
@@ -520,13 +1023,12 @@ impl EpochConsistencyTracker {
             drop(records);
             self.record_violation(violation);
 
-            debug!(
-                module_id = %module,
-                current_epoch = %current_epoch,
-                reported_from_epoch = %from_epoch,
-                transition_time_ns = now.as_nanos(),
-                "epoch_transition_start_ignored"
-            );
+            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionStartIgnored {
+                module,
+                current_epoch,
+                reported_from_epoch: from_epoch,
+                transition_time_ns: now.as_nanos(),
+            });
             return;
         }
 
@@ -839,135 +1341,25 @@ impl EpochConsistencyTracker {
             }
         }
 
-        // Generate correlation ID for this violation
         let violation_id = self.global_transition_count.load(Ordering::Relaxed);
 
-        // Extract structured logging information based on violation type
-        match &violation {
-            EpochConsistencyViolation::ModuleDesync {
-                modules,
-                detected_at,
-                max_skew,
-            } => {
-                let affected_modules: Vec<String> = modules
-                    .iter()
-                    .map(|(module, epoch)| format!("{module}@{epoch}"))
-                    .collect();
-
-                // ModuleDesync is a *heuristic* skew observation, not a true
-                // runtime invariant violation. Subsystems can legitimately
-                // diverge — e.g., the reporter's repro for #42 only spawns
-                // tasks, so TaskTable advances past RegionTable@Genesis
-                // even though nothing is broken. The actual ordering
-                // invariant (a dependent module ahead of its dependency)
-                // is checked separately as AdvancementOrderViolation and
-                // still logs at error! below. Emit module_desync at debug!
-                // so it stays available for diagnostic queries
-                // (`tracker.violations()` keeps the record) without
-                // spamming the default-level log on routine workloads.
-                debug!(
-                    violation_type = "module_desync",
-                    affected_modules = ?affected_modules,
-                    epoch_skew = max_skew,
-                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type module_desync", violation_id),
-                    "epoch_consistency_violation"
-                );
-            }
-            EpochConsistencyViolation::SlowTransition {
-                module,
-                from_epoch,
-                to_epoch,
-                started_at,
-                detected_at,
-                duration_ns,
-            } => {
-                error!(
-                    violation_type = "slow_transition",
-                    affected_modules = ?[format!("{}@{}->{}", module, from_epoch, to_epoch)],
-                    epoch_skew = 0u64,
-                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    module_id = %module,
-                    transition_duration_ns = duration_ns,
-                    threshold_ns = self.config.slow_transition_threshold_ns,
-                    started_at_ns = started_at.as_nanos(),
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type slow_transition --module {}", violation_id, module),
-                    "epoch_consistency_violation"
-                );
-            }
-            EpochConsistencyViolation::MissingTransition {
-                module,
-                expected_epoch,
-                actual_epoch,
-                detected_at,
-            } => {
-                let epoch_skew = if actual_epoch > expected_epoch {
-                    actual_epoch.as_u64() - expected_epoch.as_u64()
-                } else {
-                    expected_epoch.as_u64() - actual_epoch.as_u64()
-                };
-
-                error!(
-                    violation_type = "missing_transition",
-                    affected_modules = ?[format!("{}@{}", module, actual_epoch)],
-                    epoch_skew = epoch_skew,
-                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    module_id = %module,
-                    expected_epoch = %expected_epoch,
-                    actual_epoch = %actual_epoch,
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type missing_transition --module {} --expected-epoch {} --actual-epoch {}", violation_id, module, expected_epoch, actual_epoch),
-                    "epoch_consistency_violation"
-                );
-            }
-            EpochConsistencyViolation::AdvancementOrderViolation {
-                module,
-                advanced_to,
-                dependency_module,
-                dependency_epoch,
-                detected_at,
-            } => {
-                let epoch_skew = if advanced_to > dependency_epoch {
-                    advanced_to.as_u64() - dependency_epoch.as_u64()
-                } else {
-                    dependency_epoch.as_u64() - advanced_to.as_u64()
-                };
-
-                error!(
-                    violation_type = "advancement_order_violation",
-                    affected_modules = ?[format!("{}@{}", module, advanced_to), format!("{}@{}", dependency_module, dependency_epoch)],
-                    epoch_skew = epoch_skew,
-                    consistency_level = if self.config.strict_ordering { "strict" } else { "relaxed" },
-                    correlation_id = violation_id,
-                    violating_module = %module,
-                    advanced_to = %advanced_to,
-                    dependency_module = %dependency_module,
-                    dependency_epoch = %dependency_epoch,
-                    detected_at_ns = detected_at.as_nanos(),
-                    replay_command = %format!("epoch-tracker-replay --violation-id {} --type order_violation --module {} --dependency-module {}", violation_id, module, dependency_module),
-                    "epoch_consistency_violation"
-                );
-            }
-        }
-
         let mut violations = self.violations.write();
-        violations.push(violation);
+        violations.push(violation.clone());
+        self.enqueue_telemetry(EpochTelemetryReceipt::Violation {
+            violation,
+            violation_id,
+            strict_ordering: self.config.strict_ordering,
+            slow_transition_threshold_ns: self.config.slow_transition_threshold_ns,
+        });
 
         // Trim violations if we've exceeded the limit
         if violations.len() > self.max_violations {
             let excess = violations.len() - self.max_violations;
             violations.drain(0..excess);
-
-            warn!(
-                violations_trimmed = excess,
-                max_violations = self.max_violations,
-                "epoch_violation_buffer_trimmed"
-            );
+            self.enqueue_telemetry(EpochTelemetryReceipt::ViolationBufferTrimmed {
+                violations_trimmed: excess,
+                max_violations: self.max_violations,
+            });
         }
     }
 
@@ -1033,6 +1425,12 @@ impl EpochConsistencyTracker {
         self.module_records.write().clear();
         self.violations.write().clear();
         self.global_transition_count.store(0, Ordering::Relaxed);
+        while self.telemetry.receipts.pop().is_some() {}
+        self.telemetry.overflow_count.store(0, Ordering::Relaxed);
+        self.telemetry
+            .dispatch_panic_count
+            .store(0, Ordering::Relaxed);
+        self.telemetry.emitted_count.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1101,53 +1499,48 @@ impl EpochConsistencyTracker {
     #[allow(unused_variables)]
     pub fn log_epoch_state(&self) {
         let records = self.module_records.read();
-        let violation_count = self.violation_count();
         let total_transitions = self.global_transition_count.load(Ordering::Relaxed);
-
-        // Log overall epoch state
-        info!(
-            total_modules = records.len(),
-            total_transitions = total_transitions,
-            violation_count = violation_count,
-            consistency_level = if self.config.strict_ordering {
-                "strict"
-            } else {
-                "relaxed"
-            },
-            max_epoch_skew_allowed = self.config.max_epoch_skew,
-            slow_transition_threshold_ns = self.config.slow_transition_threshold_ns,
-            "epoch_tracker_state"
-        );
-
-        // Log per-module state
-        for (&module, record) in records.iter() {
-            debug!(
-                module_id = %module,
-                current_epoch = %record.current_epoch,
-                transition_count = record.transition_count,
-                last_transition_time_ns = record.last_transition_time.as_nanos(),
-                is_transitioning = record.transition_start_time.is_some(),
-                "module_epoch_state"
-            );
-        }
+        let module_states: Vec<_> = records
+            .iter()
+            .map(|(&module, record)| EpochTelemetryReceipt::ModuleState {
+                module,
+                current_epoch: record.current_epoch,
+                transition_count: record.transition_count,
+                last_transition_time_ns: record.last_transition_time.as_nanos(),
+                is_transitioning: record.transition_start_time.is_some(),
+            })
+            .collect();
+        let total_modules = records.len();
         drop(records);
 
-        // Log recent violations summary
-        if violation_count > 0 {
-            let violations = self.violations.read();
-            for (idx, violation) in violations.iter().enumerate().take(5) {
-                debug!(
-                    violation_index = idx,
-                    violation_type = match violation {
-                        EpochConsistencyViolation::ModuleDesync { .. } => "module_desync",
-                        EpochConsistencyViolation::SlowTransition { .. } => "slow_transition",
-                        EpochConsistencyViolation::MissingTransition { .. } => "missing_transition",
-                        EpochConsistencyViolation::AdvancementOrderViolation { .. } => "advancement_order_violation",
-                    },
-                    violation_summary = %format!("{}", violation),
-                    "recent_epoch_violation"
-                );
-            }
+        let violations = self.violations.read();
+        let violation_count = violations.len();
+        let recent_violations: Vec<_> = violations
+            .iter()
+            .enumerate()
+            .take(5)
+            .map(
+                |(violation_index, violation)| EpochTelemetryReceipt::RecentViolation {
+                    violation_index,
+                    violation: violation.clone(),
+                },
+            )
+            .collect();
+        drop(violations);
+
+        self.enqueue_telemetry(EpochTelemetryReceipt::TrackerState {
+            total_modules,
+            total_transitions,
+            violation_count,
+            strict_ordering: self.config.strict_ordering,
+            max_epoch_skew_allowed: self.config.max_epoch_skew,
+            slow_transition_threshold_ns: self.config.slow_transition_threshold_ns,
+        });
+        for module_state in module_states {
+            self.enqueue_telemetry(module_state);
+        }
+        for recent_violation in recent_violations {
+            self.enqueue_telemetry(recent_violation);
         }
     }
 
@@ -1157,8 +1550,7 @@ impl EpochConsistencyTracker {
     /// performance-critical sections or enabling it for debugging.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.config.enabled = enabled;
-
-        info!(enabled = enabled, "epoch_tracker_enabled_changed");
+        self.enqueue_telemetry(EpochTelemetryReceipt::EnabledChanged { enabled });
     }
 
     /// Updates the slow transition threshold dynamically.
@@ -1169,12 +1561,10 @@ impl EpochConsistencyTracker {
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
         let old_threshold = self.config.slow_transition_threshold_ns;
         self.config.slow_transition_threshold_ns = threshold_ns;
-
-        info!(
-            old_threshold_ns = old_threshold,
-            new_threshold_ns = threshold_ns,
-            "epoch_tracker_threshold_updated"
-        );
+        self.enqueue_telemetry(EpochTelemetryReceipt::ThresholdUpdated {
+            old_threshold_ns: old_threshold,
+            new_threshold_ns: threshold_ns,
+        });
     }
 }
 
@@ -1297,6 +1687,7 @@ mod tests {
                 EpochId::new(1),
                 now,
             );
+            tracker.drain_telemetry().dispatch();
         });
 
         let captured = events.lock();
@@ -1325,6 +1716,254 @@ mod tests {
             );
         }
         crate::test_complete!("module_desync_emits_at_debug_not_error");
+    }
+
+    #[test]
+    fn epoch_telemetry_outbox_is_bounded_and_drains_in_receipt_order() {
+        init_test("epoch_telemetry_outbox_is_bounded_and_drains_in_receipt_order");
+
+        let tracker = EpochConsistencyTracker::with_config_time_getter_and_telemetry_capacity(
+            EpochConsistencyConfig::default(),
+            Arc::new(|| Time::ZERO),
+            3,
+        );
+        let now = Time::from_nanos(10);
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+
+        let full = tracker.telemetry_statistics();
+        assert_eq!(full.pending, 3);
+        assert_eq!(full.capacity, 3);
+        assert_eq!(full.overflow_count, 1);
+
+        let first = tracker.telemetry.drain(2);
+        assert!(matches!(
+            first.receipts.as_slice(),
+            [
+                EpochTelemetryReceipt::Transition { .. },
+                EpochTelemetryReceipt::ConsistencyCheckLatency { .. }
+            ]
+        ));
+        assert_eq!(tracker.telemetry_statistics().pending, 1);
+        first.dispatch();
+
+        let second = tracker.telemetry.drain(2);
+        assert!(matches!(
+            second.receipts.as_slice(),
+            [EpochTelemetryReceipt::TransitionDuplicate { .. }]
+        ));
+        second.dispatch();
+
+        let drained = tracker.telemetry_statistics();
+        assert_eq!(drained.pending, 0);
+        assert_eq!(drained.emitted_count, 3);
+        assert_eq!(drained.overflow_count, 1);
+        crate::test_complete!("epoch_telemetry_outbox_is_bounded_and_drains_in_receipt_order");
+    }
+
+    #[test]
+    fn epoch_telemetry_public_drain_enforces_production_batch_limit() {
+        init_test("epoch_telemetry_public_drain_enforces_production_batch_limit");
+
+        let tracker = EpochConsistencyTracker::with_config_time_getter_and_telemetry_capacity(
+            EpochConsistencyConfig::default(),
+            Arc::new(|| Time::ZERO),
+            DEFAULT_TELEMETRY_CAPACITY,
+        );
+        let now = Time::from_nanos(10);
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            now,
+        );
+        for _ in 0..DEFAULT_TELEMETRY_DRAIN_LIMIT {
+            tracker.notify_epoch_transition(
+                ModuleId::Scheduler,
+                EpochId::GENESIS,
+                EpochId::new(1),
+                now,
+            );
+        }
+
+        let first = tracker.drain_telemetry();
+        assert_eq!(first.receipts.len(), DEFAULT_TELEMETRY_DRAIN_LIMIT);
+        assert_eq!(tracker.telemetry_statistics().pending, 2);
+        first.dispatch();
+
+        let second = tracker.drain_telemetry();
+        assert_eq!(second.receipts.len(), 2);
+        second.dispatch();
+        assert_eq!(tracker.telemetry_statistics().pending, 0);
+        crate::test_complete!("epoch_telemetry_public_drain_enforces_production_batch_limit");
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn epoch_telemetry_dispatch_allows_subscriber_reentry_after_tracker_unlock() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use tracing::Subscriber;
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::registry::LookupSpan;
+
+        init_test("epoch_telemetry_dispatch_allows_subscriber_reentry_after_tracker_unlock");
+
+        struct ReenteringLayer {
+            tracker: Arc<EpochConsistencyTracker>,
+            events: Arc<AtomicUsize>,
+        }
+        impl<S> Layer<S> for ReenteringLayer
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, _event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let _ = self.tracker.transition_statistics();
+                self.events.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        }
+
+        let tracker = Arc::new(EpochConsistencyTracker::new());
+        let events = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(ReenteringLayer {
+                tracker: Arc::clone(&tracker),
+                events: Arc::clone(&events),
+            });
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracker.notify_epoch_transition(
+                ModuleId::Scheduler,
+                EpochId::GENESIS,
+                EpochId::new(1),
+                Time::from_nanos(10),
+            );
+            assert_eq!(events.load(AtomicOrdering::Relaxed), 0);
+            tracker.drain_telemetry().dispatch();
+        });
+
+        assert_eq!(events.load(AtomicOrdering::Relaxed), 2);
+        assert_eq!(tracker.telemetry_statistics().dispatch_panic_count, 0);
+        crate::test_complete!(
+            "epoch_telemetry_dispatch_allows_subscriber_reentry_after_tracker_unlock"
+        );
+    }
+
+    #[cfg(feature = "tracing-integration")]
+    #[test]
+    fn epoch_telemetry_dispatch_contains_enabled_and_on_event_panics() {
+        const PANIC_SITE_ENV: &str = "ASUPERSYNC_EPOCH_TELEMETRY_PANIC_SITE";
+        const TEST_NAME: &str = concat!(
+            "runtime::epoch_tracker::tests::",
+            "epoch_telemetry_dispatch_contains_enabled_and_on_event_panics"
+        );
+
+        use tracing::Subscriber;
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Clone, Copy)]
+        enum PanicSite {
+            Enabled,
+            OnEvent,
+        }
+        struct PanickingLayer(PanicSite);
+        impl<S> Layer<S> for PanickingLayer
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn enabled(&self, _metadata: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+                if matches!(self.0, PanicSite::Enabled) {
+                    panic!("enabled panic"); // ubs:ignore -- adversarial containment fixture
+                }
+                true
+            }
+
+            fn on_event(&self, _event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                if matches!(self.0, PanicSite::OnEvent) {
+                    panic!("on_event panic"); // ubs:ignore -- adversarial containment fixture
+                }
+            }
+        }
+
+        if let Some(site) = std::env::var_os(PANIC_SITE_ENV) {
+            let panic_site = match site.to_str() {
+                Some("enabled") => PanicSite::Enabled,
+                Some("on_event") => PanicSite::OnEvent,
+                // ubs:ignore -- child-process test protocol rejects invalid modes.
+                other => panic!("unknown epoch telemetry panic site: {other:?}"),
+            };
+            let tracker = EpochConsistencyTracker::new();
+            tracker.notify_epoch_transition(
+                ModuleId::Scheduler,
+                EpochId::GENESIS,
+                EpochId::new(1),
+                Time::from_nanos(10),
+            );
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_subscriber::filter::LevelFilter::TRACE)
+                .with(PanickingLayer(panic_site));
+            let delivery = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tracing::subscriber::with_default(subscriber, || {
+                    tracker.drain_telemetry().dispatch();
+                });
+            }));
+            if let Err(payload) = delivery {
+                assert!(
+                    matches!(panic_site, PanicSite::Enabled),
+                    "on_event panic must be fully contained by dispatch"
+                );
+                drop(payload);
+            }
+
+            let after_panic = tracker.telemetry_statistics();
+            assert_eq!(after_panic.pending, 0);
+            assert_eq!(after_panic.dispatch_panic_count, 1);
+
+            tracker.notify_epoch_transition(
+                ModuleId::Scheduler,
+                EpochId::new(1),
+                EpochId::new(2),
+                Time::from_nanos(20),
+            );
+            assert_eq!(tracker.transition_statistics().total_transitions, 2);
+            assert_eq!(tracker.telemetry_statistics().dispatch_panic_count, 1);
+            return;
+        }
+
+        init_test("epoch_telemetry_dispatch_contains_enabled_and_on_event_panics");
+        for panic_site in ["enabled", "on_event"] {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current epoch telemetry test executable"),
+            )
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(PANIC_SITE_ENV, panic_site)
+            .status()
+            .expect("run isolated epoch telemetry panic test");
+            assert!(
+                status.success(),
+                "isolated {panic_site} panic test failed with {status}"
+            );
+        }
+        crate::test_complete!("epoch_telemetry_dispatch_contains_enabled_and_on_event_panics");
     }
 
     #[test]

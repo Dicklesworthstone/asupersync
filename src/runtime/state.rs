@@ -531,6 +531,7 @@ pub struct TaskCompletionObserver {
     payload: Option<TaskCompletionObserverPayload>,
     panic_count: Option<Arc<AtomicU64>>,
     retired_cancel_wakers: TaskCompletionRetirements,
+    epoch_telemetry: Option<super::epoch_tracker::EpochTelemetryDispatch>,
 }
 
 enum TaskCompletionObserverPayload {
@@ -571,6 +572,7 @@ impl TaskCompletionObserver {
             }),
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
+            epoch_telemetry: None,
         }
     }
 
@@ -579,6 +581,14 @@ impl TaskCompletionObserver {
             payload: Some(TaskCompletionObserverPayload::UnknownTask { task_id }),
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
+            epoch_telemetry: None,
+        }
+    }
+
+    fn attach_epoch_telemetry(&mut self, telemetry: super::epoch_tracker::EpochTelemetryDispatch) {
+        if !telemetry.is_empty() {
+            debug_assert!(self.epoch_telemetry.is_none());
+            self.epoch_telemetry = Some(telemetry);
         }
     }
 
@@ -603,6 +613,9 @@ impl TaskCompletionObserver {
         // The caller has released runtime-state locks before observer dispatch.
         // Retire arbitrary RawWaker payloads at this callback boundary.
         retired_cancel_wakers.retire();
+        if let Some(epoch_telemetry) = self.epoch_telemetry.take() {
+            epoch_telemetry.dispatch();
+        }
         let observer_panicked = match payload {
             TaskCompletionObserverPayload::Completed {
                 metrics,
@@ -724,6 +737,7 @@ impl TaskSpawnSource {
 pub struct TaskSpawnEffects {
     payload: Option<TaskSpawnEffectsPayload>,
     panic_count: Option<Arc<AtomicU64>>,
+    epoch_telemetry: Option<super::epoch_tracker::EpochTelemetryDispatch>,
 }
 
 struct TaskSpawnEffectsPayload {
@@ -761,6 +775,14 @@ impl TaskSpawnEffects {
                 source,
             }),
             panic_count: Some(Arc::clone(panic_count)),
+            epoch_telemetry: None,
+        }
+    }
+
+    fn attach_epoch_telemetry(&mut self, telemetry: super::epoch_tracker::EpochTelemetryDispatch) {
+        if !telemetry.is_empty() {
+            debug_assert!(self.epoch_telemetry.is_none());
+            self.epoch_telemetry = Some(telemetry);
         }
     }
 
@@ -788,6 +810,10 @@ impl TaskSpawnEffects {
             budget,
             source,
         } = payload;
+
+        if let Some(epoch_telemetry) = self.epoch_telemetry.take() {
+            epoch_telemetry.dispatch();
+        }
 
         let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             trace.record_event(|seq| {
@@ -3033,6 +3059,7 @@ impl RuntimeState {
             record.set_cx(cx.clone());
         });
 
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
         let spawn_effects =
             self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Direct, now);
 
@@ -3115,9 +3142,6 @@ impl RuntimeState {
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
-        // Notify epoch tracker of task creation
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
-
         Ok((task_id, handle))
     }
 
@@ -3163,7 +3187,6 @@ impl RuntimeState {
 
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         Ok((task_id, handle, spawn_effects))
     }
@@ -3373,9 +3396,9 @@ impl RuntimeState {
         let cancel_publication =
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
         let spawn_effects =
             self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Mailbox, now);
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         // Successor state (task list + stored future) is visible; release
         // the pending-spawn credit last.
@@ -3452,9 +3475,9 @@ impl RuntimeState {
         let cancel_publication =
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
         let spawn_effects =
             self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Local, now);
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         // The task is already visible in the region's task list
         // (admission core ran `add_task`), so the pending credit can be
@@ -3540,9 +3563,6 @@ impl RuntimeState {
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
-        // Notify epoch tracker of task creation
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
-
         Ok((task_id, handle))
     }
 
@@ -3574,6 +3594,13 @@ impl RuntimeState {
             .notify_epoch_transition(module, from_epoch, to_epoch, now);
     }
 
+    /// Takes one bounded epoch telemetry batch for explicit delivery after
+    /// publishing the associated mutation and releasing runtime locks.
+    #[must_use]
+    pub fn take_epoch_telemetry(&self) -> super::epoch_tracker::EpochTelemetryDispatch {
+        self.epoch_tracker.drain_telemetry()
+    }
+
     fn record_task_trace_event<F>(&self, task_id: TaskId, build: F)
     where
         F: FnOnce(u64) -> TraceEvent,
@@ -3597,7 +3624,7 @@ impl RuntimeState {
         source: TaskSpawnSource,
         spawned_at: Time,
     ) -> TaskSpawnEffects {
-        TaskSpawnEffects::new(
+        let mut effects = TaskSpawnEffects::new(
             Arc::clone(&self.metrics),
             self.trace_handle(),
             task_id,
@@ -3607,7 +3634,9 @@ impl RuntimeState {
             budget,
             source,
             &self.task_spawn_observer_panics,
-        )
+        );
+        effects.attach_epoch_telemetry(self.take_epoch_telemetry());
+        effects
     }
 
     fn prepare_task_completion_observer(
@@ -5019,6 +5048,8 @@ impl RuntimeState {
         // Advance region state if possible (e.g. if this was the last task)
         self.advance_region_state(owner);
 
+        let mut observer = observer;
+        observer.attach_epoch_telemetry(self.take_epoch_telemetry());
         TaskCompletionEffects {
             waiters,
             observer,
