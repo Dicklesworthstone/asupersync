@@ -445,6 +445,36 @@ try {
     bootstrap.storageExercise?.backend === "indexeddb",
     `worker storage exercise must use indexeddb, got ${bootstrap.storageExercise?.backend ?? "missing"}`,
   );
+  const blockedUpgrade = bootstrap.storageExercise?.blockedUpgradeExercise;
+  assert(
+    blockedUpgrade?.blockedCount === 1,
+    `blocked IndexedDB upgrade must emit one progress callback, got ${blockedUpgrade?.blockedCount ?? "missing"}`,
+  );
+  assert(
+    blockedUpgrade?.blockedProgress?.reason === "blocked_upgrade"
+      && blockedUpgrade?.blockedProgress?.dbName === "asupersync-blocked-upgrade-fixture"
+      && blockedUpgrade?.blockedProgress?.storeName === "blocked-upgrade-v2"
+      && blockedUpgrade?.blockedProgress?.version === 2,
+    `blocked IndexedDB progress metadata drifted: ${JSON.stringify(blockedUpgrade?.blockedProgress ?? null)}`,
+  );
+  assert(
+    blockedUpgrade?.pendingWhileBlocked === true,
+    "blocked IndexedDB upgrade must remain pending until the older connection closes",
+  );
+  assert(
+    blockedUpgrade?.terminalState === "resolved"
+      && blockedUpgrade?.terminalCount === 1,
+    `blocked IndexedDB upgrade must resolve exactly once, got ${blockedUpgrade?.terminalState ?? "missing"}/${blockedUpgrade?.terminalCount ?? "missing"}`,
+  );
+  assert(
+    blockedUpgrade?.upgradedStoreRoundtrip === true
+      && blockedUpgrade?.upgradedStoresPresent === true,
+    "blocked IndexedDB upgrade must run the schema migration and preserve its stored value",
+  );
+  assert(
+    blockedUpgrade?.postSuccessBlockedCount === 0,
+    `later IndexedDB upgrade must not be blocked by an orphan connection, got ${blockedUpgrade?.postSuccessBlockedCount ?? "missing"} blocked events`,
+  );
   assert(
     bootstrap.storageExercise?.illFormedValidationBeforeIndexedDbAccess === true,
     "ill-formed storage keys, namespaces, and artifact ids must reject before IndexedDB access",

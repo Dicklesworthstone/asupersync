@@ -507,14 +507,56 @@ fn browser_src_index_exposes_browser_storage_lane() {
         "export class BrowserStorage",
         "async listKeys(namespace: string): Promise<string[]>",
         "async clearNamespace(namespace: string): Promise<number>",
+        "export interface BrowserIndexedDbBlockedProgress",
+        "onIndexedDbBlocked?: (progress: BrowserIndexedDbBlockedProgress) => void;",
         "case \"blocked_upgrade\":",
         "case \"quota_exceeded\":",
-        "IndexedDB open blocked by another connection",
         "localStorage is unavailable in this browser/runtime.",
     ] {
         assert!(
             content.contains(marker),
             "browser src/index.ts must preserve BrowserStorage marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn indexeddb_blocked_open_remains_pending_and_cancellation_owns_late_success() {
+    let browser = read_source("packages/browser/src/index.ts");
+    assert!(
+        !browser.contains("reject(new Error(\"IndexedDB open blocked"),
+        "a blocked IndexedDB open is nonterminal and must not reject its operation"
+    );
+    for marker in [
+        "request.onblocked = () => {",
+        "reason: \"blocked_upgrade\",",
+        "onBlocked({",
+        "this.onIndexedDbBlocked = options.onIndexedDbBlocked;",
+        "this.onIndexedDbBlocked,",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser IndexedDB blocked-progress contract must preserve marker: {marker}"
+        );
+    }
+
+    let rust = read_source("src/io/browser_storage.rs");
+    assert!(
+        !rust.contains("IndexedDB open blocked by another connection"),
+        "the Rust IndexedDB open bridge must not treat blocked as terminal"
+    );
+    for marker in [
+        "struct IdbOpenRequestHandlerGuard",
+        "self.cancelled.set(true);",
+        "if let Some(database) = self.pending_database.borrow_mut().take()",
+        "if let Some(transaction) = upgrade_request.transaction()",
+        "let _ = transaction.abort();",
+        "database.close();",
+        "request.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));",
+    ] {
+        assert!(
+            rust.contains(marker),
+            "Rust IndexedDB cancellation ownership must preserve marker: {marker}"
         );
     }
 }
@@ -565,6 +607,10 @@ fn dedicated_worker_fixture_covers_indexeddb_namespace_range_boundaries() {
         "await listReadersReady;",
         "storage.listKeys = storageListKeys;",
         "concurrentStorage.listKeys = concurrentStorageListKeys;",
+        "await blockedObserved;",
+        "const pendingWhileBlocked = terminalState === \"pending\";",
+        "postSuccessBlockedCount",
+        "await deleteFixtureIndexedDbDatabase(WORKER_BLOCKED_UPGRADE_DB_NAME);",
     ] {
         assert!(
             worker.contains(marker),

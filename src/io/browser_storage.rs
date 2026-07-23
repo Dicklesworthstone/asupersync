@@ -1181,20 +1181,7 @@ impl IndexedDbHostBackend {
             .open_with_u32(Self::DB_NAME, Self::DB_VERSION)
             .map_err(|error| format!("failed to open IndexedDB database: {error:?}"))?;
 
-        let upgrade_request = request.clone();
-        let on_upgrade = Closure::once_into_js(move |_event: Event| {
-            if let Ok(result) = upgrade_request.result() {
-                if let Ok(db) = result.dyn_into::<IdbDatabase>() {
-                    let _ = db.create_object_store(IndexedDbHostBackend::STORE_NAME);
-                }
-            }
-        });
-        request.set_onupgradeneeded(Some(on_upgrade.unchecked_ref()));
-
-        let value = await_open_request(&request).await?;
-        value
-            .dyn_into::<IdbDatabase>()
-            .map_err(|value| format!("IndexedDB open did not return a database: {value:?}"))
+        await_open_request(&request, Self::STORE_NAME).await
     }
 
     #[allow(clippy::future_not_send)]
@@ -1350,6 +1337,39 @@ fn indexed_db_error_message(value: &JsValue) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
+type IdbOpenRequestCallbacks = (
+    Closure<dyn FnMut(Event)>,
+    Closure<dyn FnMut(Event)>,
+    Closure<dyn FnMut(Event)>,
+    Closure<dyn FnMut(Event)>,
+);
+
+#[cfg(target_arch = "wasm32")]
+struct IdbOpenRequestHandlerGuard {
+    cancelled: std::rc::Rc<std::cell::Cell<bool>>,
+    callbacks: std::rc::Rc<std::cell::RefCell<Option<IdbOpenRequestCallbacks>>>,
+    pending_database: std::rc::Rc<std::cell::RefCell<Option<IdbDatabase>>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for IdbOpenRequestHandlerGuard {
+    fn drop(&mut self) {
+        if self.callbacks.borrow().is_some() {
+            // An IDBOpenDBRequest cannot be cancelled while it is blocked. Keep
+            // its handlers alive so a later upgrade can be aborted and a late
+            // successful connection can be closed instead of orphaned.
+            self.cancelled.set(true);
+        }
+        if let Some(database) = self.pending_database.borrow_mut().take() {
+            // Success may resolve the JavaScript Promise before the Rust future
+            // is polled again. Cancellation in that window still owns the
+            // connection through this guard and must close it.
+            database.close();
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 /// br-asupersync-abfhxh: RAII guard that clears the IdbRequest's
 /// event handlers if the await_request future is cancelled before
 /// the Promise resolves. Pre-fix the closures stayed registered on
@@ -1443,65 +1463,114 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
 
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::future_not_send)]
-async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, String> {
+async fn await_open_request(
+    request: &IdbOpenDbRequest,
+    store_name: &'static str,
+) -> Result<IdbDatabase, String> {
     let request = request.clone();
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let callbacks: std::rc::Rc<std::cell::RefCell<Option<IdbOpenRequestCallbacks>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let pending_database = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let _guard = IdbOpenRequestHandlerGuard {
+        cancelled: cancelled.clone(),
+        callbacks: callbacks.clone(),
+        pending_database: pending_database.clone(),
+    };
+    let cb_for_promise = callbacks.clone();
+    let pending_database_for_promise = pending_database.clone();
     let promise = Promise::new(&mut move |resolve, reject| {
-        let callbacks = std::rc::Rc::new(std::cell::RefCell::new(None));
-
         let success_request = request.clone();
         let success_cleanup = request.clone();
         let resolve_success = resolve.clone();
         let reject_success = reject.clone();
-        let success_callbacks = callbacks.clone();
+        let success_callbacks = cb_for_promise.clone();
+        let success_cancelled = cancelled.clone();
+        let success_database = pending_database_for_promise.clone();
         let on_success: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&success_cleanup);
-            let _ = success_callbacks.borrow_mut().take();
+            let callbacks = success_callbacks.borrow_mut().take();
             match success_request.result() {
-                Ok(value) => {
-                    let _ = resolve_success.call1(&JsValue::UNDEFINED, &value);
-                }
+                Ok(value) => match value.dyn_into::<IdbDatabase>() {
+                    Ok(database) if success_cancelled.get() => database.close(),
+                    Ok(database) => {
+                        let _ = success_database.borrow_mut().replace(database);
+                        let _ = resolve_success.call0(&JsValue::UNDEFINED);
+                    }
+                    Err(value) => {
+                        let _ = reject_success.call1(&JsValue::UNDEFINED, &value);
+                    }
+                },
                 Err(error) => {
                     let _ = reject_success.call1(&JsValue::UNDEFINED, &error);
                 }
             }
+            drop(callbacks);
         });
 
         let error_request = request.clone();
         let error_cleanup = request.clone();
         let reject_error = reject.clone();
-        let error_callbacks = callbacks.clone();
+        let error_callbacks = cb_for_promise.clone();
+        let error_cancelled = cancelled.clone();
         let on_error: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&error_cleanup);
-            let _ = error_callbacks.borrow_mut().take();
-            let error = error_request.error().map_or_else(
-                |_| JsValue::from_str("IndexedDB open failed"),
-                JsValue::from,
-            );
-            let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
+            let callbacks = error_callbacks.borrow_mut().take();
+            if !error_cancelled.get() {
+                let error = error_request.error().map_or_else(
+                    |_| JsValue::from_str("IndexedDB open failed"),
+                    JsValue::from,
+                );
+                let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
+            }
+            drop(callbacks);
         });
 
-        let blocked_cleanup = request.clone();
-        let reject_blocked = reject.clone();
-        let blocked_callbacks = callbacks.clone();
         let on_blocked: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
-            clear_idb_open_request_handlers(&blocked_cleanup);
-            let _ = blocked_callbacks.borrow_mut().take();
-            let _ = reject_blocked.call1(
-                &JsValue::UNDEFINED,
-                &JsValue::from_str("IndexedDB open blocked by another connection"),
-            );
+            // `blocked` is progress, not a terminal request outcome. The
+            // browser will run upgrade/error/success after old connections
+            // close, so all handlers and the pending Promise must stay live.
+        });
+
+        let upgrade_request = request.clone();
+        let upgrade_cancelled = cancelled.clone();
+        let on_upgrade: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
+            if upgrade_cancelled.get() {
+                if let Some(transaction) = upgrade_request.transaction() {
+                    let _ = transaction.abort();
+                }
+                if let Ok(value) = upgrade_request.result() {
+                    if let Ok(database) = value.dyn_into::<IdbDatabase>() {
+                        database.close();
+                    }
+                }
+                return;
+            }
+            if let Ok(value) = upgrade_request.result() {
+                if let Ok(database) = value.dyn_into::<IdbDatabase>() {
+                    let _ = database.create_object_store(store_name);
+                }
+            }
         });
 
         request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
         request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
         request.set_onblocked(Some(on_blocked.as_ref().unchecked_ref()));
+        request.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));
 
-        *callbacks.borrow_mut() = Some((on_success, on_error, on_blocked));
+        *cb_for_promise.borrow_mut() = Some((on_success, on_error, on_blocked, on_upgrade));
     });
 
-    JsFuture::from(promise)
+    let result = JsFuture::from(promise)
         .await
-        .map_err(|error| indexed_db_error_message(&error))
+        .map_err(|error| indexed_db_error_message(&error));
+    match result {
+        Ok(_) => {
+            let database = pending_database.borrow_mut().take();
+            database.ok_or_else(|| "IndexedDB open completed without a database".to_owned())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

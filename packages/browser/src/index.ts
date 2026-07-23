@@ -415,10 +415,19 @@ export interface BrowserStorageSupportDiagnostics {
   capabilities: BrowserCapabilitySnapshot;
 }
 
+export interface BrowserIndexedDbBlockedProgress {
+  backend: "indexeddb";
+  dbName: string;
+  reason: "blocked_upgrade";
+  storeName: string;
+  version: number;
+}
+
 export interface BrowserStorageOptions {
   backend?: BrowserStorageBackend;
   dbName?: string;
   globalObject?: Record<string, unknown>;
+  onIndexedDbBlocked?: (progress: BrowserIndexedDbBlockedProgress) => void;
   storeName?: string;
   version?: number;
 }
@@ -5018,6 +5027,7 @@ async function openIndexedDbDatabase(
   dbName: string,
   storeName: string,
   version: number,
+  onBlocked?: (progress: BrowserIndexedDbBlockedProgress) => void,
 ): Promise<IDBDatabase> {
   const factory = browserIndexedDbFactory(globalObject);
   if (!factory) {
@@ -5038,7 +5048,22 @@ async function openIndexedDbDatabase(
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("IndexedDB open failed"));
     request.onblocked = () => {
-      reject(new Error("IndexedDB open blocked by another connection"));
+      // `blocked` is a progress event: the request remains queued and will
+      // upgrade/error/succeed after older connections close.
+      if (onBlocked) {
+        try {
+          onBlocked({
+            backend: "indexeddb",
+            dbName,
+            reason: "blocked_upgrade",
+            storeName,
+            version,
+          });
+        } catch {
+          // Diagnostic observers must not turn nonterminal progress into an
+          // operation failure or detach the terminal request handlers.
+        }
+      }
     };
   });
 }
@@ -6045,6 +6070,9 @@ export class BrowserStorage {
   readonly backend: BrowserStorageBackend;
   readonly dbName: string;
   readonly globalObject: Record<string, unknown> | undefined;
+  readonly onIndexedDbBlocked:
+    | ((progress: BrowserIndexedDbBlockedProgress) => void)
+    | undefined;
   readonly storeName: string;
   readonly version: number;
 
@@ -6052,6 +6080,7 @@ export class BrowserStorage {
     this.backend = options.backend ?? "indexeddb";
     this.dbName = options.dbName ?? DEFAULT_INDEXEDDB_NAME;
     this.globalObject = options.globalObject ?? defaultGlobalObject();
+    this.onIndexedDbBlocked = options.onIndexedDbBlocked;
     this.storeName = options.storeName ?? DEFAULT_INDEXEDDB_STORE;
     this.version = options.version ?? DEFAULT_INDEXEDDB_VERSION;
   }
@@ -6072,6 +6101,7 @@ export class BrowserStorage {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { store } = openIndexedDbStore(
@@ -6143,6 +6173,7 @@ export class BrowserStorage {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { transaction, store } = openIndexedDbStore(
@@ -6203,6 +6234,7 @@ export class BrowserStorage {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { transaction, store } = openIndexedDbStore(
@@ -6261,6 +6293,7 @@ export class BrowserStorage {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { store } = openIndexedDbStore(
@@ -6342,6 +6375,7 @@ export class BrowserStorage {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { transaction, store } = openIndexedDbStore(
@@ -7638,6 +7672,9 @@ export class BrowserServiceWorkerBrokerStore {
   readonly globalObject: Record<string, unknown> | undefined;
   readonly namespace: string;
   readonly now: () => number;
+  readonly onIndexedDbBlocked:
+    | ((progress: BrowserIndexedDbBlockedProgress) => void)
+    | undefined;
   readonly storeName: string;
   readonly version: number;
 
@@ -7653,6 +7690,7 @@ export class BrowserServiceWorkerBrokerStore {
       options.namespace ?? DEFAULT_BROWSER_SERVICE_WORKER_BROKER_NAMESPACE,
     );
     this.now = options.now ?? (() => Date.now());
+    this.onIndexedDbBlocked = options.onIndexedDbBlocked;
     this.storeName = options.storeName ?? DEFAULT_INDEXEDDB_STORE;
     this.version = options.version ?? DEFAULT_INDEXEDDB_VERSION;
   }
@@ -7742,6 +7780,7 @@ export class BrowserServiceWorkerBrokerStore {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { store } = openIndexedDbStore(
@@ -7803,6 +7842,7 @@ export class BrowserServiceWorkerBrokerStore {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { transaction, store } = openIndexedDbStore(
@@ -7853,6 +7893,7 @@ export class BrowserServiceWorkerBrokerStore {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { transaction, store } = openIndexedDbStore(
@@ -7908,6 +7949,7 @@ export class BrowserServiceWorkerBrokerStore {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { store } = openIndexedDbStore(
@@ -7984,6 +8026,7 @@ export class BrowserServiceWorkerBrokerStore {
           this.dbName,
           this.storeName,
           this.version,
+          this.onIndexedDbBlocked,
         );
         try {
           const { transaction, store } = openIndexedDbStore(

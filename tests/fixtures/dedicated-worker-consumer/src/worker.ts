@@ -32,6 +32,10 @@ type ScopeSelection = Awaited<ReturnType<typeof createBrowserScopeSelection>>;
 const WORKER_STORAGE_NAMESPACE = "worker_fixture_storage";
 const WORKER_STORAGE_DB_NAME = "asupersync-fixture";
 const WORKER_STORAGE_STORE_NAME = "browser-fixture";
+const WORKER_BLOCKED_UPGRADE_DB_NAME = "asupersync-blocked-upgrade-fixture";
+const WORKER_BLOCKED_UPGRADE_STORE_V1 = "blocked-upgrade-v1";
+const WORKER_BLOCKED_UPGRADE_STORE_V2 = "blocked-upgrade-v2";
+const WORKER_BLOCKED_UPGRADE_STORE_V3 = "blocked-upgrade-v3";
 const WORKER_ARTIFACT_NAMESPACE = "worker_fixture_artifacts";
 const WORKER_ARTIFACT_QUOTA_NAMESPACE = "worker_fixture_artifacts_quota";
 const WORKER_SCENARIO_ID = "DEDICATED-WORKER-CONSUMER";
@@ -274,6 +278,138 @@ async function deleteFixtureIndexedDbKey(key: string): Promise<void> {
   });
 }
 
+function deleteFixtureIndexedDbDatabase(dbName: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = self.indexedDB.deleteDatabase(dbName);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(
+      request.error ?? new Error("fixture IndexedDB deletion failed"),
+    );
+    request.onblocked = () => reject(
+      new Error("fixture IndexedDB deletion was blocked by an orphan connection"),
+    );
+  });
+}
+
+function openFixtureIndexedDbDatabase(
+  dbName: string,
+  version: number,
+  onUpgrade: (database: IDBDatabase) => void,
+  onBlocked: () => void = () => {},
+): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = self.indexedDB.open(dbName, version);
+    request.onupgradeneeded = () => onUpgrade(request.result);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(
+      request.error ?? new Error("fixture IndexedDB open failed"),
+    );
+    request.onblocked = onBlocked;
+  });
+}
+
+async function exerciseIndexedDbBlockedUpgrade(
+  globalObject: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await deleteFixtureIndexedDbDatabase(WORKER_BLOCKED_UPGRADE_DB_NAME);
+  let heldVersionOne: IDBDatabase | null = null;
+  let versionThree: IDBDatabase | null = null;
+  try {
+    heldVersionOne = await openFixtureIndexedDbDatabase(
+      WORKER_BLOCKED_UPGRADE_DB_NAME,
+      1,
+      (database) => {
+        database.createObjectStore(WORKER_BLOCKED_UPGRADE_STORE_V1);
+      },
+    );
+
+    let blockedCount = 0;
+    let blockedProgress:
+      | {
+        backend: string;
+        dbName: string;
+        reason: string;
+        storeName: string;
+        version: number;
+      }
+      | null = null;
+    let releaseBlocked = (): void => {};
+    const blockedObserved = new Promise<void>((resolve) => {
+      releaseBlocked = resolve;
+    });
+    const upgradeStorage = createBrowserStorage({
+      backend: "indexeddb",
+      dbName: WORKER_BLOCKED_UPGRADE_DB_NAME,
+      storeName: WORKER_BLOCKED_UPGRADE_STORE_V2,
+      version: 2,
+      globalObject,
+      onIndexedDbBlocked(progress) {
+        blockedCount += 1;
+        blockedProgress = progress;
+        releaseBlocked();
+      },
+    });
+
+    let terminalCount = 0;
+    let terminalState: "pending" | "resolved" | "rejected" = "pending";
+    const upgradeOperation = upgradeStorage
+      .set("blocked-upgrade", "ready", new Uint8Array([0xb2]))
+      .then(
+        () => {
+          terminalCount += 1;
+          terminalState = "resolved";
+        },
+        (error: unknown) => {
+          terminalCount += 1;
+          terminalState = "rejected";
+          throw error;
+        },
+      );
+
+    await blockedObserved;
+    await Promise.resolve();
+    const pendingWhileBlocked = terminalState === "pending";
+    heldVersionOne.close();
+    heldVersionOne = null;
+    await upgradeOperation;
+
+    const upgradedValue = await upgradeStorage.get("blocked-upgrade", "ready");
+    const upgradedStoreRoundtrip = hasExactCompactBytes(upgradedValue, [0xb2]);
+
+    let postSuccessBlockedCount = 0;
+    versionThree = await openFixtureIndexedDbDatabase(
+      WORKER_BLOCKED_UPGRADE_DB_NAME,
+      3,
+      (database) => {
+        database.createObjectStore(WORKER_BLOCKED_UPGRADE_STORE_V3);
+      },
+      () => {
+        postSuccessBlockedCount += 1;
+      },
+    );
+    const upgradedStoresPresent = versionThree.objectStoreNames.contains(
+      WORKER_BLOCKED_UPGRADE_STORE_V2,
+    ) && versionThree.objectStoreNames.contains(WORKER_BLOCKED_UPGRADE_STORE_V3);
+    versionThree.close();
+    versionThree = null;
+
+    return {
+      blockedCount,
+      blockedProgress,
+      pendingWhileBlocked,
+      terminalCount,
+      terminalState,
+      upgradedStoreRoundtrip,
+      upgradedStoresPresent,
+      postSuccessBlockedCount,
+    };
+  } finally {
+    heldVersionOne?.close();
+    versionThree?.close();
+    await deleteFixtureIndexedDbDatabase(WORKER_BLOCKED_UPGRADE_DB_NAME);
+  }
+}
+
 function hasExactCompactBytes(value: unknown, expected: readonly number[]): boolean {
   return value instanceof Uint8Array
     && value.byteOffset === 0
@@ -407,6 +543,9 @@ async function bootstrap(): Promise<void> {
   let storageExercise: Record<string, unknown> | null = null;
   let artifactExercise: Record<string, unknown> | null = null;
   if (storageSupport.supported) {
+    const blockedUpgradeExercise = await exerciseIndexedDbBlockedUpgrade(
+      workerGlobalObject,
+    );
     const storage = createBrowserStorage({
       backend: "indexeddb",
       dbName: WORKER_STORAGE_DB_NAME,
@@ -1162,6 +1301,7 @@ async function bootstrap(): Promise<void> {
       concurrentClearResults,
       concurrentClearSerialized,
       clearedKeys,
+      blockedUpgradeExercise,
     };
     artifactExercise = {
       marker: WORKER_STORAGE_ARTIFACT_MARKER,
