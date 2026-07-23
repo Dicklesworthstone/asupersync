@@ -20,8 +20,16 @@ use asupersync::distributed::recovery::{
     CollectedSymbol, CollectionConsistency, RecoveryCollector, RecoveryConfig,
     RecoveryDecodingConfig, RecoveryOrchestrator, RecoveryTrigger, StateDecoder,
 };
+#[cfg(feature = "messaging-fabric")]
+use asupersync::distributed::snapshot::SnapshotError;
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use asupersync::error::ErrorKind;
+#[cfg(feature = "messaging-fabric")]
+use asupersync::messaging::federation::{
+    FederationBridge, FederationError, FederationRole, ReplicationConfig,
+};
+#[cfg(feature = "messaging-fabric")]
+use asupersync::messaging::{FabricCapability as MorphismCapability, Morphism};
 use asupersync::record::distributed_region::{
     ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord, DistributedRegionState,
     ReplicaInfo, ReplicaStatus,
@@ -280,6 +288,53 @@ impl TestCluster {
             Duration::from_millis(12),
         )
     }
+}
+
+// =========================================================================
+// Authenticated Replication Transfer
+// =========================================================================
+
+#[cfg(feature = "messaging-fabric")]
+#[test]
+fn e2e_replication_rejects_forged_snapshot_with_recomputed_hash() {
+    common::init_test_logging();
+
+    let mut federation = FederationBridge::new(
+        FederationRole::ReplicationLink(ReplicationConfig::default()),
+        vec![Morphism::default()],
+        Vec::new(),
+        [MorphismCapability::RewriteNamespace],
+    )
+    .expect("replication bridge");
+
+    let region = RegionId::new_for_test(30, 0);
+    let mut source = RegionBridge::new_local(region, None, Budget::new());
+    source
+        .add_task(TaskId::new_for_test(31, 0))
+        .expect("source task");
+    let snapshot_auth_key = snapshot_auth_key();
+    let mut transfer = federation
+        .export_replication_transfer(&mut source, Time::from_secs(3), &snapshot_auth_key)
+        .expect("authenticated export");
+
+    let mut forged =
+        RegionSnapshot::from_bytes(&transfer.snapshot_bytes).expect("decode exported snapshot");
+    forged.tasks.clear();
+    forged.metadata = b"attacker-controlled state".to_vec();
+    forged.sign(&AuthKey::from_seed(0xBAD0_CAFE));
+    transfer.snapshot_hash = forged.content_hash().to_hex();
+    transfer.snapshot_bytes = forged.to_bytes();
+
+    let mut target = RegionBridge::new_local(region, None, Budget::new());
+    let error = federation
+        .apply_replication_transfer(&mut target, &transfer, &snapshot_auth_key)
+        .expect_err("forged transfer must fail authentication");
+
+    assert!(matches!(
+        error,
+        FederationError::SnapshotDecode(SnapshotError::AuthenticationFailed)
+    ));
+    assert!(target.local().task_ids().is_empty());
 }
 
 // =========================================================================
