@@ -31,10 +31,18 @@
 //! - `flush` and `shutdown` are cancel-safe (can retry).
 //!
 //! ## Copy operations
-//! - `copy` is cancel-safe (bytes already written remain committed).
-//! - `copy_buf` is cancel-safe (bytes already written remain committed).
-//! - `copy_with_progress` is cancel-safe (progress callback is accurate).
-//! - `copy_bidirectional` is cancel-safe (both directions can be partially complete).
+//! - `copy` is **not drop-cancel-safe**: a dropped future can discard private
+//!   read-ahead after the source advanced and before the writer committed it.
+//! - `copy_buf` is drop-cancel-safe: it consumes caller-owned buffered input
+//!   only after the corresponding write commits.
+//! - `copy_with_progress` reports committed progress accurately but is **not
+//!   drop-cancel-safe** for the same private-read-ahead reason as `copy`.
+//! - `copy_bidirectional` is **not drop-cancel-safe**: either direction can
+//!   discard one private buffer while its peer writer is pending.
+//!
+//! The unbuffered futures separately perform a bounded best-effort drain when
+//! cooperative `Cx` cancellation is observed on a later poll. A race/select
+//! that drops the future without polling it again cannot run that drain.
 
 pub mod browser_storage;
 pub mod browser_stream;

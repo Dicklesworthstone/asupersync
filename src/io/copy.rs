@@ -4,10 +4,19 @@
 //!
 //! # Cancel Safety
 //!
-//! - [`Copy`]: Cancel-safe. Bytes already written to the destination remain committed.
-//! - [`CopyBuf`]: Cancel-safe. Bytes already written remain committed.
-//! - [`CopyWithProgress`]: Cancel-safe. Progress callback receives accurate byte counts.
-//! - [`CopyBidirectional`]: Cancel-safe. Both directions can be partially complete.
+//! - [`Copy`]: **Not drop-cancel-safe.** Dropping after a successful read but
+//!   before the corresponding write discards private read-ahead.
+//! - [`CopyBuf`]: Drop-cancel-safe. The caller-owned reader buffer is consumed
+//!   only after the corresponding write commits.
+//! - [`CopyWithProgress`]: **Not drop-cancel-safe.** Its byte count is accurate
+//!   for committed writes, but private read-ahead is lost on drop.
+//! - [`CopyBidirectional`]: **Not drop-cancel-safe.** Either direction can lose
+//!   up to one private buffer of read-ahead on drop.
+//!
+//! Cooperative `Cx` cancellation is a separate boundary: the unbuffered
+//! futures make a bounded best-effort attempt to drain private read-ahead when
+//! they are polled after cancellation. A race/select that drops the future
+//! without another poll cannot run that drain.
 
 use super::{AsyncRead, AsyncWrite, ReadBuf};
 use std::future::Future;
@@ -96,9 +105,15 @@ fn checked_write_progress(n: usize, remaining: usize) -> io::Result<usize> {
 ///
 /// # Cancel Safety
 ///
-/// This future is cancel-safe. Bytes already written to the writer remain
-/// committed. If cancelled, the returned byte count reflects all data that
-/// was successfully written before cancellation.
+/// This future is **not drop-cancel-safe**. Bytes already written to the
+/// writer remain committed, but dropping the future after `reader` advanced
+/// and while `writer` is pending discards up to 8192 bytes of
+/// private read-ahead. Restarting with the same reader then skips those bytes.
+///
+/// Use [`copy_buf`] with a caller-owned [`AsyncBufRead`] when future-drop
+/// recovery is required. If cooperative `Cx` cancellation is observed on a
+/// later poll, this future makes a bounded best-effort drain before returning
+/// `Interrupted`; that does not make arbitrary future drop safe.
 ///
 /// # Example
 ///
@@ -307,7 +322,10 @@ where
 ///
 /// # Cancel Safety
 ///
-/// This future is cancel-safe. Bytes already written remain committed.
+/// This future is drop-cancel-safe. It calls [`AsyncBufRead::consume`] only
+/// after the corresponding write commits. If the writer is pending and this
+/// future is dropped, the uncommitted bytes remain in the caller-owned reader
+/// buffer and a new `copy_buf` future can resume without skipping them.
 #[inline]
 pub fn copy_buf<'a, R, W>(reader: &'a mut R, writer: &'a mut W) -> CopyBuf<'a, R, W>
 where
@@ -439,8 +457,13 @@ where
 ///
 /// # Cancel Safety
 ///
-/// This future is cancel-safe. The progress callback receives accurate
-/// cumulative byte counts.
+/// This future is **not drop-cancel-safe**. The callback accurately reports
+/// committed writes, but dropping after a successful read and before its write
+/// completes discards private read-ahead that was never reported. Use
+/// [`copy_buf`] when restart-without-skips is required.
+///
+/// Cooperative `Cx` cancellation observed on a later poll performs the same
+/// bounded best-effort drain as [`copy`].
 ///
 /// # Example
 ///
@@ -623,9 +646,15 @@ where
 ///
 /// # Cancel Safety
 ///
-/// This future is cancel-safe. Both directions can be partially complete
-/// upon cancellation. The returned byte counts reflect all data that was
-/// successfully written in each direction.
+/// This future is **not drop-cancel-safe**. Each direction owns a private
+/// 8192-byte read-ahead buffer. Dropping while either peer's
+/// writer is pending discards that direction's uncommitted read-ahead, so
+/// restarting with the same streams can skip bytes in one or both directions.
+/// Returned byte counts still reflect only successful writes.
+///
+/// Cooperative `Cx` cancellation observed on a later poll makes a bounded
+/// best-effort attempt to drain both private buffers before returning
+/// `Interrupted`; arbitrary future drop cannot do so.
 ///
 /// # Example
 ///
