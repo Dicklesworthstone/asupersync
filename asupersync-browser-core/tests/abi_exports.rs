@@ -1262,3 +1262,151 @@ fn cancelled_task_join_preserves_cancellation_payload_and_invalidates_handle() {
         "expected clean diagnostics: {diagnostics:?}"
     );
 }
+
+#[cfg(target_arch = "wasm32")]
+mod writable_stream_cancellation {
+    use asupersync::io::{AsyncWrite, WasmWritableStreamSink};
+    use js_sys::Promise;
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+    use web_sys::WritableStream;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen(inline_js = r#"
+        export function makeControlledWritableHarness() {
+            const writes = [];
+            const pending = [];
+            const stream = new WritableStream({
+                write(chunk) {
+                    writes.push(Array.from(chunk));
+                    return new Promise((resolve, reject) => {
+                        pending.push({ resolve, reject });
+                    });
+                }
+            });
+            return { stream, writes, pending };
+        }
+
+        export function controlledWritableStream(harness) {
+            return harness.stream;
+        }
+
+        export function controlledWritableWritesJson(harness) {
+            return JSON.stringify(harness.writes);
+        }
+
+        export function resolveNextControlledWrite(harness) {
+            const next = harness.pending.shift();
+            if (next === undefined) {
+                throw new Error("no controlled WritableStream write is pending");
+            }
+            next.resolve();
+        }
+    "#)]
+    extern "C" {
+        #[wasm_bindgen(js_name = makeControlledWritableHarness)]
+        fn make_controlled_writable_harness() -> JsValue;
+
+        #[wasm_bindgen(js_name = controlledWritableStream)]
+        fn controlled_writable_stream(harness: &JsValue) -> WritableStream;
+
+        #[wasm_bindgen(js_name = controlledWritableWritesJson)]
+        fn controlled_writable_writes_json(harness: &JsValue) -> String;
+
+        #[wasm_bindgen(js_name = resolveNextControlledWrite)]
+        fn resolve_next_controlled_write(harness: &JsValue);
+    }
+
+    fn writes(harness: &JsValue) -> Vec<Vec<u8>> {
+        serde_json::from_str(&controlled_writable_writes_json(harness))
+            .expect("controlled write log must be valid JSON")
+    }
+
+    fn poll_write_once(
+        sink: &mut WasmWritableStreamSink,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        Pin::new(sink).poll_write(&mut cx, buf)
+    }
+
+    async fn yield_microtask() {
+        JsFuture::from(Promise::resolve(&JsValue::UNDEFINED))
+            .await
+            .expect("microtask yield must resolve");
+    }
+
+    async fn wait_for_write_count(harness: &JsValue, expected: usize) {
+        for _ in 0..16 {
+            if writes(harness).len() == expected {
+                return;
+            }
+            yield_microtask().await;
+        }
+        panic!("WritableStream did not observe {expected} queued writes");
+    }
+
+    async fn poll_until_first_chunk_is_accepted(
+        sink: &mut WasmWritableStreamSink,
+        first: &[u8],
+    ) -> std::io::Result<usize> {
+        for _ in 0..16 {
+            if let Poll::Ready(result) = poll_write_once(sink, first) {
+                return result;
+            }
+            yield_microtask().await;
+        }
+        panic!("WritableStream writer.ready did not accept the first chunk");
+    }
+
+    async fn assert_cancelled_write_does_not_credit_old_chunk(first: &[u8], second: &[u8]) {
+        let harness = make_controlled_writable_harness();
+        let stream = controlled_writable_stream(&harness);
+        let mut sink = WasmWritableStreamSink::new(&stream).expect("getWriter succeeds");
+
+        let first_written = poll_until_first_chunk_is_accepted(&mut sink, first)
+            .await
+            .expect("first write succeeds");
+        assert_eq!(first_written, first.len());
+        wait_for_write_count(&harness, 1).await;
+        assert_eq!(writes(&harness), vec![first.to_vec()]);
+
+        // Model a second write future that is polled and then dropped while
+        // the first chunk is still completing. No part of `second` may be
+        // accepted or credited yet.
+        assert!(poll_write_once(&mut sink, second).is_pending());
+        assert_eq!(writes(&harness), vec![first.to_vec()]);
+
+        resolve_next_controlled_write(&harness);
+        yield_microtask().await;
+
+        let second_written = poll_fn(|cx| Pin::new(&mut sink).poll_write(cx, second))
+            .await
+            .expect("second write succeeds");
+        assert_eq!(second_written, second.len());
+        wait_for_write_count(&harness, 2).await;
+        assert_eq!(writes(&harness), vec![first.to_vec(), second.to_vec()]);
+
+        resolve_next_controlled_write(&harness);
+        poll_fn(|cx| Pin::new(&mut sink).poll_shutdown(cx))
+            .await
+            .expect("controlled stream closes cleanly");
+    }
+
+    #[wasm_bindgen_test]
+    async fn cancelled_pending_write_with_unequal_lengths_enqueues_new_buffer() {
+        assert_cancelled_write_does_not_credit_old_chunk(b"old", b"new-buffer").await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn cancelled_pending_write_with_equal_lengths_enqueues_new_buffer() {
+        assert_cancelled_write_does_not_credit_old_chunk(b"old!", b"new!").await;
+    }
+}

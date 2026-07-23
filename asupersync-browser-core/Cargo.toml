@@ -37,6 +37,8 @@ web-sys = { version = "0.3", features = [
     "Event",
     "MessageEvent",
     "WebSocket",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
     "console",
 ] }
 
