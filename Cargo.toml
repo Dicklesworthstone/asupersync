@@ -23,6 +23,7 @@ readme = "README.md"
 documentation = "https://docs.rs/asupersync"
 keywords = ["async", "structured", "cancellation", "runtime"]
 categories = ["asynchronous", "concurrency"]
+autobenches = false
 include = [
     "Cargo.toml",
     "README.md",

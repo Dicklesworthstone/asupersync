@@ -8,6 +8,8 @@ const README_PATH: &str = "README.md";
 const WORKFLOW_PATH: &str = ".github/workflows/methodology-gates.yml";
 const CONTRACT_PATH: &str = "artifacts/phase6_methodology_gate_enforcement_contract_v1.json";
 const METHODOLOGY_BENCH_PATH: &str = "benches/methodology_baselines.rs";
+const GOLDEN_BENCH_PATH: &str = "benches/golden_output.rs";
+const GOLDEN_REGISTRY_PATH: &str = "benches/golden_registry.rs";
 const CARGO_TOML_PATH: &str = "Cargo.toml";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -312,6 +314,140 @@ fn direct_main_benchmark_commands_and_comparator_are_executable_and_fail_closed(
             "README must publish the checked {gate_id} command verbatim"
         );
     }
+}
+
+#[test]
+fn golden_registry_and_reviewed_update_flow_fail_closed() {
+    let contract = contract();
+    assert_eq!(
+        contract
+            .get("golden_registry_repair_bead_id")
+            .and_then(JsonValue::as_str),
+        Some("asupersync-golden-registry-fail-closed-provenance-xzv2c4")
+    );
+
+    let gate = local_gate(&contract, "golden-checksums-bench");
+    let normal = gate
+        .get("normal_mode_contract")
+        .expect("golden normal_mode_contract");
+    assert_eq!(
+        normal
+            .get("tracked_registry_required")
+            .and_then(JsonValue::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        normal.get("scenario_set").and_then(JsonValue::as_str),
+        Some("exact")
+    );
+    for field in [
+        "duplicate_scenario",
+        "missing_scenario",
+        "extra_scenario",
+        "generate_sentinel",
+        "malformed_hash_or_provenance",
+    ] {
+        assert_eq!(
+            normal.get(field).and_then(JsonValue::as_str),
+            Some("fail_closed"),
+            "{field} must fail closed"
+        );
+    }
+
+    let update = gate
+        .get("reviewed_update_contract")
+        .expect("golden reviewed_update_contract");
+    let update_command = nonempty_string(update, "rch_command");
+    for required in [
+        "RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec",
+        "--base HEAD --clean-overlay --no-overlay",
+        "-- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=$(git rev-parse HEAD)",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update",
+        "cargo bench -p asupersync --bench golden_output",
+        "--features test-internals,criterion-benches",
+    ] {
+        assert!(
+            update_command.contains(required),
+            "reviewed update command must contain {required:?}: {update_command}"
+        );
+    }
+    for boolean in [
+        "requires_clean_tracked_tree",
+        "requires_reviewed_sha_equal_to_head",
+        "candidate_contains_only_fresh_exact_scenario_set",
+        "promotion_requires_separate_reviewed_commit",
+    ] {
+        assert_eq!(
+            update.get(boolean).and_then(JsonValue::as_bool),
+            Some(true),
+            "{boolean} must be true"
+        );
+    }
+    assert_eq!(
+        update
+            .get("tracked_registry_mutated_by_benchmark")
+            .and_then(JsonValue::as_bool),
+        Some(false)
+    );
+    assert_eq!(nonempty_string(update, "write_mode"), "atomic_candidate");
+    assert_eq!(
+        nonempty_string(update, "candidate_location"),
+        "${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update/criterion/golden-update/golden_checksums.json"
+    );
+
+    let registry = read_repo_file(GOLDEN_REGISTRY_PATH);
+    for required in [
+        "const GOLDEN_SCENARIOS: [&str; 14]",
+        "load_golden_registry_from_path",
+        "duplicate golden checksum scenario",
+        "git_sha: String",
+        "generated_at: String",
+        "build_update_candidate",
+    ] {
+        assert!(
+            registry.contains(required),
+            "golden registry must preserve fail-closed anchor {required:?}"
+        );
+    }
+
+    let cargo_toml = read_repo_file(CARGO_TOML_PATH);
+    assert!(
+        cargo_toml.contains("autobenches = false"),
+        "bench support modules must not be auto-discovered as standalone bench targets"
+    );
+
+    let bench = read_repo_file(GOLDEN_BENCH_PATH);
+    for required in [
+        "mod golden_registry;",
+        "GOLDEN_REVIEWED_GIT_SHA",
+        "write_json_atomically",
+        "finalize_golden_run",
+    ] {
+        assert!(
+            bench.contains(required),
+            "golden bench must preserve fail-closed anchor {required:?}"
+        );
+    }
+    for forbidden in [
+        "fn inline_registry()",
+        "expected == \"GENERATE\"",
+        "std::fs::write(GOLDEN_CHECKSUMS_PATH",
+    ] {
+        assert!(
+            !bench.contains(forbidden) && !registry.contains(forbidden),
+            "golden bench/registry must not restore stale behavior {forbidden:?}"
+        );
+    }
+
+    let readme = read_repo_file(README_PATH);
+    assert!(
+        readme.contains("-- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=${GOLDEN_REVIEWED_SHA}"),
+        "README must place reviewed update controls inside the remote environment"
+    );
+    assert!(
+        readme.contains("criterion/golden-update/golden_checksums.json"),
+        "README must name the retrieved candidate"
+    );
 }
 
 #[test]

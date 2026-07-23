@@ -1928,6 +1928,26 @@ RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTA
 RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals,criterion-benches -- --noplot
 ```
 
+An intentional golden change uses a separate reviewed-update flow. Commit the
+behavior change first, ensure the tracked tree is clean, and generate a complete
+candidate from that exact commit. Update mode rejects a missing or mismatched
+reviewed SHA, tracked dirt, partial scenario runs, stale extra rows, sentinel or
+malformed hashes, and incomplete provenance. It atomically writes the candidate
+under Criterion's artifact directory so RCH retrieves it without mutating the
+tracked registry on the worker:
+
+```bash
+GOLDEN_REVIEWED_SHA=$(git rev-parse HEAD)
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=${GOLDEN_REVIEWED_SHA} CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update cargo bench -p asupersync --bench golden_output --features test-internals,criterion-benches -- --noplot
+```
+
+Review
+`${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update/criterion/golden-update/golden_checksums.json`
+against `artifacts/golden_checksums.json`, then replace the tracked registry in a
+separate commit only if every behavioral change and provenance row is intended.
+Normal verification never accepts a missing registry, a `GENERATE` sentinel, or
+missing/extra scenario keys.
+
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -j 4 -p asupersync --test golden_outputs --features test-internals -- --nocapture
 ```
@@ -1944,7 +1964,7 @@ rch exec -- bash -lc 'test -f artifacts/proof_notes/main-<bead-or-short-sha>.md 
 
 All four gates are live today, but their enforcement lane matters. The PR workflow is **PR-only and CI-blocking** for pull-request/release-review events. Normal agent work on `main` is **locally enforced** by the `rch` preflight commands above plus the required committed artifacts. Push-on-main GitHub enforcement is not currently enabled, and the signoff contract records that explicitly.
 
-Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by re-running with `GOLDEN_UPDATE=1` and committing the new checksums (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
+Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by committing the reviewed behavior change, running the fail-closed golden candidate flow above from that clean commit, reviewing the retrieved exact-set candidate, and committing the promoted registry separately (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
 
 If you are landing a change that touches a hot-path or safety-critical directory, generate the artifact (flamegraph or proof note) before committing the change to `main`. Re-running validation without committing the required artifact does not satisfy the direct-main gate.
 

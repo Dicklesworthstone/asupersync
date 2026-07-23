@@ -297,9 +297,11 @@ jobs:
               echo "FAIL: $MISMATCHES golden checksum mismatches out of $TOTAL_CHECKSUMS"
               echo "$MISMATCH_DETAILS"
               echo ""
-              echo "To fix: If the behavioral change is intentional, run:"
-              echo "  GOLDEN_UPDATE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_methodology_golden_update cargo bench -p asupersync --bench golden_output --all-features -- --noplot"
-              echo "and commit the updated artifacts/golden_checksums.json"
+              echo "To fix an intentional behavioral change: commit the behavior change first,"
+              echo "then run the reviewed exact-set candidate flow from a clean tracked tree:"
+              echo "  RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=\$(git rev-parse HEAD) CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_methodology_golden_update cargo bench -p asupersync --bench golden_output --all-features -- --noplot"
+              echo "Review \${TMPDIR:-/tmp}/rch_target_methodology_golden_update/criterion/golden-update/golden_checksums.json,"
+              echo "then promote the registry in a separate commit."
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
             echo "::error::Golden checksum gate FAILED: $MISMATCHES mismatches"
@@ -487,7 +489,7 @@ jobs:
 
             - **Baseline Benchmarks**: Compares PR benchmarks against \`artifacts/baseline.json\`. Fails if any p50 regresses >5%.
             - **Flamegraph**: Required when hot-path files change (\`src/scheduler/\`, \`src/channel/\`, \`src/obligation/\`). Provide \`artifacts/flamegraphs/pr-<N>.svg\`.
-            - **Golden Checksums**: Verifies behavioral equivalence via \`artifacts/golden_checksums.json\`. Update with \`GOLDEN_UPDATE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_methodology_golden_update cargo bench -p asupersync --bench golden_output --all-features -- --noplot\`.
+            - **Golden Checksums**: Verifies behavioral equivalence via \`artifacts/golden_checksums.json\`. After committing an intentional behavior change, generate an exact-set reviewed candidate from the clean commit with \`RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=\$(git rev-parse HEAD) CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_methodology_golden_update cargo bench -p asupersync --bench golden_output --all-features -- --noplot\`, then review and promote the retrieved candidate separately.
             - **Proof Notes**: Required when safety-critical files change (\`src/obligation/\`, \`src/safety/\`, files with \`unsafe\`). Provide \`artifacts/proof_notes/pr-<N>.md\`.
 
             </details>
