@@ -256,6 +256,37 @@ impl SecurityContext {
         tag
     }
 
+    /// Signs an explicitly framed control payload under a caller-owned domain.
+    ///
+    /// Unlike symbol verification modes, authenticated control envelopes are
+    /// always fail-closed: callers use the boolean verifier below before any
+    /// control data can influence allocation or shortcut behavior.
+    #[must_use]
+    pub(crate) fn sign_domain_payload(&self, domain: &[u8], payload: &[u8]) -> AuthenticationTag {
+        let tag = AuthenticationTag::compute_for_domain_payload(&self.key, domain, payload);
+        self.stats.signed.fetch_add(1, Ordering::Relaxed);
+        tag
+    }
+
+    /// Verifies a control-payload tag in constant time and fails closed in every
+    /// [`AuthMode`].
+    #[must_use]
+    pub(crate) fn verify_domain_payload(
+        &self,
+        domain: &[u8],
+        payload: &[u8],
+        tag: &AuthenticationTag,
+    ) -> bool {
+        let valid = tag.verify_domain_payload(&self.key, domain, payload);
+        let counter = if valid {
+            &self.stats.verified_ok
+        } else {
+            &self.stats.verified_fail
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        valid
+    }
+
     /// Verifies an authenticated symbol.
     ///
     /// The behavior depends on the configured `AuthMode`:
