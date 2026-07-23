@@ -562,6 +562,106 @@ fn indexeddb_blocked_open_remains_pending_and_cancellation_owns_late_success() {
 }
 
 #[test]
+fn browser_fetch_requires_explicit_scope_authority_before_host_effects() {
+    let dispatcher = read_source("src/types/wasm_abi.rs");
+    for marker in [
+        "fetch_authorities: DetHashMap<WasmHandleRef, FetchAuthority>",
+        "pub fn register_runtime_fetch_authority(",
+        "self.fetch_authorities.get(&request.parent).cloned()",
+        ".unwrap_or_default();",
+        "WasmDispatchError::CapabilityDenied",
+    ] {
+        assert!(
+            dispatcher.contains(marker),
+            "WASM dispatcher fetch-authority capsule must preserve marker: {marker}"
+        );
+    }
+    let fetch_start = dispatcher
+        .find("pub fn fetch_request(")
+        .expect("dispatcher fetch_request must exist");
+    let fetch_end = dispatcher[fetch_start..]
+        .find("pub fn fetch_complete(")
+        .map(|offset| fetch_start + offset)
+        .expect("dispatcher fetch_complete must follow fetch_request");
+    let fetch = &dispatcher[fetch_start..fetch_end];
+    let authorize = fetch
+        .find("authority.authorize(&capability_request)")
+        .expect("fetch_request must authorize");
+    let allocate = fetch
+        .find("allocate_with_parent(WasmHandleKind::FetchRequest")
+        .expect("fetch_request must allocate its handle");
+    assert!(
+        authorize < allocate,
+        "fetch authority must run before handle allocation"
+    );
+
+    let bridge = read_source("asupersync-browser-core/src/lib.rs");
+    for marker in [
+        "canonicalize_browser_http_url",
+        "let url = Url::new(raw)",
+        "Ok((url.href(), origin))",
+        "dispatcher.register_runtime_fetch_authority(&handle, fetch_authority)",
+        "RequestCredentials::Omit",
+    ] {
+        assert!(
+            bridge.contains(marker),
+            "browser fetch bridge must preserve fail-closed marker: {marker}"
+        );
+    }
+    let implementation = bridge
+        .find("fn fetch_request_impl(")
+        .expect("fetch_request_impl must exist");
+    let implementation = &bridge[implementation..];
+    let dispatch = implementation
+        .find("dispatcher.fetch_request(&request, consumer_version)")
+        .expect("fetch_request_impl must dispatch");
+    let host = implementation
+        .find("spawn_browser_fetch(handle, request.clone())")
+        .expect("fetch_request_impl must invoke host fetch");
+    assert!(
+        dispatch < host,
+        "dispatcher authority must succeed before host fetch is invoked"
+    );
+
+    let package = read_source("packages/browser-core/index.js");
+    for marker in [
+        "function normalizeFetchAuthority(authority = {})",
+        "fetchAuthority: normalizeFetchAuthority(options.fetchAuthority)",
+        "const credentials = request.credentials ?? false;",
+    ] {
+        assert!(
+            package.contains(marker),
+            "browser-core package must preserve explicit fetch configuration marker: {marker}"
+        );
+    }
+
+    let worker = read_source("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
+    let checker =
+        read_source("tests/fixtures/dedicated-worker-consumer/scripts/check-browser-run.mjs");
+    for marker in [
+        "exerciseFetchAuthority",
+        "hostCallsAfterDefaultDeny",
+        "hostCallsAfterPolicyDenials",
+        "HTTPS://API.EXAMPLE.COM:443\\\\records?limit=1",
+    ] {
+        assert!(
+            worker.contains(marker),
+            "dedicated-worker fetch-authority e2e must preserve marker: {marker}"
+        );
+    }
+    for marker in [
+        "fetchAuthority?.hostCallsAfterDefaultDeny === 0",
+        "fetchAuthority?.hostFetchCount === 1",
+        "fetchAuthority?.hostCall?.credentials === \"omit\"",
+    ] {
+        assert!(
+            checker.contains(marker),
+            "dedicated-worker fetch-authority checker must preserve marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_indexeddb_namespace_operations_use_exact_key_ranges() {
     let content = read_source("packages/browser/src/index.ts");
     assert!(

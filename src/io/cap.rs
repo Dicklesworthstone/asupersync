@@ -71,7 +71,8 @@ pub struct IoStats {
 }
 
 /// HTTP method allowlist for browser fetch capability checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum FetchMethod {
     /// HTTP GET.
     Get,
@@ -87,6 +88,23 @@ pub enum FetchMethod {
     Head,
     /// HTTP OPTIONS.
     Options,
+}
+
+impl FetchMethod {
+    /// Parses a normalized HTTP method token used by browser fetch.
+    #[must_use]
+    pub fn from_http_token(method: &str) -> Option<Self> {
+        match method {
+            "GET" => Some(Self::Get),
+            "POST" => Some(Self::Post),
+            "PUT" => Some(Self::Put),
+            "PATCH" => Some(Self::Patch),
+            "DELETE" => Some(Self::Delete),
+            "HEAD" => Some(Self::Head),
+            "OPTIONS" => Some(Self::Options),
+            _ => None,
+        }
+    }
 }
 
 /// Request envelope used for explicit fetch authority checks.
@@ -128,20 +146,8 @@ impl FetchRequest {
         self
     }
 
-    fn origin(&self) -> Option<&str> {
-        let scheme_end = self.url.find("://")?;
-        if scheme_end == 0 {
-            return None;
-        }
-        let rest = &self.url[scheme_end + 3..];
-        if rest.is_empty() {
-            return None;
-        }
-        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        if authority_end == 0 {
-            return None;
-        }
-        Some(&self.url[..scheme_end + 3 + authority_end])
+    fn origin(&self) -> Option<String> {
+        parse_browser_transport_url(&self.url).map(|(_, origin, _)| origin)
     }
 }
 
@@ -182,7 +188,7 @@ impl std::fmt::Display for FetchPolicyError {
 impl std::error::Error for FetchPolicyError {}
 
 /// Explicit authority boundaries for browser fetch operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FetchAuthority {
     /// Allowed origins (`scheme://host[:port]`). Empty means no origin authority.
     pub allowed_origins: Vec<String>,
@@ -259,9 +265,9 @@ impl FetchAuthority {
         let origin_allowed = self
             .allowed_origins
             .iter()
-            .any(|candidate| candidate == "*" || candidate == origin);
+            .any(|candidate| candidate == "*" || candidate == &origin);
         if !origin_allowed {
-            return Err(FetchPolicyError::OriginDenied(origin.to_owned()));
+            return Err(FetchPolicyError::OriginDenied(origin));
         }
 
         if !self.allowed_methods.contains(&request.method) {
@@ -2554,6 +2560,30 @@ mod tests {
             authority.authorize(&request),
             Err(FetchPolicyError::InvalidUrl("not-a-url".to_owned()))
         );
+    }
+
+    #[test]
+    fn fetch_authority_uses_browser_special_url_authority_boundaries() {
+        let authority = FetchAuthority::deny_all()
+            .grant_origin("https://api.example.com")
+            .grant_method(FetchMethod::Get);
+
+        let allowed = FetchRequest::new(FetchMethod::Get, r"https://api.example.com\records");
+        assert_eq!(authority.authorize(&allowed), Ok(()));
+
+        for url in [
+            r"https://evil.example\@api.example.com/records",
+            "https://user:password@evil.example/records",
+        ] {
+            let denied = FetchRequest::new(FetchMethod::Get, url);
+            assert_eq!(
+                authority.authorize(&denied),
+                Err(FetchPolicyError::OriginDenied(
+                    "https://evil.example".to_owned()
+                )),
+                "fetch policy must use the host selected by browser special-URL parsing: {url}"
+            );
+        }
     }
 
     #[test]

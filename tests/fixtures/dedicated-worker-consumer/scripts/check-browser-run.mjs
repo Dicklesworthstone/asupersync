@@ -441,6 +441,29 @@ try {
     bootstrap.runtimeSelectionRecovered.outcome === "ok",
     `recovered runtime selection must return ok, got ${bootstrap.runtimeSelectionRecovered.outcome ?? "missing"}`,
   );
+  const fetchAuthority = bootstrap.fetchAuthorityExercise;
+  assert(
+    fetchAuthority?.defaultDeniedCode === "capability_denied"
+      && fetchAuthority?.unlistedDeniedCode === "capability_denied"
+      && fetchAuthority?.credentialsDeniedCode === "capability_denied",
+    `fetch authority denials drifted: ${JSON.stringify(fetchAuthority ?? null)}`,
+  );
+  assert(
+    fetchAuthority?.hostCallsAfterDefaultDeny === 0
+      && fetchAuthority?.hostCallsAfterPolicyDenials === 0,
+    "default, unlisted-origin, and credential denials must not invoke host fetch",
+  );
+  assert(
+    fetchAuthority?.allowedOutcome === "ok"
+      && fetchAuthority?.hostFetchCount === 1,
+    `listed fetch must invoke host fetch exactly once: ${JSON.stringify(fetchAuthority ?? null)}`,
+  );
+  assert(
+    fetchAuthority?.hostCall?.url === "https://api.example.com/records?limit=1"
+      && fetchAuthority?.hostCall?.method === "GET"
+      && fetchAuthority?.hostCall?.credentials === "omit",
+    `authorized fetch must use the exact canonical URL and explicit credential mode: ${JSON.stringify(fetchAuthority?.hostCall ?? null)}`,
+  );
   assert(
     bootstrap.storageExercise?.backend === "indexeddb",
     `worker storage exercise must use indexeddb, got ${bootstrap.storageExercise?.backend ?? "missing"}`,

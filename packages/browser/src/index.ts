@@ -44,6 +44,7 @@ import initWasm, {
   type AbiVersion,
   type Budget,
   type ErrorCode,
+  type FetchAuthority,
   type FetchRequest,
   type HandleKind,
   type HandleRef,
@@ -109,6 +110,7 @@ export type {
   AbiVersion,
   Budget,
   ErrorCode,
+  FetchAuthority,
   FetchRequest,
   HandleKind,
   HandleRef,
@@ -137,6 +139,7 @@ export interface BrowserRuntimeOptions {
   wasmInput?: InitInput;
   consumerVersion?: AbiVersion | null;
   eagerInit?: boolean;
+  fetchAuthority?: FetchAuthority;
   globalObject?: Record<string, unknown>;
   preferredLane?: BrowserExecutionLane | null;
   healthPolicy?: Partial<BrowserLaneHealthPolicy>;
@@ -9142,7 +9145,9 @@ export async function createBrowserRuntimeSelection(
     }
   }
 
-  const outcome = mapOutcome(runtimeCreate(consumerVersion), (handle) => {
+  const outcome = mapOutcome(runtimeCreate({
+    fetchAuthority: options.fetchAuthority,
+  }, consumerVersion), (handle) => {
     const stableLaneHealth = clearBrowserLaneHealth(
       executionLadder.health.laneId,
       options.healthScopeKey,

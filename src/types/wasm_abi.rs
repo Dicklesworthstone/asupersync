@@ -9,8 +9,9 @@
 //! - Ownership state transitions for boundary handles
 //! - Deterministic fingerprinting for ABI drift detection
 
+use crate::io::{FetchAuthority, FetchMethod, FetchRequest};
 use crate::types::{CancelPhase, CancelReason, Outcome};
-use crate::util::det_hash::{BTreeMap, DetHashSet, DetHasher};
+use crate::util::det_hash::{BTreeMap, DetHashMap, DetHashSet, DetHasher};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -1514,6 +1515,9 @@ pub struct WasmFetchRequest {
     pub url: String,
     /// HTTP method (GET, POST, etc.).
     pub method: String,
+    /// Whether the browser may attach credentials to the request.
+    #[serde(default)]
+    pub credentials: bool,
     /// Optional request body bytes.
     pub body: Option<Vec<u8>>,
 }
@@ -1554,6 +1558,12 @@ pub enum WasmDispatchError {
         /// Explanation of the validation failure.
         reason: String,
     },
+    /// Request was outside the explicit capability capsule for its scope.
+    #[error("capability denied: {reason}")]
+    CapabilityDenied {
+        /// Stable policy explanation suitable for structured diagnostics.
+        reason: String,
+    },
 }
 
 impl WasmDispatchError {
@@ -1573,6 +1583,11 @@ impl WasmDispatchError {
             },
             Self::InvalidRequest { .. } => WasmAbiFailure {
                 code: WasmAbiErrorCode::DecodeFailure,
+                recoverability: WasmAbiRecoverability::Permanent,
+                message: self.to_string(),
+            },
+            Self::CapabilityDenied { .. } => WasmAbiFailure {
+                code: WasmAbiErrorCode::CapabilityDenied,
                 recoverability: WasmAbiRecoverability::Permanent,
                 message: self.to_string(),
             },
@@ -1657,6 +1672,8 @@ pub struct WasmExportDispatcher {
     producer_version: WasmAbiVersion,
     /// Abort interop mode for cancel/abort bridging.
     abort_mode: WasmAbortPropagationMode,
+    /// Explicit fetch authority capsule for each live runtime/region handle.
+    fetch_authorities: DetHashMap<WasmHandleRef, FetchAuthority>,
     /// Total dispatch call counter (monotonic).
     dispatch_count: u64,
 }
@@ -1676,6 +1693,7 @@ impl WasmExportDispatcher {
             event_log: WasmBoundaryEventLog::new(),
             producer_version: WasmAbiVersion::CURRENT,
             abort_mode: WasmAbortPropagationMode::Bidirectional,
+            fetch_authorities: DetHashMap::default(),
             dispatch_count: 0,
         }
     }
@@ -1732,6 +1750,36 @@ impl WasmExportDispatcher {
     #[must_use]
     pub fn dispatch_count(&self) -> u64 {
         self.dispatch_count
+    }
+
+    /// Installs the explicit fetch authority for a newly-created runtime.
+    ///
+    /// Registration is one-shot: a live runtime's authority cannot be widened
+    /// after it has been exposed to callers. Regions inherit the exact capsule
+    /// from their parent when they are created.
+    pub fn register_runtime_fetch_authority(
+        &mut self,
+        runtime: &WasmHandleRef,
+        authority: FetchAuthority,
+    ) -> Result<(), WasmDispatchError> {
+        let entry = self
+            .handles
+            .get(runtime)
+            .map_err(WasmDispatchError::Handle)?;
+        if entry.handle.kind != WasmHandleKind::Runtime || entry.state != WasmBoundaryState::Active
+        {
+            return Err(WasmDispatchError::InvalidState {
+                state: entry.state,
+                symbol: WasmAbiSymbol::RuntimeCreate,
+            });
+        }
+        if self.fetch_authorities.contains_key(runtime) {
+            return Err(WasmDispatchError::InvalidRequest {
+                reason: "runtime fetch authority is already registered".to_string(),
+            });
+        }
+        self.fetch_authorities.insert(*runtime, authority);
+        Ok(())
     }
 
     /// Validates ABI compatibility for an incoming call.
@@ -1811,6 +1859,7 @@ impl WasmExportDispatcher {
         self.handles
             .release(handle)
             .map_err(WasmDispatchError::Handle)?;
+        self.fetch_authorities.remove(handle);
         Ok(state_from)
     }
 
@@ -1936,6 +1985,7 @@ impl WasmExportDispatcher {
             WasmAbiSymbol::ScopeEnter,
             "scope_enter parent",
         )?;
+        let inherited_fetch_authority = self.fetch_authorities.get(&request.parent).cloned();
 
         let handle = self
             .handles
@@ -1946,6 +1996,9 @@ impl WasmExportDispatcher {
         self.handles
             .transition(&handle, WasmBoundaryState::Active)
             .map_err(WasmDispatchError::Handle)?;
+        if let Some(authority) = inherited_fetch_authority {
+            self.fetch_authorities.insert(handle, authority);
+        }
         self.emit_event(
             WasmAbiSymbol::ScopeEnter,
             WasmBoundaryState::Unbound,
@@ -2151,6 +2204,26 @@ impl WasmExportDispatcher {
                 reason: "fetch URL must not be empty".to_string(),
             });
         }
+
+        let method = FetchMethod::from_http_token(&request.method).ok_or_else(|| {
+            WasmDispatchError::InvalidRequest {
+                reason: format!("unsupported fetch method: {}", request.method),
+            }
+        })?;
+        let mut capability_request = FetchRequest::new(method, request.url.clone());
+        if request.credentials {
+            capability_request = capability_request.with_credentials();
+        }
+        let authority = self
+            .fetch_authorities
+            .get(&request.scope)
+            .cloned()
+            .unwrap_or_default();
+        authority.authorize(&capability_request).map_err(|error| {
+            WasmDispatchError::CapabilityDenied {
+                reason: error.to_string(),
+            }
+        })?;
 
         let handle = self
             .handles
@@ -2369,6 +2442,7 @@ pub struct WasmFetchBuilder {
     scope: WasmHandleRef,
     url: String,
     method: String,
+    credentials: bool,
     body: Option<Vec<u8>>,
 }
 
@@ -2380,6 +2454,7 @@ impl WasmFetchBuilder {
             scope,
             url: url.into(),
             method: "GET".to_string(),
+            credentials: false,
             body: None,
         }
     }
@@ -2388,6 +2463,13 @@ impl WasmFetchBuilder {
     #[must_use]
     pub fn method(mut self, method: impl Into<String>) -> Self {
         self.method = method.into();
+        self
+    }
+
+    /// Allows the browser to attach credentials to the request.
+    #[must_use]
+    pub fn with_credentials(mut self) -> Self {
+        self.credentials = true;
         self
     }
 
@@ -2405,6 +2487,7 @@ impl WasmFetchBuilder {
             scope: self.scope,
             url: self.url,
             method: self.method,
+            credentials: self.credentials,
             body: self.body,
         }
     }
@@ -4374,6 +4457,20 @@ mod tests {
         }
     }
 
+    fn register_example_fetch_authority(
+        dispatcher: &mut WasmExportDispatcher,
+        runtime: &WasmHandleRef,
+    ) {
+        dispatcher
+            .register_runtime_fetch_authority(
+                runtime,
+                FetchAuthority::deny_all()
+                    .grant_origin("https://example.com")
+                    .grant_method(FetchMethod::Get),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn abi_compatibility_rules_enforced() {
         let exact = classify_wasm_abi_compatibility(
@@ -5157,6 +5254,7 @@ mod tests {
     fn dispatcher_runtime_close_releases_descendants() {
         let mut d = WasmExportDispatcher::new();
         let rt = d.runtime_create(None).unwrap();
+        register_example_fetch_authority(&mut d, &rt);
         let scope = d
             .scope_enter(
                 &WasmScopeEnterRequest {
@@ -5182,6 +5280,7 @@ mod tests {
                     scope,
                     url: "https://example.com/data".to_string(),
                     method: "GET".to_string(),
+                    credentials: false,
                     body: None,
                 },
                 None,
@@ -5512,6 +5611,7 @@ mod tests {
                     scope: task,
                     url: "https://example.com/data".to_string(),
                     method: "GET".to_string(),
+                    credentials: false,
                     body: None,
                 },
                 None,
@@ -5565,6 +5665,7 @@ mod tests {
     fn dispatcher_fetch_request_and_complete() {
         let mut d = WasmExportDispatcher::new();
         let rt = d.runtime_create(None).unwrap();
+        register_example_fetch_authority(&mut d, &rt);
         let scope = d
             .scope_enter(
                 &WasmScopeEnterRequest {
@@ -5581,6 +5682,7 @@ mod tests {
                     scope,
                     url: "https://example.com/api".to_string(),
                     method: "GET".to_string(),
+                    credentials: false,
                     body: None,
                 },
                 None,
@@ -5603,6 +5705,121 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_fetch_defaults_to_deny_without_allocating_a_handle() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("default-deny".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let live_before = d.handles().live_count();
+
+        let err = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope,
+                    url: "https://example.com/denied".to_string(),
+                    method: "GET".to_string(),
+                    credentials: false,
+                    body: None,
+                },
+                None,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, WasmDispatchError::CapabilityDenied { .. }));
+        assert_eq!(err.to_failure().code, WasmAbiErrorCode::CapabilityDenied);
+        assert_eq!(d.handles().live_count(), live_before);
+    }
+
+    #[test]
+    fn dispatcher_fetch_authority_is_one_shot_and_inherited_by_regions() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let authority = FetchAuthority::deny_all()
+            .grant_origin("https://api.example.com")
+            .grant_method(FetchMethod::Get);
+        d.register_runtime_fetch_authority(&rt, authority.clone())
+            .unwrap();
+        let duplicate = d
+            .register_runtime_fetch_authority(&rt, authority)
+            .unwrap_err();
+        assert!(matches!(
+            duplicate,
+            WasmDispatchError::InvalidRequest { .. }
+        ));
+
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("inherits-fetch-authority".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let live_before = d.handles().live_count();
+
+        let denied = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope,
+                    url: "https://evil.example/collect".to_string(),
+                    method: "GET".to_string(),
+                    credentials: false,
+                    body: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(denied, WasmDispatchError::CapabilityDenied { .. }));
+        assert_eq!(d.handles().live_count(), live_before);
+
+        let allowed = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope,
+                    url: "https://api.example.com/data".to_string(),
+                    method: "GET".to_string(),
+                    credentials: false,
+                    body: None,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(allowed.kind, WasmHandleKind::FetchRequest);
+        assert_eq!(d.handles().live_count(), live_before + 1);
+    }
+
+    #[test]
+    fn dispatcher_fetch_credentials_require_an_explicit_grant() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        register_example_fetch_authority(&mut d, &rt);
+
+        let err = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope: rt,
+                    url: "https://example.com/private".to_string(),
+                    method: "GET".to_string(),
+                    credentials: true,
+                    body: None,
+                },
+                None,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, WasmDispatchError::CapabilityDenied { .. }));
+        assert!(err.to_string().contains("credentialed fetch denied"));
+    }
+
+    #[test]
     fn dispatcher_fetch_empty_url_rejected() {
         let mut d = WasmExportDispatcher::new();
         let rt = d.runtime_create(None).unwrap();
@@ -5613,6 +5830,7 @@ mod tests {
                     scope: rt,
                     url: String::new(),
                     method: "GET".to_string(),
+                    credentials: false,
                     body: None,
                 },
                 None,
@@ -5972,6 +6190,7 @@ mod tests {
             },
             url: "https://example.com".to_string(),
             method: "POST".to_string(),
+            credentials: false,
             body: Some(vec![1, 2, 3]),
         };
         let json = serde_json::to_string(&fetch_req).unwrap();

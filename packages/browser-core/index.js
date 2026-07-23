@@ -51,6 +51,16 @@ const RECOVERABILITY_LEVELS = Object.freeze([
   "unknown",
 ]);
 
+const FETCH_METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+]);
+
 export const abiMetadata = Object.freeze({
   abi_version: Object.freeze({
     major: 1,
@@ -135,6 +145,58 @@ function normalizeByteArray(bytes, label) {
     return [...bytes];
   }
   throw new TypeError(`${label} must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[]`);
+}
+
+function normalizeFetchAuthority(authority = {}) {
+  if (!authority || typeof authority !== "object" || Array.isArray(authority)) {
+    throw new TypeError("RuntimeCreateOptions.fetchAuthority must be an object");
+  }
+  const allowedOrigins = authority.allowedOrigins ?? [];
+  const allowedMethods = authority.allowedMethods ?? [];
+  if (
+    !Array.isArray(allowedOrigins)
+    || allowedOrigins.some((origin) => typeof origin !== "string" || origin.length === 0)
+  ) {
+    throw new TypeError(
+      "FetchAuthority.allowedOrigins must be an array of non-empty absolute origins",
+    );
+  }
+  if (!Array.isArray(allowedMethods)) {
+    throw new TypeError("FetchAuthority.allowedMethods must be an array");
+  }
+  const normalizedMethods = allowedMethods.map((method) => {
+    if (typeof method !== "string") {
+      throw new TypeError("FetchAuthority.allowedMethods entries must be strings");
+    }
+    const normalized = method.trim().toUpperCase();
+    if (!FETCH_METHODS.has(normalized)) {
+      throw new TypeError(`FetchAuthority contains unsupported method ${normalized}`);
+    }
+    return normalized;
+  });
+  const allowCredentials = authority.allowCredentials ?? false;
+  if (typeof allowCredentials !== "boolean") {
+    throw new TypeError("FetchAuthority.allowCredentials must be a boolean");
+  }
+  const maxHeaderCount = authority.maxHeaderCount ?? 0;
+  if (!Number.isSafeInteger(maxHeaderCount) || maxHeaderCount < 0) {
+    throw new TypeError("FetchAuthority.maxHeaderCount must be a non-negative safe integer");
+  }
+  return {
+    allowedOrigins: [...new Set(allowedOrigins)],
+    allowedMethods: [...new Set(normalizedMethods)],
+    allowCredentials,
+    maxHeaderCount,
+  };
+}
+
+function normalizeRuntimeCreateOptions(options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("RuntimeCreateOptions must be an object");
+  }
+  return {
+    fetchAuthority: normalizeFetchAuthority(options.fetchAuthority),
+  };
 }
 
 function normalizeBudgetNumber(name, value) {
@@ -780,9 +842,14 @@ async function init(input) {
 export default init;
 export { init };
 
-export function runtime_create(consumerVersion = null) {
+export function runtime_create(options = {}, consumerVersion = null) {
   return invokeHandleOperation("runtime_create", "runtime", () =>
-    rawRuntimeCreate(vjson(consumerVersion)),
+    rawRuntimeCreate(
+      JSON.stringify({
+        ...normalizeRuntimeCreateOptions(options),
+        consumerVersion: consumerVersion ?? undefined,
+      }),
+    ),
   );
 }
 
@@ -865,12 +932,17 @@ export function task_cancel(request, consumerVersion = null) {
 }
 
 export function fetch_request(request, consumerVersion = null) {
+  const credentials = request.credentials ?? false;
+  if (typeof credentials !== "boolean") {
+    throw new TypeError("request.credentials must be a boolean");
+  }
   return invokeOutcomeOperation("fetch_request", () =>
     rawFetchRequest(
       JSON.stringify({
         scope: normHandle(request.scope, "request.scope", "region"),
         url: request.url,
         method: request.method,
+        credentials,
         body:
           request.body === null || request.body === undefined
             ? undefined
