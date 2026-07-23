@@ -934,7 +934,7 @@ fn t37c_02_fs_cancel_safety_protocol() {
     for token in [
         "trait itself makes no rollback guarantee",
         "Cancellation semantics are implementation-defined",
-        "enabled create or truncate effects may commit after future drop",
+        "create or truncate effects may commit after future drop",
         "started recursive removal may continue after future drop",
         "started write may create, truncate, or partially",
     ] {
