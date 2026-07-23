@@ -291,6 +291,14 @@ const MAX_INBOUND_DATAGRAMS: usize = 65_536;
 /// spurious volume — br-asupersync-oh6gm2 forensics, 2026-07-07).
 const MAX_ACK_FRAME_RANGES: usize = 96;
 
+/// Maximum number of received packet-number ranges retained per number space.
+///
+/// The wire encoder advertises only [`MAX_ACK_FRAME_RANGES`] newest ranges.
+/// Retaining four wire windows gives reordered packets several ACK cycles to
+/// bridge nearby gaps while bounding both memory and the cost of ordered
+/// insertion. Dropping older ranges is permitted by RFC 9000 §13.2.3.
+const MAX_TRACKED_ACK_RANGES: usize = MAX_ACK_FRAME_RANGES * 4;
+
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
 const MAX_OUTBOUND_DATAGRAMS: usize = 256;
@@ -2220,39 +2228,70 @@ struct ReceivedPacketTracker {
 
 impl ReceivedPacketTracker {
     fn observe(&mut self, packet_number: u64) {
-        // In-order fast path: extending (or re-observing) the newest range
-        // avoids the per-packet sort + merged-Vec rebuild below, which is the
-        // common case on a healthy link.
+        // In-order fast path: extending (or re-observing) the newest range is
+        // the common case on a healthy link.
         if let Some(first) = self.ranges.first_mut() {
+            if packet_number >= first.smallest && packet_number <= first.largest {
+                return;
+            }
             if packet_number == first.largest.saturating_add(1) {
                 first.largest = packet_number;
                 return;
             }
-            if packet_number >= first.smallest && packet_number <= first.largest {
+        }
+
+        // Ranges are newest-first. Binary search by their largest packet
+        // number, then inspect only the two neighboring ranges for duplicate,
+        // extension, or bridge cases. Vec insertion can shift retained ranges,
+        // but the explicit cap keeps that work bounded and avoids the old
+        // full sort plus merge-rebuild on every gap packet.
+        let insert_at = self
+            .ranges
+            .partition_point(|range| range.largest > packet_number);
+
+        if insert_at > 0 {
+            let newer_idx = insert_at - 1;
+            let newer = self.ranges[newer_idx];
+            if packet_number >= newer.smallest {
+                return;
+            }
+            if packet_number.saturating_add(1) == newer.smallest {
+                self.ranges[newer_idx].smallest = packet_number;
+                if insert_at < self.ranges.len()
+                    && self.ranges[insert_at].largest.saturating_add(1) >= packet_number
+                {
+                    let older = self.ranges.remove(insert_at);
+                    self.ranges[newer_idx].smallest =
+                        self.ranges[newer_idx].smallest.min(older.smallest);
+                }
                 return;
             }
         }
-        self.ranges.push(AckRange {
-            largest: packet_number,
-            smallest: packet_number,
-        });
-        self.ranges.sort_by(|lhs, rhs| {
-            rhs.largest
-                .cmp(&lhs.largest)
-                .then_with(|| rhs.smallest.cmp(&lhs.smallest))
-        });
 
-        let mut merged: Vec<AckRange> = Vec::with_capacity(self.ranges.len());
-        for range in self.ranges.drain(..) {
-            if let Some(last) = merged.last_mut()
-                && range.largest.saturating_add(1) >= last.smallest
-            {
-                last.smallest = last.smallest.min(range.smallest);
-                continue;
+        if let Some(older) = self.ranges.get_mut(insert_at) {
+            if packet_number == older.largest {
+                return;
             }
-            merged.push(range);
+            if older.largest.saturating_add(1) == packet_number {
+                older.largest = packet_number;
+                return;
+            }
         }
-        self.ranges = merged;
+
+        // A packet older than the retained window cannot affect a future ACK
+        // frame. Avoid inserting it only to truncate it immediately.
+        if insert_at == self.ranges.len() && self.ranges.len() == MAX_TRACKED_ACK_RANGES {
+            return;
+        }
+
+        self.ranges.insert(
+            insert_at,
+            AckRange {
+                largest: packet_number,
+                smallest: packet_number,
+            },
+        );
+        self.ranges.truncate(MAX_TRACKED_ACK_RANGES);
     }
 
     fn ack_frame(&self) -> Option<QuicFrame> {
@@ -2365,6 +2404,113 @@ mod tests {
 
     fn test_cx() -> Cx<crate::cx::cap::All> {
         Cx::for_testing()
+    }
+
+    #[test]
+    fn received_packet_tracker_incrementally_merges_neighbor_ranges() {
+        let mut tracker = ReceivedPacketTracker::default();
+
+        for packet_number in [10, 8, 6] {
+            tracker.observe(packet_number);
+        }
+        assert_eq!(
+            tracker.ranges,
+            vec![
+                AckRange {
+                    largest: 10,
+                    smallest: 10,
+                },
+                AckRange {
+                    largest: 8,
+                    smallest: 8,
+                },
+                AckRange {
+                    largest: 6,
+                    smallest: 6,
+                },
+            ]
+        );
+
+        tracker.observe(8);
+        assert_eq!(tracker.ranges.len(), 3, "duplicate must be a no-op");
+
+        for packet_number in [7, 9, 12, 11, 3, 4, 5] {
+            tracker.observe(packet_number);
+        }
+        assert_eq!(
+            tracker.ranges,
+            vec![AckRange {
+                largest: 12,
+                smallest: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn received_packet_tracker_bounds_oldest_gap_history() {
+        let mut tracker = ReceivedPacketTracker::default();
+        let observed_ranges = MAX_TRACKED_ACK_RANGES + 32;
+
+        for index in 0..observed_ranges {
+            tracker.observe((index as u64) * 2);
+        }
+
+        assert_eq!(tracker.ranges.len(), MAX_TRACKED_ACK_RANGES);
+        assert_eq!(
+            tracker.ranges.first(),
+            Some(&AckRange {
+                largest: ((observed_ranges - 1) as u64) * 2,
+                smallest: ((observed_ranges - 1) as u64) * 2,
+            })
+        );
+        assert_eq!(
+            tracker.ranges.last(),
+            Some(&AckRange {
+                largest: 64,
+                smallest: 64,
+            }),
+            "oldest ranges beyond the retained window must be dropped"
+        );
+
+        let retained = tracker.ranges.clone();
+        tracker.observe(0);
+        assert_eq!(
+            tracker.ranges, retained,
+            "isolated packets older than the retained window must be ignored"
+        );
+
+        tracker.observe(63);
+        assert_eq!(tracker.ranges.last().map(|range| range.smallest), Some(63));
+        assert_eq!(tracker.ranges.len(), MAX_TRACKED_ACK_RANGES);
+
+        let QuicFrame::Ack {
+            ack_range_count,
+            ack_ranges,
+            ..
+        } = tracker.ack_frame().expect("nonempty tracker emits an ACK")
+        else {
+            panic!("received packet tracker emitted a non-ACK frame");
+        };
+        assert_eq!(ack_range_count.value() as usize, MAX_ACK_FRAME_RANGES - 1);
+        assert_eq!(ack_ranges.len(), MAX_ACK_FRAME_RANGES - 1);
+    }
+
+    #[test]
+    fn received_packet_tracker_merges_at_packet_number_boundary() {
+        let mut tracker = ReceivedPacketTracker::default();
+
+        tracker.observe(u64::MAX);
+        tracker.observe(u64::MAX - 2);
+        tracker.observe(u64::MAX - 1);
+        tracker.observe(u64::MAX);
+
+        assert_eq!(
+            tracker.ranges,
+            vec![AckRange {
+                largest: u64::MAX,
+                smallest: u64::MAX - 2,
+            }]
+        );
     }
 
     #[cfg(feature = "tls")]
