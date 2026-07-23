@@ -39,9 +39,8 @@ use crate::epoch::EpochId;
 use crate::tracing_compat::{debug, error, info, warn};
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
-use crossbeam_queue::ArrayQueue;
-use parking_lot::RwLock;
-use std::collections::BTreeMap;
+use parking_lot::{Mutex, MutexGuard, RwLock};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -257,16 +256,35 @@ pub struct EpochTelemetryStatistics {
 }
 
 struct EpochTelemetryOutbox {
-    receipts: ArrayQueue<EpochTelemetryReceipt>,
+    // Enqueue order and delivery-watermark capture share this linearization
+    // point. The tracker separately prevents watermark capture while a
+    // telemetry-producing operation is still in flight.
+    state: Mutex<EpochTelemetryOutboxState>,
     overflow_count: AtomicU64,
     dispatch_panic_count: AtomicU64,
     emitted_count: AtomicU64,
 }
 
+struct EpochTelemetryOutboxState {
+    receipts: VecDeque<SequencedEpochTelemetryReceipt>,
+    capacity: usize,
+    next_sequence: u128,
+}
+
+struct SequencedEpochTelemetryReceipt {
+    sequence: u128,
+    receipt: EpochTelemetryReceipt,
+}
+
 impl EpochTelemetryOutbox {
     fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
-            receipts: ArrayQueue::new(capacity.max(1)),
+            state: Mutex::new(EpochTelemetryOutboxState {
+                receipts: VecDeque::with_capacity(capacity),
+                capacity,
+                next_sequence: 0,
+            }),
             overflow_count: AtomicU64::new(0),
             dispatch_panic_count: AtomicU64::new(0),
             emitted_count: AtomicU64::new(0),
@@ -274,37 +292,94 @@ impl EpochTelemetryOutbox {
     }
 
     fn push(&self, receipt: EpochTelemetryReceipt) {
-        if self.receipts.push(receipt).is_err() {
+        let mut state = self.state.lock();
+        if state.receipts.len() == state.capacity || state.next_sequence == u128::MAX {
+            drop(state);
             self.overflow_count.fetch_add(1, Ordering::Relaxed);
+            return;
         }
+        let sequence = state.next_sequence;
+        state.next_sequence += 1;
+        state
+            .receipts
+            .push_back(SequencedEpochTelemetryReceipt { sequence, receipt });
     }
 
-    fn pop_batch(&self, limit: usize) -> Vec<EpochTelemetryReceipt> {
-        let mut receipts = Vec::with_capacity(limit.min(self.receipts.len()));
-        for _ in 0..limit {
-            let Some(receipt) = self.receipts.pop() else {
-                break;
-            };
-            receipts.push(receipt);
+    fn pop_batch_through(
+        &self,
+        watermark: Option<u128>,
+        limit: usize,
+    ) -> Vec<EpochTelemetryReceipt> {
+        let Some(watermark) = watermark else {
+            return Vec::new();
+        };
+        let mut state = self.state.lock();
+        let eligible = state
+            .receipts
+            .iter()
+            .take(limit)
+            .take_while(|receipt| receipt.sequence <= watermark)
+            .count();
+        let mut receipts = Vec::with_capacity(eligible);
+        for receipt in state.receipts.drain(..eligible) {
+            receipts.push(receipt.receipt);
         }
         receipts
     }
 
-    fn delivery(self: &Arc<Self>, limit: usize) -> EpochTelemetryDispatch {
+    #[cfg(test)]
+    fn pop_batch(&self, limit: usize) -> Vec<EpochTelemetryReceipt> {
+        let watermark = self.watermark();
+        self.pop_batch_through(watermark, limit)
+    }
+
+    fn watermark(&self) -> Option<u128> {
+        self.state
+            .lock()
+            .receipts
+            .back()
+            .map(|receipt| receipt.sequence)
+    }
+
+    fn has_pending_through(&self, watermark: Option<u128>) -> bool {
+        let Some(watermark) = watermark else {
+            return false;
+        };
+        self.state
+            .lock()
+            .receipts
+            .front()
+            .is_some_and(|receipt| receipt.sequence <= watermark)
+    }
+
+    fn delivery(
+        self: &Arc<Self>,
+        _publication: &MutexGuard<'_, ()>,
+        limit: usize,
+    ) -> EpochTelemetryDispatch {
         EpochTelemetryDispatch {
             outbox: Arc::clone(self),
+            watermark: self.watermark(),
             limit,
         }
     }
 
     fn statistics(&self) -> EpochTelemetryStatistics {
+        let state = self.state.lock();
         EpochTelemetryStatistics {
-            pending: self.receipts.len(),
-            capacity: self.receipts.capacity(),
+            pending: state.receipts.len(),
+            capacity: state.capacity,
             overflow_count: self.overflow_count.load(Ordering::Relaxed),
             dispatch_panic_count: self.dispatch_panic_count.load(Ordering::Relaxed),
             emitted_count: self.emitted_count.load(Ordering::Relaxed),
         }
+    }
+
+    fn clear(&self) {
+        let mut state = self.state.lock();
+        state.receipts.clear();
+        // Keep the sequence frontier monotonic so tokens created before a
+        // reset can never retarget receipts published after the reset.
     }
 }
 
@@ -571,6 +646,8 @@ impl EpochTelemetryReceipt {
 ///
 /// Receipts remain in the bounded outbox until [`dispatch`](Self::dispatch), so
 /// abandoning a deferred runtime effect cannot silently discard telemetry.
+/// Each token is bounded by the newest receipt visible when it was created, so
+/// a delayed token cannot emit telemetry for a later, unpublished mutation.
 /// Callers must dispatch this only after publishing the corresponding runtime
 /// mutation and releasing runtime/tracker locks. A subscriber panic aborts the
 /// remainder of the drained batch, is counted without tracing, and is never
@@ -578,22 +655,27 @@ impl EpochTelemetryReceipt {
 #[must_use = "epoch telemetry must be dispatched after publication and outside locks"]
 pub struct EpochTelemetryDispatch {
     outbox: Arc<EpochTelemetryOutbox>,
+    watermark: Option<u128>,
     limit: usize,
 }
 
 impl EpochTelemetryDispatch {
-    /// Returns whether the outbox currently has no receipts to deliver.
+    /// Returns whether the outbox has no pending receipts visible to this token.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.outbox.receipts.is_empty()
+        !self.outbox.has_pending_through(self.watermark)
     }
 
     /// Emits this batch once while containing subscriber `enabled`/`on_event`
     /// panics across the entire batch.
     pub fn dispatch(self) {
-        let Self { outbox, limit } = self;
-        let receipts = outbox.pop_batch(limit);
+        let Self {
+            outbox,
+            watermark,
+            limit,
+        } = self;
+        let receipts = outbox.pop_batch_through(watermark, limit);
         Self::dispatch_receipts(&outbox, receipts);
     }
 
@@ -807,6 +889,10 @@ pub struct EpochConsistencyTracker {
     violations: RwLock<Vec<EpochConsistencyViolation>>,
     /// Maximum number of violations to retain.
     max_violations: usize,
+    /// Serializes telemetry-producing tracker operations with delivery
+    /// watermark capture. This prevents one caller from capturing receipts
+    /// enqueued by another caller whose tracker mutation has not returned yet.
+    telemetry_publication: Mutex<()>,
     /// Bounded callback-free receipts awaiting an explicit safe dispatch.
     telemetry: Arc<EpochTelemetryOutbox>,
 }
@@ -850,11 +936,12 @@ impl EpochConsistencyTracker {
             global_transition_count: AtomicU64::new(0),
             violations: RwLock::new(Vec::new()),
             max_violations: 1000, // Bounded to prevent memory growth
+            telemetry_publication: Mutex::new(()),
             telemetry: Arc::new(EpochTelemetryOutbox::new(telemetry_capacity)),
         }
     }
 
-    fn enqueue_telemetry(&self, receipt: EpochTelemetryReceipt) {
+    fn enqueue_telemetry(&self, _publication: &MutexGuard<'_, ()>, receipt: EpochTelemetryReceipt) {
         self.telemetry.push(receipt);
     }
 
@@ -863,7 +950,9 @@ impl EpochConsistencyTracker {
     /// Receipts are removed from the outbox only when the token is dispatched.
     #[must_use]
     pub fn drain_telemetry(&self) -> EpochTelemetryDispatch {
-        self.telemetry.delivery(DEFAULT_TELEMETRY_DRAIN_LIMIT)
+        let publication = self.telemetry_publication.lock();
+        self.telemetry
+            .delivery(&publication, DEFAULT_TELEMETRY_DRAIN_LIMIT)
     }
 
     /// Returns callback-free outbox counters without emitting telemetry.
@@ -885,6 +974,7 @@ impl EpochConsistencyTracker {
         if !self.config.enabled {
             return;
         }
+        let publication = self.telemetry_publication.lock();
 
         // Generate correlation ID for cross-module analysis
         let correlation_id = self.global_transition_count.load(Ordering::Relaxed) + 1;
@@ -904,13 +994,16 @@ impl EpochConsistencyTracker {
                 .prev()
                 .is_some_and(|expected_from| expected_from == from_epoch);
         if exact_duplicate_completion {
-            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionDuplicate {
-                module,
-                current_epoch: record.current_epoch,
-                reported_from_epoch: from_epoch,
-                reported_to_epoch: to_epoch,
-                transition_time_ns: now.as_nanos(),
-            });
+            self.enqueue_telemetry(
+                &publication,
+                EpochTelemetryReceipt::TransitionDuplicate {
+                    module,
+                    current_epoch: record.current_epoch,
+                    reported_from_epoch: from_epoch,
+                    reported_to_epoch: to_epoch,
+                    transition_time_ns: now.as_nanos(),
+                },
+            );
             return;
         }
 
@@ -928,7 +1021,7 @@ impl EpochConsistencyTracker {
                     actual_epoch: to_epoch,
                     detected_at: now,
                 };
-                self.record_violation(violation);
+                self.record_violation(&publication, violation);
                 ("skipped_forward", true)
             } else {
                 let violation = EpochConsistencyViolation::MissingTransition {
@@ -937,7 +1030,7 @@ impl EpochConsistencyTracker {
                     actual_epoch: to_epoch,
                     detected_at: now,
                 };
-                self.record_violation(violation);
+                self.record_violation(&publication, violation);
                 ("non_advancing", false)
             }
         } else {
@@ -947,18 +1040,21 @@ impl EpochConsistencyTracker {
                 actual_epoch: to_epoch,
                 detected_at: now,
             };
-            self.record_violation(violation);
+            self.record_violation(&publication, violation);
             ("violated", to_epoch.is_after(record.current_epoch))
         };
         if !should_update {
-            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionIgnored {
-                module,
-                current_epoch: record.current_epoch,
-                reported_from_epoch: from_epoch,
-                reported_to_epoch: to_epoch,
-                transition_time_ns: now.as_nanos(),
-                sync_status,
-            });
+            self.enqueue_telemetry(
+                &publication,
+                EpochTelemetryReceipt::TransitionIgnored {
+                    module,
+                    current_epoch: record.current_epoch,
+                    reported_from_epoch: from_epoch,
+                    reported_to_epoch: to_epoch,
+                    transition_time_ns: now.as_nanos(),
+                    sync_status,
+                },
+            );
             return;
         }
 
@@ -976,37 +1072,46 @@ impl EpochConsistencyTracker {
         // Increment global counter
         self.global_transition_count.fetch_add(1, Ordering::Relaxed);
 
-        self.enqueue_telemetry(EpochTelemetryReceipt::Transition {
-            module,
-            old_epoch: from_epoch,
-            new_epoch: to_epoch,
-            transition_time_ns: now.as_nanos(),
-            sync_status,
-            correlation_id,
-            transition_count: record.transition_count,
-            transition_latency_ns,
-        });
+        self.enqueue_telemetry(
+            &publication,
+            EpochTelemetryReceipt::Transition {
+                module,
+                old_epoch: from_epoch,
+                new_epoch: to_epoch,
+                transition_time_ns: now.as_nanos(),
+                sync_status,
+                correlation_id,
+                transition_count: record.transition_count,
+                transition_latency_ns,
+            },
+        );
 
         // Log performance metrics for epoch transition latency
         if transition_latency_ns > 0 {
-            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionLatency {
-                module,
-                transition_latency_ns,
-                correlation_id,
-                threshold_ns: self.config.slow_transition_threshold_ns,
-            });
+            self.enqueue_telemetry(
+                &publication,
+                EpochTelemetryReceipt::TransitionLatency {
+                    module,
+                    transition_latency_ns,
+                    correlation_id,
+                    threshold_ns: self.config.slow_transition_threshold_ns,
+                },
+            );
         }
 
         // Check for consistency violations after this transition
         drop(records); // Release lock before consistency check
         let processing_start = std::time::Instant::now();
-        self.check_consistency_internal(now);
+        self.check_consistency_internal(&publication, now);
         let processing_latency = processing_start.elapsed().as_nanos() as u64;
 
-        self.enqueue_telemetry(EpochTelemetryReceipt::ConsistencyCheckLatency {
-            correlation_id,
-            processing_latency_ns: processing_latency,
-        });
+        self.enqueue_telemetry(
+            &publication,
+            EpochTelemetryReceipt::ConsistencyCheckLatency {
+                correlation_id,
+                processing_latency_ns: processing_latency,
+            },
+        );
     }
 
     /// Notifies the tracker that a module is starting an epoch transition.
@@ -1014,6 +1119,7 @@ impl EpochConsistencyTracker {
         if !self.config.enabled {
             return;
         }
+        let publication = self.telemetry_publication.lock();
 
         let mut records = self.module_records.write();
         let record = records
@@ -1034,14 +1140,17 @@ impl EpochConsistencyTracker {
                 detected_at: now,
             };
             drop(records);
-            self.record_violation(violation);
+            self.record_violation(&publication, violation);
 
-            self.enqueue_telemetry(EpochTelemetryReceipt::TransitionStartIgnored {
-                module,
-                current_epoch,
-                reported_from_epoch: from_epoch,
-                transition_time_ns: now.as_nanos(),
-            });
+            self.enqueue_telemetry(
+                &publication,
+                EpochTelemetryReceipt::TransitionStartIgnored {
+                    module,
+                    current_epoch,
+                    reported_from_epoch: from_epoch,
+                    transition_time_ns: now.as_nanos(),
+                },
+            );
             return;
         }
 
@@ -1093,29 +1202,30 @@ impl EpochConsistencyTracker {
     }
 
     /// Internal consistency checking with proper timestamp.
-    fn check_consistency_internal(&self, now: Time) {
+    fn check_consistency_internal(&self, publication: &MutexGuard<'_, ()>, now: Time) {
         let records = self.module_records.read();
 
         // Check for module desync
-        self.check_module_desync(&records, now);
+        self.check_module_desync(publication, &records, now);
 
         // Check for slow transitions
-        self.check_slow_transitions(&records, now);
+        self.check_slow_transitions(publication, &records, now);
 
         // Check for advancement order violations if strict ordering is enabled
         if self.config.strict_ordering {
-            self.check_advancement_order(&records, now);
+            self.check_advancement_order(publication, &records, now);
         }
     }
 
     /// Checks for module epoch desynchronization.
     fn check_module_desync(
         &self,
+        publication: &MutexGuard<'_, ()>,
         records: &DetHashMap<ModuleId, EpochTransitionRecord>,
         now: Time,
     ) {
         if let Some(violation) = self.current_module_desync_violation(records, now, true) {
-            self.record_violation(violation);
+            self.record_violation(publication, violation);
         }
     }
 
@@ -1204,11 +1314,12 @@ impl EpochConsistencyTracker {
     /// Checks for slow epoch transitions.
     fn check_slow_transitions(
         &self,
+        publication: &MutexGuard<'_, ()>,
         records: &DetHashMap<ModuleId, EpochTransitionRecord>,
         now: Time,
     ) {
         if let Some(violation) = self.current_slow_transition_violation(records, now) {
-            self.record_violation(violation);
+            self.record_violation(publication, violation);
         }
     }
 
@@ -1259,11 +1370,12 @@ impl EpochConsistencyTracker {
     /// epochs in a specific order (e.g., Scheduler before TaskTable).
     fn check_advancement_order(
         &self,
+        publication: &MutexGuard<'_, ()>,
         records: &DetHashMap<ModuleId, EpochTransitionRecord>,
         now: Time,
     ) {
         if let Some(violation) = self.current_advancement_order_violation(records, now) {
-            self.record_violation(violation);
+            self.record_violation(publication, violation);
         }
     }
 
@@ -1308,7 +1420,11 @@ impl EpochConsistencyTracker {
     // `tracing-integration` is disabled, so the bindings only become "unused"
     // in no-op builds.
     #[allow(unused_variables)]
-    fn record_violation(&self, violation: EpochConsistencyViolation) {
+    fn record_violation(
+        &self,
+        publication: &MutexGuard<'_, ()>,
+        violation: EpochConsistencyViolation,
+    ) {
         {
             let violations = self.violations.read();
             if let Some(last) = violations.last() {
@@ -1358,21 +1474,27 @@ impl EpochConsistencyTracker {
 
         let mut violations = self.violations.write();
         violations.push(violation.clone());
-        self.enqueue_telemetry(EpochTelemetryReceipt::Violation {
-            violation,
-            violation_id,
-            strict_ordering: self.config.strict_ordering,
-            slow_transition_threshold_ns: self.config.slow_transition_threshold_ns,
-        });
+        self.enqueue_telemetry(
+            publication,
+            EpochTelemetryReceipt::Violation {
+                violation,
+                violation_id,
+                strict_ordering: self.config.strict_ordering,
+                slow_transition_threshold_ns: self.config.slow_transition_threshold_ns,
+            },
+        );
 
         // Trim violations if we've exceeded the limit
         if violations.len() > self.max_violations {
             let excess = violations.len() - self.max_violations;
             violations.drain(0..excess);
-            self.enqueue_telemetry(EpochTelemetryReceipt::ViolationBufferTrimmed {
-                violations_trimmed: excess,
-                max_violations: self.max_violations,
-            });
+            self.enqueue_telemetry(
+                publication,
+                EpochTelemetryReceipt::ViolationBufferTrimmed {
+                    violations_trimmed: excess,
+                    max_violations: self.max_violations,
+                },
+            );
         }
     }
 
@@ -1435,10 +1557,11 @@ impl EpochConsistencyTracker {
 
     /// Clears all violations and statistics.
     pub fn reset(&self) {
+        let _publication = self.telemetry_publication.lock();
         self.module_records.write().clear();
         self.violations.write().clear();
         self.global_transition_count.store(0, Ordering::Relaxed);
-        while self.telemetry.receipts.pop().is_some() {}
+        self.telemetry.clear();
         self.telemetry.overflow_count.store(0, Ordering::Relaxed);
         self.telemetry
             .dispatch_panic_count
@@ -1511,6 +1634,7 @@ impl EpochConsistencyTracker {
     // so these locals are only consumed in tracing-enabled builds.
     #[allow(unused_variables)]
     pub fn log_epoch_state(&self) {
+        let publication = self.telemetry_publication.lock();
         let records = self.module_records.read();
         let total_transitions = self.global_transition_count.load(Ordering::Relaxed);
         let module_states: Vec<_> = records
@@ -1541,19 +1665,22 @@ impl EpochConsistencyTracker {
             .collect();
         drop(violations);
 
-        self.enqueue_telemetry(EpochTelemetryReceipt::TrackerState {
-            total_modules,
-            total_transitions,
-            violation_count,
-            strict_ordering: self.config.strict_ordering,
-            max_epoch_skew_allowed: self.config.max_epoch_skew,
-            slow_transition_threshold_ns: self.config.slow_transition_threshold_ns,
-        });
+        self.enqueue_telemetry(
+            &publication,
+            EpochTelemetryReceipt::TrackerState {
+                total_modules,
+                total_transitions,
+                violation_count,
+                strict_ordering: self.config.strict_ordering,
+                max_epoch_skew_allowed: self.config.max_epoch_skew,
+                slow_transition_threshold_ns: self.config.slow_transition_threshold_ns,
+            },
+        );
         for module_state in module_states {
-            self.enqueue_telemetry(module_state);
+            self.enqueue_telemetry(&publication, module_state);
         }
         for recent_violation in recent_violations {
-            self.enqueue_telemetry(recent_violation);
+            self.enqueue_telemetry(&publication, recent_violation);
         }
     }
 
@@ -1564,8 +1691,12 @@ impl EpochConsistencyTracker {
     /// queues telemetry for later delivery through
     /// [`drain_telemetry`](Self::drain_telemetry).
     pub fn set_enabled(&mut self, enabled: bool) {
+        let publication = self.telemetry_publication.lock();
         self.config.enabled = enabled;
-        self.enqueue_telemetry(EpochTelemetryReceipt::EnabledChanged { enabled });
+        self.enqueue_telemetry(
+            &publication,
+            EpochTelemetryReceipt::EnabledChanged { enabled },
+        );
     }
 
     /// Updates the slow transition threshold dynamically.
@@ -1576,12 +1707,16 @@ impl EpochConsistencyTracker {
     /// [`drain_telemetry`](Self::drain_telemetry).
     #[allow(unused_variables)]
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
+        let publication = self.telemetry_publication.lock();
         let old_threshold = self.config.slow_transition_threshold_ns;
         self.config.slow_transition_threshold_ns = threshold_ns;
-        self.enqueue_telemetry(EpochTelemetryReceipt::ThresholdUpdated {
-            old_threshold_ns: old_threshold,
-            new_threshold_ns: threshold_ns,
-        });
+        self.enqueue_telemetry(
+            &publication,
+            EpochTelemetryReceipt::ThresholdUpdated {
+                old_threshold_ns: old_threshold,
+                new_threshold_ns: threshold_ns,
+            },
+        );
     }
 }
 
@@ -1865,6 +2000,147 @@ mod tests {
         assert_eq!(delivered.pending, 0);
         assert_eq!(delivered.emitted_count, 2);
         crate::test_complete!("epoch_telemetry_abandoned_delivery_leaves_receipts_pending");
+    }
+
+    #[test]
+    fn epoch_telemetry_delivery_waits_for_in_flight_publication() {
+        init_test("epoch_telemetry_delivery_waits_for_in_flight_publication");
+
+        let tracker = Arc::new(EpochConsistencyTracker::new());
+        let publication = tracker.telemetry_publication.lock();
+        tracker.enqueue_telemetry(
+            &publication,
+            EpochTelemetryReceipt::EnabledChanged { enabled: true },
+        );
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (delivery_tx, delivery_rx) = std::sync::mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            let tracker = Arc::clone(&tracker);
+            scope.spawn(move || {
+                started_tx.send(()).expect("test receiver must remain live");
+                let delivery = tracker.drain_telemetry();
+                delivery_tx
+                    .send(delivery)
+                    .expect("test receiver must remain live");
+            });
+
+            started_rx
+                .recv()
+                .expect("delivery thread must reach the publication boundary");
+            assert!(
+                matches!(
+                    delivery_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ),
+                "delivery must not capture receipts from an in-flight producer"
+            );
+
+            drop(publication);
+            let delivery = delivery_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("delivery must resume after the producer publishes");
+            assert!(!delivery.is_empty());
+            delivery.dispatch();
+        });
+
+        let statistics = tracker.telemetry_statistics();
+        assert_eq!(statistics.pending, 0);
+        assert_eq!(statistics.emitted_count, 1);
+        crate::test_complete!("epoch_telemetry_delivery_waits_for_in_flight_publication");
+    }
+
+    #[test]
+    fn epoch_telemetry_delivery_cutoff_excludes_newer_receipts_even_out_of_order() {
+        init_test("epoch_telemetry_delivery_cutoff_excludes_newer_receipts_even_out_of_order");
+
+        let tracker = EpochConsistencyTracker::new();
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(10),
+        );
+        let first_old_delivery = tracker.drain_telemetry();
+        let second_old_delivery = tracker.drain_telemetry();
+
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::new(1),
+            EpochId::new(2),
+            Time::from_nanos(20),
+        );
+        let newer_delivery = tracker.drain_telemetry();
+
+        first_old_delivery.dispatch();
+        let after_old = tracker.telemetry_statistics();
+        assert_eq!(after_old.pending, 2);
+        assert_eq!(after_old.emitted_count, 2);
+
+        newer_delivery.dispatch();
+        let after_newer = tracker.telemetry_statistics();
+        assert_eq!(after_newer.pending, 0);
+        assert_eq!(after_newer.emitted_count, 4);
+
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::new(2),
+            EpochId::new(3),
+            Time::from_nanos(30),
+        );
+        assert!(
+            second_old_delivery.is_empty(),
+            "an old token must not adopt receipts enqueued after its creation"
+        );
+        second_old_delivery.dispatch();
+        let after_stale = tracker.telemetry_statistics();
+        assert_eq!(after_stale.pending, 2);
+        assert_eq!(after_stale.emitted_count, 4);
+
+        tracker.drain_telemetry().dispatch();
+        let delivered = tracker.telemetry_statistics();
+        assert_eq!(delivered.pending, 0);
+        assert_eq!(delivered.emitted_count, 6);
+        crate::test_complete!(
+            "epoch_telemetry_delivery_cutoff_excludes_newer_receipts_even_out_of_order"
+        );
+    }
+
+    #[test]
+    fn epoch_telemetry_reset_does_not_retarget_existing_delivery() {
+        init_test("epoch_telemetry_reset_does_not_retarget_existing_delivery");
+
+        let tracker = EpochConsistencyTracker::new();
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(10),
+        );
+        let pre_reset_delivery = tracker.drain_telemetry();
+
+        tracker.reset();
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(20),
+        );
+
+        assert!(
+            pre_reset_delivery.is_empty(),
+            "a pre-reset token must not adopt post-reset receipts"
+        );
+        pre_reset_delivery.dispatch();
+        let after_stale = tracker.telemetry_statistics();
+        assert_eq!(after_stale.pending, 2);
+        assert_eq!(after_stale.emitted_count, 0);
+
+        tracker.drain_telemetry().dispatch();
+        let delivered = tracker.telemetry_statistics();
+        assert_eq!(delivered.pending, 0);
+        assert_eq!(delivered.emitted_count, 2);
+        crate::test_complete!("epoch_telemetry_reset_does_not_retarget_existing_delivery");
     }
 
     #[cfg(feature = "tracing-integration")]
