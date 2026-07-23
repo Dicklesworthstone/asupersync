@@ -1043,10 +1043,50 @@ impl Parker {
         self.inner.cvar.notify_one();
     }
 
+    /// Publishes a permit only when a thread is currently parked or preparing
+    /// to park on this instance.
+    ///
+    /// The optimistic waiter-count check keeps the common non-waiting scan
+    /// lock-free. The second check runs under the condvar mutex, binding the
+    /// observed waiter to the notification: a timed-out waiter decrements its
+    /// count before releasing this mutex, while a waiter still preparing to
+    /// sleep will consume the published permit before entering the condvar.
+    ///
+    /// Returns `true` only when this call published a new permit for a live
+    /// waiter. An already-notified waiter returns `false`, allowing a
+    /// coordinator to try another parked worker instead of wasting the wake.
+    #[inline]
+    pub(crate) fn unpark_if_waiting(&self) -> bool {
+        if self.inner.waiting.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+
+        let _guard = self.lock_unpoisoned();
+        if self.inner.waiting.load(Ordering::Acquire) == 0
+            || self
+                .inner
+                .notified
+                .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+                .is_err()
+        {
+            return false;
+        }
+
+        crate::runtime::metrics::record_worker_unpark();
+        self.inner.cvar.notify_one();
+        true
+    }
+
     #[cfg(test)]
     #[must_use]
     pub(crate) fn notification_pending_for_test(&self) -> bool {
         self.inner.notified.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn waiting_count_for_test(&self) -> usize {
+        self.inner.waiting.load(Ordering::Acquire)
     }
 }
 

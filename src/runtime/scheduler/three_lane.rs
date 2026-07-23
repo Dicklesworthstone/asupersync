@@ -889,15 +889,41 @@ impl WorkerCoordinator {
     }
 
     #[inline]
-    pub(crate) fn wake_one(&self) {
+    fn wake_one_parker_prefer_waiter(&self) -> bool {
         let count = self.parkers.len();
         if count == 0 {
+            return false;
+        }
+
+        let start = self.next_wake.fetch_add(1, Ordering::AcqRel);
+        let slot_for = |index: usize| {
+            // Use bitmask (AND) when worker count is power-of-two to avoid IDIV.
+            self.mask.map_or_else(|| index % count, |mask| index & mask)
+        };
+
+        // br-asupersync-ppdgkg: A permit sent to a busy worker can be absorbed
+        // while another worker sleeps indefinitely. Search from the
+        // round-robin cursor for a Parker that is actually waiting and has no
+        // permit yet.
+        for offset in 0..count {
+            let slot = slot_for(start.wrapping_add(offset));
+            if self.parkers[slot].unpark_if_waiting() {
+                return true;
+            }
+        }
+
+        // Nobody is observably parked. Preserve the permit model and
+        // round-robin distribution so a worker racing into park consumes a
+        // wake instead of sleeping past newly published work.
+        self.parkers[slot_for(start)].unpark();
+        true
+    }
+
+    #[inline]
+    pub(crate) fn wake_one(&self) {
+        if !self.wake_one_parker_prefer_waiter() {
             return;
         }
-        let idx = self.next_wake.fetch_add(1, Ordering::AcqRel);
-        // Use bitmask (AND) when worker count is power-of-two to avoid IDIV.
-        let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
-        self.parkers[slot].unpark();
         if let Some(io) = &self.io_driver {
             let _ = io.wake();
         }
@@ -911,13 +937,7 @@ impl WorkerCoordinator {
     /// closing the final-check/park lost-wakeup race.
     #[inline]
     pub(crate) fn wake_one_parker(&self) {
-        let count = self.parkers.len();
-        if count == 0 {
-            return;
-        }
-        let idx = self.next_wake.fetch_add(1, Ordering::AcqRel);
-        let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
-        self.parkers[slot].unpark();
+        self.wake_one_parker_prefer_waiter();
     }
 
     #[inline]
@@ -930,11 +950,8 @@ impl WorkerCoordinator {
             self.wake_all();
             return;
         }
-        let start_idx = self.next_wake.fetch_add(num_wakes, Ordering::AcqRel);
-        for i in 0..num_wakes {
-            let idx = start_idx.wrapping_add(i);
-            let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
-            self.parkers[slot].unpark();
+        for _ in 0..num_wakes {
+            self.wake_one_parker_prefer_waiter();
         }
         if let Some(io) = &self.io_driver {
             let _ = io.wake();
@@ -10660,6 +10677,66 @@ mod tests {
         // Verify round-robin distribution: 8 wakes across 4 workers = 2 per worker
         // (We can't directly verify which parker was woken, but the modulo math
         // guarantees even distribution over time)
+    }
+
+    #[test]
+    fn coordinator_wake_one_prefers_an_actual_waiter() {
+        let busy = Parker::new();
+        let waiting = Parker::new();
+        let spare = Parker::new();
+        let coordinator =
+            WorkerCoordinator::new(vec![busy.clone(), waiting.clone(), spare].into(), None);
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let waiting_thread = waiting.clone();
+        let mut handle = Some(thread::spawn(move || {
+            waiting_thread.park();
+            woke_tx.send(()).expect("wake observer remains live");
+        }));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while waiting.waiting_count_for_test() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let entered_wait = waiting.waiting_count_for_test() != 0;
+        if !entered_wait {
+            waiting.unpark();
+            handle
+                .take()
+                .expect("waiting thread handle remains")
+                .join()
+                .expect("waiting thread cleanup");
+        }
+        assert!(
+            entered_wait,
+            "worker did not enter Parker wait state before deadline"
+        );
+
+        // The round-robin cursor points at the busy worker in slot 0. The
+        // coordinator must skip it and signal the actual sleeper in slot 1.
+        coordinator.wake_one();
+        let woke = woke_rx.recv_timeout(Duration::from_secs(2));
+        if woke.is_err() {
+            waiting.unpark();
+        }
+        handle
+            .take()
+            .expect("waiting thread handle remains")
+            .join()
+            .expect("waiting worker exits after wake");
+
+        assert!(
+            woke.is_ok(),
+            "wake_one must signal an actually parked worker"
+        );
+        assert!(
+            !busy.notification_pending_for_test(),
+            "wake permit must not be absorbed by the busy round-robin slot"
+        );
+        assert_eq!(
+            coordinator.next_wake.load(Ordering::Relaxed),
+            1,
+            "waiter preference still advances the round-robin cursor once"
+        );
     }
 
     #[test]
