@@ -2933,6 +2933,30 @@ mod tests {
     fn metamorphic_nested_scope_cancellation_closes_descendants_without_spawn_leaks() {
         use std::task::{Context, Poll};
 
+        fn run_ready_finalizer(state: &mut RuntimeState, poll_cx: &mut Context<'_>) {
+            let mut scheduled = state.drain_ready_async_finalizers();
+            assert_eq!(scheduled.len(), 1, "one LIFO finalizer should be ready");
+            let (task_id, _priority, spawn_effects) =
+                scheduled.pop().expect("ready finalizer task");
+            spawn_effects.dispatch();
+            let mut stored = state
+                .remove_stored_future(task_id)
+                .expect("ready finalizer must own a stored task");
+            let outcome = match stored.poll(poll_cx) {
+                Poll::Ready(Outcome::Ok(())) => Outcome::Ok(()),
+                Poll::Ready(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
+                Poll::Ready(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
+                Poll::Ready(Outcome::Err(())) => {
+                    panic!("finalizer task must not resolve with unit error")
+                }
+                Poll::Pending => panic!("sync finalizer task must complete on its first poll"),
+            };
+            assert!(state.complete_task(task_id, outcome));
+            let (waiters, observer) = state.task_completed(task_id).into_parts();
+            assert!(waiters.is_empty());
+            observer.dispatch();
+        }
+
         struct YieldOnce(bool);
 
         impl std::future::Future for YieldOnce {
@@ -3072,6 +3096,7 @@ mod tests {
         let (_waiters, completion_observer) = state.task_completed(grandchild_task_id).into_parts();
         completion_observer.dispatch();
         state.advance_region_state(grandchild);
+        run_ready_finalizer(&mut state, &mut poll_cx);
 
         let mut grandchild_join_fut = std::pin::pin!(grandchild_handle.join(&cx));
         let grandchild_result = match grandchild_join_fut.as_mut().poll(&mut poll_cx) {
@@ -3108,6 +3133,7 @@ mod tests {
         let (_waiters, completion_observer) = state.task_completed(child_task_id).into_parts();
         completion_observer.dispatch();
         state.advance_region_state(child);
+        run_ready_finalizer(&mut state, &mut poll_cx);
 
         let mut child_join_fut = std::pin::pin!(child_handle.join(&cx));
         let child_result = match child_join_fut.as_mut().poll(&mut poll_cx) {

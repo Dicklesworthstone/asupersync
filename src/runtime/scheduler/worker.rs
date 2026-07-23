@@ -1801,6 +1801,74 @@ mod tests {
     }
 
     #[test]
+    fn sync_finalizer_runs_after_runtime_state_lock_is_released() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use crate::types::Budget;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let finalizer_ran = Arc::new(AtomicBool::new(false));
+        let lock_was_available = Arc::new(AtomicBool::new(false));
+
+        let region = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = guard.create_root_region(Budget::INFINITE);
+            let state_for_finalizer = Arc::clone(&state);
+            let ran_for_finalizer = Arc::clone(&finalizer_ran);
+            let available_for_finalizer = Arc::clone(&lock_was_available);
+            assert!(guard.register_sync_finalizer(region, move || {
+                ran_for_finalizer.store(true, Ordering::SeqCst);
+                available_for_finalizer
+                    .store(state_for_finalizer.try_lock().is_ok(), Ordering::SeqCst);
+            }));
+            assert!(
+                guard
+                    .region(region)
+                    .expect("region should exist")
+                    .begin_close(None)
+            );
+
+            guard.advance_region_state(region);
+            assert!(
+                !finalizer_ran.load(Ordering::SeqCst),
+                "region progression beneath the state lock must not invoke user code"
+            );
+            region
+        };
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+        assert!(
+            worker.schedule_ready_finalizers(),
+            "sync finalizer should cross the scheduler task boundary"
+        );
+        let finalizer_task = global.pop().expect("finalizer task should be published");
+        worker.execute(finalizer_task);
+
+        assert!(finalizer_ran.load(Ordering::SeqCst));
+        assert!(
+            lock_was_available.load(Ordering::SeqCst),
+            "sync finalizer must be able to reacquire runtime state"
+        );
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            guard.region(region).is_none(),
+            "region should close after its scheduled finalizer completes"
+        );
+    }
+
+    #[test]
     fn test_execute_ready_with_foreign_local_waiter_does_not_panic() {
         use crate::record::task::TaskRecord;
         use crate::runtime::RuntimeState;

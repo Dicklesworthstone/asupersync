@@ -5062,10 +5062,13 @@ impl RuntimeState {
     // Async Finalizer Scheduling
     // =========================================================================
 
-    /// Drains async finalizers for regions that are ready to run them.
+    /// Drains finalizers for regions that are ready to run them.
     ///
-    /// This runs sync finalizers inline and schedules at most one async
-    /// finalizer per region (respecting the async barrier).
+    /// Both sync and async finalizers cross the task-publication boundary. In
+    /// particular, a sync finalizer must not run here: production callers hold
+    /// the runtime-state mutex while invoking this method. Scheduling at most
+    /// one finalizer task per region preserves the LIFO barrier while ensuring
+    /// arbitrary user code is first polled after that mutex has been released.
     pub fn drain_ready_async_finalizers(
         &mut self,
     ) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
@@ -5087,20 +5090,24 @@ impl RuntimeState {
         }
 
         for region_id in regions_to_process {
-            let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(region_id)
+            let Some((finalizer_id, finalizer)) = self.take_next_finalizer_tracked(region_id)
             else {
                 continue;
             };
-            let Finalizer::Async(future) = finalizer else {
-                continue;
+            let future: BoxedAsyncFinalizer = match finalizer {
+                Finalizer::Sync(finalizer) => Box::pin(async move { finalizer() }),
+                Finalizer::Async(future) => future,
             };
             match self.spawn_finalizer_task(region_id, finalizer_id, future) {
                 Ok((task_id, priority, spawn_effects)) => {
                     scheduled.push((task_id, priority, spawn_effects));
                 }
                 Err(future) => {
-                    // Preserve the async barrier when task admission fails so
-                    // the region cannot close with cleanup silently dropped.
+                    // Preserve the barrier when task admission fails so the
+                    // region cannot close with cleanup silently dropped. A
+                    // wrapped sync callback is intentionally requeued as an
+                    // async finalizer: the wrapper is now its lock-free
+                    // execution boundary.
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         region.add_finalizer(Finalizer::Async(future));
                     }
@@ -5651,6 +5658,20 @@ impl RuntimeState {
             .map(|(_, finalizer)| finalizer)
     }
 
+    fn take_next_finalizer_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
+        if let Some(region) = self.regions.get(region_id.arena_index()) {
+            debug_assert_eq!(
+                region.state(),
+                crate::record::region::RegionState::Finalizing,
+                "br-asupersync-5mty2b: finalizers may only leave the runtime-state lock in Finalizing state \
+                 (region={:?}, current_state={:?})",
+                region_id,
+                region.state()
+            );
+        }
+        self.pop_tracked_finalizer(region_id)
+    }
+
     fn run_sync_finalizers_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
         loop {
             // VALIDATION GAP FIX: Assert region is in Finalizing state before executing finalizers
@@ -5982,19 +6003,17 @@ impl RuntimeState {
                         break;
                     }
 
-                    // Run sync finalizers (requires mut self).
-                    // If we hit an async finalizer, reinsert it and wait for a scheduler.
-                    if let Some((finalizer_id, async_finalizer)) =
-                        self.run_sync_finalizers_tracked(region_id)
+                    // Region progression is frequently called beneath the
+                    // scheduler's runtime-state mutex and from RegionRunner's
+                    // destructor. Never invoke a user finalizer here. The
+                    // scheduler drains the top LIFO entry into a masked task,
+                    // then polls it only after releasing the state mutex.
+                    if self
+                        .regions
+                        .get(region_id.arena_index())
+                        .is_some_and(|region| !region.finalizers_empty())
                     {
-                        if let Some(region) = self.regions.get(region_id.arena_index()) {
-                            region.add_finalizer(async_finalizer);
-                        }
-                        self.pending_finalizer_ids
-                            .entry(region_id)
-                            .or_default()
-                            .push(finalizer_id);
-                        break; // Async finalizer pending; stop advancing
+                        break;
                     }
 
                     // If finalizing and obligations remain with no tracked tasks, mark leaks.
@@ -8733,6 +8752,39 @@ mod tests {
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn run_ready_finalizer_tasks(state: &mut RuntimeState) -> usize {
+        let mut ran = 0;
+        loop {
+            let scheduled = state.drain_ready_async_finalizers();
+            if scheduled.is_empty() {
+                return ran;
+            }
+
+            for (task_id, _priority, spawn_effects) in scheduled {
+                spawn_effects.dispatch();
+                let mut stored = state
+                    .remove_stored_future(task_id)
+                    .expect("scheduled finalizer must own a stored task");
+                let waker = Waker::noop().clone();
+                let mut poll_cx = Context::from_waker(&waker);
+                let outcome = match stored.poll(&mut poll_cx) {
+                    Poll::Ready(Outcome::Ok(())) => Outcome::Ok(()),
+                    Poll::Ready(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
+                    Poll::Ready(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
+                    Poll::Ready(Outcome::Err(())) => {
+                        panic!("finalizer task must not resolve with unit error")
+                    }
+                    Poll::Pending => panic!("focused finalizer must complete on its first poll"),
+                };
+                assert!(state.complete_task(task_id, outcome));
+                let (waiters, observer) = state.task_completed(task_id).into_parts();
+                assert!(waiters.is_empty());
+                observer.dispatch();
+                ran += 1;
+            }
+        }
     }
 
     #[test]
@@ -11613,6 +11665,7 @@ mod tests {
         let region_record = state.region(region).expect("region missing");
         assert!(region_record.begin_close(None));
         state.advance_region_state(region);
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 2);
 
         assert_eq!(
             *order.lock(),
@@ -11680,6 +11733,8 @@ mod tests {
         let _waiters = state
             .task_completed(second_task)
             .into_waiters_without_observers();
+
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
         assert!(sync_ran.load(std::sync::atomic::Ordering::SeqCst));
         assert!(state.region(region).is_none(), "closed root is retired");
@@ -11911,6 +11966,8 @@ mod tests {
         let _waiters = state
             .task_completed(task_id)
             .into_waiters_without_observers();
+
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
         crate::assert_with_log!(
             sync_runs.load(std::sync::atomic::Ordering::SeqCst) == 1,
@@ -12637,6 +12694,7 @@ mod tests {
         );
 
         finalizer_drain.advance_region_state(finalizer_root);
+        assert_eq!(run_ready_finalizer_tasks(&mut finalizer_drain), 1);
         let closed_direct = log_quiescence_observation(
             &finalizer_drain,
             finalizer_root,
@@ -13117,17 +13175,18 @@ mod tests {
             finalizer_ran
         );
 
-        // Phase 3: Second task completes → triggers advance_region_state
-        // → Finalizing (no children, no tasks) → runs sync finalizers → Closed
+        // Phase 3: Second task completion reaches Finalizing. The finalizer
+        // then crosses the scheduler-task boundary before the region closes.
         state
             .task_mut(task2)
             .expect("task2")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
         let (_waiters, observer) = state.task_completed(task2).into_parts();
         observer.dispatch();
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
-        // Region should transition through Finalizing → Closed
-        // (sync finalizers are run inline by advance_region_state)
+        // Region should transition through Finalizing → Closed after the
+        // scheduled sync finalizer task completes.
         let region_state_removed = state.regions.get(root.arena_index()).is_none();
         crate::assert_with_log!(
             region_state_removed,
@@ -13268,9 +13327,9 @@ mod tests {
 
         let region_record = state.regions.get(region.arena_index()).expect("region");
         assert!(region_record.begin_close(None));
-        assert!(region_record.begin_finalize());
 
         state.advance_region_state(region);
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
         crate::assert_with_log!(
             state.region_was_closed(region),
@@ -13312,6 +13371,7 @@ mod tests {
             .expect("task")
             .complete(Outcome::Ok(()));
         let _waiters = state.task_completed(task).into_waiters_without_observers();
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
         crate::assert_with_log!(
             state.region_was_closed(region),
@@ -13358,10 +13418,10 @@ mod tests {
         // Begin close sequence
         let region_record = state.regions.get(region.arena_index()).expect("region");
         assert!(region_record.begin_close(None));
-        assert!(region_record.begin_finalize());
 
         // Advance region state to run finalizers
         state.advance_region_state(region);
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 2);
 
         // Verify the region closed (transitions to Closed state)
         crate::assert_with_log!(
