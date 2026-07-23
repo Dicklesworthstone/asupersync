@@ -131,6 +131,11 @@ impl OpenOptions {
     }
 
     /// Opens a file at `path` with the options specified by `self`.
+    ///
+    /// This uses soft cancellation. If creation or truncation is enabled, a
+    /// started open may mutate the filesystem after the returned future is
+    /// dropped. A successfully opened but unobserved handle is closed when the
+    /// discarded result is dropped.
     pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
         let path = path.as_ref().to_owned();
         let opts = self.clone();

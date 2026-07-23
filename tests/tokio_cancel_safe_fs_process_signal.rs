@@ -12,7 +12,10 @@
 //! - CT-01..CT-04: Contract artifact validation
 
 #[cfg(feature = "test-internals")]
-use asupersync::fs::{File, FileCursorOperationProbe};
+use asupersync::fs::{
+    File, FileCursorOperationProbe, FilesystemOperationProbe,
+    stage_write_atomic_with_probe_for_test, write_atomic, write_with_probe_for_test,
+};
 use asupersync::process::{Command, Stdio};
 #[cfg(feature = "test-internals")]
 use std::sync::Arc;
@@ -225,24 +228,140 @@ fn fc_01_started_file_cursor_operation_completes_before_reuse() {
 }
 
 #[test]
-fn fc_02_file_rename_is_atomic() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let src = dir.path().join("src.txt");
-    let dst = dir.path().join("dst.txt");
-    std::fs::write(&src, b"data").expect("write");
-    std::fs::rename(&src, &dst).expect("rename");
-    assert!(!src.exists());
-    assert_eq!(std::fs::read(&dst).expect("read"), b"data");
+fn fc_02_cancelled_direct_write_may_commit_late() {
+    #[cfg(feature = "test-internals")]
+    {
+        futures_lite::future::block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("soft_cancelled_write.txt");
+            std::fs::write(&path, b"original").expect("write fixture");
+
+            let probe = Arc::new(FilesystemOperationProbe::new());
+            let mut cancelled_write = Box::pin(write_with_probe_for_test(
+                &path,
+                b"replacement",
+                Arc::clone(&probe),
+            ));
+            assert!(
+                futures_lite::future::poll_once(cancelled_write.as_mut())
+                    .await
+                    .is_none(),
+                "probe must hold the started direct write pending"
+            );
+            if !probe.wait_until_blocked(Duration::from_secs(5)) {
+                probe.release();
+                panic!("direct write must reach its deterministic pre-mutation gate");
+            }
+            assert_eq!(
+                std::fs::read(&path).expect("read target before release"),
+                b"original",
+                "the gate must precede the filesystem mutation"
+            );
+
+            drop(cancelled_write);
+            probe.release();
+            assert!(
+                probe.wait_until_completed(Duration::from_secs(5)),
+                "the dropped future's blocking write must finish"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("read target after completion"),
+                b"replacement",
+                "soft cancellation discards the result, not a started mutation"
+            );
+        });
+    }
+
+    #[cfg(not(feature = "test-internals"))]
+    {
+        let j = common::json();
+        let required = j
+            .get("proof_requirements")
+            .and_then(|requirements| requirements.get("required_features"))
+            .and_then(serde_json::Value::as_array)
+            .expect("proof_requirements.required_features");
+        assert!(required.iter().any(|feature| feature == "test-internals"));
+    }
 }
 
 #[test]
-fn fc_03_file_sync_is_idempotent() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("sync_test.txt");
-    let file = std::fs::File::create(&path).expect("create");
-    // sync_all can be called multiple times safely
-    file.sync_all().expect("sync1");
-    file.sync_all().expect("sync2");
+fn fc_03_cancelled_atomic_stage_preserves_target() {
+    #[cfg(feature = "test-internals")]
+    {
+        futures_lite::future::block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("atomic_cancelled_stage.txt");
+            std::fs::write(&path, b"original").expect("write fixture");
+
+            let probe = Arc::new(FilesystemOperationProbe::new());
+            let mut cancelled_stage = Box::pin(stage_write_atomic_with_probe_for_test(
+                &path,
+                b"replacement",
+                Arc::clone(&probe),
+            ));
+            assert!(
+                futures_lite::future::poll_once(cancelled_stage.as_mut())
+                    .await
+                    .is_none(),
+                "probe must hold the fully staged replacement pending"
+            );
+            if !probe.wait_until_blocked(Duration::from_secs(5)) {
+                probe.release();
+                panic!("atomic replacement must reach its deterministic post-stage gate");
+            }
+            assert_eq!(
+                std::fs::read(&path).expect("read target while staged"),
+                b"original",
+                "staging must not change the target"
+            );
+
+            drop(cancelled_stage);
+            probe.release();
+            assert!(
+                probe.wait_until_completed(Duration::from_secs(5)),
+                "discarding the staged result must finish temporary-file cleanup"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("read target after cancellation"),
+                b"original",
+                "cancelling staging must leave the target unchanged"
+            );
+            let leaked_temps: Vec<_> = std::fs::read_dir(dir.path())
+                .expect("read temp directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".asupersync-tmp-")
+                })
+                .collect();
+            assert!(
+                leaked_temps.is_empty(),
+                "discarded staging must remove its temporary file: {leaked_temps:?}"
+            );
+
+            write_atomic(&path, b"committed")
+                .await
+                .expect("commit replacement");
+            assert_eq!(
+                std::fs::read(&path).expect("read committed target"),
+                b"committed",
+                "the public atomic helper must commit after successful staging"
+            );
+        });
+    }
+
+    #[cfg(not(feature = "test-internals"))]
+    {
+        let j = common::json();
+        let required = j
+            .get("proof_requirements")
+            .and_then(|requirements| requirements.get("required_features"))
+            .and_then(serde_json::Value::as_array)
+            .expect("proof_requirements.required_features");
+        assert!(required.iter().any(|feature| feature == "test-internals"));
+    }
 }
 
 #[test]
@@ -526,7 +645,7 @@ fn ct_03_all_invariants_proven() {
         .get("invariants_proven")
         .and_then(serde_json::Value::as_array)
         .expect("invariants_proven");
-    assert!(invariants.len() >= 5);
+    assert!(invariants.len() >= 6);
     for inv in invariants {
         let verdict = inv
             .get("verdict")
@@ -568,6 +687,58 @@ fn ct_03_all_invariants_proven() {
         Some(false),
         "artifact must fail closed on rollback claims"
     );
+
+    let mutation_invariant = invariants
+        .iter()
+        .find(|invariant| {
+            invariant.get("id").and_then(serde_json::Value::as_str) == Some("INV-CS-6")
+        })
+        .expect("INV-CS-6");
+    assert!(
+        mutation_invariant
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|description| {
+                description.contains("direct filesystem write may commit late")
+                    && description.contains("atomic staging leaves the target unchanged")
+            }),
+        "filesystem mutation invariant must distinguish soft mutation from target-stable staging"
+    );
+
+    let mutation_contracts = j
+        .get("filesystem_mutation_contracts")
+        .and_then(serde_json::Value::as_array)
+        .expect("filesystem_mutation_contracts");
+    for operation in [
+        "File::create",
+        "OpenOptions::open(truncate)",
+        "AsyncWrite for File::poll_write",
+        "File::set_len",
+        "fs::write",
+        "fs::rename",
+        "fs::remove_dir_all",
+        "IoUringFile::open_with_flags(O_CREAT/O_TRUNC)",
+        "IoUringFile::write_at",
+        "IoUringFile::sync_all",
+        "IoUringFile::set_permissions",
+        "VfsFile::set_len",
+        "Vfs::open_create",
+        "Vfs::remove_dir_all",
+        "UnixVfs::write",
+        "fs::stage_write_atomic",
+        "StagedAtomicWrite::commit",
+        "fs::write_atomic",
+    ] {
+        assert!(
+            mutation_contracts.iter().any(|contract| {
+                contract
+                    .get("operations")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|operations| operations.iter().any(|item| item == operation))
+            }),
+            "filesystem mutation inventory missing {operation}"
+        );
+    }
 }
 
 #[test]
@@ -609,4 +780,17 @@ fn ct_04_summary_verdict() {
             .and_then(serde_json::Value::as_str),
         Some("fc_01_started_file_cursor_operation_completes_before_reuse")
     );
+    let behavioral_tests = j
+        .get("proof_requirements")
+        .and_then(|requirements| requirements.get("behavioral_tests"))
+        .and_then(serde_json::Value::as_array)
+        .expect("proof_requirements.behavioral_tests");
+    assert_eq!(behavioral_tests.len(), 3);
+    for test in [
+        "fc_01_started_file_cursor_operation_completes_before_reuse",
+        "fc_02_cancelled_direct_write_may_commit_late",
+        "fc_03_cancelled_atomic_stage_preserves_target",
+    ] {
+        assert!(behavioral_tests.iter().any(|item| item == test));
+    }
 }

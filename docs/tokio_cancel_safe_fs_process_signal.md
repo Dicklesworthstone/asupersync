@@ -22,6 +22,9 @@ This document proves that cancellation applied to cross-module workflows involvi
 | Module | Cancel-Safety Mechanism | Obligation Model |
 |--------|------------------------|------------------|
 | `src/fs/file.rs` | Shared cursor completion gate; started blocking syscalls may commit | None (soft-cancelled result is discarded) |
+| `src/fs/path_ops.rs` | Explicit direct-mutation and staged-replacement boundaries | Temporary staging file owned by `StagedAtomicWrite` |
+| `src/fs/uring.rs` | Synchronous mutation calls or lazy futures whose poll drains one terminal completion | No async cancellation point inside the mutation poll |
+| `src/fs/vfs.rs` | Implementation-defined trait contract; `UnixVfs` delegates to the matching concrete operation | Same boundary as the delegated `crate::fs` API |
 | `src/process.rs` | `kill_on_drop(true)` + try_wait reap | Child process lifetime |
 | `src/signal/signal.rs` | Monotone delivery counter + Notify | None (event-driven) |
 | `src/signal/shutdown.rs` | Idempotent broadcast via Notify | None (notification) |
@@ -58,9 +61,18 @@ This document proves that cancellation applied to cross-module workflows involvi
 | `File::read/write/seek` (poll) | One syscall per poll | The poll call is synchronous; standard partial-I/O semantics apply |
 | Owned `seek/rewind/read_into_vec` | Ordered completion | A started syscall may commit, but the shared cursor gate prevents later cursor access from overtaking it |
 | `File::sync_all/sync_data/set_len` | Not rollback-safe | A started blocking syscall may complete after its future is dropped |
-| Path ops (`read`, `write`, `rename`) | Operation-specific | No blanket rollback or atomicity claim is made here |
+| Direct path mutators (`write`, `copy`, `rename`, remove/link operations) | Soft cancellation | A started operation may commit after its future is dropped |
+| Directory create/remove operations | Soft cancellation | Started recursive operations may continue and may leave partial state on later failure |
+| `stage_write_atomic` | Target-stable staging | A dropped future may finish staging, but its discarded result cleans the temporary file without renaming it |
+| `StagedAtomicWrite::commit` | Synchronous commit | The target rename has no async cancellation point; a parent-directory sync error can be post-commit |
+| `write_atomic` | Staged then synchronous commit | Cancellation during staging leaves the target unchanged; successful staging commits in the same poll |
 
 **Key invariant**: Dropping an actually-started owned cursor operation discards its result, not its effects. The operation keeps the shared cursor gate through syscall completion, so immediate reuse cannot race or overtake it. This is ordered soft cancellation, not hard cancellation or rollback. `read_into_vec` may consume bytes and lose its owned buffer when cancelled.
+
+The exhaustive public mutation inventory is the
+`filesystem_mutation_contracts` array in the companion JSON artifact. In
+particular, `WritePermit` is an in-memory two-phase writer pattern; it is not a
+rollback mechanism for filesystem paths.
 
 ### 2.2 Process Cancel-Safety
 
@@ -89,7 +101,7 @@ This document proves that cancellation applied to cross-module workflows involvi
 
 | Scenario | Behavior | Leak Risk |
 |----------|----------|-----------|
-| Shutdown during file write | A started write may partially or fully commit; use an atomic replacement protocol when required | No handle leak; no rollback claim |
+| Shutdown during file write | A direct write may partially or fully commit; `write_atomic` keeps the target stable if cancellation wins during staging | No handle leak; no rollback claim for direct mutation |
 | Shutdown during process wait | Child continues; kill_on_drop cleans up | None with `kill_on_drop(true)` |
 | Shutdown during signal recv | recv() cancelled; delivery preserved by counter | None — counter is persistent |
 | Concurrent file + process + signal | Each follows its documented contract; File cursor reuse waits for started owned cursor work | No cross-module obligation leak claimed |
@@ -126,7 +138,7 @@ From `src/signal/graceful.rs`:
 
 | Category | Prefix | Count | Description |
 |----------|--------|-------|-------------|
-| FS cancel | FC | 5 | One public async started-operation handshake plus four kernel/lifecycle fixtures |
+| FS cancel | FC | 5 | Three deterministic public async cancellation handshakes plus two handle/metadata fixtures |
 | Process cancel | PC | 5 | Child process cancel-safety and kill-on-drop |
 | Signal cancel | SC | 4 | Signal recv and shutdown cancel-safety |
 | Integration | IC | 6 | Cross-module cancellation scenarios |
@@ -142,6 +154,7 @@ From `src/signal/graceful.rs`:
 | INV-CS-3 | Signal delivery counter survives receiver cancellation |
 | INV-CS-4 | Shutdown broadcast reaches all receivers even if some are cancelled |
 | INV-CS-5 | Cross-module cancellation produces no obligation leaks |
+| INV-CS-6 | A cancelled direct write may commit late; cancelled atomic staging preserves the target and cleans its temporary file |
 
 ---
 
@@ -155,14 +168,17 @@ From `src/signal/graceful.rs`:
 
 ### 5.1 Focused Proof Requirement
 
-The deterministic FC-01 handshake uses the opt-in `test-internals` probe. A run
-without that feature checks only that this prerequisite is declared and must not
-be cited as behavioral evidence for INV-CS-1.
+The deterministic FC-01 through FC-03 handshakes use opt-in `test-internals`
+probes. A run without that feature checks only that this prerequisite is
+declared and must not be cited as behavioral evidence for INV-CS-1 or
+INV-CS-6.
 
 ```bash
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_tokio_cancel_safe_fs_process_signal" CARGO_INCREMENTAL=0 cargo test -p asupersync --features test-internals --test tokio_cancel_safe_fs_process_signal fc_01_started_file_cursor_operation_completes_before_reuse -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_tokio_cancel_safe_fs_process_signal" CARGO_INCREMENTAL=0 cargo test -p asupersync --features test-internals --test tokio_cancel_safe_fs_process_signal fc_ -- --nocapture
 ```
 
-This focused lane proves ordered completion for the public owned cursor API. It
-does not prove rollback, recovery of a cancelled `read_into_vec` buffer, atomic
-file replacement, or hard cancellation of blocking syscalls.
+This focused lane proves ordered completion for the public owned cursor API,
+late completion for a cancelled direct write, and target stability plus
+temporary-file cleanup for cancelled atomic staging. It does not prove rollback
+for direct mutators, recovery of a cancelled `read_into_vec` buffer, rollback
+after synchronous commit, or hard cancellation of blocking syscalls.

@@ -11,8 +11,11 @@
 //! - Poll-based read/write/seek operations: one synchronous syscall per poll
 //! - Owned cursor operations: soft-cancelled syscalls may still commit, but a
 //!   per-file completion gate prevents later cursor access from overtaking them
-//! - Write operations: Use `WritePermit` for cancel-safe writes, or accept
-//!   potential partial writes on cancellation
+//! - Direct path mutations: soft-cancelled work may commit after future drop
+//! - `write_atomic`: cancellation can discard staging, while the target rename
+//!   occurs only in a synchronous commit step with no async cancellation point
+//! - `WritePermit`: an in-memory two-phase writer pattern, not filesystem
+//!   rollback for path operations
 //! - `sync_all`, `sync_data`: A started sync may finish after its future drops
 //! - Owned seek/read cancellation is ordered, not rollback-safe
 //!
@@ -69,9 +72,15 @@ pub use file::FileCursorOperationProbe;
 pub use lines::Lines;
 pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
 pub use path_ops::{
-    SymlinkKind, canonicalize, copy, hard_link, metadata, read, read_link, read_to_string,
-    remove_file, rename, set_permissions, symlink_metadata, symlink_typed, write, write_atomic,
+    FilesystemOperationProbe, stage_write_atomic_with_probe_for_test, write_with_probe_for_test,
+};
+pub use path_ops::{
+    StagedAtomicWrite, SymlinkKind, canonicalize, copy, hard_link, metadata, read, read_link,
+    read_to_string, remove_file, rename, set_permissions, stage_write_atomic, symlink_metadata,
+    symlink_typed, write, write_atomic,
 };
 pub use platform::{
     CapabilityProbe, CapabilityStatus, FilesystemCapabilityProfile,

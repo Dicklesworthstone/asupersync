@@ -10,6 +10,146 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "test-internals")]
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
+#[cfg(feature = "test-internals")]
+use std::time::Duration;
+
+/// Deterministic handshake for testing soft-cancelled filesystem operations.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct FilesystemOperationProbe {
+    blocked: StdMutex<bool>,
+    blocked_cv: Condvar,
+    released: StdMutex<bool>,
+    released_cv: Condvar,
+    completed: StdMutex<bool>,
+    completed_cv: Condvar,
+}
+
+#[cfg(feature = "test-internals")]
+impl FilesystemOperationProbe {
+    /// Creates a probe that blocks the instrumented operation once.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            blocked: StdMutex::new(false),
+            blocked_cv: Condvar::new(),
+            released: StdMutex::new(false),
+            released_cv: Condvar::new(),
+            completed: StdMutex::new(false),
+            completed_cv: Condvar::new(),
+        }
+    }
+
+    fn block_until_released(&self) {
+        {
+            let mut blocked = self
+                .blocked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *blocked = true;
+            self.blocked_cv.notify_all();
+        }
+
+        let released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(
+            self.released_cv
+                .wait_while(released, |released| !*released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
+
+    fn mark_completed(&self) {
+        let mut completed = self
+            .completed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *completed = true;
+        self.completed_cv.notify_all();
+    }
+
+    /// Waits until the instrumented operation reaches its deterministic gate.
+    #[must_use]
+    pub fn wait_until_blocked(&self, timeout: Duration) -> bool {
+        let blocked = self
+            .blocked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (blocked, _) = self
+            .blocked_cv
+            .wait_timeout_while(blocked, timeout, |blocked| !*blocked)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *blocked
+    }
+
+    /// Allows the instrumented operation to continue.
+    pub fn release(&self) {
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *released = true;
+        self.released_cv.notify_all();
+    }
+
+    /// Waits until the operation or discarded staged result has completed.
+    #[must_use]
+    pub fn wait_until_completed(&self, timeout: Duration) -> bool {
+        let completed = self
+            .completed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (completed, _) = self
+            .completed_cv
+            .wait_timeout_while(completed, timeout, |completed| !*completed)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *completed
+    }
+}
+
+#[cfg(feature = "test-internals")]
+impl Default for FilesystemOperationProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Default)]
+struct OperationProbeHook {
+    #[cfg(feature = "test-internals")]
+    probe: Option<Arc<FilesystemOperationProbe>>,
+}
+
+impl OperationProbeHook {
+    #[cfg(feature = "test-internals")]
+    fn with_probe(probe: Arc<FilesystemOperationProbe>) -> Self {
+        Self { probe: Some(probe) }
+    }
+
+    fn block_until_released(&self) {
+        #[cfg(feature = "test-internals")]
+        if let Some(probe) = &self.probe {
+            probe.block_until_released();
+        }
+    }
+
+    fn mark_completed(&self) {
+        #[cfg(feature = "test-internals")]
+        if let Some(probe) = &self.probe {
+            probe.mark_completed();
+        }
+    }
+
+    #[cfg(feature = "test-internals")]
+    fn completion_probe(&self) -> Option<Arc<FilesystemOperationProbe>> {
+        self.probe.clone()
+    }
+}
 
 /// Validates a path to prevent directory traversal attacks.
 ///
@@ -84,6 +224,9 @@ pub async fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
 }
 
 /// Set permissions for a path.
+///
+/// This uses soft cancellation. A started permission change may commit after
+/// the returned future is dropped.
 pub async fn set_permissions(path: impl AsRef<Path>, perm: Permissions) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     spawn_blocking_io(move || std::fs::set_permissions(&path, perm.into_inner())).await
@@ -102,6 +245,9 @@ pub async fn read_link(path: impl AsRef<Path>) -> io::Result<PathBuf> {
 }
 
 /// Copy a file from `src` to `dst`.
+///
+/// This uses soft cancellation. A started copy may create, truncate, or
+/// partially populate `dst` after the returned future is dropped.
 pub async fn copy(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<u64> {
     let src_path = src.as_ref();
     let dst_path = dst.as_ref();
@@ -118,6 +264,7 @@ pub async fn copy(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<u6
 /// Rename or move a file.
 ///
 /// On Linux with `io-uring`, uses `IORING_OP_RENAMEAT`.
+/// A submitted rename may commit after the returned future is dropped.
 pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let from_path = from.as_ref();
     let to_path = to.as_ref();
@@ -141,6 +288,7 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 /// Remove a file.
 ///
 /// On Linux with `io-uring`, uses `IORING_OP_UNLINKAT`.
+/// A submitted removal may commit after the returned future is dropped.
 pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     let path_ref = path.as_ref();
 
@@ -159,6 +307,9 @@ pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 /// Create a hard link.
+///
+/// This uses soft cancellation. A started link creation may commit after the
+/// returned future is dropped.
 pub async fn hard_link(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_owned();
     let link = link.as_ref().to_owned();
@@ -180,6 +331,7 @@ pub enum SymlinkKind {
 /// it even for relative, dangling, or later-created targets, so callers must
 /// carry the sender's declared type instead of probing relative to the process
 /// working directory.
+/// Link creation uses soft cancellation and may commit after future drop.
 #[cfg(unix)]
 pub async fn symlink_typed(
     original: impl AsRef<Path>,
@@ -218,6 +370,7 @@ pub async fn symlink_typed(
 /// Create a symlink (Unix).
 ///
 /// On Linux with `io-uring`, uses `IORING_OP_SYMLINKAT`.
+/// A submitted link creation may commit after the returned future is dropped.
 #[cfg(unix)]
 pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_owned();
@@ -233,6 +386,8 @@ pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::
 }
 
 /// Create a symlink to a file (Windows).
+///
+/// A started link creation may commit after the returned future is dropped.
 #[cfg(windows)]
 pub async fn symlink_file(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_owned();
@@ -241,6 +396,8 @@ pub async fn symlink_file(original: impl AsRef<Path>, link: impl AsRef<Path>) ->
 }
 
 /// Create a symlink to a directory (Windows).
+///
+/// A started link creation may commit after the returned future is dropped.
 #[cfg(windows)]
 pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_owned();
@@ -254,6 +411,7 @@ pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> 
 /// across platforms for non-ATP callers. Relative targets are resolved from the
 /// link's parent, matching Windows link semantics. Call [`symlink_typed`] when
 /// the target may be dangling or created later.
+/// A started link creation may commit after the returned future is dropped.
 #[cfg(windows)]
 pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_owned();
@@ -288,15 +446,125 @@ pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
 }
 
 /// Write bytes to a file (creates or truncates).
+///
+/// This uses soft cancellation. A started write may create, truncate, or
+/// partially update the target after the returned future is dropped. Use
+/// [`write_atomic`] when cancellation must not change the target.
 pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let path_ref = path.as_ref();
 
     // Validate path to prevent directory traversal attacks
     validate_safe_path(path_ref, true)?;
 
+    write_owned(
+        path_ref.to_owned(),
+        contents.as_ref().to_owned(),
+        OperationProbeHook::default(),
+    )
+    .await
+}
+
+async fn write_owned(path: PathBuf, contents: Vec<u8>, hook: OperationProbeHook) -> io::Result<()> {
+    spawn_blocking_io(move || {
+        hook.block_until_released();
+        let result = std::fs::write(&path, &contents);
+        hook.mark_completed();
+        result
+    })
+    .await
+}
+
+/// Runs [`write`] with a deterministic started-operation handshake.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub async fn write_with_probe_for_test(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    probe: Arc<FilesystemOperationProbe>,
+) -> io::Result<()> {
+    let path_ref = path.as_ref();
+    validate_safe_path(path_ref, true)?;
+    write_owned(
+        path_ref.to_owned(),
+        contents.as_ref().to_owned(),
+        OperationProbeHook::with_probe(probe),
+    )
+    .await
+}
+
+/// A fully written and synced atomic-replacement candidate.
+///
+/// Staging never changes the target path. [`commit`](Self::commit) performs a
+/// synchronous rename with no cancellation point. Dropping this value discards
+/// its temporary file.
+#[derive(Debug)]
+#[must_use = "a staged atomic write must be committed or deliberately dropped"]
+pub struct StagedAtomicWrite {
+    target_path: PathBuf,
+    temp_path: TempPathGuard,
+    #[cfg(feature = "test-internals")]
+    completion_probe: Option<Arc<FilesystemOperationProbe>>,
+}
+
+impl StagedAtomicWrite {
+    /// Atomically installs the staged contents at the target path.
+    ///
+    /// The rename is synchronous: once this method begins, async cancellation
+    /// cannot interleave with the target mutation. If the subsequent parent
+    /// directory sync fails, the replacement has already committed.
+    pub fn commit(mut self) -> io::Result<()> {
+        let parent = normalized_parent(&self.target_path);
+        std::fs::rename(self.temp_path.path(), &self.target_path)?;
+        self.temp_path.disarm();
+        sync_parent_dir(parent)
+    }
+}
+
+impl Drop for StagedAtomicWrite {
+    fn drop(&mut self) {
+        self.temp_path.cleanup();
+        #[cfg(feature = "test-internals")]
+        if let Some(probe) = &self.completion_probe {
+            probe.mark_completed();
+        }
+    }
+}
+
+/// Stages an atomic replacement without changing the target path.
+///
+/// The temporary file is created beside the target, fully written, permission
+/// adjusted, and synced on the blocking pool. If this future is dropped after
+/// staging starts, background work may finish, but the discarded staged value
+/// removes the temporary file and never renames it over the target.
+pub async fn stage_write_atomic(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> io::Result<StagedAtomicWrite> {
+    stage_write_atomic_with_hook(path, contents, OperationProbeHook::default()).await
+}
+
+async fn stage_write_atomic_with_hook(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    hook: OperationProbeHook,
+) -> io::Result<StagedAtomicWrite> {
+    let path_ref = path.as_ref();
+    validate_safe_path(path_ref, true)?;
+
     let path = path_ref.to_owned();
     let contents = contents.as_ref().to_owned();
-    spawn_blocking_io(move || std::fs::write(&path, &contents)).await
+    spawn_blocking_io(move || stage_write_atomic_blocking(&path, &contents, hook)).await
+}
+
+/// Runs [`stage_write_atomic`] with a deterministic post-stage handshake.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub async fn stage_write_atomic_with_probe_for_test(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+    probe: Arc<FilesystemOperationProbe>,
+) -> io::Result<StagedAtomicWrite> {
+    stage_write_atomic_with_hook(path, contents, OperationProbeHook::with_probe(probe)).await
 }
 
 /// Atomically replace file contents via temp-file + rename.
@@ -307,20 +575,19 @@ pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Re
 /// explicit.
 ///
 /// If the operation fails before rename, the temporary file is cleaned up.
+/// If this future is dropped during staging, the target path remains unchanged;
+/// the target rename occurs synchronously only after staging returns.
 pub async fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
-    let path_ref = path.as_ref();
-
-    // Validate path to prevent directory traversal attacks
-    validate_safe_path(path_ref, true)?;
-
-    let path = path_ref.to_owned();
-    let contents = contents.as_ref().to_owned();
-    spawn_blocking_io(move || write_atomic_blocking(&path, &contents)).await
+    stage_write_atomic(path, contents).await?.commit()
 }
 
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn write_atomic_blocking(path: &Path, contents: &[u8]) -> io::Result<()> {
+fn stage_write_atomic_blocking(
+    path: &Path,
+    contents: &[u8],
+    hook: OperationProbeHook,
+) -> io::Result<StagedAtomicWrite> {
     let parent = normalized_parent(path);
     let file_name = path.file_name().ok_or_else(|| {
         io::Error::new(
@@ -345,7 +612,7 @@ fn write_atomic_blocking(path: &Path, contents: &[u8]) -> io::Result<()> {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
         };
-        let mut tmp_guard = TempPathGuard::new(tmp_path.clone());
+        let tmp_guard = TempPathGuard::new(tmp_path.clone());
 
         file.write_all(contents)?;
         if let Some(permissions) = &existing_permissions {
@@ -356,10 +623,15 @@ fn write_atomic_blocking(path: &Path, contents: &[u8]) -> io::Result<()> {
         file.sync_all()?;
         drop(file);
 
-        std::fs::rename(&tmp_path, path)?;
-        tmp_guard.disarm();
-        sync_parent_dir(parent)?;
-        return Ok(());
+        hook.block_until_released();
+        #[cfg(feature = "test-internals")]
+        let completion_probe = hook.completion_probe();
+        return Ok(StagedAtomicWrite {
+            target_path: path.to_owned(),
+            temp_path: tmp_guard,
+            #[cfg(feature = "test-internals")]
+            completion_probe,
+        });
     }
 }
 
@@ -402,6 +674,7 @@ fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct TempPathGuard {
     path: PathBuf,
     armed: bool,
@@ -415,13 +688,22 @@ impl TempPathGuard {
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn cleanup(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+            self.armed = false;
+        }
+    }
 }
 
 impl Drop for TempPathGuard {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = std::fs::remove_file(&self.path);
-        }
+        self.cleanup();
     }
 }
 

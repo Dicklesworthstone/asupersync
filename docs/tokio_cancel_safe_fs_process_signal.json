@@ -1,7 +1,7 @@
 {
   "bead_id": "asupersync-2oh2u.3.6",
   "title": "[T3.6] Cancellation-Safe Integration: FS, Process, Signal Flows",
-  "version": 2,
+  "version": 3,
   "generated_at": "2026-03-04",
   "generated_by": "SapphireHill",
   "source_markdown": "docs/tokio_cancel_safe_fs_process_signal.md",
@@ -9,21 +9,61 @@
   "proof_requirements": {
     "required_features": ["test-internals"],
     "behavioral_test": "fc_01_started_file_cursor_operation_completes_before_reuse",
+    "behavioral_tests": [
+      "fc_01_started_file_cursor_operation_completes_before_reuse",
+      "fc_02_cancelled_direct_write_may_commit_late",
+      "fc_03_cancelled_atomic_stage_preserves_target"
+    ],
     "no_feature_behavior": "prerequisite declaration only; not behavioral proof"
   },
   "modules_tested": [
     {"module": "src/fs/file.rs", "cancel_safe": true, "mechanism": "shared cursor completion gate", "contract": "ordered soft cancellation", "rollback_safe": false},
+    {"module": "src/fs/path_ops.rs", "cancel_safe": true, "mechanism": "explicit soft-mutation and staged-replacement boundaries", "contract": "operation-specific", "rollback_safe": false},
+    {"module": "src/fs/uring.rs", "cancel_safe": true, "mechanism": "synchronous calls or lazy futures with synchronous terminal-completion polls", "contract": "no async cancellation point inside mutation poll", "rollback_safe": false},
+    {"module": "src/fs/vfs.rs", "cancel_safe": true, "mechanism": "implementation-defined trait contract; UnixVfs delegates to crate::fs boundaries", "contract": "operation-specific delegation", "rollback_safe": false},
     {"module": "src/process.rs", "cancel_safe": true, "mechanism": "kill_on_drop + try_wait reap"},
     {"module": "src/signal/signal.rs", "cancel_safe": true, "mechanism": "Monotone AtomicU64 counter"},
     {"module": "src/signal/shutdown.rs", "cancel_safe": true, "mechanism": "Idempotent Notify broadcast"},
     {"module": "src/signal/graceful.rs", "cancel_safe": true, "mechanism": "Region close protocol"}
+  ],
+  "filesystem_mutation_contracts": [
+    {"operations": ["File::create"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started blocking open may create or truncate after future drop", "rollback_safe": false},
+    {"operations": ["File::create_new"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started exclusive create may commit after future drop", "rollback_safe": false},
+    {"operations": ["OpenOptions::open(create)", "OpenOptions::open(create_new)", "OpenOptions::open(truncate)"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "enabled create or truncate effects may commit after future drop; an unobserved handle is closed", "rollback_safe": false},
+    {"operations": ["AsyncWrite for File::poll_write"], "classification": "synchronous_poll", "cancellation_boundary": "one immediate syscall completes before Poll::Ready; standard partial-write semantics apply", "rollback_safe": false},
+    {"operations": ["AsyncWrite for File::poll_flush"], "classification": "synchronous_poll", "cancellation_boundary": "the immediate flush call completes before Poll::Ready", "rollback_safe": false},
+    {"operations": ["File::sync_all", "File::sync_data"], "classification": "soft_cancel_may_complete", "cancellation_boundary": "a started durability syscall may finish after future drop", "rollback_safe": false},
+    {"operations": ["File::set_len"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started resize may commit after future drop", "rollback_safe": false},
+    {"operations": ["File::set_permissions", "fs::set_permissions"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started permission change may commit after future drop", "rollback_safe": false},
+    {"operations": ["fs::copy"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started copy may create, truncate, or partially populate the destination after future drop", "rollback_safe": false},
+    {"operations": ["fs::rename"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a submitted rename may commit after future drop", "rollback_safe": false},
+    {"operations": ["fs::remove_file"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a submitted removal may commit after future drop", "rollback_safe": false},
+    {"operations": ["fs::hard_link"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started link creation may commit after future drop", "rollback_safe": false},
+    {"operations": ["fs::symlink_typed", "fs::symlink", "fs::symlink_file", "fs::symlink_dir"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started or submitted link creation may commit after future drop on supported platforms", "rollback_safe": false},
+    {"operations": ["fs::write"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started write may create, truncate, or partially update the target after future drop", "rollback_safe": false},
+    {"operations": ["fs::stage_write_atomic"], "classification": "cancellable_staging", "cancellation_boundary": "staging may finish after future drop, but discarding its result removes the temporary file and never mutates the target", "rollback_safe": false, "target_rollback_safe_during_staging": true},
+    {"operations": ["StagedAtomicWrite::commit"], "classification": "synchronous_commit", "cancellation_boundary": "the target rename has no async cancellation point; a later parent-directory sync error is post-commit", "rollback_safe": false},
+    {"operations": ["fs::write_atomic"], "classification": "staged_then_synchronous_commit", "cancellation_boundary": "future drop can discard staging without changing the target; successful staging is followed in the same poll by synchronous commit", "rollback_safe": false, "target_rollback_safe_during_staging": true},
+    {"operations": ["fs::create_dir"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started or submitted directory creation may commit after future drop", "rollback_safe": false},
+    {"operations": ["fs::create_dir_all"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started traversal may create some or all missing components after future drop", "rollback_safe": false},
+    {"operations": ["fs::remove_dir"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started or submitted removal may commit after future drop", "rollback_safe": false},
+    {"operations": ["fs::remove_dir_all"], "classification": "soft_cancel_may_commit", "cancellation_boundary": "a started recursive removal may continue after future drop and may leave partial state if it later fails", "rollback_safe": false},
+    {"operations": ["IoUringFile::create", "IoUringFile::open_with_flags(O_CREAT/O_TRUNC)"], "classification": "synchronous_call", "cancellation_boundary": "create and truncate effects complete before the constructor returns", "rollback_safe": false},
+    {"operations": ["IoUringFile::write", "IoUringFile::write_at", "AsyncWrite for IoUringFile::poll_write"], "classification": "synchronous_poll", "cancellation_boundary": "dropping an unpolled lazy future has no effect; one poll drives the write through terminal completion and returns Ready", "rollback_safe": false},
+    {"operations": ["IoUringFile::sync_data", "IoUringFile::sync_all", "AsyncWrite for IoUringFile::poll_flush"], "classification": "synchronous_poll", "cancellation_boundary": "dropping an unpolled lazy future has no effect; one poll drives the sync through terminal completion and returns Ready", "rollback_safe": false},
+    {"operations": ["IoUringFile::set_len", "IoUringFile::set_permissions"], "classification": "synchronous_call", "cancellation_boundary": "the mutation completes before the function returns", "rollback_safe": false},
+    {"operations": ["VfsFile::sync_all", "VfsFile::sync_data", "VfsFile::set_len", "VfsFile::set_permissions", "AsyncWrite for VfsFile"], "classification": "implementation_defined", "cancellation_boundary": "the VfsFile trait makes no rollback guarantee; UnixVfsFile inherits the corresponding File operation boundary", "rollback_safe": false},
+    {"operations": ["Vfs::open", "Vfs::open_create", "UnixVfs::open", "UnixVfs::open_create"], "classification": "implementation_defined", "cancellation_boundary": "the Vfs trait makes no rollback guarantee; with UnixVfs, enabled create or truncate effects may commit after future drop", "rollback_safe": false},
+    {"operations": ["Vfs::set_permissions", "Vfs::create_dir", "Vfs::create_dir_all", "Vfs::remove_dir", "Vfs::remove_dir_all", "Vfs::remove_file", "Vfs::rename", "Vfs::copy", "Vfs::hard_link", "Vfs::write"], "classification": "implementation_defined", "cancellation_boundary": "the Vfs trait makes no rollback guarantee; each UnixVfs method inherits the matching crate::fs operation-specific boundary", "rollback_safe": false},
+    {"operations": ["UnixVfs::set_permissions", "UnixVfs::create_dir", "UnixVfs::create_dir_all", "UnixVfs::remove_dir", "UnixVfs::remove_dir_all", "UnixVfs::remove_file", "UnixVfs::rename", "UnixVfs::copy", "UnixVfs::hard_link", "UnixVfs::write"], "classification": "delegated_operation_specific", "cancellation_boundary": "each operation delegates to the matching soft-cancelled crate::fs mutator and may commit after future drop according to that operation's boundary", "rollback_safe": false}
   ],
   "invariants_proven": [
     {"id": "INV-CS-1", "description": "A started owned File cursor operation completes before subsequent cursor access; its effects are not rolled back", "verdict": "PROVEN"},
     {"id": "INV-CS-2", "description": "kill_on_drop prevents zombie processes after cancellation", "verdict": "PROVEN"},
     {"id": "INV-CS-3", "description": "Signal delivery counter survives receiver cancellation", "verdict": "PROVEN"},
     {"id": "INV-CS-4", "description": "Shutdown broadcast reaches all receivers even if some are cancelled", "verdict": "PROVEN"},
-    {"id": "INV-CS-5", "description": "Cross-module cancellation produces no obligation leaks", "verdict": "PROVEN"}
+    {"id": "INV-CS-5", "description": "Cross-module cancellation produces no obligation leaks", "verdict": "PROVEN"},
+    {"id": "INV-CS-6", "description": "A cancelled started direct filesystem write may commit late, while cancelled atomic staging leaves the target unchanged and cleans its temporary file", "verdict": "PROVEN"}
   ],
   "cross_module_scenarios": [
     {"scenario": "Shutdown during file write", "behavior": "A started write may partially or fully commit; use atomic replacement when required", "leak_risk": "No handle leak; no rollback claim"},
@@ -44,8 +84,8 @@
     {"id": "DRIFT-CS3", "trigger": "New cross-module interaction pattern", "action": "Add integration cancel test"}
   ],
   "summary": {
-    "modules_tested": 5,
-    "invariants_proven": 5,
+    "modules_tested": 8,
+    "invariants_proven": 6,
     "all_invariants_pass": true,
     "obligation_leaks": 0,
     "total_tests": 24,
@@ -55,6 +95,8 @@
     "hard cancellation of blocking syscalls",
     "rollback of started file operations",
     "recovery of an owned read_into_vec buffer after cancellation",
-    "atomicity of general writes or path mutations"
+    "atomicity of general writes or path mutations",
+    "rollback of a committed StagedAtomicWrite when parent-directory sync reports an error",
+    "absence of a temporary file while atomic staging is still in flight"
   ]
 }

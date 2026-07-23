@@ -83,7 +83,8 @@ use asupersync::fs::{BufReader, BufWriter};
 
 | API | Purpose |
 |-----|---------|
-| `fs::write_atomic(path, data)` | Atomic write via temp file + rename |
+| `fs::write_atomic(path, data)` | Cancellable staging followed by a synchronous atomic rename; cancellation during staging leaves the target unchanged |
+| `fs::stage_write_atomic(path, data)` | Prepare a fully written and synced replacement, then call synchronous `StagedAtomicWrite::commit()` at the chosen commit point |
 | `fs::BufReader` / `fs::BufWriter` | Async buffered I/O wrappers |
 | `fs::Vfs` trait | Deterministic testing seam (VFS abstraction) |
 | `fs::UnixVfs` | Production VFS implementation |
@@ -97,7 +98,7 @@ use asupersync::fs::{BufReader, BufWriter};
 
 3. **Error types**: I/O errors are `std::io::Error`, identical to Tokio.
 
-4. **Cancellation contract**: Blocking file operations use soft cancellation. Dropping a started future discards its result, not necessarily its effects. Owned cursor operations (`seek`, `rewind`, `stream_position`, and `read_into_vec`) serialize completion through a per-file gate, so immediate reuse cannot overtake the started syscall; they are ordered but not rollback-safe. `read_into_vec` may consume bytes and lose its owned buffer. Create, truncate, write, sync, and path-mutating operations require operation-specific reasoning and carry no blanket rollback guarantee.
+4. **Cancellation contract**: Blocking file operations use soft cancellation. Dropping a started future discards its result, not necessarily its effects. Owned cursor operations (`seek`, `rewind`, `stream_position`, and `read_into_vec`) serialize completion through a per-file gate, so immediate reuse cannot overtake the started syscall; they are ordered but not rollback-safe. `read_into_vec` may consume bytes and lose its owned buffer. Create, truncate, direct write, sync, directory, remove, rename, and link operations may still commit after future drop. The `Vfs` traits make no generic rollback guarantee; `UnixVfs` and `UnixVfsFile` inherit the matching concrete `crate::fs` boundary. Use `write_atomic` when cancellation must leave the target unchanged during staging, or `stage_write_atomic` plus synchronous `StagedAtomicWrite::commit()` when the commit point must be explicit. A parent-directory sync error from `commit()` can be reported after the rename has committed.
 
 5. **No `fs::hard_link`**: Use `std::fs::hard_link` via `spawn_blocking` if needed.
 

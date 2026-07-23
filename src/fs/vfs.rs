@@ -15,7 +15,9 @@
 //! # Cancel Safety
 //!
 //! Cancel-safety properties are inherited from the underlying implementation.
-//! For `UnixVfs`, see the per-operation notes in [`crate::fs`].
+//! The trait itself makes no rollback guarantee. `UnixVfs` delegates to the
+//! matching [`crate::fs`] operation, including its soft-cancellation or
+//! synchronous-poll boundary.
 
 use crate::fs::metadata::{Metadata, Permissions};
 use crate::fs::open_options::OpenOptions;
@@ -42,15 +44,28 @@ pub trait VfsFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Unpin {
     fn metadata(&self) -> impl Future<Output = io::Result<Metadata>> + Send;
 
     /// Syncs all OS-internal metadata to disk.
+    ///
+    /// Cancellation semantics are implementation-defined. `UnixVfsFile`
+    /// inherits [`crate::fs::File::sync_all`]'s soft-completion boundary.
     fn sync_all(&self) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Syncs file data (but not necessarily metadata) to disk.
+    ///
+    /// Cancellation semantics are implementation-defined. `UnixVfsFile`
+    /// inherits [`crate::fs::File::sync_data`]'s soft-completion boundary.
     fn sync_data(&self) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Truncates or extends the file to `size` bytes.
+    ///
+    /// Cancellation semantics are implementation-defined. `UnixVfsFile`
+    /// inherits [`crate::fs::File::set_len`]'s may-commit-after-drop boundary.
     fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Changes the file permissions.
+    ///
+    /// Cancellation semantics are implementation-defined. `UnixVfsFile`
+    /// inherits [`crate::fs::File::set_permissions`]'s may-commit-after-drop
+    /// boundary.
     fn set_permissions(&self, perm: Permissions) -> impl Future<Output = io::Result<()>> + Send;
 }
 
@@ -70,6 +85,9 @@ pub trait Vfs: Send + Sync {
     // -- file open --
 
     /// Opens a file using the given [`OpenOptions`].
+    ///
+    /// Implementations define cancellation semantics. With `UnixVfs`, enabled
+    /// create or truncate effects may commit after future drop.
     fn open(
         &self,
         path: &Path,
@@ -83,6 +101,9 @@ pub trait Vfs: Send + Sync {
     }
 
     /// Creates a file in write-only mode, truncating if it exists (convenience wrapper).
+    ///
+    /// With `UnixVfs`, a started create or truncate may commit after future
+    /// drop.
     fn open_create(&self, path: &Path) -> impl Future<Output = io::Result<Self::File>> + Send {
         let opts = OpenOptions::new().write(true).create(true).truncate(true);
         async move { self.open(path, &opts).await }
@@ -97,6 +118,9 @@ pub trait Vfs: Send + Sync {
     fn symlink_metadata(&self, path: &Path) -> impl Future<Output = io::Result<Metadata>> + Send;
 
     /// Sets permissions on `path`.
+    ///
+    /// With `UnixVfs`, a started permission change may commit after future
+    /// drop.
     fn set_permissions(
         &self,
         path: &Path,
@@ -106,15 +130,25 @@ pub trait Vfs: Send + Sync {
     // -- directory operations --
 
     /// Creates a single directory.
+    ///
+    /// With `UnixVfs`, a started creation may commit after future drop.
     fn create_dir(&self, path: &Path) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Creates a directory and all missing parents.
+    ///
+    /// With `UnixVfs`, a started traversal may keep creating components after
+    /// future drop.
     fn create_dir_all(&self, path: &Path) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Removes an empty directory.
+    ///
+    /// With `UnixVfs`, a started removal may commit after future drop.
     fn remove_dir(&self, path: &Path) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Removes a directory and all contents recursively.
+    ///
+    /// With `UnixVfs`, a started recursive removal may continue after future
+    /// drop and may leave partial state if it later fails.
     fn remove_dir_all(&self, path: &Path) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Lists directory entries.
@@ -123,15 +157,24 @@ pub trait Vfs: Send + Sync {
     // -- path operations --
 
     /// Removes a file.
+    ///
+    /// With `UnixVfs`, a started removal may commit after future drop.
     fn remove_file(&self, path: &Path) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Renames (moves) a file or directory.
+    ///
+    /// With `UnixVfs`, a started rename may commit after future drop.
     fn rename(&self, from: &Path, to: &Path) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Copies a file from `src` to `dst`, returning bytes copied.
+    ///
+    /// With `UnixVfs`, a started copy may create, truncate, or partially
+    /// populate `dst` after future drop.
     fn copy(&self, src: &Path, dst: &Path) -> impl Future<Output = io::Result<u64>> + Send;
 
     /// Creates a hard link.
+    ///
+    /// With `UnixVfs`, a started link creation may commit after future drop.
     fn hard_link(
         &self,
         original: &Path,
@@ -153,6 +196,9 @@ pub trait Vfs: Send + Sync {
     fn read_to_string(&self, path: &Path) -> impl Future<Output = io::Result<String>> + Send;
 
     /// Writes bytes to a file (creates or truncates).
+    ///
+    /// With `UnixVfs`, a started write may create, truncate, or partially
+    /// update the target after future drop.
     fn write(&self, path: &Path, contents: &[u8]) -> impl Future<Output = io::Result<()>> + Send;
 }
 

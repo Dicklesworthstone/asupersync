@@ -18,8 +18,8 @@ const DEFAULT_CREATE_DIR_MODE: libc::mode_t = 0o777;
 ///
 /// # Cancel Safety
 ///
-/// This operation is cancel-safe: it either completes or does not create the
-/// directory at all.
+/// This operation uses soft cancellation. A submitted directory creation may
+/// commit after the returned future is dropped.
 pub async fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -36,8 +36,8 @@ pub async fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// # Cancel Safety
 ///
-/// This operation is cancel-safe: partial directories may be created on
-/// cancellation but each individual mkdir is atomic.
+/// This operation uses soft cancellation. A started traversal may continue
+/// creating some or all missing components after the future is dropped.
 pub async fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     spawn_blocking_io(move || std::fs::create_dir_all(&path)).await
@@ -49,7 +49,8 @@ pub async fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// # Cancel Safety
 ///
-/// This operation is cancel-safe: it either removes the directory or fails.
+/// This operation uses soft cancellation. A submitted removal may commit after
+/// the returned future is dropped.
 pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -66,7 +67,9 @@ pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// # Cancel Safety
 ///
-/// This operation is **not** cancel-safe; cancellation may leave partial state.
+/// This operation uses soft cancellation. A started recursive removal may keep
+/// deleting entries after the returned future is dropped and may leave partial
+/// state if it later fails.
 pub async fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     spawn_blocking_io(move || std::fs::remove_dir_all(&path)).await

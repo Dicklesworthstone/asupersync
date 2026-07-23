@@ -227,6 +227,7 @@ impl File {
     /// Opens a file in write-only mode.
     ///
     /// This function will create a file if it does not exist, and will truncate it if it does.
+    /// A started open may create or truncate the path after cancellation.
     pub async fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
         let file = spawn_blocking_io(move || std::fs::File::create(&path)).await?;
@@ -237,6 +238,7 @@ impl File {
     ///
     /// The create-new operation is atomic with respect to other filesystem
     /// creators. If this succeeds, the returned file is guaranteed to be new.
+    /// A started creation may still commit after the future is dropped.
     pub async fn create_new(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
         let file = spawn_blocking_io(move || {
@@ -292,16 +294,22 @@ impl File {
     }
 
     /// Attempts to sync all OS-internal metadata to disk.
+    ///
+    /// A started sync may finish after the returned future is dropped.
     pub async fn sync_all(&self) -> io::Result<()> {
         self.with_inner(|inner| inner.sync_all()).await
     }
 
     /// This function is similar to `sync_all`, except that it will not sync file metadata.
+    /// A started sync may finish after the returned future is dropped.
     pub async fn sync_data(&self) -> io::Result<()> {
         self.with_inner(|inner| inner.sync_data()).await
     }
 
     /// Truncates or extends the underlying file.
+    ///
+    /// This uses soft cancellation. A started resize may commit after the
+    /// returned future is dropped.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
         self.with_inner(move |inner| inner.set_len(size)).await
     }
@@ -326,6 +334,9 @@ impl File {
     }
 
     /// Changes the permissions on the underlying file.
+    ///
+    /// This uses soft cancellation. A started permission change may commit
+    /// after the returned future is dropped.
     pub async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
         self.with_inner(move |inner| inner.set_permissions(perm.into_inner()))
             .await

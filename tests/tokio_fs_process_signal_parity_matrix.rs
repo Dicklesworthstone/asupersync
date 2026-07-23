@@ -24,6 +24,13 @@ fn load_matrix_json() -> Value {
     serde_json::from_str(&raw).expect("json matrix must parse")
 }
 
+fn load_cancel_contract_json() -> Value {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_cancel_safe_fs_process_signal.json");
+    let raw = std::fs::read_to_string(path).expect("cancellation contract must exist");
+    serde_json::from_str(&raw).expect("cancellation contract must parse")
+}
+
 fn extract_gap_ids(doc: &str) -> BTreeSet<String> {
     let mut ids = BTreeSet::new();
     for line in doc.lines() {
@@ -904,9 +911,14 @@ fn t37c_01_vfs_deterministic_seam() {
 #[test]
 fn t37c_02_fs_cancel_safety_protocol() {
     let file_src = load_source("src/fs/file.rs");
+    let open_options_src = load_source("src/fs/open_options.rs");
+    let path_ops_src = load_source("src/fs/path_ops.rs");
+    let dir_src = load_source("src/fs/dir.rs");
+    let uring_src = load_source("src/fs/uring.rs");
+    let vfs_src = load_source("src/fs/vfs.rs");
     let mod_src = load_source("src/fs/mod.rs");
+    let cancel_contract = load_cancel_contract_json();
 
-    // File type with core async operations
     for token in [
         "pub struct File",
         "fn open",
@@ -919,11 +931,103 @@ fn t37c_02_fs_cancel_safety_protocol() {
             "[T37C-02/FS-G2] FS cancel-safety: src/fs/file.rs missing token: {token}"
         );
     }
-
-    // WritePermit documented as cancel-safety pattern
+    for token in [
+        "trait itself makes no rollback guarantee",
+        "Cancellation semantics are implementation-defined",
+        "enabled create or truncate effects may commit after future drop",
+        "started recursive removal may continue after future drop",
+        "started write may create, truncate, or partially",
+    ] {
+        assert!(
+            vfs_src.contains(token),
+            "[T37C-02/FS-G2] VFS mutation docs missing boundary: {token}"
+        );
+    }
+    for token in [
+        "effects complete before return",
+        "cancellation cannot interleave inside the poll",
+        "dropping it unpolled has no effect",
+        "mutation completes before this function returns",
+    ] {
+        assert!(
+            uring_src.contains(token),
+            "[T37C-02/FS-G2] io_uring mutation docs missing boundary: {token}"
+        );
+    }
     assert!(
-        mod_src.contains("WritePermit"),
-        "[T37C-02/FS-G2] FS cancel-safety: src/fs/mod.rs must document WritePermit pattern"
+        file_src.contains("may create or truncate the path after cancellation")
+            && file_src.contains("A started sync may finish")
+            && file_src.contains("A started resize may commit"),
+        "[T37C-02/FS-G2] File mutation docs must fail closed on late completion"
+    );
+    assert!(
+        open_options_src.contains("creation or truncation is enabled")
+            && open_options_src.contains("may mutate the filesystem"),
+        "[T37C-02/FS-G2] OpenOptions mutation docs must state late effects"
+    );
+    for token in [
+        "A started copy may create, truncate, or",
+        "A submitted rename may commit",
+        "A submitted removal may commit",
+        "A started link creation may commit",
+        "A started write may create, truncate, or",
+    ] {
+        assert!(
+            path_ops_src.contains(token),
+            "[T37C-02/FS-G2] path mutation docs missing boundary: {token}"
+        );
+    }
+    for token in [
+        "submitted directory creation may",
+        "started traversal may continue",
+        "submitted removal may commit",
+        "started recursive removal may keep",
+    ] {
+        assert!(
+            dir_src.contains(token),
+            "[T37C-02/FS-G2] directory mutation docs missing boundary: {token}"
+        );
+    }
+    assert!(
+        mod_src.contains("an in-memory two-phase writer pattern, not filesystem"),
+        "[T37C-02/FS-G2] WritePermit must be scoped away from filesystem rollback"
+    );
+
+    let mutation_contracts = cancel_contract["filesystem_mutation_contracts"]
+        .as_array()
+        .expect("filesystem_mutation_contracts must be an array");
+    assert!(
+        mutation_contracts.len() >= 29,
+        "[T37C-02/FS-G2] expected exhaustive scoped mutation inventory"
+    );
+    for contract in mutation_contracts {
+        assert!(
+            contract["operations"]
+                .as_array()
+                .is_some_and(|ops| !ops.is_empty())
+                && contract["classification"].as_str().is_some()
+                && contract["cancellation_boundary"].as_str().is_some()
+                && contract["rollback_safe"].as_bool().is_some(),
+            "[T37C-02/FS-G2] malformed mutation contract: {contract}"
+        );
+    }
+    let direct_write = mutation_contracts
+        .iter()
+        .find(|contract| {
+            contract["operations"]
+                .as_array()
+                .is_some_and(|ops| ops.iter().any(|op| op == "fs::write"))
+        })
+        .expect("fs::write mutation contract");
+    assert_eq!(direct_write["classification"], "soft_cancel_may_commit");
+    assert_eq!(direct_write["rollback_safe"], false);
+    assert!(
+        cancel_contract["proof_requirements"]["behavioral_tests"]
+            .as_array()
+            .is_some_and(|tests| tests
+                .iter()
+                .any(|test| { test == "fc_02_cancelled_direct_write_may_commit_late" })),
+        "[T37C-02/FS-G2] deterministic late-write proof must be registered"
     );
 }
 
@@ -931,19 +1035,40 @@ fn t37c_02_fs_cancel_safety_protocol() {
 fn t37c_03_atomic_write_error_fidelity() {
     let path_ops_src = load_source("src/fs/path_ops.rs");
     let mod_src = load_source("src/fs/mod.rs");
+    let cancel_contract = load_cancel_contract_json();
 
-    assert!(
-        path_ops_src.contains("write_atomic"),
-        "[T37C-03/FS-G1] atomic write: src/fs/path_ops.rs must contain write_atomic"
-    );
+    for token in [
+        "pub struct StagedAtomicWrite",
+        "pub fn commit",
+        "pub async fn stage_write_atomic",
+        "pub async fn write_atomic",
+        "stage_write_atomic(path, contents).await?.commit()",
+    ] {
+        assert!(
+            path_ops_src.contains(token),
+            "[T37C-03/FS-G1] atomic replacement source missing token: {token}"
+        );
+    }
     assert!(
         mod_src.contains("try_exists"),
         "[T37C-03/FS-G1] error fidelity: src/fs/mod.rs must export try_exists"
     );
-    // write_atomic should use temp file + rename pattern
     assert!(
-        path_ops_src.contains("rename") || path_ops_src.contains("persist"),
-        "[T37C-03/FS-G1] write_atomic should use rename/persist for atomicity"
+        mod_src.contains("StagedAtomicWrite") && mod_src.contains("stage_write_atomic"),
+        "[T37C-03/FS-G1] staged replacement API must be publicly exported"
+    );
+    assert!(
+        path_ops_src.contains("std::fs::rename(self.temp_path.path(), &self.target_path)")
+            && path_ops_src.contains("sync_parent_dir(parent)"),
+        "[T37C-03/FS-G1] synchronous commit must rename then sync the parent"
+    );
+    assert!(
+        cancel_contract["proof_requirements"]["behavioral_tests"]
+            .as_array()
+            .is_some_and(|tests| tests
+                .iter()
+                .any(|test| { test == "fc_03_cancelled_atomic_stage_preserves_target" })),
+        "[T37C-03/FS-G1] deterministic cancelled-staging proof must be registered"
     );
 }
 
