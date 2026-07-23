@@ -5,12 +5,26 @@
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::bytes::Bytes;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::bytes::BytesMut;
 use crate::cx::{Cx, cap};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::server::HostPolicy;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h2::listener::{Http2Listener, Http2ListenerConfig};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h2::settings::Settings;
+#[cfg(not(target_arch = "wasm32"))]
+use base64::Engine as _;
 
 use super::client::CompressionEncoding;
 pub use super::codec::RequestBodyMeter;
@@ -363,9 +377,9 @@ pub struct ServerConfig {
     /// Maximum message size for receiving, in bytes.
     ///
     /// Supplied to codecs created through [`Server::framed_codec`]
-    /// (the canonical helper for transport adapters). The built-in server
-    /// transport does not currently call that helper automatically. Adapters
-    /// that construct their own codec must pass this value to
+    /// (the canonical helper for transport adapters). The production native
+    /// H2 path returned by [`Server::bind_http2`] calls that helper
+    /// automatically. Other adapters that construct their own codec must pass this value to
     /// [`super::codec::FramedCodec::with_message_size_limits`]
     /// or call the helper. The client-side analog at
     /// [`super::client::ChannelConfig::max_recv_message_size`]
@@ -398,17 +412,17 @@ pub struct ServerConfig {
     /// follow-up (br-asupersync-woj18e); production decode wiring is
     /// br-asupersync-s5e129.
     pub max_request_body_bytes: Option<usize>,
-    /// Initial connection-window value stored for a transport adapter.
-    /// The built-in server currently has no automatic H2 settings bridge for
-    /// this field.
+    /// Initial H2 connection receive window. [`Server::bind_http2`] advertises
+    /// values above the protocol baseline with an initial stream-0
+    /// WINDOW_UPDATE and replenishes receive credit to this target.
     pub initial_connection_window_size: u32,
-    /// Initial stream-window value stored for a transport adapter.
-    /// The built-in server currently has no automatic H2 settings bridge for
-    /// this field.
+    /// Initial H2 stream receive window advertised through
+    /// SETTINGS_INITIAL_WINDOW_SIZE by [`Server::bind_http2`].
     pub initial_stream_window_size: u32,
-    /// Per-connection stream limit supplied to
-    /// [`ConnectionRegistry::enforce_stream_limits`] by callers that use the
-    /// wrapped dispatch helper. This field is not automatic H2 enforcement.
+    /// Per-connection stream limit advertised and enforced by the native H2
+    /// connection used by [`Server::bind_http2`]. It is also supplied to
+    /// [`ConnectionRegistry::enforce_stream_limits`] for non-H2 adapters that
+    /// opt into the legacy accounting helper.
     pub max_concurrent_streams: u32,
     /// Keep-alive interval.
     pub keepalive_interval_ms: Option<u64>,
@@ -452,12 +466,12 @@ pub struct ServerConfig {
     ///
     /// br-asupersync-i2bae8.
     pub max_metadata_size: usize,
-    /// Maximum idle time used by [`ConnectionRegistry::enforce_stream_limits`]
-    /// when that helper admits a stream and sweeps stale registrations.
-    /// The field does not schedule a periodic sweep by itself, and the built-in
-    /// transport does not currently demonstrate automatic integration of the
-    /// wrapped dispatch path. Defaults to 60 seconds; `None` disables cleanup
-    /// in callers that use the helper.
+    /// Maximum inactivity interval for a request stream. The production H2
+    /// listener resets the deadline on request HEADERS/DATA and resets only
+    /// the expired stream with CANCEL, dropping a pending handler future. The
+    /// same value remains the stale-registration threshold for non-H2 adapters
+    /// using [`ConnectionRegistry::enforce_stream_limits`]. Defaults to 60
+    /// seconds; `None` disables both behaviors.
     ///
     /// br-asupersync-8vn9iu: helper seam for limiting stale registration
     /// residency when transport adapters wire the accounting path.
@@ -834,11 +848,10 @@ impl ServerBuilder {
 
     /// Set the stream idle timeout.
     ///
-    /// Configures the threshold consumed by
-    /// [`ConnectionRegistry::enforce_stream_limits`]. This setter does not
-    /// schedule cleanup or wire the wrapped dispatch path into a transport.
-    /// Set to `None` to disable cleanup in callers that use the helper.
-    /// (br-asupersync-8vn9iu.)
+    /// The native H2 listener returned by [`Server::bind_http2`] resets this
+    /// deadline on inbound HEADERS/DATA and cancels only the expired stream.
+    /// Non-H2 adapters using [`ConnectionRegistry::enforce_stream_limits`]
+    /// consume the same value as a stale-registration threshold.
     #[must_use]
     pub fn stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.config.stream_idle_timeout = timeout;
@@ -864,24 +877,25 @@ impl ServerBuilder {
         self
     }
 
-    /// Store the initial connection-window value for a transport adapter.
-    /// This setter does not wire the value into H2 settings.
+    /// Set the native H2 connection receive window. Values must be within
+    /// `65_535..=2^31-1`; [`Server::bind_http2`] rejects invalid values before
+    /// binding.
     #[must_use]
     pub fn initial_connection_window_size(mut self, size: u32) -> Self {
         self.config.initial_connection_window_size = size;
         self
     }
 
-    /// Store the initial stream-window value for a transport adapter.
-    /// This setter does not wire the value into H2 settings.
+    /// Set SETTINGS_INITIAL_WINDOW_SIZE for the native H2 transport. Values
+    /// above the 31-bit HTTP/2 maximum are rejected before binding.
     #[must_use]
     pub fn initial_stream_window_size(mut self, size: u32) -> Self {
         self.config.initial_stream_window_size = size;
         self
     }
 
-    /// Configure the limit consumed by the wrapped stream-enforcement helper.
-    /// This setter does not wire that helper into the built-in transport.
+    /// Configure native H2 per-connection stream admission and the equivalent
+    /// limit used by the optional non-H2 accounting helper.
     #[must_use]
     pub fn max_concurrent_streams(mut self, max: u32) -> Self {
         self.config.max_concurrent_streams = max;
@@ -1058,6 +1072,43 @@ pub struct Server {
     connection_registry: Arc<ConnectionRegistry>,
 }
 
+/// One decoded unary gRPC request admitted from the production HTTP/2
+/// listener.
+///
+/// The transport adapter has already validated the HTTP method/media type,
+/// decoded exactly one gRPC message through [`Server::framed_codec`], applied
+/// inbound metadata validation, and run the server interceptor/deadline path.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct GrpcTransportRequest {
+    path: String,
+    request: Request<Bytes>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GrpcTransportRequest {
+    /// Fully qualified RPC path (for example `/package.Service/Method`).
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Borrow the decoded request and its validated metadata.
+    #[must_use]
+    pub fn request(&self) -> &Request<Bytes> {
+        &self.request
+    }
+
+    /// Consume this envelope into `(path, request)`.
+    #[must_use]
+    pub fn into_parts(self) -> (String, Request<Bytes>) {
+        (self.path, self.request)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type GrpcHttp2Future = Pin<Box<dyn Future<Output = HttpResponse> + Send>>;
+
 impl std::fmt::Debug for Server {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Server")
@@ -1103,6 +1154,278 @@ impl Server {
             self.config.max_recv_message_size,
         )
         .with_request_body_limit(self.config.max_request_body_bytes)
+    }
+
+    /// Build the production HTTP/2 listener configuration for this gRPC
+    /// server.
+    ///
+    /// This is the single bridge from [`ServerConfig`] into the native H2
+    /// transport: stream and connection receive windows, concurrent-stream
+    /// admission, header-list bounds, unary request buffering, and per-stream
+    /// inactivity cancellation all derive from the server configuration.
+    /// Message send/receive limits are applied by the decoded adapter returned
+    /// from [`Self::bind_http2`], not approximated at the HTTP body boundary.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn http2_listener_config(&self, host_policy: HostPolicy) -> Http2ListenerConfig {
+        let mut settings = Settings::server();
+        settings.initial_window_size = self.config.initial_stream_window_size;
+        settings.max_concurrent_streams = self.config.max_concurrent_streams;
+        settings.max_header_list_size = if self.config.max_metadata_size == 0 {
+            u32::MAX
+        } else {
+            u32::try_from(self.config.max_metadata_size).unwrap_or(u32::MAX)
+        };
+
+        // The production adapter currently admits exactly one unary message,
+        // so the maximum legal wire body is one five-byte gRPC prefix plus the
+        // configured maximum wire payload. The decoded aggregate meter remains
+        // authoritative after decompression.
+        let max_body_size = self
+            .config
+            .max_recv_message_size
+            .saturating_add(super::codec::MESSAGE_HEADER_SIZE);
+
+        Http2ListenerConfig::default()
+            .settings(settings)
+            .initial_connection_window_size(self.config.initial_connection_window_size)
+            .max_body_size(max_body_size)
+            .host_policy(host_policy)
+            .stream_idle_timeout(self.config.stream_idle_timeout)
+    }
+
+    /// Bind the production native HTTP/2 transport and decode unary gRPC
+    /// requests before invoking `handler`.
+    ///
+    /// The returned listener must be run with
+    /// [`Http2Listener::run`](crate::http::h2::listener::Http2Listener::run).
+    /// It advertises this server's flow-control settings, enforces H2 stream
+    /// admission and inactivity cancellation, decodes exactly one framed
+    /// message through [`Self::framed_codec`], applies interceptors/deadlines,
+    /// and encodes the handler result with the configured outbound limit.
+    ///
+    /// `host_policy` is mandatory so a production caller cannot accidentally
+    /// inherit an allow-all authority policy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn bind_http2<A, F, Fut>(
+        self: &Arc<Self>,
+        addr: A,
+        host_policy: HostPolicy,
+        handler: F,
+    ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static>>
+    where
+        A: std::net::ToSocketAddrs + Send + 'static,
+        F: Fn(GrpcTransportRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<Bytes>, Status>> + Send + 'static,
+    {
+        if self.config.initial_stream_window_size > 0x7fff_ffff {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gRPC initial stream window exceeds the HTTP/2 31-bit maximum",
+            ));
+        }
+        if !(65_535..=0x7fff_ffff).contains(&self.config.initial_connection_window_size) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gRPC initial connection window must be within 65535..=2^31-1",
+            ));
+        }
+        let config = self.http2_listener_config(host_policy);
+        let server = Arc::clone(self);
+        let handler = Arc::new(handler);
+        let transport_handler = move |request: HttpRequest| -> GrpcHttp2Future {
+            let server = Arc::clone(&server);
+            let handler = Arc::clone(&handler);
+            Box::pin(async move { server.dispatch_http2_unary(request, handler).await })
+        };
+        Http2Listener::bind_with_config(addr, transport_handler, config).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn dispatch_http2_unary<F, Fut>(
+        &self,
+        request: HttpRequest,
+        handler: Arc<F>,
+    ) -> HttpResponse
+    where
+        F: Fn(GrpcTransportRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<Bytes>, Status>> + Send + 'static,
+    {
+        let (path, request) = match self.decode_http2_unary_request(request) {
+            Ok(decoded) => decoded,
+            Err(status) => return Self::http2_status_response(&status),
+        };
+        let result = self
+            .dispatch_unary(request, move |request| {
+                handler(GrpcTransportRequest { path, request })
+            })
+            .await;
+        match result {
+            Ok(response) => match self.encode_http2_unary_response(&response) {
+                Ok(response) => response,
+                Err(status) => Self::http2_status_response(&status),
+            },
+            Err(status) => Self::http2_status_response(&status),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn decode_http2_unary_request(
+        &self,
+        request: HttpRequest,
+    ) -> Result<(String, Request<Bytes>), Status> {
+        if request.method != crate::http::h1::types::Method::Post {
+            return Err(Status::invalid_argument(
+                "gRPC over HTTP/2 requires the POST method",
+            ));
+        }
+        let content_type = request
+            .content_type()
+            .ok_or_else(|| Status::invalid_argument("missing gRPC content-type"))?;
+        if !grpc_content_type_is_allowed(content_type) {
+            return Err(Status::invalid_argument(format!(
+                "content-type must be application/grpc(+proto|+json), got {content_type}"
+            )));
+        }
+
+        let mut metadata = Metadata::new();
+        metadata.reserve(request.headers.len());
+        for (key, value) in &request.headers {
+            let inserted = if key.ends_with("-bin") {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(value)
+                    .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
+                    .map_err(|_| {
+                        Status::invalid_argument(format!(
+                            "binary metadata value for '{key}' is not valid base64"
+                        ))
+                    })?;
+                metadata.insert_bin(key, Bytes::from(decoded))
+            } else {
+                metadata.insert(key, value)
+            };
+            if !inserted {
+                return Err(Status::invalid_argument(format!(
+                    "invalid gRPC metadata entry '{key}'"
+                )));
+            }
+        }
+
+        let grpc_encoding = request.header_value("grpc-encoding");
+        let encoding = match grpc_encoding {
+            Some(value) => CompressionEncoding::from_header_value(value).ok_or_else(|| {
+                Status::unimplemented(format!("unsupported grpc-encoding: {value}"))
+            })?,
+            None => CompressionEncoding::Identity,
+        };
+        if !self.config.accept_compression.contains(&encoding) {
+            return Err(Status::unimplemented(format!(
+                "grpc-encoding is not accepted by this server: {}",
+                grpc_encoding.unwrap_or("identity")
+            )));
+        }
+
+        let mut codec = self.framed_codec(super::codec::IdentityCodec);
+        if encoding != CompressionEncoding::Identity {
+            let decompressor = encoding.frame_decompressor().ok_or_else(|| {
+                Status::unimplemented(format!(
+                    "grpc-encoding support is not compiled in: {}",
+                    grpc_encoding.unwrap_or("identity")
+                ))
+            })?;
+            codec = codec.with_frame_hooks(None, Some(decompressor));
+        }
+
+        let mut body = BytesMut::from(request.body.as_slice());
+        let message = codec
+            .decode_message_with_encoding(&mut body, grpc_encoding)
+            .map_err(GrpcError::into_status)?
+            .ok_or_else(|| Status::invalid_argument("incomplete gRPC message frame"))?;
+        if !body.is_empty() {
+            match codec.decode_message_with_encoding(&mut body, grpc_encoding) {
+                Ok(Some(_)) => {
+                    return Err(Status::invalid_argument(
+                        "unary gRPC request contains more than one message",
+                    ));
+                }
+                Ok(None) => {
+                    return Err(Status::invalid_argument(
+                        "unary gRPC request has a truncated trailing frame",
+                    ));
+                }
+                Err(error) => return Err(error.into_status()),
+            }
+        }
+
+        Ok((request.uri, Request::with_metadata(message, metadata)))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn encode_http2_unary_response(
+        &self,
+        response: &Response<Bytes>,
+    ) -> Result<HttpResponse, Status> {
+        let mut codec = self.framed_codec(super::codec::IdentityCodec);
+        let mut grpc_encoding = None;
+        if let Some(encoding) = self.config.send_compression {
+            if encoding != CompressionEncoding::Identity {
+                let compressor = encoding.frame_compressor().ok_or_else(|| {
+                    Status::unimplemented("configured response compression is not compiled in")
+                })?;
+                codec = codec.with_frame_hooks(Some(compressor), None);
+                grpc_encoding = Some(match encoding {
+                    CompressionEncoding::Identity => "identity",
+                    CompressionEncoding::Gzip => "gzip",
+                });
+            }
+        }
+
+        let mut body = BytesMut::new();
+        codec
+            .encode_message(response.get_ref(), &mut body)
+            .map_err(GrpcError::into_status)?;
+        let mut http = HttpResponse::new(200, "OK", body.to_vec())
+            .with_header("content-type", "application/grpc");
+        if let Some(encoding) = grpc_encoding {
+            http.headers
+                .push(("grpc-encoding".to_owned(), encoding.to_owned()));
+        }
+        for (key, value) in response.metadata().iter() {
+            if key.eq_ignore_ascii_case("content-type")
+                || key.eq_ignore_ascii_case("grpc-status")
+                || key.eq_ignore_ascii_case("grpc-message")
+            {
+                return Err(Status::internal(format!(
+                    "response metadata uses transport-reserved key '{key}'"
+                )));
+            }
+            let value = match value {
+                super::streaming::MetadataValue::Ascii(value) => value.clone(),
+                super::streaming::MetadataValue::Binary(value) => {
+                    base64::engine::general_purpose::STANDARD_NO_PAD.encode(value)
+                }
+            };
+            http.headers.push((key.to_owned(), value));
+        }
+        http.trailers
+            .push(("grpc-status".to_owned(), "0".to_owned()));
+        Ok(http)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn http2_status_response(status: &Status) -> HttpResponse {
+        let mut response = HttpResponse::new(200, "OK", Vec::new())
+            .with_header("content-type", "application/grpc");
+        response
+            .trailers
+            .push(("grpc-status".to_owned(), status.code().as_i32().to_string()));
+        if let Some(details) = status.details() {
+            response.trailers.push((
+                "grpc-status-details-bin".to_owned(),
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(details),
+            ));
+        }
+        response
     }
 
     /// Get the registered services.
@@ -1399,8 +1722,11 @@ impl Server {
     /// This wrapper registers the stream, enforces the configured in-memory
     /// registration count, and purges stale accounting entries during admission.
     /// It does not close an idle transport stream or schedule a periodic sweep, and
-    /// the built-in transport does not currently invoke this wrapper automatically.
-    /// Adapters may call it when they need this accounting seam.
+    /// is intended for non-H2 adapters that need this accounting seam. The native
+    /// transport returned by [`Server::bind_http2`] instead uses the H2 connection's
+    /// authoritative stream state, SETTINGS admission, and timer-driven
+    /// RST_STREAM cancellation; duplicating those streams in this registry would
+    /// create two competing sources of liveness truth.
     /// (br-asupersync-8vn9iu.)
     ///
     /// # Parameters
@@ -1472,7 +1798,9 @@ impl Server {
     ///
     /// Adapters using the accounting helper may call this when they receive a
     /// frame. It updates state inspected by a later explicit stale-entry purge;
-    /// it does not reset a scheduled timer or cancel a transport stream.
+    /// it does not reset a scheduled timer or cancel a transport stream. Native
+    /// H2 adapters do not call it because [`Server::bind_http2`] owns activity
+    /// deadlines in the transport driver itself.
     /// (br-asupersync-8vn9iu.)
     pub fn update_stream_activity(&self, connection_id: &str, stream_id: u32) {
         self.connection_registry
@@ -1504,8 +1832,9 @@ impl Server {
     /// - The listen address parses as a socket address
     /// - The process can bind a listener at that address
     ///
-    /// The listener is immediately dropped after validation; request serving is
-    /// provided by transport adapters layered above this core server registry.
+    /// The listener is immediately dropped after validation. Use
+    /// [`Self::bind_http2`] for the production native HTTP/2 serving path; this
+    /// legacy probe does not accept or dispatch requests.
     #[allow(clippy::unused_async)]
     pub async fn serve(self, addr: &str) -> Result<(), GrpcError> {
         if self.services.is_empty() {
@@ -2187,6 +2516,127 @@ mod tests {
         let has_service = server.get_service("test.TestService").is_some();
         crate::assert_with_log!(has_service, "service exists", true, has_service);
         crate::test_complete!("test_server_builder");
+    }
+
+    #[test]
+    fn http2_listener_config_bridges_grpc_flow_control_policy() {
+        let server = Server::builder()
+            .initial_connection_window_size(2 * 1024 * 1024)
+            .initial_stream_window_size(512 * 1024)
+            .max_concurrent_streams(37)
+            .max_recv_message_size(8192)
+            .max_metadata_size(4096)
+            .stream_idle_timeout(Some(Duration::from_secs(7)))
+            .build();
+
+        let config =
+            server.http2_listener_config(HostPolicy::allow_list(vec!["grpc.example".to_owned()]));
+
+        assert_eq!(config.initial_connection_window_size, 2 * 1024 * 1024);
+        assert_eq!(config.settings.initial_window_size, 512 * 1024);
+        assert_eq!(config.settings.max_concurrent_streams, 37);
+        assert_eq!(config.settings.max_header_list_size, 4096);
+        assert_eq!(
+            config.max_body_size,
+            8192 + super::super::codec::MESSAGE_HEADER_SIZE
+        );
+        assert_eq!(config.stream_idle_timeout, Some(Duration::from_secs(7)));
+    }
+
+    fn unary_http2_request(server: &Server, path: &str, message: Bytes) -> HttpRequest {
+        let mut codec = server.framed_codec(super::super::codec::IdentityCodec);
+        let mut body = BytesMut::new();
+        codec
+            .encode_message(&message, &mut body)
+            .expect("test request framing");
+        HttpRequest {
+            method: crate::http::h1::types::Method::Post,
+            uri: path.to_owned(),
+            version: crate::http::h1::types::Version::Http2,
+            headers: vec![
+                ("host".to_owned(), "grpc.example".to_owned()),
+                ("content-type".to_owned(), "application/grpc".to_owned()),
+                ("te".to_owned(), "trailers".to_owned()),
+            ],
+            body: body.to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        }
+    }
+
+    fn grpc_status_trailer(response: &HttpResponse) -> Option<&str> {
+        response
+            .trailers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("grpc-status"))
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn http2_unary_adapter_decodes_dispatches_and_encodes_through_server_policy() {
+        let server = Arc::new(
+            Server::builder()
+                .max_recv_message_size(64)
+                .max_send_message_size(64)
+                .build(),
+        );
+        let request = unary_http2_request(&server, "/test.Echo/Unary", Bytes::from_static(b"ping"));
+
+        let response = futures_lite::future::block_on(server.dispatch_http2_unary(
+            request,
+            Arc::new(|transport: GrpcTransportRequest| async move {
+                assert_eq!(transport.path(), "/test.Echo/Unary");
+                assert_eq!(transport.request().get_ref().as_ref(), b"ping");
+                Ok(Response::new(Bytes::from_static(b"pong")))
+            }),
+        ));
+
+        assert_eq!(response.status, 200);
+        assert_eq!(grpc_status_trailer(&response), Some("0"));
+        let mut body = BytesMut::from(response.body.as_slice());
+        let mut codec = server.framed_codec(super::super::codec::IdentityCodec);
+        let decoded = codec
+            .decode_message(&mut body)
+            .expect("response frame is valid")
+            .expect("one response message");
+        assert_eq!(decoded.as_ref(), b"pong");
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn http2_unary_adapter_enforces_directional_message_limits() {
+        let recv_limited = Arc::new(Server::builder().max_recv_message_size(3).build());
+        // Frame with a four-byte payload using an unrestricted encoder so the
+        // production receive path, not test setup, performs the rejection.
+        let encoder = Server::builder().max_send_message_size(64).build();
+        let request =
+            unary_http2_request(&encoder, "/test.Echo/Unary", Bytes::from_static(b"four"));
+        let response = futures_lite::future::block_on(recv_limited.dispatch_http2_unary(
+            request,
+            Arc::new(|_: GrpcTransportRequest| async move {
+                panic!("oversized request must not reach handler");
+                #[allow(unreachable_code)]
+                Ok(Response::new(Bytes::new()))
+            }),
+        ));
+        assert_eq!(grpc_status_trailer(&response), Some("8"));
+
+        let send_limited = Arc::new(
+            Server::builder()
+                .max_recv_message_size(64)
+                .max_send_message_size(3)
+                .build(),
+        );
+        let request =
+            unary_http2_request(&send_limited, "/test.Echo/Unary", Bytes::from_static(b"ok"));
+        let response = futures_lite::future::block_on(send_limited.dispatch_http2_unary(
+            request,
+            Arc::new(|_: GrpcTransportRequest| async move {
+                Ok(Response::new(Bytes::from_static(b"four")))
+            }),
+        ));
+        assert_eq!(grpc_status_trailer(&response), Some("8"));
+        assert!(response.body.is_empty());
     }
 
     #[test]

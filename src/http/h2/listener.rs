@@ -726,11 +726,24 @@ async fn race_force_close<F: Future>(signal: &ShutdownSignal, fut: F) -> Option<
     .await
 }
 
-/// A handler response travelling back to the connection driver, carrying
-/// the in-flight guard so accounting is released only after the response
-/// frames are queued. The trailing flag records whether the originating
-/// request was HEAD and therefore must not receive DATA frames.
-type FunnelItem = (u32, Http2Response, InFlightRequestGuard, bool);
+/// A handler outcome travelling back to the connection driver.
+enum FunnelItem {
+    /// A completed response. The guard is retained until its queued frames
+    /// have flushed; `suppress_response_body` records HEAD semantics.
+    Response {
+        stream_id: u32,
+        response: Http2Response,
+        guard: InFlightRequestGuard,
+        suppress_response_body: bool,
+    },
+    /// The request stream exceeded its inactivity budget while the handler
+    /// future was pending. The driver owns the mutable connection and emits
+    /// RST_STREAM(CANCEL); dropping the guard releases in-flight accounting.
+    StreamIdleTimeout {
+        stream_id: u32,
+        guard: InFlightRequestGuard,
+    },
+}
 
 fn release_flushed_response_guards(
     conn: &Connection,
@@ -992,6 +1005,9 @@ enum DriverEvent {
     /// the configured budget with no further frame: close it with a
     /// PROTOCOL_ERROR GOAWAY (br-asupersync-mfqfst L4).
     ContinuationTimeout,
+    /// A partially received request stream made no progress before its
+    /// inactivity deadline. Reset only that stream; keep the connection open.
+    StreamIdleTimeout(u32),
 }
 
 /// Flush every frame the connection has queued onto the transport.
@@ -1020,6 +1036,7 @@ async fn next_driver_event(
     finalize_deadline: Option<Time>,
     idle_deadline: Option<Time>,
     continuation_deadline: Option<Time>,
+    stream_idle_deadline: Option<(u32, Time)>,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
         return DriverEvent::DrainRequested;
@@ -1059,6 +1076,13 @@ async fn next_driver_event(
             None => std::future::pending::<()>().await,
         }
     });
+    let stream_idle_at = stream_idle_deadline.map(|(_, deadline)| deadline);
+    let mut stream_idle_fut = std::pin::pin!(async move {
+        match stream_idle_at {
+            Some(deadline) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
     std::future::poll_fn(move |cx| {
         if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
             || force_fut.as_mut().poll(cx).is_ready()
@@ -1076,6 +1100,11 @@ async fn next_driver_event(
         }
         if continuation_deadline.is_some() && continuation_fut.as_mut().poll(cx).is_ready() {
             return Poll::Ready(DriverEvent::ContinuationTimeout);
+        }
+        if let Some((stream_id, _)) = stream_idle_deadline {
+            if stream_idle_fut.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(DriverEvent::StreamIdleTimeout(stream_id));
+            }
         }
         // Cancel-correct channels make dropping a partially-polled recv
         // safe: no item is consumed unless the future completes.
@@ -1112,6 +1141,7 @@ fn dispatch_h2_request<F, Fut, R>(
     request_timeout: Option<Duration>,
     request_timeout_header_cap: Option<Duration>,
     request_drain_grace: Duration,
+    stream_idle_timeout: Option<Duration>,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
@@ -1156,7 +1186,12 @@ fn dispatch_h2_request<F, Fut, R>(
                 .with_header("content-type", "text/plain; charset=utf-8")
                 .into_h2_response();
             if let Ok(permit) = resp_tx.reserve(&cx).await {
-                permit.send((stream_id, reject, guard, suppress_response_body));
+                permit.send(FunnelItem::Response {
+                    stream_id,
+                    response: reject,
+                    guard,
+                    suppress_response_body,
+                });
             }
             return;
         }
@@ -1182,81 +1217,102 @@ fn dispatch_h2_request<F, Fut, R>(
             request_timeout_header_cap,
         );
 
-        let response = match ServerRequestRegion::mint("h2", request_budget, request_now) {
-            Some(region) => {
-                // Race the whole hop against ForceClosing so a slow handler
-                // cannot block shutdown (drop is the backstop, h1 parity).
-                let hop = race_force_close(
-                    &signal,
-                    region.run_with_protocol_drain(
-                        budget_source,
-                        None,
-                        request_drain_grace,
-                        handler(request),
-                    ),
-                )
-                .await;
-                match hop {
-                    None => {
-                        // Force-close interrupted the handler.
-                        drop(guard);
-                        return;
-                    }
-                    Some(ServerHopOutcome::Ok(response)) => response.into_h2_response(),
-                    Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
-                        // The request was cancelled before producing a
-                        // response; nothing useful can be written back. The
-                        // stream is torn down with the connection.
-                        drop(guard);
-                        return;
-                    }
-                    Some(ServerHopOutcome::Panicked(message)) => {
-                        // Panic isolation (h1 parity): the connection driver
-                        // survives and the stream completes with a 500 instead
-                        // of staying active forever.
-                        let _ = &message;
-                        error!(message = %message, "h2 handler task panicked");
-                        Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
-                    }
-                    Some(ServerHopOutcome::DeadlineExceeded) => Response::new(
-                        503,
-                        "Service Unavailable",
-                        b"request budget deadline exceeded".to_vec(),
+        let handler_future = async move {
+            match ServerRequestRegion::mint("h2", request_budget, request_now) {
+                Some(region) => {
+                    // Race the whole hop against ForceClosing so a slow handler
+                    // cannot block shutdown (drop is the backstop, h1 parity).
+                    let hop = race_force_close(
+                        &signal,
+                        region.run_with_protocol_drain(
+                            budget_source,
+                            None,
+                            request_drain_grace,
+                            handler(request),
+                        ),
                     )
-                    .into_h2_response(),
+                    .await;
+                    match hop {
+                        None => None,
+                        Some(ServerHopOutcome::Ok(response)) => Some(response.into_h2_response()),
+                        Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
+                            None
+                        }
+                        Some(ServerHopOutcome::Panicked(message)) => {
+                            // Panic isolation (h1 parity): the connection driver
+                            // survives and the stream completes with a 500 instead
+                            // of staying active forever.
+                            let _ = &message;
+                            error!(message = %message, "h2 handler task panicked");
+                            Some(
+                                Response::new(500, "Internal Server Error", Vec::new())
+                                    .into_h2_response(),
+                            )
+                        }
+                        Some(ServerHopOutcome::DeadlineExceeded) => Some(
+                            Response::new(
+                                503,
+                                "Service Unavailable",
+                                b"request budget deadline exceeded".to_vec(),
+                            )
+                            .into_h2_response(),
+                        ),
+                    }
                 }
-            }
-            None => {
-                // No runtime installed on this thread: preserve the legacy
-                // direct-call path (force-close race + panic isolation, no
-                // request region).
-                let Some(handler_result) = race_force_close(
-                    &signal,
-                    CatchUnwind {
-                        inner: handler(request),
-                    },
-                )
-                .await
-                else {
-                    drop(guard);
-                    return;
-                };
-                match handler_result {
-                    Ok(response) => response.into_h2_response(),
-                    Err(payload) => {
-                        let message = crate::cx::scope::payload_to_string(&payload);
-                        let _ = &message;
-                        error!(
-                            message = %message,
-                            "h2 handler task panicked"
-                        );
-                        Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
+                None => {
+                    // No runtime installed on this thread: preserve the legacy
+                    // direct-call path (force-close race + panic isolation, no
+                    // request region).
+                    let handler_result = race_force_close(
+                        &signal,
+                        CatchUnwind {
+                            inner: handler(request),
+                        },
+                    )
+                    .await?;
+                    match handler_result {
+                        Ok(response) => Some(response.into_h2_response()),
+                        Err(payload) => {
+                            let message = crate::cx::scope::payload_to_string(&payload);
+                            let _ = &message;
+                            error!(
+                                message = %message,
+                                "h2 handler task panicked"
+                            );
+                            Some(
+                                Response::new(500, "Internal Server Error", Vec::new())
+                                    .into_h2_response(),
+                            )
+                        }
                     }
                 }
             }
         };
+
+        let response = if let Some(timeout) = stream_idle_timeout {
+            match crate::time::timeout_at(request_now + timeout, handler_future).await {
+                Ok(response) => response,
+                Err(_) => {
+                    if let Ok(permit) = resp_tx.reserve(&cx).await {
+                        permit.send(FunnelItem::StreamIdleTimeout { stream_id, guard });
+                    }
+                    return;
+                }
+            }
+        } else {
+            handler_future.await
+        };
+        let Some(response) = response else {
+            drop(guard);
+            return;
+        };
         if let Ok(permit) = resp_tx.reserve(&cx).await {
-            permit.send((stream_id, response, guard, suppress_response_body));
+            permit.send(FunnelItem::Response {
+                stream_id,
+                response,
+                guard,
+                suppress_response_body,
+            });
         }
     });
     if spawned.is_err() {
@@ -1293,6 +1349,7 @@ async fn serve_h2_connection<F, Fut, R>(
     peer_addr: Option<SocketAddr>,
     handler: Arc<F>,
     settings: Settings,
+    initial_connection_window_size: u32,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: RuntimeHandle,
@@ -1303,6 +1360,7 @@ async fn serve_h2_connection<F, Fut, R>(
     request_drain_grace: Duration,
     max_requests_per_connection: Option<u64>,
     idle_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     time_getter: fn() -> Time,
 ) -> io::Result<()>
 where
@@ -1332,12 +1390,18 @@ where
     let local_max_frame_size = settings.max_frame_size;
     let mut conn = Connection::server_with_time_getter(settings, time_getter);
     conn.queue_initial_settings();
+    conn.set_initial_connection_recv_window(initial_connection_window_size)
+        .map_err(io::Error::other)?;
     let mut framed = Framed::new(stream, frame_codec_for(local_max_frame_size));
 
     let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
     // Per-stream request assembly: headers arrive first, DATA accumulates
     // until END_STREAM completes the request.
     let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)> = HashMap::new();
+    // Absolute inactivity deadlines for partially received request streams.
+    // A deadline is replaced only by actual HEADERS/DATA progress, never by
+    // unrelated connection wake-ups.
+    let mut pending_stream_idle_deadlines: HashMap<u32, Time> = HashMap::new();
     // Fixed stage-2 GOAWAY deadline, armed once when stage-1 is outstanding.
     let mut finalize_at: Option<Time> = None;
     let mut response_guards: HashMap<u32, InFlightRequestGuard> = HashMap::new();
@@ -1414,6 +1478,10 @@ where
         let continuation_at = conn
             .continuation_timeout_remaining()
             .map(|remaining| now + remaining);
+        let stream_idle_at = pending_stream_idle_deadlines
+            .iter()
+            .min_by_key(|(stream_id, deadline)| (**deadline, **stream_id))
+            .map(|(stream_id, deadline)| (*stream_id, *deadline));
         let event = next_driver_event(
             &mut framed,
             &mut resp_rx,
@@ -1423,6 +1491,7 @@ where
             finalize_at,
             idle_at,
             continuation_at,
+            stream_idle_at,
         )
         .await;
 
@@ -1467,6 +1536,12 @@ where
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
                 return Ok(());
             }
+            DriverEvent::StreamIdleTimeout(stream_id) => {
+                pending_stream_idle_deadlines.remove(&stream_id);
+                pending_requests.remove(&stream_id);
+                conn.reset_stream(stream_id, ErrorCode::Cancel);
+                reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
+            }
             DriverEvent::Frame(None) => {
                 // Peer closed the transport.
                 return Ok(());
@@ -1488,6 +1563,7 @@ where
                     if let Some(stream_id) = protocol_error.stream_id {
                         conn.reset_stream(stream_id, protocol_error.code);
                         pending_requests.remove(&stream_id);
+                        pending_stream_idle_deadlines.remove(&stream_id);
                         reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                     } else {
                         conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
@@ -1502,6 +1578,7 @@ where
                     end_stream,
                 })) => {
                     if let Some((req_headers, req_body)) = pending_requests.remove(&stream_id) {
+                        pending_stream_idle_deadlines.remove(&stream_id);
                         // A second HEADERS block on a stream already
                         // assembling a body is request trailers (RFC 9113
                         // §8.1; the connection enforces trailers carry
@@ -1523,6 +1600,7 @@ where
                             request_timeout,
                             request_timeout_header_cap,
                             request_drain_grace,
+                            stream_idle_timeout,
                         );
                         requests_dispatched = requests_dispatched.saturating_add(1);
                     } else if end_stream {
@@ -1541,10 +1619,15 @@ where
                             request_timeout,
                             request_timeout_header_cap,
                             request_drain_grace,
+                            stream_idle_timeout,
                         );
                         requests_dispatched = requests_dispatched.saturating_add(1);
                     } else {
                         pending_requests.insert(stream_id, (headers, Vec::new()));
+                        if let Some(timeout) = stream_idle_timeout {
+                            pending_stream_idle_deadlines
+                                .insert(stream_id, (time_getter)() + timeout);
+                        }
                     }
                 }
                 Ok(Some(ReceivedFrame::Data {
@@ -1553,6 +1636,10 @@ where
                     end_stream,
                 })) => {
                     if let Some((_, body)) = pending_requests.get_mut(&stream_id) {
+                        if let Some(timeout) = stream_idle_timeout {
+                            pending_stream_idle_deadlines
+                                .insert(stream_id, (time_getter)() + timeout);
+                        }
                         if body.len().saturating_add(data.len()) > max_body_size {
                             // Bound per-stream request buffering: HTTP/2 flow
                             // control auto-replenishes windows, so without
@@ -1561,12 +1648,14 @@ where
                             // partial body.
                             conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);
                             pending_requests.remove(&stream_id);
+                            pending_stream_idle_deadlines.remove(&stream_id);
                         } else {
                             body.extend_from_slice(&data);
                             if end_stream {
                                 let (headers, body) = pending_requests
                                     .remove(&stream_id)
                                     .expect("pending request present");
+                                pending_stream_idle_deadlines.remove(&stream_id);
                                 dispatch_h2_request(
                                     &mut conn,
                                     stream_id,
@@ -1582,6 +1671,7 @@ where
                                     request_timeout,
                                     request_timeout_header_cap,
                                     request_drain_grace,
+                                    stream_idle_timeout,
                                 );
                                 requests_dispatched = requests_dispatched.saturating_add(1);
                             }
@@ -1590,21 +1680,36 @@ where
                 }
                 Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
                     pending_requests.remove(&stream_id);
+                    pending_stream_idle_deadlines.remove(&stream_id);
                     reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                 }
                 Ok(_) => {}
             },
-            DriverEvent::Response((stream_id, response, guard, suppress_response_body)) => {
-                let outcomes = queue_h2_response(
-                    &mut conn,
+            DriverEvent::Response(item) => match item {
+                FunnelItem::Response {
                     stream_id,
                     response,
                     guard,
                     suppress_response_body,
-                    &mut response_guards,
-                );
-                record_promised_pushes(&mut associated_pushes, &outcomes);
-            }
+                } => {
+                    let outcomes = queue_h2_response(
+                        &mut conn,
+                        stream_id,
+                        response,
+                        guard,
+                        suppress_response_body,
+                        &mut response_guards,
+                    );
+                    record_promised_pushes(&mut associated_pushes, &outcomes);
+                }
+                FunnelItem::StreamIdleTimeout { stream_id, guard } => {
+                    pending_stream_idle_deadlines.remove(&stream_id);
+                    pending_requests.remove(&stream_id);
+                    conn.reset_stream(stream_id, ErrorCode::Cancel);
+                    reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
+                    drop(guard);
+                }
+            },
         }
 
         // br-asupersync-mfqfst L4: recycle the connection once it has served
@@ -1630,6 +1735,9 @@ where
 pub struct Http2ListenerConfig {
     /// HTTP/2 connection settings advertised by the server.
     pub settings: Settings,
+    /// Connection-level receive window advertised with an initial stream-0
+    /// WINDOW_UPDATE. HTTP/2 has no SETTINGS field for this window.
+    pub initial_connection_window_size: u32,
     /// Maximum concurrent connections. `None` means unlimited.
     pub max_connections: Option<usize>,
     /// Soft drain budget: when it elapses with requests in flight, the
@@ -1682,6 +1790,14 @@ pub struct Http2ListenerConfig {
     /// frame-arrival-independent backstop against a client that opens a
     /// connection and then makes no progress (slowloris). `None` disables it.
     pub idle_timeout: Option<Duration>,
+    /// Maximum inactivity interval for an individual request stream.
+    ///
+    /// The deadline is reset whenever request HEADERS or DATA arrives. It also
+    /// bounds handler execution after END_STREAM because this listener buffers
+    /// request bodies before dispatch. Expiry resets only the affected stream
+    /// with CANCEL and drops the associated handler future; the multiplexed
+    /// connection remains available to other streams. `None` disables it.
+    pub stream_idle_timeout: Option<Duration>,
     /// Time source for shutdown bookkeeping and drain supervision.
     pub time_getter: fn() -> Time,
 }
@@ -1696,6 +1812,7 @@ impl Default for Http2ListenerConfig {
     fn default() -> Self {
         Self {
             settings: Settings::server(),
+            initial_connection_window_size: 65_535,
             max_connections: Some(10_000),
             drain_timeout: Duration::from_secs(30),
             hard_drain_timeout: Duration::from_secs(60),
@@ -1707,6 +1824,7 @@ impl Default for Http2ListenerConfig {
             request_drain_grace: Duration::from_millis(500),
             max_requests_per_connection: Some(1000),
             idle_timeout: Some(Duration::from_secs(60)),
+            stream_idle_timeout: None,
             time_getter: default_h2_listener_time_getter,
         }
     }
@@ -1717,6 +1835,17 @@ impl Http2ListenerConfig {
     #[must_use]
     pub fn settings(mut self, settings: Settings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// Set the connection-level receive window advertised at handshake.
+    ///
+    /// Values outside `65_535..=2^31-1` are rejected by the connection driver
+    /// when a peer is accepted; the setter preserves the requested value so a
+    /// configuration error cannot be silently clamped.
+    #[must_use]
+    pub fn initial_connection_window_size(mut self, size: u32) -> Self {
+        self.initial_connection_window_size = size;
         self
     }
 
@@ -1804,6 +1933,13 @@ impl Http2ListenerConfig {
     #[must_use]
     pub fn idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.idle_timeout = timeout;
+        self
+    }
+
+    /// Set the per-request-stream inactivity timeout. `None` disables it.
+    #[must_use]
+    pub fn stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.stream_idle_timeout = timeout;
         self
     }
 
@@ -1999,6 +2135,7 @@ where
 
             let handler = Arc::clone(&self.handler);
             let settings = self.config.settings.clone();
+            let initial_connection_window_size = self.config.initial_connection_window_size;
             let shutdown_signal = self.shutdown_signal.clone();
             let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let runtime_for_conn = runtime.clone();
@@ -2009,6 +2146,7 @@ where
             let request_drain_grace = self.config.request_drain_grace;
             let max_requests_per_connection = self.config.max_requests_per_connection;
             let idle_timeout = self.config.idle_timeout;
+            let stream_idle_timeout = self.config.stream_idle_timeout;
             let conn_time_getter = self.config.time_getter;
             let spawn_result = runtime.try_spawn(async move {
                 let peer_addr = Some(addr);
@@ -2017,6 +2155,7 @@ where
                     peer_addr,
                     handler,
                     settings,
+                    initial_connection_window_size,
                     shutdown_signal,
                     in_flight_requests,
                     runtime_for_conn,
@@ -2027,6 +2166,7 @@ where
                     request_drain_grace,
                     max_requests_per_connection,
                     idle_timeout,
+                    stream_idle_timeout,
                     conn_time_getter,
                 )
                 .await
@@ -2672,12 +2812,22 @@ mod tests {
                 None,
                 None,
                 Duration::from_millis(500),
+                None,
             );
 
-            let (response_stream, response, guard, suppress_response_body) = resp_rx
+            let item = resp_rx
                 .recv(&cx)
                 .await
                 .expect("panic response must be sent through funnel");
+            let FunnelItem::Response {
+                stream_id: response_stream,
+                response,
+                guard,
+                suppress_response_body,
+            } = item
+            else {
+                panic!("expected handler response, got stream timeout");
+            };
             assert_eq!(response_stream, 1);
             assert_eq!(response.response.status, 500);
             assert_eq!(response.response.reason, "Internal Server Error");
@@ -2759,12 +2909,22 @@ mod tests {
                 None,
                 None,
                 Duration::from_millis(500),
+                None,
             );
 
-            let (stream_id, response, guard, _suppress) = resp_rx
+            let item = resp_rx
                 .recv(&cx)
                 .await
                 .expect("421 response must be sent through funnel");
+            let FunnelItem::Response {
+                stream_id,
+                response,
+                guard,
+                suppress_response_body: _,
+            } = item
+            else {
+                panic!("expected host-rejection response, got stream timeout");
+            };
             assert_eq!(stream_id, 1);
             assert_eq!(response.response.status, 421);
             assert!(
@@ -2821,12 +2981,22 @@ mod tests {
                 None,
                 None,
                 Duration::from_millis(500),
+                None,
             );
 
-            let (stream_id, response, guard, _suppress) = resp_rx
+            let item = resp_rx
                 .recv(&cx)
                 .await
                 .expect("handler response must be sent through funnel");
+            let FunnelItem::Response {
+                stream_id,
+                response,
+                guard,
+                suppress_response_body: _,
+            } = item
+            else {
+                panic!("expected handler response, got stream timeout");
+            };
             assert_eq!(stream_id, 1);
             assert_eq!(response.response.status, 200);
             assert!(
@@ -2834,6 +3004,53 @@ mod tests {
                 "handler must run for an allow-listed host"
             );
             drop(guard);
+        });
+    }
+
+    #[test]
+    fn stream_idle_timeout_drops_handler_and_returns_reset_outcome() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime installs Cx for block_on");
+            let mut conn = Connection::server(Settings::default());
+            let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+            let shutdown_signal = ShutdownSignal::new();
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let handler = Arc::new(|_req: Request| std::future::pending::<Response>());
+
+            dispatch_h2_request(
+                &mut conn,
+                1,
+                request_block(&[]),
+                Vec::new(),
+                None,
+                &handler,
+                &resp_tx,
+                &shutdown_signal,
+                &in_flight,
+                &handle,
+                &HostPolicy::allow_list(vec!["example.com".to_owned()]),
+                None,
+                None,
+                Duration::from_millis(500),
+                Some(Duration::ZERO),
+            );
+
+            let item = resp_rx
+                .recv(&cx)
+                .await
+                .expect("idle timeout must be sent through funnel");
+            let FunnelItem::StreamIdleTimeout { stream_id, guard } = item else {
+                panic!("pending handler must produce stream timeout, not a response");
+            };
+            assert_eq!(stream_id, 1);
+            assert_eq!(in_flight.load(Ordering::Acquire), 1);
+            drop(guard);
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
         });
     }
 
