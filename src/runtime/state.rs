@@ -12657,13 +12657,7 @@ mod tests {
             true,
             root_began_close
         );
-        let root_began_finalize = finalizer_root_record.begin_finalize();
-        crate::assert_with_log!(
-            root_began_finalize,
-            "parent begin finalize before finalizer drain",
-            true,
-            root_began_finalize
-        );
+        finalizer_drain.advance_region_state(finalizer_root);
         let finalizer_direct = log_quiescence_observation(
             &finalizer_drain,
             finalizer_root,
