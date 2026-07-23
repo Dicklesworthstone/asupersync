@@ -1,27 +1,23 @@
-//! `InactivationDecoder::decode_with_object_id` ObjectId rate-limit contract (bead bd-3uox5).
+//! `InactivationDecoder` compute-admission and ObjectId rate-limit contract.
 //!
-//! `decode_with_object_id` is the only public decode entry point that exposes the
-//! `Option<&ObjectId>` choice between *unguarded* decoding (`None`, the path
-//! `decode()` delegates to) and *amplification-guarded* decoding (`Some`, the
-//! br-asupersync-ju2k01 DoS defense). `decode()` always passes `None`;
-//! `decode_with_proof()` always passes `Some` -- so neither pins the switch
-//! itself, and a grep of `tests/` for `decode_with_object_id` returns nothing.
-//! That leaves the security-critical rate-limiter contract unverified at the
-//! integration boundary:
+//! Every decode entry point applies the same object-independent structural and
+//! per-call compute admission policy. The `Option<&ObjectId>` accepted by
+//! `decode_with_object_id` only controls cross-call accounting keyed by
+//! `(ESI, ObjectId)`; `decode()` passes `None`, while `decode_with_proof()`
+//! supplies its proof ObjectId.
 //!
-//!   * `decode(s)` is byte-for-byte the unguarded `decode_with_object_id(s, None)`.
-//!   * The guard is transparent for well-behaved traffic: `Some(oid)` recovers
-//!     the identical payload that `None` does, including through erasure.
-//!   * The guard activates ONLY with an ObjectId, and the rate-limit check runs
-//!     *before* the source-ESI-range check -- a near-`u32::MAX` ESI yields
-//!     `EsiRateLimitExceeded` under `Some` but `SourceEsiOutOfRange` under `None`
-//!     (gating + error precedence, the ordering an attacker would probe).
+//!   * `decode(s)` is byte-for-byte `decode_with_object_id(s, None)`.
+//!   * Valid traffic recovers identically with or without cross-call accounting.
+//!   * Every mode rejects a near-`u32::MAX` ESI before tuple expansion.
+//!   * The per-call compute ceiling scales with the admitted block dimensions,
+//!     so the RFC 6330 maximum K does not spuriously exhaust a fixed budget.
 //!   * Per-`(esi, ObjectId)` state accumulates across calls: repeated decoding
 //!     under one ObjectId is eventually rate-limited (the >100-access ceiling),
-//!     while a fresh ObjectId per call never is (the guard is ObjectId-keyed).
+//!     while a fresh ObjectId per call never is.
 //!
-//! Guard constants pinned implicitly: `MAX_ALLOWED_ESI = 1_000_000`,
-//! `MAX_COLUMNS_PER_ESI = 1000`, access ceiling `> 100` per window.
+//! Admission constants pinned implicitly: `MAX_ALLOWED_ESI = 1_000_000`,
+//! `MAX_COLUMNS_PER_ESI = 1000`, RFC tuple width `<= 32`, access ceiling
+//! `> 100` per window.
 //!
 //! # Repro
 //!
@@ -33,6 +29,7 @@
 #![allow(missing_docs)]
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::proof::ProofOutcome;
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 use asupersync::util::DetRng;
@@ -40,6 +37,7 @@ use asupersync::util::DetRng;
 const K: usize = 16;
 const SYMBOL_SIZE: usize = 40;
 const SEED: u64 = 0x00FE_DCBA_9876_5432;
+const RFC6330_MAX_K: usize = 56_403;
 
 /// `MAX_COLUMNS_PER_ESI` reported back by `EsiRateLimitExceeded` (decoder.rs).
 const EXPECTED_MAX_COLUMNS: usize = 1000;
@@ -118,8 +116,8 @@ fn decode_delegates_to_object_id_none() {
     );
 }
 
-/// For well-behaved traffic the ObjectId guard is transparent: `Some(oid)`
-/// recovers exactly what the unguarded path does.
+/// For well-behaved traffic the ObjectId ledger is transparent: `Some(oid)`
+/// recovers exactly what the object-independent admission path does.
 #[test]
 fn object_id_guard_transparent_for_valid_traffic() {
     let (encoder, decoder, source) = build();
@@ -190,12 +188,10 @@ fn erasure_recovery_identical_across_object_id_modes() {
     );
 }
 
-/// A near-`u32::MAX` ESI is rate-limited ONLY when an ObjectId is supplied, and
-/// the rate-limit check fires *before* the source-ESI-range check. The same
-/// malformed symbol therefore yields different, deterministic errors per mode --
-/// pinning both the ObjectId gating and the security-critical check ordering.
+/// A near-`u32::MAX` ESI is rejected before tuple expansion in every decode
+/// mode. ObjectId controls cross-call accounting, not structural admission.
 #[test]
-fn near_max_esi_rate_limited_only_with_object_id() {
+fn near_max_esi_is_rejected_identically_across_decode_modes() {
     let (encoder, decoder, source) = build();
     let mut received = clean_received(&encoder, &decoder, &source, 5, None);
     // A "source" symbol claiming ESI = u32::MAX, well past MAX_ALLOWED_ESI.
@@ -203,34 +199,102 @@ fn near_max_esi_rate_limited_only_with_object_id() {
 
     let oid = ObjectId::new(0x0000_0000_0000_DEAD, 0x0000_0000_0000_BEEF);
 
-    // With ObjectId: amplification guard fires first.
-    match decoder.decode_with_object_id(&received, Some(&oid)) {
+    let assert_rate_limited = |result: Result<_, DecodeError>, mode: &str| match result {
         Err(DecodeError::EsiRateLimitExceeded {
             esi,
             column_count,
             max_columns,
         }) => {
-            assert_eq!(esi, u32::MAX, "guard reports the offending ESI verbatim");
+            assert_eq!(esi, u32::MAX, "{mode} reports the offending ESI verbatim");
             assert_eq!(
                 column_count, 0,
-                "over-threshold ESI is rejected before any columns are generated"
+                "{mode} rejects the ESI before any columns are generated"
             );
             assert_eq!(
                 max_columns, EXPECTED_MAX_COLUMNS,
-                "MAX_COLUMNS_PER_ESI surfaced"
+                "{mode} surfaces MAX_COLUMNS_PER_ESI"
             );
         }
-        other => panic!("expected EsiRateLimitExceeded with ObjectId, got {other:?}"),
-    }
+        other => panic!("expected EsiRateLimitExceeded from {mode}, got {other:?}"),
+    };
 
-    // Without ObjectId: the rate check is skipped, so the same symbol falls
-    // through to the source-ESI-range validation.
-    match decoder.decode_with_object_id(&received, None) {
-        Err(DecodeError::SourceEsiOutOfRange { esi, max_valid }) => {
+    assert_rate_limited(decoder.decode(&received), "decode");
+    assert_rate_limited(
+        decoder.decode_with_object_id(&received, None),
+        "decode_with_object_id(None)",
+    );
+    assert_rate_limited(
+        decoder.decode_with_object_id(&received, Some(&oid)),
+        "decode_with_object_id(Some)",
+    );
+
+    match decoder.decode_with_proof(&received, oid, 0) {
+        Err((DecodeError::EsiRateLimitExceeded { esi, .. }, proof)) => {
             assert_eq!(esi, u32::MAX);
-            assert_eq!(max_valid, K, "source ESI domain is [0, K)");
+            assert!(
+                matches!(proof.outcome, ProofOutcome::Failure { .. }),
+                "proof mode records the shared admission failure"
+            );
         }
-        other => panic!("expected SourceEsiOutOfRange without ObjectId, got {other:?}"),
+        other => panic!("expected EsiRateLimitExceeded from decode_with_proof, got {other:?}"),
+    }
+}
+
+/// The RFC 6330 maximum source-block shape must not trip a fixed compute
+/// ceiling in proof mode. Supplying all K systematic rows but omitting the
+/// required constraint rows intentionally stops after admission with
+/// `InsufficientSymbols`, avoiding an enormous solve while exercising all K
+/// tuple-cost charges. Before br-asupersync-v96kw8, the plain path reached
+/// `InsufficientSymbols` but proof mode failed earlier with
+/// `ComputeBudgetExhausted`.
+#[test]
+fn maximum_k_compute_admission_is_block_scaled_and_mode_invariant() {
+    const MAX_K_SYMBOL_SIZE: usize = 1;
+    const MAX_K_SEED: u64 = 0xA55A_5AA5_C33C_3CC3;
+
+    let decoder = InactivationDecoder::new(RFC6330_MAX_K, MAX_K_SYMBOL_SIZE, MAX_K_SEED);
+    let received = (0..RFC6330_MAX_K)
+        .map(|esi| ReceivedSymbol::source(esi as u32, vec![0u8; MAX_K_SYMBOL_SIZE]))
+        .collect::<Vec<_>>();
+    let expected_required = decoder.params().l;
+    assert!(
+        expected_required > received.len(),
+        "fixture must omit constraint rows and stop after input admission"
+    );
+
+    let assert_insufficient = |result: Result<_, DecodeError>, mode: &str| match result {
+        Err(DecodeError::InsufficientSymbols { received, required }) => {
+            assert_eq!(received, RFC6330_MAX_K, "{mode} reports all supplied rows");
+            assert_eq!(
+                required, expected_required,
+                "{mode} reports the block-shaped minimum"
+            );
+        }
+        other => panic!("expected InsufficientSymbols from {mode}, got {other:?}"),
+    };
+
+    assert_insufficient(decoder.decode(&received), "decode");
+    assert_insufficient(
+        decoder.decode_with_object_id(&received, None),
+        "decode_with_object_id(None)",
+    );
+
+    let object_id = ObjectId::new(0x5654_0300_0000_0000, 0x0000_0000_0000_0001);
+    match decoder.decode_with_proof(&received, object_id, 0) {
+        Err((error, proof)) => {
+            match error {
+                DecodeError::InsufficientSymbols { received, required } => {
+                    assert_eq!(received, RFC6330_MAX_K);
+                    assert_eq!(required, expected_required);
+                }
+                other => panic!("expected InsufficientSymbols from proof decode, got {other:?}"),
+            }
+            assert!(
+                matches!(proof.outcome, ProofOutcome::Failure { .. }),
+                "proof records the shared insufficient-symbol failure"
+            );
+        }
+        Ok(_) => panic!("fixture intentionally omits required constraint rows"),
     }
 }
 
