@@ -935,7 +935,7 @@ fn t37c_02_fs_cancel_safety_protocol() {
         "trait itself makes no rollback guarantee",
         "Cancellation semantics are implementation-defined",
         "create or truncate effects may commit after future drop",
-        "started recursive removal may continue after future drop",
+        "started recursive removal may continue after future",
         "started write may create, truncate, or partially",
     ] {
         assert!(
