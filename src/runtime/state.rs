@@ -3594,8 +3594,9 @@ impl RuntimeState {
             .notify_epoch_transition(module, from_epoch, to_epoch, now);
     }
 
-    /// Takes one bounded epoch telemetry batch for explicit delivery after
-    /// publishing the associated mutation and releasing runtime locks.
+    /// Creates one bounded epoch telemetry delivery token for use after
+    /// publishing the associated mutation and releasing runtime locks. The
+    /// token does not remove receipts from the outbox until it is dispatched.
     #[must_use]
     pub fn take_epoch_telemetry(&self) -> super::epoch_tracker::EpochTelemetryDispatch {
         self.epoch_tracker.drain_telemetry()

@@ -279,7 +279,7 @@ impl EpochTelemetryOutbox {
         }
     }
 
-    fn drain(self: &Arc<Self>, limit: usize) -> EpochTelemetryDispatch {
+    fn pop_batch(&self, limit: usize) -> Vec<EpochTelemetryReceipt> {
         let mut receipts = Vec::with_capacity(limit.min(self.receipts.len()));
         for _ in 0..limit {
             let Some(receipt) = self.receipts.pop() else {
@@ -287,9 +287,13 @@ impl EpochTelemetryOutbox {
             };
             receipts.push(receipt);
         }
+        receipts
+    }
+
+    fn delivery(self: &Arc<Self>, limit: usize) -> EpochTelemetryDispatch {
         EpochTelemetryDispatch {
-            receipts,
             outbox: Arc::clone(self),
+            limit,
         }
     }
 
@@ -563,29 +567,37 @@ impl EpochTelemetryReceipt {
     }
 }
 
-/// Owned one-shot epoch telemetry drained from the tracker outbox.
+/// Owned one-shot epoch telemetry delivery token.
 ///
+/// Receipts remain in the bounded outbox until [`dispatch`](Self::dispatch), so
+/// abandoning a deferred runtime effect cannot silently discard telemetry.
 /// Callers must dispatch this only after publishing the corresponding runtime
 /// mutation and releasing runtime/tracker locks. A subscriber panic aborts the
-/// remainder of this batch, is counted without tracing, and is never retried.
+/// remainder of the drained batch, is counted without tracing, and is never
+/// retried.
 #[must_use = "epoch telemetry must be dispatched after publication and outside locks"]
 pub struct EpochTelemetryDispatch {
-    receipts: Vec<EpochTelemetryReceipt>,
     outbox: Arc<EpochTelemetryOutbox>,
+    limit: usize,
 }
 
 impl EpochTelemetryDispatch {
-    /// Returns whether this bounded drain contained no receipts.
+    /// Returns whether the outbox currently has no receipts to deliver.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.receipts.is_empty()
+        self.outbox.receipts.is_empty()
     }
 
     /// Emits this batch once while containing subscriber `enabled`/`on_event`
     /// panics across the entire batch.
     pub fn dispatch(self) {
-        let Self { receipts, outbox } = self;
+        let Self { outbox, limit } = self;
+        let receipts = outbox.pop_batch(limit);
+        Self::dispatch_receipts(&outbox, receipts);
+    }
+
+    fn dispatch_receipts(outbox: &EpochTelemetryOutbox, receipts: Vec<EpochTelemetryReceipt>) {
         let mut emitted = 0u64;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             for receipt in receipts {
@@ -846,11 +858,12 @@ impl EpochConsistencyTracker {
         self.telemetry.push(receipt);
     }
 
-    /// Drains a bounded batch for delivery after the corresponding runtime
+    /// Creates a bounded delivery token for use after the corresponding runtime
     /// mutation is published and all runtime/tracker locks are released.
+    /// Receipts are removed from the outbox only when the token is dispatched.
     #[must_use]
     pub fn drain_telemetry(&self) -> EpochTelemetryDispatch {
-        self.telemetry.drain(DEFAULT_TELEMETRY_DRAIN_LIMIT)
+        self.telemetry.delivery(DEFAULT_TELEMETRY_DRAIN_LIMIT)
     }
 
     /// Returns callback-free outbox counters without emitting telemetry.
@@ -1489,11 +1502,11 @@ impl EpochConsistencyTracker {
         }
     }
 
-    /// Logs comprehensive epoch state for debugging and monitoring.
+    /// Queues comprehensive epoch state telemetry for debugging and monitoring.
     ///
-    /// This method provides structured logging of the complete epoch state
-    /// across all modules, which can be useful for debugging and monitoring
-    /// epoch consistency in production environments.
+    /// This method snapshots the complete epoch state across all modules. Call
+    /// [`drain_telemetry`](Self::drain_telemetry) and dispatch the returned token
+    /// after releasing any surrounding runtime locks to emit that snapshot.
     // `tracing_compat` expands to no-op macros without tracing integration,
     // so these locals are only consumed in tracing-enabled builds.
     #[allow(unused_variables)]
@@ -1547,7 +1560,9 @@ impl EpochConsistencyTracker {
     /// Enables or disables epoch consistency checking at runtime.
     ///
     /// This can be useful for temporarily disabling checking during
-    /// performance-critical sections or enabling it for debugging.
+    /// performance-critical sections or enabling it for debugging. The change
+    /// queues telemetry for later delivery through
+    /// [`drain_telemetry`](Self::drain_telemetry).
     pub fn set_enabled(&mut self, enabled: bool) {
         self.config.enabled = enabled;
         self.enqueue_telemetry(EpochTelemetryReceipt::EnabledChanged { enabled });
@@ -1556,7 +1571,9 @@ impl EpochConsistencyTracker {
     /// Updates the slow transition threshold dynamically.
     ///
     /// This allows tuning the sensitivity of slow transition detection
-    /// based on runtime conditions or performance requirements.
+    /// based on runtime conditions or performance requirements. The change
+    /// queues telemetry for later delivery through
+    /// [`drain_telemetry`](Self::drain_telemetry).
     #[allow(unused_variables)]
     pub fn set_slow_transition_threshold(&mut self, threshold_ns: u64) {
         let old_threshold = self.config.slow_transition_threshold_ns;
@@ -1752,23 +1769,23 @@ mod tests {
         assert_eq!(full.capacity, 3);
         assert_eq!(full.overflow_count, 1);
 
-        let first = tracker.telemetry.drain(2);
+        let first = tracker.telemetry.pop_batch(2);
         assert!(matches!(
-            first.receipts.as_slice(),
+            first.as_slice(),
             [
                 EpochTelemetryReceipt::Transition { .. },
                 EpochTelemetryReceipt::ConsistencyCheckLatency { .. }
             ]
         ));
         assert_eq!(tracker.telemetry_statistics().pending, 1);
-        first.dispatch();
+        EpochTelemetryDispatch::dispatch_receipts(&tracker.telemetry, first);
 
-        let second = tracker.telemetry.drain(2);
+        let second = tracker.telemetry.pop_batch(2);
         assert!(matches!(
-            second.receipts.as_slice(),
+            second.as_slice(),
             [EpochTelemetryReceipt::TransitionDuplicate { .. }]
         ));
-        second.dispatch();
+        EpochTelemetryDispatch::dispatch_receipts(&tracker.telemetry, second);
 
         let drained = tracker.telemetry_statistics();
         assert_eq!(drained.pending, 0);
@@ -1803,15 +1820,51 @@ mod tests {
         }
 
         let first = tracker.drain_telemetry();
-        assert_eq!(first.receipts.len(), DEFAULT_TELEMETRY_DRAIN_LIMIT);
-        assert_eq!(tracker.telemetry_statistics().pending, 2);
+        assert_eq!(
+            tracker.telemetry_statistics().pending,
+            DEFAULT_TELEMETRY_DRAIN_LIMIT + 2,
+            "creating a delivery token must not remove receipts"
+        );
         first.dispatch();
+        assert_eq!(tracker.telemetry_statistics().pending, 2);
+        assert_eq!(
+            tracker.telemetry_statistics().emitted_count,
+            DEFAULT_TELEMETRY_DRAIN_LIMIT as u64
+        );
 
         let second = tracker.drain_telemetry();
-        assert_eq!(second.receipts.len(), 2);
         second.dispatch();
         assert_eq!(tracker.telemetry_statistics().pending, 0);
         crate::test_complete!("epoch_telemetry_public_drain_enforces_production_batch_limit");
+    }
+
+    #[test]
+    fn epoch_telemetry_abandoned_delivery_leaves_receipts_pending() {
+        init_test("epoch_telemetry_abandoned_delivery_leaves_receipts_pending");
+
+        let tracker = EpochConsistencyTracker::new();
+        tracker.notify_epoch_transition(
+            ModuleId::Scheduler,
+            EpochId::GENESIS,
+            EpochId::new(1),
+            Time::from_nanos(10),
+        );
+        assert_eq!(tracker.telemetry_statistics().pending, 2);
+
+        let abandoned = tracker.drain_telemetry();
+        assert!(!abandoned.is_empty());
+        drop(abandoned);
+        assert_eq!(
+            tracker.telemetry_statistics().pending,
+            2,
+            "dropping an undispatched token must leave receipts available"
+        );
+
+        tracker.drain_telemetry().dispatch();
+        let delivered = tracker.telemetry_statistics();
+        assert_eq!(delivered.pending, 0);
+        assert_eq!(delivered.emitted_count, 2);
+        crate::test_complete!("epoch_telemetry_abandoned_delivery_leaves_receipts_pending");
     }
 
     #[cfg(feature = "tracing-integration")]
@@ -2661,6 +2714,7 @@ mod tests {
 
         // Test state logging
         tracker.log_epoch_state();
+        tracker.drain_telemetry().dispatch();
 
         // Test replay command generation
         let replay_cmd = tracker
