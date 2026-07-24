@@ -170,6 +170,15 @@ mod tests {
         );
         assert!(custom.is_err(), "unsupported custom Serde format must fail");
 
+        let recovered = ConsumerRecord::boundary_fixture();
+        let encoded = codec
+            .serialize(&recovered, SerializationFormat::Json)
+            .expect("codec must remain usable after prior errors");
+        let decoded: ConsumerRecord = codec
+            .deserialize(&encoded, SerializationFormat::Json)
+            .expect("valid decode must recover after prior errors");
+        assert_eq!(decoded, recovered);
+
         let symbol = TypedSymbol::from_value(
             &ConsumerRecord::boundary_fixture(),
             SerializationFormat::Bincode,
