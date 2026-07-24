@@ -95,7 +95,7 @@
       "adr_id": "DEP-ADR-002",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.2",
       "title": "Preserve arbitrary downstream Protobuf messages and ergonomic authoring",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-003",
@@ -159,6 +159,551 @@
     }
   ],
   "adrs": [
+    {
+      "adr_id": "DEP-ADR-002",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.2",
+      "title": "Preserve arbitrary downstream Protobuf messages and ergonomic authoring",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-PROTOBUF-GENERIC"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "`prost` stays as the public authoring and codec boundary. `ProstCodec<T, U>` is an unrestricted generic surface: the struct carries no bounds at all, and the `Codec` impl accepts any `T: prost::Message + Send + 'static` and `U: prost::Message + Default + Send + 'static`, so any downstream crate can plug in its own derived or generated message type. The claim-time source read produced the argument that settles this. The finite message sets that the Rev-3 plan proposed to hand-write in exchange for dropping prost — gRPC health and reflection — are ALREADY prost-free today, and the only closed prost message set in the crate, `otlp_logs_proto`, is module-private. So prost buys exactly one thing: the arbitrary downstream generic surface. Trading it for a finite set would surrender the entire capability while gaining nothing that is not already owned. Owning further finite internal message sets is permitted and already happens; it is not a path to removing prost.",
+      "alternatives_considered": [
+        {
+          "option": "Replace `ProstCodec` with an owned `ProtoMessage` trait over a finite hand-written message set, per the Rev-3 plan.",
+          "rejected_because": "It would delete `ProstCodec<T, U>`, `SymmetricProstCodec<T>`, and both prost-typed `ProtobufError` variants, and would break the executable downstream journey in tests/fixtures/dependency-capability-baseline-consumer plus six conformance tests and eight fuzz targets. The bead states outright that a finite hand-written set removes functionality and is forbidden, and the capability registry's no-claim boundary says finite in-repo schemas cannot replace arbitrary downstream Protobuf capability."
+        },
+        {
+          "option": "Justify the finite set by pointing at gRPC health, reflection, and status-details as the messages that matter.",
+          "rejected_because": "Those surfaces contain zero prost references today. src/grpc/health.rs and src/grpc/reflection.rs are already hand-written and prost-free, so this alternative describes work that is already done and would not remove the dependency. It mistakes the internal message sets for the capability."
+        },
+        {
+          "option": "Own a `ProtoMessage` trait plus a production-quality derive macro and codegen, matching prost's ergonomics.",
+          "rejected_because": "Not rejected in principle, but it is a very large piece of work that must clear a high bar before it can be evaluated: arbitrary downstream compile and runtime fixtures, cross-language Protobuf and gRPC interop, malformed and resource-limit behavior, fuzzing, and rollback. Manual trait implementation alone is explicitly not equivalent ergonomics. Until that exists and passes, KEEP."
+        },
+        {
+          "option": "Narrow the public surface to `SymmetricProstCodec<T>` only, since it is the common case.",
+          "rejected_because": "Asymmetric request and response types are the normal gRPC shape, and the doc example itself uses `ProstCodec<HelloRequest, HelloResponse>`. Collapsing the two parameters is generic-API narrowing."
+        },
+        {
+          "option": "Make `prost` optional behind a feature so it leaves the default graph.",
+          "rejected_because": "`prost = \"0.14\"` is currently a plain non-optional dependency, so protobuf support is unconditional on native targets. Gating it would remove capability from every consumer who does not opt in, which is narrowing by another name. If the marginal graph cost is the concern, that is a measurement question for the marginal ledger, not a licence to gate a shipped public API."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::grpc",
+          "feature_gate": null,
+          "source_file": "src/grpc/mod.rs",
+          "symbols": [
+            "ProstCodec",
+            "ProtobufError",
+            "DEFAULT_MAX_MESSAGE_SIZE"
+          ],
+          "note": "The blessed short path. `pub mod grpc` is platform-gated to non-wasm32 but carries no feature gate, so this is default-feature public API."
+        },
+        {
+          "module_path": "asupersync::grpc::protobuf",
+          "feature_gate": null,
+          "source_file": "src/grpc/protobuf.rs",
+          "symbols": [
+            "ProstCodec",
+            "SymmetricProstCodec",
+            "ProtobufError",
+            "MessageTooLarge",
+            "with_max_size",
+            "max_message_size"
+          ],
+          "note": "`SymmetricProstCodec<T>` is NOT re-exported at `asupersync::grpc` and is reachable only by this long path; it is public API regardless. `ProstCodec::new`, `Default`, and `Clone` are all implemented without bounds, so a codec value can be constructed for any pair of types."
+        },
+        {
+          "module_path": "asupersync::grpc::codec",
+          "feature_gate": null,
+          "source_file": "src/grpc/codec.rs",
+          "symbols": [
+            "Codec",
+            "FramedCodec",
+            "GrpcCodec",
+            "GrpcMessage",
+            "IdentityCodec",
+            "MESSAGE_HEADER_SIZE",
+            "FrameCompressor",
+            "FrameDecompressor",
+            "RequestBodyMeter"
+          ],
+          "note": "The generic seam `ProstCodec` implements. Client and server are generic over `Codec`, which is what makes a downstream `ProstCodec<Req, Resp>` usable end to end."
+        },
+        {
+          "module_path": "asupersync::grpc::client",
+          "feature_gate": null,
+          "source_file": "src/grpc/client.rs",
+          "symbols": [
+            "GrpcClient",
+            "Channel",
+            "ChannelBuilder",
+            "ChannelConfig",
+            "CompressionEncoding",
+            "ResponseStream",
+            "ClientInterceptor",
+            "MetadataInterceptor"
+          ],
+          "note": "`GrpcClient<C>` is generic over `Codec`, defaulting to `IdentityCodec`."
+        },
+        {
+          "module_path": "asupersync::grpc::server",
+          "feature_gate": null,
+          "source_file": "src/grpc/server.rs",
+          "symbols": [
+            "Server",
+            "ServerBuilder",
+            "ServerConfig",
+            "CallContext",
+            "CallContextWithCx",
+            "Interceptor",
+            "parse_grpc_timeout",
+            "format_grpc_timeout"
+          ],
+          "note": "Server-side `framed_codec` is generic over `Codec` on the same seam."
+        },
+        {
+          "module_path": "asupersync::grpc::streaming",
+          "feature_gate": null,
+          "source_file": "src/grpc/streaming.rs",
+          "symbols": [
+            "Request",
+            "Response",
+            "Streaming",
+            "StreamingRequest",
+            "ServerStreaming",
+            "ClientStreaming",
+            "Metadata",
+            "MetadataValue",
+            "MAX_STREAM_BUFFERED",
+            "CallCancellation"
+          ],
+          "note": "Streaming must keep working with the generic codec, not only with unary calls; the bead requires generic codec use in both."
+        },
+        {
+          "module_path": "asupersync::grpc::service",
+          "feature_gate": null,
+          "source_file": "src/grpc/service.rs",
+          "symbols": [
+            "MethodDescriptor",
+            "ServiceDescriptor",
+            "NamedService",
+            "UnaryMethod",
+            "ServerStreamingMethod",
+            "ClientStreamingMethod",
+            "BidiStreamingMethod",
+            "ServiceHandler"
+          ],
+          "note": "Service description surface downstream authors implement alongside their own messages."
+        },
+        {
+          "module_path": "asupersync::grpc::status",
+          "feature_gate": null,
+          "source_file": "src/grpc/status.rs",
+          "symbols": [
+            "Code",
+            "Status",
+            "GrpcError"
+          ],
+          "note": "Status mapping is part of the interop contract; codec errors surface through it."
+        },
+        {
+          "module_path": "asupersync::grpc::health",
+          "feature_gate": null,
+          "source_file": "src/grpc/health.rs",
+          "symbols": [
+            "HealthCheckRequest",
+            "HealthCheckResponse",
+            "ServingStatus",
+            "HealthService",
+            "HealthReporter",
+            "HealthServiceBuilder"
+          ],
+          "note": "Already hand-written and prost-free. Frozen here as evidence that the finite internal message sets do not require prost, which is the core of this ADR's argument."
+        },
+        {
+          "module_path": "asupersync::grpc::reflection",
+          "feature_gate": null,
+          "source_file": "src/grpc/reflection.rs",
+          "symbols": [
+            "ReflectedMethod",
+            "ReflectedService",
+            "ReflectionService",
+            "ReflectionListServicesRequest",
+            "ReflectionListServicesResponse",
+            "ReflectionDescribeServiceRequest",
+            "ReflectionDescribeServiceResponse"
+          ],
+          "note": "Also already prost-free."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "default",
+          "cargo_definition": "default = [\"proc-macros\", \"nightly-outcome-try\"]",
+          "effect": "The protobuf surface is NOT behind any feature. `prost` is a plain non-optional dependency, so `ProstCodec` and the gRPC stack are available in a default build on non-wasm32 targets. This row exists to pin that fact: making protobuf feature-gated would be capability narrowing.",
+          "must_remain": true,
+          "no_tokio_guarantee": "prost's only dependencies are bytes and prost-derive; it introduces no tokio edge."
+        },
+        {
+          "name": "compression",
+          "cargo_definition": "compression = [\"dep:flate2\", \"dep:brotli\"]",
+          "effect": "Gates the gzip frame compressor and decompressor used with `FramedCodec` around `ProstCodec`, and the gzip parity conformance coverage.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Pure-Rust codecs; no tokio edge."
+        },
+        {
+          "name": "fuzz",
+          "cargo_definition": "fuzz = [\"dep:arbitrary\", \"dep:opentelemetry-proto\"]",
+          "effect": "Enables the arbitrary-derive support used by the eight `ProstCodec` fuzz targets, and separately the quarantined OTLP proto helpers.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Explicitly excluded from the no-Tokio production guarantee via the opentelemetry-proto edge; that carve-out is documented by DEP-ADR-003."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "generic_downstream_codec",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/grpc/protobuf.rs",
+          "wire_encoder": "prost 0.14, non-optional",
+          "transport": "gRPC length-prefixed message framing",
+          "public_entry_points": [
+            "ProstCodec",
+            "SymmetricProstCodec",
+            "ProtobufError"
+          ],
+          "note": "The whole capability. Unrestricted in the type parameters; the size limit is enforced before encode via encoded_len and before decode, so oversized messages are rejected without allocating."
+        },
+        {
+          "surface": "codec_seam",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/grpc/codec.rs",
+          "wire_encoder": "owned gRPC framing",
+          "transport": "HTTP/2",
+          "public_entry_points": [
+            "Codec",
+            "FramedCodec",
+            "GrpcCodec",
+            "IdentityCodec",
+            "MESSAGE_HEADER_SIZE"
+          ],
+          "note": "Already owned and prost-free. Any owned protobuf implementation would plug in here rather than replacing this."
+        },
+        {
+          "surface": "grpc_internal_message_sets",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/grpc/health.rs and src/grpc/reflection.rs",
+          "wire_encoder": "hand-written, no prost",
+          "transport": "gRPC",
+          "public_entry_points": [
+            "HealthCheckRequest",
+            "HealthCheckResponse",
+            "ServingStatus",
+            "ReflectedService",
+            "ReflectionService"
+          ],
+          "note": "Decisive for this ADR: the finite sets the Rev-3 plan wanted to hand-write in exchange for dropping prost already exist without it."
+        },
+        {
+          "surface": "otlp_internal_message_set",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "metrics",
+          "implementation": "src/observability/otel.rs",
+          "wire_encoder": "hand-rolled prost derives in a module-private message set",
+          "transport": "OTLP over HTTP",
+          "public_entry_points": [
+            "to_otlp_protobuf"
+          ],
+          "note": "The only closed prost message set in the crate. It is module-private and does not exercise the generic codec, so it is not evidence about the generic capability. Owned by DEP-ADR-003."
+        },
+        {
+          "surface": "owned_proto_message_trait",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "There is no src/codec/proto.rs and no owned ProtoMessage trait. The varint helpers in src/grpc/protobuf.rs are cfg(test) differential-oracle code, not reusable production code, and must not be cited as a partial implementation."
+        },
+        {
+          "surface": "protobuf_code_generation",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "Neither prost-build nor prost-types is a dependency and there is no build-script codegen. Downstream authors rely on prost's derive macro, which is exactly the ergonomics an owned replacement would have to reproduce."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "gRPC over HTTP/2, plus gRPC-Web",
+        "encoding": "Protocol Buffers as implemented by prost 0.14",
+        "content_type": "application/grpc",
+        "grpc_supported": true,
+        "signal_paths_note": "Length-prefixed message framing is one compression byte followed by a big-endian u32 length, then the encoded message. Byte parity with other gRPC implementations is an explicit conformance claim in the repository's own test suite.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "gRPC status codes via the owned Code and Status types",
+        "retry_jitter": "not applicable",
+        "collector_interop": "Cross-language Protobuf and gRPC interoperability with other implementations is part of the capability, not an optional extra.",
+        "accepted_data_model": "All Protobuf scalar and wire types, packed fields, maps, oneofs, repeated and nested messages, enums, and unknown-field preservation, as accepted by prost 0.14. The downstream fixture exercises uint64, repeated string, a string-to-int64 map, and a two-variant oneof.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "max_message_size",
+          "surface": "ProstCodec::new / with_max_size / max_message_size",
+          "contract": "Defaults to DEFAULT_MAX_MESSAGE_SIZE, 4 MiB. Enforced before encoding using the computed encoded length and before decoding, so an oversized message is rejected without allocating it."
+        },
+        {
+          "name": "size_error_reporting",
+          "surface": "ProtobufError::MessageTooLarge",
+          "contract": "Carries both the actual size and the configured limit. Reducing this to an opaque error is a diagnostic regression."
+        },
+        {
+          "name": "error_variant_distinctness",
+          "surface": "ProtobufError",
+          "contract": "Encode failure, decode failure, and size-limit failure stay three distinct variants. The encode and decode variants currently wrap prost's own error types, which is itself part of the frozen surface."
+        },
+        {
+          "name": "varint_strictness",
+          "surface": "ProstCodec decode path",
+          "contract": "A ten-byte varint encoding u64::MAX is accepted; a ten-byte varint with bits above u64, an eleven-byte varint, and an unterminated ten-byte varint are all rejected. The size limit is checked before decoding begins."
+        },
+        {
+          "name": "unknown_field_policy",
+          "surface": "prost decode behavior",
+          "contract": "Whatever prost 0.14 does for unknown fields is the accepted behavior, and schema evolution depends on it. Any owned replacement must match it exactly, not approximately."
+        },
+        {
+          "name": "streaming_use",
+          "surface": "FramedCodec around ProstCodec in client and server streaming",
+          "contract": "Message ordering is preserved across long streams; the repository pins a hundred-message server-streaming ordering case."
+        },
+        {
+          "name": "compression_interop",
+          "surface": "FramedCodec::with_gzip_frame_codec and identity",
+          "contract": "gzip and identity frames must decode to an identical message tree, with no double decoding."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "PB-GAP-01",
+          "summary": "The capability registry records source_owners for CAP-PROTOBUF-GENERIC as src/grpc/mod.rs and src/encoding.rs. src/encoding.rs is the RaptorQ FEC encoding pipeline and contains zero occurrences of prost or protobuf, and src/grpc/protobuf.rs, which actually defines ProstCodec and ProtobufError, is not named at all.",
+          "consequence": "Inventory or baseline work that trusts that row will read an unrelated FEC module and miss the file that owns the capability. This is the second confirmed instance of the same defect class in the registry.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "PB-GAP-02",
+          "summary": "Two files under src/ exercise ProstCodec with downstream-style messages over real HTTP/2 gRPC streaming, but neither is declared as a module anywhere, so neither is ever compiled.",
+          "consequence": "They look like the richest end-to-end downstream-message journeys in the tree but provide zero coverage. They may not be counted as evidence while they remain undeclared.",
+          "owner_bead": "asupersync-d24mms.12.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "PB-GAP-03",
+          "summary": "There is no gRPC or protobuf example under examples/, and the module-level doc example showing a downstream author defining messages and building a ProstCodec is inside an ignore fence, so it is never compiled.",
+          "consequence": "The primary authoring journey this ADR protects has no executed demonstration outside the standalone consumer fixture.",
+          "owner_bead": "asupersync-5z2scg.1.7",
+          "may_widen": false
+        },
+        {
+          "gap_id": "PB-GAP-04",
+          "summary": "ProtobufError wraps prost's own encode and decode error types in two of its three variants, so the public error surface is not prost-free.",
+          "consequence": "Any replacement changes the public error type, not merely the internal codec. That cost belongs in the replacement's parity budget and must not be discovered late.",
+          "owner_bead": "asupersync-5z2scg.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "PB-GAP-05",
+          "summary": "ProstCodec does not override the Codec trait's set_max_encode_message_size or set_max_decode_message_size, whose default bodies are no-ops, so runtime limit renegotiation never reaches it. Only construction-time with_max_size has effect.",
+          "consequence": "An operator or peer-negotiated message-size change does not apply to a ProstCodec. This is current behavior and is frozen as such, but it is a real limitation rather than a designed guarantee.",
+          "owner_bead": "asupersync-5z2scg.1.4",
+          "may_widen": false
+        },
+        {
+          "gap_id": "PB-GAP-06",
+          "summary": "The capability baseline records CAP-PROTOBUF-GENERIC as EXECUTABLE_PARTIAL_BLOCKING: the positive, empty and boundary, malformed and error, and resource-limit cases have evidence, but cancellation cleanup is blocked on an owner and recovery is blocked externally.",
+          "consequence": "Cancellation and recovery behavior for the generic codec is unproven, so a cutover cannot claim lifecycle parity today.",
+          "owner_bead": "asupersync-5z2scg.1.7",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Untrusted wire input stays bounded: the size limit is enforced before decode, and malformed varints, wire types, lengths, depths, and truncation are rejected rather than absorbed.",
+        "The decode path allocates only after the size check passes, so an oversized declared length cannot drive allocation.",
+        "The unknown-field policy is explicit and inherited from prost; it may not silently change under a replacement.",
+        "The codec kernel stays strictly safe: no unsafe code is introduced on the protobuf path."
+      ],
+      "cancellation_invariants": [
+        "Partial frames remain owned by the connection and are not leaked on cancellation.",
+        "Stream cancellation releases buffers and any reservations held by the framed codec.",
+        "These are stated obligations, not proven ones; PB-GAP-06 records that the cancellation and recovery cases are currently blocked."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "The registry scopes CAP-PROTOBUF-GENERIC to all supported platforms and to the default feature set."
+        },
+        {
+          "target_family": "wasm32",
+          "support": "unsupported",
+          "note": "`pub mod grpc` is gated to non-wasm32, so the protobuf and gRPC surface is absent on wasm32 by construction. That exclusion is pre-existing and is not a loss introduced here."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "asupersync::grpc::ProstCodec as a codec over any downstream prost::Message",
+          "asupersync::grpc::protobuf::SymmetricProstCodec for same-type request and response",
+          "prost's own derive macro, used by downstream crates to author message types"
+        ],
+        "accepted_providers": "Any type implementing prost::Message, whether hand-derived downstream or produced by prost-build in the consumer's own build script.",
+        "pinned_crate_versions": {
+          "prost": "0.14 (non-optional, plain dependency; resolves to 0.14.4)",
+          "prost-types": "not a dependency",
+          "prost-build": "not a dependency"
+        },
+        "no_reexport_note": "asupersync does not re-export prost, so downstream consumers depend on it directly and must resolve to a compatible version. The standalone consumer fixture pins prost to exactly 0.14.4 and asserts that pin, which makes a prost major bump a downstream-visible break requiring its own evidence.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "The Codec trait, the framing layer, and the client and server seams are all owned and prost-free. The dependency is confined to the message type bound and the two wrapped error variants.",
+        "removal_precondition": "An owned replacement must provide an authoring experience at least as usable as prost's derive, accept arbitrary downstream schemas, match the full accepted data model including maps, oneofs, packed fields and unknown-field evolution, preserve the error surface or justify changing it, and pass arbitrary-downstream compile and runtime fixtures, cross-language Protobuf and gRPC interop, malformed and resource tests, fuzzing, and rollback. Manual trait implementation alone does not qualify as equivalent ergonomics unless the owner explicitly finds it better after consumer trials. Until then: KEEP.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "consumer-portfolio",
+        "arbitrary-protobuf-authors",
+        "gRPC-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "pb-journey-author-own-message",
+          "description": "Downstream author derives their own prost message with scalars, repeated fields, a map, and a oneof, builds a ProstCodec over it, and round-trips it. This is executed today by the standalone consumer fixture, which deliberately builds without test-internals."
+        },
+        {
+          "id": "pb-journey-asymmetric-unary-rpc",
+          "description": "Author uses distinct request and response types through ProstCodec<Req, Resp> in a unary gRPC call, the shape the module documentation itself demonstrates."
+        },
+        {
+          "id": "pb-journey-streaming",
+          "description": "Author uses the generic codec for client, server, and bidirectional streaming, relying on preserved message ordering across long streams."
+        },
+        {
+          "id": "pb-journey-size-limit-diagnostics",
+          "description": "Operator sets a message size limit and receives a MessageTooLarge error naming both the actual size and the limit, rather than an opaque failure."
+        },
+        {
+          "id": "pb-journey-cross-language-interop",
+          "description": "Messages encoded by asupersync are consumed by a non-Rust gRPC implementation and vice versa, relying on exact wire-byte compatibility."
+        },
+        {
+          "id": "pb-journey-compression-negotiation",
+          "description": "Author enables gzip framing and gets an identical decoded message tree to the identity path."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. Every frozen symbol lives under `asupersync::grpc`, not at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 3 item 3.2",
+          "stale_text": "owned ProtoMessage trait over a finite message set; drop the public arbitrary-prost::Message surface",
+          "resolution": "Rejected by the no-loss gate. Dropping the arbitrary surface is precisely the functionality removal this ADR exists to prevent."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 9.6",
+          "stale_text": "Owned ProtoMessage trait plus hand-written finite message set (gRPC health/reflection/status-details; OTLP export subset) replaces prost",
+          "resolution": "The premise does not hold. The gRPC health and reflection message sets are already hand-written and prost-free, and the OTLP subset is a module-private set owned by DEP-ADR-003. Building those does not remove prost, because prost is required only for the arbitrary downstream generic surface."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, prost row",
+          "stale_text": "OWN (SAFE) ... owned ProtoMessage trait + finite hand-written message types replace the public generic ProstCodec",
+          "resolution": "Disposition is KEEP_UNTIL_PARITY, not OWN. The row's dependent claim that the OpenTelemetry replacement depends on the prost replacement is also unnecessary: an owned OTLP message set can be written with prost derives exactly as otlp_logs_proto already is."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "Owning further finite internal message sets is permitted and already happens. Doing so adds capability; it does not subtract the generic surface and is not a step toward removing prost.",
+        "coexistence": "prost remains the public authoring and codec boundary. An owned protobuf implementation, if ever built, would plug into the existing Codec seam alongside ProstCodec rather than replacing it, until parity is proven.",
+        "sequencing": "The baseline corpus for the full accepted data model must exist before any replacement is evaluable, and the currently blocked cancellation and recovery cases must be unblocked before lifecycle parity can be claimed.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_002_protobuf_generic.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any downstream crate that can no longer author or use its own message type, any narrowing of the accepted data model, any loss of a ProtobufError variant or of the size and limit detail, any wire-byte divergence from other gRPC implementations, any streaming ordering change, or any prost major bump that breaks the pinned consumer fixture.",
+        "action": "Revert to the frozen surface recorded here. Because the decision is KEEP, rollback means abandoning the replacement attempt rather than restoring a deleted capability.",
+        "verification": "Re-run the focused ADR contract, the six gRPC codec conformance tests, the eight ProstCodec fuzz targets, and the standalone downstream consumer fixture before declaring the rollback complete."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-5z2scg.1.1",
+        "unit_test_owner": "asupersync-5z2scg.1.4",
+        "e2e_owner": "asupersync-5z2scg.1.7",
+        "scenario_ids": [
+          "protobuf_generic_consumer",
+          "protobuf_cross_language",
+          "grpc_streaming"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario protobuf_cross_language",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "unit: full accepted data model including scalars, repeated, packed, maps, enums, oneofs, nested messages, and unknown-field evolution",
+          "unit: empty message, boundary and maximum sizes, malformed varints, wrong wire types, truncation, and recursion depth",
+          "unit: cancellation, race, shutdown, leak, and quiescence behavior for the framed codec, which PB-GAP-06 records as currently blocked",
+          "property: round-trip idempotence over generated message trees",
+          "differential: byte-for-byte agreement with prost for encode and decode, and length-prefixed framing parity with other gRPC implementations",
+          "fuzz: the existing ProstCodec fuzz targets covering decode, huge messages, framing, and malformed varint overflow",
+          "downstream-consumer: a standalone crate outside the workspace authoring its own message with map and oneof fields, compiled without test-internals, with its prost version pinned",
+          "cross-language E2E: interoperability with a non-Rust gRPC implementation in both directions",
+          "streaming E2E: ordering preserved across long client, server, and bidirectional streams"
+        ],
+        "note": "Naming these owners does not assert they have run. The two undeclared files recorded in PB-GAP-02 and the ignore-fenced doc example in PB-GAP-03 may not be counted toward any of these classes."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "cutover_state": "KEEP_INCUMBENT",
+        "disposition": "KEEP_UNTIL_PARITY",
+        "primary_authorities": [
+          "asupersync-5z2scg.1"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. prost remains a non-optional production dependency. Phase-5 protobuf children inherit the KEEP and must not proceed on the assumption that the generic surface is being retired."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_002_protobuf_generic.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that cross-language interoperability has been demonstrated, that cancellation and recovery behavior is correct, that an owned protobuf implementation could reach ergonomic or wire parity, that performance is unchanged, or that prost may be removed. It also does not certify the capability registry's source-owner rows, which PB-GAP-01 records as incorrect for this capability."
+    },
     {
       "adr_id": "DEP-ADR-003",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.3",
@@ -1340,6 +1885,18 @@
       "adr_id": "DEP-ADR-004",
       "prohibited_text": "stop accepting YAML scenarios",
       "expected_error": "accepted format loss: YAML scenarios"
+    },
+    {
+      "fixture_id": "protobuf-finite-message-set",
+      "adr_id": "DEP-ADR-002",
+      "prohibited_text": "replace ProstCodec with a finite-only enum",
+      "expected_error": "generic API narrowing: Protobuf"
+    },
+    {
+      "fixture_id": "protobuf-feature-gating",
+      "adr_id": "DEP-ADR-002",
+      "prohibited_text": "make prost an optional feature-gated dependency",
+      "expected_error": "default-feature surface loss: Protobuf"
     }
   ],
   "validation": {
