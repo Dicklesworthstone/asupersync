@@ -40,6 +40,8 @@ binaries, 298 root exports, 19 API-map entry points, 19 format families, 43
 ASUP codes, 33 safety-taxonomy candidates, a curated live downstream
 portfolio, and every current `dep-plan` bead. New source or tracker surfaces
 therefore fail the focused contract until they receive an explicit mapping.
+Exact bead rules override prefixes; otherwise the unique longest prefix is
+authoritative. Missing mappings and equal-precedence matches fail closed.
 
 CLI coverage is deliberately fail-closed while CLI A1 is pending. The registry
 pins all six parser/command sources plus the shared exit-code registry by full
@@ -49,6 +51,50 @@ contract. Any option, alias, default, value parser, constraint, help text, or
 exit-path edit therefore forces review. These source snapshots are an
 inventory boundary, not a substitute for CLI A1 byte goldens or CLI A11
 installed workflows.
+
+## CAP A4 graph-wide no-loss signoff
+
+The canonical artifact now contains the deterministic
+`graph_signoff_report`. It joins all 398 canonical `dep-plan` issues, including
+335 non-epic executable work nodes, to the 50-capability registry through 108
+effective exact-or-longest-prefix rules. The only excluded tracker row is the
+explicitly superseded duplicate `asupersync-5z2scg.9`, whose closure names
+`asupersync-5z2scg.10` as the canonical no-loss aggregate. The report records
+zero unmapped, ambiguous, authority-mismatched, UNKNOWN-at-cutover,
+evidence-bypassing, feature-loss-authorizing, or stale-terminal-owner rows.
+
+Five new aggregate terminals have exact mappings to the complete capability
+unions recorded by their tracker authority comments:
+
+- Phase 2 S1 (`asupersync-d24mms.13`);
+- Phase 3 S1 (`asupersync-dep-p3-api-adrs-h3jspm.13`);
+- Phase 5 S1 (`asupersync-5z2scg.10`);
+- Phase 8a S1 (`asupersync-3u3tej.5`); and
+- Phase 8b S1 (`asupersync-0h6myr.7`).
+
+Exact aggregate mappings express secondary compatibility obligations. They do
+not replace each campaign's primary implementation, evidence, or cutover
+authority.
+
+Evidence owners must be executable terminal leaves, never coordination epics.
+The registry therefore points Kafka unit/security evidence to K12.5 and real
+E2E to K13.6, full regex evidence to R3.7.4, and SQLite parity evidence to P9.
+The report also checks all decomposed Kafka, regex, OS-lock, signal, NKey, and
+SQLite parent epics against their explicit terminal children and parent-child
+edges.
+
+Every one of the 41 cutover targets remains `dependency_exit_allowed=false`
+and inherits all twelve CAP A3 global gates: capability map, baseline, safety,
+marginal graph, unit invariants, downstream, no-mock E2E, oracle, rollback,
+UX/docs, owner, and final no-loss. The nine cross-cutting rows remain guards
+only.
+
+The fail-closed fixture catalog directly rejects all eight historical loss
+patterns: Kafka feature deletion, finite-only `ProstCodec`, JSON-only config,
+subset regex, OTLP logs omission, Brotli removal, generic Serde format
+removal, and SQLite relocation without a blessed adapter. The live tracker
+scan applies the same detector to titles, descriptions, and acceptance
+criteria.
 
 ## Evidence ownership
 
@@ -75,7 +121,7 @@ cycle and is forbidden.
 
 <!-- BEGIN GENERATED CAPABILITY SUMMARY -->
 - Artifact: `dependency-capability-registry-v1` (schema 1)
-- Inventories: 50 capabilities; 57 Cargo features; 14 binaries; 19 formats; 33 journeys; 33 taxonomy candidates; 16 downstream consumers; 103 bead mapping rules.
+- Inventories: 50 capabilities; 57 Cargo features; 15 binaries; 19 formats; 33 journeys; 33 taxonomy candidates; 16 downstream consumers; 108 bead mapping rules.
 - Categories: CLI=4, async-api=1, authentication=1, benchmark-tooling=1, codec=2, collection=2, compression=2, concurrency-hot-path=1, configuration=2, database=2, dependency-governance=1, downstream-interop=1, filesystem=2, interop=1, messaging=2, operator-ux=1, parser=1, pattern-matching=1, performance-experiment=1, performance-kernel=1, persisted-format=1, platform=3, platform-io=1, proc-macro=1, public-api=2, runtime-core=1, security=1, security-protocol=1, serialization=2, synchronization=1, telemetry=1, time=1, transport=1, verification=2, verification-runtime=1.
 - Dispositions: EXPERIMENT_ONLY=2, INTERNAL_ONLY=1, KEEP_UNTIL_PARITY=21, PRESERVE=8, PRESERVE_AND_REPLACE_IF_PARITY=18.
 - Evidence states: BASELINE_EXISTING=4, BASELINE_PLANNED=46.
@@ -104,7 +150,7 @@ cycle and is forbidden.
 | `CAP-HOST-BENCH-METADATA` | benchmark-tooling | PRESERVE_AND_REPLACE_IF_PARITY | BASELINE_PLANNED | BLOCKED_PENDING_EVIDENCE | `asupersync-dep-p1-foundations-upksjk.6.5` |
 | `CAP-HOST-INTROSPECTION` | platform | KEEP_UNTIL_PARITY | BASELINE_PLANNED | KEEP_INCUMBENT | `asupersync-3u3tej.2.7` |
 | `CAP-HTTP-COMPRESSION` | compression | KEEP_UNTIL_PARITY | BASELINE_PLANNED | KEEP_INCUMBENT | `asupersync-0h6myr.5.7` |
-| `CAP-KAFKA` | messaging | KEEP_UNTIL_PARITY | BASELINE_PLANNED | KEEP_INCUMBENT | `asupersync-dep-p7-kafka-removal-sarszu.2.13` |
+| `CAP-KAFKA` | messaging | KEEP_UNTIL_PARITY | BASELINE_PLANNED | KEEP_INCUMBENT | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
 | `CAP-LAB-DETERMINISM` | verification-runtime | PRESERVE_AND_REPLACE_IF_PARITY | BASELINE_PLANNED | BLOCKED_PENDING_EVIDENCE | `asupersync-dep-p1-foundations-upksjk.6.2` |
 | `CAP-NATS-MESSAGING` | messaging | PRESERVE_AND_REPLACE_IF_PARITY | BASELINE_PLANNED | BLOCKED_PENDING_EVIDENCE | `asupersync-dep-p1-foundations-upksjk.6.3` |
 | `CAP-NKEY-AUTH` | authentication | KEEP_UNTIL_PARITY | BASELINE_PLANNED | KEEP_INCUMBENT | `asupersync-dep-p4-nkeys-poc60v.5` |
@@ -146,9 +192,13 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBU
 The contract validates row completeness and negative mutations, exact Cargo
 features and binaries, the semantic root-export projection, entry-point
 journeys, formats, ASUP codes, safety candidates, downstream manifests, all
-current dependency-program beads, and this generated summary.
+current dependency-program beads, exact aggregate authority mappings,
+terminal-leaf evidence ownership, converted-epic membership, all global
+cutover gates, the eight named historical loss fixtures, and this generated
+summary.
 
-This is scoped inventory evidence only. It does not prove implementation
-parity, runtime correctness, performance, live-service interoperability, broad
-workspace health, release readiness, or permission to cut over or delete
-anything.
+This is scoped registry and graph-contract evidence only. It does not prove
+planned evidence has run, implementation parity, runtime correctness,
+performance, live-service interoperability, broad workspace health, release
+readiness, a production dependency exit, or permission to cut over, narrow
+functionality, or delete anything.

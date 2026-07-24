@@ -16,6 +16,7 @@ const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const ARTIFACT_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
 const API_MAP_PATH: &str = "artifacts/api_surface_map_v1.json";
 const TAXONOMY_PATH: &str = "artifacts/dependency_safety_taxonomy_v1.json";
+const CUTOVER_POLICY_PATH: &str = "artifacts/dependency_cutover_policy_v1.json";
 const ERROR_REGISTRY_PATH: &str = "docs/error_codes/registry.json";
 const DOC_PATH: &str = "docs/dependency_capability_registry.md";
 const MANIFEST_PATH: &str = "Cargo.toml";
@@ -23,6 +24,8 @@ const TRACKER_PATH: &str = ".beads/issues.jsonl";
 const GENERATED_BEGIN: &str = "<!-- BEGIN GENERATED CAPABILITY SUMMARY -->";
 const GENERATED_END: &str = "<!-- END GENERATED CAPABILITY SUMMARY -->";
 const SCENARIO_ID: &str = "dependency_capability_registry_contract_v1";
+const CAP_A4_BEAD_ID: &str = "asupersync-dep-p1-foundations-upksjk.5.4";
+const AUTHORITY_MARKER: &str = "REV-4 CAPABILITY AUTHORITY";
 const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_capability_registry\" cargo test -p asupersync --test dependency_capability_registry_contract -- --nocapture";
 
 fn repo_root() -> PathBuf {
@@ -859,7 +862,7 @@ fn binaries_are_exhaustive_and_source_checked() {
         artifact_binaries, source_binaries,
         "binary inventory drifted; user and internal tools must all be mapped"
     );
-    assert_eq!(artifact_binaries.len(), 14);
+    assert_eq!(artifact_binaries.len(), 15);
     for user_binary in ["asupersync", "atp", "atpd", "offline_tuner"] {
         assert!(artifact_binaries.contains_key(user_binary));
     }
@@ -1195,14 +1198,418 @@ fn bead_rule_matches(rule: &Value, bead_id: &str) -> bool {
     }
 }
 
+fn effective_bead_rule<'a>(rules: &'a [Value], bead_id: &str) -> Result<&'a Value, String> {
+    let matches = rules
+        .iter()
+        .filter(|rule| bead_rule_matches(rule, bead_id))
+        .collect::<Vec<_>>();
+    let exact = matches
+        .iter()
+        .copied()
+        .filter(|rule| string(rule, "scope") == "exact")
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return Ok(exact[0]);
+    }
+    if exact.len() > 1 {
+        return Err(format!(
+            "{bead_id}: ambiguous mapping: {} exact rules",
+            exact.len()
+        ));
+    }
+
+    let Some(longest) = matches
+        .iter()
+        .map(|rule| string(rule, "bead_id").len())
+        .max()
+    else {
+        return Err(format!("{bead_id}: unmapped dep-plan bead"));
+    };
+    let longest_matches = matches
+        .into_iter()
+        .filter(|rule| string(rule, "bead_id").len() == longest)
+        .collect::<Vec<_>>();
+    if longest_matches.len() != 1 {
+        return Err(format!(
+            "{bead_id}: ambiguous mapping: {} equal-precedence prefix rules",
+            longest_matches.len()
+        ));
+    }
+    Ok(longest_matches[0])
+}
+
+fn authority_capability_ids(issue: &Value) -> BTreeSet<String> {
+    let mut capabilities = BTreeSet::new();
+    for comment in issue
+        .get("comments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(text) = comment.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if !text.contains(AUTHORITY_MARKER) {
+            continue;
+        }
+        let authority_segment = text.split("Role =").next().unwrap_or(text);
+        for token in authority_segment.split(|character: char| {
+            character.is_ascii_whitespace() || matches!(character, ',' | ';' | '.' | '`')
+        }) {
+            let candidate = token.trim_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '-'
+            });
+            if candidate.starts_with("CAP-")
+                && candidate
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                capabilities.insert(candidate.to_owned());
+            }
+        }
+    }
+    capabilities
+}
+
+fn issue_contract_text(issue: &Value) -> String {
+    [
+        issue.get("title").and_then(Value::as_str).unwrap_or(""),
+        issue
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        issue
+            .get("acceptance_criteria")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    ]
+    .join(" ")
+    .to_ascii_lowercase()
+}
+
+fn loss_authorization_errors(registry: &Value, text: &str) -> Vec<String> {
+    let normalized = text.to_ascii_lowercase();
+    array(registry, "known_loss_fixtures")
+        .iter()
+        .filter_map(|fixture| {
+            let prohibited = string(fixture, "prohibited_text").to_ascii_lowercase();
+            normalized
+                .contains(&prohibited)
+                .then(|| string(fixture, "expected_error").to_owned())
+        })
+        .collect()
+}
+
+fn is_superseded_duplicate(issue: &Value) -> bool {
+    issue.get("status").and_then(Value::as_str) == Some("closed")
+        && issue
+            .get("close_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| {
+                let reason = reason.to_ascii_lowercase();
+                reason.contains("superseded") && reason.contains("duplicate")
+            })
+}
+
+fn has_parent_edge(issue: &Value, parent_id: &str) -> bool {
+    issue
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .is_some_and(|dependencies| {
+            dependencies.iter().any(|dependency| {
+                dependency.get("type").and_then(Value::as_str) == Some("parent-child")
+                    && dependency.get("depends_on_id").and_then(Value::as_str) == Some(parent_id)
+            })
+        })
+}
+
+fn graph_signoff_errors(registry: &Value, issues: &[Value], cutover: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    let report = object(registry, "graph_signoff_report");
+    let rules = array(registry, "bead_mapping_rules");
+    let known_capabilities = capability_ids(registry);
+    let excluded_superseded_duplicates = issues
+        .iter()
+        .filter(|issue| issue_has_label(issue, "dep-plan") && is_superseded_duplicate(issue))
+        .map(|issue| string(issue, "id").to_owned())
+        .collect::<BTreeSet<_>>();
+    let dep_plan_issues = issues
+        .iter()
+        .filter(|issue| issue_has_label(issue, "dep-plan") && !is_superseded_duplicate(issue))
+        .collect::<Vec<_>>();
+    let issue_by_id = issues
+        .iter()
+        .map(|issue| (string(issue, "id").to_owned(), issue))
+        .collect::<BTreeMap<_, _>>();
+
+    let expected_counts = [
+        ("dep_plan_issue_count", dep_plan_issues.len()),
+        (
+            "non_epic_work_count",
+            dep_plan_issues
+                .iter()
+                .filter(|issue| issue.get("issue_type").and_then(Value::as_str) != Some("epic"))
+                .count(),
+        ),
+        ("capability_count", known_capabilities.len()),
+        ("mapping_rule_count", rules.len()),
+    ];
+    for (key, expected) in expected_counts {
+        if report.get(key).and_then(Value::as_u64) != Some(expected as u64) {
+            errors.push(format!("graph signoff {key} drifted: expected {expected}"));
+        }
+    }
+    if string(report, "signoff_bead_id") != CAP_A4_BEAD_ID {
+        errors.push("graph signoff references the wrong CAP A4 bead".to_owned());
+    }
+    if string(report, "status") != "PASS_SCOPED" {
+        errors.push("graph signoff status must be PASS_SCOPED".to_owned());
+    }
+    if string_set(report, "excluded_superseded_duplicate_ids") != excluded_superseded_duplicates {
+        errors.push(
+            "graph signoff excluded_superseded_duplicate_ids drifted from explicit tracker closures"
+                .to_owned(),
+        );
+    }
+
+    let mut unmapped = BTreeSet::new();
+    let mut ambiguous = BTreeSet::new();
+    let mut authority_mismatches = BTreeSet::new();
+    let mut loss_authorizations = BTreeSet::new();
+    for issue in &dep_plan_issues {
+        let bead_id = string(issue, "id");
+        match effective_bead_rule(rules, bead_id) {
+            Ok(rule) => {
+                let mapped = string_set(rule, "capability_ids");
+                for capability_id in &mapped {
+                    if !known_capabilities.contains(capability_id) {
+                        errors.push(format!(
+                            "{bead_id}: mapping references unknown capability {capability_id}"
+                        ));
+                    }
+                }
+                let authority = authority_capability_ids(issue);
+                if !authority.is_empty() && authority != mapped {
+                    authority_mismatches.insert(bead_id.to_owned());
+                }
+            }
+            Err(error) if error.contains("unmapped") => {
+                unmapped.insert(bead_id.to_owned());
+            }
+            Err(_) => {
+                ambiguous.insert(bead_id.to_owned());
+            }
+        }
+        if !loss_authorization_errors(registry, &issue_contract_text(issue)).is_empty() {
+            loss_authorizations.insert(bead_id.to_owned());
+        }
+    }
+
+    let reported_findings = [
+        ("unmapped_bead_ids", &unmapped),
+        ("ambiguous_bead_ids", &ambiguous),
+        ("authority_mismatch_bead_ids", &authority_mismatches),
+        ("loss_authorization_bead_ids", &loss_authorizations),
+    ];
+    for (key, actual) in reported_findings {
+        if string_set(report, key) != *actual {
+            errors.push(format!("graph signoff {key} does not match live findings"));
+        }
+        if !actual.is_empty() {
+            errors.push(format!("graph signoff {key} must be empty: {actual:?}"));
+        }
+    }
+
+    for bead_id in strings(report, "exact_aggregate_ids") {
+        let Some(issue) = issue_by_id.get(&bead_id) else {
+            errors.push(format!("missing exact aggregate tracker issue {bead_id}"));
+            continue;
+        };
+        match effective_bead_rule(rules, &bead_id) {
+            Ok(rule) => {
+                if string(rule, "scope") != "exact" {
+                    errors.push(format!("{bead_id}: aggregate must use an exact rule"));
+                }
+                if string_set(rule, "capability_ids") != authority_capability_ids(issue) {
+                    errors.push(format!(
+                        "{bead_id}: exact aggregate mapping differs from tracker authority"
+                    ));
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+
+    let mut stale_owner_ids = BTreeSet::new();
+    for row in array(registry, "capabilities") {
+        for key in ["unit_test_owner", "e2e_owner"] {
+            let owner = string(row, key);
+            match issue_by_id.get(owner) {
+                Some(issue) if issue.get("issue_type").and_then(Value::as_str) != Some("epic") => {}
+                _ => {
+                    stale_owner_ids.insert(owner.to_owned());
+                }
+            }
+        }
+    }
+    for remap in array(report, "terminal_owner_remaps") {
+        let capability_id = string(remap, "capability_id");
+        let owner_key = match string(remap, "owner_kind") {
+            "unit" => "unit_test_owner",
+            "e2e" => "e2e_owner",
+            other => {
+                errors.push(format!("{capability_id}: unsupported owner kind {other}"));
+                continue;
+            }
+        };
+        let Some(capability) = array(registry, "capabilities")
+            .iter()
+            .find(|row| string(row, "capability_id") == capability_id)
+        else {
+            errors.push(format!("terminal owner remap references {capability_id}"));
+            continue;
+        };
+        let epic_id = string(remap, "superseded_epic_id");
+        let terminal_id = string(remap, "terminal_owner_id");
+        if string(capability, owner_key) != terminal_id {
+            errors.push(format!(
+                "{capability_id}: {owner_key} must resolve to terminal {terminal_id}"
+            ));
+        }
+        if issue_by_id
+            .get(epic_id)
+            .and_then(|issue| issue.get("issue_type"))
+            .and_then(Value::as_str)
+            != Some("epic")
+        {
+            errors.push(format!("{epic_id}: superseded owner must remain an epic"));
+        }
+        match issue_by_id.get(terminal_id) {
+            Some(issue)
+                if issue.get("issue_type").and_then(Value::as_str) != Some("epic")
+                    && has_parent_edge(issue, epic_id) => {}
+            _ => errors.push(format!(
+                "{terminal_id}: terminal owner must be a non-epic child of {epic_id}"
+            )),
+        }
+    }
+    if string_set(report, "stale_terminal_owner_ids") != stale_owner_ids {
+        errors.push("graph signoff stale_terminal_owner_ids drifted".to_owned());
+    }
+    if !stale_owner_ids.is_empty() {
+        errors.push(format!(
+            "capability evidence owners must be terminal leaves: {stale_owner_ids:?}"
+        ));
+    }
+
+    for conversion in array(report, "converted_epic_terminals") {
+        let epic_id = string(conversion, "epic_id");
+        if issue_by_id
+            .get(epic_id)
+            .and_then(|issue| issue.get("issue_type"))
+            .and_then(Value::as_str)
+            != Some("epic")
+        {
+            errors.push(format!("{epic_id}: converted parent must be an epic"));
+        }
+        for terminal_id in strings(conversion, "terminal_ids") {
+            match issue_by_id.get(&terminal_id) {
+                Some(issue)
+                    if issue.get("issue_type").and_then(Value::as_str) != Some("epic")
+                        && has_parent_edge(issue, epic_id) => {}
+                _ => errors.push(format!(
+                    "{terminal_id}: converted terminal must be a non-epic child of {epic_id}"
+                )),
+            }
+        }
+    }
+
+    let bindings = array(cutover, "capability_bindings");
+    let cutover_targets = bindings
+        .iter()
+        .filter(|binding| string(binding, "binding_role") == "CUTOVER_TARGET")
+        .count();
+    let guard_only = bindings.len() - cutover_targets;
+    if report.get("cutover_target_count").and_then(Value::as_u64) != Some(cutover_targets as u64) {
+        errors.push("graph signoff cutover_target_count drifted".to_owned());
+    }
+    if report
+        .get("cross_cutting_guard_count")
+        .and_then(Value::as_u64)
+        != Some(guard_only as u64)
+    {
+        errors.push("graph signoff cross_cutting_guard_count drifted".to_owned());
+    }
+    if string_set(report, "required_cutover_gate_ids") != string_set(cutover, "global_gate_ids") {
+        errors.push("graph signoff must retain every global cutover gate".to_owned());
+    }
+
+    let mut evidence_bypass = BTreeSet::new();
+    for binding in bindings {
+        if string(binding, "binding_role") != "CUTOVER_TARGET" {
+            continue;
+        }
+        let capability_id = string(binding, "capability_id");
+        let Some(capability) = array(registry, "capabilities")
+            .iter()
+            .find(|row| string(row, "capability_id") == capability_id)
+        else {
+            evidence_bypass.insert(capability_id.to_owned());
+            continue;
+        };
+        let owners_are_terminal = ["unit_test_owner", "e2e_owner"].into_iter().all(|key| {
+            issue_by_id
+                .get(string(capability, key))
+                .is_some_and(|issue| {
+                    issue.get("issue_type").and_then(Value::as_str) != Some("epic")
+                })
+        });
+        if binding
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool)
+            != Some(false)
+            || !owners_are_terminal
+        {
+            evidence_bypass.insert(capability_id.to_owned());
+        }
+    }
+    if string_set(report, "evidence_bypass_capability_ids") != evidence_bypass {
+        errors.push("graph signoff evidence_bypass_capability_ids drifted".to_owned());
+    }
+    if !evidence_bypass.is_empty() {
+        errors.push(format!(
+            "cutover bindings bypass required evidence: {evidence_bypass:?}"
+        ));
+    }
+
+    let unknown_at_cutover = array(registry, "capabilities")
+        .iter()
+        .filter(|row| {
+            string(row, "evidence_state") == "UNKNOWN_BLOCKING"
+                && string(row, "cutover_state") != "BLOCKED_PENDING_EVIDENCE"
+        })
+        .map(|row| string(row, "capability_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    if string_set(report, "unknown_at_cutover_capability_ids") != unknown_at_cutover {
+        errors.push("graph signoff unknown_at_cutover_capability_ids drifted".to_owned());
+    }
+    if !unknown_at_cutover.is_empty() {
+        errors.push(format!(
+            "UNKNOWN capability evidence reached cutover: {unknown_at_cutover:?}"
+        ));
+    }
+
+    errors
+}
+
 #[test]
-fn every_dep_plan_bead_has_exactly_one_capability_rule() {
+fn every_dep_plan_bead_has_one_unambiguous_effective_rule() {
     let registry = registry();
     let rules = array(&registry, "bead_mapping_rules");
     let known_capabilities = capability_ids(&registry);
     let dep_plan_issues = tracker_issues()
         .into_iter()
-        .filter(|issue| issue_has_label(issue, "dep-plan"))
+        .filter(|issue| issue_has_label(issue, "dep-plan") && !is_superseded_duplicate(issue))
         .collect::<Vec<_>>();
     assert!(
         dep_plan_issues.len() >= 270,
@@ -1233,15 +1640,126 @@ fn every_dep_plan_bead_has_exactly_one_capability_rule() {
 
     for issue in dep_plan_issues {
         let bead_id = string(&issue, "id");
-        let matches = rules
-            .iter()
-            .filter(|rule| bead_rule_matches(rule, bead_id))
-            .count();
-        assert_eq!(
-            matches, 1,
-            "{bead_id} must have exactly one mapping rule, found {matches}"
+        let rule = effective_bead_rule(rules, bead_id)
+            .unwrap_or_else(|error| panic!("effective rule resolution failed: {error}"));
+        assert!(
+            !strings(rule, "capability_ids").is_empty(),
+            "{bead_id}: effective mapping must not be empty"
         );
     }
+}
+
+#[test]
+fn graph_wide_no_loss_signoff_is_current() {
+    let registry = registry();
+    let issues = tracker_issues();
+    let cutover = parse_repo_json(CUTOVER_POLICY_PATH);
+    let errors = graph_signoff_errors(&registry, &issues, &cutover);
+    assert!(
+        errors.is_empty(),
+        "CAP A4 graph signoff failed:\n{}",
+        errors.join("\n")
+    );
+}
+
+#[test]
+fn negative_unmapped_and_ambiguous_rules_fail_closed() {
+    let mut missing_registry = registry();
+    let issues = tracker_issues();
+    let cutover = parse_repo_json(CUTOVER_POLICY_PATH);
+    missing_registry["bead_mapping_rules"]
+        .as_array_mut()
+        .expect("bead_mapping_rules")
+        .retain(|rule| string(rule, "bead_id") != "asupersync-d24mms.13");
+    let errors = graph_signoff_errors(&missing_registry, &issues, &cutover).join("\n");
+    assert!(errors.contains("unmapped_bead_ids"));
+
+    let mut ambiguous_registry = registry();
+    let duplicate = array(&ambiguous_registry, "bead_mapping_rules")
+        .iter()
+        .find(|rule| string(rule, "bead_id") == "asupersync-d24mms.13")
+        .expect("exact aggregate rule")
+        .clone();
+    ambiguous_registry["bead_mapping_rules"]
+        .as_array_mut()
+        .expect("bead_mapping_rules")
+        .push(duplicate);
+    let errors = graph_signoff_errors(&ambiguous_registry, &issues, &cutover).join("\n");
+    assert!(errors.contains("ambiguous_bead_ids"));
+}
+
+#[test]
+fn negative_authority_and_terminal_owner_drift_fail_closed() {
+    let issues = tracker_issues();
+    let cutover = parse_repo_json(CUTOVER_POLICY_PATH);
+    let mut authority_registry = registry();
+    let exact = authority_registry["bead_mapping_rules"]
+        .as_array_mut()
+        .expect("bead_mapping_rules")
+        .iter_mut()
+        .find(|rule| string(rule, "bead_id") == "asupersync-3u3tej.5")
+        .expect("platform aggregate rule");
+    exact["capability_ids"] = serde_json::json!(["CAP-SIGNALS"]);
+    let errors = graph_signoff_errors(&authority_registry, &issues, &cutover).join("\n");
+    assert!(errors.contains("authority_mismatch_bead_ids"));
+    assert!(errors.contains("exact aggregate mapping differs"));
+
+    let mut owner_registry = registry();
+    set_value(
+        capability_row_mut(&mut owner_registry, "CAP-KAFKA"),
+        "e2e_owner",
+        Value::String("asupersync-dep-p7-kafka-removal-sarszu.2.13".to_owned()),
+    );
+    let errors = graph_signoff_errors(&owner_registry, &issues, &cutover).join("\n");
+    assert!(errors.contains("capability evidence owners must be terminal leaves"));
+    assert!(errors.contains("e2e_owner must resolve to terminal"));
+}
+
+#[test]
+fn all_named_feature_loss_fixtures_fail_for_the_intended_reason() {
+    let registry = registry();
+    assert_eq!(array(&registry, "known_loss_fixtures").len(), 8);
+    for fixture in array(&registry, "known_loss_fixtures") {
+        let errors = loss_authorization_errors(&registry, string(fixture, "prohibited_text"));
+        assert_eq!(
+            errors,
+            [string(fixture, "expected_error").to_owned()],
+            "{} must fail for its intended reason",
+            string(fixture, "fixture_id")
+        );
+    }
+    assert!(
+        loss_authorization_errors(
+            &registry,
+            "KEEP Kafka, Brotli, generic Serde, TOML, regex, OTLP logs, and SQLite until parity"
+        )
+        .is_empty(),
+        "explicit preservation language must remain accepted"
+    );
+}
+
+#[test]
+fn negative_cutover_gate_bypass_fails_closed() {
+    let registry = registry();
+    let issues = tracker_issues();
+    let mut cutover = parse_repo_json(CUTOVER_POLICY_PATH);
+    cutover["global_gate_ids"]
+        .as_array_mut()
+        .expect("global_gate_ids")
+        .retain(|gate| gate.as_str() != Some("GATE-E2E"));
+    let errors = graph_signoff_errors(&registry, &issues, &cutover).join("\n");
+    assert!(errors.contains("must retain every global cutover gate"));
+
+    let mut cutover = parse_repo_json(CUTOVER_POLICY_PATH);
+    let binding = cutover["capability_bindings"]
+        .as_array_mut()
+        .expect("capability_bindings")
+        .iter_mut()
+        .find(|binding| string(binding, "capability_id") == "CAP-KAFKA")
+        .expect("Kafka cutover binding");
+    binding["dependency_exit_allowed"] = Value::Bool(true);
+    let errors = graph_signoff_errors(&registry, &issues, &cutover).join("\n");
+    assert!(errors.contains("bypass required evidence"));
 }
 
 #[test]
