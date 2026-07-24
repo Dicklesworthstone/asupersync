@@ -125,7 +125,7 @@
       "adr_id": "DEP-ADR-007",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.7",
       "title": "Preserve complete NKey credential, prefix, signing, verification and downstream API capability",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-008",
@@ -149,7 +149,7 @@
       "adr_id": "DEP-ADR-011",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
       "title": "Owned UTC timestamp/calendar surface for full chrono/time capability, serialization, and UX",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-012",
@@ -3729,6 +3729,490 @@
       "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the codecs are byte-compatible with any reference implementation, that cross-implementation interoperability has been demonstrated, that the bomb bounds have been fuzzed adequately, that an owned RFC 7932 codec is feasible, that performance is unchanged, or that either codec dependency may be removed. It also does not certify the capability registry's source-owner row, which CMP-GAP-01 records as incorrect for this capability."
     },
     {
+      "adr_id": "DEP-ADR-007",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.7",
+      "title": "Preserve complete NKey credential, prefix, signing, verification and downstream API capability",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-NKEY-AUTH"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "nkeys stays. The source read reframes the replacement in three ways that all point the same direction. First, scope: the plan's design section sizes the work at roughly two hundred lines of base32, CRC-16 and prefix codec and frames it as NATS-only, but nkeys is load-bearing in four independent subsystems, not one, and the registry demands every prefix form, Curve keys, JWT signer policy and secret zeroization. Those are not the same order of magnitude. Second, direction of trade: ed25519-dalek is not a direct dependency today, it arrives only through nkeys, so the swap adds a direct cryptographic dependency plus hand-written credential-encoding code in exchange for removing one crate. For a security capability that is a materially different proposition than a net reduction. Third, readiness: the differential oracle that would prove parity does not exist, its harness directory is absent, nkeys is not a dev-dependency so it cannot yet serve as the reference, and the declared independent security review has not happened.",
+      "alternatives_considered": [
+        {
+          "option": "Implement the owned codec now, per the plan's Phase-4 design.",
+          "rejected_because": "The design is scoped to a base32, CRC-16 and prefix codec for NATS. The real capability spans NATS messaging, ATP identity, ATP capability-token verification, agent-swarm credential admission and runtime signed-profile bundles, plus a key store with rotation and revocation. The estimate does not cover the consumers it would break."
+        },
+        {
+          "option": "Accept the replacement because it removes a crate from the graph.",
+          "rejected_because": "It does not straightforwardly reduce trust surface. ed25519-dalek is transitive through nkeys today; the replacement makes it direct and adds hand-rolled base32 and CRC-16 in first-party code. The program's own discipline says moving unsafe or security-critical code from a mature, widely-used dependency into fresh first-party code does not inherently reduce risk without measured evidence and owner sign-off."
+        },
+        {
+          "option": "Narrow the replacement to the User prefix, since that is all production accepts.",
+          "rejected_because": "Tempting, and it would be honest about current usage: production enforces User-only fail-closed at three sites, and Cluster and Operator appear solely as test fixtures. But the registry's scope explicitly includes every prefix form and Curve keys, and NATS interoperability means credential forms arrive from outside. Narrowing is a decision the owner must make deliberately, and this ADR records the choice rather than making it silently."
+        },
+        {
+          "option": "Keep nkeys but hide it behind an owned wrapper type to remove the public leak.",
+          "rejected_because": "Worth doing eventually and cheap in isolation, since the leak is a single public function returning Result<nkeys::KeyPair, KeyStoreError>. But it is a breaking change for any downstream that calls sign or verify on the returned value, and the bead forbids permanent shims, so it belongs with the replacement rather than ahead of it."
+        },
+        {
+          "option": "Proceed once the codec passes NATS fixture vectors.",
+          "rejected_because": "Those vectors do not exist. The oracle policy names a harness directory that is absent, and nkeys is a normal dependency rather than a dev-dependency, so the reference implementation is not even wired for differential testing. Parity is currently unmeasurable, exactly as with the CLI."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::security::keys",
+          "feature_gate": null,
+          "source_file": "src/security/keys/mod.rs",
+          "symbols": [
+            "IdentityKeyStore",
+            "KeyFingerprint",
+            "PublicIdentityKey",
+            "KeyStorePlatform",
+            "KeyStoreError",
+            "active_key_pair",
+            "export_public",
+            "export_public_history",
+            "rotate",
+            "revoke",
+            "active_generation",
+            "from_public_key",
+            "from_hex",
+            "to_hex",
+            "redacted"
+          ],
+          "note": "The largest owned surface and the location of the single public nkeys leak. active_key_pair returns Result<nkeys::KeyPair, KeyStoreError>, which is the only place an nkeys type reaches asupersync's public API. This file is absent from the capability registry's source owners."
+        },
+        {
+          "module_path": "asupersync::messaging::nats",
+          "feature_gate": null,
+          "source_file": "src/messaging/nats.rs",
+          "symbols": [
+            "NatsConfig",
+            "nkey_seed",
+            "apply_creds",
+            "NatsError",
+            "NATS_CREDS_JWT_BEGIN",
+            "NATS_CREDS_SEED_BEGIN"
+          ],
+          "note": "The NATS authentication path: seed loading, nonce signing, JWT subject binding and CONNECT emission. The credential block markers are the accepted .creds text format and are part of the operator-facing contract."
+        },
+        {
+          "module_path": "asupersync::runtime::config",
+          "feature_gate": null,
+          "source_file": "src/runtime/config.rs",
+          "symbols": [
+            "SignedProfileBundleIntegrityMode"
+          ],
+          "note": "Signed profile bundles sign and verify through nkeys with an explicit ed25519-nkey integrity mode. A consumer of this capability that the registry does not name."
+        },
+        {
+          "module_path": "asupersync::atp::identity",
+          "feature_gate": null,
+          "source_file": "src/atp/identity/mod.rs",
+          "symbols": [
+            "DurablePeerIdentity"
+          ],
+          "note": "ATP peer identity validates NKey public keys and records an nkey-ed25519 auth method. Also unnamed by the registry."
+        },
+        {
+          "module_path": "asupersync::agent_swarm::control_plane",
+          "feature_gate": null,
+          "source_file": "src/agent_swarm/control_plane.rs",
+          "symbols": [
+            "AGENT_CREDENTIAL_SIGNATURE_SCHEME"
+          ],
+          "note": "Agent admission verifies credential signatures with a pinned nkey_ed25519 scheme constant. Also unnamed by the registry."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "nkeys",
+          "cargo_definition": "nkeys = \"0.4.5\"",
+          "effect": "Unconditional and non-optional, so NKey credential support ships in every build on every target with no feature gate. It also transitively supplies ed25519-dalek, ed25519 and data-encoding, none of which is a direct dependency.",
+          "must_remain": true,
+          "no_tokio_guarantee": "nkeys introduces no tokio edge."
+        },
+        {
+          "name": "test-internals",
+          "cargo_definition": "test-internals = [",
+          "effect": "Gates the doc-hidden fuzz shims that expose seed loading as a String-returning function. Those deliberately launder the type so no nkeys value escapes even through the fuzz surface.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "identity_key_store",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/security/keys/mod.rs",
+          "wire_encoder": "persisted key records",
+          "transport": "local key store file",
+          "public_entry_points": [
+            "IdentityKeyStore",
+            "rotate",
+            "revoke",
+            "export_public_history"
+          ],
+          "note": "Generation-tracked keys with rotation, revocation and history. The store, its platform permission model, its domain-separated fingerprints and its seed entropy validation are all asupersync-owned; only the key type itself comes from nkeys."
+        },
+        {
+          "surface": "public_keypair_leak",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/security/keys/mod.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "active_key_pair"
+          ],
+          "note": "The entire public nkeys surface is this one function. Everything else that touches nkeys does so behind an owned type or a private function, so the API blast radius of a replacement is small even though the internal blast radius is not."
+        },
+        {
+          "surface": "nats_credential_authentication",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/messaging/nats.rs",
+          "wire_encoder": "NATS CONNECT protocol with base64url nonce signatures",
+          "transport": "NATS wire protocol",
+          "public_entry_points": [
+            "NatsConfig",
+            "apply_creds"
+          ],
+          "note": "Seed loading, nonce signing, JWT subject binding with a constant-time comparison, and a required ed25519-nkey algorithm. The .creds text block markers are the accepted operator format."
+        },
+        {
+          "surface": "signed_profile_bundles",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/runtime/config.rs",
+          "wire_encoder": "nkey_ed25519 signatures over profile bundles",
+          "transport": "persisted configuration artifacts",
+          "public_entry_points": [
+            "SignedProfileBundleIntegrityMode"
+          ],
+          "note": "Signing and verification of runtime profile bundles. One of the four subsystems the plan's NATS-only framing omits."
+        },
+        {
+          "surface": "atp_and_swarm_credential_verification",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/atp/identity/mod.rs and src/agent_swarm/control_plane.rs",
+          "wire_encoder": "nkey-ed25519 signatures over capability tokens and agent credentials",
+          "transport": "ATP protocol and swarm control plane",
+          "public_entry_points": [
+            "DurablePeerIdentity",
+            "AGENT_CREDENTIAL_SIGNATURE_SCHEME"
+          ],
+          "note": "Two further consumers unnamed by the registry. Capability-token verification reconstructs a key pair from a public key and verifies a signature; agent admission does the same for credentials."
+        },
+        {
+          "surface": "owned_nkey_codec",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "src/security/nkey.rs, the file the plan's design section names, does not exist. Nothing NKey-format-related is hand-rolled in asupersync today: base32, CRC-16 and the prefix codec are all upstream. Recorded so the plan entry is not read as describing partially built work."
+        },
+        {
+          "surface": "differential_oracle_harness",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "The oracle policy names a harness directory that does not exist, and nkeys is a normal dependency rather than a dev-dependency, so it is not wired as a reference implementation. Parity against the incumbent is currently unmeasurable."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "NATS authentication, ATP capability tokens, agent-swarm credentials and signed profile bundles",
+        "encoding": "canonical NKey base32 with CRC-16/XMODEM and typed prefix bytes, over ed25519 signatures",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "NATS CONNECT carries the public key and a base64url-encoded nonce signature. Credential files use explicit BEGIN and END markers for the JWT and the seed.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "not applicable",
+        "collector_interop": "Real NATS servers and clients must continue to accept and be accepted.",
+        "algorithm_pinning": "The JWT algorithm must be ed25519-nkey, and the signed-profile and swarm schemes are pinned constants. These are fail-closed checks, not hints.",
+        "prefix_enforcement": "Production accepts User keys only and rejects other kinds explicitly at three separate sites. That restriction is current behavior and is frozen as such.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "user_only_enforcement",
+          "surface": "key store, NATS seed loading and ATP identity validation",
+          "contract": "All three reject a non-User key kind with an explicit error naming the kind found. Type separation between public, seed and private forms is fail-closed."
+        },
+        {
+          "name": "secret_redaction",
+          "surface": "NatsConfig and persisted key records",
+          "contract": "Debug output redacts the JWT and the seed, and persisted seed material never appears in diagnostics. Both are covered by dedicated tests today."
+        },
+        {
+          "name": "seed_entropy_validation",
+          "surface": "the key store",
+          "contract": "Weak seed material is rejected before use, with owned thresholds. This is asupersync's own check layered on top of nkeys."
+        },
+        {
+          "name": "domain_separated_fingerprints",
+          "surface": "KeyFingerprint",
+          "contract": "SHA-256 fingerprints are domain-separated with an explicit constant, and a redacted rendering exists for logs. Both the domain separation and the redacted form are contract."
+        },
+        {
+          "name": "constant_time_comparison",
+          "surface": "JWT subject binding",
+          "contract": "The subject comparison is constant-time. Replacing it with an ordinary equality check would be a security regression, not a refactor."
+        },
+        {
+          "name": "key_rotation_and_revocation",
+          "surface": "IdentityKeyStore",
+          "contract": "Keys carry generations, rotation preserves history, and revocation is recorded rather than deleting the record. Export of public history must remain available."
+        },
+        {
+          "name": "platform_permission_model",
+          "surface": "KeyStorePlatform",
+          "contract": "The store distinguishes owner-only Unix permissions, a Windows ACL requirement and a best-effort fallback. Weakening any cell is a security change."
+        },
+        {
+          "name": "algorithm_fail_closed",
+          "surface": "JWT and bundle verification",
+          "contract": "An unexpected algorithm is rejected rather than defaulted. Signer authorization failures are distinct from signature failures and neither is oracular."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "NKY-GAP-01",
+          "summary": "The capability registry names src/messaging/nats.rs and Cargo.toml as source owners. Both genuinely contain nkey code, so this row is not a phantom-owner row, but it is wrong by omission: five production files with real nkey code are missing, including src/security/keys/mod.rs which hosts the only public leak, plus src/runtime/config.rs, src/atp/identity/mod.rs, src/atp/policy/verification.rs and src/agent_swarm/control_plane.rs.",
+          "consequence": "The row makes the capability look NATS-shaped when it actually spans four independent subsystems. Any scoping built from it, including the plan's own design section, will underestimate the consumers a replacement breaks.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "NKY-GAP-02",
+          "summary": "The registry's dependency owners list base32 and crc16 as if they were crates. Neither exists in the manifest or the lockfile: base32 comes from data-encoding pulled in by nkeys, and CRC-16/XMODEM is implemented inside nkeys itself. The same list names ed25519-dalek as an owner although it is not a direct dependency.",
+          "consequence": "A marginal-cost calculation or an SBOM built from that list would reference crates that are not in the graph and would misattribute the ed25519 edge.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "NKY-GAP-03",
+          "summary": "The differential oracle does not exist. The oracle policy names a harness directory that is absent from the tree, and nkeys is a normal dependency rather than a dev-dependency, so the reference implementation is not wired for differential testing at all.",
+          "consequence": "Parity against the incumbent cannot currently be measured. This is the single blocking precondition for any replacement.",
+          "owner_bead": "asupersync-dep-p4-nkeys-poc60v.1.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "NKY-GAP-04",
+          "summary": "There are no independent official NKey or NATS vectors in the repository. Existing tests generate their own deterministic seeds from fixed raw bytes, which proves self-consistency rather than interoperability.",
+          "consequence": "A replacement could be self-consistent and still wrong against real NATS peers.",
+          "owner_bead": "asupersync-dep-p4-nkeys-poc60v.1.6",
+          "may_widen": false
+        },
+        {
+          "gap_id": "NKY-GAP-05",
+          "summary": "The declared independent security review has not happened. The safety taxonomy records the gate with no exception record, and the capability remains at planned evidence with the incumbent kept.",
+          "consequence": "The gate the program itself set for this capability is unmet, so no cutover discussion is in order.",
+          "owner_bead": "asupersync-dep-p4-nkeys-poc60v.5",
+          "may_widen": false
+        },
+        {
+          "gap_id": "NKY-GAP-06",
+          "summary": "The plan's design section sizes the replacement at roughly two hundred lines covering base32, CRC-16 and prefixes, and frames it as NATS-only. The registry scopes the same capability to every prefix form, Curve and X25519 keys, JWT signer policy and secret zeroization, across four subsystems.",
+          "consequence": "The two scopes differ by more than an order of magnitude. Planning from the smaller one would commit the project to a security-critical rewrite on a false estimate.",
+          "owner_bead": "asupersync-dep-p4-nkeys-poc60v.1.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "NKY-GAP-07",
+          "summary": "Production exercises the User kind only, enforced fail-closed. Cluster and Operator appear solely as test fixtures, and Account, Server, Module, Service and Curve are not referenced anywhere in the repository.",
+          "consequence": "Whether the replacement must preserve actual capability, which is User-only, or nominal upstream capability, which is eight kinds plus seed, private and curve encodings, is an unresolved owner decision that changes the scope enormously. Recorded rather than silently narrowed.",
+          "owner_bead": "asupersync-dep-p4-nkeys-poc60v.1.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "NKY-GAP-08",
+          "summary": "The capability baseline records resource-limit evidence as blocked on an owner and cancellation-cleanup and recovery as blocked externally.",
+          "consequence": "Bounded parse and verify behavior, and the cancellation invariant that authentication cancellation wipes transient secrets, are both unproven.",
+          "owner_bead": "asupersync-dep-p4-nkeys-poc60v.5",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Sensitive comparisons are constant-time, including the JWT subject binding.",
+        "Secrets are zeroized and never cloned into ordinary APIs; debug output redacts both the JWT and the seed.",
+        "Public, seed and private forms are type-separated, and only the User kind is accepted in production, fail-closed.",
+        "Signer authorization fails closed, and an unexpected algorithm is rejected rather than defaulted.",
+        "Seed entropy is validated before use.",
+        "An independent security review is a precondition for any cutover, and it has not happened."
+      ],
+      "cancellation_invariants": [
+        "Authentication cancellation releases connection state and wipes transient secrets.",
+        "A partially completed handshake never leaves a usable authenticated session.",
+        "These are stated obligations rather than proven ones; the baseline records both as blocked."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "nkeys is unconditional and platform-neutral. The key store's permission model is platform-aware with explicit Unix, Windows and best-effort cells."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "asupersync::security::keys::IdentityKeyStore::active_key_pair returning an nkeys key pair",
+          "NATS credential files in the accepted .creds text format",
+          "ATP capability tokens and agent-swarm credentials verified against NKey public keys",
+          "signed runtime profile bundles"
+        ],
+        "accepted_providers": "Real NATS servers and clients, and any producer of canonical NKey credentials.",
+        "pinned_crate_versions": {
+          "nkeys": "0.4.5, unconditional and non-optional",
+          "ed25519-dalek": "2.2, transitive through nkeys only, not a direct dependency",
+          "data-encoding": "transitive through nkeys; the actual base32 implementation"
+        },
+        "no_reexport_note": "nkeys is not re-exported. Exactly one public function returns an nkeys type. The doc-hidden fuzz shims deliberately return a String rather than a key pair so that even the test surface does not widen the leak.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "The key store, its fingerprints, its entropy validation, its permission model, the credential text format and the constant-time comparison are all owned. The dependency supplies the key type, the format codec and the signature primitive.",
+        "removal_precondition": "A differential oracle must exist first, with nkeys wired as a dev-dependency reference and a harness in place. Then independent official NKey and NATS vectors, a negative credential matrix, fuzzing, cross-implementation NATS server and client E2E, arbitrary downstream consumer compile and runtime fixtures, and an independent security review. The owner must also decide explicitly whether the target is User-only actual capability or full upstream nominal capability. The incumbent remains a quarantined oracle under policy and stays in production if any capability cannot be matched safely.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "NATS-users",
+        "consumer-portfolio",
+        "JWT-auth-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "nky-journey-nats-auth",
+          "description": "An operator supplies a .creds file, the client loads the User seed, signs the server nonce, and authenticates against a real NATS server."
+        },
+        {
+          "id": "nky-journey-jwt-authorization",
+          "description": "A JWT-authenticated connection binds the subject to the public key with a constant-time comparison and rejects a mismatched or empty issuer."
+        },
+        {
+          "id": "nky-journey-key-rotation",
+          "description": "An operator rotates the identity key, history is preserved, the previous generation can still be exported, and a revoked key is recorded rather than deleted."
+        },
+        {
+          "id": "nky-journey-atp-capability-token",
+          "description": "An ATP peer verifies a capability token signature against an issuer public key reconstructed from its NKey form."
+        },
+        {
+          "id": "nky-journey-swarm-admission",
+          "description": "An agent presents a credential whose signature is verified under the pinned nkey_ed25519 scheme before admission."
+        },
+        {
+          "id": "nky-journey-signed-profile-bundle",
+          "description": "A runtime profile bundle is signed and later verified under the ed25519-nkey integrity mode."
+        },
+        {
+          "id": "nky-journey-secret-redaction",
+          "description": "An operator debugs a configuration and sees the JWT and seed redacted rather than printed."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The affected symbols live under asupersync::security, asupersync::messaging, asupersync::runtime, asupersync::atp and asupersync::agent_swarm rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, nkeys row",
+          "stale_text": "OWN (SAFE), Phase 4, security-contract replacement, marginal ~16",
+          "resolution": "Disposition is KEEP_UNTIL_PARITY, matching the capability registry. The marginal figure stands as a measurement but is not a licence, and the trade is not a simple reduction because ed25519-dalek becomes a direct dependency and the credential codec becomes first-party code."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 9.5",
+          "stale_text": "roughly two hundred lines of SAFE-OWN codec (base32 no-pad plus CRC-16/XMODEM plus prefixes) on a direct ed25519-dalek dep, with NATS-fixture differential vectors",
+          "resolution": "Scope is understated and the target file does not exist. The capability spans four subsystems rather than NATS alone, the registry demands every prefix form plus Curve keys, JWT signer policy and zeroization, and the differential vectors and their harness have not been created."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "Owned wrapper types and ergonomic constructors may be added. No credential form, prefix handling, signing or verification operation, error class or downstream workflow may disappear. Type names may change since permanent shims are not wanted, but the migration must be documented and direct.",
+        "coexistence": "nkeys remains in production. The incumbent additionally becomes a quarantined oracle under the oracle policy so that a candidate can be measured against it.",
+        "sequencing": "Oracle harness and dev-dependency wiring first, then official vectors and a negative matrix, then fuzzing, then cross-implementation NATS E2E and downstream fixtures, then independent security review. The owner decision on User-only versus full prefix coverage must be settled before implementation begins.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_007_nkey_auth.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any credential form that stops being accepted, any lost prefix handling, any changed error class, any weakened redaction or constant-time comparison, any failure to authenticate against a real NATS server, any downstream that can no longer obtain or use a key pair, or any regression in the key store's rotation, revocation or permission model.",
+        "action": "Revert to nkeys and the frozen surface. Because the decision is KEEP, rollback means abandoning the replacement attempt.",
+        "verification": "Re-run the focused ADR contract, the signed profile bundle contract, the NATS authentication and redaction tests, the JWT issuer rejection test, and the credential fuzz target."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-dep-p4-nkeys-poc60v.1.1",
+        "unit_test_owner": "asupersync-dep-p4-nkeys-poc60v.1.6",
+        "e2e_owner": "asupersync-dep-p4-nkeys-poc60v.5",
+        "scenario_ids": [
+          "nkey_all_forms",
+          "nkey_nats_auth",
+          "nkey_jwt_authorization",
+          "nkey_secret_redaction"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario nkey_nats_auth",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "oracle: a differential harness with nkeys wired as a dev-dependency reference, which NKY-GAP-03 records as entirely absent",
+          "vectors: independent official NKey and NATS vectors rather than self-generated deterministic seeds",
+          "unit: every prefix and credential form the owner decides to support, plus seed, private and public encodings and canonical base32 with CRC verification",
+          "unit: negative credential matrix covering wrong prefix, bad checksum, wrong length, malformed base32, truncated and adversarial inputs, with distinct non-oracular errors",
+          "unit: secret zeroization, redaction in debug output, and constant-time comparison behavior",
+          "property and fuzz: parse, encode, sign and verify over generated and malformed credentials with bounded resource use",
+          "downstream-consumer: an out-of-workspace crate obtaining a key pair and signing and verifying with it",
+          "real-service E2E: authentication against a real NATS server and client in both directions, including JWT authorization",
+          "security review: independent review before any cutover, which NKY-GAP-05 records as not done"
+        ],
+        "note": "Naming these owners does not assert they have run. Existing tests generate their own seeds and therefore prove self-consistency rather than interoperability, and the baseline records resource-limit, cancellation-cleanup and recovery evidence as blocked."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-NKEY-AUTH",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-dep-p4-nkeys-poc60v"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. nkeys remains an unconditional production dependency across four subsystems. Cutover additionally requires an independent security review, which has not happened."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_007_nkey_auth.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the current implementation interoperates with any particular NATS deployment, that secret zeroization or cancellation cleanup behave as stated, that an owned codec could reach byte or security parity, that performance is unchanged, or that nkeys may be removed. It also does not certify the capability registry's source-owner or dependency-owner rows, which NKY-GAP-01 and NKY-GAP-02 record as incomplete and incorrect."
+    },
+    {
       "adr_id": "DEP-ADR-008",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.8",
       "title": "Preserve full futures-lite production semantics, public Stream usability, and test executor workflows",
@@ -4208,6 +4692,555 @@
       },
       "doc_path": "docs/adr/dep_plan_adr_008_futures_streams.md",
       "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the public ecosystem Stream impls behave correctly, that an owned helper layer could match wake, parking, reentrancy, fairness or panic semantics, that the migration is mechanically safe, that performance is unchanged, or that futures-lite may be removed. It also does not certify the capability registry's source-owner row, feature list or evidence state, which FUT-GAP-01, -04 and -05 record as incorrect."
+    },
+    {
+      "adr_id": "DEP-ADR-011",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
+      "title": "Owned UTC timestamp/calendar surface for full chrono/time capability, serialization, and UX",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-TIME-UTC-RFC3339"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "decision_summary": "An owned UTC timestamp type may be built additively, but chrono and the time crate stay until it demonstrably parses the existing persisted corpus. The bead was right that the one-helper estimate is invalid, and the source read shows why in a specific way. The time crate genuinely has exactly one call site, private and non-leaking, so the plan is correct about it. chrono is a different matter: ten public serde-derived fields typed as a chrono UTC datetime across three public modules, feeding three JSON index stores that are read as well as written. Replacing chrono therefore has to parse an existing on-disk corpus, not merely emit a new format. Two facts make the work more tractable than it looks. The repository already owns two chrono-free RFC 3339 formatters, one at second precision and one at nanosecond precision with correct pre-epoch handling, which are duplicated logic and the natural seed for the owned type. And the owned type is genuinely new rather than a rename: the existing Time newtype is nanoseconds but process-epoch relative in its wall-clock fallback, so it is not interchangeable with a UNIX-epoch instant.",
+      "alternatives_considered": [
+        {
+          "option": "Remove the time crate now, since it has one call site.",
+          "rejected_because": "Permitted in principle and the plan is right about the scope, but the registry binds time, chrono and std::time to a single capability whose no-claim boundary says a nanoseconds-to-RFC3339 helper is only a foundation and cannot justify removing chrono or time before full public and persisted parity. Removing one while the other remains would also leave two RFC 3339 implementations plus the two already-owned ones, which is more duplication rather than less."
+        },
+        {
+          "option": "Replace chrono in place by swapping the field types.",
+          "rejected_because": "Those ten fields are public and serde-derived, so the swap is a semver-breaking public API change whenever the cli or benchmark-adapters feature is enabled, and it changes the on-disk representation of three JSON index stores that are read back. Nothing currently tests that round-trip in either direction."
+        },
+        {
+          "option": "Treat the existing owned RFC 3339 formatters as the replacement.",
+          "rejected_because": "They are emit-only. Neither parses, neither does calendar arithmetic, and neither is a serde-stable type. They cover formatting, which is the easy third of the capability, and they are also duplicated between two modules, which is itself worth fixing."
+        },
+        {
+          "option": "Reuse the existing Time newtype as the owned UTC instant.",
+          "rejected_because": "It is nanoseconds, but its wall-clock accessor is process-epoch relative rather than UNIX-epoch, and it deliberately carries no calendar semantics because it exists for scheduling and virtual time. Conflating the two would either corrupt scheduling semantics or produce wrong timestamps."
+        },
+        {
+          "option": "Drop the chrono dev-dependency along with the production one.",
+          "rejected_because": "It is used as an independent differential oracle for PostgreSQL binary temporal decoding. Removing it would remove the reference implementation that proves that decoding correct, which is the opposite of what a replacement campaign needs."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::cli::atp_command_tree",
+          "feature_gate": "cli",
+          "source_file": "src/cli/atp_command_tree.rs",
+          "symbols": [
+            "AtpStatusOutput",
+            "AtpCiArtifact",
+            "AtpReleaseInfo",
+            "AtpArchiveEntry",
+            "timestamp",
+            "expires_at",
+            "published_at",
+            "archived_at",
+            "last_verified_at",
+            "updated_at",
+            "last_check_at"
+          ],
+          "note": "Ten public serde-derived fields typed as a chrono UTC datetime. This is the entire public leak, and it is the file the capability registry does not name."
+        },
+        {
+          "module_path": "asupersync::cli::atp_workflows",
+          "feature_gate": "cli",
+          "source_file": "src/cli/atp_workflows.rs",
+          "symbols": [
+            "AtpWorkflowCoordinator"
+          ],
+          "note": "Owns the three JSON index stores and all calendar arithmetic, converting standard durations into calendar durations for expiry, retention and cutoff computations. Also unnamed by the registry."
+        },
+        {
+          "module_path": "asupersync::atp::benchmark",
+          "feature_gate": "benchmark-adapters",
+          "source_file": "src/atp/benchmark/mod.rs",
+          "symbols": [
+            "BenchmarkEnvironment"
+          ],
+          "note": "A public serde-derived struct with a chrono UTC timestamp captured at collection time."
+        },
+        {
+          "module_path": "asupersync::atp::benchmark::reports",
+          "feature_gate": "benchmark-adapters",
+          "source_file": "src/atp/benchmark/reports.rs",
+          "symbols": [
+            "BenchmarkReport"
+          ],
+          "note": "Same shape, and the report is a persisted artifact."
+        },
+        {
+          "module_path": "asupersync::types",
+          "feature_gate": null,
+          "source_file": "src/types/id.rs",
+          "symbols": [
+            "Time",
+            "from_nanos",
+            "from_millis",
+            "from_secs"
+          ],
+          "note": "The owned logical timestamp: nanoseconds, serde-derived, with no calendar semantics. Production wall-clock and lab virtual time both flow through it. It is not a UNIX-epoch instant and must not be conflated with one."
+        },
+        {
+          "module_path": "asupersync::time",
+          "feature_gate": null,
+          "source_file": "src/time/mod.rs",
+          "symbols": [
+            "TimeSource",
+            "TimerDriver",
+            "VirtualClock",
+            "WallClock",
+            "TimerWheel",
+            "Sleep",
+            "sleep",
+            "wall_now",
+            "timeout",
+            "Interval",
+            "MissedTickBehavior"
+          ],
+          "note": "The owned async timer surface. It contains zero chrono and zero time-crate code, which is exactly why the registry naming it as this capability's source owner is a defect. Frozen here as the surface that must stay independent of any calendar work."
+        },
+        {
+          "module_path": "asupersync::atp::logging",
+          "feature_gate": null,
+          "source_file": "src/atp/logging/mod.rs",
+          "symbols": [
+            "current_timestamp"
+          ],
+          "note": "An already-owned chrono-free RFC 3339 formatter at second precision, built on a civil-from-days conversion. One of the two natural seeds for the owned type."
+        },
+        {
+          "module_path": "asupersync::messaging::jetstream",
+          "feature_gate": null,
+          "source_file": "src/messaging/jetstream.rs",
+          "symbols": [
+            "fuzz_format_deliver_by_start_time_rfc3339"
+          ],
+          "note": "A second, independent owned RFC 3339 formatter at nanosecond precision with correct pre-epoch handling, used for a NATS JetStream wire field. Duplicated logic with the logging one; consolidating them is the obvious first step."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "chrono",
+          "cargo_definition": "chrono = { version = \"0.4\", features = [\"serde\"], optional = true }",
+          "effect": "Supplies the UTC datetime type, calendar arithmetic and the serde representation used by ten public fields and three persisted JSON index stores. The serde feature is on in every manifest in the repository.",
+          "must_remain": true,
+          "no_tokio_guarantee": "chrono introduces no tokio edge."
+        },
+        {
+          "name": "time",
+          "cargo_definition": "time = { version = \">=0.3\", features = [\"formatting\"], optional = true }",
+          "effect": "Formatting only, with no parsing, macros or serde features. Exactly one call site converts nanoseconds since the epoch to RFC 3339 inside a private CLI helper.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        },
+        {
+          "name": "cli",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "effect": "The only feature enabling the time crate, and one of two enabling chrono. Neither is in the default feature set, so a default library build has neither.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        },
+        {
+          "name": "benchmark-adapters",
+          "cargo_definition": "benchmark-adapters = [",
+          "effect": "The second enabler of chrono, covering the two public benchmark structs. Recorded because a feature matrix that only tests cli would miss those public fields entirely.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Outside the no-Tokio production guarantee by its own documented carve-out."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "public_chrono_fields",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/cli/atp_command_tree.rs",
+          "wire_encoder": "chrono serde, RFC 3339 string with sub-second precision",
+          "transport": "JSON output and persisted index files",
+          "public_entry_points": [
+            "AtpCiArtifact",
+            "AtpReleaseInfo",
+            "AtpArchiveEntry",
+            "AtpStatusOutput"
+          ],
+          "note": "Ten downstream-visible fields. Replacing the type is semver-breaking whenever the feature is enabled, and it changes the serialized representation."
+        },
+        {
+          "surface": "persisted_index_stores",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/cli/atp_workflows.rs",
+          "wire_encoder": "chrono serde inside JSON documents",
+          "transport": "one JSON file per entry under the ATP workflow root",
+          "public_entry_points": [
+            "AtpWorkflowCoordinator"
+          ],
+          "note": "Three stores covering CI artifacts, releases and archives. They are read as well as written, so a replacement must parse the existing corpus, not merely emit a new format. Nothing tests that round-trip today."
+        },
+        {
+          "surface": "calendar_arithmetic",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/cli/atp_workflows.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "AtpWorkflowCoordinator"
+          ],
+          "note": "Conversion of standard durations into calendar durations for expiry, retention and cutoff computation. This is the part the owned formatters do not cover at all."
+        },
+        {
+          "surface": "cli_nanos_rfc3339_helper",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/bin/asupersync.rs",
+          "wire_encoder": "time crate RFC 3339 formatting",
+          "transport": "CLI output",
+          "public_entry_points": [],
+          "note": "The single time-crate call site, private with a plain integer-to-string signature so no type escapes. Covered by exactly one test vector."
+        },
+        {
+          "surface": "owned_rfc3339_formatters",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/atp/logging/mod.rs and src/messaging/jetstream.rs",
+          "wire_encoder": "hand-written RFC 3339",
+          "transport": "ATP logs and the NATS JetStream start-time wire field",
+          "public_entry_points": [
+            "current_timestamp",
+            "fuzz_format_deliver_by_start_time_rfc3339"
+          ],
+          "note": "Two independent chrono-free implementations already exist, one at second and one at nanosecond precision with correct pre-epoch handling. They are duplicated logic and the natural seed for the owned type."
+        },
+        {
+          "surface": "owned_logical_time",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/types/id.rs and src/time/mod.rs",
+          "wire_encoder": "serde over a nanosecond integer",
+          "transport": "in-process scheduling",
+          "public_entry_points": [
+            "Time",
+            "wall_now",
+            "VirtualClock",
+            "TimerDriver"
+          ],
+          "note": "Complete ownership of monotone, virtual and logical time, with no calendar semantics and no chrono dependency. The wall-clock accessor is process-epoch relative, so this is not a UNIX-epoch instant."
+        },
+        {
+          "surface": "owned_utc_timestamp_type",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No serde-stable owned UTC instant type exists. Recorded so the two emit-only formatters are not mistaken for one."
+        },
+        {
+          "surface": "rfc3339_parsing",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "Nothing owned parses RFC 3339. Both owned formatters emit only, and parsing is required to read the existing persisted corpus."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "persisted JSON artifacts and CLI output; not a network protocol",
+        "encoding": "RFC 3339 UTC strings produced by chrono serde for the public fields, plus two owned formatters at second and nanosecond precision",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Three JSON index stores under the ATP workflow root hold serialized timestamps and are read back on every list, clean and retention operation.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "not applicable",
+        "collector_interop": "not applicable",
+        "precision_variants": "Three distinct precisions are in use and observable: chrono serde sub-second for the public fields, second precision from the ATP logging formatter, and nanosecond precision from the JetStream formatter. A frozen golden pins second precision with a Z suffix.",
+        "epoch_millis_paths": "Some test and integration paths use epoch milliseconds rather than RFC 3339, notably Redis stream entry identifiers. Any owned type must express both.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "serde_representation",
+          "surface": "the ten public chrono fields",
+          "contract": "Serialized as RFC 3339 UTC strings with sub-second precision. The exact rendering is a persisted-format contract because the same documents are deserialized again."
+        },
+        {
+          "name": "round_trip_readback",
+          "surface": "the three JSON index stores",
+          "contract": "Documents written by an earlier build must continue to deserialize. This is the obligation that turns a type swap into a migration."
+        },
+        {
+          "name": "optional_timestamps",
+          "surface": "expires_at, last_verified_at",
+          "contract": "Optional fields must remain optional and must round-trip absence as absence rather than as an epoch default."
+        },
+        {
+          "name": "calendar_duration_conversion",
+          "surface": "workflow expiry and retention",
+          "contract": "Standard durations are converted to calendar durations and added to a UTC instant. Overflow and conversion failure must remain explicit rather than saturating silently."
+        },
+        {
+          "name": "owned_formatter_precision",
+          "surface": "the two owned RFC 3339 formatters",
+          "contract": "One emits second precision with a Z suffix and one emits nanosecond precision with correct pre-epoch handling. Both renderings are observed by tests and one by a frozen golden, so neither precision may drift."
+        },
+        {
+          "name": "logical_time_separation",
+          "surface": "types::Time and the timer module",
+          "contract": "Logical and virtual time stay free of calendar semantics and free of any wall-clock dependency. Deterministic paths must not acquire an ambient clock."
+        },
+        {
+          "name": "clock_injection",
+          "surface": "wall_now and the replayable system-time source",
+          "contract": "Wall-clock acquisition routes through an injectable source so lab and replay runs stay deterministic. An owned timestamp type must not reintroduce a direct ambient clock read."
+        },
+        {
+          "name": "database_temporal_boundaries",
+          "surface": "PostgreSQL binary temporal decoding",
+          "contract": "Date and timestamp decoding is validated against an independent chrono-based oracle in tests. Production emits canonical text without chrono, and that separation must hold."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "TIM-GAP-01",
+          "summary": "The capability registry names src/time/mod.rs and src/bin/asupersync.rs as source owners. Every file under src/time/ contains zero chrono and zero time-crate references; it is asupersync's own async timer module and appears to have been matched on the word time. The binary is a correct owner for the time crate only. The row names none of the four files that actually own chrono.",
+          "consequence": "The row's own exposure classification cites public API and persisted format, yet the entire justification for both lives in files it does not list. A baseline built from it would inventory the timer wheel and miss ten public fields and three persisted stores.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-02",
+          "summary": "There is no round-trip test for any chrono field, and no test at all for the three persisted JSON index stores.",
+          "consequence": "The registry promises round-trip compatible public and persisted values, and nothing measures it. This is the single largest evidence gap for the capability and the precondition for any type swap.",
+          "owner_bead": "asupersync-5z2scg.6.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-03",
+          "summary": "There are no byte-level goldens for any chrono-serde persisted document. The one frozen golden containing literal RFC 3339 values covers an observability diagnostics schema at second precision, and the CLI output golden scrubs timestamps entirely, so it is format-blind.",
+          "consequence": "A precision or suffix change in the public serde representation would pass the CLI goldens unnoticed.",
+          "owner_bead": "asupersync-5z2scg.6.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-04",
+          "summary": "The single time-crate call site is covered by exactly one test vector, at a whole-second boundary. There is no leap-year, fractional-second, negative-epoch or range-limit case.",
+          "consequence": "Even the smallest and best-understood part of the capability lacks the calendar vectors the bead requires.",
+          "owner_bead": "asupersync-5z2scg.6.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-05",
+          "summary": "Nothing owned parses RFC 3339. The two existing owned formatters emit only, and they are duplicated logic across the ATP logging module and the JetStream module at different precisions.",
+          "consequence": "Reading the existing persisted corpus is unachievable with the current owned code, and consolidating the two formatters is prerequisite work rather than cleanup.",
+          "owner_bead": "asupersync-5z2scg.6.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-06",
+          "summary": "The existing Time newtype is nanoseconds but process-epoch relative in its wall-clock fallback, and deliberately carries no calendar semantics.",
+          "consequence": "An owned UTC instant is genuinely new work, not a rename or an extension of the existing type. Any plan that assumes otherwise will either corrupt scheduling semantics or produce wrong timestamps.",
+          "owner_bead": "asupersync-5z2scg.6.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-07",
+          "summary": "chrono is used in tests as an independent differential oracle for PostgreSQL binary date, timestamp and interval decoding.",
+          "consequence": "Removing the dev-dependency would remove the reference implementation that proves that decoding correct. The dev-dependency must outlive the production one.",
+          "owner_bead": "asupersync-5z2scg.6.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-08",
+          "summary": "The plan classifies the time crate as a Phase-2 removal and chrono as Phase-5 owned work, while an earlier audit line proposes consolidating both in Phase 2. The registry binds both plus the standard library clock to one capability with a single disposition, and its no-claim boundary states that a nanoseconds-to-RFC3339 helper cannot justify removing either before full public and persisted parity.",
+          "consequence": "Three documents disagree about phase and scope. Acting on the Phase-2 framing would remove one crate while leaving the harder half untouched and would add a third RFC 3339 implementation to the two already present.",
+          "owner_bead": "asupersync-5z2scg.6.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "TIM-GAP-09",
+          "summary": "Neither the registry's baseline command nor any of its three scenario identifiers appears anywhere in the repository.",
+          "consequence": "The named baseline command exercises nothing for this capability today.",
+          "owner_bead": "asupersync-5z2scg.6.7",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Deterministic logic acquires no ambient clock; wall-clock access routes through an injectable, replayable source.",
+        "Untrusted timestamp text is bounded during parsing, so a hostile document cannot drive unbounded work.",
+        "Range, calendar, parse, offset, precision and overflow failures remain typed and contextual rather than collapsing to a single error.",
+        "Timestamps in logs and artifacts carry no additional identifying information beyond the instant itself."
+      ],
+      "cancellation_invariants": [
+        "Time acquisition and formatting never block cancellation.",
+        "Timeouts preserve monotonic semantics and are unaffected by wall-clock adjustment.",
+        "A cancelled workflow operation leaves no half-written index document."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "chrono and the time crate are platform-neutral, and both are opt-in through features rather than default."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "public serde-derived structs carrying chrono UTC datetimes in the CLI and benchmark modules",
+          "the three persisted JSON index stores under the ATP workflow root",
+          "owned RFC 3339 emission in ATP logging and the JetStream start-time field"
+        ],
+        "accepted_providers": "Any consumer deserializing the public structs, and any previously written index document.",
+        "pinned_crate_versions": {
+          "chrono": "0.4 with the serde feature, optional, enabled by cli and benchmark-adapters; also an unconditional dev-dependency",
+          "time": "at least 0.3 with the formatting feature only, optional, enabled by cli"
+        },
+        "no_reexport_note": "Neither crate is re-exported, but chrono's datetime type appears directly in ten public field types, so downstream consumers depend on it by structure rather than by import. The time crate leaks nothing.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "Logical and virtual time, the timer wheel, the clock injection seam and two RFC 3339 formatters are already owned and chrono-free. The dependency supplies the calendar type, calendar arithmetic, parsing and the serde representation.",
+        "removal_precondition": "An owned UTC instant must exist with a serde representation byte-compatible with the current one, must parse the existing persisted corpus rather than only emit, and must cover the accepted range, Gregorian conversion including negative epochs and leap rules, checked arithmetic, offsets and fractional precision, ordering and hashing, and typed errors. Round-trip and byte-level goldens must exist first, the two duplicated owned formatters should be consolidated into it, and the chrono dev-dependency must be retained as a differential oracle. Until then both crates stay.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "consumer-portfolio",
+        "CLI-users",
+        "database-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "tim-journey-ci-artifact-expiry",
+          "description": "An operator publishes a CI artifact with an expiry, and a later clean operation reads the index, compares against the current instant, and removes expired entries."
+        },
+        {
+          "id": "tim-journey-release-listing",
+          "description": "An operator lists releases and sees publication timestamps read back from previously written index documents."
+        },
+        {
+          "id": "tim-journey-archive-retention",
+          "description": "An archive entry carries archived, expiry and last-verified instants, and a retention pass applies a calendar cutoff to them."
+        },
+        {
+          "id": "tim-journey-benchmark-report",
+          "description": "A benchmark run records an environment and a report, each stamped with a UTC instant, and the report is persisted and later read."
+        },
+        {
+          "id": "tim-journey-cli-trace-timestamp",
+          "description": "A CLI command renders a recorded nanosecond instant as an RFC 3339 string for human display."
+        },
+        {
+          "id": "tim-journey-deterministic-replay",
+          "description": "A lab or replay run acquires time through the injectable source so results are reproducible, with no ambient clock read anywhere in the deterministic path."
+        },
+        {
+          "id": "tim-journey-historical-index-readback",
+          "description": "An index document written by an earlier build still deserializes. This is the journey a naive type swap would break."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The affected symbols live under asupersync::cli, asupersync::atp, asupersync::types and asupersync::time rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, time row",
+          "stale_text": "REMOVE, Phase 2, 1 call site to own RFC3339-ns formatter",
+          "resolution": "The one-call-site measurement is correct, but removal is gated with chrono rather than ahead of it. The capability binds both crates, and removing one alone would add a third RFC 3339 implementation alongside the two the repository already owns."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, chrono row",
+          "stale_text": "OWN (SAFE), Phase 5, UtcTimestamp plus RFC3339 plus serde impls",
+          "resolution": "Direction is right and the owned type is authorized as additive work, but the disposition is PRESERVE_AND_REPLACE_IF_PARITY and cutover is blocked. The scope must include parsing the existing persisted corpus and the ten public serde-derived fields, not only formatting."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 2.4 audit findings",
+          "stale_text": "time plus chrono both in CLI; time has one call site; consolidate (Phase 2)",
+          "resolution": "The observation is accurate but the Phase-2 consolidation conflicts with the Phase-5 chrono row in the same document. Consolidation of the two already-owned formatters is Phase-2-sized; replacing chrono is not."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "An owned UTC timestamp type may be introduced alongside. No public field may change type, and no persisted document may become unreadable, until the owned type provably parses the existing corpus.",
+        "coexistence": "chrono and the time crate remain until parity is demonstrated. The chrono dev-dependency additionally remains as a differential oracle after any production removal.",
+        "sequencing": "Consolidate the two owned formatters into one type, add parsing, add round-trip and byte-level goldens for the persisted stores, then evaluate a swap. Removing the time crate alone is permitted only once the owned type subsumes its single call site.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_011_time_utc.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any persisted index document that stops deserializing, any changed serialized rendering or precision, any optional timestamp that stops round-tripping absence, any public field type change without downstream evidence, any ambient clock read appearing in a deterministic path, or any drift in the two owned formatters' precisions.",
+        "action": "Revert to chrono and the time crate and to the frozen surface. Because the decision is additive coexistence, rollback removes the owned path rather than restoring a deleted capability.",
+        "verification": "Re-run the focused ADR contract, the owned formatter tests, the single time-crate vector, the PostgreSQL temporal differential test, and a full read of the persisted index corpus."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-5z2scg.6.1",
+        "unit_test_owner": "asupersync-5z2scg.6.3",
+        "e2e_owner": "asupersync-5z2scg.6.7",
+        "scenario_ids": [
+          "time_calendar_corpus",
+          "time_cli_artifacts",
+          "time_database_roundtrip"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario time_utc_rfc3339",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "calendar vectors: independent Gregorian conversion cases including negative epochs, leap years and century rules, across the full accepted range",
+          "parse and format: RFC 3339 with offsets, fractional precision and the Z suffix, including malformed and bounded-untrusted input",
+          "round-trip: serialize and deserialize every public field type, which TIM-GAP-02 records as entirely untested",
+          "golden: byte-level goldens for the three persisted index documents and the benchmark report, which TIM-GAP-03 records as absent",
+          "corpus: index documents written by an earlier build must still deserialize",
+          "property: checked arithmetic and ordering across the accepted range, with explicit overflow rather than saturation",
+          "differential: an oracle comparison retaining chrono as the reference, including the PostgreSQL binary temporal decoding case",
+          "determinism: no ambient clock read in any deterministic path, verified through the injectable source",
+          "E2E: CLI artifact, database round-trip and calendar corpus scenarios, none of which currently exist"
+        ],
+        "note": "Naming these owners does not assert they have run. Neither the baseline command nor any scenario identifier appears anywhere in the repository, and the CLI output golden scrubs timestamps so it cannot detect a format change."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-TIME-UTC-RFC3339",
+            "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+            "cutover_state": "BLOCKED_PENDING_EVIDENCE"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-5z2scg.6"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13",
+          "asupersync-d24mms.4"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. An owned UTC timestamp type is authorized as additive work only. The chrono dev-dependency must be retained as a differential oracle even after any future production removal."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_011_time_utc.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the persisted index corpus round-trips, that the owned formatters are correct across the calendar range, that an owned UTC type could reach serde or parsing parity, that performance is unchanged, or that either crate may be removed. It also does not certify the capability registry's source-owner row, which TIM-GAP-01 records as naming a module containing no chrono or time-crate code at all."
     }
   ],
   "known_loss_fixtures": [
@@ -4300,6 +5333,18 @@
       "adr_id": "DEP-ADR-008",
       "prohibited_text": "drop the public Stream implementation",
       "expected_error": "third-party ecosystem loss: Stream trait"
+    },
+    {
+      "fixture_id": "nkey-credential-form-loss",
+      "adr_id": "DEP-ADR-007",
+      "prohibited_text": "drop support for a credential prefix",
+      "expected_error": "credential form loss: NKey prefix"
+    },
+    {
+      "fixture_id": "time-persisted-readback-loss",
+      "adr_id": "DEP-ADR-011",
+      "prohibited_text": "emit a new timestamp format without a reader",
+      "expected_error": "persisted artifact loss: timestamp corpus"
     }
   ],
   "validation": {

@@ -85,8 +85,8 @@ the observability re-exports.
 <!-- BEGIN GENERATED ADR SUMMARY -->
 - Artifact: `dependency-api-adr-registry-v1` (schema 1)
 - Phase: `asupersync-dep-p3-api-adrs-h3jspm`; aggregate terminal `asupersync-dep-p3-api-adrs-h3jspm.13`.
-- Roster: 12 ADRs; RESOLVED=7; PENDING=5.
-- Negative fixtures: 15.
+- Roster: 12 ADRs; RESOLVED=9; PENDING=3.
+- Negative fixtures: 17.
 
 | ADR | Bead | Capabilities | State | Decision | Cutover |
 |---|---|---|---|---|---|
@@ -96,11 +96,11 @@ the observability re-exports.
 | `DEP-ADR-004` | `asupersync-dep-p3-api-adrs-h3jspm.4` | `CAP-CONFIG-TOML-JSON`, `CAP-SCENARIO-YAML-JSON` | RESOLVED | ADDITIVE_COEXISTENCE | KEEP_INCUMBENT |
 | `DEP-ADR-005` | `asupersync-dep-p3-api-adrs-h3jspm.5` | `CAP-CLI-ASUPERSYNC`, `CAP-CLI-ATP`, `CAP-CLI-ATPD`, `CAP-CLI-OFFLINE-TUNER` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-006` | `asupersync-dep-p3-api-adrs-h3jspm.6` | `CAP-HTTP-COMPRESSION` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
-| `DEP-ADR-007` | `asupersync-dep-p3-api-adrs-h3jspm.7` | `CAP-NKEY-AUTH` | PENDING | - | - |
+| `DEP-ADR-007` | `asupersync-dep-p3-api-adrs-h3jspm.7` | `CAP-NKEY-AUTH` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-008` | `asupersync-dep-p3-api-adrs-h3jspm.8` | `CAP-FUTURES-STREAMS` | RESOLVED | KEEP_UNTIL_PARITY | BLOCKED_PENDING_EVIDENCE |
 | `DEP-ADR-009` | `asupersync-dep-p3-api-adrs-h3jspm.9` | `CAP-KAFKA` | PENDING | - | - |
 | `DEP-ADR-010` | `asupersync-dep-p3-api-adrs-h3jspm.10` | `CAP-SQLITE` | PENDING | - | - |
-| `DEP-ADR-011` | `asupersync-dep-p3-api-adrs-h3jspm.11` | `CAP-TIME-UTC-RFC3339` | PENDING | - | - |
+| `DEP-ADR-011` | `asupersync-dep-p3-api-adrs-h3jspm.11` | `CAP-TIME-UTC-RFC3339` | RESOLVED | ADDITIVE_COEXISTENCE | BLOCKED_PENDING_EVIDENCE |
 | `DEP-ADR-012` | `asupersync-dep-p3-api-adrs-h3jspm.12` | `CAP-REGEX-PRIVACY` | PENDING | - | - |
 <!-- END GENERATED ADR SUMMARY -->
 
