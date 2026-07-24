@@ -2021,11 +2021,28 @@ fn test_function() {
             let (_, reviewed_inventory) = snapshot
                 .split_once("\n---\n")
                 .expect("ambient inventory snapshot must have an insta metadata header");
-            assert_eq!(
-                inventory,
-                reviewed_inventory.trim_end_matches('\n'),
-                "ambient inventory differs from the canonical library-test snapshot"
-            );
+            let reviewed_inventory = reviewed_inventory.trim_end_matches('\n');
+            if inventory != reviewed_inventory {
+                let reviewed_lines = reviewed_inventory
+                    .lines()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let current_lines = inventory.lines().collect::<std::collections::BTreeSet<_>>();
+                let removed = reviewed_lines
+                    .difference(&current_lines)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n- ");
+                let added = current_lines
+                    .difference(&reviewed_lines)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n+ ");
+                panic!(
+                    "ambient inventory differs from the canonical library-test snapshot\n\
+                     - {removed}\n\
+                     + {added}"
+                );
+            }
         }
         assert_eq!(
             violations.len(),

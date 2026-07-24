@@ -8713,12 +8713,29 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(PanickingLayer {
             attempts: Arc::clone(&attempts),
         });
+        let telemetry_before = state.epoch_tracker.telemetry_statistics();
+        assert!(
+            telemetry_before.pending > 0,
+            "task completion must carry its pending epoch telemetry"
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tracing::subscriber::with_default(subscriber, || observer.dispatch());
         }));
 
         assert!(result.is_ok(), "subscriber panic must not escape dispatch");
-        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            2,
+            "epoch telemetry and the completion debug event each reach their own containment boundary"
+        );
+        assert_eq!(
+            state
+                .epoch_tracker
+                .telemetry_statistics()
+                .dispatch_panic_count,
+            telemetry_before.dispatch_panic_count + 1,
+            "the epoch telemetry boundary must count its contained subscriber panic"
+        );
         assert_eq!(state.task_completion_observer_panic_count(), 1);
     }
 
