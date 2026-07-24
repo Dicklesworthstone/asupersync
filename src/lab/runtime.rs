@@ -787,6 +787,13 @@ pub struct LabRuntime {
     virtual_clock: Arc<VirtualClock>,
     /// Number of steps executed.
     steps: u64,
+    /// Number of steps that actually dispatched a task.
+    ///
+    /// GH#55: `steps` counts loop turns, including turns where the scheduler
+    /// reported pending work but nothing was dispatchable. Progress-based
+    /// bailouts must key off this counter, not `steps`, or a task stranded in
+    /// `LabScheduler::scheduled` spins forever while looking busy.
+    dispatches: u64,
     /// Chaos RNG for deterministic fault injection.
     chaos_rng: Option<ChaosRng>,
     /// Statistics about chaos injections.
@@ -872,6 +879,7 @@ impl LabRuntime {
             virtual_time: Time::ZERO,
             virtual_clock,
             steps: 0,
+            dispatches: 0,
             chaos_rng,
             chaos_stats: ChaosStats::new(),
             seen_reactor_chaos_stats: ChaosStats::new(),
@@ -1143,8 +1151,22 @@ impl LabRuntime {
             // Run until the scheduler is empty
             let is_empty = self.scheduler.lock().is_empty();
             if !is_empty {
-                stuck_counter = 0;
+                // GH#55: reset the stall counter only when the step actually
+                // dispatched something. `is_empty()` reads `scheduled`, which
+                // can retain a task that is no longer queued in any worker
+                // lane; resetting unconditionally made `StuckBailout`
+                // unreachable, turning that strand into an unbounded spin
+                // bounded only by `max_steps`.
+                let before = self.dispatches;
                 self.step();
+                if self.dispatches != before {
+                    stuck_counter = 0;
+                } else {
+                    stuck_counter = stuck_counter.saturating_add(1);
+                    if stuck_counter > 1000 {
+                        break AutoAdvanceTermination::StuckBailout;
+                    }
+                }
                 continue;
             }
 
@@ -1942,6 +1964,8 @@ impl LabRuntime {
                 return;
             }
         };
+
+        self.dispatches = self.dispatches.saturating_add(1);
 
         // Record task scheduling in certificate and replay recorder
         self.certificate.record(task_id, dispatch_lane, self.steps);
@@ -3209,7 +3233,10 @@ pub struct LabScheduler {
     scheduled: DetHashSet<TaskId>,
     pending_spurious_wakes: DetHashMap<TaskId, PendingSpuriousWake>,
     /// Task → worker assignment, indexed by arena slot.
-    assignments: Vec<Option<usize>>,
+    /// Task → worker assignment, indexed by arena slot and tagged with the
+    /// generation the assignment was recorded for (GH#55). The generation tag
+    /// keeps slot reuse from aliasing a live task's routing.
+    assignments: Vec<Option<(u32, usize)>>,
     next_worker: usize,
     cancel_streak: Vec<usize>,
     cancel_streak_limit: usize,
@@ -3254,22 +3281,37 @@ impl LabScheduler {
         if slot >= self.assignments.len() {
             self.assignments.resize(slot + 1, None);
         }
-        self.assignments[slot] = Some(worker);
+        self.assignments[slot] = Some((task.arena_index().generation(), worker));
+    }
+
+    /// Returns the worker owning `task`, but only when the recorded assignment
+    /// belongs to this exact task generation.
+    ///
+    /// GH#55: `assignments` is indexed by arena slot, while `scheduled` and the
+    /// per-worker queues are keyed by the full `TaskId` (slot + generation).
+    /// Without the generation check, a task that reuses a slot aliases the
+    /// previous occupant's assignment and can be routed to a worker that does
+    /// not hold its queue entry.
+    #[inline]
+    fn assignment_for(&self, task: TaskId) -> Option<usize> {
+        let slot = task.arena_index().index() as usize;
+        match self.assignments.get(slot) {
+            Some(&Some((generation, worker)))
+                if generation == task.arena_index().generation() =>
+            {
+                Some(worker)
+            }
+            _ => None,
+        }
     }
 
     fn assign_worker(&mut self, task: TaskId) -> usize {
-        let slot = task.arena_index().index() as usize;
-        if slot < self.assignments.len() {
-            if let Some(worker) = self.assignments[slot] {
-                return worker;
-            }
+        if let Some(worker) = self.assignment_for(task) {
+            return worker;
         }
         let worker = self.next_worker % self.workers.len();
         self.next_worker = self.next_worker.wrapping_add(1);
-        if slot >= self.assignments.len() {
-            self.assignments.resize(slot + 1, None);
-        }
-        self.assignments[slot] = Some(worker);
+        self.set_assignment(task, worker);
         worker
     }
 
@@ -3324,9 +3366,16 @@ impl LabScheduler {
             return;
         }
 
-        let slot = task.arena_index().index() as usize;
-        if let Some(&Some(worker)) = self.assignments.get(slot) {
+        // GH#55: the task is already in `scheduled`, so `is_empty()` reports
+        // work pending. If we cannot promote it we must still queue it
+        // somewhere, or it is stranded — present in `scheduled` with no entry
+        // in any worker lane — and the runtime spins forever waiting for work
+        // that can never be dispatched.
+        if let Some(worker) = self.assignment_for(task) {
             self.workers[worker].move_to_cancel_lane(task, priority);
+        } else {
+            let worker = self.assign_worker(task);
+            self.workers[worker].schedule_cancel(task, priority);
         }
     }
 
@@ -3421,8 +3470,12 @@ impl LabScheduler {
     fn forget_task(&mut self, task: TaskId) {
         self.scheduled.remove(&task);
         self.pending_spurious_wakes.remove(&task);
-        let slot = task.arena_index().index() as usize;
-        if slot < self.assignments.len() {
+        // GH#55: only clear the slot when the recorded assignment belongs to
+        // this generation. `scheduled` and the worker lanes are keyed by the
+        // full `TaskId`, so clearing on slot alone would drop the routing of a
+        // still-live task that merely reuses the arena slot.
+        if self.assignment_for(task).is_some() {
+            let slot = task.arena_index().index() as usize;
             self.assignments[slot] = None;
         }
         for worker in &mut self.workers {
