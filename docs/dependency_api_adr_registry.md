@@ -85,8 +85,8 @@ the observability re-exports.
 <!-- BEGIN GENERATED ADR SUMMARY -->
 - Artifact: `dependency-api-adr-registry-v1` (schema 1)
 - Phase: `asupersync-dep-p3-api-adrs-h3jspm`; aggregate terminal `asupersync-dep-p3-api-adrs-h3jspm.13`.
-- Roster: 12 ADRs; RESOLVED=4; PENDING=8.
-- Negative fixtures: 11.
+- Roster: 12 ADRs; RESOLVED=5; PENDING=7.
+- Negative fixtures: 13.
 
 | ADR | Bead | Capabilities | State | Decision | Cutover |
 |---|---|---|---|---|---|
@@ -94,7 +94,7 @@ the observability re-exports.
 | `DEP-ADR-002` | `asupersync-dep-p3-api-adrs-h3jspm.2` | `CAP-PROTOBUF-GENERIC` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-003` | `asupersync-dep-p3-api-adrs-h3jspm.3` | `CAP-OTLP-ECOSYSTEM` | RESOLVED | ADDITIVE_COEXISTENCE | KEEP_INCUMBENT |
 | `DEP-ADR-004` | `asupersync-dep-p3-api-adrs-h3jspm.4` | `CAP-CONFIG-TOML-JSON`, `CAP-SCENARIO-YAML-JSON` | RESOLVED | ADDITIVE_COEXISTENCE | KEEP_INCUMBENT |
-| `DEP-ADR-005` | `asupersync-dep-p3-api-adrs-h3jspm.5` | `CAP-CLI-ASUPERSYNC`, `CAP-CLI-ATP`, `CAP-CLI-ATPD`, `CAP-CLI-OFFLINE-TUNER` | PENDING | - | - |
+| `DEP-ADR-005` | `asupersync-dep-p3-api-adrs-h3jspm.5` | `CAP-CLI-ASUPERSYNC`, `CAP-CLI-ATP`, `CAP-CLI-ATPD`, `CAP-CLI-OFFLINE-TUNER` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-006` | `asupersync-dep-p3-api-adrs-h3jspm.6` | `CAP-HTTP-COMPRESSION` | PENDING | - | - |
 | `DEP-ADR-007` | `asupersync-dep-p3-api-adrs-h3jspm.7` | `CAP-NKEY-AUTH` | PENDING | - | - |
 | `DEP-ADR-008` | `asupersync-dep-p3-api-adrs-h3jspm.8` | `CAP-FUTURES-STREAMS` | PENDING | - | - |

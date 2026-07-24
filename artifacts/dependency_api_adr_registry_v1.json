@@ -113,7 +113,7 @@
       "adr_id": "DEP-ADR-005",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.5",
       "title": "Capability-complete, accessible CLI contract and tracing/config edges",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-006",
@@ -2515,6 +2515,709 @@
       },
       "doc_path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
       "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that JSON is in fact lossless with respect to the accepted TOML and YAML corpora, that the accepted YAML subset has been characterized, that config write-back preserves comments, that any owned parser could reach parity, that performance is unchanged, or that either parser dependency may be removed. It also does not certify the capability registry's source-owner rows, which CFG-GAP-01 records as incorrect for this capability."
+    },
+    {
+      "adr_id": "DEP-ADR-005",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.5",
+      "title": "Capability-complete, accessible CLI contract and tracing/config edges",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-CLI-ASUPERSYNC",
+        "CAP-CLI-ATP",
+        "CAP-CLI-ATPD",
+        "CAP-CLI-OFFLINE-TUNER"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "clap stays as the parser for all four installed binaries. The Rev-3 plan already re-scoped an owned parser to XL after measuring roughly 33.8k lines across six clap-consuming sources with hundreds of derive sites, and this ADR does not overturn that estimate. What it adds is the reason a replacement cannot even be evaluated yet: the CLI contract is currently pinned by source hashes rather than behavior. There is no --help golden anywhere in the repository for any of the four binaries, the help/OsString/accessibility contract is a prose sentence enforced by a substring assertion, and no test asserts a nonzero semantic exit code from a real binary run. An owned parser could pass every existing test while silently changing usage text, wrapping, error wording, and exit behavior. Byte-level argv, help and error goldens are therefore the precondition, not a later refinement. Two clap feature choices are load-bearing and frozen here because a naive reimplementation would change them by default: wrap_help is OFF, so help wraps at clap's fixed width rather than the terminal's, and the env feature is OFF, so no argument is populated from the environment by the parser and every environment read is hand-rolled.",
+      "alternatives_considered": [
+        {
+          "option": "Replace clap with an owned parser now, per the plan's OWN (SAFE) disposition.",
+          "rejected_because": "The plan's own re-scope calls it XL: roughly 33.8k lines across six sources with hundreds of attribute sites, and an owned parser must cover OsString and invalid UTF-8, the bare double-dash terminator, short clusters, negative values, global and flattened args, counts, custom parsers, defaults, value delimiters and enums, help text and exit codes. None of that has a behavioral baseline today, so parity is currently unmeasurable."
+        },
+        {
+          "option": "Treat the existing source-hash pins as the drift boundary and proceed.",
+          "rejected_because": "The registry says so itself: a hash match is inventory evidence, not behavioral parity. Hashes detect that a file changed; they cannot tell whether usage text, option spelling, wrapping, error wording or an exit path changed meaning. They also cannot survive the replacement they are meant to gate, since an owned parser rewrites those files entirely."
+        },
+        {
+          "option": "Unify all four binaries on the shared ExitCode registry as part of the parser work.",
+          "rejected_because": "Desirable but it is a user-visible behavior change, not a refactor. Only the asupersync binary consumes the registry today; atp returns std ExitCode SUCCESS or FAILURE, atpd returns a Result so a failure exits 1 through Rust's default Termination, and offline_tuner calls process::exit(1) directly. Scripts and CI already depend on those observed codes. Unification must be its own reviewed change with its own evidence, and this ADR freezes the current asymmetry so the change cannot happen silently."
+        },
+        {
+          "option": "Adopt the command vocabulary in src/cli/atp_command_tree.rs as part of the frozen CLI surface.",
+          "rejected_because": "It is unreachable. No binary imports it: its only consumers are atp_config.rs, atp_workflows.rs and the module re-export. Its twenty-two commands, including config, ci, dataset, fuzz, release and archive, cannot be typed by any user today. Freezing them would invent a user-facing contract that does not exist, and would let a future refactor silently promote them."
+        },
+        {
+          "option": "Drop the tracing-integration edge from the cli feature to reduce the marginal graph.",
+          "rejected_because": "The plan flags this as part of this ADR, and the bead requires defining tracing subscriber initialization so that removing env_logger or clap does not silence useful diagnostics. Dropping the edge without first specifying the replacement initialization would remove operator diagnostics. Deferred to the implementation campaign with that requirement attached."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::cli::exit",
+          "feature_gate": "cli",
+          "source_file": "src/cli/exit.rs",
+          "symbols": [
+            "ExitCode",
+            "SUCCESS",
+            "USER_ERROR",
+            "RUNTIME_ERROR",
+            "INTERNAL_ERROR",
+            "CANCELLED",
+            "PARTIAL_SUCCESS",
+            "TEST_FAILURE",
+            "ORACLE_VIOLATION",
+            "DETERMINISM_FAILURE",
+            "TRACE_MISMATCH",
+            "MIN_VALID",
+            "MAX_VALID",
+            "description",
+            "is_success",
+            "is_valid",
+            "sanitize",
+            "is_failure"
+          ],
+          "note": "The shared semantic exit-code registry: ten meaningful codes plus the valid range bounds, with out-of-range values collapsing to INTERNAL_ERROR. The registry contract already parses this file and asserts equality with the artifact, which makes it the strongest existing CLI contract."
+        },
+        {
+          "module_path": "asupersync::cli::output",
+          "feature_gate": "cli",
+          "source_file": "src/cli/output.rs",
+          "symbols": [
+            "ColorChoice",
+            "Auto",
+            "Always",
+            "Never",
+            "OutputFormat",
+            "Human",
+            "Json",
+            "StreamJson",
+            "JsonPretty",
+            "Output",
+            "Outputtable",
+            "auto_detect",
+            "should_colorize",
+            "NO_COLOR",
+            "CLICOLOR_FORCE",
+            "ASUPERSYNC_OUTPUT_FORMAT"
+          ],
+          "note": "The accessibility and machine-readability contract, and the part of it that is genuinely portable across any parser because it is hand-rolled rather than clap-derived."
+        },
+        {
+          "module_path": "asupersync::cli::args",
+          "feature_gate": "cli",
+          "source_file": "src/cli/args.rs",
+          "symbols": [
+            "COMMON_ARGS_HELP",
+            "parse_color_choice",
+            "CommonArgs"
+          ],
+          "note": "COMMON_ARGS_HELP is the only frozen help text that exists anywhere in the repository. This file is hash-pinned by the registry yet is not listed as a source owner of any capability row, which is part of CLI-GAP-02."
+        },
+        {
+          "module_path": "asupersync::cli::completion",
+          "feature_gate": "cli",
+          "source_file": "src/cli/completion.rs",
+          "symbols": [
+            "Completable",
+            "CompletionItem",
+            "Shell",
+            "generate_completions"
+          ],
+          "note": "Shell completions are a user-visible surface and the checked-in atp completion scripts are the de facto command-name golden for that binary."
+        },
+        {
+          "module_path": "asupersync::cli",
+          "feature_gate": "cli",
+          "source_file": "src/cli/mod.rs",
+          "symbols": [
+            "ExitCode",
+            "ColorChoice",
+            "Output",
+            "OutputFormat",
+            "Outputtable",
+            "CliError",
+            "ProgressReporter",
+            "ProgressEvent",
+            "SignalHandler",
+            "CancellationToken",
+            "generate_completions"
+          ],
+          "note": "The re-export facade. Frozen for the paths it publishes, not as an implementation owner; see CLI-GAP-01, which records that the registry wrongly names this file as a source owner of the parser surface."
+        },
+        {
+          "module_path": "asupersync (binary asupersync)",
+          "feature_gate": "cli",
+          "source_file": "src/bin/asupersync.rs",
+          "symbols": [
+            "AtpCommand",
+            "AtpPairCommand",
+            "AtpInboxCommand",
+            "AtpTraceCommand",
+            "AtpDirectoryCommand",
+            "TraceCommand",
+            "ConformanceCommand",
+            "LabCommand",
+            "DoctorCommand",
+            "CommonArgsCli"
+          ],
+          "note": "The command-tree roots of the asupersync binary: five top-level groups over five nested ATP trees plus trace, conformance, lab and doctor. This binary is the only one that consumes the shared exit-code registry."
+        },
+        {
+          "module_path": "asupersync (binary atp)",
+          "feature_gate": "atp-cli",
+          "source_file": "src/bin/atp.rs",
+          "symbols": [
+            "BondDonate",
+            "BondRecv",
+            "BondPull",
+            "BondDescriptor",
+            "RqKeygen",
+            "DeltaStateExport",
+            "SendArgs",
+            "RecvArgs"
+          ],
+          "note": "A single-level command tree. Two commands are hidden from help and are typed with a double-underscore prefix; the registry records them without that prefix, which CLI-GAP-04 corrects."
+        },
+        {
+          "module_path": "asupersync (binary atpd)",
+          "feature_gate": "atpd-daemon",
+          "source_file": "src/bin/atpd.rs",
+          "symbols": [
+            "AtpdCli",
+            "AtpdCommand",
+            "IdentityAction",
+            "install_signal_listener",
+            "default_atpd_config_path"
+          ],
+          "note": "The daemon lifecycle surface. Its signal handling is implemented here against signal_hook, not in src/cli/signal.rs, which the registry incorrectly names as its co-owner."
+        },
+        {
+          "module_path": "asupersync (binary offline_tuner)",
+          "feature_gate": "cli",
+          "source_file": "src/bin/offline_tuner.rs",
+          "symbols": [
+            "ArchitectureArg"
+          ],
+          "note": "Five commands with two global options. Uses env_logger with a RUST_LOG-aware default filter, which is the diagnostics path the bead requires be preserved if env_logger is removed."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "clap",
+          "cargo_definition": "clap = { version = \"4.4\", features = [\"derive\"], optional = true }",
+          "effect": "The parser for all four installed binaries. Only the derive feature is enabled. Crucially, wrap_help is OFF so help wraps at clap's fixed default width rather than the terminal width, and env is OFF so no argument can be populated from the environment by the parser. Both are behavioral defaults an owned parser would likely change without noticing.",
+          "must_remain": true,
+          "no_tokio_guarantee": "clap introduces no tokio edge."
+        },
+        {
+          "name": "cli",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "effect": "Gates the asupersync and offline_tuner binaries and the whole src/cli module. Note the tracing-integration edge, which the plan flags for review under this ADR, and the env_logger edge that offline_tuner depends on for RUST_LOG-driven verbosity.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        },
+        {
+          "name": "atp-cli",
+          "cargo_definition": "atp-cli = [\"dep:clap\", \"tls\", \"dep:rustls-native-certs\"]",
+          "effect": "Gates the atp binary. It pulls clap directly rather than through the cli feature, and pulls tls plus rustls-native-certs directly rather than the tls-native-roots feature that the capability row names.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        },
+        {
+          "name": "atpd-daemon",
+          "cargo_definition": "atpd-daemon = [\"cli\", \"dep:tracing-subscriber\"]",
+          "effect": "Gates the atpd binary and adds the tracing subscriber the daemon uses for operator diagnostics.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "asupersync_command_tree",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/bin/asupersync.rs",
+          "wire_encoder": "clap 4 derive",
+          "transport": "argv",
+          "public_entry_points": [
+            "AtpCommand",
+            "TraceCommand",
+            "ConformanceCommand",
+            "LabCommand",
+            "DoctorCommand"
+          ],
+          "note": "Five top-level groups. The atp group carries twenty-two commands over five nested trees; doctor carries twenty-three. This is the largest command surface in the repository."
+        },
+        {
+          "surface": "atp_command_tree",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "atp-cli",
+          "implementation": "src/bin/atp.rs",
+          "wire_encoder": "clap 4 derive",
+          "transport": "argv",
+          "public_entry_points": [
+            "BondDonate",
+            "BondPull",
+            "BondRecv",
+            "RqKeygen"
+          ],
+          "note": "Single level, nine commands, two of them hidden. serve is a documented alias for recv and must remain accepted."
+        },
+        {
+          "surface": "atpd_command_tree",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "atpd-daemon",
+          "implementation": "src/bin/atpd.rs",
+          "wire_encoder": "clap 4 derive",
+          "transport": "argv and signals",
+          "public_entry_points": [
+            "AtpdCommand",
+            "IdentityAction",
+            "install_signal_listener"
+          ],
+          "note": "Seven lifecycle commands plus a four-action identity subtree, with root options for config path, log level, foreground and pid file. Signal handling is bespoke to this binary."
+        },
+        {
+          "surface": "offline_tuner_command_tree",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/bin/offline_tuner.rs",
+          "wire_encoder": "clap 4 derive",
+          "transport": "argv",
+          "public_entry_points": [
+            "ArchitectureArg"
+          ],
+          "note": "Five commands with two global options, verbose and output-dir."
+        },
+        {
+          "surface": "semantic_exit_codes",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "cli",
+          "implementation": "src/cli/exit.rs",
+          "wire_encoder": "not applicable",
+          "transport": "process exit status",
+          "public_entry_points": [
+            "ExitCode",
+            "sanitize",
+            "description"
+          ],
+          "note": "Owned and parser-independent, so it survives any parser replacement unchanged. Adoption is currently limited to one of the four binaries; see CLI-GAP-03."
+        },
+        {
+          "surface": "color_and_format_resolution",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "cli",
+          "implementation": "src/cli/output.rs",
+          "wire_encoder": "not applicable",
+          "transport": "stdout and stderr",
+          "public_entry_points": [
+            "ColorChoice",
+            "OutputFormat",
+            "auto_detect",
+            "should_colorize"
+          ],
+          "note": "Hand-rolled and therefore fully portable across a parser replacement. NO_COLOR takes precedence over CLICOLOR_FORCE, a non-TTY stdout disables color, and CI or a non-TTY stdout selects JSON."
+        },
+        {
+          "surface": "shell_completions",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "cli",
+          "implementation": "src/cli/completion.rs",
+          "wire_encoder": "bash, zsh and fish completion scripts",
+          "transport": "generated scripts",
+          "public_entry_points": [
+            "generate_completions",
+            "Shell",
+            "CompletionItem"
+          ],
+          "note": "Checked-in atp completion scripts for three shells act as the de facto command-name golden for that binary."
+        },
+        {
+          "surface": "help_and_usage_goldens",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No test anywhere captures --help, -h or --version output for any of the four binaries. This is the single largest obstacle to evaluating a parser replacement, because usage text, option spelling, wrapping and error wording are exactly what would drift."
+        },
+        {
+          "surface": "nonzero_exit_code_assertions",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No test asserts a nonzero semantic exit code from a real binary invocation. Only success paths are exercised end to end."
+        },
+        {
+          "surface": "unreachable_library_command_tree",
+          "state": "TEST_ONLY",
+          "feature_gate": "cli",
+          "implementation": "src/cli/atp_command_tree.rs",
+          "wire_encoder": "clap 4 derive",
+          "transport": "none",
+          "public_entry_points": [
+            "AtpCiAction",
+            "AtpDatasetAction",
+            "AtpFuzzAction",
+            "AtpReleaseAction",
+            "AtpArchiveAction"
+          ],
+          "note": "Twenty-two clap-derived commands that no binary imports and no user can type. Recorded so it is not mistaken for user-facing vocabulary and so a refactor cannot promote it silently."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "command-line argv, environment, stdout and stderr, and process exit status",
+        "encoding": "clap 4 derive parsing with only the derive feature enabled",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Machine-readable output uses the JSON, StreamJson and JsonPretty formats; StreamJson is newline-delimited with immediate flush for streaming consumers. Progress reporting uses stderr while data output uses stdout, and each checks its own stream for terminal state.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "not applicable",
+        "collector_interop": "not applicable",
+        "help_width_policy": "clap wrap_help is disabled, so help text wraps at clap's fixed default width and does not consult COLUMNS or the terminal size. An owned parser that wrapped to terminal width would be a visible behavior change.",
+        "env_population_policy": "clap's env feature is disabled and there are zero clap env attributes in the tree. Every environment read is hand-rolled, which makes the environment contract independent of the parser.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "binary_manifest_stanzas",
+          "surface": "Cargo.toml bin declarations",
+          "contract": "The four installed binaries are asupersync requiring cli, atp requiring atp-cli, atpd requiring atpd-daemon, and offline_tuner requiring cli and simd-intrinsics. Binary names, paths and required-features are user-visible and may not change silently."
+        },
+        {
+          "name": "color_precedence",
+          "surface": "ColorChoice auto-detection",
+          "contract": "NO_COLOR takes precedence over CLICOLOR_FORCE, and a non-terminal stdout disables color. The -c/--color flag accepts auto and automatic, always and on and yes and true, never and off and no and false."
+        },
+        {
+          "name": "format_auto_detection",
+          "surface": "OutputFormat auto-detection",
+          "contract": "CI being set selects JSON, then a non-terminal stdout selects JSON, then ASUPERSYNC_OUTPUT_FORMAT is consulted, otherwise Human. This ordering is the machine-consumer contract."
+        },
+        {
+          "name": "common_flags",
+          "surface": "CommonArgs and COMMON_ARGS_HELP",
+          "contract": "The shared flags are format, color, verbose as a repeatable count, quiet, debug and config, with the documented short forms. COMMON_ARGS_HELP is the only frozen help text and its content is part of the contract."
+        },
+        {
+          "name": "exit_code_semantics",
+          "surface": "ExitCode",
+          "contract": "Success is zero, user error one, runtime error two, internal error three, cancelled four, partial success five, and the testing codes are ten through thirteen. Values outside zero through one hundred twenty-five collapse to internal error. Codes may be added; existing values may not be reassigned."
+        },
+        {
+          "name": "current_exit_adoption_asymmetry",
+          "surface": "the four binaries",
+          "contract": "Only asupersync uses the shared registry today. atp yields zero or one through std ExitCode, atpd yields one on error through the default Termination, and offline_tuner calls process::exit with one. This asymmetry is frozen as observed behavior so that unifying it becomes a deliberate reviewed change rather than silent drift."
+        },
+        {
+          "name": "environment_reads",
+          "surface": "hand-rolled environment access across the CLI",
+          "contract": "The CLI reads at least CI, ASUPERSYNC_OUTPUT_FORMAT, NO_COLOR, CLICOLOR_FORCE, SHELL, HOME, USERPROFILE, HOMEDRIVE, HOMEPATH, APPDATA, XDG_CONFIG_HOME, PROGRAMDATA, HOSTNAME, COMPUTERNAME, SSL_CERT_FILE, SSL_CERT_DIR, ATP_RQ_AUTH_KEY_HEX, ASUPERSYNC_ATP_WORKFLOW_ROOT and RUST_LOG. Path-bearing variables are sanitized before use."
+        },
+        {
+          "name": "stream_routing",
+          "surface": "output and progress",
+          "contract": "Data goes to stdout and progress to stderr, and each consults its own stream's terminal state. Redirecting one must not silence or corrupt the other."
+        },
+        {
+          "name": "hidden_command_visibility",
+          "surface": "the atp binary",
+          "contract": "The two double-underscore-prefixed commands are hidden from help but remain typable. Their hidden status and their exact spelling are both part of the contract."
+        },
+        {
+          "name": "alias_preservation",
+          "surface": "the atp binary",
+          "contract": "serve remains accepted as a documented alias for recv."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "CLI-GAP-01",
+          "summary": "Four of the eight source_owners entries across the CAP-CLI rows do not own the code they are credited with. src/cli/mod.rs contains zero clap references and is a pure re-export facade. src/cli/signal.rs contains zero clap references and is not used by atpd at all, which implements its own signal listener against signal_hook. Cargo.toml is the manifest rather than source. src/cli/atp_command_tree.rs is clap-dense but unreachable from any binary.",
+          "consequence": "Every CAP-CLI row names at least one wrong file, so a baseline built from these rows would inventory a facade, an unused module, a manifest and an unreachable tree while missing src/cli/args.rs and src/cli/output.rs, which hold the only frozen help text and the entire color and format contract.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-02",
+          "summary": "The registry's hash-pinned snapshot list and its source_owners lists disagree. src/cli/args.rs is hash-pinned but is not a source owner of any capability row, while src/cli/mod.rs and src/cli/signal.rs are source owners but are not hash-pinned.",
+          "consequence": "Neither list alone is a complete inventory, and a reader cannot tell which is authoritative.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-03",
+          "summary": "The shared exit-code registry is consumed by only one of the four binaries. atp returns std ExitCode SUCCESS or FAILURE, atpd returns a Result so failures exit one through the default Termination, and offline_tuner calls process::exit with one directly.",
+          "consequence": "The semantic exit-code set is aspirational for three of four binaries. Any claim that the CLI has a unified exit contract is currently false, and scripts depending on the observed codes would break if unification happened silently.",
+          "owner_bead": "asupersync-5z2scg.7.8",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-04",
+          "summary": "The registry records the two hidden atp commands without their double-underscore prefix, so the recorded names are not the names a user types.",
+          "consequence": "An implementer working from the registry would build the wrong command spellings.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-05",
+          "summary": "The registry pins exactly ten environment variables, but the CLI demonstrably reads at least nine more, including CI, SHELL, XDG_CONFIG_HOME, APPDATA, USERPROFILE, HOMEDRIVE, HOMEPATH, ASUPERSYNC_ATP_WORKFLOW_ROOT and RUST_LOG. The count assertion passes only because the test checks names against the seven hash-pinned sources, which exclude output.rs, first_run.rs and completion.rs where several of those reads live.",
+          "consequence": "The environment contract is materially incomplete, and the test that appears to guard it cannot detect the omissions.",
+          "owner_bead": "asupersync-5z2scg.7.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-06",
+          "summary": "No help golden exists. No test captures --help, -h or --version output for any of the four binaries. The help, OsString and accessibility contract is a prose sentence in the artifact, enforced only by asserting that the sentence contains the substring shell/OsString.",
+          "consequence": "This is the central blocker for a parser replacement. Usage text, option spelling, wrapping, ordering and error wording are precisely what an owned parser would change, and nothing would detect it.",
+          "owner_bead": "asupersync-5z2scg.7.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-07",
+          "summary": "There is no explicit handling or test for non-UTF-8 argv. Invalid UTF-8 is handled only implicitly by clap's PathBuf value parsers and one default_value_os_t. There is no allow_invalid_utf8 setting, no explicit OsString value parser and no test.",
+          "consequence": "The OsString half of the claimed contract has no behavioral evidence, on any platform.",
+          "owner_bead": "asupersync-5z2scg.7.6",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-08",
+          "summary": "No test asserts a nonzero semantic exit code from a real binary invocation. Existing real-binary tests assert success only.",
+          "consequence": "The failure half of the exit contract is unproven end to end, which is the half operators and CI actually depend on.",
+          "owner_bead": "asupersync-5z2scg.7.11",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-09",
+          "summary": "The CAP-CLI-OFFLINE-TUNER row claims the benchmark-adapters feature, but the binary's required-features are only cli and simd-intrinsics. Separately the CAP-CLI-ATP row claims tls-native-roots, while atp-cli pulls tls and rustls-native-certs directly rather than that feature. The registry documentation also states fourteen binaries while the artifact and its test say fifteen.",
+          "consequence": "Feature and platform matrices built from these rows would test the wrong cells.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CLI-GAP-10",
+          "summary": "The accessibility constraints that exist in code belong to the doctor TUI visual-language contract, not to CLI help output. They govern rendered screens, including alert-role distinguishability and avoiding motion-only state signals.",
+          "consequence": "They must not be cited as evidence for the CLI accessibility contract, which currently has no executable coverage beyond the color and format resolution functions.",
+          "owner_bead": "asupersync-5z2scg.7.6",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Secrets and credentials are redacted in output, logs and diagnostics; the ATP RQ auth key may be supplied by environment but must never be echoed.",
+        "Untrusted paths are bounded and sanitized before use, and path-bearing environment variables pass through explicit sanitization.",
+        "Arguments are never passed through a shell, so no argument can be interpreted as shell syntax.",
+        "TLS root discovery honors SSL_CERT_FILE and SSL_CERT_DIR as OsStr values without lossy conversion.",
+        "Suggestion and error text stays bounded against secret material.",
+        "The daemon binds and holds credentials with least privilege and its liveness checks resist PID reuse."
+      ],
+      "cancellation_invariants": [
+        "Interrupt and broken-pipe produce a clean exit rather than a panic or a partial write mistaken for success.",
+        "Partial outputs are identified as partial, which is what the partial-success code exists for.",
+        "Signals cause a bounded structured drain with an explicit second-signal policy, and no child work survives the parent.",
+        "Progress reporting on stderr stops cleanly when stdout is closed."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "linux",
+          "support": "supported",
+          "note": "All four binaries."
+        },
+        {
+          "target_family": "macos",
+          "support": "supported",
+          "note": "All four binaries; the ATP config path has a macOS-specific branch."
+        },
+        {
+          "target_family": "windows",
+          "support": "supported",
+          "note": "All four binaries. Windows-specific environment handling covers PROGRAMDATA, APPDATA, USERPROFILE, HOMEDRIVE, HOMEPATH and COMPUTERNAME."
+        },
+        {
+          "target_family": "wasm32",
+          "support": "not-applicable",
+          "note": "The cli feature is native-only and is rejected on wasm32 by an explicit compile-time assertion."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "the asupersync binary and its five command groups",
+          "the atp binary and its nine commands",
+          "the atpd binary and its seven lifecycle commands plus identity subtree",
+          "the offline_tuner binary and its five commands",
+          "generated bash, zsh and fish completion scripts"
+        ],
+        "accepted_providers": "Shells, CI systems and operator scripts consuming argv, exit status, stdout JSON and stderr progress.",
+        "pinned_crate_versions": {
+          "clap": "4.4 with only the derive feature; resolves to 4.6.x",
+          "env_logger": "enabled by cli and consumed by offline_tuner for RUST_LOG-driven verbosity",
+          "tracing-subscriber": "enabled by atpd-daemon for operator diagnostics"
+        },
+        "no_reexport_note": "clap is not re-exported and does not appear in any library public signature; the coupling is confined to the four binaries and the derive-carrying cli modules. That means an owned parser is an internal change from the library's perspective and a total behavioral change from the user's.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "The exit-code registry, the color and format resolution, the progress reporter and the completion generator are all owned and parser-independent, so they survive a replacement unchanged.",
+        "removal_precondition": "Byte-level argv, help, usage, version and error goldens must exist for all four binaries first, plus non-UTF-8 argv coverage and real-binary nonzero exit-code assertions. Only then can an owned parser be measured against the current behavior. The replacement must additionally preserve the disabled wrap_help width policy and the absence of parser-populated environment variables, or declare those as reviewed changes.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "CLI-users",
+        "atpd-users",
+        "consumer-portfolio",
+        "trace-tool-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "cli-journey-help-discovery",
+          "description": "A user runs each binary with --help and with a subcommand --help and gets stable, readable usage text. Currently unguarded by any golden."
+        },
+        {
+          "id": "cli-journey-machine-consumption",
+          "description": "A CI job runs a command with CI set and receives JSON on stdout without color, without needing to pass a flag."
+        },
+        {
+          "id": "cli-journey-accessibility-no-color",
+          "description": "A user with NO_COLOR set receives uncolored output even on a terminal, and CLICOLOR_FORCE does not override it."
+        },
+        {
+          "id": "cli-journey-atp-transfer",
+          "description": "An operator runs atp send and atp recv, including the serve alias, and can resume or cancel a transfer."
+        },
+        {
+          "id": "cli-journey-atpd-lifecycle",
+          "description": "An operator starts, queries, reloads and stops the daemon, and a termination signal produces a bounded structured drain."
+        },
+        {
+          "id": "cli-journey-failure-diagnostics",
+          "description": "A wrong argument produces an actionable diagnostic and a meaningful exit code. The exit half of this journey is currently unproven for three of four binaries."
+        },
+        {
+          "id": "cli-journey-shell-completion",
+          "description": "A user installs generated completions for bash, zsh or fish and gets the current command vocabulary."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The CLI surface lives in binaries and in the cli-gated module rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, clap row",
+          "stale_text": "OWN (SAFE) - XL",
+          "resolution": "Reconciled to KEEP_UNTIL_PARITY, which is what the capability registry already records. The XL scoping and the listed parser obligations stand and are adopted verbatim as the replacement precondition; only the disposition label changes, so that the row cannot be read as authorizing implementation before goldens exist."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 3 item 3.5",
+          "stale_text": "CLI surface: owned-parser contract (XL scope per section 5) and help/error-golden strategy",
+          "resolution": "Resolved by this ADR. The strategy is that goldens come first and gate everything else: there is no help golden today, so parity is unmeasurable until one exists."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "New commands, options and output formats may be added. No command, alias, option, short form, default, value parser, environment interaction, diagnostic or exit path may be removed or silently changed.",
+        "coexistence": "clap remains the parser. An owned parser, if built, must be validated against the goldens before replacing it, not alongside it in production.",
+        "sequencing": "Goldens first, then non-UTF-8 argv coverage and real-binary exit assertions, then a measured owned parser. Unifying exit-code adoption across the four binaries is a separate reviewed change with its own evidence.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_005_cli_contract.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any removed or renamed command, alias, option or short form; any changed default, value parser or constraint; any altered help, usage or version text; any changed exit code for an existing condition; any lost environment interaction; any color or format precedence change; any stream routing change; or any newly required argument.",
+        "action": "Revert to clap and to the frozen surface recorded here. Because the decision is KEEP, rollback means abandoning the replacement attempt rather than restoring a deleted capability.",
+        "verification": "Re-run the focused ADR contract, the registry CLI surface snapshot test, the CLI output goldens, and the real-binary journeys for all four binaries."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-5z2scg.7.1",
+        "unit_test_owner": "asupersync-5z2scg.7.6",
+        "e2e_owner": "asupersync-5z2scg.7.11",
+        "scenario_ids": [
+          "cli_asupersync_help",
+          "cli_asupersync_errors",
+          "cli_asupersync_trace_config",
+          "cli_atp_help",
+          "cli_atp_transfer",
+          "cli_atp_resume_cancel",
+          "cli_atp_security_errors",
+          "cli_atpd_help",
+          "cli_atpd_start_ready_shutdown",
+          "cli_atpd_signal_failure",
+          "cli_offline_tuner_help",
+          "cli_offline_tuner_report",
+          "cli_offline_tuner_interrupt"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario cli_asupersync",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "golden: byte-exact --help, subcommand --help, and --version output for all four binaries, which CLI-GAP-06 records as entirely absent today",
+          "golden: error and usage text for wrong argument, missing required argument, unknown command and invalid value",
+          "unit: argv parsing for short clusters, the bare double-dash terminator, negative values, repeated counts, global and flattened args, value delimiters and enums, and defaults",
+          "unit: non-UTF-8 argv on every supported platform, which CLI-GAP-07 records as untested",
+          "unit: color precedence, format auto-detection and stream routing under TTY and non-TTY conditions",
+          "real-binary: nonzero semantic exit codes for representative failures on each binary, which CLI-GAP-08 records as unproven",
+          "real-binary: representative journeys per binary including transfer, resume, cancel, daemon lifecycle, signal handling and tuner report",
+          "failure injection: interrupt during operation, broken pipe, and a second signal during drain",
+          "installed consumer: a synthesized install of each binary exercising completions and first-run behavior",
+          "feature and platform matrix: linux, macos and windows across the cli, atp-cli, atpd-daemon and simd-intrinsics cells"
+        ],
+        "note": "Naming these owners does not assert they have run. The existing CLI output goldens cover formatting only, not help. The doctor visual-language accessibility constraints govern TUI screens and may not be cited for CLI help accessibility."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-CLI-ASUPERSYNC",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          },
+          {
+            "capability_id": "CAP-CLI-ATP",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          },
+          {
+            "capability_id": "CAP-CLI-ATPD",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          },
+          {
+            "capability_id": "CAP-CLI-OFFLINE-TUNER",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-5z2scg.7"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. clap remains the parser for all four binaries. The tracing-integration edge on the cli feature is not dropped here, because the bead requires subscriber initialization to be specified first so diagnostics are not silenced."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_005_cli_contract.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the recorded command vocabulary is exhaustive, that help or error text is stable, that non-UTF-8 argv is handled correctly, that exit codes behave as documented on any binary other than asupersync, that an owned parser could reach parity, or that clap may be removed. It also does not certify the capability registry's CAP-CLI source-owner rows, environment-variable list, hidden-command names or feature claims, which CLI-GAP-01, -02, -04, -05 and -09 record as incorrect or incomplete."
     }
   ],
   "known_loss_fixtures": [
@@ -2583,6 +3286,18 @@
       "adr_id": "DEP-ADR-001",
       "prohibited_text": "stop reading historical persisted artifacts",
       "expected_error": "persisted artifact loss: historical corpus"
+    },
+    {
+      "fixture_id": "cli-command-removal",
+      "adr_id": "DEP-ADR-005",
+      "prohibited_text": "remove a command or alias from the CLI",
+      "expected_error": "user journey loss: CLI command"
+    },
+    {
+      "fixture_id": "cli-parser-swap-without-goldens",
+      "adr_id": "DEP-ADR-005",
+      "prohibited_text": "replace clap before help goldens exist",
+      "expected_error": "cutover authorization without evidence"
     }
   ],
   "validation": {
