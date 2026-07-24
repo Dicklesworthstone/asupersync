@@ -77,7 +77,11 @@ counts, marginal package IDs, and the exact Cargo commands.
 
 First-party workspace path packages and the two synthetic roots are excluded.
 An unrelated external path package is not silently merged into that
-first-party set.
+first-party set. Package-version marginals retain that exclusion, while
+`proc_macros` also records an active direct root when it is itself a proc-macro
+package. That root evidence remains present even when the package is
+first-party or retained elsewhere in the workspace graph, so a `host`
+execution-context label never loses its supporting package identity.
 
 ## Host and Target Context
 

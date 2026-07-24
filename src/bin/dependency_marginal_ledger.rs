@@ -867,11 +867,7 @@ fn resolve_measurement(
             &marginal_ids,
             "custom-build",
         ),
-        proc_macros: packages_with_target_kind(
-            &cell.baseline.metadata,
-            &marginal_ids,
-            "proc-macro",
-        ),
+        proc_macros: proc_macro_evidence(&cell.baseline.metadata, &marginal_ids, root_package_id),
         root_native_code: native_evidence(&cell.baseline, &root_closure, root_package_id)?,
         marginal_native_code: native_evidence(&cell.baseline, &marginal_ids, root_package_id)?,
         taxonomy_refs,
@@ -1637,6 +1633,18 @@ fn packages_with_target_kind(
         .collect()
 }
 
+fn proc_macro_evidence(
+    metadata: &CargoMetadata,
+    marginal_package_ids: &BTreeSet<String>,
+    root_package_id: &str,
+) -> Vec<String> {
+    let mut evidence_ids = marginal_package_ids.clone();
+    if package_has_target_kind(metadata, root_package_id, "proc-macro") {
+        evidence_ids.insert(root_package_id.to_owned());
+    }
+    packages_with_target_kind(metadata, &evidence_ids, "proc-macro")
+}
+
 fn upstream_identities(metadata: &CargoMetadata, package_ids: &BTreeSet<String>) -> Vec<String> {
     metadata
         .packages
@@ -2100,6 +2108,68 @@ windows-sys = "0.61"
             "alpha_beta_gamma"
         );
         assert_eq!(cargo_dependency_name(""), "");
+    }
+
+    #[test]
+    fn proc_macro_evidence_includes_active_root_and_marginal_packages() {
+        let metadata = CargoMetadata {
+            packages: vec![
+                CargoPackage {
+                    id: "root-proc-macro".to_owned(),
+                    name: "root-proc-macro".to_owned(),
+                    source: None,
+                    manifest_path: "/workspace/root-proc-macro/Cargo.toml".to_owned(),
+                    repository: None,
+                    checksum: None,
+                    targets: vec![CargoTarget {
+                        kind: vec!["proc-macro".to_owned()],
+                    }],
+                },
+                CargoPackage {
+                    id: "marginal-proc-macro".to_owned(),
+                    name: "marginal-proc-macro".to_owned(),
+                    source: None,
+                    manifest_path: "/registry/marginal-proc-macro/Cargo.toml".to_owned(),
+                    repository: None,
+                    checksum: None,
+                    targets: vec![CargoTarget {
+                        kind: vec!["proc-macro".to_owned()],
+                    }],
+                },
+                CargoPackage {
+                    id: "ordinary-root".to_owned(),
+                    name: "ordinary-root".to_owned(),
+                    source: None,
+                    manifest_path: "/registry/ordinary-root/Cargo.toml".to_owned(),
+                    repository: None,
+                    checksum: None,
+                    targets: vec![CargoTarget {
+                        kind: vec!["lib".to_owned()],
+                    }],
+                },
+            ],
+            resolve: None,
+            workspace_members: Vec::new(),
+        };
+        let marginal_ids = BTreeSet::from(["marginal-proc-macro".to_owned()]);
+
+        assert_eq!(
+            proc_macro_evidence(&metadata, &BTreeSet::new(), "root-proc-macro"),
+            ["root-proc-macro"]
+        );
+        assert_eq!(
+            proc_macro_evidence(&metadata, &marginal_ids, "root-proc-macro"),
+            ["root-proc-macro", "marginal-proc-macro"]
+        );
+        let root_already_marginal = BTreeSet::from([
+            "root-proc-macro".to_owned(),
+            "marginal-proc-macro".to_owned(),
+        ]);
+        assert_eq!(
+            proc_macro_evidence(&metadata, &root_already_marginal, "root-proc-macro"),
+            ["root-proc-macro", "marginal-proc-macro"]
+        );
+        assert!(proc_macro_evidence(&metadata, &BTreeSet::new(), "ordinary-root").is_empty());
     }
 
     #[test]
