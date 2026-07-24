@@ -1,0 +1,1353 @@
+{
+  "schema_version": 1,
+  "artifact_id": "config-toml-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.4.1",
+  "capability_id": "CAP-CONFIG-TOML-JSON",
+  "captured_date_utc": "2026-07-24",
+  "baseline_revision": "3468d4474e981fd2b19a8020175e6bb8bd4a5dc3",
+  "authority_revision": "673a905631c5580cdc8037315569b72bd636ecca",
+  "authority": {
+    "adr_id": "DEP-ADR-004",
+    "adr_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.4",
+    "adr_path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+    "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+    "api_surface_map_path": "artifacts/api_surface_map_v1.json",
+    "decision": "ADDITIVE_COEXISTENCE",
+    "disposition": "KEEP_UNTIL_PARITY",
+    "cutover_state": "KEEP_INCUMBENT",
+    "dependency_exit_allowed": false
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "allowed_inventory_states": [
+      "FROZEN",
+      "EXPLICIT_NON_TOML",
+      "EXPLICIT_TEST_ONLY",
+      "EXPLICIT_UNSUPPORTED"
+    ],
+    "allowed_evidence_states": [
+      "EXECUTED",
+      "PARTIAL_EXECUTED",
+      "SOURCE_BASELINED",
+      "EXISTING_TEST",
+      "PLANNED",
+      "BLOCKED_GAP",
+      "EXPLICIT_NON_TOML",
+      "EXPLICIT_TEST_ONLY",
+      "EXPLICIT_UNSUPPORTED"
+    ],
+    "default_action": "Keep the incumbent toml dependency and every observed accepted document until A5 records complete SAME-or-BETTER evidence."
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "src/runtime/env_config.rs",
+      "sha256": "d4e12314788bd50940e904daf2ccc565b4a24607b47fd46dcb286b22b5b96d9c",
+      "line_count": 1009
+    },
+    {
+      "path": "src/runtime/builder.rs",
+      "sha256": "8ad1b6dc373c385e22a24159153c0fa092d74cdb678f6efc9e3d3001a1475be0",
+      "line_count": 7407
+    },
+    {
+      "path": "src/runtime/env_config_metamorphic_tests.rs",
+      "sha256": "088fbc0d9afb79086c698e47aeec9ffa6e0e0c51b5f094488d1b3070ed5396f0",
+      "line_count": 683
+    },
+    {
+      "path": "src/cli/atp_config.rs",
+      "sha256": "6251a2f39ef6175d8bc9d195adbe5626950ae14261a91aee7e75ad0ee76dd2c2",
+      "line_count": 775
+    },
+    {
+      "path": "src/cli/atp_command_tree.rs",
+      "sha256": "b79d4f01345274f6260d3ce911e48e2c2d2cd7c0c49ff7562f5ecf1a58d2e603",
+      "line_count": 1706
+    },
+    {
+      "path": "src/cli/first_run.rs",
+      "sha256": "2247c2463ed01e602004406b3f04949c1a7f983c9e0c83d85f836e92c681d029",
+      "line_count": 773
+    },
+    {
+      "path": "src/cli/upgrade.rs",
+      "sha256": "84432aafba9a0f3639da320040007f205f9177a5dcc58a268a922e95649b713c",
+      "line_count": 786
+    },
+    {
+      "path": "src/bin/atpd.rs",
+      "sha256": "8d969a0669bcd865be9589f5a408cab2b861c1a14ab0a3e5a9e8b1f1fb731cf8",
+      "line_count": 2333
+    },
+    {
+      "path": "src/bin/dependency_marginal_ledger.rs",
+      "sha256": "98653e7247ea43ef2a67b78ac0955f22addcdd6abcbffb05d31090b96ee7fddc",
+      "line_count": 2358
+    },
+    {
+      "path": "src/config.rs",
+      "sha256": "de72f96a52b9a31bb2934f1d7a19b3836fafc1f1be21afae4afacc66a8fb05c8",
+      "line_count": 1917
+    },
+    {
+      "path": "src/fs_config_metamorphic_tests.rs",
+      "sha256": "9cd3c037eb04bcbc5856b5d85b23db8022751fe338e91d72230367661dd8a561",
+      "line_count": 977
+    },
+    {
+      "path": "franken_decision/src/lib.rs",
+      "sha256": "7011ddd729e1a8176ce34481148a141cf7029116492fd249f88aeb0b2233c7f9",
+      "line_count": 2300
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+      "sha256": "2255312c71b2b861af5542ed5298e78969887ecaef1c999984b8798060785012",
+      "line_count": 166
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+      "sha256": "51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a",
+      "line_count": 29
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
+      "line_count": 354
+    }
+  ],
+  "feature_profiles": [
+    {
+      "profile_id": "CFG-PROFILE-DEFAULT",
+      "cargo_features": [],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED",
+      "toml_surfaces": [],
+      "other_config_surfaces": [
+        "CFG-NON-TOML-RAPTORQ"
+      ],
+      "no_claim": "The default RaptorQ ConfigLoader is INI-style and is not evidence for TOML parsing."
+    },
+    {
+      "profile_id": "CFG-PROFILE-CONFIG-FILE",
+      "cargo_features": [
+        "config-file"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST",
+      "toml_surfaces": [
+        "CFG-TOML-RUNTIME"
+      ],
+      "other_config_surfaces": [],
+      "no_claim": "This profile does not expose ATP CLI or atpd configuration."
+    },
+    {
+      "profile_id": "CFG-PROFILE-CLI",
+      "cargo_features": [
+        "cli",
+        "config-file"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "PARTIAL_EXECUTED",
+      "toml_surfaces": [
+        "CFG-TOML-RUNTIME",
+        "CFG-TOML-ATP-COMMAND",
+        "CFG-TOML-ATP-INSTALL"
+      ],
+      "other_config_surfaces": [],
+      "no_claim": "The cli feature does not compile the atpd binary unless atpd-daemon is also enabled."
+    },
+    {
+      "profile_id": "CFG-PROFILE-ATPD",
+      "cargo_features": [
+        "atpd-daemon",
+        "cli",
+        "config-file"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED",
+      "toml_surfaces": [
+        "CFG-TOML-RUNTIME",
+        "CFG-TOML-ATP-COMMAND",
+        "CFG-TOML-ATP-INSTALL",
+        "CFG-TOML-ATPD"
+      ],
+      "other_config_surfaces": [],
+      "no_claim": "Source inventory is not a real daemon start, reload, failure, or precedence E2E."
+    },
+    {
+      "profile_id": "CFG-PROFILE-DEPENDENCY-LEDGER",
+      "cargo_features": [
+        "dependency-ledger"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED",
+      "toml_surfaces": [
+        "CFG-TOML-DEPENDENCY-LEDGER"
+      ],
+      "other_config_surfaces": [],
+      "no_claim": "Cargo manifest transformation is an internal audit-tool surface, not an operator runtime-config API."
+    }
+  ],
+  "toml_surfaces": [
+    {
+      "surface_id": "CFG-TOML-RUNTIME",
+      "support_class": "production-opt-in-library",
+      "feature_gate": "config-file",
+      "source_paths": [
+        "src/runtime/env_config.rs",
+        "src/runtime/builder.rs"
+      ],
+      "public_entrypoints": [
+        "runtime::RuntimeBuilder::from_toml",
+        "runtime::RuntimeBuilder::from_toml_str",
+        "runtime::RuntimeBuilder::with_env_overrides",
+        "runtime::env_config::parse_toml_file",
+        "runtime::env_config::parse_toml_str"
+      ],
+      "field_count": 14,
+      "field_groups": [
+        {
+          "table": "scheduler",
+          "required": false,
+          "fields": [
+            "worker_threads:Option<usize>",
+            "task_queue_depth:Option<usize>",
+            "thread_stack_size:Option<usize>",
+            "thread_name_prefix:Option<String>",
+            "steal_batch_size:Option<usize>",
+            "enable_parking:Option<bool>",
+            "poll_budget:Option<u32>",
+            "cancel_lane_max_streak:Option<usize>",
+            "enable_governor:Option<bool>",
+            "governor_interval:Option<u32>",
+            "enable_adaptive_cancel_streak:Option<bool>",
+            "adaptive_cancel_streak_epoch_steps:Option<u32>"
+          ]
+        },
+        {
+          "table": "blocking",
+          "required": false,
+          "fields": [
+            "min_threads:Option<usize>",
+            "max_threads:Option<usize>"
+          ]
+        }
+      ],
+      "empty_document": "ACCEPT_DEFAULTS",
+      "partial_document": "ACCEPT_OVERLAY_ON_DEFAULTS",
+      "unknown_fields": "ACCEPT_AND_IGNORE",
+      "duplicate_keys": "REJECT_PARSER",
+      "read_behavior": "Read entire file through EnvReader, deserialize to an intermediate all-optional model, then apply to a fresh RuntimeConfig.",
+      "write_behavior": "NO_WRITER",
+      "precedence_id": "CFG-PRECEDENCE-RUNTIME",
+      "error_contract_ids": [
+        "CFG-ERROR-RUNTIME-READ",
+        "CFG-ERROR-RUNTIME-PARSE",
+        "CFG-ERROR-RUNTIME-SEMANTIC"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "support_class": "production-opt-in-library-cli",
+      "feature_gate": "cli",
+      "source_paths": [
+        "src/cli/atp_config.rs",
+        "src/cli/atp_command_tree.rs"
+      ],
+      "public_entrypoints": [
+        "cli::atp_config::AtpConfigManager::load_all",
+        "cli::atp_config::AtpConfigManager::load_daemon_policy",
+        "cli::atp_config::AtpConfigManager::load_local_config",
+        "cli::atp_config::AtpConfigManager::save_config",
+        "cli::AtpConfig"
+      ],
+      "field_count": 11,
+      "field_groups": [
+        {
+          "table": "<root>",
+          "required": true,
+          "fields": [
+            "profile:Option<AtpProfile>",
+            "chunk_size:Option<u64>",
+            "max_concurrent:Option<u32>",
+            "timeout:Option<u64>",
+            "compression:Option<bool>",
+            "encryption:Option<bool>",
+            "repair_overhead:Option<f32>",
+            "interface:Option<String>",
+            "relay_server:Option<String>",
+            "daemon_socket:Option<PathBuf>",
+            "verbose:Option<bool>"
+          ]
+        }
+      ],
+      "empty_document": "ACCEPT_ALL_NONE_LAYER",
+      "partial_document": "ACCEPT_OPTION_OVERLAY",
+      "unknown_fields": "ACCEPT_AND_IGNORE",
+      "duplicate_keys": "REJECT_PARSER",
+      "read_behavior": "load_all attempts daemon policy then local config; user_config is never loaded; read and parse failures are swallowed and the layer remains absent.",
+      "write_behavior": "Pretty TOML is written directly with create_dir_all plus fs::write; not atomic, no fsync, comments and input ordering are not preserved.",
+      "precedence_id": "CFG-PRECEDENCE-ATP-COMMAND",
+      "error_contract_ids": [
+        "CFG-ERROR-ATP-FILE",
+        "CFG-ERROR-ATP-PARSE",
+        "CFG-ERROR-ATP-SERIALIZE",
+        "CFG-ERROR-ATP-SCOPE"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "PARTIAL_EXECUTED"
+    },
+    {
+      "surface_id": "CFG-TOML-ATP-INSTALL",
+      "support_class": "production-opt-in-persisted-cli",
+      "feature_gate": "cli",
+      "source_paths": [
+        "src/cli/atp_config.rs",
+        "src/cli/first_run.rs",
+        "src/cli/upgrade.rs"
+      ],
+      "public_entrypoints": [
+        "cli::atp_config::AtpInstallConfig::read_from_file",
+        "cli::atp_config::AtpInstallConfig::read_from_file_secure",
+        "cli::atp_config::AtpInstallConfig::write_to_file",
+        "cli::atp_config::AtpInstallConfig::write_to_file_secure"
+      ],
+      "field_count": 14,
+      "field_groups": [
+        {
+          "table": "<root>",
+          "required": true,
+          "fields": [
+            "schema_version:ConfigVersion",
+            "version:Option<semver::Version>",
+            "identity_path:PathBuf",
+            "inbox_dir:PathBuf",
+            "peer_dir:PathBuf",
+            "daemon_state_dir:PathBuf",
+            "receive_safety_policy:ReceiveSafetyPolicy",
+            "proof_retention_policy:ProofRetentionPolicy",
+            "enable_tailscale:bool",
+            "allow_relays:bool",
+            "logging_level:String",
+            "service_platform:String",
+            "service_daemon_enabled:bool",
+            "service_auto_start:bool"
+          ]
+        }
+      ],
+      "empty_document": "REJECT_MISSING_REQUIRED_FIELDS",
+      "partial_document": "REJECT_UNLESS_ONLY_OPTIONAL_VERSION_IS_OMITTED",
+      "unknown_fields": "ACCEPT_AND_IGNORE",
+      "duplicate_keys": "REJECT_PARSER",
+      "read_behavior": "Secure variants constrain the requested path to an explicit base; compatibility variants pass the path directly and emit a tracing warning.",
+      "write_behavior": "Pretty TOML is written directly with create_dir_all plus fs::write; not atomic, no fsync, comments and input ordering are not preserved.",
+      "precedence_id": "CFG-PRECEDENCE-ATP-INSTALL",
+      "error_contract_ids": [
+        "CFG-ERROR-ATP-FILE",
+        "CFG-ERROR-ATP-PARSE",
+        "CFG-ERROR-ATP-SERIALIZE",
+        "CFG-ERROR-ATP-PATH"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "CFG-TOML-ATPD",
+      "support_class": "production-opt-in-binary",
+      "feature_gate": "atpd-daemon",
+      "source_paths": [
+        "src/bin/atpd.rs"
+      ],
+      "public_entrypoints": [
+        "atpd --config <PATH> start",
+        "atpd --config <PATH> reload",
+        "atpd --config <PATH> diagnostics",
+        "atpd --config <PATH> identity"
+      ],
+      "field_count": 45,
+      "field_groups": [
+        {
+          "table": "identity",
+          "required": true,
+          "fields": [
+            "peer_id:String",
+            "private_key_path:PathBuf",
+            "device_name:String",
+            "team_memberships:Vec<String>"
+          ]
+        },
+        {
+          "table": "network",
+          "required": true,
+          "fields": [
+            "bind_addr:SocketAddr",
+            "enable_quic:bool",
+            "enable_relay:bool",
+            "enable_mailbox:bool"
+          ]
+        },
+        {
+          "table": "network.quic",
+          "required": false,
+          "fields": [
+            "server_cert_path:Option<PathBuf>",
+            "server_key_path:Option<PathBuf>",
+            "rq_auth_key_hex:Option<String>",
+            "allow_unauthenticated_lab:bool"
+          ]
+        },
+        {
+          "table": "network.discovery",
+          "required": true,
+          "fields": [
+            "enable_local:bool",
+            "enable_relay_discovery:bool",
+            "relay_servers:Vec<String>",
+            "bootstrap_peers:Vec<String>"
+          ]
+        },
+        {
+          "table": "storage",
+          "required": true,
+          "fields": [
+            "data_dir:PathBuf",
+            "cache_dir:PathBuf",
+            "max_cache_size:u64",
+            "cache_retention_secs:u64"
+          ]
+        },
+        {
+          "table": "storage.journal",
+          "required": true,
+          "fields": [
+            "enable:bool",
+            "journal_path:PathBuf",
+            "max_journal_size:u64",
+            "rotation_policy:String"
+          ]
+        },
+        {
+          "table": "transfers",
+          "required": true,
+          "fields": [
+            "max_concurrent:u32",
+            "default_timeout_secs:u64",
+            "max_transfer_size:u64",
+            "enable_bandwidth_limit:bool",
+            "bandwidth_limit_bps:Option<u64>"
+          ]
+        },
+        {
+          "table": "service",
+          "required": true,
+          "fields": [
+            "auto_start:bool",
+            "restart_policy:RestartPolicy",
+            "shutdown_timeout_secs:u64"
+          ]
+        },
+        {
+          "table": "service.health_check",
+          "required": true,
+          "fields": [
+            "enable:bool",
+            "interval_secs:u64",
+            "timeout_secs:u64",
+            "failure_threshold:u32"
+          ]
+        },
+        {
+          "table": "diagnostics",
+          "required": true,
+          "fields": [
+            "enable_metrics:bool",
+            "metrics_bind:Option<SocketAddr>",
+            "enable_debug:bool"
+          ]
+        },
+        {
+          "table": "diagnostics.logging",
+          "required": true,
+          "fields": [
+            "level:String",
+            "format:String",
+            "file_path:Option<PathBuf>"
+          ]
+        },
+        {
+          "table": "diagnostics.logging.rotation",
+          "required": false,
+          "fields": [
+            "max_size:u64",
+            "keep_files:u32",
+            "frequency:String"
+          ]
+        }
+      ],
+      "empty_document": "REJECT_MISSING_REQUIRED_TABLES",
+      "partial_document": "REJECT_MISSING_REQUIRED_FIELDS_EXCEPT_DEFAULT_QUIC_AND_OPTION_FIELDS",
+      "unknown_fields": "ACCEPT_AND_IGNORE",
+      "duplicate_keys": "REJECT_PARSER",
+      "read_behavior": "Missing file returns defaults. Existing read or parse failure propagates from load_daemon_config, but the start path catches any loader error and falls back to defaults.",
+      "write_behavior": "NO_WRITER",
+      "precedence_id": "CFG-PRECEDENCE-ATPD",
+      "error_contract_ids": [
+        "CFG-ERROR-ATPD-READ",
+        "CFG-ERROR-ATPD-PARSE",
+        "CFG-ERROR-ATPD-START-FALLBACK"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "CFG-TOML-DEPENDENCY-LEDGER",
+      "support_class": "internal-production-tool",
+      "feature_gate": "dependency-ledger",
+      "source_paths": [
+        "src/bin/dependency_marginal_ledger.rs"
+      ],
+      "public_entrypoints": [
+        "dependency_marginal_ledger"
+      ],
+      "field_count": 0,
+      "field_groups": [],
+      "empty_document": "ACCEPT_GENERIC_EMPTY_TABLE_BUT_NOT_USEFUL_AS_CARGO_MANIFEST",
+      "partial_document": "ACCEPT_GENERIC_TOML_THEN_VALIDATE_REQUIRED_CARGO_SHAPE_AT_CONSUMER",
+      "unknown_fields": "PRESERVE_UNLESS_EXPLICITLY_MUTATED",
+      "duplicate_keys": "REJECT_PARSER",
+      "read_behavior": "Parses root and member Cargo.toml files into toml::Value, then performs named dependency, feature, workspace, dev-dependency and target mutations.",
+      "write_behavior": "Writes pretty generated shadow manifests directly; comments and original ordering are not preserved.",
+      "precedence_id": "CFG-PRECEDENCE-DEPENDENCY-LEDGER",
+      "error_contract_ids": [
+        "CFG-ERROR-DEPENDENCY-LEDGER"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "adjacent_surfaces": [
+    {
+      "surface_id": "CFG-TOML-FRANKEN-DECISION-TEST",
+      "source_path": "franken_decision/src/lib.rs",
+      "behavior": "Test-only TOML serialization round-trips LossMatrix and FallbackPolicy; no production parse or write call exists.",
+      "inventory_state": "EXPLICIT_TEST_ONLY",
+      "evidence_state": "EXPLICIT_TEST_ONLY"
+    },
+    {
+      "surface_id": "CFG-TOML-MOCK-METAMORPHIC",
+      "source_path": "src/fs_config_metamorphic_tests.rs",
+      "behavior": "Legacy-harness test-only TOML properties operate on MockRuntimeConfig rather than any production config type.",
+      "inventory_state": "EXPLICIT_TEST_ONLY",
+      "evidence_state": "EXPLICIT_TEST_ONLY"
+    },
+    {
+      "surface_id": "CFG-NON-TOML-RAPTORQ",
+      "source_path": "src/config.rs",
+      "behavior": "Public ConfigLoader is an INI-style line parser with six sections and 33 exact keys; it rejects unknown sections and keys and is not TOML.",
+      "field_groups": [
+        "encoding:5",
+        "transport:9",
+        "resources:4",
+        "timeouts:5",
+        "observability:7",
+        "security:3"
+      ],
+      "inventory_state": "EXPLICIT_NON_TOML",
+      "evidence_state": "EXPLICIT_NON_TOML"
+    }
+  ],
+  "grammar_constructs": [
+    {
+      "construct_id": "CFG-GRAMMAR-BASIC-STRING",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ACCEPT_WHERE_STRING_PATH_OR_SOCKET_FIELD_MATCHES",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-LITERAL-STRING",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ACCEPT_WHERE_STRING_OR_PATH_FIELD_MATCHES",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-MULTILINE-STRING",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ACCEPT_WHERE_STRING_OR_PATH_FIELD_MATCHES",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-INTEGER",
+      "generic_toml": "toml::Value ACCEPTS_SIGNED_64_BIT_RANGE_AND_RADIX_FORMS",
+      "typed_config": "DIRECT_DESERIALIZATION_ACCEPTS_NONNEGATIVE_VALUES_THROUGH_U64_MAX_WHEN_THE_TARGET_FIELD_IS_U64",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-FLOAT",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ONLY_ATP_COMMAND_REPAIR_OVERHEAD_IS_FLOAT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-BOOLEAN",
+      "generic_toml": "ACCEPT_TRUE_FALSE_ONLY",
+      "typed_config": "ACCEPT_ON_BOOL_FIELDS",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-OFFSET-DATETIME",
+      "generic_toml": "ACCEPT",
+      "typed_config": "NO_TYPED_DATETIME_FIELD; ACCEPT_ONLY_WHEN_UNKNOWN_AND_IGNORED",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-LOCAL-DATETIME-DATE-TIME",
+      "generic_toml": "ACCEPT",
+      "typed_config": "NO_TYPED_DATETIME_FIELD; ACCEPT_ONLY_WHEN_UNKNOWN_AND_IGNORED",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-ARRAY",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ATPD_STRING_VECTOR_FIELDS_ACCEPT_HOMOGENEOUS_STRING_ARRAYS",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-TABLE",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ACCEPT_WHERE_TABLE_PATH_MATCHES_OR_UNKNOWN_TABLE_IS_IGNORED",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-INLINE-TABLE",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ACCEPT_WHERE_STRUCT_FIELD_MATCHES; OTHERWISE TYPE_ERROR_OR_IGNORED_UNKNOWN",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-DOTTED-KEY",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ACCEPT_WHEN_RESOLVED_TABLE_AND_FIELD_MATCH",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-QUOTED-KEY",
+      "generic_toml": "ACCEPT",
+      "typed_config": "ACCEPT_WHEN_DECODED_KEY_MATCHES",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-COMMENT",
+      "generic_toml": "ACCEPT_AND_DISCARD",
+      "typed_config": "ACCEPT_AND_DISCARD",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-DUPLICATE-OR-CONFLICT",
+      "generic_toml": "REJECT",
+      "typed_config": "REJECT_BEFORE_DESERIALIZATION",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "construct_id": "CFG-GRAMMAR-ARRAY-OF-TABLES",
+      "generic_toml": "ACCEPT",
+      "typed_config": "NO_TYPED_ARRAY_OF_TABLES_FIELD; ACCEPT_ONLY_WHEN_UNKNOWN_AND_IGNORED",
+      "evidence_state": "EXECUTED"
+    }
+  ],
+  "precedence_contracts": [
+    {
+      "precedence_id": "CFG-PRECEDENCE-RUNTIME",
+      "low_to_high": [
+        "RuntimeConfig::default",
+        "RuntimeBuilder::from_toml or from_toml_str",
+        "RuntimeBuilder::with_env_overrides when called after TOML construction",
+        "later RuntimeBuilder programmatic setters"
+      ],
+      "caveat": "Precedence is method-call order, not an enforced global layer manager; calling with_env_overrides later always mutates the current builder.",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "precedence_id": "CFG-PRECEDENCE-ATP-COMMAND",
+      "low_to_high": [
+        "AtpConfig::default",
+        "daemon policy",
+        "local .atp.toml",
+        "CLI flags"
+      ],
+      "caveat": "A user_config path and User save scope exist, but load_all never loads user_config. Failed daemon/local reads and parses are silently treated as absent layers.",
+      "evidence_state": "PARTIAL_EXECUTED"
+    },
+    {
+      "precedence_id": "CFG-PRECEDENCE-ATP-INSTALL",
+      "low_to_high": [
+        "persisted config.toml"
+      ],
+      "caveat": "First-run creates the file and upgrade reads, rewrites, backs up, and restores it; this is persisted state, not a multi-layer configuration.",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "precedence_id": "CFG-PRECEDENCE-ATPD",
+      "low_to_high": [
+        "AtpdConfig::default when file is absent or start catches a load error",
+        "TOML file when successfully loaded",
+        "start CLI overrides"
+      ],
+      "caveat": "Start flags can enable selected booleans but cannot disable file-enabled values; reload does not apply every listener-affecting change without restart.",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "precedence_id": "CFG-PRECEDENCE-DEPENDENCY-LEDGER",
+      "low_to_high": [
+        "input Cargo manifest",
+        "deterministic shadow-manifest mutations selected by the tool"
+      ],
+      "caveat": "This is transformation order, not user configuration precedence.",
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "io_and_security_contracts": [
+    {
+      "io_id": "CFG-IO-RUNTIME-FILE",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "paths": [
+        "caller-supplied RuntimeBuilder::from_toml path"
+      ],
+      "path_policy": "No base-directory confinement; EnvReader owns file access.",
+      "atomic_read": "PARSE_THEN_APPLY_TO_FRESH_BUILDER",
+      "atomic_write": "NOT_APPLICABLE",
+      "permissions": "OS defaults",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "io_id": "CFG-IO-ATP-COMMAND",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "paths": [
+        "/etc/asupersync/atp.toml or macOS/Windows equivalent",
+        "$XDG_CONFIG_HOME/asupersync/atp.toml user path",
+        ".atp.toml"
+      ],
+      "path_policy": "Environment-derived base paths reject traversal, excessive length, controls, and relative Unix paths; the local file remains ambient-current-directory relative.",
+      "atomic_read": "READ_STRING_THEN_DESERIALIZE_LAYER",
+      "atomic_write": "NO_DIRECT_FS_WRITE",
+      "permissions": "OS defaults; no explicit restrictive mode",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "io_id": "CFG-IO-ATP-INSTALL",
+      "surface_id": "CFG-TOML-ATP-INSTALL",
+      "paths": [
+        "<config_dir>/config.toml",
+        "<backup_dir>/<backup_id>/config.toml"
+      ],
+      "path_policy": "Secure public variants require an explicit base; first-run and upgrade call compatibility variants without a base.",
+      "atomic_read": "READ_STRING_THEN_DESERIALIZE",
+      "atomic_write": "NO_DIRECT_FS_WRITE",
+      "permissions": "OS defaults; no explicit restrictive mode",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "io_id": "CFG-IO-ATPD",
+      "surface_id": "CFG-TOML-ATPD",
+      "paths": [
+        "caller-supplied atpd --config path"
+      ],
+      "path_policy": "No base-directory confinement.",
+      "atomic_read": "READ_STRING_THEN_DESERIALIZE",
+      "atomic_write": "NOT_APPLICABLE",
+      "permissions": "OS defaults",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "io_id": "CFG-IO-DEPENDENCY-LEDGER",
+      "surface_id": "CFG-TOML-DEPENDENCY-LEDGER",
+      "paths": [
+        "root Cargo.toml",
+        "workspace member Cargo.toml",
+        "generated shadow Cargo.toml"
+      ],
+      "path_policy": "Repository/internal-tool paths and resolved workspace members.",
+      "atomic_read": "READ_STRING_THEN_PARSE_VALUE",
+      "atomic_write": "NO_DIRECT_FS_WRITE",
+      "permissions": "OS defaults",
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "error_contracts": [
+    {
+      "error_id": "CFG-ERROR-RUNTIME-READ",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "distinction": "BuildError custom message includes the requested path and source I/O error.",
+      "stable_asup_code": null,
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "error_id": "CFG-ERROR-RUNTIME-PARSE",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "distinction": "BuildError custom message prefixes failed to parse TOML config and preserves toml parser detail.",
+      "stable_asup_code": null,
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "error_id": "CFG-ERROR-RUNTIME-SEMANTIC",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "distinction": "BuildError reports semantic builder failures such as a NUL thread-name prefix after parsing.",
+      "stable_asup_code": null,
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "error_id": "CFG-ERROR-ATP-FILE",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "distinction": "ConfigError::FileRead and ConfigError::FileWrite retain path and source error when directly returned.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "error_id": "CFG-ERROR-ATP-PARSE",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "distinction": "ConfigError::Parse retains path and toml::de::Error, but manager load methods swallow it.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "error_id": "CFG-ERROR-ATP-SERIALIZE",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "distinction": "ConfigError::Serialize retains path and toml::ser::Error.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "error_id": "CFG-ERROR-ATP-SCOPE",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "distinction": "ConfigError::InvalidScope retains the rejected scope string.",
+      "stable_asup_code": null,
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "error_id": "CFG-ERROR-ATP-PATH",
+      "surface_id": "CFG-TOML-ATP-INSTALL",
+      "distinction": "ConfigError::PathSecurity distinguishes explicit secure-path validation failure.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "error_id": "CFG-ERROR-ATPD-READ",
+      "surface_id": "CFG-TOML-ATPD",
+      "distinction": "CLI error text prefixes Failed to read config file.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "error_id": "CFG-ERROR-ATPD-PARSE",
+      "surface_id": "CFG-TOML-ATPD",
+      "distinction": "CLI error text prefixes Failed to parse config file and includes toml parser detail.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "error_id": "CFG-ERROR-ATPD-START-FALLBACK",
+      "surface_id": "CFG-TOML-ATPD",
+      "distinction": "The start path converts any loader error into a warning and default config rather than a failing exit.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "error_id": "CFG-ERROR-DEPENDENCY-LEDGER",
+      "surface_id": "CFG-TOML-DEPENDENCY-LEDGER",
+      "distinction": "anyhow context distinguishes manifest read, parse, shape, transform, and shadow write failures.",
+      "stable_asup_code": null,
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "corpus_cases": [
+    {
+      "case_id": "CFG-CORPUS-GENERIC-EMPTY",
+      "surface_id": "GENERIC",
+      "class": "empty",
+      "document": "",
+      "expected": "ACCEPT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-GENERIC-SCALARS",
+      "surface_id": "GENERIC",
+      "class": "valid-scalars",
+      "document": "basic = \"hello\\nworld\"\nliteral = 'C:\\\\tmp'\ninteger = 42\nhex = 0x2A\nfloat = 1.25\nboolean = true\noffset = 1979-05-27T07:32:00Z\nlocal_date = 1979-05-27\n",
+      "expected": "ACCEPT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-GENERIC-COLLECTIONS",
+      "surface_id": "GENERIC",
+      "class": "valid-collections",
+      "document": "dotted.key = \"value\"\nquoted.\"key\" = \"value\"\narray = [\"a\", \"b\"]\ninline = { enabled = true, count = 2 }\n[[servers]]\nname = \"one\"\n[[servers]]\nname = \"two\"\n",
+      "expected": "ACCEPT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-GENERIC-COMMENTS",
+      "surface_id": "GENERIC",
+      "class": "valid-comments-formatting",
+      "document": "# leading\nkey = \"value\" # trailing\n",
+      "expected": "ACCEPT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-GENERIC-DUPLICATE",
+      "surface_id": "GENERIC",
+      "class": "malformed-duplicate",
+      "document": "key = 1\nkey = 2\n",
+      "expected": "REJECT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-GENERIC-TABLE-CONFLICT",
+      "surface_id": "GENERIC",
+      "class": "malformed-conflict",
+      "document": "key = 1\n[key]\nchild = 2\n",
+      "expected": "REJECT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-GENERIC-SYNTAX",
+      "surface_id": "GENERIC",
+      "class": "malformed-syntax",
+      "document": "key = {{{{\n",
+      "expected": "REJECT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-GENERIC-U64-OVER-VALUE-RANGE",
+      "surface_id": "GENERIC",
+      "class": "generic-value-boundary",
+      "document": "key = 18446744073709551615\n",
+      "expected": "REJECT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-RUNTIME-EMPTY",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "class": "empty",
+      "document": "",
+      "expected": "ACCEPT_DEFAULTS",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-RUNTIME-FULL",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "class": "valid-all-fields",
+      "document": "[scheduler]\nworker_threads = 8\ntask_queue_depth = 2048\nthread_stack_size = 2097152\nthread_name_prefix = \"cfg-worker\"\nsteal_batch_size = 16\nenable_parking = true\npoll_budget = 4294967295\ncancel_lane_max_streak = 64\nenable_governor = true\ngovernor_interval = 4294967295\nenable_adaptive_cancel_streak = true\nadaptive_cancel_streak_epoch_steps = 4294967295\n[blocking]\nmin_threads = 2\nmax_threads = 32\n",
+      "expected": "ACCEPT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-RUNTIME-UNKNOWN",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "class": "unknown-security-adjacent",
+      "document": "[scheduler]\nworker_threads = 2\nunknown_limit = 99\n[security]\nallow_everything = true\n",
+      "expected": "ACCEPT_AND_IGNORE_UNKNOWN",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-RUNTIME-WRONG-TYPE",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "class": "malformed-type",
+      "document": "[scheduler]\nworker_threads = \"many\"\n",
+      "expected": "REJECT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-RUNTIME-NUL-PREFIX",
+      "surface_id": "CFG-TOML-RUNTIME",
+      "class": "semantic-error",
+      "document": "[scheduler]\nthread_name_prefix = \"bad\\u0000name\"\n",
+      "expected": "REJECT_ON_APPLY",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-COMMAND-EMPTY",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "class": "empty",
+      "document": "",
+      "expected": "ACCEPT_ALL_NONE_LAYER",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-COMMAND-FULL",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "class": "valid-all-fields",
+      "document": "profile = \"lossy-wifi\"\nchunk_size = 18446744073709551615\nmax_concurrent = 4294967295\ntimeout = 18446744073709551615\ncompression = true\nencryption = true\nrepair_overhead = 2.0\ninterface = \"eth0\"\nrelay_server = \"relay.example\"\ndaemon_socket = \"/tmp/atpd.sock\"\nverbose = false\n",
+      "expected": "ACCEPT_DIRECT_U64_TARGET",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-COMMAND-BOUNDARY",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "class": "valid-boundary",
+      "document": "profile = \"lossy-wifi\"\nchunk_size = 9223372036854775807\nmax_concurrent = 4294967295\ntimeout = 9223372036854775807\ncompression = true\nencryption = true\nrepair_overhead = 2.0\ninterface = \"eth0\"\nrelay_server = \"relay.example\"\ndaemon_socket = \"/tmp/atpd.sock\"\nverbose = false\n",
+      "expected": "ACCEPT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-COMMAND-UNKNOWN",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "class": "unknown-field",
+      "document": "profile = \"auto\"\nfuture_field = true\n",
+      "expected": "ACCEPT_AND_IGNORE_UNKNOWN",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-COMMAND-BAD-ENUM",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "class": "malformed-enum",
+      "document": "profile = \"LossyWifi\"\n",
+      "expected": "REJECT",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-PROGRAMMATIC-DEFAULT-OVERLAY",
+      "surface_id": "CFG-TOML-ATP-COMMAND",
+      "class": "programmatic-precedence-boundary",
+      "document": "AtpConfig { timeout: Some(120), compression: Some(true), ..Default::default() }",
+      "expected": "OBSERVED_PROFILE_AUTO_OVERRIDES_LOWER_SYNCTREE_PROFILE",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-INSTALL-EMPTY",
+      "surface_id": "CFG-TOML-ATP-INSTALL",
+      "class": "empty",
+      "document": "",
+      "expected": "REJECT_MISSING_FIELDS",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-INSTALL-ROUNDTRIP",
+      "surface_id": "CFG-TOML-ATP-INSTALL",
+      "class": "valid-write-read",
+      "document": "GENERATED_BY_AtpInstallConfig",
+      "expected": "SEMANTIC_ROUNDTRIP",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATP-INSTALL-PATH-TRAVERSAL",
+      "surface_id": "CFG-TOML-ATP-INSTALL",
+      "class": "path-security-error",
+      "document": "../outside/config.toml",
+      "expected": "REJECT_SECURE_VARIANT",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATPD-MISSING",
+      "surface_id": "CFG-TOML-ATPD",
+      "class": "missing-file",
+      "document": "<missing>",
+      "expected": "ACCEPT_DEFAULTS",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATPD-EMPTY",
+      "surface_id": "CFG-TOML-ATPD",
+      "class": "empty",
+      "document": "",
+      "expected": "REJECT_LOADER_BUT_START_FALLS_BACK",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATPD-DEFAULT-SHAPE",
+      "surface_id": "CFG-TOML-ATPD",
+      "class": "valid-all-fields",
+      "document": "SERIALIZED_AtpdConfig_DEFAULT_SHAPE",
+      "expected": "ACCEPT",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "case_id": "CFG-CORPUS-ATPD-UNKNOWN",
+      "surface_id": "CFG-TOML-ATPD",
+      "class": "unknown-security-field",
+      "document": "FULL_CONFIG_PLUS_network.quic.unknown_auth_mode",
+      "expected": "ACCEPT_AND_IGNORE_UNKNOWN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "case_id": "CFG-CORPUS-DEPENDENCY-LEDGER-CARGO",
+      "surface_id": "CFG-TOML-DEPENDENCY-LEDGER",
+      "class": "valid-cargo-manifest-shapes",
+      "document": "TABLES_ARRAYS_INLINE_TABLES_DOTTED_AND_QUOTED_TARGET_KEYS",
+      "expected": "ACCEPT_AND_TRANSFORM_SELECTED_KEYS",
+      "evidence_state": "EXISTING_TEST"
+    }
+  ],
+  "downstream_files_and_consumers": [
+    {
+      "consumer_id": "CFG-CONSUMER-RUNTIME-BUILDER",
+      "paths": [
+        "src/runtime/builder.rs",
+        "README.md"
+      ],
+      "surface_ids": [
+        "CFG-TOML-RUNTIME"
+      ],
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "consumer_id": "CFG-CONSUMER-ATP-FIRST-RUN",
+      "paths": [
+        "src/cli/first_run.rs",
+        "<config_dir>/config.toml"
+      ],
+      "surface_ids": [
+        "CFG-TOML-ATP-INSTALL"
+      ],
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "consumer_id": "CFG-CONSUMER-ATP-UPGRADE",
+      "paths": [
+        "src/cli/upgrade.rs",
+        "<config_dir>/config.toml",
+        "<backup_dir>/<backup_id>/config.toml"
+      ],
+      "surface_ids": [
+        "CFG-TOML-ATP-INSTALL"
+      ],
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "consumer_id": "CFG-CONSUMER-ATP-CONFIG-MANAGER",
+      "paths": [
+        "/etc/asupersync/atp.toml",
+        "$XDG_CONFIG_HOME/asupersync/atp.toml",
+        ".atp.toml"
+      ],
+      "surface_ids": [
+        "CFG-TOML-ATP-COMMAND"
+      ],
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "consumer_id": "CFG-CONSUMER-ATPD",
+      "paths": [
+        "src/bin/atpd.rs",
+        "atpd --config <PATH>"
+      ],
+      "surface_ids": [
+        "CFG-TOML-ATPD"
+      ],
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "consumer_id": "CFG-CONSUMER-DEPENDENCY-LEDGER",
+      "paths": [
+        "src/bin/dependency_marginal_ledger.rs",
+        "Cargo.toml",
+        "<workspace-member>/Cargo.toml",
+        "<shadow-workspace>/Cargo.toml"
+      ],
+      "surface_ids": [
+        "CFG-TOML-DEPENDENCY-LEDGER"
+      ],
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "consumer_id": "CFG-CONSUMER-PORTFOLIO-FIXTURE",
+      "paths": [
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ],
+      "surface_ids": [
+        "CFG-NON-TOML-RAPTORQ"
+      ],
+      "evidence_state": "BLOCKED_GAP"
+    }
+  ],
+  "child_capability_rows": [
+    {
+      "owner_bead": "asupersync-5z2scg.4.1",
+      "owned_capability": "Exhaustive live TOML/config inventory, typed field map, observed grammar, corpus, precedence, errors, I/O, downstream consumers, gaps, and zero-UNKNOWN gate.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXECUTED",
+      "required_evidence": [
+        "config-toml-capability-inventory-contract"
+      ],
+      "no_claim": "Inventory evidence does not add JSON, improve behavior, prove E2E, or authorize toml removal."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.4.2",
+      "owned_capability": "One versioned typed model, additive canonical JSON, schema/default/redaction rules, atomic model I/O, and TOML coexistence.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PLANNED",
+      "required_evidence": [
+        "golden JSON",
+        "TOML-to-model-to-JSON equivalence",
+        "schema migration and rollback"
+      ],
+      "no_claim": "A new JSON representation does not narrow or replace any accepted TOML surface."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.4.3",
+      "owned_capability": "Incumbent KEEP decision or exact accepted TOML parser/writer parity with bounded differential, property, fuzz, and diagnostics evidence.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PLANNED",
+      "required_evidence": [
+        "complete A1 corpus",
+        "independent differential oracle",
+        "bounded-resource cases",
+        "write/read semantic parity"
+      ],
+      "no_claim": "An owned parser may not ship or replace toml unless every observed accepted case is SAME-or-BETTER."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "owned_capability": "Diagnostics, exact precedence, secure and atomic I/O, secret redaction, conversion, rollback, examples, help, and operator documentation.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PLANNED",
+      "required_evidence": [
+        "missing/unreadable/malformed/conflicting/unknown tests",
+        "path and permission tests",
+        "secret redaction",
+        "discoverable examples"
+      ],
+      "no_claim": "Documentation or error improvements do not prove binary journeys or dependency cutover."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.4.5",
+      "owned_capability": "Real asupersync/ATP/atpd TOML and JSON user journeys, precedence, save/reload, conversion, invalid files, attacks, permissions, cancellation, rollback, and terminal KEEP-or-cutover decision.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PLANNED",
+      "required_evidence": [
+        "config_toml_json_roundtrip",
+        "config_precedence",
+        "atpd_config_user",
+        "dependency-sovereignty forensic artifacts"
+      ],
+      "no_claim": "Only this terminal child may authorize removal, and only when all rows are SAME-or-BETTER; otherwise KEEP."
+    }
+  ],
+  "known_gaps": [
+    {
+      "gap_id": "CFG-GAP-01",
+      "finding": "Capability registry and API map route TOML to src/config.rs and src/bin/asupersync.rs, but neither owns a toml call; the real owners are inventoried here.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-02",
+      "finding": "No integration test exercises RuntimeBuilder::from_toml with a real file path.",
+      "owner_bead": "asupersync-5z2scg.4.3",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-05",
+      "finding": "There is no checked-in runtime TOML example; ignored rustdoc refers to nonexistent config/runtime.toml.",
+      "owner_bead": "asupersync-5z2scg.4.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-06",
+      "finding": "The legacy metamorphic TOML tests use MockRuntimeConfig, not live config types.",
+      "owner_bead": "asupersync-5z2scg.4.3",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-07",
+      "finding": "AtpConfigManager defines a user config path and User save scope but load_all never loads user_config.",
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-08",
+      "finding": "AtpConfigManager silently swallows missing, unreadable, and malformed daemon/local config instead of preserving the public ConfigError distinctions.",
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-09",
+      "finding": "atpd start catches every config read/parse error and starts with defaults; other atpd subcommands propagate the same error.",
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-10",
+      "finding": "Typed TOML structs do not deny unknown fields, including unknown security-adjacent keys; this conflicts with the registry's stated fail-closed unknown-security-field invariant.",
+      "owner_bead": "asupersync-5z2scg.4.3",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-11",
+      "finding": "ATP/install/shadow-manifest writes are direct fs::write operations without tempfile, fsync, rename, rollback, restrictive permissions, or comment/order retention.",
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-12",
+      "finding": "No application-level input byte, nesting, string, array, table, or work limit is enforced for TOML documents.",
+      "owner_bead": "asupersync-5z2scg.4.3",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-13",
+      "finding": "The portfolio config-profile fixture enables config-file but exercises only the non-TOML RaptorQ ConfigLoader and never RuntimeBuilder::from_toml[_str].",
+      "owner_bead": "asupersync-5z2scg.4.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-14",
+      "finding": "ADR language says all config tables and fields are optional, but AtpInstallConfig and most AtpdConfig tables and fields are required by observed serde behavior.",
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-15",
+      "finding": "Operator-facing TOML read, parse, validation, path, and fallback diagnostics have no stable ASUP error codes and no proven secret-redaction boundary.",
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-16",
+      "finding": "No JSON configuration loader, shared canonical typed model, conversion path, or cross-format equivalence test exists.",
+      "owner_bead": "asupersync-5z2scg.4.2",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "CFG-GAP-17",
+      "finding": "Programmatic ATP overlays built with struct update from AtpConfig::default inject Some defaults for unrelated keys and override lower-priority layers; the existing test_config_precedence currently observes Auto instead of expected SyncTree.",
+      "owner_bead": "asupersync-5z2scg.4.4",
+      "evidence_state": "BLOCKED_GAP"
+    }
+  ],
+  "executable_baselines": [
+    {
+      "baseline_id": "CFG-BASELINE-INVENTORY",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/config_toml_capability_inventory_v1.json --overlay-path docs/config_toml_capability_inventory.md --overlay-path tests/config_toml_capability_inventory_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_config_toml_capability_inventory\" cargo test -p asupersync --test config_toml_capability_inventory_contract --features cli -- --nocapture",
+      "result": "7 passed; 0 failed; remote ovh-a; 2026-07-24T21:46:01Z",
+      "evidence_state": "EXECUTED"
+    },
+    {
+      "baseline_id": "CFG-BASELINE-RUNTIME",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_config_toml_runtime\" cargo test -p asupersync --lib --features config-file runtime::env_config::toml_tests -- --nocapture",
+      "result": "PLANNED_REPLAY_OF_EXISTING_TESTS",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "baseline_id": "CFG-BASELINE-CLI",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_config_toml_cli\" cargo test -p asupersync --lib --features cli cli::atp_config::tests -- --nocapture",
+      "result": "3 passed; 1 failed: test_config_precedence observed Some(Auto), expected Some(SyncTree); remote hz2; 2026-07-24T22:04:14Z",
+      "evidence_state": "PARTIAL_EXECUTED"
+    },
+    {
+      "baseline_id": "CFG-BASELINE-E2E",
+      "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario config_formats",
+      "result": "PLANNED_FOR_A5",
+      "evidence_state": "PLANNED"
+    }
+  ],
+  "no_claim_boundary": "This A1 packet proves a source-pinned, zero-UNKNOWN inventory and executable parser/typed-model corpus only. It does not add JSON, change precedence, fix diagnostics or I/O, prove real binary journeys, prove arbitrary TOML, prove broad workspace health or performance, or authorize removal of toml, serde, any feature, field, error, path, input, output, or user journey."
+}
