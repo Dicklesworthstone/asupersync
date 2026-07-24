@@ -1774,12 +1774,6 @@ fn native_evidence(
         .iter()
         .map(|package| (package.id.as_str(), package))
         .collect::<BTreeMap<_, _>>();
-    let names = package_ids
-        .iter()
-        .filter_map(|package_id| package_map.get(package_id.as_str()))
-        .map(|package| package.name.as_str())
-        .collect::<BTreeSet<_>>();
-
     for package_id in package_ids {
         let package = package_map
             .get(package_id.as_str())
@@ -1823,7 +1817,9 @@ fn native_evidence(
                 ));
                 "active"
             }
-            "signal-hook" if !names.contains("cc") => {
+            "signal-hook"
+                if !has_active_package_dependency(&resolution.metadata, package_id, "cc") =>
+            {
                 evidence.push("signal-hook's cc build dependency is feature-declared but absent from this resolved closure".to_owned());
                 "declared-inactive"
             }
@@ -1863,6 +1859,29 @@ fn native_evidence(
         status: status.to_owned(),
         packages,
     })
+}
+
+fn has_active_package_dependency(
+    metadata: &CargoMetadata,
+    package_id: &str,
+    dependency_name: &str,
+) -> bool {
+    let dependency_ids = metadata
+        .packages
+        .iter()
+        .filter(|package| package.name == dependency_name)
+        .map(|package| package.id.as_str())
+        .collect::<BTreeSet<_>>();
+    metadata
+        .resolve
+        .as_ref()
+        .and_then(|resolve| resolve.nodes.iter().find(|node| node.id == package_id))
+        .is_some_and(|node| {
+            node.deps.iter().any(|dependency| {
+                dependency.name == dependency_name
+                    || dependency_ids.contains(dependency.pkg.as_str())
+            })
+        })
 }
 
 fn phase_forecasts(measurements: &[MarginalRecord]) -> Vec<PhaseForecast> {
@@ -2128,6 +2147,64 @@ serde = "1"
                 kind: None,
                 target: None,
             }
+        ));
+    }
+
+    #[test]
+    fn active_dependency_is_edge_local_not_closure_global() {
+        let mut metadata = CargoMetadata {
+            packages: vec![
+                CargoPackage {
+                    id: "signal-hook-id".to_owned(),
+                    name: "signal-hook".to_owned(),
+                    source: None,
+                    manifest_path: "/registry/signal-hook/Cargo.toml".to_owned(),
+                    repository: None,
+                    checksum: None,
+                    targets: Vec::new(),
+                },
+                CargoPackage {
+                    id: "cc-id".to_owned(),
+                    name: "cc".to_owned(),
+                    source: None,
+                    manifest_path: "/registry/cc/Cargo.toml".to_owned(),
+                    repository: None,
+                    checksum: None,
+                    targets: Vec::new(),
+                },
+            ],
+            resolve: Some(CargoResolve {
+                nodes: vec![CargoNode {
+                    id: "signal-hook-id".to_owned(),
+                    deps: Vec::new(),
+                }],
+            }),
+            workspace_members: Vec::new(),
+        };
+        assert!(!has_active_package_dependency(
+            &metadata,
+            "signal-hook-id",
+            "cc"
+        ));
+
+        metadata
+            .resolve
+            .as_mut()
+            .expect("fixture resolve graph")
+            .nodes[0]
+            .deps
+            .push(CargoNodeDep {
+                name: "cc".to_owned(),
+                pkg: "cc-id".to_owned(),
+                dep_kinds: vec![CargoDepKind {
+                    kind: Some("build".to_owned()),
+                    target: None,
+                }],
+            });
+        assert!(has_active_package_dependency(
+            &metadata,
+            "signal-hook-id",
+            "cc"
         ));
     }
 
