@@ -1286,6 +1286,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tls")]
+    fn builder_with_test_root() -> TlsConnectorBuilder {
+        let certs = Certificate::from_pem(TEST_CERT_PEM).expect("parse TLS test certificate");
+        TlsConnectorBuilder::new().add_root_certificates(certs)
+    }
+
     #[test]
     fn test_builder_default() {
         let builder = TlsConnectorBuilder::new();
@@ -1376,12 +1382,11 @@ mod tests {
     #[test]
     fn test_build_with_test_root_succeeds() {
         // Positive control for the empty-roots rejection above. Uses
-        // the test-fixture CA so build() succeeds. Pins the success
-        // path so a future agent removing the empty-roots check
-        // cannot land it without also breaking this test.
-        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
-        let connector = TlsConnectorBuilder::new()
-            .add_root_certificates(certs)
+        // the explicit test-fixture certificate so build() succeeds.
+        // Pins the success path so a future agent removing the
+        // empty-roots check cannot land it without also breaking this
+        // test.
+        let connector = builder_with_test_root()
             .build()
             .expect("builder with one root should succeed");
         assert!(connector.config().alpn_protocols.is_empty());
@@ -1504,7 +1509,7 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn test_build_with_alpn() {
-        let connector = TlsConnectorBuilder::new().alpn_http().build().unwrap();
+        let connector = builder_with_test_root().alpn_http().build().unwrap();
 
         assert_eq!(
             connector.config().alpn_protocols,
@@ -1516,7 +1521,7 @@ mod tests {
     #[test]
     fn test_handshake_timeout_builder() {
         let timeout = std::time::Duration::from_secs(1);
-        let connector = TlsConnectorBuilder::new()
+        let connector = builder_with_test_root()
             .handshake_timeout(timeout)
             .build()
             .unwrap();
@@ -1526,7 +1531,7 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn test_connector_clone_is_cheap() {
-        let connector = TlsConnectorBuilder::new().build().unwrap();
+        let connector = builder_with_test_root().build().unwrap();
 
         let start = std::time::Instant::now();
         for _ in 0..10000 {
@@ -1545,7 +1550,7 @@ mod tests {
         use crate::test_utils::run_test_with_cx;
 
         run_test_with_cx(|_cx| async move {
-            let connector = TlsConnectorBuilder::new().build().unwrap();
+            let connector = builder_with_test_root().build().unwrap();
             let (client_io, _server_io) = VirtualTcpStream::pair(
                 "127.0.0.1:5100".parse().unwrap(),
                 "127.0.0.1:5101".parse().unwrap(),
@@ -1645,7 +1650,7 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn test_session_resumption_custom() {
-        let connector = TlsConnectorBuilder::new()
+        let connector = builder_with_test_root()
             .session_resumption(rustls::client::Resumption::in_memory_sessions(512))
             .build()
             .unwrap();
@@ -1656,7 +1661,7 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn test_session_resumption_disabled() {
-        let connector = TlsConnectorBuilder::new()
+        let connector = builder_with_test_root()
             .disable_session_resumption()
             .build()
             .unwrap();
@@ -1777,8 +1782,7 @@ mod tests {
         let mut pins = CertificatePinSet::new();
         pins.add_spki_sha256_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
             .expect("valid base64");
-        let connector = TlsConnectorBuilder::new()
-            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+        let connector = builder_with_test_root()
             .with_certificate_pins(pins)
             .build()
             .expect("build with pins");
@@ -1799,8 +1803,7 @@ mod tests {
         // Back-compat: a connector built WITHOUT calling
         // with_certificate_pins() carries no pin set, so existing
         // callers that rely on rustls-only validation are unaffected.
-        let connector = TlsConnectorBuilder::new()
-            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+        let connector = builder_with_test_root()
             .build()
             .expect("build without pins");
         assert!(
@@ -1860,8 +1863,7 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn y0gm5q_default_connector_disables_0rtt_early_data() {
-        let connector = TlsConnectorBuilder::new()
-            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+        let connector = builder_with_test_root()
             .build()
             .expect("build default connector");
         assert!(
@@ -1873,12 +1875,12 @@ mod tests {
 
     #[cfg(feature = "tls")]
     #[test]
-    fn y0gm5q_enable_early_data_opt_in_sets_flag() {
-        let connector = TlsConnectorBuilder::new()
-            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+    fn y0gm5q_enable_early_data_opt_in_with_risk_ack_sets_flag() {
+        let connector = builder_with_test_root()
             .enable_early_data(true)
+            .acknowledge_zero_rtt_replay_risk()
             .build()
-            .expect("build with early data enabled");
+            .expect("build with early data enabled and replay risk acknowledged");
         assert!(
             connector.config.enable_early_data,
             "enable_early_data(true) must propagate to ClientConfig"
@@ -1888,8 +1890,7 @@ mod tests {
     #[cfg(feature = "tls")]
     #[test]
     fn y0gm5q_enable_early_data_false_disables_flag() {
-        let connector = TlsConnectorBuilder::new()
-            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+        let connector = builder_with_test_root()
             .enable_early_data(true)
             .enable_early_data(false)
             .build()
@@ -2009,10 +2010,18 @@ mod tests {
             "Production builds with strict validation must reject leaf certificates"
         );
 
-        // Should succeed to build even with empty root store (will use system roots)
-        // The key is that the leaf cert was properly rejected
-        let result = builder.build();
-        assert!(result.is_ok(), "Builder should succeed with system roots");
+        // Rejection leaves the store empty. The connector must remain
+        // fail-closed rather than acquiring ambient system roots.
+        let err = builder
+            .build()
+            .expect_err("strict rejection must leave no configured trust roots");
+        match err {
+            TlsError::Certificate(message) => assert!(
+                message.contains("no root certificates configured"),
+                "unexpected empty-root error: {message}"
+            ),
+            other => panic!("expected empty-root certificate error, got {other:?}"),
+        }
     }
 
     /// Regression test for asupersync-2o602p: Verify that the insecure bypass
