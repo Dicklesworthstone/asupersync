@@ -85,12 +85,12 @@ the observability re-exports.
 <!-- BEGIN GENERATED ADR SUMMARY -->
 - Artifact: `dependency-api-adr-registry-v1` (schema 1)
 - Phase: `asupersync-dep-p3-api-adrs-h3jspm`; aggregate terminal `asupersync-dep-p3-api-adrs-h3jspm.13`.
-- Roster: 12 ADRs; RESOLVED=3; PENDING=9.
-- Negative fixtures: 9.
+- Roster: 12 ADRs; RESOLVED=4; PENDING=8.
+- Negative fixtures: 11.
 
 | ADR | Bead | Capabilities | State | Decision | Cutover |
 |---|---|---|---|---|---|
-| `DEP-ADR-001` | `asupersync-dep-p3-api-adrs-h3jspm.1` | `CAP-SERDE-GENERIC`, `CAP-PERSISTED-TRACE-SNAPSHOT` | PENDING | - | - |
+| `DEP-ADR-001` | `asupersync-dep-p3-api-adrs-h3jspm.1` | `CAP-SERDE-GENERIC`, `CAP-PERSISTED-TRACE-SNAPSHOT` | RESOLVED | ADDITIVE_COEXISTENCE | BLOCKED_PENDING_EVIDENCE / KEEP_INCUMBENT |
 | `DEP-ADR-002` | `asupersync-dep-p3-api-adrs-h3jspm.2` | `CAP-PROTOBUF-GENERIC` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-003` | `asupersync-dep-p3-api-adrs-h3jspm.3` | `CAP-OTLP-ECOSYSTEM` | RESOLVED | ADDITIVE_COEXISTENCE | KEEP_INCUMBENT |
 | `DEP-ADR-004` | `asupersync-dep-p3-api-adrs-h3jspm.4` | `CAP-CONFIG-TOML-JSON`, `CAP-SCENARIO-YAML-JSON` | RESOLVED | ADDITIVE_COEXISTENCE | KEEP_INCUMBENT |

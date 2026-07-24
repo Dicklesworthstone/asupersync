@@ -89,7 +89,7 @@
       "adr_id": "DEP-ADR-001",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.1",
       "title": "Preserve generic SerdeCodec JSON + MessagePack + Bincode while versioning owned artifacts",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-002",
@@ -159,6 +159,660 @@
     }
   ],
   "adrs": [
+    {
+      "adr_id": "DEP-ADR-001",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.1",
+      "title": "Preserve generic SerdeCodec JSON + MessagePack + Bincode while versioning owned artifacts",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-SERDE-GENERIC",
+        "CAP-PERSISTED-TRACE-SNAPSHOT"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "decision_summary": "All four SerializationFormat discriminants stay, SerdeCodec stays generic over arbitrary Serialize and DeserializeOwned types, and the custom-codec injection points stay. Owned artifact schemas are versioned additively on top of the encoders already in use. The claim-time source read shows the Rev-3 proposal to drop the public Bincode and MessagePack variants is not an API-narrowing question at all: MessagePack is the on-disk encoding of every trace file and replay trace, and Bincode encodes distributed-snapshot vector clocks under a pinned legacy config. Removing either makes existing persisted artifacts unreadable. The versioning the bead asks for partly exists already and is preserved rather than invented: trace files carry an eleven-byte magic plus a u16 container version with a forward-rejecting check, replay carries an exact-match schema version, crash packs carry both a current version and a minimum supported floor, and TypeRegistry records a name, version and schema hash per type.",
+      "alternatives_considered": [
+        {
+          "option": "Replace the public Bincode and MessagePack variants with JSON plus purpose-built codecs, per the Rev-3 plan.",
+          "rejected_because": "Presented as an API narrowing, it is really a persisted-format break. rmp-serde writes trace metadata and every trace event; bincode with the legacy config writes distributed-snapshot vector clocks. Dropping the variants strands the existing corpus. It also deletes a genuine downstream extension capability, which the no-loss gate forbids independently."
+        },
+        {
+          "option": "Keep the encoders internally but remove the variants from the public SerializationFormat enum.",
+          "rejected_because": "SerializationFormat is public, re-exported at asupersync::types, and is a parameter of the public Serializer and Deserializer traits and of the TypedEncoder and TypedDecoder constructors. The discriminants are also frozen on the wire as bytes 1, 2, 3 and 255 in the typed-symbol header, so removing a variant breaks both compilation and stored bytes."
+        },
+        {
+          "option": "Drop SerializationFormat::Custom, since SerdeCodec itself rejects it.",
+          "rejected_because": "Custom is not dead. Byte 255 round-trips through the header parser, and the discriminant is what a downstream Serializer or Deserializer implementation claims when injected through with_serializer or with_deserializer. SerdeCodec declining it is the intended division of labour, and the downstream consumer fixture already asserts that rejection as contract."
+        },
+        {
+          "option": "Migrate persisted traces and snapshots to one owned canonical format and retire the incumbent readers.",
+          "rejected_because": "Permitted only as an additive format with a reader for the existing corpus. The persisted capability is PRESERVE_AND_REPLACE_IF_PARITY and BLOCKED_PENDING_EVIDENCE, and its no-claim boundary states that canonicalizing future artifacts does not authorize dropping any accepted historical artifact without migration and rollback proof."
+        },
+        {
+          "option": "Write an owned serializer and deserializer covering the full Serde data model, then drop rmp-serde and bincode.",
+          "rejected_because": "Not rejected in principle, but the bar is the complete Serde data model, the accepted byte formats, matching error and resource semantics, and comparable usability, validated against synthesized arbitrary-type consumers, the persisted corpus, a malformed corpus and migration readers. KEEP is explicitly correct if the marginal benefit does not justify reimplementing a complete serializer and deserializer."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::types",
+          "feature_gate": null,
+          "source_file": "src/types/mod.rs",
+          "symbols": [
+            "DeserializationError",
+            "Deserializer",
+            "SerdeCodec",
+            "SerializationError",
+            "SerializationFormat",
+            "Serializer",
+            "TYPED_SYMBOL_HEADER_LEN",
+            "TYPED_SYMBOL_MAGIC",
+            "TypeDescriptor",
+            "TypeMismatchError",
+            "TypeRegistry",
+            "TypedDecoder",
+            "TypedEncoder",
+            "TypedSymbol"
+          ],
+          "note": "The exact re-export set. None reach the crate root, so both asupersync::types:: and asupersync::types::typed_symbol:: are stable paths and both are frozen."
+        },
+        {
+          "module_path": "asupersync::types::typed_symbol",
+          "feature_gate": null,
+          "source_file": "src/types/typed_symbol.rs",
+          "symbols": [
+            "SerializationFormat",
+            "MessagePack",
+            "Bincode",
+            "Json",
+            "Custom",
+            "SerdeCodec",
+            "Serializer",
+            "Deserializer",
+            "TypeRegistry",
+            "TypeDescriptor",
+            "TypedSymbol",
+            "TypedEncoder",
+            "TypedDecoder",
+            "with_serializer",
+            "with_deserializer",
+            "from_value",
+            "into_value",
+            "register",
+            "schema_hash",
+            "TYPED_SYMBOL_MAGIC",
+            "TYPED_SYMBOL_HEADER_LEN"
+          ],
+          "note": "SerdeCodec is a unit struct with zero inherent methods; all behavior comes from two blanket impls bounded only by T: Serialize and T: DeserializeOwned. with_serializer and with_deserializer are the concrete custom-codec injection points. register and schema_hash are the per-type versioning machinery."
+        },
+        {
+          "module_path": "asupersync::trace::file",
+          "feature_gate": null,
+          "source_file": "src/trace/file.rs",
+          "symbols": [
+            "TRACE_MAGIC",
+            "TRACE_FILE_VERSION",
+            "FLAG_COMPRESSED",
+            "HEADER_SIZE",
+            "TraceFileError",
+            "TraceFileConfig",
+            "CompressionMode",
+            "TraceWriter",
+            "TraceReader",
+            "write_trace",
+            "read_trace",
+            "MAX_META_LEN",
+            "MAX_EVENT_LEN",
+            "MAX_COMPRESSED_CHUNK_LEN",
+            "MAX_EVENT_PREALLOC"
+          ],
+          "note": "The persisted trace container: an eleven-byte magic, a u16 container version, a compression flag, and explicit bounds on metadata, event, chunk and preallocation sizes. Payloads inside are MessagePack. Several of these, including HEADER_SIZE, FLAG_COMPRESSED and the MAX_ bounds, are reachable only by the long path and are public API regardless."
+        },
+        {
+          "module_path": "asupersync::trace::replay",
+          "feature_gate": null,
+          "source_file": "src/trace/replay.rs",
+          "symbols": [
+            "REPLAY_SCHEMA_VERSION",
+            "TraceMetadata",
+            "ReplayEvent",
+            "ReplayTrace",
+            "ReplayTraceError",
+            "CompactTaskId",
+            "CompactRegionId",
+            "to_bytes",
+            "from_bytes"
+          ],
+          "note": "ReplayTrace::to_bytes returns Result<Vec<u8>, rmp_serde::encode::Error>, so a format crate appears directly in a public return type, and ReplayTraceError holds a #[from] rmp_serde::decode::Error variant."
+        },
+        {
+          "module_path": "asupersync::trace::crashpack",
+          "feature_gate": null,
+          "source_file": "src/trace/crashpack.rs",
+          "symbols": [
+            "CRASHPACK_SCHEMA_VERSION",
+            "MINIMUM_SUPPORTED_SCHEMA_VERSION",
+            "CrashPackManifest",
+            "CrashPackWriter",
+            "FileCrashPackWriter",
+            "MemoryCrashPackWriter",
+            "ArtifactId",
+            "CrashPackWriteError",
+            "artifact_filename"
+          ],
+          "note": "Pretty JSON with deterministic version-stamped filenames and atomic temp-plus-rename writes. This is the only artifact in the crate with an explicit backward-compatibility floor as well as a current version, and it is the model the other artifacts should generalize. The entire writer surface is reachable only by the long path."
+        },
+        {
+          "module_path": "asupersync::lab::snapshot_restore",
+          "feature_gate": null,
+          "source_file": "src/lab/snapshot_restore.rs",
+          "symbols": [
+            "RestorableSnapshot",
+            "RestoreError",
+            "ValidationResult",
+            "SnapshotStats",
+            "SnapshotRestore",
+            "verify_integrity",
+            "SCHEMA_VERSION"
+          ],
+          "note": "There is no disk format here. serde_json appears in exactly one place, feeding an FNV content hash, so the JSON encoder is a hash-determinism dependency rather than a storage dependency."
+        },
+        {
+          "module_path": "asupersync::distributed::snapshot",
+          "feature_gate": null,
+          "source_file": "src/distributed/snapshot.rs",
+          "symbols": [
+            "SnapshotError",
+            "SnapshotMergeError",
+            "TaskSnapshot",
+            "RegionSnapshot",
+            "BudgetSnapshot",
+            "ContentHash",
+            "MAX_METADATA_LEN",
+            "MAX_VECTOR_CLOCK_LEN"
+          ],
+          "note": "The only production bincode user outside typed_symbol.rs. Vector clocks encode under bincode::config::legacy() for a deterministic binary representation; decode failure maps to an explicit invalid-vector-clock error."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "default",
+          "cargo_definition": "default = [\"proc-macros\", \"nightly-outcome-try\"]",
+          "effect": "None of serde, serde_json, rmp-serde or bincode is optional, so all three real format paths are available even to a consumer building with default-features = false. This row pins that: feature-gating any format would be capability narrowing.",
+          "must_remain": true,
+          "no_tokio_guarantee": "None of the four serialization crates introduces a tokio edge."
+        },
+        {
+          "name": "trace-compression",
+          "cargo_definition": "trace-compression = [\"dep:lz4_flex\"]",
+          "effect": "Enables LZ4 block framing for trace chunks, signalled by FLAG_COMPRESSED in the container header. Uncompressed trace files must remain readable whether or not this is enabled.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Pure-Rust codec; no tokio edge."
+        },
+        {
+          "name": "serialization-golden-harnesses",
+          "cargo_definition": "serialization-golden-harnesses = []",
+          "effect": "Gates the golden-artifact and protocol-serialization harnesses. Recorded because the capability registry names it, and because SER-GAP-04 shows those harnesses do not currently cover the codec.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No dependency edges at all."
+        },
+        {
+          "name": "cli",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "effect": "Provides the trace-inspection CLI, the operator-facing consumer of the persisted trace format, and transitively enables trace-compression so any CLI build reads and writes LZ4 trace files.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "generic_serde_codec",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/types/typed_symbol.rs",
+          "wire_encoder": "serde_json, rmp-serde, and bincode (package bincode-next) behind one dispatch",
+          "transport": "typed symbols and downstream-chosen storage",
+          "public_entry_points": [
+            "SerdeCodec",
+            "SerializationFormat",
+            "Serializer",
+            "Deserializer",
+            "TypedEncoder",
+            "TypedDecoder"
+          ],
+          "note": "Unlike the protobuf codec, this error surface is already owned: every failure is stringified into SerializationError or DeserializationError, and the format crates appear only as closure parameter annotations. SerdeCodec could swap backends with no public API change, which is exactly why the capability is about the accepted BYTES and the data model rather than about types."
+        },
+        {
+          "surface": "custom_codec_extension",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/types/typed_symbol.rs",
+          "wire_encoder": "downstream-supplied",
+          "transport": "typed symbols",
+          "public_entry_points": [
+            "with_serializer",
+            "with_deserializer",
+            "Custom"
+          ],
+          "note": "Owned code with no dependency on any format crate. Byte 255 round-trips through the header parser so a downstream codec can own the Custom discriminant."
+        },
+        {
+          "surface": "typed_symbol_container",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/types/typed_symbol.rs",
+          "wire_encoder": "owned 27-byte header",
+          "transport": "symbols",
+          "public_entry_points": [
+            "TYPED_SYMBOL_MAGIC",
+            "TYPED_SYMBOL_HEADER_LEN",
+            "TypeRegistry",
+            "TypeDescriptor"
+          ],
+          "note": "The container and its versioning are already owned; only the payload encoders are third-party. Format discriminants are frozen as header bytes and an unknown byte is rejected explicitly."
+        },
+        {
+          "surface": "persisted_trace_files",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/trace/file.rs and src/trace/replay.rs",
+          "wire_encoder": "MessagePack via rmp-serde, optionally LZ4-framed chunks",
+          "transport": "local files",
+          "public_entry_points": [
+            "TRACE_MAGIC",
+            "TRACE_FILE_VERSION",
+            "TraceWriter",
+            "TraceReader",
+            "ReplayTrace",
+            "REPLAY_SCHEMA_VERSION"
+          ],
+          "note": "This is why the format variants are not merely an enum. Two independent version checks apply: the container version is forward-rejecting and backward-accepting, while the embedded replay schema version is exact-equality and therefore strictly stricter."
+        },
+        {
+          "surface": "crashpack_artifacts",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/trace/crashpack.rs",
+          "wire_encoder": "pretty JSON via serde_json",
+          "transport": "atomic temp-plus-rename file writes through an explicit writer capability",
+          "public_entry_points": [
+            "CRASHPACK_SCHEMA_VERSION",
+            "MINIMUM_SUPPORTED_SCHEMA_VERSION",
+            "CrashPackWriter",
+            "artifact_filename"
+          ],
+          "note": "The only versioned artifact with a backward-compatibility floor, validated as a closed range. There are no ambient filesystem writes; persistence requires the writer capability."
+        },
+        {
+          "surface": "distributed_snapshots",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/distributed/snapshot.rs",
+          "wire_encoder": "bincode legacy config for vector clocks, inside an owned framed layout",
+          "transport": "distributed snapshot exchange",
+          "public_entry_points": [
+            "SnapshotError",
+            "TaskSnapshot",
+            "RegionSnapshot",
+            "ContentHash",
+            "MAX_VECTOR_CLOCK_LEN"
+          ],
+          "note": "The legacy config is a deliberate wire-compatibility pin, not an incidental default. Changing it silently changes the bytes and breaks interchange."
+        },
+        {
+          "surface": "lab_snapshot_hash_determinism",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/lab/snapshot_restore.rs",
+          "wire_encoder": "serde_json, used only as input to an FNV content hash",
+          "transport": "in-memory",
+          "public_entry_points": [
+            "RestorableSnapshot",
+            "verify_integrity",
+            "SnapshotRestore"
+          ],
+          "note": "There is no lab snapshot disk format. The subtle hazard is that the integrity hash is computed over serde_json output, so changing the JSON encoder silently changes every content hash and invalidates verify_integrity for any previously stored hash."
+        },
+        {
+          "surface": "owned_full_serde_data_model_codec",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No owned serializer or deserializer covering the Serde data model exists. Recorded so this ADR cannot be read as implying a partial replacement is available."
+        },
+        {
+          "surface": "artifact_migration_readers",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "Version checks reject incompatible artifacts but nothing converts an older artifact into a newer or canonical form. Any canonicalization plan must build migration readers first."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "local persisted artifacts and in-process typed symbols, not a network protocol",
+        "encoding": "JSON, MessagePack, and Bincode legacy config, selected by SerializationFormat, plus a Custom discriminant for downstream codecs",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Typed symbols begin with a four-byte TSYM magic in a 27-byte header whose format byte is 1 for MessagePack, 2 for Bincode, 3 for JSON and 255 for Custom; an unknown byte is rejected. Trace files begin with the eleven-byte magic ASUPERTRACE, then a u16 container version, then flags and a compression byte.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "not applicable",
+        "collector_interop": "not applicable",
+        "schema_versioning": "Five independent version surfaces exist and are preserved: the typed-symbol header version, the trace container version with a forward-rejecting check, the replay schema version with exact-equality matching, the crash-pack current version together with its minimum supported floor, and the per-type name, version and schema hash in TypeRegistry.",
+        "bincode_config_pin": "bincode is the bincode-next package aliased to the name bincode, and every call site uses config::legacy(). Both the alias and the legacy pin are part of the persisted contract.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "format_selection",
+          "surface": "SerializationFormat and the TypedEncoder / TypedDecoder constructors",
+          "contract": "All four discriminants remain selectable, and their header byte values remain 1, 2, 3 and 255. Removing, renumbering or reordering is a breaking change to both the API and stored bytes."
+        },
+        {
+          "name": "custom_codec_injection",
+          "surface": "TypedEncoder::with_serializer / TypedDecoder::with_deserializer",
+          "contract": "Downstream codecs can be supplied for any discriminant including Custom. This extension point may not be removed or narrowed to a fixed set."
+        },
+        {
+          "name": "owned_codec_error_surface",
+          "surface": "SerializationError / DeserializationError / TypeMismatchError",
+          "contract": "Codec failures are reported as owned variants carrying a reason string rather than by exposing the upstream error type. Size overflow is a distinct variant carrying both the size and the maximum, and an unknown format byte is its own variant."
+        },
+        {
+          "name": "trace_version_policy",
+          "surface": "TRACE_FILE_VERSION check and TraceMetadata compatibility check",
+          "contract": "The container version is forward-rejecting and backward-accepting; the embedded replay schema version is exact-equality. That asymmetry is deliberate and must be preserved or deliberately changed with evidence, not drifted into."
+        },
+        {
+          "name": "crashpack_compatibility_floor",
+          "surface": "CrashPackManifest validation against the current and minimum supported schema versions",
+          "contract": "Validation enforces a closed supported range. The floor may only rise with a documented migration story."
+        },
+        {
+          "name": "trace_resource_bounds",
+          "surface": "MAX_META_LEN, MAX_EVENT_LEN, MAX_COMPRESSED_CHUNK_LEN, MAX_EVENT_PREALLOC",
+          "contract": "Untrusted trace input is bounded on metadata length, event length, compressed chunk length and preallocation count. Bounds may tighten only with evidence that the existing corpus still loads."
+        },
+        {
+          "name": "compression_optionality",
+          "surface": "FLAG_COMPRESSED and CompressionMode",
+          "contract": "Compression is signalled in the header. Uncompressed trace files remain readable regardless of the trace-compression feature."
+        },
+        {
+          "name": "snapshot_determinism",
+          "surface": "bincode legacy config in distributed snapshots",
+          "contract": "Vector-clock encoding is deterministic for a given clock. Changing the config or encoder changes the bytes and breaks interchange."
+        },
+        {
+          "name": "lab_snapshot_hash_stability",
+          "surface": "RestorableSnapshot content hash and verify_integrity",
+          "contract": "The integrity hash is computed over JSON output, so the JSON encoder is part of the hash contract. Changing it invalidates stored hashes even though no file format changed."
+        },
+        {
+          "name": "type_versioning",
+          "surface": "TypeRegistry::register / schema_hash",
+          "contract": "Each registered type carries a stable name, an explicit version and a schema hash. These identify artifacts across versions and may not be dropped from the container."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "SER-GAP-01",
+          "summary": "The capability registry records source_owners for CAP-SERDE-GENERIC as src/encoding.rs and src/decoding.rs. Both are RaptorQ erasure-coding pipelines and contain zero serde, rmp, bincode or serde_json tokens. The real owner, src/types/typed_symbol.rs, is not named. The root cause is visible in api_surface_snapshot.selectors, which map the module prefixes encoding:: and decoding:: to CAP-SERDE-GENERIC, apparently by matching the words encoding and decoding to serialization, while the types:: prefix is mapped to API topology instead.",
+          "consequence": "The entire generic Serde surface is attributed to the erasure codec and the real codec is attributed to API topology. This is the third confirmed wrong source_owners row and the first with an identified mechanism, which makes every row suspect until audited.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-02",
+          "summary": "CAP-PERSISTED-TRACE-SNAPSHOT names src/trace/mod.rs as a source owner, but that file is a pure module facade with no serialization code. The real owners are src/trace/file.rs, replay.rs, crashpack.rs, event.rs, compat.rs, streaming.rs and integrity.rs. Neither src/lab/snapshot_restore.rs nor src/distributed/snapshot.rs is named anywhere, despite the capability title mentioning snapshots and despite the latter being the only production bincode user outside typed_symbol.rs.",
+          "consequence": "A baseline built from that row would miss the entire trace file implementation, both snapshot surfaces, and the crash-pack format. The same facade-instead-of-implementation error also affects CAP-TRACE-LZ4, whose source_owners names src/trace/mod.rs while every LZ4 call is in src/trace/file.rs.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-03",
+          "summary": "There is no byte-level golden for the Bincode or MessagePack paths anywhere in the repository. The three format tests assert round-trip only, and the single frozen serialization golden covers JSON.",
+          "consequence": "A silent change in either binary encoder would not be caught by any existing test, even though both encode persisted artifacts. This is the largest evidence hole behind the capability's BASELINE_PLANNED state.",
+          "owner_bead": "asupersync-5z2scg.3.6",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-04",
+          "summary": "The persisted trace error surface exposes the MessagePack crate directly: ReplayTrace::to_bytes returns a Result whose error type is rmp_serde::encode::Error, ReplayTraceError holds a #[from] rmp_serde::decode::Error variant and is re-exported at asupersync::trace, and TraceFileError has public From impls naming both rmp error types.",
+          "consequence": "Unlike the typed-symbol codec, which fully owns its errors, the persisted trace path cannot swap encoders without a breaking public API change.",
+          "owner_bead": "asupersync-5z2scg.3.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-05",
+          "summary": "No migration reader exists for any persisted artifact. Trace containers reject a newer version, replay metadata requires exact version equality, and crash packs enforce a closed range, but nothing converts an older artifact into a newer or canonical form.",
+          "consequence": "Any future canonicalization must build migration and rollback tooling first, which is why the persisted capability is already BLOCKED_PENDING_EVIDENCE.",
+          "owner_bead": "asupersync-5z2scg.3.7",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-06",
+          "summary": "bincode is the bincode-next package aliased to the name bincode, and every call site pins bincode::config::legacy(). Neither the alias nor the legacy pin is recorded as a compatibility contract outside the call sites themselves.",
+          "consequence": "A well-meaning upgrade to the default or standard config would silently change persisted snapshot and typed-symbol bytes.",
+          "owner_bead": "asupersync-5z2scg.3.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-07",
+          "summary": "The lab RestorableSnapshot integrity hash is computed by hashing serde_json output, so the JSON encoder participates in hash stability even though no file format exists there.",
+          "consequence": "Changing or replacing the JSON encoder silently changes every content hash and invalidates verify_integrity for stored hashes, a failure mode no format-compatibility test would catch.",
+          "owner_bead": "asupersync-5z2scg.3.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-08",
+          "summary": "artifacts/api_surface_map_v1.json contains no codec symbols at all: none of SerdeCodec, SerializationFormat, the two codec traits, TypedSymbol, TypedEncoder, TypedDecoder or TypeRegistry appears. The encoding:: and decoding:: entries it does carry are RaptorQ types.",
+          "consequence": "The public generic codec surface is invisible to the API drift-detection contract, so a narrowing change there would not be flagged. Correcting it requires adding symbols, and the capability registry pins that map by semantic hash, so it must be done by the map's owner rather than from this ADR.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SER-GAP-09",
+          "summary": "artifacts/dependency_safety_taxonomy_v1.json still carries the superseded removal framing, describing purpose-built schemas as replacing the public Bincode and MessagePack variants and asserting that the SerdeCodec ADR names the removal of arbitrary Serialize.",
+          "consequence": "That artifact now contradicts this ADR and the capability registry's KEEP_UNTIL_PARITY disposition. It must be amended by its owner before it is cited as guidance.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Untrusted persisted input is bounded on metadata length, event length, compressed chunk length and preallocation count before any allocation is sized from it.",
+        "A trace container whose version exceeds the supported version, or a crash pack outside the supported range, is rejected explicitly rather than parsed optimistically.",
+        "An unknown typed-symbol format byte is rejected with a dedicated error rather than defaulted.",
+        "Crash-pack persistence requires an explicit writer capability; there are no ambient filesystem writes, and writes are atomic through temp file and rename.",
+        "Deserialization of downstream types produces values only and cannot grant ambient authority.",
+        "Content hashing stays available so tampering is detectable independently of the encoder."
+      ],
+      "cancellation_invariants": [
+        "A partially written trace file is detectable through the header and length framing rather than truncating into a valid-looking file.",
+        "Crash-pack writes publish only on rename, so a cancelled write never appears as a complete artifact.",
+        "Encode and decode are synchronous pure transformations, so cancelling a surrounding task cannot leave a codec half-applied.",
+        "Streaming trace writers release their buffers on drop."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "The registry scopes CAP-SERDE-GENERIC to the default feature set on all supported platforms, and all four format crates are unconditional."
+        },
+        {
+          "target_family": "native",
+          "support": "supported",
+          "note": "The persisted trace container and the trace-inspection CLI are native-facing, since the cli feature is native-only."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "asupersync::types::SerdeCodec over any downstream Serialize and DeserializeOwned type",
+          "asupersync::types::Serializer and Deserializer implemented by downstream code",
+          "TypedEncoder::with_serializer and TypedDecoder::with_deserializer for custom codec injection"
+        ],
+        "accepted_providers": "Any type implementing serde's Serialize and DeserializeOwned, and any downstream implementation of the two public codec traits. The traits require only those bounds, with no 'static and no sealed supertrait.",
+        "pinned_crate_versions": {
+          "serde": "1.0 with derive (non-optional)",
+          "serde_json": "1.0 (non-optional)",
+          "rmp-serde": "1.3 (non-optional)",
+          "bincode": "package bincode-next 3.1.1 with the serde feature, always used with config::legacy() (non-optional)"
+        },
+        "no_reexport_note": "No format crate is re-exported, and the typed-symbol errors deliberately stringify upstream failures rather than wrapping them, so the codec itself could swap backends without an API break. The persisted trace error surface is the exception and is recorded as SER-GAP-04.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "The typed-symbol container, its header, TypeRegistry versioning and the two codec traits are all owned. The dependency is confined to the three encoders behind the dispatch, the persisted trace error conversions, and the lab snapshot hash input.",
+        "removal_precondition": "An owned implementation must cover the full Serde data model, reproduce the accepted bytes for existing persisted artifacts including the bincode legacy dialect, match error and resource semantics, and offer comparable usability, validated against synthesized arbitrary-type consumers, the persisted corpus, a malformed corpus and working migration readers. Byte goldens for Bincode and MessagePack must exist first, since SER-GAP-03 shows nothing would currently detect a divergence. Until then: KEEP for the generic formats and BLOCKED_PENDING_EVIDENCE for the persisted artifacts.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "consumer-portfolio",
+        "arbitrary-serde-users",
+        "CLI-users",
+        "trace-tool-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "ser-journey-arbitrary-type",
+          "description": "Downstream defines its own Serialize and DeserializeOwned type and round-trips it through SerdeCodec in each of the three real formats. Executed today by the standalone consumer fixture, including a boundary fixture with extreme integers, an empty-string map key, non-ASCII text and raw bytes."
+        },
+        {
+          "id": "ser-journey-custom-codec",
+          "description": "Downstream implements the public Serializer and Deserializer traits, injects them through with_serializer and with_deserializer, and owns the Custom discriminant."
+        },
+        {
+          "id": "ser-journey-codec-error-recovery",
+          "description": "A truncated payload produces an owned deserialization error, the Custom discriminant is rejected by SerdeCodec, and the codec remains usable afterwards. Asserted today by the consumer fixture."
+        },
+        {
+          "id": "ser-journey-typed-symbol-versioning",
+          "description": "A consumer registers a type with a name and version, encodes a typed symbol, and later detects a type or version mismatch rather than misreading the payload."
+        },
+        {
+          "id": "ser-journey-trace-capture-and-replay",
+          "description": "An operator captures a trace to disk and replays it later through the CLI, in both compressed and uncompressed form, relying on the container magic and version."
+        },
+        {
+          "id": "ser-journey-historical-artifact-readback",
+          "description": "An artifact written by an earlier build still loads. This is the journey the Rev-3 proposal would have broken, because trace payloads are MessagePack and snapshot vector clocks are Bincode."
+        },
+        {
+          "id": "ser-journey-distributed-snapshot-exchange",
+          "description": "Two nodes exchange snapshots whose vector clocks encode deterministically to identical bytes for identical clocks."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change, and every frozen symbol lives under asupersync::types, asupersync::trace, asupersync::lab or asupersync::distributed rather than at the crate root. The map is nonetheless missing the codec symbols entirely, which is recorded as SER-GAP-08; correcting that means adding entries and the capability registry pins the map by semantic hash, so it belongs to the map's owner and not to this decision record."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 3 item 3.1",
+          "stale_text": "replace public Bincode/MessagePack format variants with JSON + explicit purpose-built codecs",
+          "resolution": "Rejected. Presented as an API narrowing, it is really a persisted-format break: trace payloads are MessagePack and snapshot vector clocks are Bincode. All four discriminants stay."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, bincode-next plus rmp-serde row",
+          "stale_text": "OWN (SAFE) ... SerdeCodec's public Bincode/MessagePack variants are replaced by JSON + explicit purpose-built codecs; snapshot and trace schemas hand-coded separately",
+          "resolution": "Disposition is KEEP_UNTIL_PARITY for the generic formats and PRESERVE_AND_REPLACE_IF_PARITY, currently blocked, for the persisted artifacts. Hand-coding schemas does not remove the dependency while the existing corpus must still be readable."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 5 sequencing",
+          "stale_text": "bincode+rmp exit together — same files, one bead",
+          "resolution": "They do not exit, and they do not share one file set. bincode is used by typed_symbol.rs and distributed/snapshot.rs; rmp-serde is used by typed_symbol.rs and five files under src/trace/."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "New owned artifact schemas and any canonical encoding are added alongside the existing formats. No accepted persisted artifact may become unreadable and no format discriminant may be removed or renumbered.",
+        "coexistence": "The generic codec keeps all four discriminants indefinitely. Owned schemas may take over new artifact writes only once a reader for the existing corpus exists.",
+        "sequencing": "Byte goldens for Bincode and MessagePack come first, then a persisted corpus, then migration readers. Only then can canonicalization change what is written. The persisted capability stays BLOCKED_PENDING_EVIDENCE until then.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_001_serde_generic_formats.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any previously written trace file, crash pack or snapshot that stops loading, any removed or renumbered format discriminant, any loss of the custom codec injection points, any change to the bincode legacy config or to a container magic or version, any coarsened codec error, any changed lab snapshot content hash, or any tightened resource bound that rejects an artifact in the existing corpus.",
+        "action": "Revert to the frozen surface recorded here. Because the decision is additive coexistence, rollback removes the new owned schema path rather than restoring a deleted format.",
+        "verification": "Re-run the focused ADR contract and the five scenario IDs owned by the two capabilities, and re-read the persisted corpus end to end."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-5z2scg.3.1",
+        "unit_test_owner": "asupersync-5z2scg.3.6",
+        "e2e_owner": "asupersync-5z2scg.3.7",
+        "scenario_ids": [
+          "generic_serde_downstream",
+          "cross_version_artifact",
+          "trace_snapshot_migration",
+          "trace_cli_replay",
+          "artifact_rollback"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario cross_version_artifact",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "unit: round-trip across all three real formats for scalars, nested structures, collections, maps, enums, options and newtypes",
+          "unit: empty, boundary and maximum sizes, malformed bytes, truncation, the value-too-large path with its size and maximum, and the unknown-format-byte path",
+          "unit: type and version mismatch detection through TypeRegistry including schema-hash disagreement",
+          "golden: byte-level goldens for the Bincode and MessagePack paths, which SER-GAP-03 records as entirely absent today",
+          "property: round-trip idempotence over generated downstream types in each format",
+          "differential: byte stability for the bincode legacy dialect and for MessagePack across crate versions",
+          "fuzz: malformed persisted input bounded by the trace and snapshot limits with no panic",
+          "corpus: artifacts written by an earlier build that must still load, covering compressed and uncompressed trace files, crash packs and distributed snapshots",
+          "invariant: lab snapshot content hashes unchanged, since the hash is computed over JSON output",
+          "downstream-consumer: a synthesized crate defining its own Serde type and its own custom codec",
+          "E2E: trace capture, CLI replay and artifact rollback"
+        ],
+        "note": "Naming these owners does not assert they have run. The persisted capability is BLOCKED_PENDING_EVIDENCE, so no cutover claim can rest on it today. The serialization-golden harnesses do not currently cover the codec and may not be cited for it."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-SERDE-GENERIC",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          },
+          {
+            "capability_id": "CAP-PERSISTED-TRACE-SNAPSHOT",
+            "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+            "cutover_state": "BLOCKED_PENDING_EVIDENCE"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-5z2scg.3"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. The two capabilities deliberately carry different postures: the generic formats keep the incumbent, while the persisted artifacts may be replaced only on proven parity and are currently blocked."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_001_serde_generic_formats.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the persisted corpus still loads, that byte stability holds across format-crate versions, that an owned serializer could cover the Serde data model, that migration readers are feasible, that performance is unchanged, or that any format dependency may be removed. It also does not certify the capability registry's source-owner rows, the api surface map, or the dependency safety taxonomy, which SER-GAP-01, SER-GAP-02, SER-GAP-08 and SER-GAP-09 record as incorrect or superseded for these capabilities."
+    },
     {
       "adr_id": "DEP-ADR-002",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.2",
@@ -677,8 +1331,13 @@
       },
       "cutover": {
         "dependency_exit_allowed": false,
-        "cutover_state": "KEEP_INCUMBENT",
-        "disposition": "KEEP_UNTIL_PARITY",
+        "per_capability": [
+          {
+            "capability_id": "CAP-PROTOBUF-GENERIC",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
         "primary_authorities": [
           "asupersync-5z2scg.1"
         ],
@@ -1235,8 +1894,13 @@
       },
       "cutover": {
         "dependency_exit_allowed": false,
-        "cutover_state": "KEEP_INCUMBENT",
-        "disposition": "KEEP_UNTIL_PARITY",
+        "per_capability": [
+          {
+            "capability_id": "CAP-OTLP-ECOSYSTEM",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
         "primary_authorities": [
           "asupersync-5z2scg.2"
         ],
@@ -1814,8 +2478,18 @@
       },
       "cutover": {
         "dependency_exit_allowed": false,
-        "cutover_state": "KEEP_INCUMBENT",
-        "disposition": "KEEP_UNTIL_PARITY",
+        "per_capability": [
+          {
+            "capability_id": "CAP-CONFIG-TOML-JSON",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          },
+          {
+            "capability_id": "CAP-SCENARIO-YAML-JSON",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
         "primary_authorities": [
           "asupersync-5z2scg.4",
           "asupersync-5z2scg.5"
@@ -1897,6 +2571,18 @@
       "adr_id": "DEP-ADR-002",
       "prohibited_text": "make prost an optional feature-gated dependency",
       "expected_error": "default-feature surface loss: Protobuf"
+    },
+    {
+      "fixture_id": "serde-format-variant-removal",
+      "adr_id": "DEP-ADR-001",
+      "prohibited_text": "drop generic Serde formats",
+      "expected_error": "generic API narrowing: Serde"
+    },
+    {
+      "fixture_id": "persisted-artifact-readback-loss",
+      "adr_id": "DEP-ADR-001",
+      "prohibited_text": "stop reading historical persisted artifacts",
+      "expected_error": "persisted artifact loss: historical corpus"
     }
   ],
   "validation": {

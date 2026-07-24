@@ -415,10 +415,18 @@ fn every_resolved_adr_row_is_complete() {
             "{adr_id} evidence.state is outside the allow-list"
         );
         let cutover = adr.get("cutover").expect("cutover present");
-        assert!(
-            allowed_cutover.contains(text(cutover, "cutover_state")),
-            "{adr_id} cutover.cutover_state is outside the allow-list"
+        let per_capability = array(cutover, "per_capability");
+        assert_eq!(
+            per_capability.len(),
+            array(adr, "capability_ids").len(),
+            "{adr_id} must carry one cutover row per claimed capability"
         );
+        for row in per_capability {
+            assert!(
+                allowed_cutover.contains(text(row, "cutover_state")),
+                "{adr_id} cutover_state is outside the allow-list"
+            );
+        }
         for surface in array(adr, "preserved_surfaces") {
             assert!(
                 allowed_surfaces.contains(text(surface, "state")),
@@ -476,18 +484,25 @@ fn resolved_adr_capability_authority_matches_the_registry() {
         );
 
         let cutover = adr.get("cutover").expect("cutover present");
+        let per_capability = array(cutover, "per_capability");
         for capability_id in &claimed {
             let row = capability_rows.get(capability_id).unwrap_or_else(|| {
                 panic!("{adr_id} references unknown capability {capability_id}")
             });
+            let declared = per_capability
+                .iter()
+                .find(|entry| text(entry, "capability_id") == capability_id)
+                .unwrap_or_else(|| {
+                    panic!("{adr_id} has no cutover row for capability {capability_id}")
+                });
             assert_eq!(
                 text(row, "disposition"),
-                text(cutover, "disposition"),
+                text(declared, "disposition"),
                 "{adr_id} disposition disagrees with capability {capability_id}"
             );
             assert_eq!(
                 text(row, "cutover_state"),
-                text(cutover, "cutover_state"),
+                text(declared, "cutover_state"),
                 "{adr_id} cutover_state disagrees with capability {capability_id}"
             );
         }
@@ -686,12 +701,15 @@ fn no_resolved_adr_authorizes_a_dependency_exit_or_functionality_loss() {
             Some(false),
             "{adr_id} must not authorize a dependency exit"
         );
-        if text(cutover, "cutover_state") == "KEEP_INCUMBENT" {
-            assert_eq!(
-                text(cutover, "disposition"),
-                "KEEP_UNTIL_PARITY",
-                "{adr_id} keeping the incumbent must carry the KEEP_UNTIL_PARITY disposition"
-            );
+        for row in array(cutover, "per_capability") {
+            if text(row, "cutover_state") == "KEEP_INCUMBENT" {
+                assert_eq!(
+                    text(row, "disposition"),
+                    "KEEP_UNTIL_PARITY",
+                    "{adr_id} keeping the incumbent must carry KEEP_UNTIL_PARITY for {}",
+                    text(row, "capability_id")
+                );
+            }
         }
         assert!(
             !array(cutover, "gates").is_empty(),
@@ -839,13 +857,22 @@ fn render_generated_summary() -> String {
                     .join(", ")
             })
             .unwrap_or_else(|| "-".to_owned());
-        let (decision, cutover) = bodies.get(adr_id).map_or(("-", "-"), |adr| {
-            (
-                text(adr, "decision"),
-                adr.get("cutover")
-                    .map_or("-", |cutover| text(cutover, "cutover_state")),
-            )
-        });
+        let (decision, cutover) =
+            bodies
+                .get(adr_id)
+                .map_or(("-".to_owned(), "-".to_owned()), |adr| {
+                    let states: BTreeSet<&str> = array(
+                        adr.get("cutover").expect("cutover present"),
+                        "per_capability",
+                    )
+                    .iter()
+                    .map(|row| text(row, "cutover_state"))
+                    .collect();
+                    (
+                        text(adr, "decision").to_owned(),
+                        states.into_iter().collect::<Vec<_>>().join(" / "),
+                    )
+                });
         let _ = writeln!(
             out,
             "| `{adr_id}` | `{bead_id}` | {capabilities} | {state} | {decision} | {cutover} |"
