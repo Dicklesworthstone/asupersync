@@ -682,6 +682,10 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         "failure-injection-contract",
         "dependency_failure_injection_matrix_contract",
         "ver-a4-failure-injection-contract",
+        "artifacts/dependency_real_service_fixture_matrix_v1.json",
+        "real-service-fixture-contract",
+        "dependency_real_service_fixture_contract",
+        "ver-a3-real-service-fixture-contract",
     ] {
         assert!(
             runner.contains(token),

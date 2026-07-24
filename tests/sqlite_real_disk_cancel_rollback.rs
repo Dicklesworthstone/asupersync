@@ -16,17 +16,23 @@
 //! 1. Open a SQLite file in a tempdir, create the schema, set
 //!    journal_mode=WAL.
 //! 2. Run `with_sqlite_transaction` with a body that INSERTs a row
-//!    then awaits a sleep. A sidecar `std::thread` cancels the same
+//!    then awaits a cancel-aware oneshot receive. A sidecar `std::thread`
+//!    cancels the same
 //!    `Cx` after ~150 ms via `cx.cancel_with(CancelKind::User, …)`.
 //! 3. Assert the outcome is `Outcome::Cancelled` with `CancelKind::User`
 //!    attribution — the cancel signal flowed through the transaction
 //!    helper and `with_sqlite_transaction` (src/database/transaction.rs:442)
 //!    took the Cancelled arm which calls `tx.rollback`.
-//! 4. Open a *fresh* `SqliteConnection` to the same file and verify the
-//!    INSERTed row is NOT visible (rollback hit disk before any other
-//!    reader could observe it).
-//! 5. Run `PRAGMA integrity_check` on the fresh connection and assert
+//! 4. Open a direct *reference* `rusqlite::Connection` to the same file
+//!    and verify the INSERTed row is NOT visible (rollback hit disk before
+//!    any other reader could observe it).
+//! 5. Run `PRAGMA integrity_check` on the reference connection and assert
 //!    the result is `"ok"` — no torn pages, no orphaned WAL frames.
+//! 6. Close the cancelled Asupersync connection, re-check through the
+//!    reference connection that deferred rollback cleanup left zero rows,
+//!    then commit a reference row, reopen through Asupersync, and verify that
+//!    row is visible. This proves both directions of the wrapper boundary
+//!    without relying on two simultaneous writers.
 //!
 //! When the cancel-rollback contract regresses, this test fails with
 //! whichever assertion broke first: an unexpected `Outcome::Ok` (the
@@ -37,14 +43,13 @@
 #![cfg(all(test, feature = "sqlite"))]
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
 
+use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
 use asupersync::database::sqlite::{SqliteConnection, SqliteValue};
 use asupersync::database::transaction::with_sqlite_transaction;
 use asupersync::test_utils::run_test_with_cx;
-use asupersync::time::sleep;
 use asupersync::types::{CancelKind, Outcome};
 
-use std::pin::Pin;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
@@ -68,13 +73,20 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
         // WAL mode is the production default for SQLite under asupersync;
         // set it explicitly here so the test exercises the WAL path even if
         // the runtime default ever changes.
-        match conn
-            .execute_unchecked(&cx, "PRAGMA journal_mode = WAL", &[])
+        let journal_mode = match conn
+            .query_unchecked(&cx, "PRAGMA journal_mode = WAL", &[])
             .await
         {
-            Outcome::Ok(_) => {}
+            Outcome::Ok(rows) => rows[0]
+                .get_str("journal_mode")
+                .expect("journal_mode")
+                .to_ascii_lowercase(),
             other => panic!("set WAL failed: {other:?}"),
-        }
+        };
+        assert_eq!(
+            journal_mode, "wal",
+            "real-disk fixture must enter WAL mode before cancellation"
+        );
 
         match conn
             .execute_unchecked(
@@ -133,20 +145,17 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
                         other => return other.map(|_| ()),
                     }
 
-                    // Park on a long sleep so the cancel arrives mid-body.
-                    // 5 s ceiling — the cancel should land in ~150 ms; a
-                    // regression that misses the cancel makes this branch
-                    // run to completion and the test catches an unexpected
-                    // Outcome::Ok at the assertion below.
-                    let now = tx_cx.now();
-                    let mut sleeper = sleep(now, Duration::from_secs(5));
-                    std::future::poll_fn(|task_cx| {
-                        if tx_cx.checkpoint().is_err() {
-                            return std::task::Poll::Ready(());
-                        }
-                        Pin::new(&mut sleeper).poll(task_cx)
-                    })
-                    .await;
+                    // Park on a cancel-aware receive with its sender retained.
+                    // Unlike a raw timer, the receive owns a cancellation-Waker
+                    // registration and must resume promptly when the sidecar
+                    // cancels this Cx.
+                    let (pending_tx, mut pending_rx) = oneshot::channel::<()>();
+                    let wait_result = pending_rx.recv(tx_cx).await;
+                    assert!(
+                        matches!(wait_result, Err(oneshot::RecvError::Cancelled)),
+                        "pending receive must wake through Cx cancellation: {wait_result:?}"
+                    );
+                    drop(pending_tx);
 
                     // Re-check the cancel after the sleep so the body
                     // surfaces Outcome::Cancelled rather than Ok if the
@@ -183,34 +192,24 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
             Outcome::Panicked(p) => panic!("transaction body panicked: {p:?}"),
         }
 
-        // The 5 s sleep would still be active without the cancel. Hard
-        // ceiling at 3 s catches a regression that closes the body
-        // without firing the cancel checkpoint.
+        // Hard ceiling at 3 s catches a cancellation-Waker regression.
         assert!(
             elapsed < Duration::from_secs(3),
             "cancel must short-circuit the 5 s sleep well under 3 s, took {elapsed:?}"
         );
 
         // ── assert: rollback hit disk, no other reader sees the INSERT ──
-        // Open a fresh connection to the same file. SqliteConnection on
-        // the same path opens its own rusqlite handle, which sees the
-        // server-side committed state — what asupersync's internal Mutex
-        // cannot synthesize.
+        // Open an independent direct rusqlite connection to the same file.
+        // This bypasses asupersync's internal Mutex and wrapper query path.
         let cx_recover = Cx::for_testing();
-        let recover = match SqliteConnection::open(&cx_recover, &db_path_str).await {
-            Outcome::Ok(c) => c,
-            other => panic!("recover open failed: {other:?}"),
-        };
-        let after = match recover
-            .query_unchecked(&cx_recover, "SELECT count(*) AS n FROM qlwsxf_rows", &[])
-            .await
-        {
-            Outcome::Ok(rows) => rows[0].get_i64("n").expect("n"),
-            other => panic!("post-cancel count failed: {other:?}"),
-        };
+        let reference =
+            rusqlite::Connection::open(&db_path_str).expect("open direct reference connection");
+        let after: i64 = reference
+            .query_row("SELECT count(*) FROM qlwsxf_rows", [], |row| row.get(0))
+            .expect("reference post-cancel count");
         assert_eq!(
             after, 0,
-            "transaction rolled back must hide INSERTed row from a fresh connection; got {after} \
+            "transaction rolled back must hide INSERTed row from the reference connection; got {after} \
              rows. If this fails the cancel arm of with_sqlite_transaction did NOT call rollback \
              before disposing the SqliteTransaction."
         );
@@ -219,21 +218,65 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
         // determine whether the WAL/main DB pages are torn or
         // orphaned. The single-row 'ok' result is the canonical
         // healthy DB signal.
-        let integrity = match recover
-            .query_unchecked(&cx_recover, "PRAGMA integrity_check", &[])
-            .await
-        {
-            Outcome::Ok(rows) => rows[0]
-                .get_str("integrity_check")
-                .map(str::to_string)
-                .unwrap_or_else(|_| "<missing>".to_string()),
-            other => panic!("integrity_check failed: {other:?}"),
-        };
+        let integrity: String = reference
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("reference integrity_check");
         assert_eq!(
             integrity, "ok",
             "PRAGMA integrity_check must be 'ok' after a cancel-rollback; got {integrity:?}. \
              A non-ok result indicates torn writes or orphaned WAL frames — review the rollback \
              path in src/database/transaction.rs:442 and src/database/sqlite.rs:1801."
+        );
+
+        // End the cancelled connection's lifecycle before handing write
+        // ownership to the reference connection. SQLite permits the
+        // read-only checks above while the wrapper retains its WAL handle,
+        // but a second writer must not depend on overlapping connection
+        // teardown. `close` also drains any rollback marked for deferred
+        // cleanup by the cancelled transaction path.
+        conn.close()
+            .expect("close cancelled asupersync connection before reference write");
+        assert!(
+            !conn.is_open(),
+            "explicit fixture teardown must release the original connection"
+        );
+        let after_close: i64 = reference
+            .query_row("SELECT count(*) FROM qlwsxf_rows", [], |row| row.get(0))
+            .expect("reference count after rollback-draining close");
+        assert_eq!(
+            after_close, 0,
+            "explicit close must drain the cancelled transaction rollback before reference writes"
+        );
+
+        reference
+            .execute(
+                "INSERT INTO qlwsxf_rows (id, payload) VALUES (?1, ?2)",
+                rusqlite::params![2_i64, "reference-persists"],
+            )
+            .expect("reference write");
+        drop(reference);
+
+        let recover = match SqliteConnection::open(&cx_recover, &db_path_str).await {
+            Outcome::Ok(c) => c,
+            other => panic!("recover open failed: {other:?}"),
+        };
+        let payload = match recover
+            .query_unchecked(
+                &cx_recover,
+                "SELECT payload FROM qlwsxf_rows WHERE id = ?1",
+                &[SqliteValue::Integer(2)],
+            )
+            .await
+        {
+            Outcome::Ok(rows) => rows[0]
+                .get_str("payload")
+                .map(str::to_string)
+                .expect("reference payload"),
+            other => panic!("asupersync read of reference write failed: {other:?}"),
+        };
+        assert_eq!(
+            payload, "reference-persists",
+            "asupersync must read a committed row written by the reference connection"
         );
     });
 }

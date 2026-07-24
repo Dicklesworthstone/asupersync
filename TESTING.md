@@ -949,7 +949,9 @@ manage services, ports, and metadata deterministically.
 | `TestEnvironment` | Ties together `TestContext` + ports + services + cleanup |
 | `PortAllocator` | OS-assigned ephemeral ports with labels; prevents conflicts |
 | `FixtureService` trait | `start()` / `stop()` / `is_healthy()` for any service |
-| `DockerFixtureService` | Docker container lifecycle with health checks |
+| `DockerFixtureService` | SHA-256-pinned Docker lifecycle, health checks, redacted logs |
+| `PinnedProcessIdentity` | Absolute binary path + SHA-256 + exact version probe |
+| `ProcessFixtureService` | Isolated process, bounded readiness, crash/log/orphan handling |
 | `TempDirFixture` | Per-test temp directory (auto-cleaned on drop) |
 | `InProcessService<S>` | Closure-backed in-process service (echo servers, etc.) |
 | `NoOpFixtureService` | For testing the orchestration itself |
@@ -970,7 +972,10 @@ let ws_port = env.allocate_port("websocket")?;
 
 // Register services
 env.register_service(Box::new(
-    DockerFixtureService::new("redis", "redis:7-alpine")
+    DockerFixtureService::new(
+        "redis",
+        "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
         .with_port_map(env.port_for("redis").unwrap(), 6379)
         .with_health_cmd(vec!["redis-cli", "ping"]),
 ));
@@ -993,10 +998,23 @@ env.write_metadata_artifact();
 
 **Key invariants:**
 - Ports are held by `TcpListener` until explicitly released, preventing reuse.
+- Held ports are released immediately before managed service startup.
+- Partial startup rolls back in reverse order.
 - Services are stopped in reverse registration order.
 - Cleanup callbacks (`on_teardown`) run in reverse order.
-- Teardown is idempotent (safe to call multiple times).
+- Teardown is idempotent; failed stops remain retryable and visible through
+  `teardown_errors()` and `orphaned_services()`.
 - `EnvironmentMetadata` excludes nondeterministic fields (no wall-clock timestamps).
+
+The dependency program's pinned service-family catalog, explicit
+`BLOCKED_EXTERNAL`/`UNSUPPORTED` receipts, and no-claim boundary are documented
+in [`docs/dependency_real_service_fixtures.md`](docs/dependency_real_service_fixtures.md).
+Its focused canonical scenario is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario real-service-fixture-contract
+```
 
 ### NDJSON Event Schema (bd-1t58q)
 

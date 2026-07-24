@@ -225,6 +225,12 @@ RCH_REQUIRE_REMOTE=1 \
   bash scripts/run_dependency_sovereignty_e2e.sh \
   --scenario failure-injection-contract \
   --run-id ver-a4-failure-matrix-001
+
+# Validate pinned real-service fixture lifecycle and explicit blocked cells.
+RCH_REQUIRE_REMOTE=1 \
+  bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario real-service-fixture-contract \
+  --run-id ver-a3-real-service-fixtures-001
 ```
 
 `--scenario` may be repeated. `--timeout` bounds each scenario; the direct
@@ -258,6 +264,29 @@ on success, error, cancellation, and panic. Sleeps used to create races,
 ambient randomness, mocks, unbounded waits, and log-substring pass criteria are
 fail-closed. See `docs/dependency_failure_injection_matrix.md` for the
 applicability rules, receipt fields, negative fixtures, and no-claim boundary.
+
+### VER A3 real-service fixture mapping
+
+`artifacts/dependency_real_service_fixture_matrix_v1.json` is the canonical
+Kafka, NATS/NKey, OTLP, SQLite, FrankenSQLite, HTTP compression, TLS/X.509, and
+downstream-consumer fixture catalog. Its focused contract is
+`tests/dependency_real_service_fixture_contract.rs`; its stable E2E step is
+`ver-a3-real-service-fixture-contract`.
+
+The lifecycle harness verifies absolute process paths, exact binary SHA-256 and
+version output, immutable container digests, isolated ports/directories,
+bounded readiness, crash and failure logs, redaction, reverse rollback,
+retryable idempotent teardown, and orphan detection. The contract emits one
+catalog-preflight receipt per service family. Those receipts set
+`proof_admitted=false`: executable, blocked, and unsupported catalog states do
+not claim that the preflight exercised a service.
+
+Only the real-file SQLite WAL cell is currently
+`EXECUTABLE_COMPLETE`. Missing immutable broker/collector/peer identities are
+`BLOCKED_EXTERNAL`; FrankenSQLite and downstream-owner cells are `UNSUPPORTED`
+inside this workspace. Neither outcome is a passing skip. See
+`docs/dependency_real_service_fixtures.md` for the exact blockers, unblock
+requirements, replay commands, and no-claim boundary.
 
 The suite root maintains machine-readable `latest.json` and
 `latest_success.json` pointers. A failed or blocked attempt advances only
