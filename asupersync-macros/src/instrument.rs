@@ -133,11 +133,15 @@ impl Parse for InstrumentArgs {
 }
 
 fn expand_item_fn(function: ItemFn, args: &InstrumentArgs) -> Result<TokenStream2> {
+    // syn 3.0 added the non-exhaustive `modifiers` field. A free function
+    // carries no modifier we need to re-emit here (`defaultness` is only
+    // meaningful inside an impl block), so it is intentionally ignored.
     let ItemFn {
         attrs,
         vis,
         sig,
         block,
+        ..
     } = function;
     let block = build_instrumented_block(&sig, &block, args)?;
 
@@ -151,10 +155,15 @@ fn expand_impl_item_fn(method: ImplItemFn, args: &InstrumentArgs) -> Result<Toke
     let ImplItemFn {
         attrs,
         vis,
-        defaultness,
+        modifiers,
         sig,
         block,
+        ..
     } = method;
+    // syn 3.0 moved `defaultness` into the non-exhaustive `FnModifiers`.
+    // It is re-emitted below, so `default fn` in an impl block survives
+    // instrumentation.
+    let defaultness = modifiers.defaultness;
     let block = build_instrumented_block(&sig, &block, args)?;
 
     Ok(quote! {
