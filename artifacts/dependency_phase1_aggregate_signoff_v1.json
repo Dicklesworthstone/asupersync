@@ -15,7 +15,7 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.2",
       "role": "MARGINAL_LEDGER",
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "1e9729e3c33425172e5218b0f6ddfc73c3e1353501ce7ab7d0d4e7f74dc47138"
+      "sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.3",
@@ -55,7 +55,7 @@
     }
   ],
   "baseline_provenance": {
-    "ledger_source_commit": "06a2ce21eb8bd609602f22865341cb8fb366d557",
+    "ledger_source_commit": "f606e28983199a1b51af11e6f65bb9b00686ceb3",
     "capability_baseline_revision": "6a0d2c79eaf989b649ad0b63dcbec9a1169e3abf",
     "tracker_plan_semantic_sha256": "f83003c1b99336b90d3237e5002d50d3b0c7695393288760829539b8fe3229ec",
     "cargo_version": "cargo 1.98.0-nightly (a335d47ff 2026-06-26)",
@@ -289,7 +289,7 @@
     }
   ],
   "canonical_commands": {
-    "ledger_regeneration": "set -o pipefail; GENERATOR_COMMIT=06a2ce21eb8bd609602f22865341cb8fb366d557; RCH_REQUIRE_REMOTE=1 rch exec -q --base \"$GENERATOR_COMMIT\" --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_marginal_ledger_generate\" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 8 --quiet -p asupersync --bin dependency_marginal_ledger --no-default-features --features dependency-ledger -- --source-commit \"$GENERATOR_COMMIT\" --jobs 8 --output - 2>&1 | sed '/^\\[RCH\\] remote /d' > artifacts/dependency_marginal_ledger_v1.json",
+    "ledger_regeneration": "set -o pipefail; GENERATOR_COMMIT=f606e28983199a1b51af11e6f65bb9b00686ceb3; RCH_REQUIRE_REMOTE=1 rch exec -q --base \"$GENERATOR_COMMIT\" --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_marginal_ledger_generate\" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 8 --quiet -p asupersync --bin dependency_marginal_ledger --no-default-features --features dependency-ledger -- --source-commit \"$GENERATOR_COMMIT\" --jobs 8 --output - 2>&1 | sed '/^\\[RCH\\] remote /d' > artifacts/dependency_marginal_ledger_v1.json",
     "focused_foundation_and_aggregate_contracts": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_phase1_aggregate_signoff\" cargo test -p asupersync --test dependency_safety_taxonomy_contract --test dependency_marginal_ledger_contract --test dependency_oracle_policy_contract --test dependency_phase1_aggregate_signoff_contract -- --nocapture",
     "verification_final_contract": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_verification_final_signoff\" cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture",
     "live_prerequisite_audit": "br show asupersync-dep-p1-foundations-upksjk.1 asupersync-dep-p1-foundations-upksjk.2 asupersync-dep-p1-foundations-upksjk.3 asupersync-dep-p1-foundations-upksjk.5.4 asupersync-dep-p1-foundations-upksjk.6.6 --json",

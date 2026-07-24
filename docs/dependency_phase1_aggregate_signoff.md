@@ -41,10 +41,14 @@ identifiers: Cargo reports hyphenated keys with underscores. Consequently,
 Commit `06a2ce21eb8bd609602f22865341cb8fb366d557` normalizes that comparison,
 retains the original manifest spelling in the artifact, and projects taxonomy
 references from the direct package plus packages actually removed by the
-counterfactual. Unit regressions cover plain, empty, single-hyphen, and
-multiple-hyphen names plus the transitive
-`crossbeam-utils::CachePadded` surface. The canonical ledger was regenerated
-from that exact clean commit.
+counterfactual. Follow-up commit
+`f606e28983199a1b51af11e6f65bb9b00686ceb3` preserves the active direct
+proc-macro root as execution-context evidence even when the package is
+first-party or retained elsewhere in the workspace graph. Unit regressions
+cover plain, empty, single-hyphen, and multiple-hyphen names; the transitive
+`crossbeam-utils::CachePadded` surface; empty and combined proc-macro evidence;
+and duplicate suppression. The canonical ledger was regenerated from the
+follow-up commit's exact clean tree.
 
 ## Frozen matrix and provenance
 

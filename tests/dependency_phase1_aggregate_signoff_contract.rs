@@ -742,7 +742,7 @@ fn commands_docs_and_no_claim_boundaries_are_exact() {
 
     for token in [
         "PASS_SCOPED_FOUNDATIONS_ONLY",
-        "06a2ce21eb8bd609602f22865341cb8fb366d557",
+        "f606e28983199a1b51af11e6f65bb9b00686ceb3",
         "33 taxonomy candidates",
         "13 feature profiles",
         "4 target triples",
