@@ -153,6 +153,7 @@
       "cutover_state"
     ],
     "column_joins": {
+      "capability_id": "exact set equality across the signoff row_ids, capability registry, capability baseline, and cutover policy",
       "unit_evidence": "capability_registry.capabilities[].unit_test_owner plus implementation verification_matrix unit plans",
       "integration_evidence": "capability_baseline.capability_baselines[].evidence_ids plus verification_matrix contract/downstream/lab plans",
       "e2e_evidence": "capability_registry.capabilities[].e2e_owner and scenario_ids plus direct or capability-aggregate verification_matrix e2e/downstream plans",
