@@ -131,6 +131,7 @@ contract, documentation, taxonomy, root manifest, and lockfile used to produce
 it. From a clean `main`, regenerate with remote Cargo execution:
 
 ```bash
+set -o pipefail
 GENERATOR_COMMIT="$(git rev-parse HEAD)"
 RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 rch exec -q \
   --base "$GENERATOR_COMMIT" --clean-overlay --no-overlay -- \
@@ -141,12 +142,16 @@ RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 rch exec -q \
   --bin dependency_marginal_ledger \
   --no-default-features --features dependency-ledger -- \
   --source-commit "$GENERATOR_COMMIT" --jobs 8 --output - \
+  2>&1 | sed '/^\[RCH\] remote /d' \
   > artifacts/dependency_marginal_ledger_v1.json
 ```
 
-The redirect captures the generator's stdout locally; RCH status and
-diagnostics remain on stderr. `--jobs` changes only bounded counterfactual
-concurrency. Rows are sorted by their stable key before serialization.
+RCH quiet mode relays the remote command's stdout on its own stderr stream, so
+the pipeline captures both local streams and removes only RCH's terminal status
+line. With `pipefail` enabled explicitly, a failed remote command still fails
+the pipeline. `--jobs` changes only bounded
+counterfactual concurrency. Rows are sorted by their stable key before
+serialization.
 
 Validate the generated artifact with:
 
