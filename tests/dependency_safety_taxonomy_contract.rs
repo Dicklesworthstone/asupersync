@@ -97,9 +97,11 @@ fn expected_classifications() -> BTreeMap<&'static str, &'static str> {
         ("hex-codec", "SAFE-OWN"),
         ("base64-codec", "SAFE-OWN"),
         ("future-utilities", "SAFE-OWN"),
+        ("public-stream-migration", "SAFE-OWN"),
         ("token-slab", "SAFE-OWN"),
         ("visibility-attribute", "SAFE-OWN"),
         ("rfc3339-formatter", "SAFE-OWN"),
+        ("atp-version-scanner", "SAFE-OWN"),
         ("typed-symbol-bincode-codec", "SAFE-OWN"),
         ("typed-symbol-msgpack-codec", "SAFE-OWN"),
         ("config-schema-migration", "SAFE-OWN"),
@@ -112,12 +114,14 @@ fn expected_classifications() -> BTreeMap<&'static str, &'static str> {
         ("parking-lot-wrapper", "SAFE-OWN"),
         ("lz4-codec", "SAFE-OWN"),
         ("deflate-codec", "SAFE-OWN"),
+        ("safe-queue-prototype", "SAFE-OWN"),
+        ("cache-padded-experiment", "SAFE-OWN"),
         ("polling-reactor", "BOUNDARY-UNSAFE"),
         ("socket-platform", "BOUNDARY-UNSAFE"),
         ("signal-platform", "BOUNDARY-UNSAFE"),
         ("host-introspection", "BOUNDARY-UNSAFE"),
         ("extended-attributes", "BOUNDARY-UNSAFE"),
-        ("x509-residual-parser", "BOUNDARY-UNSAFE"),
+        ("x509-residual-parser", "SAFE-OWN"),
         ("simd-dispatch-boundary", "BOUNDARY-UNSAFE"),
         ("lock-free-queue", "ALGORITHMIC-UNSAFE"),
         ("inline-storage", "ALGORITHMIC-UNSAFE"),
@@ -128,10 +132,160 @@ fn expected_classifications() -> BTreeMap<&'static str, &'static str> {
     .collect()
 }
 
+fn expected_sensitivities() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
+    [
+        ("hex-codec", &["ordinary"][..]),
+        (
+            "base64-codec",
+            &["security-sensitive-parser", "wire-format-parser"][..],
+        ),
+        (
+            "future-utilities",
+            &["concurrency-liveness", "runtime-hot-path"][..],
+        ),
+        (
+            "public-stream-migration",
+            &[
+                "concurrency-liveness",
+                "public-api-redesign",
+                "runtime-hot-path",
+            ][..],
+        ),
+        (
+            "token-slab",
+            &["concurrency-liveness", "runtime-hot-path"][..],
+        ),
+        ("visibility-attribute", &["public-api-redesign"][..]),
+        ("rfc3339-formatter", &["persistent-format"][..]),
+        (
+            "atp-version-scanner",
+            &["security-sensitive-parser", "wire-format-parser"][..],
+        ),
+        (
+            "typed-symbol-bincode-codec",
+            &[
+                "persistent-format",
+                "public-api-redesign",
+                "wire-format-parser",
+            ][..],
+        ),
+        (
+            "typed-symbol-msgpack-codec",
+            &[
+                "persistent-format",
+                "public-api-redesign",
+                "wire-format-parser",
+            ][..],
+        ),
+        (
+            "config-schema-migration",
+            &["persistent-format", "public-api-redesign"][..],
+        ),
+        ("cli-parser", &["public-api-redesign"][..]),
+        (
+            "regex-scanners",
+            &["runtime-hot-path", "security-sensitive-parser"][..],
+        ),
+        (
+            "nkey-codec",
+            &[
+                "cryptographic-format",
+                "persistent-format",
+                "security-sensitive-parser",
+                "wire-format-parser",
+            ][..],
+        ),
+        (
+            "proto-codec",
+            &[
+                "public-api-redesign",
+                "security-sensitive-parser",
+                "wire-format-parser",
+            ][..],
+        ),
+        (
+            "otlp-metrics",
+            &["public-api-redesign", "wire-format-parser"][..],
+        ),
+        ("chrono-time", &["persistent-format"][..]),
+        (
+            "parking-lot-wrapper",
+            &["concurrency-liveness", "runtime-hot-path"][..],
+        ),
+        (
+            "lz4-codec",
+            &[
+                "persistent-format",
+                "security-sensitive-parser",
+                "wire-format-parser",
+            ][..],
+        ),
+        (
+            "deflate-codec",
+            &["security-sensitive-parser", "wire-format-parser"][..],
+        ),
+        (
+            "safe-queue-prototype",
+            &["concurrency-liveness", "runtime-hot-path"][..],
+        ),
+        (
+            "cache-padded-experiment",
+            &["platform-boundary", "runtime-hot-path"][..],
+        ),
+        (
+            "polling-reactor",
+            &[
+                "concurrency-liveness",
+                "platform-boundary",
+                "runtime-hot-path",
+            ][..],
+        ),
+        (
+            "socket-platform",
+            &["platform-boundary", "runtime-hot-path"][..],
+        ),
+        (
+            "signal-platform",
+            &["concurrency-liveness", "platform-boundary"][..],
+        ),
+        ("host-introspection", &["platform-boundary"][..]),
+        ("extended-attributes", &["platform-boundary"][..]),
+        (
+            "x509-residual-parser",
+            &["security-sensitive-parser", "wire-format-parser"][..],
+        ),
+        (
+            "simd-dispatch-boundary",
+            &["platform-boundary", "runtime-hot-path"][..],
+        ),
+        (
+            "lock-free-queue",
+            &["concurrency-liveness", "runtime-hot-path"][..],
+        ),
+        ("inline-storage", &["runtime-hot-path"][..]),
+        (
+            "pin-projection",
+            &["concurrency-liveness", "runtime-hot-path"][..],
+        ),
+        (
+            "raw-lock-parking-protocol",
+            &[
+                "concurrency-liveness",
+                "platform-boundary",
+                "runtime-hot-path",
+            ][..],
+        ),
+    ]
+    .into_iter()
+    .map(|(candidate, tags)| (candidate, tags.iter().copied().collect()))
+    .collect()
+}
+
 fn classification_errors(
     row: &Value,
     allowed_eligibility: &BTreeMap<String, BTreeSet<String>>,
     exception_fields: &BTreeSet<String>,
+    review_tag_ids: &BTreeSet<String>,
 ) -> Vec<String> {
     let candidate_id = string(row, "candidate_id");
     let class_id = string(row, "class_id");
@@ -156,6 +310,55 @@ fn classification_errors(
         errors.push(format!(
             "{candidate_id}: {class_id} must name its unsafe techniques"
         ));
+    }
+
+    let sensitivity_tags = string_set(row, "review_sensitivity_tags");
+    if sensitivity_tags.is_empty() {
+        errors.push(format!(
+            "{candidate_id}: review_sensitivity_tags must not be empty"
+        ));
+    }
+    if sensitivity_tags.len() != array(row, "review_sensitivity_tags").len() {
+        errors.push(format!(
+            "{candidate_id}: review_sensitivity_tags must be unique"
+        ));
+    }
+    let unknown_tags = sensitivity_tags
+        .difference(review_tag_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown_tags.is_empty() {
+        errors.push(format!(
+            "{candidate_id}: unknown review-sensitivity tags {unknown_tags:?}"
+        ));
+    }
+    if sensitivity_tags.contains("ordinary") && sensitivity_tags.len() != 1 {
+        errors.push(format!(
+            "{candidate_id}: ordinary must not be combined with another tag"
+        ));
+    }
+
+    let sensitivity_evidence = object(row, "sensitivity_evidence_requirements");
+    let evidence_tags = sensitivity_evidence
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if evidence_tags != sensitivity_tags {
+        errors.push(format!(
+            "{candidate_id}: sensitivity evidence keys {evidence_tags:?} do not match tags {sensitivity_tags:?}"
+        ));
+    }
+    for (tag, evidence) in sensitivity_evidence {
+        if evidence.as_array().is_none_or(|entries| {
+            entries.is_empty()
+                || entries
+                    .iter()
+                    .any(|entry| entry.as_str().is_none_or(|text| text.trim().is_empty()))
+        }) {
+            errors.push(format!(
+                "{candidate_id}: sensitivity evidence for {tag} must be a nonempty string array"
+            ));
+        }
     }
 
     let exception = row
@@ -227,6 +430,12 @@ fn artifact_schema_and_source_metadata_are_pinned() {
     assert_eq!(
         generated_from.get("plan_commit").and_then(Value::as_str),
         Some("bf759eabc")
+    );
+    assert_eq!(
+        generated_from
+            .get("tracker_contract_revision")
+            .and_then(Value::as_str),
+        Some("Rev 4")
     );
 
     for path in [
@@ -355,6 +564,94 @@ fn class_definitions_preserve_the_programs_substantive_policy() {
 }
 
 #[test]
+fn review_sensitivity_axis_is_complete_and_substantive() {
+    let taxonomy = taxonomy();
+    let expected_ids = BTreeSet::from([
+        "ordinary".to_owned(),
+        "public-api-redesign".to_owned(),
+        "persistent-format".to_owned(),
+        "wire-format-parser".to_owned(),
+        "security-sensitive-parser".to_owned(),
+        "cryptographic-format".to_owned(),
+        "concurrency-liveness".to_owned(),
+        "platform-boundary".to_owned(),
+        "runtime-hot-path".to_owned(),
+    ]);
+    let tags = array(&taxonomy, "review_sensitivity_tags");
+    let actual_ids = tags
+        .iter()
+        .map(|tag| string(tag, "tag_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_ids, expected_ids);
+    assert_eq!(actual_ids.len(), tags.len(), "tag ids must be unique");
+
+    let required_fields = string_set(&taxonomy, "review_sensitivity_tag_required_fields");
+    assert_eq!(
+        required_fields,
+        BTreeSet::from([
+            "tag_id".to_owned(),
+            "definition".to_owned(),
+            "required_evidence".to_owned(),
+            "review_rules".to_owned(),
+            "explicit_no_claims".to_owned(),
+        ])
+    );
+    for tag in tags {
+        let tag_id = string(tag, "tag_id");
+        for field in &required_fields {
+            assert!(
+                tag.get(field).is_some(),
+                "{tag_id}: missing required field {field}"
+            );
+        }
+        assert!(!string(tag, "definition").trim().is_empty());
+        nonempty_string_array(tag, "required_evidence");
+        nonempty_string_array(tag, "review_rules");
+        nonempty_string_array(tag, "explicit_no_claims");
+    }
+
+    let wire = tags
+        .iter()
+        .find(|tag| string(tag, "tag_id") == "wire-format-parser")
+        .expect("wire-format-parser tag must exist");
+    let wire_policy = format!(
+        "{}\n{}",
+        string(wire, "definition"),
+        array(wire, "review_rules")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(wire_policy.contains("safe Rust remains SAFE-OWN"));
+
+    let security = tags
+        .iter()
+        .find(|tag| string(tag, "tag_id") == "security-sensitive-parser")
+        .expect("security-sensitive-parser tag must exist");
+    let security_policy = format!(
+        "{}\n{}",
+        string(security, "definition"),
+        array(security, "required_evidence")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for marker in [
+        "authentication",
+        "Independent security review",
+        "fail-closed",
+        "resource-bound",
+    ] {
+        assert!(
+            security_policy.contains(marker),
+            "security-sensitive-parser policy must mention {marker}"
+        );
+    }
+}
+
+#[test]
 fn classification_inventory_and_required_assignments_are_exact() {
     let taxonomy = taxonomy();
     let expected = expected_classifications();
@@ -375,8 +672,10 @@ fn classification_inventory_and_required_assignments_are_exact() {
         "hex-codec",
         "base64-codec",
         "future-utilities",
+        "public-stream-migration",
         "token-slab",
         "visibility-attribute",
+        "atp-version-scanner",
         "nkey-codec",
         "proto-codec",
         "typed-symbol-msgpack-codec",
@@ -384,6 +683,9 @@ fn classification_inventory_and_required_assignments_are_exact() {
         "cli-parser",
         "regex-scanners",
         "parking-lot-wrapper",
+        "safe-queue-prototype",
+        "cache-padded-experiment",
+        "x509-residual-parser",
     ] {
         assert_eq!(
             string(classification_by_id(&taxonomy, candidate), "class_id"),
@@ -417,6 +719,83 @@ fn classification_inventory_and_required_assignments_are_exact() {
 }
 
 #[test]
+fn review_sensitivity_assignments_are_exact_and_cover_every_row() {
+    let taxonomy = taxonomy();
+    let expected = expected_sensitivities();
+    let rows = array(&taxonomy, "classifications");
+    let actual = rows
+        .iter()
+        .map(|row| {
+            (
+                string(row, "candidate_id"),
+                array(row, "review_sensitivity_tags")
+                    .iter()
+                    .map(|tag| {
+                        tag.as_str()
+                            .expect("review sensitivity tag must be a string")
+                    })
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.len(),
+        rows.len(),
+        "every candidate must have one exact sensitivity assignment"
+    );
+}
+
+#[test]
+fn safe_parsers_are_not_misclassified_as_boundary_unsafe() {
+    let taxonomy = taxonomy();
+
+    for candidate in [
+        "base64-codec",
+        "atp-version-scanner",
+        "proto-codec",
+        "lz4-codec",
+        "deflate-codec",
+        "x509-residual-parser",
+    ] {
+        let row = classification_by_id(&taxonomy, candidate);
+        assert_eq!(
+            string(row, "class_id"),
+            "SAFE-OWN",
+            "{candidate}: parser sensitivity is not boundary unsafe"
+        );
+        assert!(
+            array(row, "unsafe_techniques").is_empty(),
+            "{candidate}: SAFE-OWN parser cannot list unsafe techniques"
+        );
+        let tags = string_set(row, "review_sensitivity_tags");
+        assert!(
+            tags.contains("wire-format-parser"),
+            "{candidate}: safe parser must retain wire review sensitivity"
+        );
+    }
+
+    for candidate in [
+        "base64-codec",
+        "atp-version-scanner",
+        "proto-codec",
+        "lz4-codec",
+        "deflate-codec",
+        "x509-residual-parser",
+    ] {
+        assert!(
+            string_set(
+                classification_by_id(&taxonomy, candidate),
+                "review_sensitivity_tags"
+            )
+            .contains("security-sensitive-parser"),
+            "{candidate}: security-sensitive parser tag must not be dropped"
+        );
+    }
+}
+
+#[test]
 fn every_classification_obeys_its_class_eligibility_and_exception_rules() {
     let taxonomy = taxonomy();
     let required_fields = string_set(&taxonomy, "classification_required_fields");
@@ -428,6 +807,8 @@ fn every_classification_obeys_its_class_eligibility_and_exception_rules() {
         "program_verdict".to_owned(),
         "class_id".to_owned(),
         "eligibility".to_owned(),
+        "review_sensitivity_tags".to_owned(),
+        "sensitivity_evidence_requirements".to_owned(),
         "unsafe_techniques".to_owned(),
         "program_gates".to_owned(),
         "exception_record".to_owned(),
@@ -450,6 +831,10 @@ fn every_classification_obeys_its_class_eligibility_and_exception_rules() {
             .expect("missing exception process"),
         "required_fields",
     );
+    let review_tag_ids = array(&taxonomy, "review_sensitivity_tags")
+        .iter()
+        .map(|tag| string(tag, "tag_id").to_owned())
+        .collect::<BTreeSet<_>>();
 
     let mut all_errors = Vec::new();
     for row in array(&taxonomy, "classifications") {
@@ -480,12 +865,56 @@ fn every_classification_obeys_its_class_eligibility_and_exception_rules() {
             row,
             &allowed_eligibility,
             &exception_fields,
+            &review_tag_ids,
         ));
     }
     assert!(
         all_errors.is_empty(),
         "classification eligibility errors:\n{}",
         all_errors.join("\n")
+    );
+}
+
+#[test]
+fn missing_review_sensitivity_evidence_fails_closed() {
+    let taxonomy = taxonomy();
+    let allowed_eligibility = array(&taxonomy, "classes")
+        .iter()
+        .map(|class| {
+            (
+                string(class, "class_id").to_owned(),
+                string_set(class, "allowed_row_eligibility"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let exception_fields = string_set(
+        taxonomy
+            .get("algorithmic_unsafe_exception_process")
+            .expect("missing exception process"),
+        "required_fields",
+    );
+    let review_tag_ids = array(&taxonomy, "review_sensitivity_tags")
+        .iter()
+        .map(|tag| string(tag, "tag_id").to_owned())
+        .collect::<BTreeSet<_>>();
+
+    let mut incomplete = classification_by_id(&taxonomy, "base64-codec").clone();
+    incomplete
+        .get_mut("sensitivity_evidence_requirements")
+        .and_then(Value::as_object_mut)
+        .expect("sensitivity evidence fixture must be an object")
+        .remove("security-sensitive-parser");
+    let errors = classification_errors(
+        &incomplete,
+        &allowed_eligibility,
+        &exception_fields,
+        &review_tag_ids,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("sensitivity evidence keys")),
+        "missing review sensitivity evidence must fail closed: {errors:?}"
     );
 }
 
@@ -536,6 +965,10 @@ fn algorithmic_unsafe_exception_process_is_complete_and_partial_evidence_fails_c
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let review_tag_ids = array(&taxonomy, "review_sensitivity_tags")
+        .iter()
+        .map(|tag| string(tag, "tag_id").to_owned())
+        .collect::<BTreeSet<_>>();
     let mut incomplete = classification_by_id(&taxonomy, "lock-free-queue").clone();
     let incomplete = incomplete
         .as_object_mut()
@@ -551,7 +984,12 @@ fn algorithmic_unsafe_exception_process_is_complete_and_partial_evidence_fails_c
         }),
     );
     let incomplete = Value::Object(incomplete.clone());
-    let errors = classification_errors(&incomplete, &allowed_eligibility, &required_fields);
+    let errors = classification_errors(
+        &incomplete,
+        &allowed_eligibility,
+        &required_fields,
+        &review_tag_ids,
+    );
     assert!(
         errors
             .iter()
@@ -576,6 +1014,17 @@ fn summary_counts_are_derived_from_rows() {
         *counts.entry(string(row, "eligibility")).or_insert(0_u64) += 1;
         counts
     });
+    let sensitivity_counts = rows.iter().fold(BTreeMap::new(), |mut counts, row| {
+        for tag in array(row, "review_sensitivity_tags") {
+            *counts
+                .entry(
+                    tag.as_str()
+                        .expect("review sensitivity tag must be a string"),
+                )
+                .or_insert(0_u64) += 1;
+        }
+        counts
+    });
 
     assert_eq!(
         summary.get("class_count").and_then(Value::as_u64),
@@ -584,6 +1033,12 @@ fn summary_counts_are_derived_from_rows() {
     assert_eq!(
         summary.get("classification_count").and_then(Value::as_u64),
         Some(rows.len() as u64)
+    );
+    assert_eq!(
+        summary
+            .get("review_sensitivity_tag_count")
+            .and_then(Value::as_u64),
+        Some(array(&taxonomy, "review_sensitivity_tags").len() as u64)
     );
     for (class_id, count) in class_counts {
         assert_eq!(
@@ -609,6 +1064,17 @@ fn summary_counts_are_derived_from_rows() {
                 .and_then(Value::as_u64),
             Some(expected),
             "summary eligibility count drifted for {eligibility}"
+        );
+    }
+    for tag in array(&taxonomy, "review_sensitivity_tags") {
+        let tag_id = string(tag, "tag_id");
+        assert_eq!(
+            summary
+                .get("classification_counts_by_review_sensitivity_tag")
+                .and_then(|value| value.get(tag_id))
+                .and_then(Value::as_u64),
+            sensitivity_counts.get(tag_id).copied(),
+            "summary review-sensitivity count drifted for {tag_id}"
         );
     }
 }
@@ -645,7 +1111,9 @@ fn policy_scope_and_citation_contract_prevent_overclaiming() {
             "candidate_id".to_owned(),
             "class_id".to_owned(),
             "eligibility".to_owned(),
+            "review_sensitivity_tags".to_owned(),
             "evidence_refs".to_owned(),
+            "sensitivity_evidence_refs".to_owned(),
             "explicit_no_claims".to_owned(),
         ])
     );
@@ -660,8 +1128,26 @@ fn policy_scope_and_citation_contract_prevent_overclaiming() {
     let row = classification_by_id(&taxonomy, string(example, "candidate_id"));
     assert_eq!(string(example, "class_id"), string(row, "class_id"));
     assert_eq!(string(example, "eligibility"), string(row, "eligibility"));
+    assert_eq!(
+        string_set(example, "review_sensitivity_tags"),
+        string_set(row, "review_sensitivity_tags")
+    );
     nonempty_string_array(example, "evidence_refs");
     nonempty_string_array(example, "explicit_no_claims");
+    let sensitivity_evidence = object(example, "sensitivity_evidence_refs");
+    assert_eq!(
+        sensitivity_evidence
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        string_set(example, "review_sensitivity_tags")
+    );
+    for refs in sensitivity_evidence.values() {
+        assert!(
+            refs.as_array().is_some_and(|entries| !entries.is_empty()),
+            "citation sensitivity evidence must be nonempty"
+        );
+    }
 }
 
 #[test]
@@ -669,8 +1155,9 @@ fn docs_publish_the_citation_workflow_and_no_claim_boundary() {
     let docs = read_repo_file(DOC_PATH);
     for section in [
         "Purpose and Scope",
-        "The Three Classes",
-        "Safety Eligibility Is Not Program Approval",
+        "Axis A: Implementation Unsafety",
+        "Axis B: Review-Sensitivity Tags",
+        "The Two Axes Are Not Program Approval",
         "How an Implementation Bead Cites the Taxonomy",
         "Algorithmic-Unsafe Exception Process",
         "No-Claim Boundaries",
@@ -687,8 +1174,19 @@ fn docs_publish_the_citation_workflow_and_no_claim_boundary() {
         "SAFE-OWN",
         "BOUNDARY-UNSAFE",
         "ALGORITHMIC-UNSAFE",
+        "ordinary",
+        "public-api-redesign",
+        "persistent-format",
+        "wire-format-parser",
+        "security-sensitive-parser",
+        "cryptographic-format",
+        "concurrency-liveness",
+        "platform-boundary",
+        "runtime-hot-path",
         "candidate_id",
+        "review_sensitivity_tags",
         "evidence_refs",
+        "sensitivity_evidence_refs",
         "explicit_no_claims",
         "does not retroactively",
         PROOF_COMMAND,

@@ -8,16 +8,20 @@ The canonical machine-readable policy is
 `artifacts/dependency_safety_taxonomy_v1.json`. Its contract test is
 `tests/dependency_safety_taxonomy_contract.rs`.
 
-This taxonomy answers one narrow question for the Dependency Sovereignty
-Program: what safety evidence is required before a proposed first-party
-dependency replacement can be approved?
+This taxonomy answers two orthogonal questions for the Dependency Sovereignty
+Program:
+
+1. What implementation-unsafety class does a proposed first-party replacement
+   occupy?
+2. Which review sensitivities apply even when the implementation is entirely
+   safe Rust?
 
 It governs prospective replacement approvals. It does not decide whether a
 replacement is worthwhile on marginal dependency cost, performance,
 interoperability, maintenance, portability, or product grounds. Those remain
 separate gates in the owning bead and the marginal-cost ledger.
 
-## The Three Classes
+## Axis A: Implementation Unsafety
 
 | Class | Meaning | Default safety eligibility |
 | --- | --- | --- |
@@ -50,7 +54,46 @@ linearizability. Miri does not model weak memory. A 48-hour soak is not a
 proof. Moving this unsafe class from a mature, widely-fuzzed crate into fresh
 first-party code increases risk.
 
-## Safety Eligibility Is Not Program Approval
+## Axis B: Review-Sensitivity Tags
+
+Review sensitivity is multi-valued and independent of implementation
+unsafety. A strict safe-Rust DER, protobuf, LZ4, or DEFLATE parser is
+`SAFE-OWN`; the parser's security and wire obligations are represented by
+tags, not by falsely labeling it `BOUNDARY-UNSAFE`.
+
+| Tag | Additional evidence required |
+| --- | --- |
+| `ordinary` | Focused semantics and the owning bead's normal proof packet. This tag is exclusive. |
+| `public-api-redesign` | Approved ADR, API-surface-map update, consumer migration, and no-shim decision. |
+| `persistent-format` | Versioned schema, historical goldens, and an explicit migration, rejection, or retention policy. |
+| `wire-format-parser` | Canonical and adversarial wire vectors, provenance, decoder fuzzing or exhaustive bounded-input strategy. |
+| `security-sensitive-parser` | Independent security review, negative confusion/bypass/amplification fixtures, and fail-closed resource bounds. |
+| `cryptographic-format` | Reference vectors, key-kind and canonicalization review, secret redaction/zeroization, and security sign-off. |
+| `concurrency-liveness` | LabRuntime or DPOR schedules, leak/quiescence assertions, liveness argument, and bounded stress evidence. |
+| `platform-boundary` | Target/host matrix, ABI references, and target-gated RCH evidence or an explicit no-host receipt. |
+| `runtime-hot-path` | Real-workload performance evidence, appropriate resource metrics, and a rollback threshold. |
+
+Every classification row lists at least one
+`review_sensitivity_tags` value and a matching
+`sensitivity_evidence_requirements` entry for each tag. Missing, unknown, or
+duplicate tags fail the contract. `ordinary` cannot be combined with another
+tag.
+
+Parser safety and parser review are deliberately separate. For example:
+
+- `x509-residual-parser` is `SAFE-OWN` plus `wire-format-parser` and
+  `security-sensitive-parser`.
+- `proto-codec` and `deflate-codec` are `SAFE-OWN` plus parser sensitivity
+  tags.
+- `nkey-codec` is `SAFE-OWN` plus `cryptographic-format`,
+  `security-sensitive-parser`, `wire-format-parser`, and
+  `persistent-format`.
+- `signal-platform` and `extended-attributes` are
+  `BOUNDARY-UNSAFE` plus `platform-boundary`.
+- `safe-queue-prototype` is `SAFE-OWN` plus `concurrency-liveness` and
+  `runtime-hot-path`.
+
+## The Two Axes Are Not Program Approval
 
 The taxonomy separates two decisions that must not be collapsed:
 
@@ -76,12 +119,14 @@ Downstream beads cite the stable `candidate_id`, not a free-form paraphrase.
 The artifact carries the complete row inventory. Important groups are:
 
 - `SAFE-OWN`: `hex-codec`, `base64-codec`, `future-utilities`,
-  `token-slab`, `visibility-attribute`, `nkey-codec`, `proto-codec`,
+  `public-stream-migration`, `token-slab`, `visibility-attribute`,
+  `atp-version-scanner`, `nkey-codec`, `proto-codec`,
   `typed-symbol-msgpack-codec`, `config-schema-migration`, `cli-parser`,
-  `regex-scanners`, and `parking-lot-wrapper`.
+  `regex-scanners`, `parking-lot-wrapper`, `x509-residual-parser`,
+  `safe-queue-prototype`, and `cache-padded-experiment`.
 - `BOUNDARY-UNSAFE`: `polling-reactor`, `socket-platform`,
   `signal-platform`, `host-introspection`, `extended-attributes`,
-  `x509-residual-parser`, and `simd-dispatch-boundary`.
+  and `simd-dispatch-boundary`.
 - `ALGORITHMIC-UNSAFE`: `lock-free-queue`, `inline-storage`,
   `pin-projection`, and `raw-lock-parking-protocol`.
 
@@ -94,8 +139,9 @@ Before implementation:
 
 1. Find the exact row in
    `artifacts/dependency_safety_taxonomy_v1.json`.
-2. Copy its `candidate_id`, `class_id`, `eligibility`, and `program_gates`
-   into the bead plan.
+2. Copy its `candidate_id`, `class_id`, `eligibility`,
+   `review_sensitivity_tags`, `sensitivity_evidence_requirements`, and
+   `program_gates` into the bead plan.
 3. Reserve the exact implementation, test, artifact, ledger, and documentation
    paths before editing.
 4. If the row is `prohibited`, stop. Do not prototype first-party algorithmic
@@ -111,19 +157,25 @@ owned evidence artifact:
   "candidate_id": "hex-codec",
   "class_id": "SAFE-OWN",
   "eligibility": "eligible",
+  "review_sensitivity_tags": ["ordinary"],
   "evidence_refs": [
     "tests/example_hex_differential.rs",
     "bead-comment-with-rch-result"
   ],
+  "sensitivity_evidence_refs": {
+    "ordinary": ["tests/example_hex_differential.rs"]
+  },
   "explicit_no_claims": [
     "This citation does not prove marginal dependency savings or broad workspace health."
   ]
 }
 ```
 
-Every key in that example is required. `evidence_refs` must link actual
-terminal evidence, not planned commands. `explicit_no_claims` must name the
-important guarantees that the cited evidence does not establish.
+Every key in that example is required. `evidence_refs` and every
+`sensitivity_evidence_refs` entry must link actual terminal evidence, not
+planned commands. The sensitivity evidence keys must exactly match the row's
+tags. `explicit_no_claims` must name the important guarantees that the cited
+evidence does not establish.
 
 For a `BOUNDARY-UNSAFE` row, the references must also include the exact unsafe
 ledger row, its documentation evidence, the Miri or explicit no-host result,
@@ -158,6 +210,10 @@ unsafe boundaries.
 Passing the contract test proves only that:
 
 - the three classes and their required evidence remain present;
+- the nine review-sensitivity tags and their required evidence remain present;
+- all 33 planned OWN, evidence-gated, and explanatory KEEP rows have exact
+  class and sensitivity assignments;
+- safe parsers are not mislabeled `BOUNDARY-UNSAFE`;
 - every classification uses an eligibility state allowed by its class;
 - prohibited rows cannot carry an implicit or partial exception;
 - summary counts, citation fields, and documentation markers stay aligned.

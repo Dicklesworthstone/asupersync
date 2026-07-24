@@ -6,13 +6,15 @@
   "generated_from": {
     "plan_path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
     "plan_revision": "Rev 3",
-    "plan_commit": "bf759eabc"
+    "plan_commit": "bf759eabc",
+    "tracker_contract_revision": "Rev 4"
   },
   "policy_scope": {
     "governs": [
-      "Prospective safety classification and approval evidence for first-party dependency replacements in the Dependency Sovereignty Program.",
+      "Prospective implementation-unsafety classification and orthogonal review-sensitivity tagging for first-party dependency replacements in the Dependency Sovereignty Program.",
       "The minimum evidence a downstream implementation bead must cite before it can claim that a replacement is safety-eligible.",
-      "The fail-closed exception process for replacements that would introduce algorithmic unsafe."
+      "The fail-closed exception process for replacements that would introduce algorithmic unsafe.",
+      "The extra review evidence required for public APIs, persisted or wire formats, security-sensitive parsers, cryptographic formats, concurrency/liveness, platform boundaries, and runtime hot paths."
     ],
     "does_not_govern": [
       "Whether a replacement is worthwhile on marginal dependency cost, interoperability, performance, maintenance, or product grounds.",
@@ -20,7 +22,7 @@
       "Third-party dependency safety in general or the safety of transitive dependency implementations.",
       "Release readiness, broad workspace health, runtime correctness, or performance parity."
     ],
-    "no_claim_boundary": "This taxonomy governs prospective dependency-replacement approvals only. It does not retroactively judge, revoke, certify, or reclassify existing ledgered unsafe boundaries. A matching class row is not proof that its evidence requirements or separate program gates have been satisfied."
+    "no_claim_boundary": "This two-axis taxonomy governs prospective dependency-replacement approvals only. It does not retroactively judge, revoke, certify, or reclassify existing ledgered unsafe boundaries. A matching implementation-unsafety class and review-sensitivity tag set are not proof that their evidence requirements or separate program gates have been satisfied."
   },
   "eligibility_states": {
     "eligible": "The safety class permits implementation without an exception when the row and its separate program gates are satisfied.",
@@ -141,6 +143,157 @@
       "No field may be omitted, marked pending, or inferred from another field."
     ]
   },
+  "review_sensitivity_tag_required_fields": [
+    "tag_id",
+    "definition",
+    "required_evidence",
+    "review_rules",
+    "explicit_no_claims"
+  ],
+  "review_sensitivity_tags": [
+    {
+      "tag_id": "ordinary",
+      "definition": "No additional sensitivity category applies beyond the implementation-unsafety class and the owning bead's ordinary semantic gates.",
+      "required_evidence": [
+        "Focused semantic tests and the owning bead's normal proof packet."
+      ],
+      "review_rules": [
+        "ordinary is exclusive and must not be combined with another review-sensitivity tag.",
+        "Do not use ordinary to avoid a more specific tag."
+      ],
+      "explicit_no_claims": [
+        "ordinary does not mean trivial, risk-free, or exempt from program gates."
+      ]
+    },
+    {
+      "tag_id": "public-api-redesign",
+      "definition": "The replacement changes a public type, trait, format enum, feature contract, or consumer-visible behavior.",
+      "required_evidence": [
+        "An approved ADR naming every changed public symbol and chosen end-state.",
+        "An artifacts/api_surface_map_v1.json update in the implementation commit.",
+        "Consumer migration and no-compatibility-shim notes."
+      ],
+      "review_rules": [
+        "Treat removal of external interoperability as a product decision, not an internal refactor.",
+        "Do not add deprecated aliases, wrappers, or compatibility shims."
+      ],
+      "explicit_no_claims": [
+        "A safe implementation does not approve the public API break."
+      ]
+    },
+    {
+      "tag_id": "persistent-format",
+      "definition": "The replacement reads or writes bytes that may outlive the producing process or release.",
+      "required_evidence": [
+        "A versioned schema or canonical-format contract.",
+        "Golden fixtures covering prior supported encodings and boundary values.",
+        "An explicit migration, rejection, or retention policy for existing data."
+      ],
+      "review_rules": [
+        "Fail closed on unknown versions and non-canonical encodings.",
+        "Never delete legacy fixtures or user data without explicit permission."
+      ],
+      "explicit_no_claims": [
+        "Round-trip success does not prove compatibility with historical artifacts."
+      ]
+    },
+    {
+      "tag_id": "wire-format-parser",
+      "definition": "The replacement parses or emits protocol bytes exchanged across a process, host, or trust boundary.",
+      "required_evidence": [
+        "Canonical and adversarial wire vectors, including truncation, length, overflow, and non-canonical cases.",
+        "Differential or standards-based fixtures with documented provenance.",
+        "A fuzz or exhaustive bounded-input strategy for the decoder."
+      ],
+      "review_rules": [
+        "A parser written entirely in safe Rust remains SAFE-OWN; this tag does not imply unsafe code.",
+        "Reject malformed and unsupported input deterministically."
+      ],
+      "explicit_no_claims": [
+        "Differential agreement does not prove both wire implementations correct."
+      ]
+    },
+    {
+      "tag_id": "security-sensitive-parser",
+      "definition": "Parser behavior can affect authentication, authorization, confidentiality, integrity, redaction, or resource-exhaustion boundaries.",
+      "required_evidence": [
+        "Independent security review of accepted, rejected, and ambiguous inputs.",
+        "Negative fixtures for confusion, truncation, non-canonical, amplification, and bypass cases.",
+        "Explicit fail-closed and resource-bound contracts."
+      ],
+      "review_rules": [
+        "Classify by security consequence even when every implementation line is safe Rust.",
+        "Do not infer acceptance from another parser's permissive behavior."
+      ],
+      "explicit_no_claims": [
+        "Memory safety does not prove parser security or denial-of-service resistance."
+      ]
+    },
+    {
+      "tag_id": "cryptographic-format",
+      "definition": "The replacement owns encoding, key-kind, checksum, domain-separation, or canonicalization rules adjacent to retained cryptographic primitives.",
+      "required_evidence": [
+        "Standards or upstream-reference vectors for every supported key or message kind.",
+        "Canonical encoding, secret redaction, zeroization, and type-confusion review.",
+        "Independent security sign-off before cutover."
+      ],
+      "review_rules": [
+        "Do not reimplement cryptographic primitives under this tag.",
+        "Unknown key kinds, prefixes, and encodings fail closed."
+      ],
+      "explicit_no_claims": [
+        "Wire compatibility does not prove cryptographic soundness."
+      ]
+    },
+    {
+      "tag_id": "concurrency-liveness",
+      "definition": "The replacement can affect wakeups, cancellation, fairness, ownership transfer, quiescence, or progress.",
+      "required_evidence": [
+        "Deterministic LabRuntime or DPOR coverage for cancellation and wake races.",
+        "No-task-leak, no-obligation-leak, loser-drain, and region-quiescence assertions where applicable.",
+        "A liveness argument plus bounded stress evidence."
+      ],
+      "review_rules": [
+        "Loom or stress evidence supplements but does not prove liveness or linearizability.",
+        "Preserve structured-concurrency and cancel-correctness invariants."
+      ],
+      "explicit_no_claims": [
+        "Passing schedules do not exhaust all scheduler or weak-memory behaviors."
+      ]
+    },
+    {
+      "tag_id": "platform-boundary",
+      "definition": "The replacement depends on OS ABI, target architecture, cache topology, target features, handles, syscalls, or platform-specific semantics.",
+      "required_evidence": [
+        "A target and host matrix naming exercised and unexercised combinations.",
+        "Platform documentation or ABI references for every conditional implementation.",
+        "Target-gated RCH proof or an explicit no-host limitation receipt."
+      ],
+      "review_rules": [
+        "Platform sensitivity is independent of whether the implementation contains unsafe code.",
+        "Unknown platform evidence remains blocked rather than being reported safe."
+      ],
+      "explicit_no_claims": [
+        "Evidence on one host or architecture does not establish another."
+      ]
+    },
+    {
+      "tag_id": "runtime-hot-path",
+      "definition": "The replacement executes on a scheduler, synchronization, allocation, I/O, parsing, or telemetry path where regressions can materially affect runtime behavior.",
+      "required_evidence": [
+        "Before-and-after benchmarks on the owning bead's agreed workload and axes.",
+        "Allocation, latency, throughput, or contention measurements appropriate to the path.",
+        "A rollback threshold and no-regression interpretation."
+      ],
+      "review_rules": [
+        "Do not substitute microbenchmarks for the real runtime workload.",
+        "A measured regression blocks cutover unless the owner explicitly changes the gate."
+      ],
+      "explicit_no_claims": [
+        "Taxonomy classification contains no benchmark or performance result."
+      ]
+    }
+  ],
   "classification_required_fields": [
     "candidate_id",
     "incumbents",
@@ -149,6 +302,8 @@
     "program_verdict",
     "class_id",
     "eligibility",
+    "review_sensitivity_tags",
+    "sensitivity_evidence_requirements",
     "unsafe_techniques",
     "program_gates",
     "exception_record",
@@ -165,6 +320,14 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "ordinary"
+      ],
+      "sensitivity_evidence_requirements": {
+        "ordinary": [
+          "Focused encode/decode semantics, malformed-input, and differential vectors."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Differential vectors against the retained incumbent.",
@@ -178,11 +341,23 @@
       "incumbents": [
         "base64"
       ],
-      "replacement_surface": "Scalar base64 engines for WebSocket, certificate pin, gRPC-Web, and NATS credential surfaces.",
+      "replacement_surface": "Scalar base64 engines for WebSocket, certificate pin, gRPC-Web, and NATS credential surfaces, including padded URL_SAFE input where the live API requires it.",
       "program_phase": "2",
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "wire-format-parser",
+        "security-sensitive-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "wire-format-parser": [
+          "Canonical vectors cover STANDARD, URL_SAFE, padded URL_SAFE, no-pad, whitespace, truncation, and rejected non-canonical forms."
+        ],
+        "security-sensitive-parser": [
+          "Independent review covers credential and certificate-pin parsing, input bounds, and fail-closed errors."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Differential vectors for every accepted alphabet and padding policy.",
@@ -196,11 +371,23 @@
       "incumbents": [
         "futures-lite"
       ],
-      "replacement_surface": "Owned block_on, poll_fn, zip, race, and yield_now test and utility helpers.",
+      "replacement_surface": "Owned block_on, poll_fn, zip, race, yield_now, and Future::poll panic-catching adapters used by test and production containment paths.",
       "program_phase": "2",
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "LabRuntime coverage preserves wake, cancellation, loser-drain, panic-payload, and drop-scope semantics at Future::poll boundaries."
+        ],
+        "runtime-hot-path": [
+          "Poll-path overhead is benchmarked for ready, pending, wake, and panic containment cases."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Differential behavior against futures-lite as a dev-only oracle.",
@@ -219,6 +406,18 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "Deterministic ABA, stale-token, removal, and reuse schedules preserve ownership and cancellation invariants."
+        ],
+        "runtime-hot-path": [
+          "Allocation, lookup, and removal latency plus memory overhead are measured against slab."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "ABA and stale-token regression coverage.",
@@ -237,6 +436,14 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The proc-macro surface map and compile fixtures cover every supported attribute input and emitted visibility."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Compile-pass and compile-fail macro fixtures.",
@@ -255,6 +462,14 @@
       "program_verdict": "REMOVE_WITH_SAFE_OWN_FORMATTER",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "persistent-format"
+      ],
+      "sensitivity_evidence_requirements": {
+        "persistent-format": [
+          "Version-independent RFC3339 goldens cover range limits, leap years, nanoseconds, and historical artifact expectations."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Boundary, leap-year, and golden-format vectors.",
@@ -273,6 +488,22 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign",
+        "persistent-format",
+        "wire-format-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The SerdeCodec ADR and API surface map name the removal of arbitrary Serialize and the Bincode variant."
+        ],
+        "persistent-format": [
+          "Versioned snapshot and trace schemas include migration or rejection rules plus historical goldens."
+        ],
+        "wire-format-parser": [
+          "Decoder fixtures cover truncation, lengths, unknown versions, non-canonical values, and bounded allocation."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Phase-3 public API ADR approval.",
@@ -292,6 +523,22 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign",
+        "persistent-format",
+        "wire-format-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The SerdeCodec ADR and API surface map name the removal of arbitrary Serialize and the MessagePack variant."
+        ],
+        "persistent-format": [
+          "Versioned typed-symbol, snapshot, and trace schemas include migration or rejection rules plus historical goldens."
+        ],
+        "wire-format-parser": [
+          "Decoder fixtures cover truncation, lengths, unknown versions, non-canonical values, and bounded allocation."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Phase-3 public API ADR approval.",
@@ -312,6 +559,18 @@
       "program_verdict": "REMOVE_MIGRATE",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign",
+        "persistent-format"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The config ADR and API surface map record removed TOML/YAML inputs and the chosen versioned JSON contract."
+        ],
+        "persistent-format": [
+          "A reviewed migration corpus proves field preservation, unknown-version rejection, and explicit legacy-file disposition."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Owner-approved TOML and YAML to versioned JSON migration ADR.",
@@ -331,6 +590,14 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The CLI ADR, API surface map, help/error goldens, OsString cases, and exit-code matrix cover the complete consumer contract."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Phase-3 CLI API ADR approval.",
@@ -345,11 +612,23 @@
       "incumbents": [
         "regex"
       ],
-      "replacement_surface": "Fixed PII scanners and an owned subset matcher.",
+      "replacement_surface": "Fixed PII redaction scanners and an owned subset matcher.",
       "program_phase": "5",
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "security-sensitive-parser",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "security-sensitive-parser": [
+          "Independent redaction review and adversarial bypass corpus prove unsupported syntax fails closed without silently exposing PII."
+        ],
+        "runtime-hot-path": [
+          "Representative log and trace scanning benchmarks bound throughput, allocations, and worst-case input behavior."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Unsupported syntax fails closed.",
@@ -369,6 +648,26 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "persistent-format",
+        "wire-format-parser",
+        "security-sensitive-parser",
+        "cryptographic-format"
+      ],
+      "sensitivity_evidence_requirements": {
+        "persistent-format": [
+          "Persisted seed and public-key fixtures retain canonical text encoding and explicit migration or rejection behavior."
+        ],
+        "wire-format-parser": [
+          "NATS reference vectors cover every approved prefix, compound seeds, CRC failures, truncation, and non-canonical base32."
+        ],
+        "security-sensitive-parser": [
+          "Independent review verifies signer-kind allow matrices, secret redaction, resource bounds, and fail-closed unknown prefixes."
+        ],
+        "cryptographic-format": [
+          "Reference vectors and security sign-off cover key-kind type separation while ed25519-dalek remains the primitive."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Security review before cutover.",
@@ -388,6 +687,22 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign",
+        "wire-format-parser",
+        "security-sensitive-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The ProstCodec ADR and API surface map define the finite owned message set and removal of arbitrary prost::Message."
+        ],
+        "wire-format-parser": [
+          "Protobuf differential, truncation, varint overflow, recursion, unknown-field, and allocation-bound fixtures cover the finite decoder."
+        ],
+        "security-sensitive-parser": [
+          "Independent review verifies hostile-message bounds, ambiguity handling, and deterministic fail-closed errors."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Phase-3 ProstCodec public API ADR approval.",
@@ -408,6 +723,18 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign",
+        "wire-format-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The OTLP ADR and API surface map explicitly approve removal of external Meter and SDK interoperability."
+        ],
+        "wire-format-parser": [
+          "OTLP goldens and bounded malformed-response fixtures cover the finite owned protobuf and transport surface."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Explicit ADR approval to remove external OpenTelemetry Meter and SDK interoperability.",
@@ -427,6 +754,14 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "persistent-format"
+      ],
+      "sensitivity_evidence_requirements": {
+        "persistent-format": [
+          "Timestamp formatting and parsing goldens cover stored evidence, trace, report, and migration expectations."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Complete call-site inventory.",
@@ -447,6 +782,18 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "Deterministic cancellation, wake, poisoning, guard-drop, condvar, and quiescence schedules preserve synchronization semantics."
+        ],
+        "runtime-hot-path": [
+          "The agreed 1, 8, 32, and 64-core contention matrix must meet the owner-approved latency and throughput gates."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Stable lane remains supported.",
@@ -467,6 +814,22 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "persistent-format",
+        "wire-format-parser",
+        "security-sensitive-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "persistent-format": [
+          "Historical trace-compression fixtures retain canonical decode or carry an explicit versioned rejection and migration policy."
+        ],
+        "wire-format-parser": [
+          "Differential and fuzz fixtures cover malformed blocks, offsets, lengths, truncation, and non-canonical frames."
+        ],
+        "security-sensitive-parser": [
+          "Independent review verifies output-size, ratio, allocation, and CPU bounds for hostile compressed input."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Differential round-trip and malformed-input corpus.",
@@ -486,6 +849,18 @@
       "program_verdict": "OWN",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "wire-format-parser",
+        "security-sensitive-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "wire-format-parser": [
+          "RFC and differential fixtures cover headers, Huffman tables, block boundaries, truncation, checksums, and rejected malformed streams."
+        ],
+        "security-sensitive-parser": [
+          "Independent review verifies decompressed-size, ratio, allocation, and CPU bounds for hostile HTTP content."
+        ]
+      },
       "unsafe_techniques": [],
       "program_gates": [
         "Format interoperability and malformed-input corpus.",
@@ -494,6 +869,134 @@
       ],
       "exception_record": null,
       "notes": "This stretch row remains SAFE-OWN; unsafe acceleration requires a different classification."
+    },
+    {
+      "candidate_id": "public-stream-migration",
+      "incumbents": [
+        "futures-lite"
+      ],
+      "replacement_surface": "Migration of ATP reader and writer types from the public futures_lite::Stream trait to the blessed owned crate::stream::Stream contract.",
+      "program_phase": "3-to-5",
+      "program_verdict": "OWN_AFTER_ADR",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "public-api-redesign",
+        "concurrency-liveness",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "public-api-redesign": [
+          "The futures-lite exit ADR and API surface map name every public ATP Stream implementation and consumer migration."
+        ],
+        "concurrency-liveness": [
+          "Deterministic stream polling covers pending, wake, EOF, cancellation, drop, and region-quiescence behavior."
+        ],
+        "runtime-hot-path": [
+          "ATP stream throughput, wake count, allocation, and latency are measured before and after migration."
+        ]
+      },
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Phase-3 futures-lite public Stream ADR approval.",
+        "No compatibility shim or second executor semantics.",
+        "Public API map and downstream consumer evidence."
+      ],
+      "exception_record": null,
+      "notes": "SAFE-OWN does not approve the trait-path break or claim ecosystem interoperability parity."
+    },
+    {
+      "candidate_id": "atp-version-scanner",
+      "incumbents": [
+        "semver"
+      ],
+      "replacement_surface": "Finite ATP protocol-version scanner and comparator for the exact accepted version grammar.",
+      "program_phase": "2",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "wire-format-parser",
+        "security-sensitive-parser"
+      ],
+      "sensitivity_evidence_requirements": {
+        "wire-format-parser": [
+          "Canonical, overflow, leading-zero, prerelease, truncation, separator, and unsupported-version fixtures cover the exact ATP grammar."
+        ],
+        "security-sensitive-parser": [
+          "Independent review verifies downgrade resistance, bounded input, deterministic comparison, and fail-closed unsupported versions."
+        ]
+      },
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Complete live-call-site grammar inventory.",
+        "Differential fixtures against semver for the accepted subset.",
+        "Protocol compatibility and downgrade tests."
+      ],
+      "exception_record": null,
+      "notes": "The finite scanner must reject general semver syntax that ATP does not explicitly support."
+    },
+    {
+      "candidate_id": "safe-queue-prototype",
+      "incumbents": [
+        "crossbeam-queue"
+      ],
+      "replacement_surface": "Safe mutex-backed queue prototype used only to decide whether a first-party safe replacement can meet the scheduler workload gate.",
+      "program_phase": "8",
+      "program_verdict": "EVIDENCE_GATED_EXPERIMENT",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "LabRuntime and stress schedules cover multi-producer ordering, wakeups, cancellation, close, fairness, and no-task-leak behavior."
+        ],
+        "runtime-hot-path": [
+          "The owner-approved scheduler matrix compares latency, throughput, contention, fairness, and memory at 1, 8, 32, and 64 cores."
+        ]
+      },
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Prototype must remain safe Rust and isolated from production until the full gate passes.",
+        "KEEP crossbeam-queue if the safe prototype does not win or tie the agreed workload gate.",
+        "No result authorizes a first-party lock-free implementation."
+      ],
+      "exception_record": null,
+      "notes": "This SAFE-OWN experiment is distinct from the prohibited lock-free-queue candidate."
+    },
+    {
+      "candidate_id": "cache-padded-experiment",
+      "incumbents": [
+        "crossbeam-utils::CachePadded"
+      ],
+      "replacement_surface": "Safe first-party cache-line padding wrapper evaluated against the actual scheduler and synchronization layouts.",
+      "program_phase": "8",
+      "program_verdict": "EVIDENCE_GATED_EXPERIMENT",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "platform-boundary",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "platform-boundary": [
+          "The alignment and size policy names supported architectures, cache-line assumptions, layout checks, and untested targets."
+        ],
+        "runtime-hot-path": [
+          "False-sharing, memory-footprint, latency, and throughput measurements cover the actual padded fields on agreed hosts."
+        ]
+      },
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Layout assertions and architecture matrix.",
+        "Before-and-after false-sharing and memory-footprint evidence.",
+        "KEEP the incumbent unless the safe wrapper passes the agreed full-axis gate."
+      ],
+      "exception_record": null,
+      "notes": "A safe repr(align) wrapper remains SAFE-OWN even though its review obligations are platform-sensitive."
     },
     {
       "candidate_id": "polling-reactor",
@@ -505,6 +1008,22 @@
       "program_verdict": "KEEP_UNLESS_GATED",
       "class_id": "BOUNDARY-UNSAFE",
       "eligibility": "eligible_with_required_evidence",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "platform-boundary",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "Deterministic registration, readiness, wake, cancellation, close, and stale-token schedules preserve reactor progress."
+        ],
+        "platform-boundary": [
+          "Linux, macOS, and Windows ABI and host evidence name every unexercised backend and platform limitation."
+        ],
+        "runtime-hot-path": [
+          "Real reactor workloads compare syscall rate, wake latency, throughput, contention, and allocation behavior."
+        ]
+      },
       "unsafe_techniques": [
         "OS reactor FFI",
         "raw descriptor and handle ownership"
@@ -527,6 +1046,18 @@
       "program_verdict": "KEEP_UNLESS_GATED",
       "class_id": "BOUNDARY-UNSAFE",
       "eligibility": "eligible_with_required_evidence",
+      "review_sensitivity_tags": [
+        "platform-boundary",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "platform-boundary": [
+          "Per-OS socket option, address, handle ownership, inheritance, and error-mapping evidence names untested targets."
+        ],
+        "runtime-hot-path": [
+          "Connection, accept, datagram, and option-setting workloads compare latency, syscall count, and allocation behavior."
+        ]
+      },
       "unsafe_techniques": [
         "socket FFI",
         "raw address and descriptor conversion"
@@ -549,6 +1080,18 @@
       "program_verdict": "OWN_DEFERRED",
       "class_id": "BOUNDARY-UNSAFE",
       "eligibility": "eligible_with_required_evidence",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "platform-boundary"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "Deterministic coalescing, registration, wake, cancellation, teardown, and repeated-signal schedules preserve progress."
+        ],
+        "platform-boundary": [
+          "Unix and Windows signal or control-handler ABI, async-signal-safety, and untested-host evidence are explicit."
+        ]
+      },
       "unsafe_techniques": [
         "sigaction and self-pipe FFI",
         "process signal delivery"
@@ -571,6 +1114,14 @@
       "program_verdict": "OWN_DEFERRED",
       "class_id": "BOUNDARY-UNSAFE",
       "eligibility": "eligible_with_required_evidence",
+      "review_sensitivity_tags": [
+        "platform-boundary"
+      ],
+      "sensitivity_evidence_requirements": {
+        "platform-boundary": [
+          "Linux procfs or sysfs, macOS sysctl, and Windows API fixtures distinguish missing, denied, malformed, and unsupported data."
+        ]
+      },
       "unsafe_techniques": [
         "platform resource FFI",
         "kernel structure and buffer parsing"
@@ -593,6 +1144,14 @@
       "program_verdict": "OWN_DEFERRED",
       "class_id": "BOUNDARY-UNSAFE",
       "eligibility": "eligible_with_required_evidence",
+      "review_sensitivity_tags": [
+        "platform-boundary"
+      ],
+      "sensitivity_evidence_requirements": {
+        "platform-boundary": [
+          "Linux and macOS ABI signatures, dereference policy, namespace behavior, error mapping, and untested targets are explicit."
+        ]
+      },
       "unsafe_techniques": [
         "raw libc xattr FFI",
         "platform-specific buffer sizing"
@@ -613,11 +1172,21 @@
       "replacement_surface": "Strict DER residue for SPKI extraction and SAN access that cannot be delegated to rustls or webpki.",
       "program_phase": "8",
       "program_verdict": "OWN_DEFERRED",
-      "class_id": "BOUNDARY-UNSAFE",
-      "eligibility": "eligible_with_required_evidence",
-      "unsafe_techniques": [
-        "security-sensitive byte parsing boundary"
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "wire-format-parser",
+        "security-sensitive-parser"
       ],
+      "sensitivity_evidence_requirements": {
+        "wire-format-parser": [
+          "Strict DER fixtures cover lengths, tags, nesting, truncation, canonical encodings, trailing bytes, and delegation boundaries."
+        ],
+        "security-sensitive-parser": [
+          "Independent X.509 review verifies ambiguity rejection, resource bounds, name, time, and extension handling, and delegate-to-webpki-first scope."
+        ]
+      },
+      "unsafe_techniques": [],
       "program_gates": [
         "Delegate-to-webpki inventory complete.",
         "Differential fuzz corpus and independent security review.",
@@ -625,7 +1194,7 @@
         "Explicit owner sign-off."
       ],
       "exception_record": null,
-      "notes": "This row never approves first-party certificate chain validation, name constraints, wildcards, or path building."
+      "notes": "Strict safe-Rust DER parsing remains SAFE-OWN; parser sensitivity is represented only by the orthogonal review tags. This row never approves first-party certificate chain validation, name constraints, wildcards, or path building."
     },
     {
       "candidate_id": "simd-dispatch-boundary",
@@ -635,6 +1204,18 @@
       "program_verdict": "EVIDENCE_GATED",
       "class_id": "BOUNDARY-UNSAFE",
       "eligibility": "eligible_with_required_evidence",
+      "review_sensitivity_tags": [
+        "platform-boundary",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "platform-boundary": [
+          "Target-feature detection, architecture fallbacks, Miri limitations, and exercised CPU or host combinations are explicit."
+        ],
+        "runtime-hot-path": [
+          "Scalar and accelerated kernels are benchmarked and differentially checked across aligned, unaligned, small, and large inputs."
+        ]
+      },
       "unsafe_techniques": [
         "target_feature intrinsics",
         "architecture-specific dispatch"
@@ -657,6 +1238,18 @@
       "program_verdict": "KEEP",
       "class_id": "ALGORITHMIC-UNSAFE",
       "eligibility": "prohibited",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "Any exception requires a concrete linearizability, reclamation, ABA, cancellation, fairness, and liveness proof plan."
+        ],
+        "runtime-hot-path": [
+          "The safe mutex-backed prototype must first fail the agreed real-workload gate on the same axes."
+        ]
+      },
       "unsafe_techniques": [
         "lock-free pointer ownership",
         "weak-memory linearization",
@@ -679,6 +1272,14 @@
       "program_verdict": "KEEP",
       "class_id": "ALGORITHMIC-UNSAFE",
       "eligibility": "prohibited",
+      "review_sensitivity_tags": [
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "runtime-hot-path": [
+          "Any exception requires a measured allocation or locality defect and a safe inline or heap-backed alternative benchmark."
+        ]
+      },
       "unsafe_techniques": [
         "MaybeUninit initialization tracking",
         "manual move and drop invariants"
@@ -700,6 +1301,18 @@
       "program_verdict": "KEEP",
       "class_id": "ALGORITHMIC-UNSAFE",
       "eligibility": "prohibited",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "Any exception requires a soundness plan for structural pinning, conditional Unpin, drop, cancellation, and generator state."
+        ],
+        "runtime-hot-path": [
+          "Any exception requires a measured macro or runtime defect and benchmarked safe or retained alternatives."
+        ]
+      },
       "unsafe_techniques": [
         "pinning invariants",
         "conditional Unpin",
@@ -722,6 +1335,22 @@
       "program_verdict": "PROHIBITED_BY_DEFAULT",
       "class_id": "ALGORITHMIC-UNSAFE",
       "eligibility": "prohibited",
+      "review_sensitivity_tags": [
+        "concurrency-liveness",
+        "platform-boundary",
+        "runtime-hot-path"
+      ],
+      "sensitivity_evidence_requirements": {
+        "concurrency-liveness": [
+          "Any exception requires a waiter-ownership, wake-loss, fairness, cancellation, poisoning, and quiescence proof plan."
+        ],
+        "platform-boundary": [
+          "Any exception requires separate futex, WaitOnAddress, and os_unfair_lock ABI and memory-order evidence."
+        ],
+        "runtime-hot-path": [
+          "The safe std::sync backend must first fail the agreed 1, 8, 32, and 64-core real-workload gates."
+        ]
+      },
       "unsafe_techniques": [
         "futex parking protocol",
         "waiter ownership and wake liveness",
@@ -741,7 +1370,9 @@
       "candidate_id",
       "class_id",
       "eligibility",
+      "review_sensitivity_tags",
       "evidence_refs",
+      "sensitivity_evidence_refs",
       "explicit_no_claims"
     ],
     "artifact_path": "artifacts/dependency_safety_taxonomy_v1.json",
@@ -750,10 +1381,18 @@
       "candidate_id": "hex-codec",
       "class_id": "SAFE-OWN",
       "eligibility": "eligible",
+      "review_sensitivity_tags": [
+        "ordinary"
+      ],
       "evidence_refs": [
         "tests/example_hex_differential.rs",
         "bead-comment-with-rch-result"
       ],
+      "sensitivity_evidence_refs": {
+        "ordinary": [
+          "tests/example_hex_differential.rs"
+        ]
+      },
       "explicit_no_claims": [
         "This citation does not prove marginal dependency savings or broad workspace health."
       ]
@@ -769,17 +1408,29 @@
   },
   "summary": {
     "class_count": 3,
-    "classification_count": 29,
+    "review_sensitivity_tag_count": 9,
+    "classification_count": 33,
     "classification_counts_by_class": {
-      "SAFE-OWN": 18,
-      "BOUNDARY-UNSAFE": 7,
+      "SAFE-OWN": 23,
+      "BOUNDARY-UNSAFE": 6,
       "ALGORITHMIC-UNSAFE": 4
     },
     "classification_counts_by_eligibility": {
-      "eligible": 18,
-      "eligible_with_required_evidence": 7,
+      "eligible": 23,
+      "eligible_with_required_evidence": 6,
       "prohibited": 4,
       "exception_approved": 0
+    },
+    "classification_counts_by_review_sensitivity_tag": {
+      "ordinary": 1,
+      "public-api-redesign": 8,
+      "persistent-format": 7,
+      "wire-format-parser": 10,
+      "security-sensitive-parser": 8,
+      "cryptographic-format": 1,
+      "concurrency-liveness": 10,
+      "platform-boundary": 8,
+      "runtime-hot-path": 14
     }
   }
 }
