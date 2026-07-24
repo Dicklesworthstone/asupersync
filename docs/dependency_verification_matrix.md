@@ -191,10 +191,11 @@ The default smoke profile runs two local, non-Cargo contract scenarios:
   replay failure, and cleanup failure. It separately injects a deterministic
   canary through the redaction filter.
 
-The runner also exposes four opt-in Cargo-backed contract scenarios:
+The runner also exposes four foundational opt-in Cargo-backed contract scenarios:
 `registry-contract`, `baseline-contract`, `cutover-policy-contract`, and
-`verification-matrix-contract`, plus the VER A4
-`failure-injection-contract`. They refuse execution unless
+`verification-matrix-contract`, plus the VER A3
+`real-service-fixture-contract`, VER A4 `failure-injection-contract`, and VER A5
+`feature-platform-consumer-contract`. They refuse execution unless
 `RCH_REQUIRE_REMOTE=1` and `rch` are both present; a local fallback marker is a
 terminal non-green result.
 
@@ -231,6 +232,12 @@ RCH_REQUIRE_REMOTE=1 \
   bash scripts/run_dependency_sovereignty_e2e.sh \
   --scenario real-service-fixture-contract \
   --run-id ver-a3-real-service-fixtures-001
+
+# Validate sparse features, host/target cells, consumers, and service versions.
+RCH_REQUIRE_REMOTE=1 \
+  bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario feature-platform-consumer-contract \
+  --run-id ver-a5-feature-platform-consumer-001
 ```
 
 `--scenario` may be repeated. `--timeout` bounds each scenario; the direct
@@ -287,6 +294,34 @@ Only the real-file SQLite WAL cell is currently
 inside this workspace. Neither outcome is a passing skip. See
 `docs/dependency_real_service_fixtures.md` for the exact blockers, unblock
 requirements, replay commands, and no-claim boundary.
+
+### VER A5 feature, platform, consumer, and service mapping
+
+`artifacts/dependency_feature_platform_consumer_matrix_v1.json` joins every
+live Cargo feature and capability to a checked platform-selector expansion,
+concrete host/target coordinates, maintained public consumer profiles, the
+external downstream portfolio, and all VER A3 service-version cells. Its
+focused contract is
+`tests/dependency_feature_platform_consumer_matrix_contract.rs`; its stable E2E
+step is `ver-a5-feature-platform-consumer-contract`.
+
+All 57 direct feature profiles remain independent. The stable no-default plus
+proc-macros lane, all-targets profiles, relevant combinations, wasm target
+checks, fuzz quarantine, and workspace quarantine are separate coordinates;
+none can satisfy another by feature unification.
+
+Cross-compilation is compile evidence only. macOS, Windows, Android, BSD, and
+unavailable architecture runtime cells remain `BLOCKED_PLATFORM`; wasm runtime
+remains `BLOCKED_EXTERNAL`. Apple Silicon, Intel, and AMD performance cells
+carry no performance claim without fresh identified-host evidence.
+
+Maintained runtime consumer rows require exact RCH commands and pinned
+provenance. The 16 registry repositories remain `BLOCKED_EXTERNAL` when `/dp`
+and exact owner revisions are absent. Service cells preserve VER A3 blockers;
+only SQLite has an executable fixture, and VER A5 still marks it
+`RERUN_REQUIRED` for the source revision under review. See
+`docs/dependency_feature_platform_consumer_matrix.md` for the projection rules,
+negative fixtures, exact commands, and no-claim boundary.
 
 The suite root maintains machine-readable `latest.json` and
 `latest_success.json` pointers. A failed or blocked attempt advances only

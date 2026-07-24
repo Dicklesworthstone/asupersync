@@ -339,6 +339,10 @@ RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
 RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
   --scenario failure-injection-contract \
   --run-id ver-a4-failure-matrix-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario feature-platform-consumer-contract \
+  --run-id ver-a5-feature-platform-consumer-001
 ```
 
 `--dry-run` emits the complete inventory and replay bundle without executing a
@@ -352,6 +356,10 @@ taxonomy, and no-claim boundary. VER A4 replacement owners should also read
 phase matrix, structured receipt, cleanup oracles, negative fixtures, exact
 replay requirements, and the boundary between contract proof and real no-mock
 replacement evidence.
+VER A5 profile or platform owners should read
+`docs/dependency_feature_platform_consumer_matrix.md`; it defines the complete
+sparse feature projection, host-versus-target coordinates, public-consumer and
+service-version rows, negative fixtures, and fail-closed no-claim states.
 
 CI evidence:
 - `.github/workflows/ci.yml` check job runs `scripts/check_ci_matrix_policy.py`
@@ -1014,6 +1022,17 @@ Its focused canonical scenario is:
 ```bash
 RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
   --scenario real-service-fixture-contract
+```
+
+The dependency program's sparse-feature, target/platform, maintained public
+consumer, external downstream portfolio, and service-version coordinates are
+defined in
+[`docs/dependency_feature_platform_consumer_matrix.md`](docs/dependency_feature_platform_consumer_matrix.md).
+Its focused canonical scenario is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario feature-platform-consumer-contract
 ```
 
 ### NDJSON Event Schema (bd-1t58q)

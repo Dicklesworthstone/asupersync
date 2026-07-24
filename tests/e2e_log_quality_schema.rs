@@ -686,6 +686,10 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         "real-service-fixture-contract",
         "dependency_real_service_fixture_contract",
         "ver-a3-real-service-fixture-contract",
+        "artifacts/dependency_feature_platform_consumer_matrix_v1.json",
+        "feature-platform-consumer-contract",
+        "dependency_feature_platform_consumer_matrix_contract",
+        "ver-a5-feature-platform-consumer-contract",
     ] {
         assert!(
             runner.contains(token),

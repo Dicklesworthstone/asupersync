@@ -1,0 +1,593 @@
+{
+  "schema_version": "dependency-feature-platform-consumer-matrix-v1",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.6.5",
+  "artifact_path": "artifacts/dependency_feature_platform_consumer_matrix_v1.json",
+  "claim_base_revision": "c8be50fd61913d5328b897670714bcc9b864969a",
+  "purpose": "Define the fail-closed sparse-feature, target/platform, public-consumer, and service-version coordinates required before dependency capability preservation may be claimed.",
+  "source_of_truth": {
+    "cargo_manifest": "Cargo.toml",
+    "capability_registry": "artifacts/dependency_capability_registry_v1.json",
+    "capability_baseline": "artifacts/dependency_capability_baseline_v1.json",
+    "api_surface_map": "artifacts/api_surface_map_v1.json",
+    "platform_matrix": "artifacts/platform_capability_matrix_v1.json",
+    "browser_consumer_matrix": "artifacts/browser_consumer_compatibility_matrix_v1.json",
+    "downstream_consumer_proof": "artifacts/downstream_consumer_proof_v1.json",
+    "real_service_matrix": "artifacts/dependency_real_service_fixture_matrix_v1.json",
+    "contract_test": "tests/dependency_feature_platform_consumer_matrix_contract.rs",
+    "operator_runbook": "docs/dependency_feature_platform_consumer_matrix.md"
+  },
+  "counts": {
+    "cargo_features": 57,
+    "capabilities": 50,
+    "platform_selectors": 14,
+    "target_coordinates": 11,
+    "registry_consumers": 16,
+    "maintained_consumer_profiles": 11,
+    "service_version_cells": 16,
+    "combination_profiles": 13
+  },
+  "allowed_outcomes": [
+    "RERUN_REQUIRED",
+    "BLOCKED_PLATFORM",
+    "BLOCKED_EXTERNAL",
+    "BLOCKED_OWNER",
+    "UNSUPPORTED",
+    "NO_CLAIM"
+  ],
+  "policy": {
+    "sparse_feature_rule": "Every Cargo feature is selected directly by exactly one sparse profile. Except for default, each sparse profile disables default features and selects exactly one root feature. Resolved transitive feature closure is recorded separately and never substitutes for the direct selector.",
+    "stable_rule": "The audited stable lane is no-default-features plus proc-macros and must use scripts/run_stable_lane_e2e.sh. A nightly sparse proc-macros check cannot substitute for it.",
+    "all_features_rule": "An all-features or umbrella build is supplemental only. It cannot satisfy any sparse feature, public consumer, service version, or target/runtime coordinate.",
+    "projection_rule": "Feature-to-capability and feature-to-platform joins come from the live capability registry. Every registry platform selector expands through platform_selector_expansions; missing selectors, targets, profiles, or capabilities are contract failures.",
+    "host_target_rule": "host_id and target_id are independent required coordinates. Cross-compilation is compile evidence only and never runtime evidence for the target.",
+    "consumer_rule": "Runtime-required public consumers have an exact RCH command and pinned fixture or dependency identity. Compile-only checks cannot satisfy runtime-required profiles. External portfolio absence is BLOCKED_EXTERNAL, never pass.",
+    "service_rule": "Service cells are joined from the VER A3 real-service matrix. Oldest/current ranges, immutable identities, both directions, and restart/reconnect remain required where applicable. Missing pins or infrastructure stay BLOCKED_EXTERNAL or UNSUPPORTED.",
+    "performance_rule": "Apple Silicon, Intel x86_64, and AMD x86_64 coordinates remain NO_CLAIM or BLOCKED_PLATFORM until fresh host-specific benchmark evidence exists. Compile success is not performance evidence.",
+    "cutover_rule": "No outcome in this artifact authorizes dependency removal, feature narrowing, platform inference, service deprecation, or production cutover."
+  },
+  "command_templates": [
+    {
+      "template_id": "nightly-default-lib-check",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_default cargo check -p asupersync --lib",
+      "toolchain": "rust-toolchain.toml pinned nightly",
+      "no_local_fallback": true
+    },
+    {
+      "template_id": "nightly-sparse-lib-check",
+      "command_template": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_sparse_{feature_id} cargo check -p asupersync --lib --no-default-features --features {feature_id}",
+      "toolchain": "rust-toolchain.toml pinned nightly",
+      "no_local_fallback": true
+    }
+  ],
+  "sparse_feature_profiles": [
+    {"profile_id":"default-nightly","feature_id":"default","default_features":true,"requested_features":[],"command_template_id":"nightly-default-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-atp-cli","feature_id":"atp-cli","default_features":false,"requested_features":["atp-cli"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-atpd-daemon","feature_id":"atpd-daemon","default_features":false,"requested_features":["atpd-daemon"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-benchmark-adapters","feature_id":"benchmark-adapters","default_features":false,"requested_features":["benchmark-adapters"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-browser-io","feature_id":"browser-io","default_features":false,"requested_features":["browser-io"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-browser-trace","feature_id":"browser-trace","default_features":false,"requested_features":["browser-trace"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-cancel-correctness-oracle","feature_id":"cancel-correctness-oracle","default_features":false,"requested_features":["cancel-correctness-oracle"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-channel-mpsc-select-e2e","feature_id":"channel-mpsc-select-e2e","default_features":false,"requested_features":["channel-mpsc-select-e2e"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-ci-cross-platform","feature_id":"ci-cross-platform","default_features":false,"requested_features":["ci-cross-platform"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-cli","feature_id":"cli","default_features":false,"requested_features":["cli"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-compression","feature_id":"compression","default_features":false,"requested_features":["compression"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-config-file","feature_id":"config-file","default_features":false,"requested_features":["config-file"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-criterion-benches","feature_id":"criterion-benches","default_features":false,"requested_features":["criterion-benches"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-debug-server","feature_id":"debug-server","default_features":false,"requested_features":["debug-server"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-dependency-ledger","feature_id":"dependency-ledger","default_features":false,"requested_features":["dependency-ledger"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-deterministic-mode","feature_id":"deterministic-mode","default_features":false,"requested_features":["deterministic-mode"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-fuzz","feature_id":"fuzz","default_features":false,"requested_features":["fuzz"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-h3-websocket-e2e","feature_id":"h3-websocket-e2e","default_features":false,"requested_features":["h3-websocket-e2e"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-http3","feature_id":"http3","default_features":false,"requested_features":["http3"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-io-uring","feature_id":"io-uring","default_features":false,"requested_features":["io-uring"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-kafka","feature_id":"kafka","default_features":false,"requested_features":["kafka"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-lab-stack-traces","feature_id":"lab-stack-traces","default_features":false,"requested_features":["lab-stack-traces"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-legacy-internal-test-harnesses","feature_id":"legacy-internal-test-harnesses","default_features":false,"requested_features":["legacy-internal-test-harnesses"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-lock-metrics","feature_id":"lock-metrics","default_features":false,"requested_features":["lock-metrics"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-loom-tests","feature_id":"loom-tests","default_features":false,"requested_features":["loom-tests"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-messaging-fabric","feature_id":"messaging-fabric","default_features":false,"requested_features":["messaging-fabric"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-metrics","feature_id":"metrics","default_features":false,"requested_features":["metrics"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-mysql","feature_id":"mysql","default_features":false,"requested_features":["mysql"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-native-runtime","feature_id":"native-runtime","default_features":false,"requested_features":["native-runtime"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-nightly-outcome-try","feature_id":"nightly-outcome-try","default_features":false,"requested_features":["nightly-outcome-try"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-obligation-cleanup-e2e","feature_id":"obligation-cleanup-e2e","default_features":false,"requested_features":["obligation-cleanup-e2e"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-obligation-leak-detection","feature_id":"obligation-leak-detection","default_features":false,"requested_features":["obligation-leak-detection"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-postgres","feature_id":"postgres","default_features":false,"requested_features":["postgres"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-proc-macros","feature_id":"proc-macros","default_features":false,"requested_features":["proc-macros"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-quic","feature_id":"quic","default_features":false,"requested_features":["quic"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-raptorq-roundtrip-e2e","feature_id":"raptorq-roundtrip-e2e","default_features":false,"requested_features":["raptorq-roundtrip-e2e"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-real-service-e2e","feature_id":"real-service-e2e","default_features":false,"requested_features":["real-service-e2e"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-runtime-metrics","feature_id":"runtime-metrics","default_features":false,"requested_features":["runtime-metrics"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-serialization-golden-harnesses","feature_id":"serialization-golden-harnesses","default_features":false,"requested_features":["serialization-golden-harnesses"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-simd-intrinsics","feature_id":"simd-intrinsics","default_features":false,"requested_features":["simd-intrinsics"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-sqlite","feature_id":"sqlite","default_features":false,"requested_features":["sqlite"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tailscale-path-provider","feature_id":"tailscale-path-provider","default_features":false,"requested_features":["tailscale-path-provider"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-test-internals","feature_id":"test-internals","default_features":false,"requested_features":["test-internals"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tls","feature_id":"tls","default_features":false,"requested_features":["tls"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tls-native-roots","feature_id":"tls-native-roots","default_features":false,"requested_features":["tls-native-roots"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tls-webpki-roots","feature_id":"tls-webpki-roots","default_features":false,"requested_features":["tls-webpki-roots"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tokio-compat","feature_id":"tokio-compat","default_features":false,"requested_features":["tokio-compat"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tower","feature_id":"tower","default_features":false,"requested_features":["tower"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-trace-compression","feature_id":"trace-compression","default_features":false,"requested_features":["trace-compression"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-tracing-integration","feature_id":"tracing-integration","default_features":false,"requested_features":["tracing-integration"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-waker-profiling","feature_id":"waker-profiling","default_features":false,"requested_features":["waker-profiling"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-wasm-browser-deterministic","feature_id":"wasm-browser-deterministic","default_features":false,"requested_features":["wasm-browser-deterministic"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-wasm-browser-dev","feature_id":"wasm-browser-dev","default_features":false,"requested_features":["wasm-browser-dev"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-wasm-browser-minimal","feature_id":"wasm-browser-minimal","default_features":false,"requested_features":["wasm-browser-minimal"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-wasm-browser-preview","feature_id":"wasm-browser-preview","default_features":false,"requested_features":["wasm-browser-preview"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-wasm-browser-prod","feature_id":"wasm-browser-prod","default_features":false,"requested_features":["wasm-browser-prod"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"},
+    {"profile_id":"sparse-wasm-runtime","feature_id":"wasm-runtime","default_features":false,"requested_features":["wasm-runtime"],"command_template_id":"nightly-sparse-lib-check","outcome":"RERUN_REQUIRED"}
+  ],
+  "combination_profiles": [
+    {
+      "profile_id": "stable-no-default-proc-macros",
+      "requested_features": ["proc-macros"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "stable",
+      "command": "RCH_REQUIRE_REMOTE=1 bash scripts/run_stable_lane_e2e.sh",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "This lane covers the audited stable subset only."
+    },
+    {
+      "profile_id": "nightly-default-all-targets",
+      "requested_features": ["default"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "all-targets",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_default_all_targets cargo check -p asupersync --all-targets",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "All-targets does not replace sparse feature checks."
+    },
+    {
+      "profile_id": "nightly-test-internals-all-targets",
+      "requested_features": ["test-internals"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "all-targets",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_test_internals_all_targets cargo check -p asupersync --all-targets --features test-internals",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Test internals are not public production API."
+    },
+    {
+      "profile_id": "metrics-tracing",
+      "requested_features": ["metrics", "tracing-integration"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "relevant-combination",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_metrics_tracing cargo check -p asupersync --lib --no-default-features --features metrics,tracing-integration",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Compile evidence is not OTLP collector interoperability."
+    },
+    {
+      "profile_id": "tls-native-roots",
+      "requested_features": ["tls", "tls-native-roots"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "relevant-combination",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_tls_native cargo check -p asupersync --lib --no-default-features --features tls,tls-native-roots",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Compile evidence is not independent TLS peer interoperability."
+    },
+    {
+      "profile_id": "tls-webpki-roots",
+      "requested_features": ["tls", "tls-webpki-roots"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "relevant-combination",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_tls_webpki cargo check -p asupersync --lib --no-default-features --features tls,tls-webpki-roots",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Compile evidence is not independent TLS peer interoperability."
+    },
+    {
+      "profile_id": "quic-http3-tls",
+      "requested_features": ["quic", "http3", "tls"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "relevant-combination",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_quic_http3_tls cargo check -p asupersync --lib --no-default-features --features quic,http3,tls",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Compile evidence is not QUIC/HTTP3 transport parity or performance."
+    },
+    {
+      "profile_id": "sqlite-test-internals",
+      "requested_features": ["sqlite", "test-internals"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "relevant-combination",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_sqlite cargo test -p asupersync --features sqlite,test-internals --test sqlite_real_disk_cancel_rollback -- --nocapture --test-threads=1",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "This proves the real-file SQLite fixture only, not FrankenSQLite."
+    },
+    {
+      "profile_id": "kafka-test-internals",
+      "requested_features": ["kafka", "test-internals"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "relevant-combination",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_kafka cargo test -p asupersync --features kafka,test-internals --test kafka_real_broker --no-run",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "No-run compilation is not broker interoperability."
+    },
+    {
+      "profile_id": "wasm-browser-prod-target",
+      "requested_features": ["wasm-browser-prod"],
+      "target_id": "wasm32-browser",
+      "lane_kind": "target-compile",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_wasm_prod cargo check -p asupersync --lib --target wasm32-unknown-unknown --no-default-features --features wasm-browser-prod",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Wasm target compilation is not browser-host runtime proof."
+    },
+    {
+      "profile_id": "wasm-browser-deterministic-target",
+      "requested_features": ["wasm-browser-deterministic"],
+      "target_id": "wasm32-browser",
+      "lane_kind": "target-compile",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_wasm_deterministic cargo check -p asupersync --lib --target wasm32-unknown-unknown --no-default-features --features wasm-browser-deterministic",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Wasm target compilation is not deterministic browser-host runtime proof."
+    },
+    {
+      "profile_id": "fuzz-quarantine",
+      "requested_features": ["fuzz"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "fuzz-quarantine",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_fuzz cargo check -p asupersync --lib --no-default-features --features fuzz",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "This compiles fuzz helpers and intentionally does not prove a fuzz campaign or production no-Tokio graph."
+    },
+    {
+      "profile_id": "workspace-cross-platform-quarantine",
+      "requested_features": ["ci-cross-platform"],
+      "target_id": "linux-x86_64-gnu",
+      "lane_kind": "workspace-quarantine",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_workspace cargo check --workspace --features ci-cross-platform",
+      "outcome": "RERUN_REQUIRED",
+      "no_claim_boundary": "Workspace feature unification cannot satisfy sparse feature or production consumer proof."
+    }
+  ],
+  "host_catalog": [
+    {
+      "host_id": "rch-linux-x86_64",
+      "host_triple": "x86_64-unknown-linux-gnu",
+      "execution_backend": "rch",
+      "availability": "RERUN_REQUIRED",
+      "no_local_fallback": true
+    }
+  ],
+  "target_catalog": [
+    {
+      "target_id": "linux-x86_64-gnu",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "native",
+      "compile_outcome": "RERUN_REQUIRED",
+      "runtime_outcome": "RERUN_REQUIRED",
+      "compile_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_linux cargo check -p asupersync --lib --features ci-cross-platform",
+      "runtime_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_linux_runtime cargo test -p asupersync --test dependency_feature_platform_consumer_matrix_contract -- --nocapture",
+      "blocker": null
+    },
+    {
+      "target_id": "linux-aarch64-gnu",
+      "target_triple": "aarch64-unknown-linux-gnu",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "cross-compile",
+      "compile_outcome": "BLOCKED_PLATFORM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "No admitted aarch64 Linux RCH target toolchain or runtime host is recorded."
+    },
+    {
+      "target_id": "macos-aarch64",
+      "target_triple": "aarch64-apple-darwin",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "cross-compile",
+      "compile_outcome": "BLOCKED_PLATFORM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "The Linux RCH fleet has no admitted Apple SDK target or Apple Silicon runtime host."
+    },
+    {
+      "target_id": "macos-x86_64",
+      "target_triple": "x86_64-apple-darwin",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "cross-compile",
+      "compile_outcome": "BLOCKED_PLATFORM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "The Linux RCH fleet has no admitted Apple SDK target or macOS x86_64 runtime host."
+    },
+    {
+      "target_id": "windows-x86_64-msvc",
+      "target_triple": "x86_64-pc-windows-msvc",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "cross-compile",
+      "compile_outcome": "BLOCKED_PLATFORM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "The Linux RCH fleet has no admitted MSVC target toolchain or Windows runtime host."
+    },
+    {
+      "target_id": "wasm32-browser",
+      "target_triple": "wasm32-unknown-unknown",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "cross-compile",
+      "compile_outcome": "RERUN_REQUIRED",
+      "runtime_outcome": "BLOCKED_EXTERNAL",
+      "compile_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_wasm cargo check -p asupersync --lib --target wasm32-unknown-unknown --no-default-features --features wasm-browser-prod",
+      "runtime_command": null,
+      "blocker": "The Cargo target check has no managed browser host for runtime lifecycle and I/O proof."
+    },
+    {
+      "target_id": "android-aarch64",
+      "target_triple": "aarch64-linux-android",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "cross-compile",
+      "compile_outcome": "BLOCKED_PLATFORM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "No admitted Android NDK target or Android runtime host is recorded."
+    },
+    {
+      "target_id": "supported-bsd-x86_64",
+      "target_triple": "x86_64-unknown-freebsd",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "cross-compile",
+      "compile_outcome": "BLOCKED_PLATFORM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "No admitted BSD target toolchain or runtime host is recorded."
+    },
+    {
+      "target_id": "other-scalar",
+      "target_triple": "capability-selected-other-scalar",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "policy-only",
+      "compile_outcome": "BLOCKED_PLATFORM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "The registry names the portable scalar contract but no concrete additional target is admitted."
+    },
+    {
+      "target_id": "linux-x86_64-amd-perf",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "benchmark-host",
+      "compile_outcome": "NO_CLAIM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "No fresh identified AMD benchmark host and retained performance receipt are attached."
+    },
+    {
+      "target_id": "linux-x86_64-intel-perf",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "host_id": "rch-linux-x86_64",
+      "execution_kind": "benchmark-host",
+      "compile_outcome": "NO_CLAIM",
+      "runtime_outcome": "BLOCKED_PLATFORM",
+      "compile_command": null,
+      "runtime_command": null,
+      "blocker": "No fresh identified Intel benchmark host and retained performance receipt are attached."
+    }
+  ],
+  "platform_selector_expansions": [
+    {"selector":"all-supported","target_ids":["linux-x86_64-gnu","linux-aarch64-gnu","macos-aarch64","macos-x86_64","windows-x86_64-msvc","wasm32-browser"]},
+    {"selector":"native","target_ids":["linux-x86_64-gnu","linux-aarch64-gnu","macos-aarch64","macos-x86_64","windows-x86_64-msvc","supported-bsd-x86_64"]},
+    {"selector":"linux","target_ids":["linux-x86_64-gnu","linux-aarch64-gnu"]},
+    {"selector":"macos","target_ids":["macos-aarch64","macos-x86_64"]},
+    {"selector":"windows","target_ids":["windows-x86_64-msvc"]},
+    {"selector":"wasm32-browser","target_ids":["wasm32-browser"]},
+    {"selector":"android","target_ids":["android-aarch64"]},
+    {"selector":"supported-bsd","target_ids":["supported-bsd-x86_64"]},
+    {"selector":"aarch64","target_ids":["linux-aarch64-gnu","macos-aarch64","android-aarch64"]},
+    {"selector":"x86_64","target_ids":["linux-x86_64-gnu","macos-x86_64","windows-x86_64-msvc","supported-bsd-x86_64"]},
+    {"selector":"aarch64-apple","target_ids":["macos-aarch64"]},
+    {"selector":"x86_64-amd","target_ids":["linux-x86_64-amd-perf"]},
+    {"selector":"x86_64-intel","target_ids":["linux-x86_64-intel-perf"]},
+    {"selector":"other-scalar","target_ids":["other-scalar"]}
+  ],
+  "capability_projection": {
+    "source_array": "artifacts/dependency_capability_registry_v1.json#/capabilities",
+    "capability_key": "capability_id",
+    "feature_join": "capabilities[].features[] -> sparse_feature_profiles[].feature_id",
+    "platform_join": "capabilities[].platforms[] -> platform_selector_expansions[].selector -> target_catalog[].target_id",
+    "consumer_join": "capabilities[].downstream_consumers[] plus registry downstream consumer capability_ids -> registry_consumer_projection and maintained_consumer_profiles",
+    "missing_coordinate_outcome": "contract failure",
+    "expected_capability_count": 50
+  },
+  "registry_consumer_projection": {
+    "source_array": "artifacts/dependency_capability_registry_v1.json#/downstream_consumers",
+    "expected_consumer_count": 16,
+    "current_outcome": "BLOCKED_EXTERNAL",
+    "reason": "The canonical RCH workers do not mount /dp and the registry does not pin exact downstream revisions or owner runtime commands.",
+    "unblock_requirements": [
+      "pin the exact repository revision and independent lockfile for every consumer",
+      "supply an owner-approved compile and runtime command",
+      "run on a host that contains the named repository without copying it into this workspace",
+      "retain target, host, toolchain, features, source revision, redaction, and cleanup metadata"
+    ]
+  },
+  "maintained_consumer_profiles": [
+    {
+      "consumer_profile_id": "generic-serde-protobuf-consumer",
+      "capability_ids": ["CAP-SERDE-GENERIC","CAP-PROTOBUF-GENERIC","CAP-PUBLIC-API-TOPOLOGY"],
+      "surfaces": ["arbitrary downstream Serde formats","malformed and unsupported Serde errors","downstream Prost map and oneof","decode size limit"],
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml","tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock","tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_consumer_default cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
+      "pinned_identity": "Cargo.lock sha256 168ac3b64c4baa27f70c3d31e9608a951438adf88b21ffd31f90c008ad2e7793",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "downstream-stream-trait-consumer",
+      "capability_ids": ["CAP-STRUCTURED-CONCURRENCY","CAP-PUBLIC-API-TOPOLOGY"],
+      "surfaces": ["downstream-authored Stream","Pending before item","order","size_hint","fusion"],
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml","tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock","tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_consumer_stream cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked downstream_authored_stream_preserves_pending_items_order_and_fusion_contract -- --nocapture",
+      "pinned_identity": "Cargo.lock sha256 168ac3b64c4baa27f70c3d31e9608a951438adf88b21ffd31f90c008ad2e7793",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "cli-config-workflow-consumer",
+      "capability_ids": ["CAP-CLI-ASUPERSYNC","CAP-CONFIG-TOML-JSON","CAP-DIAGNOSTICS"],
+      "surfaces": ["public configuration types","public error names","structured CLI output formats"],
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs","tests/cli_output_golden.rs"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_cli_config cargo test -p asupersync --test cli_output_golden --features cli,test-internals structured_cli_output_format_matrix_scrubbed -- --nocapture",
+      "pinned_identity": "repository source plus Cargo.lock at claim base c8be50fd61913d5328b897670714bcc9b864969a",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "metrics-exporter-consumer",
+      "capability_ids": ["CAP-OTLP-ECOSYSTEM","CAP-REGEX-PRIVACY","CAP-DIAGNOSTICS"],
+      "surfaces": ["external metrics exporter trait","privacy redaction","metrics feature resolution"],
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml","tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock","tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_consumer_metrics cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked --features full-profile external_metrics_exporter_trait_and_privacy_surface_remain_usable -- --nocapture",
+      "pinned_identity": "Cargo.lock sha256 168ac3b64c4baa27f70c3d31e9608a951438adf88b21ffd31f90c008ad2e7793",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "tower-adapter-consumer",
+      "capability_ids": ["CAP-TOWER-COMPAT","CAP-PUBLIC-API-TOPOLOGY"],
+      "surfaces": ["external Tower Service trait","readiness","response future"],
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml","tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock","tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_consumer_tower cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked --features full-profile external_tower_service_adapter_retains_trait_compatibility -- --nocapture",
+      "pinned_identity": "Cargo.lock sha256 168ac3b64c4baa27f70c3d31e9608a951438adf88b21ffd31f90c008ad2e7793",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "http-compression-public-consumer",
+      "capability_ids": ["CAP-HTTP-COMPRESSION","CAP-PUBLIC-API-TOPOLOGY"],
+      "surfaces": ["compression feature resolution","gzip/deflate/Brotli graph"],
+      "fixture_paths": ["tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml","tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_consumer_compression cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked --features full-profile -- --nocapture",
+      "pinned_identity": "Cargo.lock sha256 168ac3b64c4baa27f70c3d31e9608a951438adf88b21ffd31f90c008ad2e7793",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "sqlite-real-file-adapter",
+      "capability_ids": ["CAP-SQLITE","CAP-DOWNSTREAM-CONSUMERS"],
+      "surfaces": ["real-file WAL","cancellation rollback","fresh direct-engine read/write","reopen recovery"],
+      "fixture_paths": ["tests/sqlite_real_disk_cancel_rollback.rs","Cargo.lock"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_sqlite_consumer cargo test -p asupersync --features sqlite,test-internals --test sqlite_real_disk_cancel_rollback -- --nocapture --test-threads=1",
+      "pinned_identity": "rusqlite 0.40.1 checksum 11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "nkey-protocol-boundary",
+      "capability_ids": ["CAP-NATS-MESSAGING","CAP-AUTH-CREDENTIALS"],
+      "surfaces": ["NKey seed type validation","nonce signing","redacted debug","JWT auth errors"],
+      "fixture_paths": ["src/messaging/nats.rs","Cargo.lock"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "runtime",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a5_nkey cargo test -p asupersync --lib connect_nkey_auth_emits_signed_nonce_fields_h1gf40 -- --nocapture",
+      "pinned_identity": "nkeys 0.4.5 checksum 879011babc47a1c7fdf5a935ae3cfe94f34645ca0cac1c7f6424b36fc743d1bf",
+      "outcome": "RERUN_REQUIRED",
+      "blocker": null
+    },
+    {
+      "consumer_profile_id": "kafka-real-service-boundary",
+      "capability_ids": ["CAP-KAFKA","CAP-AUTH-CREDENTIALS"],
+      "surfaces": ["produce/consume both directions","plaintext","SASL/TLS","restart/reconnect"],
+      "fixture_paths": ["tests/integration/kafka_real_broker.rs","artifacts/dependency_real_service_fixture_matrix_v1.json"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "real-service-runtime",
+      "command": null,
+      "pinned_identity": null,
+      "outcome": "BLOCKED_EXTERNAL",
+      "blocker": "No approved oldest/current broker range or immutable Kafka image digests exist."
+    },
+    {
+      "consumer_profile_id": "tls-external-peer-boundary",
+      "capability_ids": ["CAP-TLS-X509","CAP-AUTH-CREDENTIALS"],
+      "surfaces": ["client/server both directions","X.509 hostname failure","restart/reconnect"],
+      "fixture_paths": ["artifacts/dependency_real_service_fixture_matrix_v1.json","Cargo.lock"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "real-service-runtime",
+      "command": null,
+      "pinned_identity": null,
+      "outcome": "BLOCKED_EXTERNAL",
+      "blocker": "No independently pinned TLS process fixture exists for both directions."
+    },
+    {
+      "consumer_profile_id": "external-portfolio-runtime",
+      "capability_ids": ["CAP-DOWNSTREAM-CONSUMERS","CAP-PUBLIC-API-TOPOLOGY"],
+      "surfaces": ["16 registry consumers","exact downstream revisions","owner runtime workflows"],
+      "fixture_paths": ["artifacts/dependency_capability_registry_v1.json"],
+      "target_id": "linux-x86_64-gnu",
+      "execution_kind": "external-owner-runtime",
+      "command": null,
+      "pinned_identity": null,
+      "outcome": "BLOCKED_EXTERNAL",
+      "blocker": "The /dp portfolio is absent on canonical RCH workers and exact owner revisions are not pinned."
+    }
+  ],
+  "service_version_projection": {
+    "source_array": "artifacts/dependency_real_service_fixture_matrix_v1.json#/service_families[].cells[]",
+    "expected_cell_count": 16,
+    "required_range_cells": [
+      "kafka-oldest-supported-plaintext",
+      "kafka-newest-supported-plaintext"
+    ],
+    "executable_source_state": "EXECUTABLE_COMPLETE",
+    "a5_executable_state": "RERUN_REQUIRED",
+    "blocked_states": ["BLOCKED_EXTERNAL","UNSUPPORTED"],
+    "pin_rule": "Every executable cell requires nonempty version, immutable identity, and an exact remote-required smoke command. Blocked or unsupported cells require a concrete blocker and cannot render as pass.",
+    "direction_rule": "Bidirectional protocols retain both directions from each family and restart_reconnect_required remains explicit."
+  },
+  "negative_fixture_catalog": [
+    "missing sparse feature profile",
+    "sparse profile selects multiple direct features",
+    "all-features substitutes for sparse profile",
+    "missing optional feature edge",
+    "unknown platform selector",
+    "host ID used as a target ID",
+    "target ID used as a host ID",
+    "unsupported platform reported as pass",
+    "runtime-required consumer uses compile-only command",
+    "runtime-required consumer has no pinned identity",
+    "unpinned executable service",
+    "missing oldest/current service version cell",
+    "external consumer absence reported as pass"
+  ],
+  "validation": {
+    "focused_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_feature_platform_consumer_matrix cargo test -p asupersync --test dependency_feature_platform_consumer_matrix_contract -- --nocapture",
+    "canonical_scenario_id": "feature-platform-consumer-contract",
+    "canonical_command": "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh --scenario feature-platform-consumer-contract",
+    "artifact_root": "target/e2e-results/dependency-sovereignty/<run_id>",
+    "expected_outcome": "PASSED",
+    "no_local_cargo_fallback": true
+  },
+  "docs_markers": [
+    "VER-A5-SPARSE-FEATURES",
+    "VER-A5-HOST-TARGET",
+    "VER-A5-CONSUMERS-SERVICES",
+    "VER-A5-NO-CLAIMS"
+  ],
+  "no_claim_boundaries": [
+    "This is an executable matrix and contract, not a claim that every planned lane has fresh green evidence.",
+    "RERUN_REQUIRED is not pass and cannot authorize cutover.",
+    "Cross-compilation does not prove runtime behavior on macOS, Windows, Android, BSD, Apple Silicon, or browser hosts.",
+    "The current Linux host cannot establish Apple Silicon, Intel, or AMD performance claims without fresh identified benchmark hosts.",
+    "Blocked external services and downstream repositories remain visible and are never replaced by mocks, ambient services, compile-only checks, or silent skips.",
+    "A green contract proves matrix completeness and fail-closed validation only, not replacement parity, broad workspace health, release readiness, performance improvement, real-service interoperability, or dependency exit."
+  ]
+}
