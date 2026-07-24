@@ -18,6 +18,7 @@ MATRIX="$PROJECT_ROOT/artifacts/dependency_verification_matrix_v1.json"
 FAILURE_MATRIX="$PROJECT_ROOT/artifacts/dependency_failure_injection_matrix_v1.json"
 REAL_SERVICE_FIXTURE_MATRIX="$PROJECT_ROOT/artifacts/dependency_real_service_fixture_matrix_v1.json"
 FEATURE_PLATFORM_CONSUMER_MATRIX="$PROJECT_ROOT/artifacts/dependency_feature_platform_consumer_matrix_v1.json"
+FINAL_SIGNOFF_MATRIX="$PROJECT_ROOT/artifacts/dependency_verification_final_signoff_v1.json"
 REGISTRY="$PROJECT_ROOT/artifacts/dependency_capability_registry_v1.json"
 SUITE_ID="dependency-sovereignty"
 SUITE_SCENARIO_ID="E2E-SUITE-DEPENDENCY-SOVEREIGNTY"
@@ -58,6 +59,8 @@ Cargo-backed scenarios require:
     --scenario real-service-fixture-contract
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario feature-platform-consumer-contract
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario aggregate-signoff-contract
 USAGE
 }
 
@@ -71,12 +74,13 @@ scenario_ids() {
         verification-matrix-contract \
         failure-injection-contract \
         real-service-fixture-contract \
-        feature-platform-consumer-contract
+        feature-platform-consumer-contract \
+        aggregate-signoff-contract
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract)
             return 0
             ;;
         *)
@@ -87,7 +91,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract)
             return 0
             ;;
         *)
@@ -99,7 +103,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract) printf 'contract' ;;
+        runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
 }
@@ -115,6 +119,7 @@ scenario_fixture() {
         failure-injection-contract) printf 'artifacts/dependency_failure_injection_matrix_v1.json' ;;
         real-service-fixture-contract) printf 'artifacts/dependency_real_service_fixture_matrix_v1.json' ;;
         feature-platform-consumer-contract) printf 'artifacts/dependency_feature_platform_consumer_matrix_v1.json' ;;
+        aggregate-signoff-contract) printf 'artifacts/dependency_verification_final_signoff_v1.json' ;;
     esac
 }
 
@@ -122,13 +127,14 @@ scenario_profile() {
     case "$1" in
         catalog | runner-contract) printf 'contract-only' ;;
         feature-platform-consumer-contract) printf 'sparse-feature-platform-consumer' ;;
+        aggregate-signoff-contract) printf 'aggregate-signoff' ;;
         *) printf 'nightly-default' ;;
     esac
 }
 
 scenario_capabilities() {
     case "$1" in
-        catalog | runner-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract)
+        catalog | runner-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | aggregate-signoff-contract)
             printf '["CAP-REAL-SERVICE-E2E","CAP-VERIFICATION-PROFILES"]'
             ;;
         feature-platform-consumer-contract)
@@ -151,6 +157,7 @@ scenario_evidence_owner() {
         failure-injection-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.4' ;;
         real-service-fixture-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.3' ;;
         feature-platform-consumer-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.5' ;;
+        aggregate-signoff-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.6' ;;
         *) printf '%s' "$EVIDENCE_OWNER" ;;
     esac
 }
@@ -160,6 +167,7 @@ scenario_step_id() {
         failure-injection-contract) printf 'ver-a4-failure-injection-contract' ;;
         real-service-fixture-contract) printf 'ver-a3-real-service-fixture-contract' ;;
         feature-platform-consumer-contract) printf 'ver-a5-feature-platform-consumer-contract' ;;
+        aggregate-signoff-contract) printf 'ver-a6-aggregate-signoff-contract' ;;
         *) printf 'ver-a2-%s' "$1" ;;
     esac
 }
@@ -193,6 +201,9 @@ scenario_command_display() {
             ;;
         feature-platform-consumer-contract)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_feature_platform_consumer_matrix_contract -- --nocapture"
+            ;;
+        aggregate-signoff-contract)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture"
             ;;
     esac
 }
@@ -309,12 +320,13 @@ CONFIG_DIGEST=""
 FAILURE_CONFIG_DIGEST=""
 REAL_SERVICE_FIXTURE_CONFIG_DIGEST=""
 FEATURE_PLATFORM_CONSUMER_CONFIG_DIGEST=""
+FINAL_SIGNOFF_CONFIG_DIGEST=""
 
 if [[ -e "$RUN_DIR" ]]; then
     printf 'refusing to overwrite retained evidence directory: %s\n' "$RUN_DIR" >&2
     exit 73
 fi
-if [[ ! -f "$MATRIX" || ! -f "$FAILURE_MATRIX" || ! -f "$REAL_SERVICE_FIXTURE_MATRIX" || ! -f "$FEATURE_PLATFORM_CONSUMER_MATRIX" || ! -f "$REGISTRY" ]]; then
+if [[ ! -f "$MATRIX" || ! -f "$FAILURE_MATRIX" || ! -f "$REAL_SERVICE_FIXTURE_MATRIX" || ! -f "$FEATURE_PLATFORM_CONSUMER_MATRIX" || ! -f "$FINAL_SIGNOFF_MATRIX" || ! -f "$REGISTRY" ]]; then
     printf 'required dependency-sovereignty inputs are missing\n' >&2
     exit 66
 fi
@@ -367,6 +379,7 @@ CONFIG_DIGEST="$(sha256_file "$MATRIX")"
 FAILURE_CONFIG_DIGEST="$(sha256_file "$FAILURE_MATRIX")"
 REAL_SERVICE_FIXTURE_CONFIG_DIGEST="$(sha256_file "$REAL_SERVICE_FIXTURE_MATRIX")"
 FEATURE_PLATFORM_CONSUMER_CONFIG_DIGEST="$(sha256_file "$FEATURE_PLATFORM_CONSUMER_MATRIX")"
+FINAL_SIGNOFF_CONFIG_DIGEST="$(sha256_file "$FINAL_SIGNOFF_MATRIX")"
 jq -n \
     --arg schema_version "dependency-sovereignty-environment-v1" \
     --arg run_id "$RUN_ID" \
@@ -386,6 +399,7 @@ jq -n \
     --arg failure_config_digest "$FAILURE_CONFIG_DIGEST" \
     --arg real_service_fixture_config_digest "$REAL_SERVICE_FIXTURE_CONFIG_DIGEST" \
     --arg feature_platform_consumer_config_digest "$FEATURE_PLATFORM_CONSUMER_CONFIG_DIGEST" \
+    --arg final_signoff_config_digest "$FINAL_SIGNOFF_CONFIG_DIGEST" \
     --arg redaction_policy "metadata-and-secret-patterns-v1" \
     '{
       schema_version: $schema_version,
@@ -417,6 +431,10 @@ jq -n \
           {
             source: "artifacts/dependency_feature_platform_consumer_matrix_v1.json",
             sha256: $feature_platform_consumer_config_digest
+          },
+          {
+            source: "artifacts/dependency_verification_final_signoff_v1.json",
+            sha256: $final_signoff_config_digest
           }
         ]
       },
@@ -640,10 +658,16 @@ execute_scenario() {
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_feature_platform_consumer_matrix_contract -- --nocapture
             ;;
+        aggregate-signoff-contract)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture
+            ;;
     esac
 }
 
-export MATRIX FAILURE_MATRIX REAL_SERVICE_FIXTURE_MATRIX FEATURE_PLATFORM_CONSUMER_MATRIX PROJECT_ROOT CANARY
+export MATRIX FAILURE_MATRIX REAL_SERVICE_FIXTURE_MATRIX FEATURE_PLATFORM_CONSUMER_MATRIX FINAL_SIGNOFF_MATRIX PROJECT_ROOT CANARY
 export -f classify_result execute_scenario redact_stream run_classifier_contract
 
 TOTAL=0

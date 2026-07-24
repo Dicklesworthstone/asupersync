@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-verification-final-signoff-v1",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.6.6",
+  "claim_base_revision": "22a9cdad6c6eca7c77508a6a35e49dffd97b6ff2",
+  "purpose": "Fail-closed aggregate join of the Phase-1 capability and verification contracts. The signoff proves that every live capability resolves to an executable or explicitly blocked evidence plan; it does not turn planned evidence into behavioral proof.",
+  "source_of_truth": {
+    "capability_registry": "artifacts/dependency_capability_registry_v1.json",
+    "capability_baseline": "artifacts/dependency_capability_baseline_v1.json",
+    "cutover_policy": "artifacts/dependency_cutover_policy_v1.json",
+    "verification_matrix": "artifacts/dependency_verification_matrix_v1.json",
+    "real_service_matrix": "artifacts/dependency_real_service_fixture_matrix_v1.json",
+    "failure_injection_matrix": "artifacts/dependency_failure_injection_matrix_v1.json",
+    "feature_platform_consumer_matrix": "artifacts/dependency_feature_platform_consumer_matrix_v1.json",
+    "tracker": ".beads/issues.jsonl",
+    "runner": "scripts/run_dependency_sovereignty_e2e.sh"
+  },
+  "tracker_snapshot": {
+    "source_path": ".beads/issues.jsonl",
+    "plan_semantic_sha256": "f83003c1b99336b90d3237e5002d50d3b0c7695393288760829539b8fe3229ec",
+    "graph_signoff_pointer": "artifacts/dependency_capability_registry_v1.json#/graph_signoff_report",
+    "graph_signoff_bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
+    "graph_signoff_status": "PASS_SCOPED",
+    "remote_contract_policy": "RCH excludes mutable tracker state. Remote proof validates this checked tracker-plan digest, CAP A4 graph signoff, and the required closed-state snapshot below. Operators must separately run the live prerequisite-status audit before closeout."
+  },
+  "prerequisite_deliverables": [
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "role": "CAP_A1_REGISTRY",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_capability_registry_v1.json"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.5.2",
+      "role": "CAP_A2_BASELINE",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_capability_baseline_v1.json"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.5.3",
+      "role": "CAP_A3_CUTOVER_POLICY",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_cutover_policy_v1.json"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
+      "role": "CAP_A4_GRAPH_SIGNOFF",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_capability_registry_v1.json#/graph_signoff_report"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.6.1",
+      "role": "VER_A1_EVIDENCE_MATRIX",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_verification_matrix_v1.json"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.6.2",
+      "role": "VER_A2_FORENSIC_RUNNER",
+      "required_status": "closed",
+      "primary_evidence": "scripts/run_dependency_sovereignty_e2e.sh"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.6.3",
+      "role": "VER_A3_REAL_SERVICE",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_real_service_fixture_matrix_v1.json"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.6.4",
+      "role": "VER_A4_FAILURE_INJECTION",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_failure_injection_matrix_v1.json"
+    },
+    {
+      "bead_id": "asupersync-dep-p1-foundations-upksjk.6.5",
+      "role": "VER_A5_FEATURE_PLATFORM_CONSUMER",
+      "required_status": "closed",
+      "primary_evidence": "artifacts/dependency_feature_platform_consumer_matrix_v1.json"
+    }
+  ],
+  "resolved_matrix_contract": {
+    "row_key": "capability_id",
+    "expected_row_count": 50,
+    "row_ids": [
+      "CAP-PUBLIC-API-TOPOLOGY",
+      "CAP-STRUCTURED-CONCURRENCY",
+      "CAP-PROC-MACROS",
+      "CAP-LAB-DETERMINISM",
+      "CAP-BROWSER-RUNTIME",
+      "CAP-TOWER-COMPAT",
+      "CAP-DIAGNOSTICS",
+      "CAP-VERIFICATION-PROFILES",
+      "CAP-DEPENDENCY-LEDGER",
+      "CAP-DOWNSTREAM-CONSUMERS",
+      "CAP-HASH-MAPS",
+      "CAP-HOST-BENCH-METADATA",
+      "CAP-TEMP-ARTIFACTS",
+      "CAP-FUTURES-STREAMS",
+      "CAP-VISIBILITY-MACRO",
+      "CAP-TOKEN-SLAB",
+      "CAP-HEX-CODEC",
+      "CAP-BASE64-CODEC",
+      "CAP-ATP-VERSION-SCANNER",
+      "CAP-TIME-UTC-RFC3339",
+      "CAP-SERDE-GENERIC",
+      "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "CAP-CONFIG-TOML-JSON",
+      "CAP-SCENARIO-YAML-JSON",
+      "CAP-PROTOBUF-GENERIC",
+      "CAP-OTLP-ECOSYSTEM",
+      "CAP-REGEX-PRIVACY",
+      "CAP-NKEY-AUTH",
+      "CAP-AUTH-CREDENTIALS",
+      "CAP-CLI-ASUPERSYNC",
+      "CAP-CLI-ATP",
+      "CAP-CLI-ATPD",
+      "CAP-CLI-OFFLINE-TUNER",
+      "CAP-SQLITE",
+      "CAP-KAFKA",
+      "CAP-TLS-X509",
+      "CAP-HTTP-COMPRESSION",
+      "CAP-TRACE-LZ4",
+      "CAP-SIGNALS",
+      "CAP-HOST-INTROSPECTION",
+      "CAP-XATTR",
+      "CAP-POLLING-SOCKET",
+      "CAP-SYNC-LOCKS",
+      "CAP-CONCURRENT-QUEUES",
+      "CAP-CACHE-LAYOUT",
+      "CAP-SIMD-RAPTORQ",
+      "CAP-NATS-MESSAGING",
+      "CAP-DATABASE-WIRE",
+      "CAP-QUIC-HTTP3-ATP",
+      "CAP-REAL-SERVICE-E2E"
+    ],
+    "required_columns": [
+      "capability_id",
+      "unit_evidence",
+      "integration_evidence",
+      "e2e_evidence",
+      "scan_evidence",
+      "audit_evidence",
+      "scenario_owner",
+      "fixture_or_seed",
+      "feature_cells",
+      "platform_cells",
+      "artifact_schema",
+      "failure_injection",
+      "real_service_owner_or_na",
+      "redaction_policy",
+      "final_cutover_beads",
+      "cutover_state"
+    ],
+    "column_joins": {
+      "unit_evidence": "capability_registry.capabilities[].unit_test_owner plus implementation verification_matrix unit plans",
+      "integration_evidence": "capability_baseline.capability_baselines[].evidence_ids plus verification_matrix contract/downstream/lab plans",
+      "e2e_evidence": "capability_registry.capabilities[].e2e_owner and scenario_ids plus direct or capability-aggregate verification_matrix e2e/downstream plans",
+      "scan_evidence": "capability_registry.validation and feature_platform_consumer_matrix.validation",
+      "audit_evidence": "capability_registry.graph_signoff_report and cutover_policy.capability_bindings",
+      "scenario_owner": "capability_registry.capabilities[].e2e_owner",
+      "fixture_or_seed": "capability_baseline.capability_baselines[].scenario_ids and verification_matrix evidence_plans[].seed_or_fixture_id",
+      "feature_cells": "capability_registry.capabilities[].features joined through feature_platform_consumer_matrix.capability_projection",
+      "platform_cells": "capability_registry.capabilities[].platforms joined through feature_platform_consumer_matrix.capability_projection",
+      "artifact_schema": "forensic_artifact_contract.required_retained_files and required_validation_stage_fields",
+      "failure_injection": "failure_injection_matrix.applicability_rules, including the universal-boundary family",
+      "real_service_owner_or_na": "real_service_capability_bindings or explicit NOT_APPLICABLE_NON_SERVICE_CAPABILITY",
+      "redaction_policy": "forensic_artifact_contract.redaction_policy",
+      "final_cutover_beads": "capability_registry.capabilities[].replacement_bead_ids",
+      "cutover_state": "cutover_policy.capability_bindings[].registry_cutover_state"
+    },
+    "missing_coordinate_outcome": "FAIL_CLOSED",
+    "not_applicable_policy": "N/A is valid only for a non-service capability and must resolve to NOT_APPLICABLE_NON_SERVICE_CAPABILITY; empty, skipped, inferred pass, and silent omission are contract failures."
+  },
+  "implementation_coverage_contract": {
+    "expected_implementation_beads": 106,
+    "focused_unit_rule": "Every role=implementation matrix row has at least one class=unit plan.",
+    "e2e_rule": "Every role=implementation matrix row has a direct class=e2e or class=downstream plan, or every capability on that row has a capability-aggregate e2e/downstream plan on another checked matrix row.",
+    "aggregate_na_label": "N/A_ROW_LOCAL_AGGREGATE_CAPABILITY_COVERAGE",
+    "planned_evidence_is_proof": false
+  },
+  "real_service_capability_bindings": [
+    {
+      "capability_id": "CAP-KAFKA",
+      "family_ids": ["kafka"]
+    },
+    {
+      "capability_id": "CAP-NATS-MESSAGING",
+      "family_ids": ["nats-nkey"]
+    },
+    {
+      "capability_id": "CAP-NKEY-AUTH",
+      "family_ids": ["nats-nkey"]
+    },
+    {
+      "capability_id": "CAP-OTLP-ECOSYSTEM",
+      "family_ids": ["otlp"]
+    },
+    {
+      "capability_id": "CAP-SQLITE",
+      "family_ids": ["sqlite", "frankensqlite"]
+    },
+    {
+      "capability_id": "CAP-HTTP-COMPRESSION",
+      "family_ids": ["http-compression"]
+    },
+    {
+      "capability_id": "CAP-TLS-X509",
+      "family_ids": ["tls-x509"]
+    },
+    {
+      "capability_id": "CAP-DOWNSTREAM-CONSUMERS",
+      "family_ids": ["downstream-consumers"]
+    },
+    {
+      "capability_id": "CAP-REAL-SERVICE-E2E",
+      "family_ids": [
+        "kafka",
+        "nats-nkey",
+        "otlp",
+        "sqlite",
+        "frankensqlite",
+        "http-compression",
+        "tls-x509",
+        "downstream-consumers"
+      ]
+    }
+  ],
+  "forensic_artifact_contract": {
+    "schema_version": "dependency-sovereignty-validation-stage-v1",
+    "assertion_source": "structured_receipt",
+    "log_substring_only_pass_forbidden": true,
+    "required_retained_files": [
+      "summary.json",
+      "events.ndjson",
+      "scenarios.ndjson",
+      "validation_stages.ndjson",
+      "artifact_manifest.ndjson",
+      "environment.json",
+      "repro_manifest.json",
+      "<scenario_id>/<step_id>.stdout.log",
+      "<scenario_id>/<step_id>.stderr.log"
+    ],
+    "required_validation_stage_fields": [
+      "capability_ids",
+      "scenario_id",
+      "step_id",
+      "seed_or_fixture_id",
+      "config_snapshot_ref",
+      "command",
+      "expected_outcome",
+      "observed_outcome",
+      "exit_code",
+      "signal",
+      "monotonic_elapsed_ms",
+      "artifacts",
+      "rch",
+      "evidence_owner",
+      "redaction_policy",
+      "first_failing_invariant",
+      "cleanup_result",
+      "replay_pointer"
+    ],
+    "redaction_policy": "metadata-and-secret-patterns-v1",
+    "redaction_canary": "VER_A2_CANARY_SECRET_DO_NOT_RETAIN",
+    "remote_execution": {
+      "rch_required": true,
+      "clean_overlay_required": true,
+      "local_cargo_fallback_allowed": false
+    },
+    "bounded_wait_required": true,
+    "cleanup_receipt_required": true,
+    "orphan_processes_allowed": false,
+    "minimum_log_quality_score": 80
+  },
+  "negative_fixture_catalog": [
+    {
+      "fixture_id": "NEG-A6-NO-UNIT",
+      "mutation": "remove focused unit evidence",
+      "expected_error": "missing_unit_test"
+    },
+    {
+      "fixture_id": "NEG-A6-NO-E2E",
+      "mutation": "remove direct and aggregate E2E paths",
+      "expected_error": "missing_e2e_path"
+    },
+    {
+      "fixture_id": "NEG-A6-NO-ARTIFACT-CONTRACT",
+      "mutation": "remove a required retained file or validation-stage field",
+      "expected_error": "incomplete_artifact_contract"
+    },
+    {
+      "fixture_id": "NEG-A6-LOG-ONLY",
+      "mutation": "use a log substring as the only pass assertion",
+      "expected_error": "log_only_assertion"
+    },
+    {
+      "fixture_id": "NEG-A6-SECRET-LEAK",
+      "mutation": "retain the redaction canary",
+      "expected_error": "secret_leakage"
+    },
+    {
+      "fixture_id": "NEG-A6-NO-REPLAY",
+      "mutation": "remove the deterministic replay pointer",
+      "expected_error": "missing_replay_pointer"
+    },
+    {
+      "fixture_id": "NEG-A6-LOCAL-FALLBACK",
+      "mutation": "permit silent local Cargo fallback",
+      "expected_error": "silent_local_fallback"
+    },
+    {
+      "fixture_id": "NEG-A6-MOCKED-SERVICE",
+      "mutation": "replace a required external service with a mock",
+      "expected_error": "mocked_external_service"
+    },
+    {
+      "fixture_id": "NEG-A6-MISSING-SPARSE-FEATURE",
+      "mutation": "remove one live sparse feature profile",
+      "expected_error": "missing_sparse_feature"
+    },
+    {
+      "fixture_id": "NEG-A6-UNSUPPORTED-AS-PASS",
+      "mutation": "report an unsupported target as passed",
+      "expected_error": "unsupported_platform_reported_pass"
+    },
+    {
+      "fixture_id": "NEG-A6-UNPINNED-SERVICE",
+      "mutation": "remove service version or immutable identity",
+      "expected_error": "unpinned_service"
+    },
+    {
+      "fixture_id": "NEG-A6-UNBOUNDED-WAIT",
+      "mutation": "remove the scenario timeout",
+      "expected_error": "unbounded_wait"
+    },
+    {
+      "fixture_id": "NEG-A6-ORPHAN-PROCESS",
+      "mutation": "leave a child service process alive",
+      "expected_error": "orphan_process"
+    },
+    {
+      "fixture_id": "NEG-A6-CUTOVER-BEFORE-EVIDENCE",
+      "mutation": "authorize cutover before terminal evidence",
+      "expected_error": "cutover_preceding_evidence"
+    }
+  ],
+  "canonical_commands": {
+    "live_prerequisite_audit": "br show asupersync-dep-p1-foundations-upksjk.5.1 asupersync-dep-p1-foundations-upksjk.5.2 asupersync-dep-p1-foundations-upksjk.5.3 asupersync-dep-p1-foundations-upksjk.5.4 asupersync-dep-p1-foundations-upksjk.6.1 asupersync-dep-p1-foundations-upksjk.6.2 asupersync-dep-p1-foundations-upksjk.6.3 asupersync-dep-p1-foundations-upksjk.6.4 asupersync-dep-p1-foundations-upksjk.6.5 --json",
+    "suite_discovery": "bash scripts/run_dependency_sovereignty_e2e.sh --list",
+    "suite_dry_run": "bash scripts/run_dependency_sovereignty_e2e.sh --scenario aggregate-signoff-contract --dry-run --run-id <run_id>",
+    "focused_contract": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_verification_final_signoff\" cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture",
+    "focused_e2e": "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh --scenario aggregate-signoff-contract --run-id <run_id>",
+    "replay": "RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh --scenario aggregate-signoff-contract"
+  },
+  "verdict": {
+    "outcome": "PASS_SCOPED_KEEP_DEFER",
+    "zero_gap_matrix": true,
+    "capabilities": 50,
+    "implementation_beads": 106,
+    "guard_only": 9,
+    "keep_incumbent": 23,
+    "blocked_pending_evidence": 18,
+    "dependency_exit_allowed": false,
+    "cutover_authority": false
+  },
+  "validation": {
+    "contract_test": "tests/dependency_verification_final_signoff_contract.rs",
+    "human_summary": "docs/dependency_verification_final_signoff.md",
+    "canonical_scenario_id": "aggregate-signoff-contract",
+    "canonical_step_id": "ver-a6-aggregate-signoff-contract",
+    "artifact_root": "target/e2e-results/dependency-sovereignty/<run_id>",
+    "expected_outcome": "PASSED",
+    "no_local_cargo_fallback": true
+  },
+  "no_claim_boundaries": [
+    "This aggregate signoff proves schema, join, ownership, fail-closed fixture, discovery, dry-run, replay, RCH, redaction, and cleanup contract coverage only.",
+    "PLANNED_BLOCKING evidence rows are plans, not proof that the named behavior passed.",
+    "PASS_SCOPED_KEEP_DEFER does not authorize dependency, feature, API, format, protocol, platform, diagnostic, user-journey, or file removal.",
+    "The signoff does not prove broad runtime correctness, performance, no regression, release readiness, broad workspace health, live RCH fleet availability, unavailable service or platform execution, or downstream repository behavior.",
+    "BLOCKED_EXTERNAL, BLOCKED_PLATFORM, UNSUPPORTED, KEEP_INCUMBENT, and BLOCKED_PENDING_EVIDENCE remain non-green for cutover."
+  ]
+}

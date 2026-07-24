@@ -690,6 +690,10 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         "feature-platform-consumer-contract",
         "dependency_feature_platform_consumer_matrix_contract",
         "ver-a5-feature-platform-consumer-contract",
+        "artifacts/dependency_verification_final_signoff_v1.json",
+        "aggregate-signoff-contract",
+        "dependency_verification_final_signoff_contract",
+        "ver-a6-aggregate-signoff-contract",
     ] {
         assert!(
             runner.contains(token),

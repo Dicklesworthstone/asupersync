@@ -323,6 +323,27 @@ only SQLite has an executable fixture, and VER A5 still marks it
 `docs/dependency_feature_platform_consumer_matrix.md` for the projection rules,
 negative fixtures, exact commands, and no-claim boundary.
 
+### VER A6 aggregate verification signoff
+
+`artifacts/dependency_verification_final_signoff_v1.json` joins CAP A1-A4 and
+VER A1-A5 into one deterministic, 50-row capability projection. Its focused
+contract is `tests/dependency_verification_final_signoff_contract.rs`; its
+stable E2E step is `ver-a6-aggregate-signoff-contract`.
+
+The aggregate requires focused unit evidence for all 106 implementation rows.
+A row without a direct E2E/downstream plan is accepted only as
+`N/A_ROW_LOCAL_AGGREGATE_CAPABILITY_COVERAGE`, after the contract proves that
+every capability on that row has an E2E/downstream plan elsewhere in the same
+checked matrix. Empty and silently skipped evidence coordinates fail closed.
+
+The signoff also joins feature/platform coordinates, structured artifact and
+replay fields, failure injection, pinned real-service ownership or explicit
+non-service N/A, redaction, cleanup, and cutover state. Its terminal result is
+`PASS_SCOPED_KEEP_DEFER`: all capabilities remain guard-only, KEEP, or blocked
+pending evidence, and no dependency exit is authorized. See
+`docs/dependency_verification_final_signoff.md` for the 14 negative fixtures,
+canonical discovery/dry-run/focused commands, and no-claim boundary.
+
 The suite root maintains machine-readable `latest.json` and
 `latest_success.json` pointers. A failed or blocked attempt advances only
 `latest.json`; it cannot replace the last passing pointer.
