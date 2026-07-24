@@ -826,7 +826,11 @@ fn resolve_measurement(
         &config.repo_root,
         first_party_package_names,
     )?;
-    let taxonomy_refs = taxonomy_refs_for(taxonomy, &dependency.package_name)?;
+    let mut affected_package_names = unique_package_names(&cell.baseline.metadata, &marginal_ids)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    affected_package_names.insert(dependency.package_name.clone());
+    let taxonomy_refs = taxonomy_refs_for(taxonomy, &affected_package_names)?;
     let unsafe_exposure_class = if taxonomy_refs.is_empty() {
         "unclassified-fail-closed".to_owned()
     } else {
@@ -1526,8 +1530,9 @@ fn active_direct_dependencies(
         .ok_or("shadow root is absent from resolve graph")?;
     let mut active = BTreeMap::new();
     for dependency in inventory {
+        let cargo_dependency_name = cargo_dependency_name(&dependency.dependency_name);
         if let Some(node_dep) = root.deps.iter().find(|node_dep| {
-            node_dep.name == dependency.dependency_name
+            node_dep.name == cargo_dependency_name
                 && node_dep
                     .dep_kinds
                     .iter()
@@ -1537,6 +1542,10 @@ fn active_direct_dependencies(
         }
     }
     Ok(active)
+}
+
+fn cargo_dependency_name(manifest_name: &str) -> String {
+    manifest_name.replace('-', "_")
 }
 
 fn dep_kind_matches(dependency: &DirectDependency, kind: &CargoDepKind) -> bool {
@@ -1706,7 +1715,10 @@ fn load_taxonomy(repo_root: &Path) -> Result<JsonValue> {
     Ok(serde_json::from_str(&text)?)
 }
 
-fn taxonomy_refs_for(taxonomy: &JsonValue, package_name: &str) -> Result<Vec<TaxonomyRef>> {
+fn taxonomy_refs_for(
+    taxonomy: &JsonValue,
+    affected_package_names: &BTreeSet<String>,
+) -> Result<Vec<TaxonomyRef>> {
     let classifications = taxonomy
         .get("classifications")
         .and_then(JsonValue::as_array)
@@ -1720,7 +1732,8 @@ fn taxonomy_refs_for(taxonomy: &JsonValue, package_name: &str) -> Result<Vec<Tax
         if !incumbents
             .iter()
             .filter_map(JsonValue::as_str)
-            .any(|incumbent| incumbent == package_name)
+            .filter_map(|incumbent| incumbent.split("::").next())
+            .any(|incumbent| affected_package_names.contains(incumbent))
         {
             continue;
         }
@@ -2075,6 +2088,62 @@ windows-sys = "0.61"
                 "dev:serde",
                 "target-normal:cfg(windows):windows-sys",
             ])
+        );
+    }
+
+    #[test]
+    fn cargo_dependency_names_match_metadata_identifier_normalization() {
+        assert_eq!(cargo_dependency_name("serde"), "serde");
+        assert_eq!(cargo_dependency_name("crossbeam-queue"), "crossbeam_queue");
+        assert_eq!(
+            cargo_dependency_name("alpha-beta-gamma"),
+            "alpha_beta_gamma"
+        );
+        assert_eq!(cargo_dependency_name(""), "");
+    }
+
+    #[test]
+    fn taxonomy_refs_include_direct_and_affected_transitive_packages() {
+        let taxonomy = serde_json::json!({
+            "classifications": [
+                {
+                    "candidate_id": "queue",
+                    "incumbents": ["crossbeam-queue"],
+                    "class_id": "SAFE-OWN",
+                    "review_sensitivity_tags": ["runtime-hot-path"],
+                    "program_phase": "8",
+                    "program_verdict": "EVIDENCE_GATED_EXPERIMENT"
+                },
+                {
+                    "candidate_id": "cache-layout",
+                    "incumbents": ["crossbeam-utils::CachePadded"],
+                    "class_id": "SAFE-OWN",
+                    "review_sensitivity_tags": ["runtime-hot-path"],
+                    "program_phase": "8",
+                    "program_verdict": "EVIDENCE_GATED_EXPERIMENT"
+                },
+                {
+                    "candidate_id": "unrelated",
+                    "incumbents": ["other"],
+                    "class_id": "SAFE-OWN",
+                    "review_sensitivity_tags": ["ordinary"],
+                    "program_phase": "2",
+                    "program_verdict": "OWN"
+                }
+            ]
+        });
+        let affected = BTreeSet::from(["crossbeam-queue".to_owned(), "crossbeam-utils".to_owned()]);
+        let refs = taxonomy_refs_for(&taxonomy, &affected).expect("taxonomy refs");
+        assert_eq!(
+            refs.iter()
+                .map(|reference| reference.candidate_id.as_str())
+                .collect::<Vec<_>>(),
+            ["cache-layout", "queue"]
+        );
+        assert!(
+            taxonomy_refs_for(&taxonomy, &BTreeSet::new())
+                .expect("empty affected set")
+                .is_empty()
         );
     }
 

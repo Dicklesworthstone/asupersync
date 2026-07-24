@@ -559,6 +559,50 @@ fn identities_native_evidence_and_taxonomy_fail_closed() {
 }
 
 #[test]
+fn hyphenated_direct_edges_and_complete_taxonomy_projection_are_retained() {
+    let ledger = ledger();
+    let taxonomy = json_file(TAXONOMY_PATH);
+    let active_edges = array(&ledger, "graph_records")
+        .iter()
+        .flat_map(|record| string_set(record, "active_direct_root_edges"))
+        .collect::<BTreeSet<_>>();
+    for edge in [
+        "normal:crossbeam-queue",
+        "normal:futures-lite",
+        "normal:pin-project",
+        "normal:rmp-serde",
+        "normal:x509-parser",
+        "target-normal:cfg(not(target_arch = \"wasm32\")):signal-hook",
+    ] {
+        assert!(
+            active_edges.contains(edge),
+            "Cargo metadata identifier normalization lost active edge {edge}"
+        );
+    }
+
+    let taxonomy_candidates = array(&taxonomy, "classifications")
+        .iter()
+        .map(|row| string(row, "candidate_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    let projected_candidates = array(&ledger, "marginal_measurements")
+        .iter()
+        .flat_map(|row| {
+            array(row, "taxonomy_refs")
+                .iter()
+                .map(|reference| string(reference, "candidate_id").to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        taxonomy_candidates
+            .difference(&projected_candidates)
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["simd-dispatch-boundary"]),
+        "only the implementation-specific SIMD boundary may lack a Cargo edge"
+    );
+}
+
+#[test]
 fn generated_phase_forecasts_recompute_from_measurements() {
     #[derive(Default)]
     struct Expected {

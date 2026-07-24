@@ -59,6 +59,16 @@ package-version counts and unique package-name counts. Package IDs from
 Cargo's resolve graph define reachability and set difference; package-name
 text never substitutes for a package ID.
 
+Cargo metadata reports a dependency's Rust identifier, so hyphens in a
+manifest key appear as underscores in `resolve.nodes[].deps[].name`. The
+generator normalizes that identifier only for matching the exact manifest
+edge; the artifact continues to retain the original manifest spelling.
+Taxonomy projection considers both the direct package and packages actually
+removed by the counterfactual. This lets a typed surface such as
+`crossbeam-utils::CachePadded` remain linked to the root edge that contributes
+`crossbeam-utils`, without treating an unrelated package elsewhere in the
+baseline closure as marginal.
+
 The repository `Cargo.lock` seeds every baseline. The resolved baseline lock
 then seeds each exact counterfactual. This holds the upstream version choice
 constant while still making Cargo resolve the edited manifest. Each row
