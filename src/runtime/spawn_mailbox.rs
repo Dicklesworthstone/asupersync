@@ -65,7 +65,6 @@ use crate::types::Outcome;
 use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use crate::util::{ArenaIndex, CachePadded};
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -262,6 +261,10 @@ pub struct AdmittedTaskSlot {
     admitted: OnceLock<AdmittedTask>,
     reserved: AtomicBool,
     cancel_gateway: Option<Weak<SpawnGateway>>,
+    /// Strongest cancellation requested while canonical identity publication
+    /// is still pending. The cache is initialized per slot, so unrelated
+    /// spawn producers never serialize through process-global state.
+    pending_cancel_reason: OnceLock<PendingCancelReason>,
     /// Authoritative one-shot observer receipt for managed pre-admission
     /// aborts. Every repeat abort command carries this slot, so whichever
     /// consumer wins first-lane publication also wins this receipt.
@@ -290,6 +293,7 @@ impl AdmittedTaskSlot {
             admitted: OnceLock::new(),
             reserved: AtomicBool::new(false),
             cancel_gateway: None,
+            pending_cancel_reason: OnceLock::new(),
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
     }
@@ -301,6 +305,7 @@ impl AdmittedTaskSlot {
             admitted: OnceLock::new(),
             reserved: AtomicBool::new(false),
             cancel_gateway: Some(Arc::downgrade(&cancel_gateway)),
+            pending_cancel_reason: OnceLock::new(),
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
     }
@@ -314,6 +319,31 @@ impl AdmittedTaskSlot {
 
     pub(crate) fn cancel_gateway(&self) -> Option<Arc<SpawnGateway>> {
         self.cancel_gateway.as_ref().and_then(Weak::upgrade)
+    }
+
+    /// Returns this slot's shared strongest-reason cache.
+    ///
+    /// Initialization may synchronize callers racing on the same admission
+    /// slot, but independent spawn producers touch disjoint `OnceLock`s.
+    pub(crate) fn pending_cancel_reason(&self) -> PendingCancelReason {
+        Arc::clone(
+            self.pending_cancel_reason
+                .get_or_init(|| Arc::new(RwLock::new(None))),
+        )
+    }
+
+    /// Returns the cache for a newly constructed pending handle.
+    ///
+    /// Normal producer handles are built before enqueue and share the slot
+    /// cache with admission. A handle constructed after runnable publication
+    /// keeps independent caller-side attribution because no publisher remains
+    /// to replay the slot cache.
+    pub(crate) fn pending_handle_cancel_reason(&self) -> PendingCancelReason {
+        if self.get().is_some_and(AdmittedTask::is_published) {
+            Arc::new(RwLock::new(None))
+        } else {
+            self.pending_cancel_reason()
+        }
     }
 
     fn install_spawn_effects(&self, spawn_effects: crate::runtime::state::TaskSpawnEffects) {
@@ -403,6 +433,10 @@ impl fmt::Debug for AdmittedTaskSlot {
             .field("admitted", &self.admitted.get())
             .field("reserved", &self.reserved.load(Ordering::Relaxed))
             .field("has_cancel_gateway", &self.cancel_gateway.is_some())
+            .field(
+                "has_pending_cancel_reason",
+                &self.pending_cancel_reason.get().is_some(),
+            )
             .field("spawn_effect_handoff", &{
                 let slot = self.spawn_effects.lock();
                 (slot.lane_published, slot.effects.is_some())
@@ -436,7 +470,7 @@ impl AdmissionPublication {
         cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
         slot: Option<Arc<AdmittedTaskSlot>>,
     ) -> Self {
-        let requested = slot.as_ref().map(register_pending_cancel_rendezvous);
+        let requested = slot.as_ref().map(|slot| slot.pending_cancel_reason());
         Self {
             cx_inner,
             slot,
@@ -575,99 +609,18 @@ impl AdmissionPublication {
             }
             wakes
         };
-        if let Some(slot) = slot.as_ref() {
-            let retired = retire_pending_cancel_rendezvous(slot);
-            drop(retired);
-        }
         (cancel_wakes, spawn_effects)
     }
 }
 
-struct PendingCancelRendezvous {
-    slot: Weak<AdmittedTaskSlot>,
-    reason: PendingCancelReason,
-}
-
-static PENDING_CANCEL_RENDEZVOUS: OnceLock<Mutex<HashMap<usize, PendingCancelRendezvous>>> =
-    OnceLock::new();
-static PENDING_CANCEL_REGISTRATIONS: AtomicUsize = AtomicUsize::new(0);
-const RENDEZVOUS_PURGE_INTERVAL: usize = 1024;
-
-fn pending_cancel_registry() -> &'static Mutex<HashMap<usize, PendingCancelRendezvous>> {
-    PENDING_CANCEL_RENDEZVOUS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn admitted_slot_key(slot: &Arc<AdmittedTaskSlot>) -> usize {
-    Arc::as_ptr(slot) as usize
-}
-
-fn purge_stale_rendezvous(entries: &mut HashMap<usize, PendingCancelRendezvous>) {
-    entries.retain(|_, entry| entry.slot.strong_count() > 0);
-}
-
-/// Returns the shared strongest-reason cache for `slot`, creating it when the
-/// producer has not registered the slot yet.
-pub(crate) fn register_pending_cancel_rendezvous(
-    slot: &Arc<AdmittedTaskSlot>,
-) -> PendingCancelReason {
-    let key = admitted_slot_key(slot);
-    let mut entries = pending_cancel_registry().lock();
-    if slot.get().is_some_and(AdmittedTask::is_published) {
-        // Late handle construction needs its own attribution cache, but no
-        // admission publisher remains to retire a global rendezvous entry.
-        return Arc::new(RwLock::new(None));
-    }
-    if PENDING_CANCEL_REGISTRATIONS.fetch_add(1, Ordering::Relaxed) % RENDEZVOUS_PURGE_INTERVAL == 0
-    {
-        purge_stale_rendezvous(&mut entries);
-    }
-    if let Some(entry) = entries.get(&key) {
-        if let Some(existing_slot) = entry.slot.upgrade() {
-            if Arc::ptr_eq(&existing_slot, slot) {
-                return Arc::clone(&entry.reason);
-            }
-        }
-    }
-
-    let reason = Arc::new(RwLock::new(None));
-    entries.insert(
-        key,
-        PendingCancelRendezvous {
-            slot: Arc::downgrade(slot),
-            reason: Arc::clone(&reason),
-        },
-    );
-    reason
-}
-
-/// Retires and returns the cache registered for this exact slot allocation.
-/// Pointer equality prevents a stale key from binding to a reused address.
-pub(crate) fn retire_pending_cancel_rendezvous(
-    slot: &Arc<AdmittedTaskSlot>,
-) -> Option<PendingCancelReason> {
-    let key = admitted_slot_key(slot);
-    let mut entries = pending_cancel_registry().lock();
-    let matches_slot = entries
-        .get(&key)
-        .and_then(|entry| entry.slot.upgrade())
-        .is_some_and(|registered| Arc::ptr_eq(&registered, slot));
-    if !matches_slot {
-        entries.remove(&key);
-        return None;
-    }
-    entries.remove(&key).map(|entry| entry.reason)
-}
-
-/// Retires a rendezvous only when this request never published an identity.
-/// A duplicate request can carry the winner's already-populated slot; its
-/// denial must not retire the winner's admission gate.
-fn retire_unadmitted_cancel_rendezvous(
-    slot: &Arc<AdmittedTaskSlot>,
-) -> Option<PendingCancelReason> {
+/// Returns the shared cache only when this request never published an
+/// identity. A duplicate request can carry the winner's populated slot; its
+/// denial must not inherit the winner's cancellation attribution.
+fn unadmitted_cancel_reason(slot: &Arc<AdmittedTaskSlot>) -> Option<PendingCancelReason> {
     if slot.get().is_some() {
         None
     } else {
-        retire_pending_cancel_rendezvous(slot)
+        Some(slot.pending_cancel_reason())
     }
 }
 
@@ -863,9 +816,7 @@ impl LocalSpawnRequest {
             ..
         } = self;
         drop(factory);
-        let requested = admitted_slot
-            .as_ref()
-            .and_then(retire_unadmitted_cancel_rendezvous);
+        let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         if let Some(slot) = on_unadmitted_cancel {
             slot(strengthen_with_requested_reason(reason, requested.as_ref()));
         }
@@ -887,9 +838,7 @@ impl LocalSpawnRequest {
             ..
         } = self;
         drop(factory);
-        let requested = admitted_slot
-            .as_ref()
-            .and_then(retire_unadmitted_cancel_rendezvous);
+        let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         let requested_failure = requested_admission_failure_reason(&error, requested.as_ref());
         match (requested_failure, on_unadmitted_cancel, on_admission_error) {
             (Some(reason), Some(slot), _) => slot(reason),
@@ -1152,9 +1101,7 @@ impl SpawnRequestParts {
             ..
         } = self;
         drop(payload);
-        let requested = admitted_slot
-            .as_ref()
-            .and_then(retire_unadmitted_cancel_rendezvous);
+        let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         if let Some(slot) = on_unadmitted_cancel {
             slot(strengthen_with_requested_reason(reason, requested.as_ref()));
         }
@@ -1177,9 +1124,7 @@ impl SpawnRequestParts {
             ..
         } = self;
         drop(payload);
-        let requested = admitted_slot
-            .as_ref()
-            .and_then(retire_unadmitted_cancel_rendezvous);
+        let requested = admitted_slot.as_ref().and_then(unadmitted_cancel_reason);
         let requested_failure = requested_admission_failure_reason(&error, requested.as_ref());
         match (requested_failure, on_unadmitted_cancel, on_admission_error) {
             (Some(reason), Some(slot), _) => slot(reason),
@@ -2284,47 +2229,57 @@ mod tests {
     }
 
     #[test]
-    fn pending_cancel_rendezvous_retires_and_replaces_stale_pointer_key() {
+    fn pending_cancel_reason_is_shared_within_and_isolated_between_slots() {
         let slot = Arc::new(AdmittedTaskSlot::new());
-        let reason = register_pending_cancel_rendezvous(&slot);
-        assert_eq!(
-            Arc::strong_count(&reason),
-            2,
-            "registry owns the reason until admission or denial retires it"
-        );
-        let retrieved = register_pending_cancel_rendezvous(&slot);
-        assert!(Arc::ptr_eq(&reason, &retrieved));
-        let retired = retire_pending_cancel_rendezvous(&slot).expect("rendezvous retires");
-        assert!(Arc::ptr_eq(&reason, &retired));
-        assert!(retire_pending_cancel_rendezvous(&slot).is_none());
-
-        // Deterministically model allocator address reuse by placing an
-        // expired slot under the live replacement slot's pointer key.
-        let stale_slot = Arc::new(AdmittedTaskSlot::new());
-        let stale_slot = Arc::downgrade(&stale_slot);
-        let stale_reason = Arc::new(RwLock::new(Some(CancelReason::timeout())));
-        let replacement = Arc::new(AdmittedTaskSlot::new());
-        let replacement_key = admitted_slot_key(&replacement);
-        {
-            let mut entries = pending_cancel_registry().lock();
-            entries.insert(
-                replacement_key,
-                PendingCancelRendezvous {
-                    slot: stale_slot,
-                    reason: Arc::clone(&stale_reason),
-                },
-            );
+        let barrier = Arc::new(std::sync::Barrier::new(9));
+        let mut initializers = Vec::new();
+        for _ in 0..8 {
+            let slot = Arc::clone(&slot);
+            let barrier = Arc::clone(&barrier);
+            initializers.push(thread::spawn(move || {
+                barrier.wait();
+                slot.pending_cancel_reason()
+            }));
         }
-
-        let replacement_reason = register_pending_cancel_rendezvous(&replacement);
-        assert!(!Arc::ptr_eq(&replacement_reason, &stale_reason));
-        let retired = retire_pending_cancel_rendezvous(&replacement).expect("replacement retires");
-        assert!(Arc::ptr_eq(&replacement_reason, &retired));
+        barrier.wait();
+        let reasons = initializers
+            .into_iter()
+            .map(|initializer| initializer.join().expect("initializer completes"))
+            .collect::<Vec<_>>();
         assert!(
-            !pending_cancel_registry()
-                .lock()
-                .contains_key(&replacement_key)
+            reasons
+                .iter()
+                .all(|reason| Arc::ptr_eq(reason, &reasons[0])),
+            "same-slot initialization must converge on one reason cache"
         );
+
+        *reasons[0].write() = Some(CancelReason::timeout());
+        assert!(
+            reasons.iter().all(|reason| reason
+                .read()
+                .as_ref()
+                .is_some_and(|reason| reason.is_kind(CancelKind::Timeout))),
+            "same-slot readers must observe the shared strongest reason"
+        );
+
+        let independent = Arc::new(AdmittedTaskSlot::new()).pending_cancel_reason();
+        assert!(
+            !Arc::ptr_eq(&reasons[0], &independent),
+            "independent spawn slots must never share cancellation state"
+        );
+        assert!(independent.read().is_none());
+
+        slot.set(AdmittedTask::published(
+            TaskId::from_arena(ArenaIndex::new(9, 1)),
+            Weak::new(),
+        ))
+        .expect("test identity publishes");
+        let late_handle_reason = slot.pending_handle_cancel_reason();
+        assert!(
+            !Arc::ptr_eq(&reasons[0], &late_handle_reason),
+            "a handle built after runnable publication keeps independent attribution"
+        );
+        assert!(late_handle_reason.read().is_none());
     }
 
     #[test]
@@ -2363,7 +2318,7 @@ mod tests {
                 );
             }),
         }));
-        let pending_reason = register_pending_cancel_rendezvous(&admitted);
+        let pending_reason = admitted.pending_cancel_reason();
         let (cache_locked, installer) =
             install_cancel_waker_during_admission(Arc::clone(&admitted), pending_reason, waker);
         cache_locked.wait();
@@ -2452,8 +2407,12 @@ mod tests {
             "reentrant Waker observed published, stored, scheduled state"
         );
         assert!(
-            retire_pending_cancel_rendezvous(&admitted).is_none(),
-            "successful admission retires the rendezvous"
+            admitted
+                .pending_cancel_reason()
+                .read()
+                .as_ref()
+                .is_some_and(|reason| reason.is_kind(CancelKind::RaceLost)),
+            "the slot-local cache preserves the strongest requested reason"
         );
     }
 
@@ -3534,7 +3493,7 @@ mod tests {
         else {
             panic!("expected admission to remain unpublished");
         };
-        let pending_reason = register_pending_cancel_rendezvous(&admitted);
+        let pending_reason = admitted.pending_cancel_reason();
         *pending_reason.write() = Some(CancelReason::race_loser());
 
         drop(liveness);
@@ -4166,7 +4125,7 @@ mod tests {
                 .as_ref()
                 .expect("local request carries an admitted slot"),
         );
-        let pending_reason = register_pending_cancel_rendezvous(&admitted);
+        let pending_reason = admitted.pending_cancel_reason();
         let (cache_locked, installer) =
             install_cancel_waker_during_admission(Arc::clone(&admitted), pending_reason, waker);
         cache_locked.wait();

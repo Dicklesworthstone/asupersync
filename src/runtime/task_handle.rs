@@ -273,8 +273,7 @@ impl<T> TaskHandle<T> {
         receiver: oneshot::Receiver<Result<T, JoinError>>,
         admitted: std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>,
     ) -> Self {
-        let requested_cancel_reason =
-            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted);
+        let requested_cancel_reason = admitted.pending_handle_cancel_reason();
         Self {
             task_id: provisional_task_id,
             receiver,
