@@ -211,7 +211,7 @@ hashbrown→std/DetHashMap · num_cpus/whoami→std · env_logger removal · `ti
 **Phase 3 — Public API decisions (blocks all codec/CLI/otel work; produces ADRs + api_surface_map updates, no implementation).**
 3.1 `SerdeCodec` (`typed_symbol.rs`): replace public Bincode/MessagePack format variants with JSON + explicit purpose-built codecs; decide the snapshot and trace schema ownership split.
 3.2 `ProstCodec` (`grpc/protobuf.rs`): owned `ProtoMessage` trait over a finite message set; drop the public arbitrary-`prost::Message` surface.
-3.3 OTLP/metrics: redesign around owned exporter traits; **explicit decision to remove external OpenTelemetry `Meter`/SDK interoperability** (or abandon the replacement).
+3.3 OTLP/metrics: **RESOLVED — see `docs/adr/dep_plan_adr_003_otlp_ecosystem.md` (DEP-ADR-003).** The Rev-3 framing above ("remove external OpenTelemetry `Meter`/SDK interoperability, or abandon the replacement") is superseded: the Rev-5 no-loss gate rejects both branches. Source re-read established that the owned OTLP request builders for metrics and traces are gated to test/fuzz builds (they depend on the tokio-carrying `opentelemetry-proto`), so the external SDK bridge is the *only* production export path for those two signals; only logs have a complete owned production path. The terminal decision is additive coexistence with `KEEP_UNTIL_PARITY` / `KEEP_INCUMBENT`, and a dependency exit additionally requires an owned tokio-free wire encoder for metrics and traces.
 3.4 Config formats: TOML→versioned-JSON migration decision; YAML scenario migration rules (data preservation, goldens, manual review, owner permission for deletions).
 3.5 CLI surface: owned-parser contract (XL scope per §5) and help/error-golden strategy.
 3.6 Brotli: keep vs. approved capability removal (HTTP + ATP manifest impact documented).
@@ -309,7 +309,7 @@ Pre-Phase-0: 132 crate-versions / 124 names. Post-Phase-0 (`a86bfb3a6`): 130 / 1
 | `tls` | +26 | the measured rustls/provider/webpki closure (~12–15; forecast-generated) |
 | `sqlite` | +10 + bundled C | 0 external here; capability relocates to FrankenSQLite's own measured graph (§9.1 combined budget) |
 | `kafka` | +13 + bundled C | 0 (feature removed; future native client is first-party code, tracked separately) |
-| `metrics` | +13 | 0 external **if** ADR 3.3 approves dropping external-SDK interop |
+| `metrics` | +13 | **+13 retained.** DEP-ADR-003 did not approve dropping external-SDK interop; the zero-external end-state is not an authorized outcome. Any future reduction is gated behind an owned tokio-free OTLP wire encoder for metrics and traces plus proven provider-bridge parity. |
 | `cli` | +43 | approaches 0 external **minus** the retained tracing crates while `cli` keeps its `tracing-integration` edge (dropping that edge is part of ADR 3.5) |
 | `compression` | +8 | per Brotli decision (ADR 3.6); flate2 interim |
 

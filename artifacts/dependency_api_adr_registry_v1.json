@@ -1,0 +1,768 @@
+{
+  "artifact_id": "dependency-api-adr-registry-v1",
+  "schema_version": 1,
+  "program_id": "asupersync-ir2uf0",
+  "phase_id": "asupersync-dep-p3-api-adrs-h3jspm",
+  "aggregate_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.13",
+  "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+  "doc_index_path": "docs/dependency_api_adr_registry.md",
+  "adr_doc_dir": "docs/adr",
+  "policy_as_of_release": "0.3.9",
+  "policy_as_of_date_utc": "2026-07-24",
+  "policy": {
+    "purpose": "Phase-3 owner ADRs freeze the public contract of each capability before any implementation or dependency exit may start. An ADR is a decision record, not an implementation licence.",
+    "no_loss_rule": "No ADR may authorize removal or narrowing of an accepted public API, generic extension point, Cargo feature, binary, accepted format, wire protocol, platform cell, diagnostic, third-party integration, or documented user journey. Additive redesign is permitted; erasure is not.",
+    "keep_default": "When a complete owned replacement is disproportionate or its parity is unproven, the required terminal decision is KEEP_UNTIL_PARITY with cutover_state KEEP_INCUMBENT.",
+    "no_compatibility_shims": "Asupersync is pre-1.0 with no external users to protect. Preserved surfaces stay because the capability is real, not because a deprecated alias is kept alive. ADRs may not introduce compatibility shims or wrapper facades for deprecated APIs.",
+    "authority_rule": "An ADR carries decision authority only for the capability IDs mapped to its bead by bead_mapping_rules in the capability registry. Cross-cutting capability mentions are compatibility obligations, never primary evidence ownership.",
+    "evidence_rule": "Every ADR names the exact unit-test owner, no-mock E2E owner, and stable scenario IDs that must be green before its capability may cut over. Naming planned evidence is not the same as having run it.",
+    "truthful_baseline_rule": "An ADR must record the capability as it actually is at claim time, including gaps, quarantined surfaces, and dead code paths. Freezing an aspirational surface is a defect; known gaps are recorded so they cannot silently widen.",
+    "aggregate_rule": "asupersync-dep-p3-api-adrs-h3jspm.13 may not close while any roster row is PENDING or any resolved row carries an UNKNOWN capability, format, feature, platform, interoperability, or user-journey field."
+  },
+  "allowed_adr_states": [
+    "RESOLVED",
+    "PENDING"
+  ],
+  "allowed_decisions": [
+    "KEEP_UNTIL_PARITY",
+    "PRESERVE",
+    "ADDITIVE_COEXISTENCE",
+    "RELOCATE_IF_PARITY",
+    "DEFER"
+  ],
+  "allowed_evidence_states": [
+    "BASELINE_EXISTING",
+    "BASELINE_PLANNED",
+    "UNKNOWN_BLOCKING"
+  ],
+  "allowed_cutover_states": [
+    "NOT_A_CUTOVER",
+    "BLOCKED_PENDING_EVIDENCE",
+    "KEEP_INCUMBENT"
+  ],
+  "allowed_signal_states": [
+    "SHIPPED_OWNED_WIRE",
+    "SHIPPED_ECOSYSTEM_WIRE",
+    "SHIPPED_OWNED_INPROCESS",
+    "TEST_FUZZ_ONLY_WIRE",
+    "NOT_SHIPPED"
+  ],
+  "required_adr_fields": [
+    "adr_id",
+    "bead_id",
+    "title",
+    "state",
+    "capability_ids",
+    "decision",
+    "decision_summary",
+    "alternatives_considered",
+    "preserved_public_symbols",
+    "preserved_feature_flags",
+    "preserved_signals",
+    "preserved_wire_contract",
+    "preserved_config_semantics",
+    "known_gaps",
+    "security_invariants",
+    "cancellation_invariants",
+    "platform_cells",
+    "external_ecosystem_integration",
+    "downstream_consumers",
+    "user_journeys",
+    "api_surface_delta",
+    "supersedes",
+    "migration_policy",
+    "rollback_policy",
+    "evidence",
+    "cutover",
+    "doc_path",
+    "no_claim_boundary"
+  ],
+  "roster": [
+    {
+      "adr_id": "DEP-ADR-001",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.1",
+      "title": "Preserve generic SerdeCodec JSON + MessagePack + Bincode while versioning owned artifacts",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-002",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.2",
+      "title": "Preserve arbitrary downstream Protobuf messages and ergonomic authoring",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-003",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.3",
+      "title": "Preserve OTLP metrics + traces + logs and external SDK/provider/collector interoperability",
+      "state": "RESOLVED"
+    },
+    {
+      "adr_id": "DEP-ADR-004",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.4",
+      "title": "Additive canonical JSON while preserving accepted TOML config and YAML scenarios",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-005",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.5",
+      "title": "Capability-complete, accessible CLI contract and tracing/config edges",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-006",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.6",
+      "title": "Preserve Brotli RFC 7932 capability; KEEP incumbent until a full owned parity campaign passes",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-007",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.7",
+      "title": "Preserve complete NKey credential, prefix, signing, verification and downstream API capability",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-008",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.8",
+      "title": "Preserve full futures-lite production semantics, public Stream usability, and test executor workflows",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-009",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.9",
+      "title": "Preserve complete Kafka producer, transaction, consumer-group, security, and interop capability",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-010",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.10",
+      "title": "Preserve SQLite feature and one-stop user experience under cycle-safe FrankenSQLite integration",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-011",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
+      "title": "Owned UTC timestamp/calendar surface for full chrono/time capability, serialization, and UX",
+      "state": "PENDING"
+    },
+    {
+      "adr_id": "DEP-ADR-012",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.12",
+      "title": "Preserve full user-supplied regex semantics and privacy guarantees; fixed scanners are only a fast path",
+      "state": "PENDING"
+    }
+  ],
+  "adrs": [
+    {
+      "adr_id": "DEP-ADR-003",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.3",
+      "title": "Preserve OTLP metrics + traces + logs and external SDK/provider/collector interoperability",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-OTLP-ECOSYSTEM"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "decision_summary": "Keep both telemetry tiers that ship today, because they are not redundant: they cover different signals. Tier 1 is the owned, hand-rolled OTLP surface, which reaches the wire in production for the logs signal only. Tier 2 is the external OpenTelemetry ecosystem bridge, and for the metrics and traces signals it is the only production export path that exists. The three `OtelMetrics` constructors each take an `opentelemetry::metrics::Meter` supplied by the embedder, and the re-exported `SpanStorage` type materializes spans through an embedder-supplied `opentelemetry::trace::BoxedTracer`. Deleting the `opentelemetry` and `opentelemetry_sdk` dependencies would therefore not merely remove an optional integration; it would leave asupersync with no production metrics or traces export at all. The dependencies are KEEP_UNTIL_PARITY and the capability stays KEEP_INCUMBENT.",
+      "alternatives_considered": [
+        {
+          "option": "Remove `opentelemetry` and `opentelemetry_sdk`; ship only the owned OTLP/HTTP exporters.",
+          "rejected_because": "The owned OTLP request builders for the metrics and traces signals live in `observability::otel::otlp_request_builder`, which is gated `#[cfg(all(any(test, feature = \"fuzz\"), feature = \"metrics\", feature = \"tracing-integration\"))]`. They are unreachable in any production build. Removing the ecosystem crates would delete the only production metrics and traces export path and also delete `OtelMetrics::new`, the sole integration point for downstream code that already owns a `MeterProvider`. That is compound capability loss."
+        },
+        {
+          "option": "Keep the OTLP wire path for two of the three signals and drop the third.",
+          "rejected_because": "`otlp-logs-omission` is a named historical loss fixture in the capability registry. The logs signal is in fact the single best-supported one: `LogsSnapshot::to_otlp_protobuf` and the `otlp_logs_proto` prost message set are ungated inside the `metrics`-gated module, so they encode and send in production today. Dropping it would remove the only owned end-to-end OTLP wire path in the crate."
+        },
+        {
+          "option": "Route the owned trace pipeline through the ecosystem crates and delete `otlp_trace_exporter`.",
+          "rejected_because": "`observability::otlp_trace_exporter` is ungated: its types, bounded queue, head-based sampling, and brownout policy are available at default features with no `opentelemetry` dependency. Folding it into the ecosystem crates would make that surface feature-gated and would add a dependency edge to the default production graph."
+        },
+        {
+          "option": "Promote `otlp_request_builder` out of its test/fuzz gate so metrics and traces get an owned production wire path.",
+          "rejected_because": "It depends on `opentelemetry-proto`, which is deliberately quarantined behind `fuzz` because its `gen-tonic-messages` feature pulls `tonic` and therefore `tokio`. Promoting it as written would put a tokio edge in the metrics production graph and break the no-Tokio guarantee. Closing this gap requires an owned prost message set in the style of `otlp_logs_proto`, which is real implementation work owned by asupersync-5z2scg.2, not an ADR decision."
+        },
+        {
+          "option": "Enable the `logs` feature on the `opentelemetry`/`opentelemetry_sdk` crates to back the logs signal.",
+          "rejected_because": "The production `metrics` feature deliberately pins both crates to `default-features = false, features = [\"metrics\", \"trace\"]`. Widening that set grows the production graph for a signal that already has a working owned implementation. Deferred, not rejected on principle."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::observability",
+          "feature_gate": null,
+          "source_file": "src/observability/mod.rs",
+          "symbols": [
+            "Counter",
+            "Gauge",
+            "Histogram",
+            "MetricValue",
+            "Metrics",
+            "MetricsProvider",
+            "NoOpMetrics",
+            "OutcomeKind"
+          ],
+          "note": "Dependency-free in-process metrics registry and the runtime's `MetricsProvider` seam. Available with no Cargo features enabled and entirely free of OpenTelemetry types."
+        },
+        {
+          "module_path": "asupersync::observability",
+          "feature_gate": null,
+          "source_file": "src/observability/mod.rs",
+          "symbols": [
+            "LoadSheddingTraceExporter",
+            "OTLP_TAIL_SAMPLING_E2E_BEAD_ID",
+            "OTLP_TAIL_SAMPLING_SCOPE_BEAD_ID",
+            "OTLP_TAIL_SAMPLING_SCOPE_CONTRACT_VERSION",
+            "OtlpSpan",
+            "OtlpTailSamplingScope",
+            "OtlpTailSamplingSupportClass",
+            "SpanBatch",
+            "TraceExporter",
+            "otlp_tail_based_sampling_scope"
+          ],
+          "note": "Owned in-process OTLP trace pipeline. Ungated: available at default features with no `opentelemetry` dependency."
+        },
+        {
+          "module_path": "asupersync::observability",
+          "feature_gate": null,
+          "source_file": "src/observability/mod.rs",
+          "symbols": [
+            "EntityId",
+            "OtelStructuredConcurrencyConfig",
+            "SpanStorage",
+            "SpanType"
+          ],
+          "note": "Ungated re-export, but `SpanStorage` methods take and return `opentelemetry::Context`, `BoxedTracer`, `BoxedSpan`, `Status`, and `Value`. This is a hard ecosystem coupling on a type reachable at default features."
+        },
+        {
+          "module_path": "asupersync::observability",
+          "feature_gate": null,
+          "source_file": "src/observability/mod.rs",
+          "symbols": [
+            "TraceContextError",
+            "TraceFlags",
+            "TraceId",
+            "W3CBaggage",
+            "W3CPropagationContext",
+            "W3CTraceContext",
+            "extract_from_http",
+            "extract_baggage_from_http",
+            "extract_propagation_from_http",
+            "inject_to_http",
+            "inject_to_grpc",
+            "inject_baggage_to_http"
+          ],
+          "note": "W3C Trace Context and Baggage propagation, implemented without any OpenTelemetry crate dependency."
+        },
+        {
+          "module_path": "asupersync::observability",
+          "feature_gate": "metrics",
+          "source_file": "src/observability/mod.rs",
+          "symbols": [
+            "CardinalityOverflow",
+            "ExportError",
+            "InMemoryExporter",
+            "InMemoryLogsExporter",
+            "LoadSheddingLogsExporter",
+            "LogAttributes",
+            "LogsExporter",
+            "LogsSnapshot",
+            "MetricsConfig",
+            "MetricsExporter",
+            "MetricsSnapshot",
+            "MultiExporter",
+            "MultiLogsExporter",
+            "NullExporter",
+            "NullLogsExporter",
+            "OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES",
+            "OTLP_LOGS_MAX_ATTRIBUTES",
+            "OTLP_LOGS_SCHEMA_URL",
+            "OTLP_LOGS_SCOPE_NAME",
+            "OtelMetrics",
+            "OtlpLogRecord",
+            "OtlpLogsHttpExporter",
+            "SamplingConfig",
+            "StdoutExporter",
+            "log_level_to_otlp_severity"
+          ],
+          "note": "Curated `metrics`-gated re-export set from `observability::otel`."
+        },
+        {
+          "module_path": "asupersync::observability::otel",
+          "feature_gate": "metrics",
+          "source_file": "src/observability/otel.rs",
+          "symbols": [
+            "BoundedExportQueue",
+            "CounterDataPoint",
+            "GaugeDataPoint",
+            "HistogramDataPoint",
+            "LoadSheddingExporter",
+            "LoadSheddingStats",
+            "MetricLabels",
+            "OtlpError",
+            "OtlpHttpExporter",
+            "OtlpResourceBuilder",
+            "PrivacyConfig",
+            "SpanConfig",
+            "create_otlp_resource_attributes"
+          ],
+          "note": "`pub mod otel` is public, so every `pub` item is reachable API even when it is absent from the curated re-export list. `OtlpHttpExporter` and `PrivacyConfig` in particular are reachable only by the long path, and `PrivacyConfig` already has an external-consumer smoke fixture under tests/fixtures/dependency-capability-baseline-consumer."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "metrics",
+          "cargo_definition": "metrics = [\"dep:opentelemetry\", \"dep:opentelemetry_sdk\", \"dep:regex\"]",
+          "effect": "Enables `observability::otel` (owned OTLP/HTTP logs exporter, the shared `OtlpHttpExporter` transport, the external `Meter` bridge, privacy/redaction, and cardinality control) plus `observability::histogram_conformance`. `regex` is required by the PII redaction engine.",
+          "must_remain": true,
+          "no_tokio_guarantee": "The `metrics` production graph must have no normal-edge dependency on tokio. Proof lane `metrics-production-tokio-tree`: `cargo tree -e normal -p asupersync --features metrics -i tokio` must print `warning: nothing to print.`"
+        },
+        {
+          "name": "tracing-integration",
+          "cargo_definition": "tracing-integration = [\"dep:tracing\"]",
+          "effect": "Enables the real `observability::otel::span_semantics` module; without it a stub is compiled instead. Also required, together with `test`/`fuzz`, to reach `otlp_request_builder`.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Not an OTLP transport dependency; listed because the capability registry maps it to CAP-OTLP-ECOSYSTEM."
+        },
+        {
+          "name": "compression",
+          "cargo_definition": "compression = [\"dep:flate2\", \"dep:brotli\"]",
+          "effect": "Enables gzip request-body compression in `OtlpHttpExporter`. Without it, calling `with_compression(true)` is a hard error rather than a silent downgrade.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Pure-Rust codecs; no tokio edge."
+        },
+        {
+          "name": "fuzz",
+          "cargo_definition": "fuzz = [\"dep:arbitrary\", \"dep:opentelemetry-proto\"]",
+          "effect": "Enables `opentelemetry-proto` with `gen-tonic-messages`, `trace`, `metrics`, and `logs`, which is what makes `otlp_request_builder` reachable for conformance, golden, and fuzz helpers.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Explicitly EXCLUDED from the no-Tokio production guarantee. Proof lane `fuzz-tokio-quarantine-tree` expects the `opentelemetry-proto` -> `tonic`/`tonic-prost` -> `tokio` path and treats it as an accepted, documented quarantine edge."
+        }
+      ],
+      "preserved_signals": [
+        {
+          "signal": "logs",
+          "state": "SHIPPED_OWNED_WIRE",
+          "feature_gate": "metrics",
+          "implementation": "src/observability/otel.rs",
+          "wire_encoder": "LogsSnapshot::to_otlp_protobuf via the ungated internal `otlp_logs_proto` prost message set",
+          "transport": "OtlpLogsHttpExporter::export_async -> OtlpHttpExporter::send_otlp_protobuf",
+          "public_entry_points": [
+            "OtlpLogsHttpExporter",
+            "OtlpLogRecord",
+            "LogsSnapshot",
+            "LogsExporter",
+            "InMemoryLogsExporter",
+            "MultiLogsExporter",
+            "NullLogsExporter",
+            "LoadSheddingLogsExporter",
+            "log_level_to_otlp_severity",
+            "OTLP_LOGS_SCHEMA_URL",
+            "OTLP_LOGS_SCOPE_NAME",
+            "OTLP_LOGS_MAX_ATTRIBUTES",
+            "OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES"
+          ],
+          "note": "The only signal with a complete owned production path from snapshot to wire. Implemented WITHOUT the ecosystem crates' logs feature. `otlp-logs-omission` is a named historical loss fixture; this signal may not be dropped."
+        },
+        {
+          "signal": "metrics",
+          "state": "SHIPPED_ECOSYSTEM_WIRE",
+          "feature_gate": "metrics",
+          "implementation": "src/observability/otel.rs",
+          "wire_encoder": "none in production; `otlp_request_builder::metrics_request_from_snapshot` is gated to test/fuzz",
+          "transport": "the embedder's own opentelemetry_sdk reader and exporter",
+          "public_entry_points": [
+            "OtelMetrics",
+            "MetricsConfig",
+            "MetricsSnapshot",
+            "MetricsExporter",
+            "OtlpHttpExporter",
+            "StdoutExporter",
+            "InMemoryExporter",
+            "MultiExporter",
+            "NullExporter",
+            "LoadSheddingExporter"
+          ],
+          "note": "`OtelMetrics` records into real `opentelemetry` instruments obtained from a caller-supplied `Meter`. Production metrics therefore leave the process through the embedder's SDK pipeline, not through asupersync. The dependency-free `observability::metrics` registry and its Prometheus exposition text format remain available at default features as a separate, non-OTLP path."
+        },
+        {
+          "signal": "traces",
+          "state": "SHIPPED_OWNED_INPROCESS",
+          "feature_gate": null,
+          "implementation": "src/observability/otlp_trace_exporter.rs and src/observability/otel_structured_concurrency.rs",
+          "wire_encoder": "none in production; `otlp_request_builder::traces_request` is gated to test/fuzz",
+          "transport": "the embedder's own opentelemetry_sdk tracer for exported spans; the owned pipeline is in-process only",
+          "public_entry_points": [
+            "TraceExporter",
+            "OtlpSpan",
+            "SpanBatch",
+            "LoadSheddingTraceExporter",
+            "OtlpTailSamplingScope",
+            "SpanStorage",
+            "OtelStructuredConcurrencyConfig"
+          ],
+          "note": "The owned trace pipeline ships ungated with bounded queues, head-based sampling, and brownout policy, but the only shipped `TraceExporter` implementation buffers in memory. Spans that actually reach a collector do so through the embedder's SDK via `SpanStorage` and `BoxedTracer`. Tail-based sampling is explicitly and deliberately unsupported, pinned by `otlp_tail_based_sampling_scope`."
+        },
+        {
+          "signal": "external_meter_bridge",
+          "state": "SHIPPED_ECOSYSTEM_WIRE",
+          "feature_gate": "metrics",
+          "implementation": "src/observability/otel.rs",
+          "wire_encoder": "not applicable",
+          "transport": "the embedder's own MeterProvider",
+          "public_entry_points": [
+            "OtelMetrics"
+          ],
+          "note": "`OtelMetrics::new(Meter)`, `OtelMetrics::new_with_resource_detection(Meter, ...)`, and `OtelMetrics::new_with_config(Meter, MetricsConfig)` all accept a `Meter` from ANY downstream `MeterProvider`. This is the whole third-party-ecosystem interop capability and the primary reason the `opentelemetry` dependency is KEEP_UNTIL_PARITY."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "OTLP over HTTP",
+        "encoding": "protobuf",
+        "content_type": "application/x-protobuf",
+        "grpc_supported": false,
+        "signal_paths_note": "The endpoint is caller-supplied verbatim. Asupersync does not append `/v1/logs`, `/v1/metrics`, or `/v1/traces`, and must not begin silently rewriting caller paths.",
+        "schema_url": "https://opentelemetry.io/schemas/1.37.0",
+        "scope_name": "asupersync.observability.otel",
+        "log_body_value_kinds": [
+          "StringValue"
+        ],
+        "temporality": "Cumulative only. Hardcoded in the request builders and guarded by a source-text regression test that fails if a Delta path appears without prev-value and reset tracking.",
+        "http_status_semantics": "2xx OK; 408, 429, and 502-504 retryable honoring Retry-After; 405 non-retryable echoing the Allow header; 415 triggers a single uncompressed retry; all other 4xx and 5xx are non-retryable with the batch dropped.",
+        "retry_jitter": "Deterministic, not random, so replay stays reproducible.",
+        "collector_interop": "Content type, resource and scope attributes, severity mapping, partial-success handling, throttling, and Retry-After parsing must stay collector-compatible.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "endpoint",
+          "surface": "OtlpHttpExporter::new / OtlpLogsHttpExporter::new",
+          "contract": "Caller-supplied full signal URL, used verbatim."
+        },
+        {
+          "name": "timeout",
+          "surface": "with_timeout",
+          "contract": "Per-attempt timeout, default 10s. Expiry maps to a non-retryable error and the batch is dropped rather than requeued, which is what keeps exporter memory bounded."
+        },
+        {
+          "name": "retry",
+          "surface": "with_retry_config",
+          "contract": "max_retries default 3, initial delay default 100ms, max delay default 30s, exponential doubling clamped to max delay, Retry-After taking precedence when present. There is no retry queue; a single body is held across attempts."
+        },
+        {
+          "name": "compression",
+          "surface": "with_compression",
+          "contract": "gzip request bodies, default OFF. The default must not silently change. Requesting compression without the `compression` feature is a hard error, never a silent downgrade."
+        },
+        {
+          "name": "auth",
+          "surface": "with_bearer_token / with_api_key / with_auth_header",
+          "contract": "Headers are attached to every request. They must be treated as secret material by any redaction, logging, or diagnostics surface."
+        },
+        {
+          "name": "tls",
+          "surface": "inherited from crate::http::h1::http_client::HttpClient",
+          "contract": "Fail-closed. With neither `tls-native-roots` nor `tls-webpki-roots`, the root store is empty and the client build fails. There is no silent system-CA fallback and no HTTPS-to-HTTP downgrade; TLS errors are non-retryable."
+        },
+        {
+          "name": "resource_attributes",
+          "surface": "OtlpResourceBuilder / create_otlp_resource_attributes",
+          "contract": "Three sources with fixed precedence: built-in defaults, then `OTEL_RESOURCE_ATTRIBUTES`, then programmatic attributes. Host-name detection is opt-in."
+        },
+        {
+          "name": "scope_attributes",
+          "surface": "LogsSnapshot::with_scope / with_schema_url",
+          "contract": "Defaults are the pinned scope name and schema URL; both are overridable per snapshot."
+        },
+        {
+          "name": "cardinality",
+          "surface": "MetricsConfig / CardinalityOverflow",
+          "contract": "Bounded unique label combinations per metric and bounded distinct metric names, with an explicit overflow strategy of Drop, Aggregate, or Warn and an observable overflow count."
+        },
+        {
+          "name": "privacy_redaction",
+          "surface": "observability::otel::PrivacyConfig",
+          "contract": "Attribute and label drop lists, a glob allowlist, custom regex patterns, and built-in detectors for email, SSN, Luhn-validated payment cards, and phone numbers. Applies across traces, metrics, and logs. Redaction may only widen, never narrow."
+        },
+        {
+          "name": "attribute_caps",
+          "surface": "OTLP_LOGS_MAX_ATTRIBUTES / OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES",
+          "contract": "128 attributes and 4096 value bytes, with `dropped_attributes_count` accounting rather than silent truncation."
+        },
+        {
+          "name": "sampling",
+          "surface": "SamplingConfig / head-based span filter",
+          "contract": "Per-metric sample rates plus a head-based span filter that drops unsampled spans before export. Sampling decisions are deterministic."
+        },
+        {
+          "name": "load_shedding",
+          "surface": "BoundedExportQueue / LoadSheddingExporter / LoadSheddingLogsExporter / LoadSheddingTraceExporter",
+          "contract": "Bounded queues shed with counted drops. The metrics queue drops newest; the trace queue drops oldest to preserve recency. Trace shedding is driven by runtime resource-monitor brownout levels with three actions: export all, drop low priority, retain summary only."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "OTLP-GAP-01",
+          "summary": "No owned production wire encoder for the metrics and traces signals. `otlp_request_builder` is gated to test and fuzz builds because it depends on the tokio-carrying `opentelemetry-proto`.",
+          "consequence": "Production metrics and traces export depends entirely on the embedder's OpenTelemetry SDK. This is the strongest single argument against removing the ecosystem crates.",
+          "owner_bead": "asupersync-5z2scg.2",
+          "may_widen": false
+        },
+        {
+          "gap_id": "OTLP-GAP-02",
+          "summary": "The synchronous `MetricsExporter::export` and `LogsExporter::export` implementations on the HTTP exporters return an error directing callers to the async path, because the real send requires an explicit `&Cx`.",
+          "consequence": "HTTP exporters cannot be driven through the exporter trait objects; callers must hold the concrete type and an async context.",
+          "owner_bead": "asupersync-5z2scg.2",
+          "may_widen": false
+        },
+        {
+          "gap_id": "OTLP-GAP-03",
+          "summary": "`OtelMetrics::new_with_resource_detection` builds the resource attribute set and then discards it, on the documented assumption that the caller's `Meter` already carries those attributes.",
+          "consequence": "Resource detection is advisory at that entry point rather than effective.",
+          "owner_bead": "asupersync-5z2scg.2",
+          "may_widen": false
+        },
+        {
+          "gap_id": "OTLP-GAP-04",
+          "summary": "Only `OTEL_RESOURCE_ATTRIBUTES` is honored. There is no support for the `OTEL_EXPORTER_OTLP_*` environment configuration family, and no periodic reader or collection-interval scheduling.",
+          "consequence": "Operators configure the exporter programmatically; export cadence is entirely the embedder's responsibility.",
+          "owner_bead": "asupersync-5z2scg.2",
+          "may_widen": false
+        },
+        {
+          "gap_id": "OTLP-GAP-05",
+          "summary": "The owned log body encoder supports only the string variant of the OTLP AnyValue union.",
+          "consequence": "Integer, double, boolean, array, and key-value-list log bodies are not representable on the owned wire path.",
+          "owner_bead": "asupersync-5z2scg.2",
+          "may_widen": false
+        },
+        {
+          "gap_id": "OTLP-GAP-06",
+          "summary": "Roughly 39 OTLP audit test files under src/observability are tracked but not declared in mod.rs, so they never compile. This quarantine is deliberate and documented in artifacts/otlp_audit_cluster_inventory_v1.json under the rule that blocked preserved files must not be listed until they compile against real production seams.",
+          "consequence": "A large body of OTLP failure-mode coverage is inert and must not be counted as evidence.",
+          "owner_bead": "asupersync-lf1a77",
+          "may_widen": false
+        },
+        {
+          "gap_id": "OTLP-GAP-07",
+          "summary": "Tail-based sampling is explicitly unsupported, pinned by an explicit support-class contract rather than silently missing.",
+          "consequence": "Not a defect. Recorded so that the explicit unsupported declaration is not mistaken for an accidental omission.",
+          "owner_bead": "asupersync-5z2scg.2",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "TLS configuration is fail-closed: an empty root store fails the client build rather than falling back to system CAs, and TLS errors never downgrade HTTPS to HTTP.",
+        "Bearer tokens, API keys, and custom auth headers are secret material and must not reach logs, traces, diagnostics, or error text.",
+        "The shared redaction policy applies to metrics, traces, and logs alike; no signal may bypass it.",
+        "The `metrics` production graph keeps its no-normal-edge-on-tokio guarantee; `opentelemetry-proto` stays quarantined behind `fuzz`.",
+        "Attribute count and value-size caps bound untrusted attribute input, with counted drops rather than silent truncation."
+      ],
+      "cancellation_invariants": [
+        "Exporter work takes an explicit `&Cx` and is owned by the caller's region; export tasks may not outlive the region that created them.",
+        "Flush is bounded, and the trace exporter's Drop-path flush is bounded by an explicit shutdown timeout and skipped entirely when the queue is empty, so shutdown cannot deadlock.",
+        "A timed-out or cancelled export drops its batch with a counted outcome rather than orphaning it or leaving a retry loop running.",
+        "Bounded export queues shed load with observable counts rather than blocking a runtime worker."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "native",
+          "support": "supported",
+          "note": "Full OTLP/HTTP export path over the crate's own HTTP/1.1 client."
+        },
+        {
+          "target_family": "wasm32",
+          "support": "not-applicable",
+          "note": "The capability registry scopes CAP-OTLP-ECOSYSTEM to `native`. Browser telemetry is a separate Browser Edition surface and is out of scope for this ADR."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "asupersync::observability::otel::OtelMetrics::new(meter: opentelemetry::metrics::Meter)",
+          "asupersync::observability::otel::OtelMetrics::new_with_resource_detection(meter: opentelemetry::metrics::Meter, ...)",
+          "asupersync::observability::otel::OtelMetrics::new_with_config(meter: opentelemetry::metrics::Meter, config: MetricsConfig)",
+          "asupersync::observability::SpanStorage span materialization through opentelemetry::trace::BoxedTracer"
+        ],
+        "accepted_providers": "Any implementation of `opentelemetry::metrics::MeterProvider`, including `opentelemetry_sdk::metrics::SdkMeterProvider` and third-party providers such as Prometheus bridges.",
+        "pinned_crate_versions": {
+          "opentelemetry": "0.32 (default-features = false, features = [\"metrics\", \"trace\"])",
+          "opentelemetry_sdk": "0.32 (default-features = false, features = [\"metrics\", \"trace\"])",
+          "opentelemetry-proto": "0.32 (fuzz and dev-dependency only; features = [\"gen-tonic-messages\", \"trace\", \"metrics\", \"logs\"])"
+        },
+        "no_reexport_note": "There is no `pub use opentelemetry` anywhere in the crate. Coupling is by function signature, so downstream consumers must pin a compatible `opentelemetry` version themselves. Any change to the pinned major version is a downstream-visible break and requires downstream-consumer evidence.",
+        "instrument_surface": "Counters, histograms, and observable gauges covering task, region, cancellation, budget, deadline, obligation, and scheduler instrumentation, exposed through the OpenTelemetry-free `MetricsProvider` trait at the runtime seam.",
+        "runtime_seam_is_clean": "`RuntimeBuilder::metrics` is generic over asupersync's own `MetricsProvider` trait and leaks no OpenTelemetry types.",
+        "removal_precondition": "An owned adapter must accept the same downstream provider handles and reproduce every instrument, attribute, temporality, and aggregation behavior, AND an owned tokio-free production wire encoder must exist for the metrics and traces signals, both proved by real-collector and reference-SDK evidence. Until then: KEEP.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "consumer-portfolio",
+        "external-otel-sdk-users",
+        "collector-operators"
+      ],
+      "user_journeys": [
+        {
+          "id": "otlp-journey-owned-logs-export",
+          "description": "Operator enables the `metrics` feature, builds an `OtlpLogsHttpExporter` against a collector endpoint, and ships logs over OTLP/HTTP protobuf with no OpenTelemetry SDK in their own code."
+        },
+        {
+          "id": "otlp-journey-owned-traces-default",
+          "description": "Consumer uses `TraceExporter`, `OtlpSpan`, and `SpanBatch` at DEFAULT features, with no `metrics` feature, for in-process span batching, sampling, and brownout shedding."
+        },
+        {
+          "id": "otlp-journey-external-provider-bridge",
+          "description": "Consumer already owns an `SdkMeterProvider` or a third-party provider, takes a `Meter` from it, and passes it to `OtelMetrics::new` so asupersync runtime instrumentation lands in their existing pipeline. This is the only production metrics export journey."
+        },
+        {
+          "id": "otlp-journey-prometheus-no-otlp",
+          "description": "Consumer uses the dependency-free `observability::metrics` registry and its Prometheus exposition text format with no OTLP and no OpenTelemetry crates at all."
+        },
+        {
+          "id": "otlp-journey-collector-failure-handling",
+          "description": "Operator runs against a misbehaving collector and gets distinct, actionable outcomes for throttling, partial success, auth failure, TLS failure, timeout, unsupported method, and compression rejection rather than one opaque error."
+        },
+        {
+          "id": "otlp-journey-bounded-shutdown",
+          "description": "Application cancels its region during export and reaches quiescence within its budget with counted drops and no orphaned batches or retry loops."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. `artifacts/api_surface_map_v1.json` tracks crate-root exports from src/lib.rs only, and every symbol frozen here lives under `asupersync::observability`, not the crate root. The capability registry additionally pins that map by semantic hash, so editing it here would be both unnecessary and destructive."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 3 item 3.3",
+          "stale_text": "explicit decision to remove external OpenTelemetry Meter/SDK interoperability (or abandon the replacement)",
+          "resolution": "Both branches are rejected by the Rev-5 no-loss gate. The terminal decision is additive coexistence with KEEP_UNTIL_PARITY."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md Appendix B, metrics row",
+          "stale_text": "0 external if ADR 3.3 approves dropping external-SDK interop",
+          "resolution": "ADR 3.3 does not approve it. The projected zero-external-dependency metrics graph is not an authorized outcome."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "New owned surfaces are added alongside existing ones. No accepted entry point is renamed away, deprecated behind an alias, or narrowed.",
+        "coexistence": "The owned tier and the ecosystem bridge coexist indefinitely. Documentation may recommend the owned tier as the default path for logs without weakening the bridge, which remains the only production path for metrics and traces.",
+        "sequencing": "Closing OTLP-GAP-01 with an owned tokio-free wire encoder is a precondition for even discussing a dependency exit, and is itself gated behind real-collector and reference-SDK parity evidence.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_003_otlp_ecosystem.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any downstream consumer build break, collector interop failure, lost signal, silently changed default, new tokio normal-edge in the metrics graph, or narrowed redaction.",
+        "action": "Revert to the frozen surface recorded here. Because the decision is coexistence, rollback is a revert of an additive change rather than resurrection of a deleted capability.",
+        "verification": "Re-run the focused contract lane plus the CAP-OTLP-ECOSYSTEM scenario IDs and the two tokio proof lanes before declaring the rollback complete."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-5z2scg.2.1",
+        "unit_test_owner": "asupersync-5z2scg.2.3",
+        "e2e_owner": "asupersync-5z2scg.2.9",
+        "scenario_ids": [
+          "otlp_metrics",
+          "otlp_traces",
+          "otlp_logs",
+          "otlp_external_sdk_adapter",
+          "otlp_failure_matrix"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario otlp_multisignal",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "unit: happy path, empty and maximum attribute counts and value sizes, malformed input, and distinct error mapping per failure class",
+          "unit: cancellation, race, shutdown, leak, and quiescence states for every exporter, including the bounded Drop-path flush",
+          "property and fuzz: OTLP wire-format encode and decode through the `fuzz` feature helpers",
+          "differential: owned logs encoder output compared against the reference proto encoding for identical input",
+          "sparse-feature: build and test matrix covering default, `metrics`, `metrics`+`tracing-integration`, and `metrics`+`compression`",
+          "downstream-consumer: a synthesized consumer owning an SdkMeterProvider that drives OtelMetrics::new, plus one using observability::otel::PrivacyConfig by long path",
+          "real-service E2E: a live collector accepting the logs signal on the owned path and the metrics and traces signals through a reference SDK, with partial-success, throttle, auth-failure, and TLS-failure rows",
+          "graph: both tokio proof lanes green, metrics clean and fuzz quarantined"
+        ],
+        "note": "Naming these owners does not assert they have run. BASELINE_PLANNED means the corpus is specified, not executed. The quarantined audit files recorded in OTLP-GAP-06 may not be counted toward any of these classes while they remain uncompiled."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "cutover_state": "KEEP_INCUMBENT",
+        "disposition": "KEEP_UNTIL_PARITY",
+        "primary_authority": "asupersync-5z2scg.2",
+        "secondary_compatibility_consumers": [
+          "asupersync-5z2scg.8",
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. `opentelemetry` and `opentelemetry_sdk` remain production dependencies of the `metrics` feature."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_003_otlp_ecosystem.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the owned logs encoder is byte-compatible with any reference implementation, that a live collector accepts asupersync output, that metrics, traces, or logs parity has been measured, that performance is unchanged, that the workspace is healthy, or that any dependency may be removed. Agreement on the metrics signal alone, or on generated-message shapes alone, does not prove traces, logs, provider ecosystem, lifecycle, or real collector parity."
+    }
+  ],
+  "known_loss_fixtures": [
+    {
+      "fixture_id": "otlp-logs-omission",
+      "adr_id": "DEP-ADR-003",
+      "prohibited_text": "omit OTLP logs",
+      "expected_error": "signal loss: OTLP logs"
+    },
+    {
+      "fixture_id": "otlp-external-sdk-removal",
+      "adr_id": "DEP-ADR-003",
+      "prohibited_text": "remove external OpenTelemetry SDK interoperability",
+      "expected_error": "third-party ecosystem loss: OTLP provider bridge"
+    },
+    {
+      "fixture_id": "otlp-traces-feature-gating",
+      "adr_id": "DEP-ADR-003",
+      "prohibited_text": "gate the trace exporter behind the metrics feature",
+      "expected_error": "default-feature surface loss: OTLP traces"
+    },
+    {
+      "fixture_id": "otlp-tokio-in-metrics-graph",
+      "adr_id": "DEP-ADR-003",
+      "prohibited_text": "enable opentelemetry-proto in the metrics feature",
+      "expected_error": "no-tokio guarantee violation: metrics production graph"
+    },
+    {
+      "fixture_id": "adr-authorizes-dependency-exit",
+      "adr_id": "DEP-ADR-003",
+      "prohibited_text": "dependency exit allowed without parity evidence",
+      "expected_error": "cutover authorization without evidence"
+    }
+  ],
+  "validation": {
+    "contract_test": "tests/dependency_api_adr_registry_contract.rs",
+    "doc_index": "docs/dependency_api_adr_registry.md",
+    "e2e_scenario_id": "api-adr-registry-contract",
+    "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario api-adr-registry-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_api_adr_registry\" cargo test -p asupersync --test dependency_api_adr_registry_contract -- --nocapture",
+    "checks": [
+      "the roster covers exactly the twelve asupersync-dep-p3-api-adrs-h3jspm.N ADR children present in the live capability registry bead_mapping_rules, with no extras and no omissions",
+      "every roster bead id and every evidence owner id is a live bead in .beads/issues.jsonl",
+      "every RESOLVED ADR carries all required_adr_fields with non-empty values",
+      "every capability id claimed by a RESOLVED ADR is exactly the set mapped to its bead by the capability registry, so authority drift fails closed",
+      "the capability registry rows referenced by a RESOLVED ADR agree with it on disposition and cutover state",
+      "every frozen public symbol still exists in its declared source file, so deleting a capability breaks this lane",
+      "every declared source file exists on disk",
+      "the metrics Cargo feature still enables opentelemetry and opentelemetry_sdk, and every frozen feature definition still matches Cargo.toml verbatim",
+      "opentelemetry-proto is enabled by fuzz and never by metrics",
+      "the ungated trace re-export block stays ungated and the metrics-gated otel re-export block stays gated",
+      "no RESOLVED ADR authorizes a dependency exit while its cutover state is KEEP_INCUMBENT",
+      "no ADR prose contains any known-loss prohibited text, and every named negative fixture is rejected for its intended reason",
+      "the generated summary block in docs/dependency_api_adr_registry.md matches this artifact exactly"
+    ],
+    "no_claim_boundary": "Scoped ADR-registry and public-surface contract evidence only. It does not prove planned evidence has run, implementation parity, runtime correctness, performance, live-collector interoperability, broad workspace health, release readiness, a production dependency exit, or permission to cut over, narrow functionality, or delete anything."
+  }
+}
