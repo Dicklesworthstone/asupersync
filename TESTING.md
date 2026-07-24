@@ -335,6 +335,10 @@ bash scripts/run_dependency_sovereignty_e2e.sh --list
 RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
   --scenario verification-matrix-contract \
   --run-id ver-a2-review-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario failure-injection-contract \
+  --run-id ver-a4-failure-matrix-001
 ```
 
 `--dry-run` emits the complete inventory and replay bundle without executing a
@@ -343,7 +347,11 @@ overrideable by the orchestrator environment. `--fail-fast` retains explicit
 `NOT_RUN_FAIL_FAST` rows for skipped work; the default continue-for-diagnostics
 mode preserves all attempted results. See
 `docs/dependency_verification_matrix.md` for the field contract, outcome
-taxonomy, and no-claim boundary.
+taxonomy, and no-claim boundary. VER A4 replacement owners should also read
+`docs/dependency_failure_injection_matrix.md`; it defines the deterministic
+phase matrix, structured receipt, cleanup oracles, negative fixtures, exact
+replay requirements, and the boundary between contract proof and real no-mock
+replacement evidence.
 
 CI evidence:
 - `.github/workflows/ci.yml` check job runs `scripts/check_ci_matrix_policy.py`

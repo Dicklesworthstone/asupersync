@@ -193,7 +193,8 @@ The default smoke profile runs two local, non-Cargo contract scenarios:
 
 The runner also exposes four opt-in Cargo-backed contract scenarios:
 `registry-contract`, `baseline-contract`, `cutover-policy-contract`, and
-`verification-matrix-contract`. They refuse execution unless
+`verification-matrix-contract`, plus the VER A4
+`failure-injection-contract`. They refuse execution unless
 `RCH_REQUIRE_REMOTE=1` and `rch` are both present; a local fallback marker is a
 terminal non-green result.
 
@@ -218,6 +219,12 @@ RCH_REQUIRE_REMOTE=1 \
   bash scripts/run_dependency_sovereignty_e2e.sh \
   --scenario verification-matrix-contract \
   --run-id ver-a2-matrix-001
+
+# Execute the deterministic VER A4 failure-injection matrix contract.
+RCH_REQUIRE_REMOTE=1 \
+  bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario failure-injection-contract \
+  --run-id ver-a4-failure-matrix-001
 ```
 
 `--scenario` may be repeated. `--timeout` bounds each scenario; the direct
@@ -235,6 +242,22 @@ outcome, exit and signal, monotonic elapsed time, artifact links, RCH routing,
 worker and target directory, evidence owner, redaction policy, first failing
 invariant, cleanup result, and replay pointer. The safe environment snapshot is
 allowlisted; arbitrary process environment values are not retained.
+
+### VER A4 failure-injection mapping
+
+`artifacts/dependency_failure_injection_matrix_v1.json` maps the live VER A1
+replacement inventory to deterministic cancellation, error, recovery, panic,
+leak, loser-drain, finalizer, region-tree, and quiescence obligations. Its
+focused contract is
+`tests/dependency_failure_injection_matrix_contract.rs`; its stable E2E step is
+`ver-a4-failure-injection-contract`.
+
+The contract requires bounded steps and virtual time, deterministic drivers or
+real process control, structured receipts, exact replay commands, and cleanup
+on success, error, cancellation, and panic. Sleeps used to create races,
+ambient randomness, mocks, unbounded waits, and log-substring pass criteria are
+fail-closed. See `docs/dependency_failure_injection_matrix.md` for the
+applicability rules, receipt fields, negative fixtures, and no-claim boundary.
 
 The suite root maintains machine-readable `latest.json` and
 `latest_success.json` pointers. A failed or blocked attempt advances only

@@ -678,6 +678,10 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         "REPLAY_FAILURE",
         "CLEANUP_FAILURE",
         "VER_A2_CANARY_SECRET_DO_NOT_RETAIN",
+        "artifacts/dependency_failure_injection_matrix_v1.json",
+        "failure-injection-contract",
+        "dependency_failure_injection_matrix_contract",
+        "ver-a4-failure-injection-contract",
     ] {
         assert!(
             runner.contains(token),

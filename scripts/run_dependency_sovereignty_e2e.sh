@@ -15,6 +15,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 MATRIX="$PROJECT_ROOT/artifacts/dependency_verification_matrix_v1.json"
+FAILURE_MATRIX="$PROJECT_ROOT/artifacts/dependency_failure_injection_matrix_v1.json"
 REGISTRY="$PROJECT_ROOT/artifacts/dependency_capability_registry_v1.json"
 SUITE_ID="dependency-sovereignty"
 SUITE_SCENARIO_ID="E2E-SUITE-DEPENDENCY-SOVEREIGNTY"
@@ -50,7 +51,7 @@ options:
 
 Cargo-backed scenarios require:
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
-    --scenario registry-contract
+    --scenario failure-injection-contract
 USAGE
 }
 
@@ -61,12 +62,13 @@ scenario_ids() {
         registry-contract \
         baseline-contract \
         cutover-policy-contract \
-        verification-matrix-contract
+        verification-matrix-contract \
+        failure-injection-contract
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract)
             return 0
             ;;
         *)
@@ -77,7 +79,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract)
             return 0
             ;;
         *)
@@ -89,7 +91,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        runner-contract) printf 'contract' ;;
+        runner-contract | failure-injection-contract) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
 }
@@ -102,6 +104,7 @@ scenario_fixture() {
         baseline-contract) printf 'tests/dependency_capability_baseline_contract.rs' ;;
         cutover-policy-contract) printf 'tests/dependency_cutover_policy_contract.rs' ;;
         verification-matrix-contract) printf 'tests/dependency_verification_matrix_contract.rs' ;;
+        failure-injection-contract) printf 'artifacts/dependency_failure_injection_matrix_v1.json' ;;
     esac
 }
 
@@ -114,7 +117,7 @@ scenario_profile() {
 
 scenario_capabilities() {
     case "$1" in
-        catalog | runner-contract | verification-matrix-contract)
+        catalog | runner-contract | verification-matrix-contract | failure-injection-contract)
             printf '["CAP-REAL-SERVICE-E2E","CAP-VERIFICATION-PROFILES"]'
             ;;
         registry-contract)
@@ -126,6 +129,20 @@ scenario_capabilities() {
         cutover-policy-contract)
             printf '["CAP-DEPENDENCY-LEDGER","CAP-REAL-SERVICE-E2E","CAP-VERIFICATION-PROFILES"]'
             ;;
+    esac
+}
+
+scenario_evidence_owner() {
+    case "$1" in
+        failure-injection-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.4' ;;
+        *) printf '%s' "$EVIDENCE_OWNER" ;;
+    esac
+}
+
+scenario_step_id() {
+    case "$1" in
+        failure-injection-contract) printf 'ver-a4-failure-injection-contract' ;;
+        *) printf 'ver-a2-%s' "$1" ;;
     esac
 }
 
@@ -149,6 +166,9 @@ scenario_command_display() {
             ;;
         verification-matrix-contract)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_verification_matrix_contract -- --nocapture"
+            ;;
+        failure-injection-contract)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_failure_injection_matrix_contract -- --nocapture"
             ;;
     esac
 }
@@ -262,12 +282,13 @@ LATEST_SUCCESS="$OUTPUT_ROOT/latest_success.json"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SOURCE_REVISION="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 CONFIG_DIGEST=""
+FAILURE_CONFIG_DIGEST=""
 
 if [[ -e "$RUN_DIR" ]]; then
     printf 'refusing to overwrite retained evidence directory: %s\n' "$RUN_DIR" >&2
     exit 73
 fi
-if [[ ! -f "$MATRIX" || ! -f "$REGISTRY" ]]; then
+if [[ ! -f "$MATRIX" || ! -f "$FAILURE_MATRIX" || ! -f "$REGISTRY" ]]; then
     printf 'required dependency-sovereignty inputs are missing\n' >&2
     exit 66
 fi
@@ -317,6 +338,7 @@ safe_version() {
 }
 
 CONFIG_DIGEST="$(sha256_file "$MATRIX")"
+FAILURE_CONFIG_DIGEST="$(sha256_file "$FAILURE_MATRIX")"
 jq -n \
     --arg schema_version "dependency-sovereignty-environment-v1" \
     --arg run_id "$RUN_ID" \
@@ -333,6 +355,7 @@ jq -n \
     --arg test_seed "$SEED" \
     --arg step_timeout "$STEP_TIMEOUT" \
     --arg config_digest "$CONFIG_DIGEST" \
+    --arg failure_config_digest "$FAILURE_CONFIG_DIGEST" \
     --arg redaction_policy "metadata-and-secret-patterns-v1" \
     '{
       schema_version: $schema_version,
@@ -351,7 +374,13 @@ jq -n \
       },
       config_snapshot: {
         source: "artifacts/dependency_verification_matrix_v1.json",
-        sha256: $config_digest
+        sha256: $config_digest,
+        additional_sources: [
+          {
+            source: "artifacts/dependency_failure_injection_matrix_v1.json",
+            sha256: $failure_config_digest
+          }
+        ]
       },
       redaction_policy: $redaction_policy
     }' >"$ENVIRONMENT"
@@ -396,7 +425,7 @@ emit_validation_stage() {
         --arg execution_backend "$execution_backend" \
         --arg rch_worker "$rch_worker" \
         --arg cargo_target_dir "$target_dir" \
-        --arg evidence_owner "$EVIDENCE_OWNER" \
+        --arg evidence_owner "$(scenario_evidence_owner "$scenario_id")" \
         --arg redaction_policy "metadata-and-secret-patterns-v1" \
         --arg cleanup_result "$cleanup_result" \
         --arg first_failing_invariant "$first_failing_invariant" \
@@ -555,10 +584,16 @@ execute_scenario() {
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_verification_matrix_contract -- --nocapture
             ;;
+        failure-injection-contract)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --test dependency_failure_injection_matrix_contract -- --nocapture
+            ;;
     esac
 }
 
-export MATRIX PROJECT_ROOT CANARY
+export MATRIX FAILURE_MATRIX PROJECT_ROOT CANARY
 export -f classify_result execute_scenario redact_stream run_classifier_contract
 
 TOTAL=0
@@ -572,7 +607,7 @@ STOPPED=0
 
 for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
     TOTAL=$((TOTAL + 1))
-    step_id="ver-a2-${scenario_id}"
+    step_id="$(scenario_step_id "$scenario_id")"
     step_dir="$RUN_DIR/$scenario_id"
     stdout_log="$step_dir/$step_id.stdout.log"
     stderr_log="$step_dir/$step_id.stderr.log"
@@ -726,7 +761,7 @@ for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
         --arg execution_backend "$execution_backend" \
         --arg rch_worker "$rch_worker" \
         --arg cargo_target_dir "$target_dir" \
-        --arg evidence_owner "$EVIDENCE_OWNER" \
+        --arg evidence_owner "$(scenario_evidence_owner "$scenario_id")" \
         --arg cleanup_result "$cleanup_result" \
         --arg first_failing_invariant "$first_failing_invariant" \
         --arg replay_pointer "$replay_command" \
