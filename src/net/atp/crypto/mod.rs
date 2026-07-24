@@ -435,17 +435,19 @@ impl EncryptionEngine {
         plaintext: &[u8],
         key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, Vec<u8>, EncryptionMetadata), EncryptionError> {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce};
+        use chacha20poly1305::aead::{AeadInOut, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 
         let cipher = ChaCha20Poly1305::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
         let nonce_bytes = Self::generate_iv(Self::CHACHA20POLY1305_NONCE_LEN)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes.as_slice())
+            .map_err(|_| EncryptionError::EncryptionFailed("invalid nonce length".to_string()))?;
 
         let mut buffer = plaintext.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(nonce, b"", &mut buffer)
+            .encrypt_inout_detached(&nonce, b"", buffer.as_mut_slice().into())
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
         let metadata = EncryptionMetadata {
@@ -464,16 +466,19 @@ impl EncryptionEngine {
         metadata: &EncryptionMetadata,
         key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, bool), EncryptionError> {
-        use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce, Tag};
+        use chacha20poly1305::aead::{AeadInOut, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
 
         let cipher = ChaCha20Poly1305::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
 
-        let nonce = Nonce::from_slice(&metadata.iv);
-        let tag = Tag::from_slice(&metadata.auth_tag);
+        let nonce = Nonce::try_from(metadata.iv.as_slice())
+            .map_err(|_| EncryptionError::DecryptionFailed("invalid nonce length".to_string()))?;
+        let tag = Tag::try_from(metadata.auth_tag.as_slice())
+            .map_err(|_| EncryptionError::DecryptionFailed("invalid tag length".to_string()))?;
 
         let mut buffer = ciphertext.to_vec();
-        match cipher.decrypt_in_place_detached(nonce, b"", &mut buffer, tag) {
+        match cipher.decrypt_inout_detached(&nonce, b"", buffer.as_mut_slice().into(), &tag) {
             Ok(()) => Ok((buffer, true)),
             Err(_) => Err(EncryptionError::AuthenticationFailed),
         }
@@ -484,18 +489,19 @@ impl EncryptionEngine {
         plaintext: &[u8],
         key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, Vec<u8>, EncryptionMetadata), EncryptionError> {
-        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::aead::{AeadInOut, KeyInit};
         use aes_gcm::{Aes256Gcm, Nonce};
 
         let cipher = Aes256Gcm::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
         let nonce_bytes = Self::generate_iv(Self::AES256GCM_NONCE_LEN)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes.as_slice())
+            .map_err(|_| EncryptionError::EncryptionFailed("invalid nonce length".to_string()))?;
 
         let mut buffer = plaintext.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(nonce, b"", &mut buffer)
+            .encrypt_inout_detached(&nonce, b"", buffer.as_mut_slice().into())
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
         let metadata = EncryptionMetadata {
@@ -514,17 +520,19 @@ impl EncryptionEngine {
         metadata: &EncryptionMetadata,
         key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, bool), EncryptionError> {
-        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::aead::{AeadInOut, KeyInit};
         use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
         let cipher = Aes256Gcm::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
 
-        let nonce = Nonce::from_slice(&metadata.iv);
-        let tag = Tag::from_slice(&metadata.auth_tag);
+        let nonce = Nonce::try_from(metadata.iv.as_slice())
+            .map_err(|_| EncryptionError::DecryptionFailed("invalid nonce length".to_string()))?;
+        let tag = Tag::try_from(metadata.auth_tag.as_slice())
+            .map_err(|_| EncryptionError::DecryptionFailed("invalid tag length".to_string()))?;
 
         let mut buffer = ciphertext.to_vec();
-        match cipher.decrypt_in_place_detached(nonce, b"", &mut buffer, tag) {
+        match cipher.decrypt_inout_detached(&nonce, b"", buffer.as_mut_slice().into(), &tag) {
             Ok(()) => Ok((buffer, true)),
             Err(_) => Err(EncryptionError::AuthenticationFailed),
         }

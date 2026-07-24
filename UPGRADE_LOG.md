@@ -224,3 +224,116 @@ Validation is still in progress for this pass. The focused
 `rust_crate_release_provenance_contract` lane passed after the workflow fix; the
 broad workspace check, clippy, full tests, npm checks, audits, and final release
 publish gates are tracked in the session closeout.
+
+---
+
+## 2026-07-23 — asupersync — dependency refresh + dead-dep removal (pass 4)
+
+Scope: full lockfile refresh, removal of two dead production dependencies,
+four production major bumps, and the dependency **audit** that produced
+[`COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md`](./COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md)
+(the phased program to replace external crates with home-grown strict-safe
+Rust / FrankenSuite projects). Agent: SapphireHill.
+
+Note: `Cargo.lock` **is tracked** in git today (`git check-ignore Cargo.lock` →
+not ignored; a later negation overrides the `.gitignore:6` pattern), so unlike
+pass 1's assumption, the lockfile refresh in this pass *is* a committable
+artifact.
+
+### Lockfile refresh (`cargo update`, semver-compatible)
+
+~120 crate-version bumps, notably: rustls 0.23.40→0.23.42, rustls-pki-types
+1.14.1→1.15.1, serde 1.0.228→1.0.229, serde_json 1.0.150→1.0.151, libc
+0.2.186→0.2.189, socket2 0.6.4→0.6.5, sysinfo 0.39.3→0.39.6, thiserror
+2.0.18→2.0.19, memchr 2.8.2→2.8.3, io-uring 0.7.12→0.7.13, crossbeam-queue
+0.3.12→0.3.13, wasm-bindgen family 0.2.125→0.2.126, tokio 1.52.3→1.53.1 +
+redis 1.2.4→1.4.1 + trybuild 1.0.116→1.0.118 (dev/satellite lanes), uuid
+1.23.3→1.24.0, time 0.3.49→0.3.54.
+
+Side effect: `syn v3.0.3` joins `syn v2.0.119` in the graph because
+`serde_derive 1.0.229` moved to syn 3 while the rest of the proc-macro
+ecosystem (and our own `asupersync-macros`) remains on syn 2.
+
+### Dead dependencies REMOVED
+
+| Dependency | Evidence |
+|---|---|
+| `crossbeam-deque` 0.8 | **Zero references** anywhere in the workspace. Work-stealing is fully home-grown (`src/runtime/scheduler/{local_queue,stealing,intrusive,global_injector}.rs`). Remains in the lockfile only via dev-only `criterion → rayon`. |
+| `hkdf` 0.13 | **Zero call sites** (pass 1 already documented this and realigned the version; this pass completes the removal). HKDF is hand-rolled on `Hmac<Sha256>` in `src/net/atp/handshake/key_schedule.rs` + `src/security/key.rs` (bead asupersync-3epgv2). A tombstone comment in `Cargo.toml` records why. |
+
+Also fixed: the stale `crc32fast` manifest comment (claimed Kafka KIP-98; real
+users are `atp/journal`, `net/atp/sdk/stream`, `atp/adapter/masque`).
+
+### Major bumps applied this pass
+
+| Dependency | From | To | Kind | Code change |
+|---|---|---|---|---|
+| `base64` | 0.22.1 | 0.23.0 | prod | manifest-only, **default-features off** |
+| `lz4_flex` | 0.13.1 | 0.14.0 | prod optional + dev | none (default features keep `alloc`) |
+| `aes-gcm` | 0.10.3 | 0.11.0 | prod (native-only) | 2 files, 6 fns |
+| `chacha20poly1305` | 0.10.1 | 0.11.0 | prod (native-only) | (same migration) |
+
+**base64 0.23.** No API break for our engine usage. Safety-relevant: 0.23
+default-enables the new `simd-unsafe` feature (unsafe SIMD engines). We now
+declare `default-features = false, features = ["std"]` to keep the fully safe
+scalar engine, consistent with the workspace `deny(unsafe_code)` posture. A
+`base64 0.22` copy remains in the dev graph via third-party dev-deps.
+
+**aes-gcm / chacha20poly1305 0.11 (migrated together — shared `aead` stack).**
+RustCrypto generation bump (aead 0.5→0.6, cipher 0.4→0.5, Edition 2024):
+`AeadInPlace::{en,de}crypt_in_place_detached` → `AeadInOut::{en,de}crypt_inout_detached`
+taking `InOutBuf`; `Nonce`/`Tag` moved from GenericArray (`from_slice`, panics
+on bad length) to hybrid-array (`From<[u8; N]>` / fallible `TryFrom<&[u8]>`).
+Migrated `src/net/atp/crypto/mod.rs` (ChaCha20-Poly1305 + AES-256-GCM
+encrypt/decrypt) and `src/atp/mailbox/encryption.rs` (`EncryptedChunk`). Wire
+format unchanged (same AEADs, 12-byte nonces, detached 16-byte tags);
+slice-length conversion now fails closed with explicit errors instead of
+panicking. This harmonizes the graph on the digest-0.11 generation already used
+by sha2/hmac (drops `opaque-debug`, dedups part of the digest/crypto-common
+chains); the remaining `sha2 0.10` duplicate rides `nkeys → ed25519-dalek`
+(replacement plan Phase 5).
+
+### Skipped (intentional)
+
+- **`syn` 2→3 for `asupersync-macros`/`drop_unwrap_finder`:** migrating would
+  NOT dedup the graph — thiserror-impl, pin-project-internal, zeroize_derive,
+  prost-derive et al. still require syn 2, so both majors remain either way.
+  Revisit when the ecosystem majority moves (or when plan Phase 4 makes our own
+  macros the only syn consumer we control).
+- **`serde_yaml` (deprecated upstream):** no successor to update to; plan
+  Phase 3 removes it by migrating frankenlab scenarios to JSON.
+- Pinned nightly toolchain, path/workspace pins, opentelemetry 0.32 (already
+  latest): untouched.
+
+### Method note
+
+This repo's test gate runs on the rch remote fleet with a long full-suite wall
+time and a dozen concurrent agents dirtying the working tree, so verification
+used `rch exec --base HEAD --clean-overlay` with only this pass's changed files
+overlaid (peer edits cannot confound results), in two batches: (1) lockfile
+refresh alone → full `cargo test --features test-internals`; (2) manifest
+removals + majors + AEAD migration → `cargo check --all-targets` with
+`-D warnings`, then the full suite. Each change was researched individually
+(changelogs/release notes) before applying; any batch failure is bisected
+per-dependency with rollback per the library-updater protocol.
+
+### Validation
+
+- **Batch 1 (lockfile-only), full `cargo test --features test-internals`:**
+  21,363 passed / 3 failed / 22 ignored. The 3 failures
+  (`audit::ambient::tests::ambient_authority_does_not_regress`,
+  `gen_server::tests::named_start_helper_crash_then_stop_cleans_registry`,
+  `runtime::state::tests::task_completion_tracing_panic_is_contained_and_counted`)
+  were **exonerated by a control run at clean `HEAD` with the OLD lockfile
+  (`--clean-overlay --no-overlay`), which fails the identical 3 tests** —
+  pre-existing HEAD redness from code-first peer commits, not caused by this
+  pass. Filed as `asupersync-bm3tty` (P1 bug).
+- **Batch 2 (removals + majors + AEAD migration):**
+  `cargo check --all-targets --features test-internals` with `-D warnings` —
+  clean (0 errors, 10m20s remote). Full suite: **21,363 passed / 3 failed —
+  the identical pre-existing `asupersync-bm3tty` set, zero new failures.**
+  (One fleet SSH timeout, RCH-E104, required a retry on another worker.)
+- `cargo audit` not run this session (not installed on this host); plan
+  Phase 6 adds a `cargo deny`/`cargo audit` CI lane. No known-advisory crates
+  were introduced by this refresh; the sqlx/rsa RUSTSEC-2023-0071 advisory
+  noted in pass 1 was already cleared by pass 3's sqlx 0.9 bump.

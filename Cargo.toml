@@ -367,7 +367,7 @@ franken-kernel = { version = "0.3.9", path = "franken_kernel" }
 # Optional conformance tooling (CLI + reports) - removed to break cyclic dependency
 # conformance = { package = "asupersync-conformance", version = "0.3.8", path = "conformance", optional = true }
 # Optional LZ4 compression for trace files
-lz4_flex = { version = "0.13", optional = true }
+lz4_flex = { version = "0.14", optional = true }
 # Optional visibility macro for test-internals feature
 visibility = { version = "0.1", optional = true }
 # Optional arbitrary derive support for fuzzing
@@ -390,8 +390,10 @@ rustls-native-certs = { version = "0.8", optional = true }
 webpki-roots = { version = "1.0", optional = true }
 # PEM file parsing for TLS certificates
 rustls-pemfile = { version = "2.2", optional = true }
-# Base64 encoding for WebSocket handshake and certificate pins
-base64 = "0.22.1"
+# Base64 encoding for WebSocket handshake and certificate pins.
+# default-features off: base64 0.23 default-enables an unsafe-SIMD engine
+# (`simd-unsafe`); we keep the safe scalar engine only.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 # NATS nkey seed parsing and nonce signing
 nkeys = "0.4.5"
 # SHA-1 hashing for WebSocket Sec-WebSocket-Accept calculation (RFC 6455)
@@ -422,9 +424,9 @@ hmac = "0.13"
 subtle = "2.6"
 # Secure memory zeroization for AuthKey and other sensitive data
 zeroize = { version = "1.8", features = ["derive"] }
-# HKDF for QUIC key derivation (RFC 9001)
-hkdf = "0.13"
-# CRC32 for Kafka RecordBatch v2 format validation (KIP-98)
+# NOTE: the `hkdf` crate was removed 2026-07-23 (dead dependency): HKDF is
+# hand-rolled on `hmac` in net/atp/handshake/key_schedule.rs and security/key.rs.
+# CRC32 for ATP journal/stream integrity (atp/journal, net/atp/sdk/stream, masque)
 crc32fast = "1.4"
 # QUIC/HTTP3 is intentionally native-only for ATP and the runtime core.
 # Do not add an external QUIC/H3 stack dependency here.
@@ -446,7 +448,6 @@ flate2 = { version = "1.1", optional = true }
 brotli = { version = "8.0", optional = true }
 # System information for daemon process control
 sysinfo = "0.39"
-crossbeam-deque = "0.8.6"
 prost = "0.14"
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
@@ -505,8 +506,8 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 nix = { version = "0.31", features = ["fs", "net", "poll", "signal", "socket", "uio", "user"] }
 signal-hook = "0.4"
-aes-gcm = "0.10.3"
-chacha20poly1305 = "0.10.1"
+aes-gcm = "0.11"
+chacha20poly1305 = "0.11"
 
 # xattr is unix-only (its source references std::os::unix); gate the dependency
 # so non-unix targets (e.g. x86_64-pc-windows-msvc) don't try to compile it.
@@ -531,7 +532,7 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["m
 # Dev-only OTLP wire fixtures use tonic-generated protobuf messages; this edge
 # is scoped to tests/fuzzing and not to the default or metrics production graph.
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
-lz4_flex = "0.13"
+lz4_flex = "0.14"
 toml = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 rayon = "1.12"
