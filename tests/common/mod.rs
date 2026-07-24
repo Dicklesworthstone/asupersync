@@ -32,10 +32,11 @@ pub use asupersync::lab::{
 #[cfg(feature = "test-internals")]
 pub use asupersync::test_logging::{
     ARTIFACT_SCHEMA_VERSION, AggregatedReport, AllocatedPort, DockerFixtureService,
-    EnvironmentMetadata, FixtureService, InProcessService, LIVE_CURRENT_THREAD_ADAPTER,
-    NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture, TestContext, TestEnvironment,
-    TestHarness, TestReportAggregator, TestSummary, derive_component_seed, derive_entropy_seed,
-    derive_scenario_seed, wait_until_healthy,
+    EnvironmentMetadata, FixtureLogs, FixtureService, InProcessService,
+    LIVE_CURRENT_THREAD_ADAPTER, NoOpFixtureService, PinnedProcessIdentity, PortAllocator,
+    ProcessFixtureService, ProcessReadiness, ReproManifest, TempDirFixture, TestContext,
+    TestEnvironment, TestHarness, TestReportAggregator, TestSummary, derive_component_seed,
+    derive_entropy_seed, derive_scenario_seed, wait_until_healthy,
 };
 
 #[cfg(feature = "test-internals")]

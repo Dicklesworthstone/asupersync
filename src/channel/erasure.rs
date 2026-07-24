@@ -54,10 +54,16 @@ use crate::config::EncodingConfig;
 use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
 use crate::encoding::EncodingPipeline;
-use crate::security::{AuthenticatedSymbol, SecurityContext};
+use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::util::DetRng;
+use sha2::{Digest, Sha256};
+
+const AUTHENTICATED_HEADER_DOMAIN: &[u8] =
+    b"asupersync::channel::erasure::authenticated-header::v1";
+const TRANSFER_DIGEST_DOMAIN: &[u8] = b"asupersync::channel::erasure::transfer-digest::v1";
+const SYMBOL_BINDING_DOMAIN: &[u8] = b"asupersync::channel::erasure::symbol-binding::v1";
 
 /// Configuration for an erasure-coded channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +156,7 @@ impl EcConfig {
         message_id: u64,
         message: &[u8],
     ) -> Result<EncodedMessage, EcError> {
-        self.plan(message.len())?;
+        let planned = self.plan(message.len())?;
         let enc_config = EncodingConfig {
             symbol_size: self.symbol_size,
             max_block_size: self.max_message_size,
@@ -183,8 +189,14 @@ impl EcConfig {
             ));
         }
 
-        let total_symbols =
-            u16::try_from(frames.len()).map_err(|_| EcError::SymbolCountOverflow)?;
+        let total_symbols = if message.is_empty() {
+            planned.total_symbols
+        } else {
+            u16::try_from(frames.len()).map_err(|_| EcError::SymbolCountOverflow)?
+        };
+        if message.is_empty() {
+            source_symbols = planned.source_symbols;
+        }
         let message_size =
             u32::try_from(message.len()).map_err(|_| EcError::SymbolCountOverflow)?;
         let header = MessageHeader {
@@ -194,6 +206,7 @@ impl EcConfig {
             source_symbols,
             total_symbols,
         };
+        header.validate()?;
         Ok(EncodedMessage { header, frames })
     }
 
@@ -215,8 +228,8 @@ impl EcConfig {
         message_id: u64,
         message: &[u8],
         auth: &SecurityContext,
-    ) -> Result<(MessageHeader, Vec<AuthenticatedSymbol>), EcError> {
-        self.plan(message.len())?;
+    ) -> Result<(AuthenticatedMessageHeader, Vec<AuthenticatedSymbol>), EcError> {
+        let planned = self.plan(message.len())?;
         let enc_config = EncodingConfig {
             symbol_size: self.symbol_size,
             max_block_size: self.max_message_size,
@@ -227,7 +240,7 @@ impl EcConfig {
         let object_id = ObjectId::new(message_id, 0);
         let repair_count = self.repair_overhead as usize;
 
-        let mut symbols = Vec::new();
+        let mut raw_symbols = Vec::new();
         let mut source_symbols: u16 = 0;
         for result in pipeline.encode_with_repair(object_id, message, repair_count) {
             let symbol = result.map_err(|e| EcError::Coding(e.to_string()))?;
@@ -241,11 +254,17 @@ impl EcConfig {
                     .checked_add(1)
                     .ok_or(EcError::SymbolCountOverflow)?;
             }
-            symbols.push(auth.sign_symbol(symbol.symbol()));
+            raw_symbols.push(symbol.symbol().clone());
         }
 
-        let total_symbols =
-            u16::try_from(symbols.len()).map_err(|_| EcError::SymbolCountOverflow)?;
+        let total_symbols = if message.is_empty() {
+            planned.total_symbols
+        } else {
+            u16::try_from(raw_symbols.len()).map_err(|_| EcError::SymbolCountOverflow)?
+        };
+        if message.is_empty() {
+            source_symbols = planned.source_symbols;
+        }
         let message_size =
             u32::try_from(message.len()).map_err(|_| EcError::SymbolCountOverflow)?;
         let header = MessageHeader {
@@ -255,7 +274,13 @@ impl EcConfig {
             source_symbols,
             total_symbols,
         };
-        Ok((header, symbols))
+        let authenticated_header = AuthenticatedMessageHeader::sign(header, message, auth)?;
+        let symbol_context = authenticated_header.symbol_context(auth);
+        let symbols = raw_symbols
+            .iter()
+            .map(|symbol| symbol_context.sign_symbol(symbol))
+            .collect();
+        Ok((authenticated_header, symbols))
     }
 }
 
@@ -287,6 +312,7 @@ pub struct EncodedMessage {
 /// reconstruct the block, or [`EcError::Coding`] if the decoder rejects a symbol
 /// or fails to finalize.
 pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<Vec<u8>, EcError> {
+    header.validate()?;
     if header.message_size == 0 {
         // A zero-length message carries no data symbols; the empty payload is
         // fully described by the header.
@@ -381,11 +407,14 @@ pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<
 /// the block (e.g. the wrong key, so none pass), or [`EcError::Coding`] if the
 /// decoder rejects a symbol or fails to finalize.
 pub fn decode_message_authenticated(
-    header: &MessageHeader,
+    authenticated_header: &AuthenticatedMessageHeader,
     symbols: &[AuthenticatedSymbol],
     auth: &SecurityContext,
 ) -> Result<Vec<u8>, EcError> {
+    authenticated_header.verify(auth)?;
+    let header = &authenticated_header.header;
     if header.message_size == 0 {
+        authenticated_header.verify_decoded_payload(&[])?;
         return Ok(Vec::new());
     }
     let object_id = ObjectId::new(header.message_id, 0);
@@ -401,7 +430,8 @@ pub fn decode_message_authenticated(
         ..DecodingConfig::default()
     };
 
-    let mut decoder = DecodingPipeline::with_auth(config, auth.clone());
+    let mut decoder =
+        DecodingPipeline::with_auth(config, authenticated_header.symbol_context(auth));
     decoder
         .set_object_params(ObjectParams {
             object_id,
@@ -423,9 +453,11 @@ pub fn decode_message_authenticated(
             needed: source_symbols,
         });
     }
-    decoder
+    let decoded = decoder
         .into_data()
-        .map_err(|e| EcError::Coding(e.to_string()))
+        .map_err(|e| EcError::Coding(e.to_string()))?;
+    authenticated_header.verify_decoded_payload(&decoded)?;
+    Ok(decoded)
 }
 
 /// A unit on the erasure channel's in-memory symbol transport: either a message
@@ -752,13 +784,45 @@ impl MessageHeader {
     pub fn from_layout(message_id: u64, layout: &BlockLayout) -> Result<Self, EcError> {
         let message_size =
             u32::try_from(layout.message_size).map_err(|_| EcError::SymbolCountOverflow)?;
-        Ok(Self {
+        let header = Self {
             message_id,
             message_size,
             symbol_size: layout.symbol_size,
             source_symbols: layout.source_symbols,
             total_symbols: layout.total_symbols,
-        })
+        };
+        header.validate()?;
+        Ok(header)
+    }
+
+    /// Validates the exact single-block geometry before it can influence decode
+    /// allocation or empty-message shortcuts.
+    pub fn validate(&self) -> Result<(), EcError> {
+        if self.symbol_size == 0 {
+            return Err(EcError::InvalidHeader {
+                reason: "symbol_size must be non-zero",
+            });
+        }
+        if self.source_symbols == 0 {
+            return Err(EcError::InvalidHeader {
+                reason: "source_symbols must be non-zero",
+            });
+        }
+        if self.total_symbols < self.source_symbols {
+            return Err(EcError::InvalidHeader {
+                reason: "total_symbols must be at least source_symbols",
+            });
+        }
+        let expected_source = usize::try_from(self.message_size)
+            .expect("u32 fits usize on supported targets")
+            .div_ceil(usize::from(self.symbol_size))
+            .max(1);
+        if expected_source != usize::from(self.source_symbols) {
+            return Err(EcError::InvalidHeader {
+                reason: "message_size does not match source-symbol geometry",
+            });
+        }
+        Ok(())
     }
 
     /// Reconstructs the [`BlockLayout`] a receiver should plan against from
@@ -813,12 +877,130 @@ impl MessageHeader {
         let symbol_size = u16::from_le_bytes(bytes[12..14].try_into().expect("2 bytes"));
         let source_symbols = u16::from_le_bytes(bytes[14..16].try_into().expect("2 bytes"));
         let total_symbols = u16::from_le_bytes(bytes[16..18].try_into().expect("2 bytes"));
-        Ok(Self {
+        let header = Self {
             message_id,
             message_size,
             symbol_size,
             source_symbols,
             total_symbols,
+        };
+        header.validate()?;
+        Ok(header)
+    }
+}
+
+/// Authenticated control envelope for one erasure-coded message.
+///
+/// The tag covers the exact canonical [`MessageHeader`] bytes plus a digest of
+/// those bytes and the complete message payload. The same binding derives the
+/// per-symbol authentication subkey, preventing valid symbols from a reused
+/// `message_id` from being mixed with another transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedMessageHeader {
+    /// Canonical decode geometry.
+    pub header: MessageHeader,
+    /// SHA-256 over the canonical header and complete message payload.
+    pub transfer_digest: [u8; 32],
+    /// Domain-separated HMAC over `header || transfer_digest`.
+    pub authentication_tag: AuthenticationTag,
+}
+
+impl AuthenticatedMessageHeader {
+    /// Fixed wire length: canonical header, transfer digest, and HMAC tag.
+    pub const ENCODED_LEN: usize = MessageHeader::ENCODED_LEN + 32 + 32;
+
+    fn sign(
+        header: MessageHeader,
+        message: &[u8],
+        auth: &SecurityContext,
+    ) -> Result<Self, EcError> {
+        header.validate()?;
+        let transfer_digest = Self::compute_transfer_digest(&header, message);
+        let payload = Self::binding_payload(&header, &transfer_digest);
+        let authentication_tag = auth.sign_domain_payload(AUTHENTICATED_HEADER_DOMAIN, &payload);
+        Ok(Self {
+            header,
+            transfer_digest,
+            authentication_tag,
+        })
+    }
+
+    fn compute_transfer_digest(header: &MessageHeader, message: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(TRANSFER_DIGEST_DOMAIN);
+        hasher.update(header.encode());
+        hasher.update((message.len() as u64).to_le_bytes());
+        hasher.update(message);
+        hasher.finalize().into()
+    }
+
+    fn binding_payload(header: &MessageHeader, transfer_digest: &[u8; 32]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(MessageHeader::ENCODED_LEN + transfer_digest.len());
+        payload.extend_from_slice(&header.encode());
+        payload.extend_from_slice(transfer_digest);
+        payload
+    }
+
+    fn symbol_context(&self, auth: &SecurityContext) -> SecurityContext {
+        let binding = Self::binding_payload(&self.header, &self.transfer_digest);
+        let mut purpose = Vec::with_capacity(SYMBOL_BINDING_DOMAIN.len() + binding.len());
+        purpose.extend_from_slice(SYMBOL_BINDING_DOMAIN);
+        purpose.extend_from_slice(&binding);
+        auth.derive_context(&purpose)
+    }
+
+    fn verify(&self, auth: &SecurityContext) -> Result<(), EcError> {
+        self.header.validate()?;
+        let payload = Self::binding_payload(&self.header, &self.transfer_digest);
+        if !auth.verify_domain_payload(
+            AUTHENTICATED_HEADER_DOMAIN,
+            &payload,
+            &self.authentication_tag,
+        ) {
+            return Err(EcError::AuthenticationFailed);
+        }
+        Ok(())
+    }
+
+    fn verify_decoded_payload(&self, decoded: &[u8]) -> Result<(), EcError> {
+        let actual = Self::compute_transfer_digest(&self.header, decoded);
+        if actual != self.transfer_digest {
+            return Err(EcError::AuthenticationFailed);
+        }
+        Ok(())
+    }
+
+    /// Encodes the authenticated envelope in canonical fixed-width form.
+    #[must_use]
+    pub fn encode(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0u8; Self::ENCODED_LEN];
+        out[..MessageHeader::ENCODED_LEN].copy_from_slice(&self.header.encode());
+        out[MessageHeader::ENCODED_LEN..MessageHeader::ENCODED_LEN + 32]
+            .copy_from_slice(&self.transfer_digest);
+        out[MessageHeader::ENCODED_LEN + 32..].copy_from_slice(self.authentication_tag.as_bytes());
+        out
+    }
+
+    /// Decodes and structurally validates an authenticated header envelope.
+    /// Cryptographic verification occurs in [`decode_message_authenticated`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, EcError> {
+        if bytes.len() < Self::ENCODED_LEN {
+            return Err(EcError::ShortHeader {
+                got: bytes.len(),
+                need: Self::ENCODED_LEN,
+            });
+        }
+        let header = MessageHeader::decode(&bytes[..MessageHeader::ENCODED_LEN])?;
+        let transfer_digest = bytes[MessageHeader::ENCODED_LEN..MessageHeader::ENCODED_LEN + 32]
+            .try_into()
+            .expect("32-byte transfer digest");
+        let tag_bytes = bytes[MessageHeader::ENCODED_LEN + 32..Self::ENCODED_LEN]
+            .try_into()
+            .expect("32-byte authentication tag");
+        Ok(Self {
+            header,
+            transfer_digest,
+            authentication_tag: AuthenticationTag::from_bytes(tag_bytes),
         })
     }
 }
@@ -1151,6 +1333,13 @@ pub enum EcError {
     },
     /// The plan/header would exceed the 16-/32-bit on-wire count space.
     SymbolCountOverflow,
+    /// A decoded or caller-supplied header had impossible single-block geometry.
+    InvalidHeader {
+        /// Stable diagnostic for the rejected invariant.
+        reason: &'static str,
+    },
+    /// Header, symbol binding, or reconstructed payload authentication failed.
+    AuthenticationFailed,
     /// A buffer was too short to contain a [`MessageHeader`].
     ShortHeader {
         /// Bytes available.
@@ -1199,6 +1388,12 @@ impl fmt::Display for EcError {
                     f,
                     "erasure block layout exceeds the on-wire symbol-count space"
                 )
+            }
+            Self::InvalidHeader { reason } => {
+                write!(f, "invalid erasure message header: {reason}")
+            }
+            Self::AuthenticationFailed => {
+                write!(f, "erasure message authentication failed")
             }
             Self::ShortHeader { got, need } => {
                 write!(f, "message header needs {need} bytes, got {got}")

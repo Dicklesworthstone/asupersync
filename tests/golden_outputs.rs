@@ -25,7 +25,7 @@ use asupersync::cx::Cx;
 use asupersync::lab::oracle::{LoserDrainOracle, OracleViolation};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::plan::certificate::{verify, verify_steps};
-use asupersync::plan::fixtures::all_fixtures;
+use asupersync::plan::fixtures::{all_fixtures, outcome_sets};
 use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::{JoinError, TaskHandle, yield_now};
@@ -44,21 +44,52 @@ use futures_lite::future;
 use insta::{assert_debug_snapshot, assert_snapshot};
 use parking_lot::Mutex;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 // ============================================================================
 // Checksum helper
 // ============================================================================
 
-/// Compute a stable checksum from a sequence of u64 values.
+/// Compute a cross-toolchain-stable checksum from a sequence of `u64` values.
+///
+/// The domain marker and explicit little-endian framing are part of the golden
+/// contract. The first 64 bits keep the historical compact display format;
+/// SHA-256 makes the bytes independent of `std`'s intentionally unspecified
+/// `DefaultHasher` implementation.
 fn checksum(values: &[u64]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for v in values {
-        v.hash(&mut hasher);
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.golden-u64.v1");
+    hasher.update(
+        u64::try_from(values.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for value in values {
+        hasher.update(value.to_le_bytes());
     }
-    hasher.finish()
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix is 8 bytes"))
+}
+
+fn stable_json_digest(value: &impl serde::Serialize) -> String {
+    let encoded = serde_json::to_vec(value).expect("serialize stable golden receipt");
+    let digest = Sha256::digest(encoded);
+    hex::encode(digest)
+}
+
+fn stable_plan_trace_digest(trace: &GoldenTraceFixture) -> String {
+    // `GoldenTraceFixture::fingerprint` is a compact runtime lookup key. Pin
+    // the actual serialized trace contract here with SHA-256 instead: config,
+    // event count, canonical event prefix, and oracle verdicts.
+    stable_json_digest(&json!({
+        "schema_version": trace.schema_version,
+        "config": &trace.config,
+        "event_count": trace.event_count,
+        "canonical_prefix": &trace.canonical_prefix,
+        "oracle_summary": &trace.oracle_summary,
+    }))
 }
 
 fn oracle_violation_tag(violation: &OracleViolation) -> &'static str {
@@ -189,7 +220,7 @@ fn golden_outcome_severity_lattice() {
     }
 
     let cs = checksum(&severities);
-    assert_golden("outcome_severity_lattice", cs, 0x0289_507D_DCB2_C380);
+    assert_golden("outcome_severity_lattice", cs, 0xE180_EB72_306A_2BAC);
 }
 
 #[test]
@@ -206,7 +237,7 @@ fn golden_budget_combine_semiring() {
         combined.deadline.unwrap_or(Time::ZERO).as_nanos(),
         u64::from(combined.poll_quota),
     ]);
-    assert_golden("budget_combine_semiring", cs, 0x276B_7D0F_D47B_53ED);
+    assert_golden("budget_combine_semiring", cs, 0xDF9D_D68F_C9EC_3694);
 }
 
 #[test]
@@ -227,7 +258,7 @@ fn golden_cancel_reason_strengthen() {
     let kind3 = r3.kind() as u64;
 
     let cs = checksum(&[kind1, kind2, kind3]);
-    assert_golden("cancel_reason_strengthen", cs, 0xF232_B96C_A6AB_8084);
+    assert_golden("cancel_reason_strengthen", cs, 0x5043_3370_4DE8_7FDC);
 }
 
 // ============================================================================
@@ -257,7 +288,7 @@ fn golden_arena_insert_remove_cycle() {
     values.sort_unstable();
 
     let cs = checksum(&values);
-    assert_golden("arena_insert_remove_cycle", cs, 0xBE5F_120D_9FC1_2946);
+    assert_golden("arena_insert_remove_cycle", cs, 0xC865_5E8C_82A2_704D);
 }
 
 // ============================================================================
@@ -290,7 +321,7 @@ fn golden_runtime_state_region_lifecycle() {
         cancelled.len() as u64,
         u64::from(state.is_quiescent()),
     ]);
-    assert_golden("runtime_state_region_lifecycle", cs, 0x09F8_31EE_36D2_6D6A);
+    assert_golden("runtime_state_region_lifecycle", cs, 0xAF3C_9BE4_8F6F_72CE);
 }
 
 // ============================================================================
@@ -312,7 +343,7 @@ fn golden_lab_runtime_deterministic_scheduling() {
     let trace3 = run_deterministic_workload(seed + 1);
     assert_ne!(trace1, trace3, "Different seeds produced same trace");
 
-    assert_golden("lab_runtime_deterministic", trace1, 0x7AC4_8655_0E5C_ED3D);
+    assert_golden("lab_runtime_deterministic", trace1, 0xDEEA_BFC7_6E0C_37E0);
 }
 
 const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
@@ -383,46 +414,63 @@ const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
   }
 }"#;
 
-const GOLDEN_PLAN_TRACE_SIMPLE_JOIN_RACE_DEDUP: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_THREE_WAY_RACE_OF_JOINS: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_NESTED_TIMEOUT_JOIN_RACE: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_NO_SHARED_CHILD: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_SINGLE_BRANCH_RACE: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_DEEP_CHAIN_NO_REWRITE: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_CONSERVATIVE: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_ASSOCIATIVE: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_DIAMOND_JOIN_RACE: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_TIMEOUT_WRAPPING_DEDUP: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_INDEPENDENT_SUBTREES: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_RACE_OF_LEAVES: &str = GOLDEN_TRACE_FIXTURE_LAB;
+struct PlanRewriteGolden {
+    name: &'static str,
+    seed: u64,
+    steps: &'static str,
+    before_hash: &'static str,
+    after_hash: &'static str,
+    certificate_fingerprint: &'static str,
+}
 
-// Cancel-aware fixtures (F13-F16)
-const GOLDEN_PLAN_TRACE_RACE_CANCEL_WITH_TIMEOUT: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_NESTED_RACE_CANCEL_CASCADE: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_TIMEOUT_RACE_DEDUP_CANCEL: &str = GOLDEN_TRACE_FIXTURE_LAB;
-const GOLDEN_PLAN_TRACE_RACE_OBLIGATION_CANCEL: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const PLAN_REWRITE_GOLDENS: &[PlanRewriteGolden] = &[
+    PlanRewriteGolden {
+        name: "simple_join_race_dedup",
+        seed: 10_000,
+        steps: "DedupRaceJoin:5->7",
+        before_hash: "9ab853b5bb73b95ab9b307e02357fb8e898496b7d3413557f419c0e7069e8e95",
+        after_hash: "0cffa48607f55c8b136238a76fec2d8707a9fa8956a76be5c74b163cefb665d1",
+        certificate_fingerprint: "76d3485657bf9a913513dcb613198117dcaa1a3997bb6dc2afb92ecc61bbd34e",
+    },
+    PlanRewriteGolden {
+        name: "nested_timeout_join_race",
+        seed: 10_002,
+        steps: "DedupRaceJoin:5->8",
+        before_hash: "439f8048051846cdce752e3ffe259b0431f8d44ced1fd180f0dd986a65996dc0",
+        after_hash: "26fd6ec1de81e172840dc39a0b9ab57f0e367a4d1c9bc076168cd66a8dd64f59",
+        certificate_fingerprint: "4636b36fb4b81e1908aeb87b11228bcc7b0b36232fa27e7cbb3f21306c7a59b6",
+    },
+    PlanRewriteGolden {
+        name: "shared_non_leaf_associative",
+        seed: 10_007,
+        steps: "DedupRaceJoin:7->9",
+        before_hash: "e491f8bcc017c9fbd2b4566804bc0ab4ef84ce71b017b25c9eaa9267fd5c203f",
+        after_hash: "00982263e2b81be4953f0f44314f5719e53b16938c8d85a273f2d5d5c53d33fe",
+        certificate_fingerprint: "aa18580c8a1922640ba0d12801e6082d47576471baf189b0ec7efe1815743999",
+    },
+    PlanRewriteGolden {
+        name: "timeout_wrapping_dedup",
+        seed: 10_009,
+        steps: "DedupRaceJoin:5->10",
+        before_hash: "3f58fb0f84f8fdfca9dcc7e163bcd7a98297b8ec21ff457b1631f975534d84b6",
+        after_hash: "896aca7fd80cd912ed06ba80ce1b700340294ee11984edf3acc987748039def0",
+        certificate_fingerprint: "843b0b37ef6d14371e0bdea54e7822a7ae5e838e0c28d771580d3a8aafd45a5a",
+    },
+    PlanRewriteGolden {
+        name: "timeout_race_dedup_cancel",
+        seed: 10_014,
+        steps: "DedupRaceJoin:7->9",
+        before_hash: "3cc3fbe70d9e32b9bfb820ee379944c7d87125dce6a71449de1cabf1c4093794",
+        after_hash: "70830f3ef46567d026a951e51569ccae42223c952372def529f6d70331f79525",
+        certificate_fingerprint: "e4eeb5a5a07c05c568f776e22251f130e50f610e910f7a532dc5a6b083c6cb78",
+    },
+];
 
-fn golden_plan_trace_fixture_json(name: &str) -> &'static str {
-    match name {
-        "simple_join_race_dedup" => GOLDEN_PLAN_TRACE_SIMPLE_JOIN_RACE_DEDUP,
-        "three_way_race_of_joins" => GOLDEN_PLAN_TRACE_THREE_WAY_RACE_OF_JOINS,
-        "nested_timeout_join_race" => GOLDEN_PLAN_TRACE_NESTED_TIMEOUT_JOIN_RACE,
-        "no_shared_child" => GOLDEN_PLAN_TRACE_NO_SHARED_CHILD,
-        "single_branch_race" => GOLDEN_PLAN_TRACE_SINGLE_BRANCH_RACE,
-        "deep_chain_no_rewrite" => GOLDEN_PLAN_TRACE_DEEP_CHAIN_NO_REWRITE,
-        "shared_non_leaf_conservative" => GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_CONSERVATIVE,
-        "shared_non_leaf_associative" => GOLDEN_PLAN_TRACE_SHARED_NON_LEAF_ASSOCIATIVE,
-        "diamond_join_race" => GOLDEN_PLAN_TRACE_DIAMOND_JOIN_RACE,
-        "timeout_wrapping_dedup" => GOLDEN_PLAN_TRACE_TIMEOUT_WRAPPING_DEDUP,
-        "independent_subtrees" => GOLDEN_PLAN_TRACE_INDEPENDENT_SUBTREES,
-        "race_of_leaves" => GOLDEN_PLAN_TRACE_RACE_OF_LEAVES,
-        // Cancel-aware fixtures
-        "race_cancel_with_timeout" => GOLDEN_PLAN_TRACE_RACE_CANCEL_WITH_TIMEOUT,
-        "nested_race_cancel_cascade" => GOLDEN_PLAN_TRACE_NESTED_RACE_CANCEL_CASCADE,
-        "timeout_race_dedup_cancel" => GOLDEN_PLAN_TRACE_TIMEOUT_RACE_DEDUP_CANCEL,
-        "race_obligation_cancel" => GOLDEN_PLAN_TRACE_RACE_OBLIGATION_CANCEL,
-        _ => panic!("missing golden plan trace fixture for {name}"),
-    }
+fn plan_rewrite_golden(name: &str) -> &'static PlanRewriteGolden {
+    PLAN_REWRITE_GOLDENS
+        .iter()
+        .find(|golden| golden.name == name)
+        .unwrap_or_else(|| panic!("missing real plan-rewrite golden receipt for {name}"))
 }
 
 #[test]
@@ -438,6 +486,7 @@ fn golden_trace_fixture_lab() {
 #[test]
 fn golden_plan_rewrite_trace_fixtures() {
     let fixtures = all_fixtures();
+    let mut covered_rewrite_fixtures = BTreeSet::new();
     assert!(
         fixtures.len() >= 10,
         "expected >= 10 plan fixtures, got {}",
@@ -475,11 +524,34 @@ fn golden_plan_rewrite_trace_fixtures() {
             "fixture {}: certificate step verification failed",
             fixture.name
         );
+        assert_eq!(
+            cert.before_hash,
+            asupersync::plan::certificate::PlanHash::of(&original),
+            "fixture {}: certificate must hash the actual input plan",
+            fixture.name
+        );
+        assert_eq!(
+            cert.after_hash,
+            asupersync::plan::certificate::PlanHash::of(&rewritten),
+            "fixture {}: certificate must hash the actual rewritten plan",
+            fixture.name
+        );
 
         let (original_trace, original_result) =
             build_plan_trace_fixture(seed, &original, fixture.name);
         let (rewritten_trace, rewritten_result) =
             build_plan_trace_fixture(seed, &rewritten, fixture.name);
+
+        assert!(
+            original_trace.oracle_summary.violations.is_empty(),
+            "fixture {}: original plan trace has oracle violations",
+            fixture.name
+        );
+        assert!(
+            rewritten_trace.oracle_summary.violations.is_empty(),
+            "fixture {}: rewritten plan trace has oracle violations",
+            fixture.name
+        );
 
         if fixture.expected_step_count == 0 {
             // No rewrites: plans are identical, so results and traces must match.
@@ -498,23 +570,95 @@ fn golden_plan_rewrite_trace_fixtures() {
                 "fixture {}: identity rewrite changed canonical prefix",
                 fixture.name
             );
-        }
+        } else {
+            let expected = plan_rewrite_golden(fixture.name);
+            assert_eq!(seed, expected.seed, "fixture {}: seed drift", fixture.name);
+            assert_ne!(
+                cert.before_hash, cert.after_hash,
+                "fixture {}: claimed rewrite must change the plan hash",
+                fixture.name
+            );
+            let steps = report
+                .steps()
+                .iter()
+                .map(|step| {
+                    format!(
+                        "{:?}:{}->{}",
+                        step.rule,
+                        step.before.index(),
+                        step.after.index()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(
+                steps, expected.steps,
+                "fixture {}: rewrite-step drift",
+                fixture.name
+            );
+            assert_eq!(
+                cert.before_hash.to_hex(),
+                expected.before_hash,
+                "fixture {}: input plan checksum drift",
+                fixture.name
+            );
+            assert_eq!(
+                cert.after_hash.to_hex(),
+                expected.after_hash,
+                "fixture {}: rewritten plan checksum drift",
+                fixture.name
+            );
+            assert_eq!(
+                cert.fingerprint().to_hex(),
+                expected.certificate_fingerprint,
+                "fixture {}: certificate checksum drift",
+                fixture.name
+            );
 
-        // Ensure each fixture is wired to a syntactically valid golden entry.
-        // This keeps fixture→golden mapping complete until per-fixture baselines
-        // are recorded in this test file.
-        let expected_json = golden_plan_trace_fixture_json(fixture.name);
-        let expected_fixture: GoldenTraceFixture = serde_json::from_str(expected_json)
-            .unwrap_or_else(|e| panic!("invalid golden fixture JSON for {}: {e}", fixture.name));
-        assert_eq!(
-            expected_fixture.schema_version, 1,
-            "fixture {}: unexpected golden schema version",
-            fixture.name
-        );
+            let original_static = outcome_sets(&original, original.root().expect("original root"));
+            let rewritten_static =
+                outcome_sets(&rewritten, rewritten.root().expect("rewritten root"));
+            assert_eq!(
+                original_static, rewritten_static,
+                "fixture {}: rewrite changed the static result set",
+                fixture.name
+            );
+            let original_labels = original_result.iter().cloned().collect::<Vec<_>>();
+            let rewritten_labels = rewritten_result.iter().cloned().collect::<Vec<_>>();
+            assert!(
+                original_static.contains(&original_labels),
+                "fixture {}: original runtime result escaped the static contract",
+                fixture.name
+            );
+            assert!(
+                rewritten_static.contains(&rewritten_labels),
+                "fixture {}: rewritten runtime result escaped the static contract",
+                fixture.name
+            );
+            assert_ne!(
+                stable_plan_trace_digest(&original_trace),
+                stable_plan_trace_digest(&rewritten_trace),
+                "fixture {}: real rewrite must produce a distinct trace receipt",
+                fixture.name
+            );
+            assert!(
+                covered_rewrite_fixtures.insert(fixture.name),
+                "fixture {}: duplicate rewrite coverage",
+                fixture.name
+            );
+        }
+    }
+
+    assert_eq!(
+        covered_rewrite_fixtures.len(),
+        PLAN_REWRITE_GOLDENS.len(),
+        "every reviewed rewrite golden must execute exactly once"
+    );
+    for expected in PLAN_REWRITE_GOLDENS {
         assert!(
-            expected_fixture.event_count > 0,
-            "fixture {}: golden fixture must contain at least one event",
-            fixture.name
+            covered_rewrite_fixtures.contains(expected.name),
+            "golden receipt {} did not execute",
+            expected.name
         );
     }
 }
@@ -1073,7 +1217,7 @@ fn golden_join_outcome_aggregation() {
     }
 
     let cs = checksum(&results);
-    assert_golden("join_outcome_aggregation", cs, 0x96DC_2A9B_CDB7_E036);
+    assert_golden("join_outcome_aggregation", cs, 0x280E_8891_E969_8970);
 }
 
 #[test]
@@ -1085,7 +1229,7 @@ fn golden_race_outcome_aggregation() {
     let (r2, _, _) = race2_outcomes(RaceWinner::Second, o_cancel, o_ok);
 
     let cs = checksum(&[r1.severity() as u64, r2.severity() as u64]);
-    assert_golden("race_outcome_aggregation", cs, 0x76BE_999E_3E25_B2A0);
+    assert_golden("race_outcome_aggregation", cs, 0xE737_01C1_F1CD_AB7F);
 }
 
 // ============================================================================
@@ -1107,5 +1251,5 @@ fn golden_time_arithmetic() {
         u64::from(t2 > t1),
         u64::from(t3 == Time::from_secs(2)),
     ]);
-    assert_golden("time_arithmetic", cs, 0xA957_37A5_9E2C_720B);
+    assert_golden("time_arithmetic", cs, 0xA1C4_630F_B3E2_E63F);
 }

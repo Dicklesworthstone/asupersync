@@ -307,6 +307,73 @@ E2E summary schema extension policy:
 - Any change to required fields (rename/remove/type change/semantics change)
   requires a schema version bump plus validator/test updates in the same change.
 
+### Dependency-Sovereignty E2E Contract
+
+The dependency program's maintained suite is:
+
+```bash
+bash scripts/run_all_e2e.sh --suite dependency-sovereignty
+```
+
+Its runner, `scripts/run_dependency_sovereignty_e2e.sh`, emits
+`summary.json`, `events.ndjson`, `scenarios.ndjson`,
+`validation_stages.ndjson`, `artifact_manifest.ndjson`, `environment.json`,
+`repro_manifest.json`, and per-step stdout/stderr under
+`target/e2e-results/dependency-sovereignty/<run_id>/`. The suite root also
+keeps `latest.json` and `latest_success.json` discovery pointers.
+
+The default smoke profile is contract-only and executes no Cargo. Opt-in
+Cargo-backed scenarios require `RCH_REQUIRE_REMOTE=1`, use isolated
+`CARGO_TARGET_DIR` values, and fail closed on missing RCH or any local fallback
+marker. `BLOCKED_RCH`, `UNSUPPORTED_PLATFORM`, timeout, signal, redaction,
+artifact, replay, and cleanup failures are non-green.
+
+List and select scenarios with:
+
+```bash
+bash scripts/run_dependency_sovereignty_e2e.sh --list
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario verification-matrix-contract \
+  --run-id ver-a2-review-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario failure-injection-contract \
+  --run-id ver-a4-failure-matrix-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario feature-platform-consumer-contract \
+  --run-id ver-a5-feature-platform-consumer-001
+
+bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract \
+  --dry-run \
+  --run-id ver-a6-dry-run-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract \
+  --run-id ver-a6-aggregate-signoff-001
+```
+
+`--dry-run` emits the complete inventory and replay bundle without executing a
+scenario. `--timeout` defaults to 900 seconds for direct runs and remains
+overrideable by the orchestrator environment. `--fail-fast` retains explicit
+`NOT_RUN_FAIL_FAST` rows for skipped work; the default continue-for-diagnostics
+mode preserves all attempted results. See
+`docs/dependency_verification_matrix.md` for the field contract, outcome
+taxonomy, and no-claim boundary. VER A4 replacement owners should also read
+`docs/dependency_failure_injection_matrix.md`; it defines the deterministic
+phase matrix, structured receipt, cleanup oracles, negative fixtures, exact
+replay requirements, and the boundary between contract proof and real no-mock
+replacement evidence.
+VER A5 profile or platform owners should read
+`docs/dependency_feature_platform_consumer_matrix.md`; it defines the complete
+sparse feature projection, host-versus-target coordinates, public-consumer and
+service-version rows, negative fixtures, and fail-closed no-claim states.
+VER A6 release-gate owners should read
+`docs/dependency_verification_final_signoff.md`; it defines the deterministic
+capability-to-evidence join, row-local E2E N/A rule, forensic artifact fields,
+14 negative fixtures, and `PASS_SCOPED_KEEP_DEFER` no-claim boundary.
+
 CI evidence:
 - `.github/workflows/ci.yml` check job runs `scripts/check_ci_matrix_policy.py`
   against `.github/ci_matrix_policy.json` and uploads
@@ -903,7 +970,9 @@ manage services, ports, and metadata deterministically.
 | `TestEnvironment` | Ties together `TestContext` + ports + services + cleanup |
 | `PortAllocator` | OS-assigned ephemeral ports with labels; prevents conflicts |
 | `FixtureService` trait | `start()` / `stop()` / `is_healthy()` for any service |
-| `DockerFixtureService` | Docker container lifecycle with health checks |
+| `DockerFixtureService` | SHA-256-pinned Docker lifecycle, health checks, redacted logs |
+| `PinnedProcessIdentity` | Absolute binary path + SHA-256 + exact version probe |
+| `ProcessFixtureService` | Isolated process, bounded readiness, crash/log/orphan handling |
 | `TempDirFixture` | Per-test temp directory (auto-cleaned on drop) |
 | `InProcessService<S>` | Closure-backed in-process service (echo servers, etc.) |
 | `NoOpFixtureService` | For testing the orchestration itself |
@@ -924,7 +993,10 @@ let ws_port = env.allocate_port("websocket")?;
 
 // Register services
 env.register_service(Box::new(
-    DockerFixtureService::new("redis", "redis:7-alpine")
+    DockerFixtureService::new(
+        "redis",
+        "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
         .with_port_map(env.port_for("redis").unwrap(), 6379)
         .with_health_cmd(vec!["redis-cli", "ping"]),
 ));
@@ -947,10 +1019,49 @@ env.write_metadata_artifact();
 
 **Key invariants:**
 - Ports are held by `TcpListener` until explicitly released, preventing reuse.
+- Held ports are released immediately before managed service startup.
+- Partial startup rolls back in reverse order.
 - Services are stopped in reverse registration order.
 - Cleanup callbacks (`on_teardown`) run in reverse order.
-- Teardown is idempotent (safe to call multiple times).
+- Teardown is idempotent; failed stops remain retryable and visible through
+  `teardown_errors()` and `orphaned_services()`.
 - `EnvironmentMetadata` excludes nondeterministic fields (no wall-clock timestamps).
+
+The dependency program's pinned service-family catalog, explicit
+`BLOCKED_EXTERNAL`/`UNSUPPORTED` receipts, and no-claim boundary are documented
+in [`docs/dependency_real_service_fixtures.md`](docs/dependency_real_service_fixtures.md).
+Its focused canonical scenario is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario real-service-fixture-contract
+```
+
+The dependency program's sparse-feature, target/platform, maintained public
+consumer, external downstream portfolio, and service-version coordinates are
+defined in
+[`docs/dependency_feature_platform_consumer_matrix.md`](docs/dependency_feature_platform_consumer_matrix.md).
+Its focused canonical scenario is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario feature-platform-consumer-contract
+```
+
+The aggregate capability-to-evidence projection and final fail-closed audit are
+defined in
+[`docs/dependency_verification_final_signoff.md`](docs/dependency_verification_final_signoff.md).
+Its canonical dry-run and focused scenario are:
+
+```bash
+bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract \
+  --dry-run \
+  --run-id ver-a6-dry-run-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract
+```
 
 ### NDJSON Event Schema (bd-1t58q)
 

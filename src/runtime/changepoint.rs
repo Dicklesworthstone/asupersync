@@ -49,6 +49,9 @@
 //! alarm ⇔ PH_T ≥ λ
 //! ```
 //!
+//! When reset-on-detection is enabled, the alarm sample seeds a fresh mean
+//! epoch while the public receipt index remains lifetime-wide.
+//!
 //! Substituted defaults ([`PageHinkleyConfig::conservative`]): `δ = 0.05` units
 //! (`50_000` micro-units), `λ = 3.0` units. ARL intuition: the false-alarm ARL
 //! grows roughly exponentially in `λ` relative to the noise scale, so a larger
@@ -226,7 +229,10 @@ impl PageHinkleyConfig {
 pub struct PageHinkleyDetector {
     series: RuntimeMetricSeries,
     config: PageHinkleyConfig,
+    /// Lifetime count used for public sample indexes and snapshots.
     sample_count: u64,
+    /// Samples incorporated into the running mean since the latest reset.
+    mean_sample_count: u64,
     mean_micro_units: i64,
     cumulative: i64,
     min_cumulative: i64,
@@ -240,6 +246,7 @@ impl PageHinkleyDetector {
             series,
             config,
             sample_count: 0,
+            mean_sample_count: 0,
             mean_micro_units: 0,
             cumulative: 0,
             min_cumulative: 0,
@@ -255,9 +262,13 @@ impl PageHinkleyDetector {
     /// Consume one sample and return a detection receipt if the threshold crosses.
     pub fn update(&mut self, sample: MetricSample) -> Option<ChangePointDetection> {
         self.sample_count = self.sample_count.saturating_add(1);
+        self.mean_sample_count = self.mean_sample_count.saturating_add(1);
         let sample_micro_units = sample.as_micro_units();
-        self.mean_micro_units =
-            update_running_mean(self.mean_micro_units, sample_micro_units, self.sample_count);
+        self.mean_micro_units = update_running_mean(
+            self.mean_micro_units,
+            sample_micro_units,
+            self.mean_sample_count,
+        );
         let centered = sample_micro_units
             .saturating_sub(self.mean_micro_units)
             .saturating_sub(self.config.tolerance.as_micro_units());
@@ -298,6 +309,7 @@ impl PageHinkleyDetector {
     }
 
     fn reset_at(&mut self, sample: MetricSample) {
+        self.mean_sample_count = 1;
         self.mean_micro_units = sample.as_micro_units();
         self.cumulative = 0;
         self.min_cumulative = 0;
@@ -847,6 +859,101 @@ mod tests {
         assert_eq!(detection.direction, ChangeDirection::Increase);
         assert_eq!(detection.sample_index, 7);
         assert!(detection.statistic >= detection.threshold);
+    }
+
+    #[test]
+    fn page_hinkley_reset_uses_epoch_local_mean_denominator() {
+        let mut detector = PageHinkleyDetector::new(
+            RuntimeMetricSeries::ReadyQueueDepth,
+            PageHinkleyConfig {
+                tolerance: MetricSample::from_micro_units(0),
+                threshold: 6 * MetricSample::SCALE,
+                reset_after_detection: true,
+            },
+        );
+
+        assert!(detector.update(MetricSample::from_units(0)).is_none());
+        let detection = detector
+            .update(MetricSample::from_units(20))
+            .expect("the first regime shift must cross the threshold");
+        assert_eq!(detection.sample_index, 2);
+        assert_eq!(detection.statistic, 10 * MetricSample::SCALE);
+
+        assert!(
+            detector.update(MetricSample::from_units(30)).is_none(),
+            "a fresh epoch seeded at 20 has statistic 5, below threshold 6"
+        );
+        let snapshot = detector.snapshot();
+        assert_eq!(
+            snapshot.sample_count, 3,
+            "snapshot count remains lifetime-wide"
+        );
+        assert_eq!(snapshot.mean, MetricSample::from_units(25));
+        assert_eq!(snapshot.statistic, 5 * MetricSample::SCALE);
+        assert_eq!(detector.mean_sample_count, 2);
+    }
+
+    #[test]
+    fn page_hinkley_post_reset_epoch_matches_fresh_detector() {
+        let config = PageHinkleyConfig {
+            tolerance: MetricSample::from_micro_units(0),
+            threshold: 6 * MetricSample::SCALE,
+            reset_after_detection: true,
+        };
+        let mut reset_detector =
+            PageHinkleyDetector::new(RuntimeMetricSeries::ReadyQueueDepth, config);
+        let mut fresh_detector =
+            PageHinkleyDetector::new(RuntimeMetricSeries::ReadyQueueDepth, config);
+
+        assert!(reset_detector.update(MetricSample::from_units(0)).is_none());
+        assert!(
+            reset_detector
+                .update(MetricSample::from_units(20))
+                .is_some()
+        );
+        assert!(
+            fresh_detector
+                .update(MetricSample::from_units(20))
+                .is_none()
+        );
+
+        assert_eq!(
+            reset_detector.update(MetricSample::from_units(30)),
+            fresh_detector.update(MetricSample::from_units(30))
+        );
+        assert_eq!(
+            reset_detector.mean_sample_count,
+            fresh_detector.mean_sample_count
+        );
+        assert_eq!(
+            reset_detector.mean_micro_units,
+            fresh_detector.mean_micro_units
+        );
+        assert_eq!(reset_detector.cumulative, fresh_detector.cumulative);
+        assert_eq!(reset_detector.min_cumulative, fresh_detector.min_cumulative);
+        assert_eq!(reset_detector.sample_count, 3);
+        assert_eq!(fresh_detector.sample_count, 2);
+
+        let reset_detection = reset_detector
+            .update(MetricSample::from_units(31))
+            .expect("continued epoch must cross at statistic 9");
+        let fresh_detection = fresh_detector
+            .update(MetricSample::from_units(31))
+            .expect("fresh detector must cross at the same epoch statistic");
+        assert_eq!(reset_detection.statistic, fresh_detection.statistic);
+        assert_eq!(reset_detection.sample, fresh_detection.sample);
+        assert_eq!(reset_detection.sample_index, 4);
+        assert_eq!(fresh_detection.sample_index, 3);
+        assert_eq!(
+            reset_detector.mean_sample_count,
+            fresh_detector.mean_sample_count
+        );
+        assert_eq!(
+            reset_detector.mean_micro_units,
+            fresh_detector.mean_micro_units
+        );
+        assert_eq!(reset_detector.cumulative, fresh_detector.cumulative);
+        assert_eq!(reset_detector.min_cumulative, fresh_detector.min_cumulative);
     }
 
     #[test]

@@ -1905,8 +1905,9 @@ fn e2e_obligation_cancel_mid_reserve() {
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
     let (tx, _rx) = tracked_channel::<u32>(1);
+    let fill_cx = Cx::for_testing();
     let proof = tx
-        .try_reserve()
+        .try_reserve(&fill_cx)
         .expect("reserve slot")
         .send(1)
         .expect("send");

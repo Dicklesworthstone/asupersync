@@ -3,7 +3,8 @@
   "bead_id": "asupersync-proof-orch-clean-overlay-5ve2ao.4",
   "parent_bead_id": "asupersync-proof-orch-clean-overlay-5ve2ao",
   "status": "contract_guarded",
-  "generated_on": "2026-06-14",
+  "generated_on": "2026-07-16",
+  "capability_gate_repair_bead_id": "asupersync-clean-overlay-runbook-capability-drift-gate-6h291q",
   "source_of_truth": {
     "contract": "artifacts/clean_overlay_proof_orchestration_v1.json",
     "runbook": "docs/clean_overlay_proof_orchestration_runbook.md",
@@ -16,19 +17,41 @@
     "a1_planner_contract": "tests/clean_overlay_proof_planner_contract.rs",
     "a2_blocker_receipt": "src/audit/blocker_receipt.rs",
     "a3_overlay_command": "src/audit/overlay_proof_command.rs",
-    "a3_focused_e2e": "tests/proof_orch_clean_overlay_e2e.rs"
+    "a3_focused_e2e": "tests/proof_orch_clean_overlay_e2e.rs",
+    "a3_capability_handshake": "src/audit/proof_traffic_overlay_handshake.rs",
+    "a3_capability_contract": "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs"
   },
   "proof_lane": {
     "lane_id": "clean-overlay-proof-orchestration-contract",
     "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clean_overlay_proof_orchestration_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test clean_overlay_proof_orchestration_contract -- --nocapture",
-    "covers": "Clean-overlay proof-orchestration A4 operator runbook, when-to-use prerequisites, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty blocker receipts, non-destructive cleanup/rollback, Agent Mail and br comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries stay aligned with the A1-A3 lane surfaces.",
-    "explicit_not_covered": "Does not prove runtime correctness, broad workspace health, release readiness, performance improvement, live RCH fleet availability, permission to delete files or clean worktrees, or local Cargo fallback approval."
+    "covers": "Clean-overlay proof-orchestration A4 operator-packet documentation and reference alignment: installed-capability admission and option-section parsing, when-to-use prerequisites, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty and capability-drift blocker receipts, receipt-only blocked reproduction, non-destructive cleanup/rollback, Agent Mail and br comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries remain path-pinned to the A1-A3 lane surfaces; referenced behavioral tests are separate evidence.",
+    "explicit_not_covered": "Does not prove behavioral correctness of the referenced parser, command builder, or handshake, runtime correctness, broad workspace health, release readiness, performance improvement, live RCH fleet availability, permission to delete files or clean worktrees, local Cargo fallback approval, or peer-dirt exclusion without supported installed capability evidence plus an admitted command and terminal execution evidence."
   },
   "when_to_use": [
-    "You are on main only and need to prove a focused slice without syncing peer dirt.",
+    "You are on main only and need a focused proof attempt that refuses to run while unselected peer dirt is present.",
     "You hold an Agent Mail reservation for every path you intend to overlay.",
-    "RCH is reachable; you will never fall back to a local Cargo build."
+    "RCH is reachable; you will never fall back to a local Cargo build.",
+    "Captured rch exec --help capability evidence confirms every required clean-overlay flag before any overlay command is emitted."
   ],
+  "capability_drift_gate": {
+    "capability_evidence_required": true,
+    "probe_command": "rch exec --help",
+    "nonempty_capability_probe_version_required": true,
+    "required_flags": [
+      "--base",
+      "--clean-overlay",
+      "--overlay-path",
+      "--no-overlay"
+    ],
+    "all_required_flags_must_be_declared_as_options": true,
+    "example_or_prose_mentions_do_not_count": true,
+    "unsupported_client_is_never_admitted": true,
+    "unsupported_capability_precedes_report_only": true,
+    "unsupported_client_emits_no_rch_or_cargo_command": true,
+    "ordinary_verifier_requires_peer_clean_input": true,
+    "unsupported_marker": "# BLOCKED: installed RCH clean-overlay capability unsupported; no proof command emitted",
+    "retry_condition": "rerun only after capturing a non-empty installed capability probe identity and help output that declares every required clean-overlay flag"
+  },
   "reservation_expectations": {
     "selected_paths_must_be_reserved": true,
     "unreserved_selection_is_fail_closed": true,
@@ -37,7 +60,7 @@
     "release_after_receipt": "release_file_reservations"
   },
   "stale_progress_guidance": {
-    "heartbeat_fresh_progress_stale_is_the_signature_case": true,
+    "heartbeat_fresh_progress_stale_requires_fresh_admission_decision": true,
     "never_cancel_peer_owned_builds": true,
     "cancel_only_own_progress_stale_job": true,
     "stale_or_partial_job_is_rerun_required_not_passed": true
@@ -45,6 +68,7 @@
   "peer_dirty_blocker": {
     "blocked_manifest_is_never_admitted": true,
     "blocked_emits_no_cargo_invocation": true,
+    "blocked_reproduction_is_receipt_only": true,
     "blocked_marker": "# BLOCKED: clean-overlay refused; no RCH proof command emitted",
     "report_only_marker": "# REPORT-ONLY: clean-overlay dry run; no RCH proof command emitted",
     "exclusion_reasons": [
@@ -56,7 +80,7 @@
   "non_destructive_cleanup": {
     "performs_no_io": true,
     "never_branches_clones_worktrees_or_deletes": true,
-    "rollback_action": "leave peer dirt unstaged; re-run overlay-scoped command after owned edits settle",
+    "rollback_action": "leave peer dirt unstaged; refresh installed capability evidence and rerun the capability-gated handshake after owned edits settle",
     "forbidden_operations": [
       "git branch",
       "git worktree",
@@ -67,15 +91,25 @@
     ]
   },
   "agent_mail_handoff_template": {
+    "template_stage": "operator-enriched post-decision handoff; generated handshake bodies record terminal_execution_evidence=none until an operator attaches terminal proof",
     "thread_id": "asupersync-proof-orch-clean-overlay-5ve2ao.4",
-    "subject": "[clean-overlay proof] <focused slice> — <admitted|blocked|report-only>",
+    "subject": "[clean-overlay proof] <focused slice> — <run-now|park-rerun-required|blocked-by-peer|blocked-by-capability-drift|report-only>",
     "body_required_fields": [
       "gate_id",
       "status",
       "head_commit",
-      "overlay_paths",
+      "selected_paths",
+      "included_paths",
       "excluded_paths",
-      "proof_command",
+      "rendered_command",
+      "capability_probe_version",
+      "clean_overlay_supported",
+      "missing_flags",
+      "capability_findings",
+      "admitted",
+      "report_only",
+      "retry_condition",
+      "terminal_execution_evidence",
       "rch_worker_or_refusal",
       "dirty_frontier",
       "rollback_action",
@@ -83,18 +117,32 @@
     ]
   },
   "br_comment_handoff_template": {
+    "template_stage": "operator-enriched post-decision handoff; generated handshake bodies record terminal_execution_evidence=none until an operator attaches terminal proof",
     "command": "br comments add asupersync-proof-orch-clean-overlay-5ve2ao.4 --author <agent> --message <body>",
     "body_required_fields": [
       "status",
       "head_commit",
-      "overlay_paths",
+      "selected_paths",
+      "included_paths",
       "excluded_paths",
-      "proof_command",
+      "rendered_command",
+      "capability_probe_version",
+      "clean_overlay_supported",
+      "missing_flags",
+      "capability_findings",
+      "admitted",
+      "report_only",
+      "retry_condition",
+      "terminal_execution_evidence",
+      "rch_worker_or_refusal",
+      "dirty_frontier",
+      "rollback_action",
       "no_claim_boundaries"
     ]
   },
   "bead_closeout_checklist": [
-    "Overlay scoped to owned, reserved paths; peer dirt excluded, not synced.",
+    "Only if a supported, admitted command completed with terminal execution evidence: overlay scoped to owned, reserved paths and peer dirt was excluded; otherwise record no peer-exclusion claim.",
+    "Installed capability evidence admitted the command; unsupported clients emitted only the capability-drift blocker.",
     "Proof receipt (admitted command or blocker line) captured in bead and Agent Mail thread.",
     "No branch/worktree/clone/deletion performed; no local Cargo fallback cited.",
     "Reservations renewed (if continuing) or released (if done).",
@@ -115,9 +163,10 @@
   "no_claim_boundaries": [
     "No release-readiness claim.",
     "No broad workspace-health claim.",
-    "No runtime-correctness claim outside the cited clean-overlay planner, blocker, and overlay-command surfaces.",
+    "No runtime-correctness or behavioral-correctness claim for the referenced A1-A3 parser, planner, blocker, command-builder, or handshake surfaces; their focused behavioral tests are separate evidence.",
     "No performance-improvement claim.",
     "No live RCH fleet-availability claim.",
+    "No claim that peer dirt was excluded unless installed RCH clean-overlay capability evidence is supported and an admitted command completed with terminal execution evidence.",
     "No local Cargo fallback approval.",
     "No permission to delete files, clean worktrees, create branches, or create worktrees."
   ]

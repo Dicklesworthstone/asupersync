@@ -240,9 +240,7 @@ impl LengthDelimitedCodec {
         let Ok(extra_prefix_len) = u64::try_from(extra_prefix_len) else {
             return u64::MAX;
         };
-        extra_prefix_len
-            .checked_add(adjusted_frame_len)
-            .unwrap_or(u64::MAX)
+        extra_prefix_len.saturating_add(adjusted_frame_len)
     }
 }
 

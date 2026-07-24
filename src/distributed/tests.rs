@@ -114,6 +114,7 @@ fn happy_path_encode_assign_distribute_decode() {
     // Decode from one replica's symbols (complete set).
     let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
         verify_integrity: false,
+        snapshot_auth_key: Some(snapshot_auth_key()),
         ..Default::default()
     });
     for sym in &encoded.symbols {
@@ -214,6 +215,7 @@ fn recovery_from_source_symbols_only() {
         RecoveryConfig::default(),
         RecoveryDecodingConfig {
             verify_integrity: false,
+            snapshot_auth_key: Some(snapshot_auth_key()),
             ..Default::default()
         },
     );
@@ -256,6 +258,7 @@ fn recovery_with_mixed_source_and_repair() {
         RecoveryConfig::default(),
         RecoveryDecodingConfig {
             verify_integrity: false,
+            snapshot_auth_key: Some(snapshot_auth_key()),
             ..Default::default()
         },
     );
@@ -345,12 +348,14 @@ fn snapshot_roundtrip_preserves_all_fields() {
         parent: Some(RegionId::new_for_test(0, 0)),
         metadata: vec![0xDE, 0xAD, 0xBE, 0xEF],
         auth_tag: AuthenticationTag::zero(),
-    };
+    }
+    .signed(&snapshot_auth_key());
 
     // Encode → decode roundtrip.
     let encoded = encode_snapshot(&original);
     let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
         verify_integrity: false,
+        snapshot_auth_key: Some(snapshot_auth_key()),
         ..Default::default()
     });
     for sym in &encoded.symbols {
@@ -1074,6 +1079,11 @@ fn make_rich_snapshot() -> RegionSnapshot {
         metadata: vec![1, 2, 3],
         auth_tag: AuthenticationTag::zero(),
     }
+    .signed(&snapshot_auth_key())
+}
+
+fn snapshot_auth_key() -> AuthKey {
+    AuthKey::from_seed(0xD157_5A5A)
 }
 
 fn local_node_id() -> NodeId {

@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn concurrent_sends_stop_at_exact_deterministic_limit() {
         let config = CrashConfig::new(42).with_crash_after_sends(1);
-        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+        let (tx, mut rx, ctrl) = crash_channel::<u32>(
             1,
             config,
             Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,
@@ -904,7 +904,7 @@ mod tests {
     #[test]
     fn cancelled_pending_send_does_not_consume_send_budget() {
         let config = CrashConfig::new(42).with_crash_after_sends(1);
-        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+        let (tx, mut rx, ctrl) = crash_channel::<u32>(
             1,
             config,
             Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,
@@ -945,7 +945,7 @@ mod tests {
     #[test]
     fn disconnect_releases_exact_send_serialization_without_success() {
         let config = CrashConfig::new(42).with_crash_after_sends(1);
-        let (tx, mut rx, ctrl, _) = crash_channel::<u32>(
+        let (tx, mut rx, ctrl) = crash_channel::<u32>(
             1,
             config,
             Arc::new(CollectorSink::new()) as Arc<dyn EvidenceSink>,

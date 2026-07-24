@@ -112,6 +112,7 @@ fn committed_manifest_does_not_leak_runtime_metrics() {
         total_bytes: 1024,
         merkle_root_hex: "00".repeat(32),
         metadata: None,
+        delta_manifest: None,
         entries: vec![ManifestEntry {
             index: 0,
             rel_path: "a/b.bin".to_string(),

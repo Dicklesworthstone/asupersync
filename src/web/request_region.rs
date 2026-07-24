@@ -2516,7 +2516,7 @@ mod tests {
                 let mut lab = LabRuntime::new(LabConfig::new(seed));
                 let root = lab.state.create_root_region(Budget::INFINITE);
                 let system_cx = lab.state.create_system_cx();
-                let (tid, _handle, _task_cx, _result_tx) = lab
+                let (tid, _handle, _task_cx, _result_tx, spawn_effects) = lab
                     .state
                     .create_task_infrastructure::<()>(&system_cx, root, Budget::new(), false)
                     .expect("create lab task infrastructure");
@@ -2531,6 +2531,7 @@ mod tests {
                     ),
                 );
                 lab.scheduler.lock().schedule(tid, 0);
+                spawn_effects.dispatch();
 
                 let vt = lab.run_with_auto_advance();
                 assert_eq!(

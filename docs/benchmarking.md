@@ -321,9 +321,14 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo
 ### How It Works
 
 1. Each test runs a deterministic workload with fixed inputs
-2. Outputs are hashed to a u64 checksum via `DefaultHasher`
-3. Checksums are compared against hardcoded expected values
-4. Mismatch means behavior changed — intentional changes require updating the expected values
+2. Scalar outputs are framed explicitly and hashed with SHA-256; the first 64
+   bits preserve the compact checksum display while remaining stable across
+   Rust toolchains
+3. Certified plan rewrites additionally pin full SHA-256 before/after plan
+   hashes, certificate fingerprints, semantic results, and original/rewritten
+   trace receipts
+4. Checksums and rewrite receipts are compared against reviewed expected values
+5. Mismatch means behavior changed — intentional changes require updating the expected values
 
 ### Covered Workloads
 

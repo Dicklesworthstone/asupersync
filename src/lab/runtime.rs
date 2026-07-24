@@ -857,8 +857,16 @@ impl LabRuntime {
             lab_reactor,
             spawn_mailbox,
             _spawn_liveness: spawn_liveness,
-            seen_io_tokens: DetHashSet::default(),
-            scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
+            // GH#55: derive lab hashing from the lab seed rather than
+            // `Default::default()`, which is randomly seeded in builds
+            // without `test-internals` and breaks lab determinism.
+            seen_io_tokens: DetHashSet::with_hasher(
+                crate::util::det_hash::DetBuildHasher::with_seed(config.seed),
+            ),
+            scheduler: Arc::new(Mutex::new(LabScheduler::new(
+                config.worker_count,
+                config.seed,
+            ))),
             config,
             rng,
             virtual_time: Time::ZERO,
@@ -1722,15 +1730,22 @@ impl LabRuntime {
                     task_id,
                     priority,
                     cancel_publication,
+                    spawn_effects,
                 } => {
-                    let cancel_wakes = cancel_publication.publish(|cancel_priority| {
-                        let mut scheduler = self.scheduler.lock();
-                        if let Some(cancel_priority) = cancel_priority {
-                            scheduler.schedule_cancel(task_id, cancel_priority);
-                        } else {
-                            scheduler.schedule(task_id, priority);
-                        }
-                    });
+                    let (cancel_wakes, spawn_effects) = cancel_publication
+                        .publish_with_spawn_effects(spawn_effects, |cancel_priority| {
+                            let mut scheduler = self.scheduler.lock();
+                            if let Some(cancel_priority) = cancel_priority {
+                                scheduler.schedule_cancel(task_id, cancel_priority);
+                            } else {
+                                scheduler.schedule(task_id, priority);
+                            }
+                        });
+                    // The closure-local scheduler guard is gone and the task's
+                    // runnable/cancel lane is visible before observer reentry.
+                    if let Some(spawn_effects) = spawn_effects {
+                        spawn_effects.dispatch();
+                    }
                     cancel_wakes.dispatch();
                 }
                 crate::runtime::state::SpawnAdmission::Denied { parts, error } => match error {
@@ -1765,21 +1780,38 @@ impl LabRuntime {
         }
 
         let requests = crate::runtime::spawn_mailbox::coalesce_handle_cancel_requests(requests);
-        // Concrete annotations: the only element uses are a `push` and a
-        // two-field closure pattern, which is not enough for inference
-        // in every downstream feature configuration (E0282 when built
-        // as a path dependency of FrankenSQLite).
-        let mut tasks: Vec<(TaskId, u8)> = Vec::with_capacity(requests.len());
-        let mut delegated: Vec<(TaskId, u8)> = Vec::new();
+        // Annotate explicitly: the task/priority prefix is only pinned by
+        // `schedule_cancel(task_id, priority)` far below, which the current
+        // nightly no longer back-infers through the `&mut tasks`/`&mut delegated`
+        // shared `target` binding (E0282).
+        let mut tasks: Vec<(
+            TaskId,
+            u8,
+            Option<Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
+        )> = Vec::with_capacity(requests.len());
+        let mut delegated: Vec<(
+            TaskId,
+            u8,
+            Option<Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
+        )> = Vec::new();
+        let mut spawn_effects_to_dispatch = Vec::with_capacity(requests.len());
         let mut wakes = crate::types::task_context::CancelWakeEffects::empty();
         for request in requests {
-            let effects = self
-                .state
-                .cancel_task_for_handle(request.task_id, &request.reason);
+            let task_id = request.task_id;
+            let reason = request.reason;
+            let admitted_slot = request.admitted_slot;
+            let task_exists = self.state.task(task_id).is_some();
+            let effects = self.state.cancel_task_for_handle(task_id, &reason);
             let (route, task_wakes) = effects.into_parts();
             wakes.merge(task_wakes);
 
             let Some(route) = route else {
+                if task_exists
+                    && let Some(admitted_slot) = admitted_slot
+                    && let Some(effects) = admitted_slot.take_spawn_effects_if_lane_published()
+                {
+                    spawn_effects_to_dispatch.push(effects);
+                }
                 continue;
             };
             let target = if route.delegated_initial {
@@ -1787,24 +1819,32 @@ impl LabRuntime {
             } else {
                 &mut tasks
             };
-            if let Some((_, queued_priority)) = target
+            if let Some((_, queued_priority, queued_slot)) = target
                 .iter_mut()
-                .find(|(task_id, _)| *task_id == request.task_id)
+                .find(|(queued_task_id, _, _)| *queued_task_id == task_id)
             {
                 *queued_priority = (*queued_priority).max(route.priority);
+                if queued_slot.is_none() {
+                    *queued_slot = admitted_slot;
+                }
             } else {
-                target.push((request.task_id, route.priority));
+                target.push((task_id, route.priority, admitted_slot));
             }
         }
 
         {
             let mut scheduler = self.scheduler.lock();
-            for &(task_id, priority) in &tasks {
+            for (task_id, priority, admitted_slot) in tasks {
                 scheduler.schedule_cancel(task_id, priority);
+                if let Some(admitted_slot) = admitted_slot
+                    && let Some(effects) = admitted_slot.publish_spawn_lane_and_take_effects()
+                {
+                    spawn_effects_to_dispatch.push(effects);
+                }
             }
         }
 
-        for (task_id, requested_priority) in delegated {
+        for (task_id, requested_priority, admitted_slot) in delegated {
             let scheduler = &self.scheduler;
             let (published_priority, task_wakes) = self
                 .state
@@ -1813,10 +1853,19 @@ impl LabRuntime {
                     Some(priority)
                 })
                 .into_parts();
-            wakes.merge(task_wakes);
             if let Some(published_priority) = published_priority {
+                let spawn_effects = admitted_slot
+                    .as_ref()
+                    .and_then(|slot| slot.publish_spawn_lane_and_take_effects());
                 debug_assert!(published_priority >= requested_priority);
+                if let Some(effects) = spawn_effects {
+                    spawn_effects_to_dispatch.push(effects);
+                }
             }
+            wakes.merge(task_wakes);
+        }
+        for effects in spawn_effects_to_dispatch {
+            effects.dispatch();
         }
         wakes.dispatch();
     }
@@ -2435,8 +2484,14 @@ impl LabRuntime {
             return;
         }
         let mut sched = self.scheduler.lock();
-        for (task_id, priority) in tasks {
+        let mut spawn_effects = Vec::with_capacity(tasks.len());
+        for (task_id, priority, effects) in tasks {
             sched.schedule(task_id, priority);
+            spawn_effects.push(effects);
+        }
+        drop(sched);
+        for effects in spawn_effects {
+            effects.dispatch();
         }
     }
 
@@ -2959,9 +3014,9 @@ where
     let root = runtime
         .state
         .create_root_region(crate::types::Budget::INFINITE);
-    let (task_id, mut handle) = runtime
+    let (task_id, mut handle, spawn_effects) = runtime
         .state
-        .create_task(root, crate::types::Budget::INFINITE, async move {
+        .create_task_with_deferred_spawn_effects(root, crate::types::Budget::INFINITE, async move {
             let cx = crate::cx::Cx::current()
                 .unwrap_or_else(|| panic!("lab task started without current Cx for seed {seed}"));
             task(cx).await
@@ -2971,6 +3026,7 @@ where
         .scheduler
         .lock()
         .schedule(task_id, crate::types::Budget::INFINITE.priority);
+    spawn_effects.dispatch();
 
     let report = runtime.run_until_quiescent_with_report();
     let output = handle
@@ -3012,9 +3068,9 @@ where
     let root = runtime
         .state
         .create_root_region(crate::types::Budget::INFINITE);
-    let (task_id, mut handle) = runtime
+    let (task_id, mut handle, spawn_effects) = runtime
         .state
-        .create_task(root, crate::types::Budget::INFINITE, async move {
+        .create_task_with_deferred_spawn_effects(root, crate::types::Budget::INFINITE, async move {
             let cx = crate::cx::Cx::current()
                 .unwrap_or_else(|| panic!("lab task started without current Cx for seed {seed}"));
             task(cx).await
@@ -3024,6 +3080,7 @@ where
         .scheduler
         .lock()
         .schedule(task_id, crate::types::Budget::INFINITE.priority);
+    spawn_effects.dispatch();
 
     let report = runtime.run_until_quiescent_with_report();
     let output = match handle.try_join() {
@@ -3159,15 +3216,19 @@ pub struct LabScheduler {
 }
 
 impl LabScheduler {
-    fn new(worker_count: usize) -> Self {
+    fn new(worker_count: usize, seed: u64) -> Self {
         let count = if worker_count == 0 { 1 } else { worker_count };
         let cancel_streak_limit = DEFAULT_LAB_CANCEL_STREAK_LIMIT.max(1);
+        // GH#55: seed-derived hashing keeps `scheduled` iteration (and thus
+        // every schedule-order decision that flows through it) identical for
+        // identical lab seeds, regardless of the `test-internals` feature.
+        let build_hasher = crate::util::det_hash::DetBuildHasher::with_seed(seed);
         Self {
             workers: (0..count)
                 .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
                 .collect(),
-            scheduled: DetHashSet::default(),
-            pending_spurious_wakes: DetHashMap::default(),
+            scheduled: DetHashSet::with_hasher(build_hasher.clone()),
+            pending_spurious_wakes: DetHashMap::with_hasher(build_hasher),
             assignments: Vec::new(),
             next_worker: 0,
             cancel_streak: vec![0; count],
@@ -3215,10 +3276,8 @@ impl LabScheduler {
     /// Schedules a task in the ready lane on its assigned worker.
     pub fn schedule(&mut self, task: TaskId, priority: u8) {
         if !self.scheduled.insert(task) {
-            crate::tracing_compat::trace!("LabScheduler already scheduled {task:?}");
             return;
         }
-        crate::tracing_compat::trace!("LabScheduler scheduling {task:?}");
 
         let worker = self.assign_worker(task);
         self.workers[worker].schedule(task, priority);
@@ -3803,7 +3862,7 @@ mod tests {
         runtime.scheduler.lock().schedule(task_id, 0);
 
         let canceller = std::thread::spawn(move || {
-            let mut handle = handle;
+            let handle = handle;
             entered.wait();
             handle.abort_with_reason(CancelReason::race_loser());
             abort_done.wait();
@@ -4023,15 +4082,18 @@ mod tests {
         assert_eq!(runtime.run_until_quiescent(), 1);
         let canonical = handle.task_id();
         assert_ne!(canonical, provisional);
-        assert!(matches!(
-            &runtime.state.task(canonical).expect("task record").state,
-            TaskState::Completed(Outcome::Cancelled(reason))
-                if reason.is_kind(CancelKind::RaceLost)
-        ));
+        assert!(
+            runtime.state.task(canonical).is_none(),
+            "quiescent completion retires the canonical task record"
+        );
         assert!(handle.is_finished());
         assert!(runtime.spawn_mailbox.is_empty());
         assert!(runtime.is_quiescent());
-        let _ = handle.try_join().expect("task result is available");
+        assert!(matches!(
+            handle.try_join(),
+            Err(crate::runtime::JoinError::Cancelled(reason))
+                if reason.is_kind(CancelKind::RaceLost)
+        ));
         crate::test_complete!(
             "managed_pre_admission_abort_transitions_task_record_before_first_poll"
         );
@@ -4402,7 +4464,7 @@ mod tests {
     #[test]
     fn lab_scheduler_pop_for_worker_respects_timed_deadlines() {
         init_test("lab_scheduler_pop_for_worker_respects_timed_deadlines");
-        let mut scheduler = LabScheduler::new(1);
+        let mut scheduler = LabScheduler::new(1, 0);
         let timed = TaskId::from_arena(ArenaIndex::new(1, 0));
         let ready = TaskId::from_arena(ArenaIndex::new(2, 0));
 
@@ -4439,7 +4501,7 @@ mod tests {
     #[test]
     fn lab_scheduler_steal_for_worker_only_steals_ready_tasks() {
         init_test("lab_scheduler_steal_for_worker_only_steals_ready_tasks");
-        let mut scheduler = LabScheduler::new(2);
+        let mut scheduler = LabScheduler::new(2, 0);
         let cancel = TaskId::from_arena(ArenaIndex::new(10, 0));
         let timed = TaskId::from_arena(ArenaIndex::new(11, 0));
         let ready = TaskId::from_arena(ArenaIndex::new(12, 0));
@@ -4486,7 +4548,7 @@ mod tests {
     #[test]
     fn lab_scheduler_spurious_wakes_do_not_collapse_duplicates() {
         init_test("lab_scheduler_spurious_wakes_do_not_collapse_duplicates");
-        let mut scheduler = LabScheduler::new(1);
+        let mut scheduler = LabScheduler::new(1, 0);
         let task = TaskId::from_arena(ArenaIndex::new(13, 0));
 
         scheduler.inject_spurious_wakes(task, 42, 3);
@@ -4535,7 +4597,7 @@ mod tests {
     #[test]
     fn lab_scheduler_forget_task_clears_pending_spurious_wakes() {
         init_test("lab_scheduler_forget_task_clears_pending_spurious_wakes");
-        let mut scheduler = LabScheduler::new(1);
+        let mut scheduler = LabScheduler::new(1, 0);
         let task = TaskId::from_arena(ArenaIndex::new(14, 0));
 
         scheduler.inject_spurious_wakes(task, 42, 3);
@@ -4575,7 +4637,7 @@ mod tests {
     #[test]
     fn lab_scheduler_steal_preserves_pending_spurious_wakes() {
         init_test("lab_scheduler_steal_preserves_pending_spurious_wakes");
-        let mut scheduler = LabScheduler::new(2);
+        let mut scheduler = LabScheduler::new(2, 0);
         let task = TaskId::from_arena(ArenaIndex::new(15, 0));
 
         scheduler.inject_spurious_wakes(task, 42, 3);

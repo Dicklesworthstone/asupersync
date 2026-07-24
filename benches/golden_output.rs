@@ -18,19 +18,24 @@
 //! - Obligation lifecycle: SendPermit reserve/commit ordering
 //!
 //! **Golden checksum registry**: Stored in `artifacts/golden_checksums.json`.
-//! To regenerate after intentional behavioral changes:
-//!   `rch exec -- env GOLDEN_UPDATE=1 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_output_docs cargo bench --features criterion-benches --bench golden_output`
+//! To generate a reviewed replacement after committing an intentional behavioral
+//! change, use the strict-remote command documented in the Phase 6 gate section
+//! of `README.md`. Update mode never mutates the tracked registry directly: it
+//! writes an atomic candidate beneath Criterion's retrieved artifact directory.
 
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 #![allow(clippy::cast_sign_loss)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
-use std::sync::OnceLock;
+use std::fs::OpenOptions;
+use std::io::Write as IoWrite;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use asupersync::Cx;
 use asupersync::cancel::SymbolCancelToken;
@@ -41,27 +46,16 @@ use asupersync::runtime::scheduler::{GlobalQueue, Scheduler};
 use asupersync::types::{Budget, CancelKind, CancelReason, ObjectId, TaskId, Time};
 use asupersync::util::DetRng;
 
+mod golden_registry;
+use golden_registry::{
+    GOLDEN_CHECKSUMS_PATH, GOLDEN_SCENARIOS, GoldenChecksumFile, RegistryResult,
+    ReviewedProvenance, build_update_candidate, is_lower_hex, load_golden_registry_from_path,
+    validate_reviewed_provenance,
+};
+
 // =============================================================================
 // GOLDEN OUTPUT INFRASTRUCTURE
 // =============================================================================
-
-/// Schema for the golden checksums JSON artifact.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GoldenChecksumFile {
-    schema_version: u32,
-    generated_by: String,
-    checksums: BTreeMap<String, GoldenEntry>,
-}
-
-/// A single golden checksum entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GoldenEntry {
-    output_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generated_at: Option<String>,
-}
 
 /// Computes SHA-256 hex digest of a byte slice.
 fn sha256_hex(data: &[u8]) -> String {
@@ -75,190 +69,239 @@ fn sha256_hex(data: &[u8]) -> String {
     hex
 }
 
-/// Path to the golden checksums JSON artifact.
-const GOLDEN_CHECKSUMS_PATH: &str = "artifacts/golden_checksums.json";
-
-/// Returns true if GOLDEN_UPDATE=1 is set.
-fn is_golden_update_mode() -> bool {
-    std::env::var("GOLDEN_UPDATE")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-}
-
-/// Inline fallback registry (used when `artifacts/golden_checksums.json` doesn't exist yet).
-fn inline_registry() -> BTreeMap<String, String> {
-    let mut m = BTreeMap::new();
-    m.insert(
-        "scheduler/priority_lane_ordering_100".into(),
-        "aa41a308bff0297fa0dd9d902d1263a9e19cacd3e03b1423bd0876e021904fa3".into(),
-    );
-    m.insert(
-        "scheduler/mixed_cancel_ready_timed_200".into(),
-        "ebc8100fd3915f8c0c9f782e7b38cf383ec14c9d1298075d1931fbe812b9db1b".into(),
-    );
-    m.insert(
-        "scheduler/global_inject_then_pop_50".into(),
-        "077ba6995d23b61f3de629ba45496763d3229769c03737a291904f7220f6e5e0".into(),
-    );
-    m.insert(
-        "channel/mpsc_try_send_recv_1000".into(),
-        "c76dd6f3c17103439dfb85094b25f725c8a46fabf6288b0b9e6743774739eb3e".into(),
-    );
-    m.insert(
-        "channel/mpsc_multi_producer_interleave".into(),
-        "7862b3c6abc43c253abb6269df13c023654ee8d3dc209bef3c7cc68865fe59f6".into(),
-    );
-    m.insert(
-        "channel/oneshot_send_recv_sequence".into(),
-        "305d9faa182a3fa58209faf4d462a3bf7cb25180c75e12f779a47e32899f67b4".into(),
-    );
-    m.insert(
-        "cancel/tree_propagation_depth_5".into(),
-        "85dfafed6b9ae886eda10bb758ebdd425a90e3829cee064585577874ae3caa1b".into(),
-    );
-    m.insert(
-        "cancel/cancel_budgets".into(),
-        "880088a12dbaabbd5481703bdc88075a967f1696e64e7110398bc5179da52f82".into(),
-    );
-    m.insert(
-        "lab/deterministic_schedule_seed_42".into(),
-        "0b0f3192274d644f0658c30b60a6e1acfabfa6df88207c43067b2ff70ca63945".into(),
-    );
-    m.insert(
-        "lab/deterministic_schedule_seed_1337".into(),
-        "27d627326b5b6304467eba5515a5fc0596b14063a1c52a03012ea3a1af9543be".into(),
-    );
-    m
-}
-
-/// Load golden checksums from JSON file, falling back to inline registry.
-fn load_golden_registry() -> BTreeMap<String, String> {
-    std::fs::read_to_string(GOLDEN_CHECKSUMS_PATH).map_or_else(
-        |_| inline_registry(),
-        |contents| {
-            let file: GoldenChecksumFile =
-                serde_json::from_str(&contents).expect("parse golden_checksums.json");
-            file.checksums
-                .into_iter()
-                .map(|(k, v)| (k, v.output_hash))
-                .collect()
-        },
-    )
-}
-
 /// Cached registry for the process lifetime.
-static REGISTRY: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+static REGISTRY: OnceLock<GoldenChecksumFile> = OnceLock::new();
 
-fn golden_registry() -> &'static BTreeMap<String, String> {
-    REGISTRY.get_or_init(load_golden_registry)
+fn golden_registry() -> &'static GoldenChecksumFile {
+    REGISTRY.get_or_init(|| {
+        load_golden_registry_from_path(Path::new(GOLDEN_CHECKSUMS_PATH))
+            .unwrap_or_else(|error| panic!("{error}"))
+    })
 }
 
 /// Accumulated updates when running in GOLDEN_UPDATE mode.
-static UPDATES: OnceLock<std::sync::Mutex<BTreeMap<String, String>>> = OnceLock::new();
+static UPDATES: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+static SEEN_SCENARIOS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
 
-fn record_update(scenario: &str, hash: &str) {
-    let updates = UPDATES.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
-    updates
-        .lock()
-        .expect("updates lock")
-        .insert(scenario.to_string(), hash.to_string());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoldenMode {
+    Verify,
+    Update,
 }
 
-/// Write accumulated updates to `artifacts/golden_checksums.json`.
-fn flush_updates() {
-    let Some(updates) = UPDATES.get() else {
-        return;
-    };
-    let (merged, update_count) = {
-        let map = updates.lock().expect("updates lock");
-        if map.is_empty() {
-            return;
-        }
+static GOLDEN_MODE: OnceLock<GoldenMode> = OnceLock::new();
 
-        let count = map.len();
-        // Merge with existing registry
-        let mut merged = golden_registry().clone();
-        for (k, v) in map.iter() {
-            merged.insert(k.clone(), v.clone());
-        }
-        drop(map);
-        (merged, count)
-    };
+fn golden_mode() -> GoldenMode {
+    *GOLDEN_MODE.get_or_init(|| match std::env::var("GOLDEN_UPDATE") {
+        Err(std::env::VarError::NotPresent) => GoldenMode::Verify,
+        Ok(value) if value == "0" => GoldenMode::Verify,
+        Ok(value) if value == "1" => GoldenMode::Update,
+        Ok(value) => panic!("GOLDEN_UPDATE must be unset, 0, or 1; got {value:?}"),
+        Err(error) => panic!("read GOLDEN_UPDATE: {error}"),
+    })
+}
 
-    let now = {
-        let dur = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time");
-        format!("{}Z", dur.as_secs())
-    };
-    let git_sha = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string());
-
-    let file = GoldenChecksumFile {
-        schema_version: 1,
-        generated_by: "golden_output benchmark (bd-1e2if.2)".into(),
-        checksums: merged
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    GoldenEntry {
-                        output_hash: v,
-                        git_sha: git_sha.clone(),
-                        generated_at: Some(now.clone()),
-                    },
-                )
-            })
-            .collect(),
-    };
-
-    let json = serde_json::to_string_pretty(&file).expect("serialize golden checksums");
-    std::fs::write(GOLDEN_CHECKSUMS_PATH, json).expect("write golden_checksums.json");
-    eprintln!(
-        "[GOLDEN] Updated {GOLDEN_CHECKSUMS_PATH} with {} checksums ({} new/changed)",
-        file.checksums.len(),
-        update_count
+fn mark_scenario_seen(scenario: &str) {
+    if !GOLDEN_SCENARIOS.contains(&scenario) {
+        panic!("golden scenario {scenario:?} is not declared in GOLDEN_SCENARIOS");
+    }
+    let seen = SEEN_SCENARIOS.get_or_init(|| Mutex::new(BTreeSet::new()));
+    assert!(
+        seen.lock()
+            .expect("seen scenarios lock")
+            .insert(scenario.to_string()),
+        "golden scenario {scenario:?} was verified more than once"
     );
+}
+
+fn command_stdout(command: &mut Command, description: &str) -> RegistryResult<String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("{description}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{description}: exit {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .map_err(|error| format!("{description} returned non-UTF-8 output: {error}"))
+}
+
+fn reviewed_update_provenance() -> RegistryResult<ReviewedProvenance> {
+    let reviewed_sha = std::env::var("GOLDEN_REVIEWED_GIT_SHA")
+        .map_err(|_| "GOLDEN_UPDATE=1 requires GOLDEN_REVIEWED_GIT_SHA".to_string())?;
+    let head_sha = command_stdout(
+        Command::new("git").args(["rev-parse", "HEAD"]),
+        "resolve golden update HEAD",
+    )?;
+    let tracked_status = command_stdout(
+        Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]),
+        "inspect golden update tracked tree",
+    )?;
+    validate_reviewed_provenance(&reviewed_sha, &head_sha, &tracked_status)?;
+
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("resolve golden update timestamp: {error}"))?
+        .as_secs();
+    Ok(ReviewedProvenance {
+        git_sha: reviewed_sha,
+        generated_at: format!("{seconds}Z"),
+    })
+}
+
+static UPDATE_PROVENANCE: OnceLock<ReviewedProvenance> = OnceLock::new();
+
+fn update_provenance() -> &'static ReviewedProvenance {
+    UPDATE_PROVENANCE
+        .get_or_init(|| reviewed_update_provenance().unwrap_or_else(|error| panic!("{error}")))
+}
+
+fn record_update(scenario: &str, hash: &str) {
+    assert!(
+        is_lower_hex(hash, 64),
+        "golden update hash for {scenario} must be 64 lowercase hex characters"
+    );
+    let updates = UPDATES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    assert!(
+        updates
+            .lock()
+            .expect("updates lock")
+            .insert(scenario.to_string(), hash.to_string())
+            .is_none(),
+        "golden update recorded scenario {scenario:?} more than once"
+    );
+}
+
+fn update_candidate_path() -> RegistryResult<PathBuf> {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "GOLDEN_UPDATE=1 requires an explicit CARGO_TARGET_DIR".to_string())?;
+    if !target_dir.is_absolute() {
+        return Err("GOLDEN_UPDATE CARGO_TARGET_DIR must be absolute".into());
+    }
+    Ok(target_dir
+        .join("criterion")
+        .join("golden-update")
+        .join("golden_checksums.json"))
+}
+
+fn write_json_atomically(path: &Path, file: &GoldenChecksumFile) -> RegistryResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("golden update candidate has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "create golden update directory {}: {error}",
+            parent.display()
+        )
+    })?;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("resolve golden update temp-file nonce: {error}"))?
+        .as_nanos();
+    let temp_path = parent.join(format!(
+        ".golden_checksums.json.{}.{nonce}.tmp",
+        std::process::id()
+    ));
+    let mut json = serde_json::to_string_pretty(file)
+        .map_err(|error| format!("serialize golden update candidate: {error}"))?;
+    json.push('\n');
+
+    let mut temp = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(|error| {
+            format!(
+                "create golden update temp file {}: {error}",
+                temp_path.display()
+            )
+        })?;
+    temp.write_all(json.as_bytes()).map_err(|error| {
+        format!(
+            "write golden update temp file {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    temp.sync_all().map_err(|error| {
+        format!(
+            "sync golden update temp file {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    drop(temp);
+    std::fs::rename(&temp_path, path).map_err(|error| {
+        format!(
+            "atomically publish golden update candidate {} -> {}: {error}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync golden update directory {}: {error}", parent.display()))?;
+    Ok(())
+}
+
+fn finalize_golden_run() {
+    let seen = SEEN_SCENARIOS
+        .get()
+        .map(|seen| seen.lock().expect("seen scenarios lock").clone())
+        .unwrap_or_default();
+    let expected: BTreeSet<String> = GOLDEN_SCENARIOS.iter().map(|s| (*s).to_string()).collect();
+    assert_eq!(
+        seen, expected,
+        "golden run must verify every declared scenario exactly once"
+    );
+
+    if golden_mode() == GoldenMode::Update {
+        let updates = UPDATES
+            .get()
+            .map(|updates| updates.lock().expect("updates lock").clone())
+            .unwrap_or_default();
+        let candidate = build_update_candidate(&updates, update_provenance())
+            .unwrap_or_else(|error| panic!("{error}"));
+        let path = update_candidate_path().unwrap_or_else(|error| panic!("{error}"));
+        write_json_atomically(&path, &candidate).unwrap_or_else(|error| panic!("{error}"));
+        eprintln!(
+            "[GOLDEN UPDATE] wrote reviewed candidate with {} exact scenarios to {}",
+            candidate.checksums.0.len(),
+            path.display()
+        );
+        eprintln!(
+            "[GOLDEN UPDATE] review the retrieved candidate before replacing {GOLDEN_CHECKSUMS_PATH}"
+        );
+    }
 }
 
 /// Verifies a golden checksum. In GOLDEN_UPDATE mode, records the new hash.
 fn verify_golden(scenario: &str, actual_hash: &str) -> bool {
-    if is_golden_update_mode() {
+    mark_scenario_seen(scenario);
+    if golden_mode() == GoldenMode::Update {
+        let _ = update_provenance();
         record_update(scenario, actual_hash);
         eprintln!("[GOLDEN UPDATE] {scenario}: {actual_hash}");
         return true;
     }
 
     let registry = golden_registry();
-    match registry.get(scenario) {
-        Some(expected) if expected == "GENERATE" => {
-            eprintln!("[GOLDEN] {scenario}: NEW hash = {actual_hash}");
-            eprintln!("[GOLDEN]   Run with GOLDEN_UPDATE=1 to save.");
-            true
-        }
-        Some(expected) => {
-            if actual_hash == expected {
-                true
-            } else {
-                eprintln!(
-                    "[GOLDEN] {scenario}: MISMATCH\n  expected: {expected}\n  actual:   {actual_hash}"
-                );
-                false
-            }
-        }
-        None => {
-            eprintln!(
-                "[GOLDEN] {scenario}: NOT IN REGISTRY (hash = {actual_hash})\n  \
-                 Run with GOLDEN_UPDATE=1 to add."
-            );
-            // In update mode we'd capture; in verify mode, new scenarios are accepted
-            // to allow incremental addition without breaking existing CI.
-            true
-        }
+    let Some(entry) = registry.checksums.0.get(scenario) else {
+        eprintln!("[GOLDEN] {scenario}: NOT IN REQUIRED REGISTRY");
+        return false;
+    };
+    if actual_hash == entry.output_hash {
+        true
+    } else {
+        eprintln!(
+            "[GOLDEN] {scenario}: MISMATCH\n  expected: {}\n  actual:   {actual_hash}",
+            entry.output_hash
+        );
+        false
     }
 }
 
@@ -975,11 +1018,9 @@ fn bench_golden_obligation(c: &mut Criterion) {
     group.finish();
 }
 
-/// Flush updates on benchmark completion when in GOLDEN_UPDATE mode.
+/// Validate run completeness and publish a reviewed candidate in update mode.
 fn bench_flush_golden_updates(c: &mut Criterion) {
-    if is_golden_update_mode() {
-        flush_updates();
-    }
+    finalize_golden_run();
     // No-op benchmark to ensure this function runs last
     c.bench_function("golden/_flush", |b: &mut criterion::Bencher| {
         b.iter(|| std::hint::black_box(0))

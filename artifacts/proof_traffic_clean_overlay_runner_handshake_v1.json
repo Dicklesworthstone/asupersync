@@ -4,7 +4,7 @@
   "bead_id": "asupersync-proof-traffic-control-kuyx64.3",
   "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
   "status": "contract_guarded",
-  "generated_at": "2026-06-15T06:55:00Z",
+  "generated_at": "2026-07-16T06:57:00Z",
   "source_of_truth": {
     "artifact": "artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json",
     "operator_doc": "docs/proof_traffic_control.md",
@@ -57,6 +57,14 @@
       "expected_decision_if_enabled": "report-only"
     }
   ],
+  "capability_evidence_rules": {
+    "nonempty_probe_version_required": true,
+    "required_flags_must_be_declared_in_options_section": true,
+    "prose_or_example_mentions_do_not_count": true,
+    "unsupported_capability_precedes_report_only": true,
+    "unsupported_marker": "# BLOCKED: installed RCH clean-overlay capability unsupported; no proof command emitted"
+  },
+  "handoff_stage": "pre-execution admission receipt; terminal execution evidence is none until an operator attaches a worker terminal result and durable transcript or receipt reference",
   "required_report_fields": [
     "gate_id",
     "status",
@@ -72,7 +80,13 @@
     "missing_flags",
     "capability_findings",
     "rendered_command",
+    "admitted",
+    "report_only",
     "retry_condition",
+    "terminal_execution_evidence",
+    "rch_worker_or_refusal",
+    "dirty_frontier",
+    "rollback_action",
     "no_claim_boundaries"
   ],
   "forbidden_command_surface": [
@@ -94,6 +108,6 @@
     "No local Cargo fallback approval.",
     "No peer-owned build cancellation authority.",
     "No permission to delete files, clean worktrees, create branches, or create worktrees.",
-    "No claim that peer dirt was excluded unless the installed RCH clean-overlay capability is supported."
+    "No claim that peer dirt was excluded unless installed RCH clean-overlay capability evidence is supported and an admitted command completed with terminal execution evidence."
   ]
 }

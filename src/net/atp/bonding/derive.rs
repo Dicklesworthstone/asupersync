@@ -114,6 +114,7 @@ pub async fn derive_bonded_descriptor(
         total_bytes: plan.total_bytes,
         merkle_root_hex: plan.merkle_root_hex.clone(),
         metadata: Some(metadata),
+        delta_manifest: None,
         entries,
     };
     let descriptor =

@@ -1498,19 +1498,21 @@ mod tests {
         let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(0, 20));
         let report = explorer.explore(|runtime| {
             let region = runtime.state.create_root_region(Budget::INFINITE);
-            let (t1, _) = runtime
+            let (t1, _, t1_spawn_effects) = runtime
                 .state
-                .create_task(region, Budget::INFINITE, async {})
+                .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async {})
                 .expect("t1");
-            let (t2, _) = runtime
+            let (t2, _, t2_spawn_effects) = runtime
                 .state
-                .create_task(region, Budget::INFINITE, async {})
+                .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async {})
                 .expect("t2");
             {
                 let mut sched = runtime.scheduler.lock();
                 sched.schedule(t1, 0);
                 sched.schedule(t2, 0);
             }
+            t1_spawn_effects.dispatch();
+            t2_spawn_effects.dispatch();
             runtime.run_until_quiescent();
         });
 
@@ -1926,19 +1928,21 @@ mod tests {
         let mut explorer = DporExplorer::new(ExplorerConfig::new(0, 8));
         let report = explorer.explore(|runtime| {
             let region = runtime.state.create_root_region(Budget::INFINITE);
-            let (t1, _) = runtime
+            let (t1, _, t1_spawn_effects) = runtime
                 .state
-                .create_task(region, Budget::INFINITE, async {})
+                .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async {})
                 .expect("t1");
-            let (t2, _) = runtime
+            let (t2, _, t2_spawn_effects) = runtime
                 .state
-                .create_task(region, Budget::INFINITE, async {})
+                .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async {})
                 .expect("t2");
             {
                 let mut sched = runtime.scheduler.lock();
                 sched.schedule(t1, 0);
                 sched.schedule(t2, 0);
             }
+            t1_spawn_effects.dispatch();
+            t2_spawn_effects.dispatch();
             runtime.run_until_quiescent();
         });
 

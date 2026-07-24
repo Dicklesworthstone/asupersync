@@ -1598,6 +1598,8 @@
         "src/audit/blocker_receipt.rs",
         "src/audit/overlay_proof_command.rs",
         "tests/proof_orch_clean_overlay_e2e.rs",
+        "src/audit/proof_traffic_overlay_handshake.rs",
+        "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
         "tests/clean_overlay_proof_planner_contract.rs",
         "artifacts/proof_lane_manifest_v1.json",
         "artifacts/proof_status_snapshot_v1.json"

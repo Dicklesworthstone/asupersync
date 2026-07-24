@@ -1304,7 +1304,7 @@ impl<Caps> Cx<Caps> {
         mut self,
         gateway: Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
     ) -> Self {
-        self.inner.write().cancel_gateway = gateway.clone();
+        self.inner.write().cancel_gateway.clone_from(&gateway);
         Arc::make_mut(&mut self.handles).spawn_gateway = gateway;
         self
     }
@@ -4358,23 +4358,31 @@ where
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
             gateway,
         )));
-        let pending_cancel_reason =
-            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
         let factory: LocalSpawnFactoryFn = Box::new(move |admission_cx: Cx| {
-            let task_id = admission_cx.task_id();
-            let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
-                &parent,
-                task_id,
-                capability_budget,
-            );
-            let child_all = child.retype::<cap::All>();
-            let fut = f(child);
+            // Keep a context for terminal result delivery even if inheritance
+            // itself panics. Retyping only clones the admission-built handles;
+            // all user/reentrant hooks stay inside the caught future below.
+            let completion_cx = admission_cx.retype::<cap::All>();
             Box::pin(async move {
-                match (crate::cx::scope::CatchUnwind { inner: fut }).await {
-                    Ok(value) => {
+                match (crate::cx::scope::CatchUnwind {
+                    inner: async move {
+                        let task_id = admission_cx.task_id();
+                        let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
+                            &parent,
+                            task_id,
+                            capability_budget,
+                        );
+                        let child_all = child.retype::<cap::All>();
+                        let value = f(child).await;
+                        (value, child_all)
+                    },
+                })
+                .await
+                {
+                    Ok((value, child_all)) => {
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4385,16 +4393,18 @@ where
                         crate::types::Outcome::Ok(())
                     }
                     Err(payload) => {
-                        let panic_payload = crate::types::outcome::PanicPayload::new(
-                            crate::cx::scope::payload_to_string(&payload),
-                        );
+                        let message = crate::cx::scope::payload_to_string(&payload);
+                        std::mem::forget(payload);
+                        let panic_payload = crate::types::outcome::PanicPayload::new(message);
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .take()
                         {
-                            let _ = tx
-                                .send(&child_all, Err(JoinError::Panicked(panic_payload.clone())));
+                            let _ = tx.send(
+                                &completion_cx,
+                                Err(JoinError::Panicked(panic_payload.clone())),
+                            );
                         }
                         crate::types::Outcome::Panicked(panic_payload)
                     }
@@ -4441,7 +4451,6 @@ where
         }
         let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
-        drop(pending_cancel_reason);
         Ok(handle)
     }
 
@@ -4481,24 +4490,32 @@ where
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
             gateway,
         )));
-        let pending_cancel_reason =
-            crate::runtime::spawn_mailbox::register_pending_cancel_rendezvous(&admitted_slot);
 
         // Parent snapshot for capability inheritance (cheap Arc clones).
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
         let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
-            let task_id = admission_cx.task_id();
-            let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
-                &parent,
-                task_id,
-                capability_budget,
-            );
-            let child_all = child.retype::<cap::All>();
-            let fut = f(child);
+            // Keep a context for terminal result delivery even if inheritance
+            // itself panics. Retyping only clones the admission-built handles;
+            // all user/reentrant hooks stay inside the caught future below.
+            let completion_cx = admission_cx.retype::<cap::All>();
             Box::pin(async move {
-                match (crate::cx::scope::CatchUnwind { inner: fut }).await {
-                    Ok(value) => {
+                match (crate::cx::scope::CatchUnwind {
+                    inner: async move {
+                        let task_id = admission_cx.task_id();
+                        let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
+                            &parent,
+                            task_id,
+                            capability_budget,
+                        );
+                        let child_all = child.retype::<cap::All>();
+                        let value = f(child).await;
+                        (value, child_all)
+                    },
+                })
+                .await
+                {
+                    Ok((value, child_all)) => {
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4509,16 +4526,18 @@ where
                         crate::types::Outcome::Ok(())
                     }
                     Err(payload) => {
-                        let panic_payload = crate::types::outcome::PanicPayload::new(
-                            crate::cx::scope::payload_to_string(&payload),
-                        );
+                        let message = crate::cx::scope::payload_to_string(&payload);
+                        std::mem::forget(payload);
+                        let panic_payload = crate::types::outcome::PanicPayload::new(message);
                         if let Some(tx) = factory_tx
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .take()
                         {
-                            let _ = tx
-                                .send(&child_all, Err(JoinError::Panicked(panic_payload.clone())));
+                            let _ = tx.send(
+                                &completion_cx,
+                                Err(JoinError::Panicked(panic_payload.clone())),
+                            );
                         }
                         crate::types::Outcome::Panicked(panic_payload)
                     }
@@ -4555,7 +4574,6 @@ where
 
         let handle = crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot);
         gateway.enqueue_and_notify(request)?;
-        drop(pending_cancel_reason);
         Ok(handle)
     }
 

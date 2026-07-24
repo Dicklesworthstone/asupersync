@@ -1,0 +1,552 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dormant_e2e_inventory_v1",
+  "bead_id": "asupersync-d24mms.12.1",
+  "source_commit": "61430000751d4df6edffa1f7d7a8b24faf292ad7",
+  "inventory_date": "2026-07-24",
+  "purpose": "Fail-closed inventory of three undeclared real-service E2E source files before repair or integration.",
+  "capability_ids": [
+    "CAP-REAL-SERVICE-E2E",
+    "CAP-VERIFICATION-PROFILES"
+  ],
+  "status_taxonomy": {
+    "BLOCKED_REPAIR": "The entrypoint is preserved but cannot compile or run on the inventoried source commit.",
+    "PLACEHOLDER_NOT_EVIDENCE": "The entrypoint has no substantive journey and cannot support a coverage claim."
+  },
+  "coverage_taxonomy": {
+    "UNIQUE_CANDIDATE": "The journey contains integration behavior not established by the cited narrower evidence.",
+    "OVERLAP_CANDIDATE": "Canonical evidence exercises adjacent behavior, but parity has not been proven.",
+    "AGGREGATE_WRAPPER": "The entrypoint invokes multiple separately inventoried logical scenarios.",
+    "NO_COVERAGE": "The entrypoint contains no substantive scenario."
+  },
+  "modules": [
+    {
+      "path": "src/real_fs_dir_fs_vfs_integration_e2e_tests.rs",
+      "sha256": "ffda7940ab83b3c7abbf41e8b9734759a35ebb315f36807d779e5163db4c9266",
+      "line_count": 1223,
+      "declared_in_lib": false,
+      "feature_gate": "all(test, feature = \"real-service-e2e\")",
+      "entrypoint_count": 5,
+      "logical_scenarios": [
+        "normal recursive traversal",
+        "simple symlink traversal",
+        "circular symlink detection",
+        "broken symlink handling",
+        "mixed symlink tree traversal",
+        "cross-VFS mount traversal"
+      ],
+      "fixtures": [
+        "TempDir-backed real filesystem tree",
+        "MockVfsLayer traversal harness",
+        "Unix symlinks",
+        "LabRuntime and Cx"
+      ],
+      "prerequisites": {
+        "features": ["real-service-e2e"],
+        "platforms": ["Unix-like host with symlink support"],
+        "services": [],
+        "secrets": []
+      },
+      "cleanup_contract": "TempDir should remove its tree on drop; repaired traversal must quiesce before drop and prove no task or obligation leaks.",
+      "compile_probe": {
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/lib.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dormant_e2e_fs_inventory\" cargo test -p asupersync --lib --features real-service-e2e --no-run",
+        "outcome": "BLOCKED_COMPILE_DRIFT",
+        "exit_code": 101,
+        "error_count": 8,
+        "error_codes": ["E0432", "E0599", "E0603"],
+        "representative_diagnostics": [
+          "stale or nonexistent fs::dir, fs::vfs, path_ops, test_utils, runtime, time and sync imports",
+          "private filesystem module paths are imported directly",
+          "obsolete Cx cancellation polling and std-style Mutex locking"
+        ]
+      },
+      "drift_and_risks": [
+        {"issue": "Unconditional std::os::unix::fs::symlink import", "repair_owner": "asupersync-d24mms.12.2"},
+        {"issue": "Ambient blocking std::fs calls inside async flows", "repair_owner": "asupersync-d24mms.12.2"},
+        {"issue": "Wall-clock Instant assertions and stdout logging", "repair_owner": "asupersync-d24mms.12.2"},
+        {"issue": "No explicit leak, loser-drain, or region-quiescence assertions", "repair_owner": "asupersync-d24mms.12.2"}
+      ]
+    },
+    {
+      "path": "src/real_integration_scenarios_e2e_tests.rs",
+      "sha256": "2caab9f01c37d1dff1698aec59b1aea4fce40db86ffa3094d231206cd7cb97de",
+      "line_count": 5728,
+      "declared_in_lib": false,
+      "feature_gate": "all(test, feature = \"real-service-e2e\")",
+      "entrypoint_count": 17,
+      "logical_scenarios": [
+        "pubsub fanout under partial failures",
+        "circuit-breaker cascade recovery",
+        "region failure isolation",
+        "backpressure pipeline propagation",
+        "comprehensive integration placeholder",
+        "worker-kill obligation cleanup",
+        "hedged first-success loser cancellation",
+        "distributed bridge rolling restart",
+        "pubsub broker death and reconnect",
+        "RaptorQ interruption and resume",
+        "runtime panic recovery with subscriptions",
+        "burst rate-limit throughput",
+        "HTTP/2 connection storm slot cleanup",
+        "timer-wheel churn",
+        "checkpoint and resume",
+        "memory-pressure backpressure recovery",
+        "partition split-brain healing"
+      ],
+      "fixtures": [
+        "IntegrationTestHarness with TempDir",
+        "LabRuntime",
+        "FailureInjector",
+        "localhost TCP listener for HTTP/2 scenario",
+        "unseeded fastrand failure and timing choices"
+      ],
+      "prerequisites": {
+        "features": ["real-service-e2e"],
+        "platforms": ["native host with loopback TCP and writable temp directory"],
+        "services": ["ephemeral localhost TCP only"],
+        "secrets": []
+      },
+      "cleanup_contract": "TempDir is RAII-managed, but repaired scenarios must replace orphan-prone tokio tasks with structured scopes, drain race losers, close listeners/channels, and assert region quiescence.",
+      "compile_probe": {
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/lib.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dormant_e2e_integration_inventory\" cargo test -p asupersync --lib --features real-service-e2e --no-run",
+        "outcome": "BLOCKED_COMPILE_DRIFT",
+        "exit_code": 101,
+        "error_count": 247,
+        "error_codes": ["E0061", "E0277", "E0308", "E0423", "E0425", "E0432", "E0532", "E0599", "E0608"],
+        "representative_diagnostics": [
+          "stale LabRuntime, time, RaptorQ, HTTP/2, TCP, timer, distribution and rate-limit APIs",
+          "obsolete Outcome, Error, RuntimeBuilder, channel, Mutex, sleep and timeout call shapes",
+          "all 17 entrypoints use forbidden tokio::test in core src"
+        ]
+      },
+      "drift_and_risks": [
+        {"issue": "Forbidden tokio::test executor surface in all entrypoints", "repair_owner": "asupersync-d24mms.12.3"},
+        {"issue": "Unseeded fastrand makes failure injection and timing nondeterministic", "repair_owner": "asupersync-d24mms.12.3"},
+        {"issue": "SystemTime and eprintln bypass canonical deterministic E2E logging", "repair_owner": "asupersync-d24mms.12.3"},
+        {"issue": "Ambient loopback bind needs bounded allocation, teardown and artifact capture", "repair_owner": "asupersync-d24mms.12.3"},
+        {"issue": "No uniform no-task/no-obligation/loser-drain/quiescence assertions", "repair_owner": "asupersync-d24mms.12.3"}
+      ]
+    },
+    {
+      "path": "src/real_distributed_e2e_tests.rs",
+      "sha256": "315a2c5ff591437348b3ec7f49c2b88de5bc3e6cefff1d3fdfc6d4c1aed243ae",
+      "line_count": 828,
+      "declared_in_lib": false,
+      "feature_gate": "all(test, feature = \"real-service-e2e\")",
+      "entrypoint_count": 5,
+      "logical_scenarios": [
+        "consistent-hash node-churn rebalancing",
+        "snapshot binary round trip",
+        "concurrent snapshot persistence",
+        "snapshot malformed/error handling",
+        "hash rebalancing plus snapshot migration full cycle"
+      ],
+      "fixtures": [
+        "TempDir-backed snapshot files",
+        "real HashRing",
+        "real RegionSnapshot binary serialization",
+        "fixed ring seeds 42 and 12345"
+      ],
+      "prerequisites": {
+        "features": ["real-service-e2e"],
+        "platforms": ["native host with writable temp directory"],
+        "services": [],
+        "secrets": []
+      },
+      "cleanup_contract": "TempDir should remove snapshot files on drop; repaired concurrent operations must join all workers and prove quiescence before fixture teardown.",
+      "compile_probe": {
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/lib.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dormant_e2e_distributed_inventory\" cargo test -p asupersync --lib --features real-service-e2e --no-run",
+        "outcome": "BLOCKED_COMPILE_DRIFT",
+        "exit_code": 101,
+        "error_count": 23,
+        "error_codes": ["E0061", "E0277", "E0599"],
+        "representative_diagnostics": [
+          "HashRing add_node receives &&str",
+          "RegionId, TaskId and ArenaIndex constructors no longer match",
+          "RegionState variants and RegionId accessors have drifted"
+        ]
+      },
+      "drift_and_risks": [
+        {"issue": "SystemTime and eprintln bypass canonical deterministic E2E logging", "repair_owner": "asupersync-d24mms.12.4"},
+        {"issue": "DefaultHasher-derived persisted origin IDs need an explicit stable algorithm", "repair_owner": "asupersync-d24mms.12.4"},
+        {"issue": "Concurrent filesystem workers need explicit joins and cleanup evidence", "repair_owner": "asupersync-d24mms.12.4"},
+        {"issue": "No explicit task/obligation leak or region-quiescence assertions", "repair_owner": "asupersync-d24mms.12.4"}
+      ]
+    }
+  ],
+  "test_inventory": [
+    {
+      "scenario_id": "DORMANT-FS-001",
+      "source_file": "src/real_fs_dir_fs_vfs_integration_e2e_tests.rs",
+      "test_function": "test_fs_dir_vfs_integration_basic",
+      "coverage": "AGGREGATE_WRAPPER",
+      "covers": ["normal traversal", "simple symlinks", "circular symlinks", "broken symlinks", "mixed symlinks", "cross-VFS traversal"],
+      "expected_assertions": ["all six traversal results succeed", "cycles and broken links are observed", "recursive traversal terminates"],
+      "fixtures": ["TempDir", "MockVfsLayer", "LabRuntime"],
+      "cleanup": ["quiesce runtime", "drop TempDir tree"],
+      "existing_evidence": ["src/fs/read_dir.rs", "src/fs/vfs.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.2"
+    },
+    {
+      "scenario_id": "DORMANT-FS-002",
+      "source_file": "src/real_fs_dir_fs_vfs_integration_e2e_tests.rs",
+      "test_function": "test_normal_recursive_traversal",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["nonempty bounded recursive directory traversal"],
+      "expected_assertions": ["success", "entries traversed is positive", "termination"],
+      "fixtures": ["TempDir", "nested real directories", "LabRuntime"],
+      "cleanup": ["quiesce runtime", "drop TempDir tree"],
+      "existing_evidence": ["src/fs/read_dir.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.2"
+    },
+    {
+      "scenario_id": "DORMANT-FS-003",
+      "source_file": "src/real_fs_dir_fs_vfs_integration_e2e_tests.rs",
+      "test_function": "test_circular_symlink_detection",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["real circular symlink traversal"],
+      "expected_assertions": ["cycle count is positive", "no infinite loop", "bounded completion"],
+      "fixtures": ["TempDir", "Unix circular symlinks", "LabRuntime"],
+      "cleanup": ["quiesce runtime", "drop TempDir tree"],
+      "existing_evidence": ["src/fs/vfs.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.2"
+    },
+    {
+      "scenario_id": "DORMANT-FS-004",
+      "source_file": "src/real_fs_dir_fs_vfs_integration_e2e_tests.rs",
+      "test_function": "test_broken_symlink_handling",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["real dangling symlink error propagation"],
+      "expected_assertions": ["broken link count is positive", "error is handled without traversal corruption"],
+      "fixtures": ["TempDir", "Unix dangling symlinks", "LabRuntime"],
+      "cleanup": ["quiesce runtime", "drop TempDir tree"],
+      "existing_evidence": ["src/fs/vfs.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.2"
+    },
+    {
+      "scenario_id": "DORMANT-FS-005",
+      "source_file": "src/real_fs_dir_fs_vfs_integration_e2e_tests.rs",
+      "test_function": "test_mixed_symlink_tree_traversal",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["mixed real directories, valid links, cycles and dangling links"],
+      "expected_assertions": ["entries and symlinks are observed", "cycles terminate", "aggregate success"],
+      "fixtures": ["TempDir", "Unix mixed symlink tree", "LabRuntime"],
+      "cleanup": ["quiesce runtime", "drop TempDir tree"],
+      "existing_evidence": ["src/fs/read_dir.rs", "src/fs/vfs.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.2"
+    },
+    {
+      "scenario_id": "DORMANT-INT-001",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_pubsub_fanout_partial_failures_integration",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["broadcast fanout with partial consumer failure"],
+      "expected_assertions": ["healthy consumers receive messages", "failed consumers do not stall fanout", "channels close cleanly"],
+      "fixtures": ["IntegrationTestHarness", "broadcast channel", "seeded failure schedule required"],
+      "cleanup": ["join producers and consumers", "close broadcast channel", "assert no leaks"],
+      "existing_evidence": ["src/channel/broadcast.rs", "src/channel/broadcast_metamorphic.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-002",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_circuit_breaker_cascade_recovery_integration",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["multi-tier circuit opening, half-open probing and recovery"],
+      "expected_assertions": ["cascade opens expected tiers", "recovery closes breakers", "metrics match transitions"],
+      "fixtures": ["IntegrationTestHarness", "CircuitBreaker chain", "virtual time required"],
+      "cleanup": ["drain probes", "close region", "assert quiescence"],
+      "existing_evidence": ["src/combinator/circuit_breaker.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-003",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_region_failure_isolation_integration",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["supervised region failure isolation and recovery"],
+      "expected_assertions": ["failures stay within region", "healthy regions progress", "recovery preserves lifecycle invariants"],
+      "fixtures": ["IntegrationTestHarness", "region supervision tree", "seeded failure schedule required"],
+      "cleanup": ["cancel and join region tasks", "assert obligation-free quiescence"],
+      "existing_evidence": ["src/runtime/state_verifier.rs", "src/runtime_state_machine_conformance_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-004",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_backpressure_propagation_pipeline_integration",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["multi-stage pipeline backpressure"],
+      "expected_assertions": ["pressure propagates upstream", "bounded buffers do not lose accepted data", "pipeline recovers"],
+      "fixtures": ["IntegrationTestHarness", "bounded mpsc pipeline", "virtual time required"],
+      "cleanup": ["close stages in order", "join workers", "assert no leaks"],
+      "existing_evidence": ["src/transport/tests.rs", "src/channel/atomicity_test.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-005",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_comprehensive_integration_scenario",
+      "coverage": "NO_COVERAGE",
+      "covers": ["harness initialization only"],
+      "expected_assertions": ["placeholder assertion is not accepted as scenario evidence"],
+      "fixtures": ["IntegrationTestHarness"],
+      "cleanup": ["drop TempDir"],
+      "existing_evidence": [],
+      "status": "PLACEHOLDER_NOT_EVIDENCE",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-006",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_chaos_thread_kill_obligation_cleanup_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["worker failure while obligations are live"],
+      "expected_assertions": ["obligations resolve or abort", "replacement workers preserve progress", "no task leak"],
+      "fixtures": ["IntegrationTestHarness", "seeded worker-failure schedule required"],
+      "cleanup": ["join replacement and failed-worker handles", "assert obligation ledger empty"],
+      "existing_evidence": ["src/runtime/epoch_gc_integration.rs", "src/lab/oracle/obligation_leak.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-007",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_hedge_first_success_short_circuit_integration",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["first-success hedge with slow loser"],
+      "expected_assertions": ["first success wins", "slow loser is cancelled and drained", "single result is committed"],
+      "fixtures": ["IntegrationTestHarness", "hedged operations", "virtual time required"],
+      "cleanup": ["drain race losers", "close region", "assert quiescence"],
+      "existing_evidence": ["src/combinator/hedge.rs", "src/real_service_e2e_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-008",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_distributed_bridge_rolling_restart_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["rolling bridge restart while preserving consistency"],
+      "expected_assertions": ["traffic survives each restart", "sequence remains consistent", "all bridges rejoin"],
+      "fixtures": ["IntegrationTestHarness", "distributed bridge cluster", "virtual time required"],
+      "cleanup": ["stop and join every bridge", "close regions", "assert quiescence"],
+      "existing_evidence": ["src/distributed/bridge.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-009",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_pubsub_broker_death_reconnect_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["broker death, reconnect and resumed fanout"],
+      "expected_assertions": ["disconnect is detected", "reconnect resumes delivery", "accepted messages are accounted"],
+      "fixtures": ["IntegrationTestHarness", "broker tasks", "virtual time required"],
+      "cleanup": ["stop broker tasks", "close channels", "assert no leaks"],
+      "existing_evidence": ["src/channel/broadcast.rs", "src/real_channel_supervision_e2e_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-010",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_raptorq_decode_interruption_resume_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["interrupted RaptorQ decoding and stream resume"],
+      "expected_assertions": ["decoder resumes from retained state", "payload reconstructs exactly", "partial work is bounded"],
+      "fixtures": ["IntegrationTestHarness", "RaptorQ encoder and decoder", "seeded interruption schedule required"],
+      "cleanup": ["join encoder and decoder", "release retained symbols", "assert no leaks"],
+      "existing_evidence": ["src/codec/raptorq.rs", "src/real_net_quic_native_streams_raptorq_decoder_integration_e2e_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-011",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_runtime_panic_recovery_subscriptions_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["panic isolation with active subscriptions"],
+      "expected_assertions": ["panic is contained", "subscriptions recover or terminate explicitly", "obligations do not leak"],
+      "fixtures": ["IntegrationTestHarness", "supervised subscription tasks", "seeded panic schedule required"],
+      "cleanup": ["join panicked and replacement tasks", "close subscriptions", "assert quiescence"],
+      "existing_evidence": ["src/runtime/panic_isolation.rs", "src/real_channel_supervision_e2e_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-012",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_burst_traffic_rate_limit_throughput_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["burst admission, rate limiting and sustained recovery"],
+      "expected_assertions": ["rate bound holds", "accepted work completes", "backlog returns to zero"],
+      "fixtures": ["IntegrationTestHarness", "rate limiter", "virtual time required"],
+      "cleanup": ["drain admitted requests", "join workers", "assert no leaks"],
+      "existing_evidence": ["src/transport/tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-013",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_http2_connection_storm_slot_leaks_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["real loopback HTTP/2 connection churn and slot reclamation"],
+      "expected_assertions": ["connections complete or fail explicitly", "all slots are reclaimed", "listener shuts down"],
+      "fixtures": ["IntegrationTestHarness", "ephemeral localhost listener", "HTTP/2 clients"],
+      "cleanup": ["close clients and listener", "join server", "assert slot count and task count zero"],
+      "existing_evidence": ["src/http/h2/connection.rs", "src/real_http_h2_concurrent_load_e2e_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-014",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_high_frequency_timer_churn_wheel_stress_integration",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["timer creation, cancellation and wheel churn"],
+      "expected_assertions": ["deadlines fire within virtual bounds", "cancelled timers do not fire", "wheel drains"],
+      "fixtures": ["IntegrationTestHarness", "timer wheel", "seeded durations and virtual time required"],
+      "cleanup": ["cancel remaining timers", "drain wheel", "assert no timer or task leaks"],
+      "existing_evidence": ["src/real_time_wheel_runtime_timer_integration_e2e_tests.rs", "src/real_time_intrusive_wheel_combinator_timeout_e2e_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-015",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_multi_hour_task_checkpoint_resume_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["long-horizon checkpoint and resume compressed into deterministic virtual time"],
+      "expected_assertions": ["checkpoints advance monotonically", "resume continues exactly once", "final state matches uninterrupted execution"],
+      "fixtures": ["IntegrationTestHarness", "checkpoint files", "virtual time required"],
+      "cleanup": ["join resumed task", "sync and drop checkpoint files", "assert quiescence"],
+      "existing_evidence": ["src/lab/snapshot_restore.rs", "src/types/task_context.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-016",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_memory_pressure_backpressure_recovery_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["memory-pressure admission slowdown and recovery"],
+      "expected_assertions": ["resource bound is respected", "pressure propagates", "backlog and allocations recover"],
+      "fixtures": ["IntegrationTestHarness", "bounded channels", "seeded pressure schedule required"],
+      "cleanup": ["drain buffers", "join workers", "assert resource counters and tasks zero"],
+      "existing_evidence": ["src/lab/deterministic_validation_tests.rs", "src/transport/tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-INT-017",
+      "source_file": "src/real_integration_scenarios_e2e_tests.rs",
+      "test_function": "test_partition_tolerance_split_brain_healing_integration",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["partition, split-brain detection and healing"],
+      "expected_assertions": ["majority continues", "no consensus violation occurs", "healed state converges"],
+      "fixtures": ["IntegrationTestHarness", "multi-node topology", "virtual time required"],
+      "cleanup": ["heal partition", "stop and join nodes", "assert region quiescence"],
+      "existing_evidence": ["src/distributed/bridge.rs", "src/distributed_security_codec_conformance_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.3"
+    },
+    {
+      "scenario_id": "DORMANT-DIST-001",
+      "source_file": "src/real_distributed_e2e_tests.rs",
+      "test_function": "test_consistent_hash_rebalancing_e2e",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["fixed-seed key redistribution under node add and remove"],
+      "expected_assertions": ["movement stays bounded", "distribution remains balanced", "node membership is exact"],
+      "fixtures": ["HashRing", "1000 deterministic keys", "seed 42"],
+      "cleanup": ["drop in-memory ring"],
+      "existing_evidence": ["src/distributed/consistent_hash.rs", "src/distributed_security_codec_conformance_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.4"
+    },
+    {
+      "scenario_id": "DORMANT-DIST-002",
+      "source_file": "src/real_distributed_e2e_tests.rs",
+      "test_function": "test_snapshot_serialization_roundtrip_e2e",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["real-file RegionSnapshot binary round trip"],
+      "expected_assertions": ["all snapshot fields round-trip", "wire bytes persist through fsync", "restored metadata matches"],
+      "fixtures": ["TempDir", "RegionSnapshot", "real file I/O"],
+      "cleanup": ["close file handles", "drop TempDir tree"],
+      "existing_evidence": ["src/distributed/snapshot.rs", "src/distributed/snapshots/asupersync__distributed__snapshot__tests__region_snapshot_canonical_serialization_v2.snap"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.4"
+    },
+    {
+      "scenario_id": "DORMANT-DIST-003",
+      "source_file": "src/real_distributed_e2e_tests.rs",
+      "test_function": "test_concurrent_snapshot_operations_e2e",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["concurrent real-file snapshot writes and reads"],
+      "expected_assertions": ["all workers join", "each snapshot round-trips", "files remain isolated"],
+      "fixtures": ["TempDir", "RegionSnapshot set", "filesystem workers"],
+      "cleanup": ["join all workers", "close handles", "drop TempDir tree"],
+      "existing_evidence": ["src/distributed/snapshot.rs", "src/real_distributed_snapshot_obligation_saga_integration_e2e_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.4"
+    },
+    {
+      "scenario_id": "DORMANT-DIST-004",
+      "source_file": "src/real_distributed_e2e_tests.rs",
+      "test_function": "test_snapshot_error_handling_e2e",
+      "coverage": "OVERLAP_CANDIDATE",
+      "covers": ["missing, empty, truncated or corrupted snapshot errors"],
+      "expected_assertions": ["malformed inputs fail explicitly", "no partial restore is committed", "error category is stable"],
+      "fixtures": ["TempDir", "malformed snapshot files"],
+      "cleanup": ["close handles", "drop TempDir tree"],
+      "existing_evidence": ["src/distributed/snapshot.rs", "src/distributed_security_codec_conformance_tests.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.4"
+    },
+    {
+      "scenario_id": "DORMANT-DIST-005",
+      "source_file": "src/real_distributed_e2e_tests.rs",
+      "test_function": "test_distributed_coordination_full_cycle_e2e",
+      "coverage": "UNIQUE_CANDIDATE",
+      "covers": ["hash-ring scale-up and failure with snapshot migration and recovery"],
+      "expected_assertions": ["membership changes are applied", "all migrated snapshots recover", "snapshot fields match originals"],
+      "fixtures": ["HashRing seed 12345", "TempDir", "real snapshot files"],
+      "cleanup": ["close handles", "drop ring", "drop TempDir tree"],
+      "existing_evidence": ["src/distributed/consistent_hash.rs", "src/distributed/snapshot.rs"],
+      "status": "BLOCKED_REPAIR",
+      "repair_owner": "asupersync-d24mms.12.4"
+    }
+  ],
+  "common_test_requirements": {
+    "capability_ids": ["CAP-REAL-SERVICE-E2E", "CAP-VERIFICATION-PROFILES"],
+    "required_prerequisites": ["real-service-e2e feature", "remote Cargo proof", "canonical E2E artifact logger"],
+    "required_invariants": ["no task leaks", "no obligation leaks", "race losers drained", "region close implies quiescence"],
+    "runner_owner": "asupersync-d24mms.12.5"
+  },
+  "summary": {
+    "module_count": 3,
+    "entrypoint_count": 27,
+    "blocked_repair_count": 26,
+    "placeholder_not_evidence_count": 1,
+    "compiled_entrypoint_count": 0,
+    "deleted_or_ignored_count": 0,
+    "compile_error_count": 278
+  },
+  "no_claim_boundaries": [
+    "This inventory is not evidence that any dormant entrypoint compiles or runs.",
+    "Overlap candidates are not superseded; no scenario may be discarded without parity evidence from its repair owner.",
+    "The temporary lib.rs declarations used for compile probes were restored and are not part of this packet.",
+    "No benchmark, broad workspace health, release readiness, runtime correctness, or live-service claim is made.",
+    "A downstream repair is green only after canonical no-mock execution artifacts and invariant checks are captured."
+  ]
+}

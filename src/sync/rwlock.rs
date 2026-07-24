@@ -311,11 +311,6 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn try_acquire_read_state(&self) -> Result<(), TryReadError> {
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = self.rank {
-            lock_ordering::check_acquire(self.name, rank);
-        }
-
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
@@ -323,6 +318,14 @@ impl<T> RwLock<T> {
 
         if state.writer_active || state.writer_waiters > 0 {
             return Err(TryReadError::Locked);
+        }
+
+        // Enforce lock ordering only on the success path, under the state guard
+        // and immediately before the transition, mirroring the async read
+        // acquisition. A failed try_read must return Err rather than panic with
+        // ASUP-E205 or record a phantom acquisition edge (br-asupersync-1dydby).
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
         }
 
         state.readers += 1;
@@ -338,11 +341,6 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn try_acquire_write_state(&self) -> Result<(), TryWriteError> {
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = self.rank {
-            lock_ordering::check_acquire(self.name, rank);
-        }
-
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryWriteError::Poisoned);
@@ -350,6 +348,14 @@ impl<T> RwLock<T> {
 
         if state.writer_active || state.readers > 0 || state.writer_waiters > 0 {
             return Err(TryWriteError::Locked);
+        }
+
+        // Enforce lock ordering only on the success path, under the state guard
+        // and immediately before the transition, mirroring the async write
+        // acquisition. A failed try_write must return Err rather than panic with
+        // ASUP-E205 or record a phantom acquisition edge (br-asupersync-1dydby).
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
         }
 
         state.writer_active = true;
@@ -371,6 +377,40 @@ impl<T> RwLock<T> {
     #[inline]
     fn drain_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
         SmallVec::from_vec(state.reader_waiters.drain())
+    }
+
+    /// Wakes a released batch of waiters -- an optional writer baton followed by
+    /// the eligible readers -- with per-wake panic isolation, so one hostile
+    /// safe Waker cannot strand the peers whose reader slots were already
+    /// reserved under the state lock (br-asupersync-dkubr0). The first panic is
+    /// retained, the fanout completes, then it is resumed once -- unless this
+    /// runs inside an existing unwind (a guard Drop during a panic), where the
+    /// wakes have already been delivered and resuming would abort, so the
+    /// payload is dropped instead.
+    fn wake_released_waiters(writer_waker: Option<Waker>, reader_wakers: SmallVec<[Waker; 4]>) {
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        let mut isolate = |waker: Waker| {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                waker.wake();
+            })) && first_panic.is_none()
+            {
+                first_panic = Some(payload);
+            }
+        };
+        if let Some(waker) = writer_waker {
+            isolate(waker);
+        }
+        for waker in reader_wakers {
+            isolate(waker);
+        }
+        drop(isolate);
+        if let Some(payload) = first_panic {
+            if std::thread::panicking() {
+                drop(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 
     #[inline]
@@ -538,12 +578,7 @@ impl<T> RwLock<T> {
                 }
             }
         };
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        Self::wake_released_waiters(writer_waker, reader_wakers);
     }
 
     #[inline]
@@ -696,12 +731,7 @@ impl<T> RwLock<T> {
 
         *counted = false;
 
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        Self::wake_released_waiters(writer_waker, reader_wakers);
         drop(retired_waker);
     }
 
@@ -1082,9 +1112,7 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
         };
 
         // Wake readers outside the lock
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        RwLock::<T>::wake_released_waiters(None, reader_wakers);
 
         read_guard
     }
@@ -1265,9 +1293,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
         };
 
         // Wake readers outside the lock
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        RwLock::<T>::wake_released_waiters(None, reader_wakers);
 
         read_guard
     }
@@ -1600,6 +1626,7 @@ mod tests {
         state_was_unlocked: StdArc<AtomicBool>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl std::task::Wake for StateLockDropProbe {
         fn wake(self: StdArc<Self>) {}
     }
@@ -1647,6 +1674,77 @@ mod tests {
             state_was_unlocked.load(AtomicOrdering::SeqCst),
             "{path} RawWaker owner must be destroyed after releasing rwlock state"
         );
+    }
+
+    /// br-asupersync-dkubr0: releasing a write lock pregrants a batch of eligible
+    /// reader waiters (their reader slots are reserved under the state lock) and
+    /// then wakes them. A first safe reader Waker panic must not strand the later
+    /// pregranted readers -- they must still be woken, the write-drop panic is
+    /// resumed once, both readers then complete, and after they release the lock
+    /// is writable again with zero readers.
+    #[test]
+    fn write_release_reader_fanout_panic_still_wakes_peers_then_resumes() {
+        struct PanicWaker;
+        impl std::task::Wake for PanicWaker {
+            fn wake(self: StdArc<Self>) {
+                panic!("hostile reader waker panics on wake");
+            }
+            fn wake_by_ref(self: &StdArc<Self>) {
+                panic!("hostile reader waker panics on wake");
+            }
+        }
+        struct CountWaker(StdArc<std::sync::atomic::AtomicUsize>);
+        impl std::task::Wake for CountWaker {
+            fn wake(self: StdArc<Self>) {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            fn wake_by_ref(self: &StdArc<Self>) {
+                self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+
+        init_test("write_release_reader_fanout_panic_still_wakes_peers_then_resumes");
+        // Unknown lock name -> no rank -> no lock-order interference.
+        let lock = RwLock::with_name("reader_fanout", 0u32);
+        let cx = test_cx();
+
+        // An active writer blocks readers.
+        let writer = lock.try_write().expect("writer acquires");
+
+        // Two readers park behind the writer; the first carries a panicking Waker.
+        let mut r1 = lock.read(&cx);
+        let mut r2 = lock.read(&cx);
+        let panic_waker = Waker::from(StdArc::new(PanicWaker));
+        let counter = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_waker = Waker::from(StdArc::new(CountWaker(StdArc::clone(&counter))));
+        assert!(poll_with_waker(&mut r1, &panic_waker).is_pending(), "r1 parks");
+        assert!(poll_with_waker(&mut r2, &count_waker).is_pending(), "r2 parks");
+
+        // Dropping the writer pregrants both readers and wakes them; r1's Waker
+        // panics, but r2 must still be woken, then the panic is resumed out of
+        // the guard drop.
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(writer)));
+        assert!(
+            dropped.is_err(),
+            "write-release reader fanout resumes the panic"
+        );
+        assert!(
+            counter.load(AtomicOrdering::SeqCst) >= 1,
+            "later reader still woken despite earlier panic"
+        );
+
+        // Both readers were pregranted, so they complete on the next poll without
+        // re-incrementing the reader count.
+        let g1 = poll_once(&mut r1).expect("r1 ready").expect("r1 read guard");
+        let g2 = poll_once(&mut r2).expect("r2 ready").expect("r2 read guard");
+        assert_eq!(lock.debug_state().readers, 2, "both readers active");
+        drop(g1);
+        drop(g2);
+
+        // With both readers released, zero readers remain and a writer acquires.
+        assert_eq!(lock.debug_state().readers, 0, "no readers after release");
+        assert!(lock.try_write().is_ok(), "lock writable after fanout");
+        crate::test_complete!("write_release_reader_fanout_panic_still_wakes_peers_then_resumes");
     }
 
     #[test]
@@ -5242,5 +5340,90 @@ mod metamorphic_tests {
         assert_eq!(state.writer_waiters, 0);
         assert!(!state.writer_active);
         crate::test_complete!("queued_write_handoff_checks_lock_order_before_recording_grant");
+    }
+
+    /// br-asupersync-1dydby: nonblocking `try_read`/`try_write` calls that fail
+    /// eligibility (a writer is active) must return their `Err` variant, not
+    /// panic ASUP-E205 or record a phantom acquisition edge, even when the
+    /// caller holds a higher-ranked (Tasks) lock. An *available* lower-ranked
+    /// acquisition must still enforce the ordering panic.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn failed_try_read_write_returns_err_without_false_lock_order_panic() {
+        init_test("failed_try_read_write_returns_err_without_false_lock_order_panic");
+        crate::sync::lock_ordering::clear_held_locks();
+
+        // Acquire Regions(30) then Tasks(40) -- valid ascending order -- so the
+        // caller legitimately holds the higher-ranked Tasks lock. A held writer
+        // on `regions` makes both nonblocking views unavailable.
+        let regions = RwLock::with_name("regions_table", 0u32);
+        let tasks = RwLock::with_name("tasks_queue", 0u32);
+        let regions_writer = regions
+            .try_write()
+            .expect("regions write (valid order, first)");
+        let tasks_writer = tasks
+            .try_write()
+            .expect("tasks write (valid order, second)");
+
+        // (1) try_read unavailable (writer active) -> Locked, not panic.
+        let read_locked = matches!(regions.try_read(), Err(TryReadError::Locked));
+        crate::assert_with_log!(
+            read_locked,
+            "unavailable lower-ranked try_read returns Locked, not ASUP-E205",
+            true,
+            read_locked
+        );
+
+        // (2) try_write unavailable (writer active) -> Locked, not panic.
+        let write_locked = matches!(regions.try_write(), Err(TryWriteError::Locked));
+        crate::assert_with_log!(
+            write_locked,
+            "unavailable lower-ranked try_write returns Locked, not ASUP-E205",
+            true,
+            write_locked
+        );
+
+        // (3) Available read + violation -> must still panic ASUP-E205.
+        let avail_read = RwLock::with_name("regions_table", 0u32);
+        let read_enforced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = avail_read.try_read();
+        }))
+        .is_err();
+        crate::assert_with_log!(
+            read_enforced,
+            "available lower-ranked try_read still enforces ordering panic",
+            true,
+            read_enforced
+        );
+
+        // (4) Available write + violation -> must still panic ASUP-E205.
+        let avail_write = RwLock::with_name("regions_table", 0u32);
+        let write_enforced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = avail_write.try_write();
+        }))
+        .is_err();
+        crate::assert_with_log!(
+            write_enforced,
+            "available lower-ranked try_write still enforces ordering panic",
+            true,
+            write_enforced
+        );
+
+        drop(tasks_writer);
+        drop(regions_writer);
+        crate::sync::lock_ordering::clear_held_locks();
+
+        // The rejected acquisitions must not have mutated state or recorded an
+        // edge: with the higher-ranked locks released, they acquire cleanly.
+        let read_clean = avail_read.try_read().is_ok();
+        let write_clean = avail_write.try_write().is_ok();
+        crate::assert_with_log!(
+            read_clean && write_clean,
+            "rejected try_read/try_write left the locks acquirable (no phantom state)",
+            true,
+            read_clean && write_clean
+        );
+        crate::sync::lock_ordering::clear_held_locks();
+        crate::test_complete!("failed_try_read_write_returns_err_without_false_lock_order_panic");
     }
 }

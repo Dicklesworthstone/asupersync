@@ -613,24 +613,28 @@ fn parked_from_admission(
 }
 
 fn supported_overlay_capability() -> ProofTrafficOverlayCapability {
-    ProofTrafficOverlayCapability::new(
+    ProofTrafficOverlayCapability::from_rch_exec_help(
         "rch-1.0.99-help",
-        true,
-        Vec::new(),
-        vec!["clean-overlay flags supported".to_string()],
+        r"Options:
+  -b, --base=<HEAD>
+      --clean-overlay
+  -o, --overlay-path=<PATH>
+      --no-overlay
+",
     )
 }
 
 fn unsupported_overlay_capability() -> ProofTrafficOverlayCapability {
-    ProofTrafficOverlayCapability::new(
+    ProofTrafficOverlayCapability::from_rch_exec_help(
         "rch-1.0.41-help",
-        false,
-        vec![
-            "--base".to_string(),
-            "--clean-overlay".to_string(),
-            "--overlay-path".to_string(),
-        ],
-        vec!["installed rch exec help lacks clean-overlay flags".to_string()],
+        r"Options:
+  -v, --verbose
+  Examples:
+  --base HEAD
+  --clean-overlay
+  --overlay-path PATH
+  --no-overlay
+",
     )
 }
 

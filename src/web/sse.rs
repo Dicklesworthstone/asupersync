@@ -31,6 +31,7 @@ use std::collections::VecDeque;
 use std::fmt::{self, Write};
 use std::time::Duration;
 
+use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::http::h1::codec::HttpError;
 use crate::http::h1::stream::{OutgoingBodySender, StreamingResponse};
@@ -225,9 +226,9 @@ pub enum StreamingSseError {
         /// Configured per-chunk maximum.
         max: usize,
     },
-    /// Emitting this chunk would exceed the per-response byte cap.
+    /// Emitting this event would exceed the per-response event-byte cap.
     TotalBytesExceeded {
-        /// Total bytes that would have been emitted.
+        /// Total event bytes that would have been emitted.
         actual: usize,
         /// Configured per-response maximum.
         max: usize,
@@ -248,7 +249,7 @@ impl fmt::Display for StreamingSseError {
             }
             Self::TotalBytesExceeded { actual, max } => write!(
                 f,
-                "streaming SSE response exceeds max total bytes ({actual} > {max})"
+                "streaming SSE events exceed max total bytes ({actual} > {max})"
             ),
             Self::Producer(message) => write!(f, "streaming SSE producer failed: {message}"),
         }
@@ -297,7 +298,7 @@ pub enum StreamingSseTransportStep {
     Sent {
         /// Bytes committed by this chunk.
         bytes: usize,
-        /// Total SSE bytes committed by the stream so far.
+        /// Total serialized SSE bytes produced by the stream so far.
         total_bytes: usize,
     },
     /// The SSE source completed and the HTTP/1 body sender was finished.
@@ -355,6 +356,11 @@ impl StreamingSseSource for VecSseSource {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PreparedEventChunk {
+    bytes: Vec<u8>,
+}
+
 /// Incremental Server-Sent Events response state.
 ///
 /// This is separate from [`Sse`], which remains a finite batch response that
@@ -366,7 +372,12 @@ pub struct StreamingSse<S = VecSseSource> {
     source: S,
     max_event_bytes: usize,
     max_total_bytes: usize,
+    /// Event bytes serialized and charged against `max_total_bytes`.
+    event_bytes_emitted: usize,
+    /// All serialized bytes produced (events plus heartbeats).
     bytes_emitted: usize,
+    /// Serialized event retained until a chunk API returns it or H1 commits it.
+    pending_event_chunk: Option<PreparedEventChunk>,
     heartbeat_comment: String,
     closed: bool,
 }
@@ -393,7 +404,9 @@ impl<S: StreamingSseSource> StreamingSse<S> {
             source,
             max_event_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
             max_total_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
+            event_bytes_emitted: 0,
             bytes_emitted: 0,
+            pending_event_chunk: None,
             heartbeat_comment: "keep-alive".to_string(),
             closed: false,
         }
@@ -416,7 +429,10 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         self
     }
 
-    /// Override the maximum total bytes emitted by this streaming response.
+    /// Override the maximum total event bytes emitted by this response.
+    ///
+    /// Server-authored heartbeat comments remain subject to
+    /// [`Self::max_event_bytes`] but do not consume this event-volume budget.
     #[must_use]
     pub fn max_total_bytes(mut self, max: usize) -> Self {
         self.max_total_bytes = max;
@@ -430,7 +446,10 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         self
     }
 
-    /// Return the number of serialized bytes emitted so far.
+    /// Return total serialized bytes produced by the chunk APIs so far.
+    ///
+    /// This includes both client-visible events and server-authored heartbeat
+    /// comments.
     #[must_use]
     pub const fn bytes_emitted(&self) -> usize {
         self.bytes_emitted
@@ -444,8 +463,7 @@ impl<S: StreamingSseSource> StreamingSse<S> {
 
     /// Mark the stream closed and cancel the request context for disconnect.
     pub fn cancel_for_disconnect(&mut self, cx: &Cx) {
-        self.closed = true;
-        self.source.cancel();
+        self.cancel_source();
         cx.set_cancel_requested(true);
     }
 
@@ -494,44 +512,71 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         cx: &Cx,
         sender: &mut OutgoingBodySender,
     ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
-        let Some(chunk) = self
-            .next_chunk(cx)
+        if !self
+            .prepare_next_event_chunk(cx)
             .map_err(StreamingSseTransportError::Stream)?
-        else {
+        {
             sender
                 .finish(cx)
                 .map_err(StreamingSseTransportError::Transport)?;
             return Ok(StreamingSseTransportStep::Complete);
-        };
+        }
 
-        self.send_h1_bytes(cx, sender, &chunk).await
+        // The send future owns its copy while the authoritative prepared
+        // event stays in `self` for cancellation-safe retry.
+        let body_bytes = Bytes::copy_from_slice(
+            &self
+                .pending_event_chunk
+                .as_ref()
+                .expect("prepared event remains pending until H1 commit")
+                .bytes,
+        );
+        let bytes = body_bytes.len();
+        match sender.send_bytes(cx, body_bytes).await {
+            Ok(()) => {
+                let committed = self.commit_pending_event();
+                debug_assert_eq!(committed.len(), bytes);
+                Ok(StreamingSseTransportStep::Sent {
+                    bytes,
+                    total_bytes: self.bytes_emitted,
+                })
+            }
+            Err(error) => Err(self.handle_h1_transport_error(cx, error)),
+        }
     }
 
     /// Commit one heartbeat/comment chunk to an HTTP/1 outgoing body channel.
     ///
     /// # Errors
     ///
-    /// Returns the same errors as
-    /// [`send_next_h1_chunk`](Self::send_next_h1_chunk).
+    /// Returns [`StreamingSseTransportError::Stream`] for cancellation or an
+    /// oversized heartbeat, and [`StreamingSseTransportError::Transport`] when
+    /// the HTTP/1 outgoing body rejects the write.
     pub async fn send_h1_heartbeat(
         &mut self,
         cx: &Cx,
         sender: &mut OutgoingBodySender,
     ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
-        // Do not write a heartbeat after the stream has completed. The event
-        // source finishing (or a prior cancellation) sets `closed` and finishes
-        // the body sender; writing into a finished channel surfaces
-        // `BodyChannelClosed`, which `send_h1_bytes` maps to
-        // `cancel_for_disconnect` and would wrongly cancel a cleanly-COMPLETED
-        // request `Cx` (poisoning connection-reuse / audit / disconnect
-        // accounting). Mirror `next_chunk`'s closed guard.
-        if self.closed {
+        // Do not write a heartbeat after the stream has completed. Writing
+        // into the finished channel would turn a clean completion into a
+        // disconnect cancellation.
+        let Some(chunk) = self
+            .prepare_heartbeat_chunk(cx)
+            .map_err(StreamingSseTransportError::Stream)?
+        else {
             return Ok(StreamingSseTransportStep::Complete);
+        };
+        let bytes = chunk.len();
+        match sender.send_bytes(cx, Bytes::from(chunk)).await {
+            Ok(()) => {
+                self.commit_heartbeat(bytes);
+                Ok(StreamingSseTransportStep::Sent {
+                    bytes,
+                    total_bytes: self.bytes_emitted,
+                })
+            }
+            Err(error) => Err(self.handle_h1_transport_error(cx, error)),
         }
-        let chunk = self
-            .heartbeat_chunk(cx)
-            .map_err(StreamingSseTransportError::Stream)?;
-        self.send_h1_bytes(cx, sender, &chunk).await
     }
 
     /// Emit one serialized event chunk.
@@ -540,55 +585,82 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     ///
     /// Returns [`StreamingSseError::Cancelled`] when `cx` has been cancelled,
     /// [`StreamingSseError::EventTooLarge`] when the next event exceeds
-    /// `max_event_bytes`, [`StreamingSseError::TotalBytesExceeded`] when the
-    /// stream would exceed `max_total_bytes`, or producer-specific errors from
+    /// `max_event_bytes`, [`StreamingSseError::TotalBytesExceeded`] when event
+    /// volume would exceed `max_total_bytes`, or producer-specific errors from
     /// the configured [`StreamingSseSource`].
     pub fn next_chunk(&mut self, cx: &Cx) -> Result<Option<Vec<u8>>, StreamingSseError> {
-        if self.closed {
+        if !self.prepare_next_event_chunk(cx)? {
             return Ok(None);
         }
-
-        self.checkpoint(cx)?;
-        match self.source.next_event(cx) {
-            Ok(Some(event)) => self.serialize_event(&event).map(Some),
-            Ok(None) => {
-                self.closed = true;
-                Ok(None)
-            }
-            Err(StreamingSseError::Cancelled) => {
-                self.closed = true;
-                self.source.cancel();
-                Err(StreamingSseError::Cancelled)
-            }
-            Err(error) => Err(error),
-        }
+        Ok(Some(self.commit_pending_event()))
     }
 
     /// Emit one heartbeat/comment chunk without advancing the event source.
     ///
     /// # Errors
     ///
-    /// Returns the same cancellation and byte-limit errors as
-    /// [`next_chunk`](Self::next_chunk).
+    /// Returns [`StreamingSseError::Cancelled`] on cancellation and
+    /// [`StreamingSseError::EventTooLarge`] when the heartbeat exceeds the
+    /// per-chunk cap. Heartbeats do not consume `max_total_bytes` and therefore
+    /// do not return [`StreamingSseError::TotalBytesExceeded`].
     pub fn heartbeat_chunk(&mut self, cx: &Cx) -> Result<Vec<u8>, StreamingSseError> {
-        // A completed stream has no heartbeat to emit; return empty so callers
-        // never serialize a keep-alive into a finished channel (mirrors
-        // `next_chunk`'s closed guard, which returns `Ok(None)`).
-        if self.closed {
+        let Some(chunk) = self.prepare_heartbeat_chunk(cx)? else {
             return Ok(Vec::new());
+        };
+        self.commit_heartbeat(chunk.len());
+        Ok(chunk)
+    }
+
+    fn prepare_next_event_chunk(&mut self, cx: &Cx) -> Result<bool, StreamingSseError> {
+        if self.closed {
+            return Ok(false);
+        }
+        self.checkpoint(cx)?;
+        if let Some(pending) = self.pending_event_chunk.as_ref() {
+            // Consuming builder methods can lower caps after a Pending send
+            // future is dropped, so retry must honor the current policy.
+            self.validate_event_chunk_len(pending.bytes.len())?;
+            return Ok(true);
+        }
+
+        match self.source.next_event(cx) {
+            Ok(Some(event)) => {
+                self.pending_event_chunk = Some(self.serialize_event(&event)?);
+                Ok(true)
+            }
+            Ok(None) => {
+                self.closed = true;
+                Ok(false)
+            }
+            Err(StreamingSseError::Cancelled) => {
+                self.cancel_source();
+                Err(StreamingSseError::Cancelled)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn prepare_heartbeat_chunk(&mut self, cx: &Cx) -> Result<Option<Vec<u8>>, StreamingSseError> {
+        if self.closed {
+            return Ok(None);
         }
         self.checkpoint(cx)?;
         let heartbeat = SseEvent::default().comment(self.heartbeat_comment.clone());
-        self.serialize_event(&heartbeat)
+        self.serialize_event_uncharged(&heartbeat).map(Some)
     }
 
     fn checkpoint(&mut self, cx: &Cx) -> Result<(), StreamingSseError> {
         if cx.checkpoint().is_err() {
-            self.closed = true;
-            self.source.cancel();
+            self.cancel_source();
             return Err(StreamingSseError::Cancelled);
         }
         Ok(())
+    }
+
+    fn cancel_source(&mut self) {
+        self.closed = true;
+        self.pending_event_chunk = None;
+        self.source.cancel();
     }
 
     /// Serializes an event and enforces the per-event size cap, without
@@ -609,44 +681,56 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         Ok(chunk.into_bytes())
     }
 
-    fn serialize_event(&mut self, event: &SseEvent) -> Result<Vec<u8>, StreamingSseError> {
+    fn serialize_event(&self, event: &SseEvent) -> Result<PreparedEventChunk, StreamingSseError> {
         let chunk = self.serialize_event_uncharged(event)?;
-        let chunk_len = chunk.len();
+        self.validate_event_chunk_len(chunk.len())?;
+        Ok(PreparedEventChunk { bytes: chunk })
+    }
 
-        let next_total = self.bytes_emitted.saturating_add(chunk_len);
-        if next_total > self.max_total_bytes {
+    fn validate_event_chunk_len(&self, chunk_len: usize) -> Result<(), StreamingSseError> {
+        if chunk_len > self.max_event_bytes {
+            return Err(StreamingSseError::EventTooLarge {
+                actual: chunk_len,
+                max: self.max_event_bytes,
+            });
+        }
+        let next_event_total = self.event_bytes_emitted.saturating_add(chunk_len);
+        if next_event_total > self.max_total_bytes {
             return Err(StreamingSseError::TotalBytesExceeded {
-                actual: next_total,
+                actual: next_event_total,
                 max: self.max_total_bytes,
             });
         }
 
-        self.bytes_emitted = next_total;
-        Ok(chunk)
+        Ok(())
     }
 
-    async fn send_h1_bytes(
+    fn commit_pending_event(&mut self) -> Vec<u8> {
+        let pending = self
+            .pending_event_chunk
+            .take()
+            .expect("prepared event must exist before commit");
+        self.event_bytes_emitted = self.event_bytes_emitted.saturating_add(pending.bytes.len());
+        self.bytes_emitted = self.bytes_emitted.saturating_add(pending.bytes.len());
+        pending.bytes
+    }
+
+    fn commit_heartbeat(&mut self, bytes: usize) {
+        self.bytes_emitted = self.bytes_emitted.saturating_add(bytes);
+    }
+
+    fn handle_h1_transport_error(
         &mut self,
         cx: &Cx,
-        sender: &mut OutgoingBodySender,
-        chunk: &[u8],
-    ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
-        let bytes = chunk.len();
-        match sender.send_chunk(cx, chunk).await {
-            Ok(()) => Ok(StreamingSseTransportStep::Sent {
-                bytes,
-                total_bytes: self.bytes_emitted,
-            }),
-            Err(error) => {
-                if matches!(
-                    error,
-                    HttpError::BodyCancelled | HttpError::BodyChannelClosed
-                ) {
-                    self.cancel_for_disconnect(cx);
-                }
-                Err(StreamingSseTransportError::Transport(error))
-            }
+        error: HttpError,
+    ) -> StreamingSseTransportError {
+        if matches!(
+            error,
+            HttpError::BodyCancelled | HttpError::BodyChannelClosed
+        ) {
+            self.cancel_for_disconnect(cx);
         }
+        StreamingSseTransportError::Transport(error)
     }
 }
 
@@ -1197,6 +1281,63 @@ mod tests {
             std::str::from_utf8(&event).expect("utf8"),
             "data:payload\n\n"
         );
+        assert_eq!(stream.bytes_emitted(), heartbeat.len() + event.len());
+        assert_eq!(stream.event_bytes_emitted, event.len());
+    }
+
+    #[test]
+    fn streaming_sse_heartbeats_do_not_consume_event_byte_budget() {
+        let cx = Cx::for_testing();
+        let first_wire = "data:one\n\n";
+        let second_wire = "data:two\n\n";
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("one"),
+            SseEvent::default().data("two"),
+        ])
+        .heartbeat_comment("tick")
+        .max_total_bytes(first_wire.len());
+
+        let first_heartbeat = stream.heartbeat_chunk(&cx).expect("first heartbeat");
+        let second_heartbeat = stream.heartbeat_chunk(&cx).expect("second heartbeat");
+        let heartbeat_bytes = first_heartbeat.len() + second_heartbeat.len();
+        assert_eq!(stream.bytes_emitted(), heartbeat_bytes);
+        assert_eq!(stream.event_bytes_emitted, 0);
+
+        let first_event = stream
+            .next_chunk(&cx)
+            .expect("first event serialization")
+            .expect("first event present");
+        assert_eq!(first_event, first_wire.as_bytes());
+        assert_eq!(stream.event_bytes_emitted, first_wire.len());
+        assert_eq!(stream.bytes_emitted(), heartbeat_bytes + first_wire.len());
+
+        let error = stream
+            .next_chunk(&cx)
+            .expect_err("second event must exceed the event-only byte budget");
+        assert_eq!(
+            error,
+            StreamingSseError::TotalBytesExceeded {
+                actual: first_wire.len() + second_wire.len(),
+                max: first_wire.len(),
+            }
+        );
+        assert_eq!(stream.event_bytes_emitted, first_wire.len());
+        assert_eq!(stream.bytes_emitted(), heartbeat_bytes + first_wire.len());
+    }
+
+    #[test]
+    fn streaming_sse_heartbeat_still_respects_per_chunk_cap() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![SseEvent::default().data("pending")])
+            .heartbeat_comment("tick")
+            .max_event_bytes(6);
+
+        assert_eq!(
+            stream.heartbeat_chunk(&cx),
+            Err(StreamingSseError::EventTooLarge { actual: 7, max: 6 })
+        );
+        assert_eq!(stream.event_bytes_emitted, 0);
+        assert_eq!(stream.bytes_emitted(), 0);
     }
 
     #[test]
@@ -1392,6 +1533,240 @@ mod tests {
     }
 
     #[test]
+    fn streaming_sse_h1_dropped_pending_event_retries_without_precommit() {
+        let cx = Cx::for_testing();
+        let first_wire = b"data:first\n\n";
+        let second_wire = b"data:second\n\n";
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("first"),
+            SseEvent::default().data("second"),
+        ]);
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 1);
+        let mut body = response.body;
+
+        block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("first send");
+        assert_eq!(stream.bytes_emitted(), first_wire.len());
+        assert_eq!(sender.total_bytes(), first_wire.len() as u64);
+
+        {
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.send_next_h1_chunk(&cx, &mut sender));
+            assert!(
+                future.as_mut().poll(&mut task_cx).is_pending(),
+                "a full H1 body channel must backpressure the second event"
+            );
+        }
+
+        assert_eq!(stream.bytes_emitted(), first_wire.len());
+        assert_eq!(stream.event_bytes_emitted, first_wire.len());
+        assert_eq!(sender.total_bytes(), first_wire.len() as u64);
+        assert_eq!(stream.source.remaining(), 0);
+        assert_eq!(
+            stream
+                .pending_event_chunk
+                .as_ref()
+                .map(|pending| pending.bytes.as_slice()),
+            Some(second_wire.as_slice())
+        );
+
+        let first_frame = poll_body(&mut body)
+            .expect("first frame")
+            .expect("first frame ok");
+        assert_eq!(
+            first_frame.into_data().expect("data frame").chunk(),
+            first_wire
+        );
+
+        stream = stream
+            .max_event_bytes(second_wire.len() - 1)
+            .max_total_bytes(first_wire.len() + second_wire.len() - 1);
+        let event_cap_error = block_on(stream.send_next_h1_chunk(&cx, &mut sender))
+            .expect_err("lowered event cap must revalidate the pending event");
+        assert!(matches!(
+            event_cap_error,
+            StreamingSseTransportError::Stream(StreamingSseError::EventTooLarge {
+                actual,
+                max,
+            }) if actual == second_wire.len() && max == second_wire.len() - 1
+        ));
+        assert_eq!(stream.bytes_emitted(), first_wire.len());
+        assert_eq!(sender.total_bytes(), first_wire.len() as u64);
+        assert!(stream.pending_event_chunk.is_some());
+
+        stream = stream.max_event_bytes(second_wire.len());
+        let total_cap_error = block_on(stream.send_next_h1_chunk(&cx, &mut sender))
+            .expect_err("lowered total cap must revalidate the pending event");
+        assert!(matches!(
+            total_cap_error,
+            StreamingSseTransportError::Stream(StreamingSseError::TotalBytesExceeded {
+                actual,
+                max,
+            }) if actual == first_wire.len() + second_wire.len()
+                && max == first_wire.len() + second_wire.len() - 1
+        ));
+        assert_eq!(stream.bytes_emitted(), first_wire.len());
+        assert_eq!(sender.total_bytes(), first_wire.len() as u64);
+        assert!(stream.pending_event_chunk.is_some());
+
+        stream = stream.max_total_bytes(first_wire.len() + second_wire.len());
+        let retry = {
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.send_next_h1_chunk(&cx, &mut sender));
+            match future.as_mut().poll(&mut task_cx) {
+                Poll::Ready(result) => result.expect("retried event send"),
+                Poll::Pending => panic!("dropped reserve waiter must release its queue position"),
+            }
+        };
+        assert_eq!(
+            retry,
+            StreamingSseTransportStep::Sent {
+                bytes: second_wire.len(),
+                total_bytes: first_wire.len() + second_wire.len(),
+            }
+        );
+        assert!(stream.pending_event_chunk.is_none());
+        assert_eq!(stream.bytes_emitted(), first_wire.len() + second_wire.len());
+        assert_eq!(
+            sender.total_bytes(),
+            (first_wire.len() + second_wire.len()) as u64
+        );
+
+        let second_frame = poll_body(&mut body)
+            .expect("retried second frame")
+            .expect("retried second frame ok");
+        assert_eq!(
+            second_frame.into_data().expect("data frame").chunk(),
+            second_wire
+        );
+        let complete =
+            block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("complete send");
+        assert_eq!(complete, StreamingSseTransportStep::Complete);
+    }
+
+    #[test]
+    fn streaming_sse_h1_dropped_pending_heartbeat_does_not_precommit() {
+        let cx = Cx::for_testing();
+        let heartbeat_wire = b":tick\n\n";
+        let mut stream = StreamingSse::empty().heartbeat_comment("tick");
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 1);
+        let mut body = response.body;
+
+        block_on(stream.send_h1_heartbeat(&cx, &mut sender)).expect("first heartbeat send");
+        assert_eq!(stream.bytes_emitted(), heartbeat_wire.len());
+        assert_eq!(stream.event_bytes_emitted, 0);
+        assert_eq!(sender.total_bytes(), heartbeat_wire.len() as u64);
+
+        {
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.send_h1_heartbeat(&cx, &mut sender));
+            assert!(
+                future.as_mut().poll(&mut task_cx).is_pending(),
+                "a full H1 body channel must backpressure the second heartbeat"
+            );
+        }
+
+        assert_eq!(stream.bytes_emitted(), heartbeat_wire.len());
+        assert_eq!(stream.event_bytes_emitted, 0);
+        assert_eq!(sender.total_bytes(), heartbeat_wire.len() as u64);
+        let first_frame = poll_body(&mut body)
+            .expect("first heartbeat frame")
+            .expect("first heartbeat frame ok");
+        assert_eq!(
+            first_frame.into_data().expect("data frame").chunk(),
+            heartbeat_wire
+        );
+
+        let retry = {
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.send_h1_heartbeat(&cx, &mut sender));
+            match future.as_mut().poll(&mut task_cx) {
+                Poll::Ready(result) => result.expect("retried heartbeat send"),
+                Poll::Pending => panic!("dropped reserve waiter must release its queue position"),
+            }
+        };
+        assert_eq!(
+            retry,
+            StreamingSseTransportStep::Sent {
+                bytes: heartbeat_wire.len(),
+                total_bytes: heartbeat_wire.len() * 2,
+            }
+        );
+        assert_eq!(stream.bytes_emitted(), heartbeat_wire.len() * 2);
+        assert_eq!(stream.event_bytes_emitted, 0);
+        assert_eq!(sender.total_bytes(), (heartbeat_wire.len() * 2) as u64);
+        let second_frame = poll_body(&mut body)
+            .expect("retried heartbeat frame")
+            .expect("retried heartbeat frame ok");
+        assert_eq!(
+            second_frame.into_data().expect("data frame").chunk(),
+            heartbeat_wire
+        );
+    }
+
+    #[test]
+    fn streaming_sse_h1_closed_body_does_not_commit_prepared_event() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![SseEvent::default().data("pending")]);
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 1);
+        drop(response.body);
+
+        let error = block_on(stream.send_next_h1_chunk(&cx, &mut sender))
+            .expect_err("closed body must reject the prepared event");
+
+        assert!(matches!(
+            error,
+            StreamingSseTransportError::Transport(HttpError::BodyChannelClosed)
+        ));
+        assert!(stream.is_closed());
+        assert!(cx.is_cancel_requested());
+        assert!(stream.pending_event_chunk.is_none());
+        assert_eq!(stream.source.remaining(), 0);
+        assert_eq!(stream.bytes_emitted(), 0);
+        assert_eq!(stream.event_bytes_emitted, 0);
+        assert_eq!(sender.total_bytes(), 0);
+    }
+
+    #[test]
+    fn streaming_sse_h1_cancelled_pending_send_does_not_commit_event() {
+        let cx = Cx::for_testing();
+        let first_wire = b"data:first\n\n";
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("first"),
+            SseEvent::default().data("pending"),
+            SseEvent::default().data("never-polled"),
+        ]);
+        let (_response, mut sender) = stream.h1_chunked_response(&cx, 1);
+
+        block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("first send");
+        let error = {
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.send_next_h1_chunk(&cx, &mut sender));
+            assert!(future.as_mut().poll(&mut task_cx).is_pending());
+            cx.set_cancel_requested(true);
+            match future.as_mut().poll(&mut task_cx) {
+                Poll::Ready(result) => result.expect_err("cancelled send must fail"),
+                Poll::Pending => panic!("cancelled reserve must become ready"),
+            }
+        };
+
+        assert!(matches!(
+            error,
+            StreamingSseTransportError::Transport(HttpError::BodyCancelled)
+        ));
+        assert!(stream.is_closed());
+        assert!(stream.pending_event_chunk.is_none());
+        assert_eq!(stream.source.remaining(), 0);
+        assert_eq!(stream.bytes_emitted(), first_wire.len());
+        assert_eq!(stream.event_bytes_emitted, first_wire.len());
+        assert_eq!(sender.total_bytes(), first_wire.len() as u64);
+    }
+
+    #[test]
     fn streaming_sse_h1_transport_sends_heartbeat_comment() {
         let cx = Cx::for_testing();
         let mut stream =
@@ -1416,7 +1791,14 @@ mod tests {
             b":tick\n\n"
         );
 
-        block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("event send");
+        let event = block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("event send");
+        assert_eq!(
+            event,
+            StreamingSseTransportStep::Sent {
+                bytes: "data:payload\n\n".len(),
+                total_bytes: ":tick\n\n".len() + "data:payload\n\n".len(),
+            }
+        );
         let event_frame = poll_body(&mut body)
             .expect("event frame")
             .expect("event frame ok");

@@ -179,13 +179,10 @@ impl RegisteredRateLimitWaker {
 
 #[inline]
 const fn max_bucket_tokens(rate: u64, zero_period: bool) -> u64 {
-    // `Ord::max` is only conditionally const (E0658 on some pinned
-    // nightlies / feature configurations); the branch is identical.
-    if zero_period {
-        if rate == 0 { 1 } else { rate }
-    } else {
-        rate
-    }
+    // `u64::max` (Ord::max) is not const-stable on the pinned nightly-2026-07-05
+    // (E0658 const_cmp); express the `rate.max(1)` clamp with plain const-legal
+    // comparison instead so the crate keeps building without an unstable feature.
+    if zero_period && rate < 1 { 1 } else { rate }
 }
 
 #[inline]
@@ -985,6 +982,7 @@ mod tests {
         unlocked_drops: Arc<AtomicUsize>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for RateLimitWakerDropProbe {
         fn wake(self: Arc<Self>) {}
     }
@@ -1033,6 +1031,7 @@ mod tests {
         drops: Arc<AtomicUsize>,
     }
 
+    #[allow(clippy::manual_noop_waker)]
     impl Wake for PanickingDropRateLimitWaker {
         fn wake(self: Arc<Self>) {}
     }

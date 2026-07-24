@@ -4,6 +4,7 @@
 //! TCP, RaptorQ, and native QUIC can reuse without copying private helpers.
 
 pub mod compression;
+pub mod delta;
 pub mod filter;
 pub mod metadata;
 pub mod mirror;
@@ -16,6 +17,8 @@ pub use compression::{
     CompressionAlgorithm, CompressionDescriptor, CompressionError, CompressionPolicy,
     CompressionSkipReason, PreEncodeCompression, decompress_pre_encoded, maybe_compress_pre_encode,
 };
+pub use delta::{DeltaChunkWire, DeltaManifestWire};
+pub(crate) use delta::{DeltaObjectRequest, DeltaWireMode};
 pub use filter::{FilterAction, FilterDecision, FilterError, FilterRule, FilterSet};
 pub use metadata::{
     DirectoryMetadataEntry, DirectoryMetadataManifest, DirtyPathSet, EntryMetadata, FileIdentity,

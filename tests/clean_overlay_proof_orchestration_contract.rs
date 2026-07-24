@@ -108,11 +108,65 @@ fn contract_artifact_pins_sources_lane_templates_and_boundaries() {
         string_field(&contract["source_of_truth"], "a2_blocker_receipt"),
         string_field(&contract["source_of_truth"], "a3_overlay_command"),
         string_field(&contract["source_of_truth"], "a3_focused_e2e"),
+        string_field(&contract["source_of_truth"], "a3_capability_handshake"),
+        string_field(&contract["source_of_truth"], "a3_capability_contract"),
     ] {
         assert!(repo_path(path).exists(), "{path} must exist");
     }
 
     assert_eq!(string_field(&contract["proof_lane"], "lane_id"), LANE_ID);
+
+    let capability = &contract["capability_drift_gate"];
+    assert_eq!(
+        capability["capability_evidence_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability["nonempty_capability_probe_version_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability["all_required_flags_must_be_declared_as_options"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability["example_or_prose_mentions_do_not_count"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability["unsupported_client_is_never_admitted"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability["unsupported_capability_precedes_report_only"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability["unsupported_client_emits_no_rch_or_cargo_command"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        capability["ordinary_verifier_requires_peer_clean_input"].as_bool(),
+        Some(true)
+    );
+    assert!(string_field(capability, "retry_condition").contains("non-empty"));
+    assert_eq!(string_field(capability, "probe_command"), "rch exec --help");
+    assert_eq!(
+        string_field(capability, "unsupported_marker"),
+        "# BLOCKED: installed RCH clean-overlay capability unsupported; no proof command emitted"
+    );
+    let required_flags = string_set(capability, "required_flags");
+    for flag in [
+        "--base",
+        "--clean-overlay",
+        "--overlay-path",
+        "--no-overlay",
+    ] {
+        assert!(
+            required_flags.contains(flag),
+            "missing required flag {flag}"
+        );
+    }
 
     // Fail-closed / non-destructive posture is pinned, not aspirational.
     let stale = &contract["stale_progress_guidance"];
@@ -124,6 +178,10 @@ fn contract_artifact_pins_sources_lane_templates_and_boundaries() {
         stale["stale_or_partial_job_is_rerun_required_not_passed"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        stale["heartbeat_fresh_progress_stale_requires_fresh_admission_decision"].as_bool(),
+        Some(true)
+    );
     let blocker = &contract["peer_dirty_blocker"];
     assert_eq!(
         blocker["blocked_manifest_is_never_admitted"].as_bool(),
@@ -131,6 +189,10 @@ fn contract_artifact_pins_sources_lane_templates_and_boundaries() {
     );
     assert_eq!(
         blocker["blocked_emits_no_cargo_invocation"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        blocker["blocked_reproduction_is_receipt_only"].as_bool(),
         Some(true)
     );
     let cleanup = &contract["non_destructive_cleanup"];
@@ -145,6 +207,19 @@ fn contract_artifact_pins_sources_lane_templates_and_boundaries() {
         string_field(&contract["agent_mail_handoff_template"], "thread_id"),
         "asupersync-proof-orch-clean-overlay-5ve2ao.4"
     );
+    assert!(
+        string_field(&contract["agent_mail_handoff_template"], "subject")
+            .contains("blocked-by-capability-drift")
+    );
+    for template in [
+        &contract["agent_mail_handoff_template"],
+        &contract["br_comment_handoff_template"],
+    ] {
+        assert!(
+            string_field(template, "template_stage")
+                .contains("generated handshake bodies record terminal_execution_evidence=none")
+        );
+    }
     let handoff = string_set(
         &contract["agent_mail_handoff_template"],
         "body_required_fields",
@@ -152,7 +227,19 @@ fn contract_artifact_pins_sources_lane_templates_and_boundaries() {
     for field in [
         "gate_id",
         "status",
-        "proof_command",
+        "head_commit",
+        "selected_paths",
+        "included_paths",
+        "excluded_paths",
+        "rendered_command",
+        "capability_probe_version",
+        "clean_overlay_supported",
+        "missing_flags",
+        "capability_findings",
+        "admitted",
+        "report_only",
+        "retry_condition",
+        "terminal_execution_evidence",
         "rch_worker_or_refusal",
         "dirty_frontier",
         "rollback_action",
@@ -164,7 +251,26 @@ fn contract_artifact_pins_sources_lane_templates_and_boundaries() {
         &contract["br_comment_handoff_template"],
         "body_required_fields",
     );
-    for field in ["status", "proof_command", "no_claim_boundaries"] {
+    for field in [
+        "status",
+        "head_commit",
+        "selected_paths",
+        "included_paths",
+        "excluded_paths",
+        "rendered_command",
+        "capability_probe_version",
+        "clean_overlay_supported",
+        "missing_flags",
+        "capability_findings",
+        "admitted",
+        "report_only",
+        "retry_condition",
+        "terminal_execution_evidence",
+        "rch_worker_or_refusal",
+        "dirty_frontier",
+        "rollback_action",
+        "no_claim_boundaries",
+    ] {
         assert!(
             br_fields.contains(field),
             "missing br comment field {field}"
@@ -176,8 +282,10 @@ fn contract_artifact_pins_sources_lane_templates_and_boundaries() {
     for boundary in [
         "No release-readiness claim.",
         "No broad workspace-health claim.",
+        "No runtime-correctness or behavioral-correctness claim for the referenced A1-A3 parser, planner, blocker, command-builder, or handshake surfaces; their focused behavioral tests are separate evidence.",
         "No performance-improvement claim.",
         "No live RCH fleet-availability claim.",
+        "No claim that peer dirt was excluded unless installed RCH clean-overlay capability evidence is supported and an admitted command completed with terminal execution evidence.",
         "No local Cargo fallback approval.",
         "No permission to delete files, clean worktrees, create branches, or create worktrees.",
     ] {
@@ -199,10 +307,14 @@ fn runbook_documents_prereqs_commands_reservations_and_handoffs() {
             "src/audit/clean_overlay_planner.rs",
             "src/audit/blocker_receipt.rs",
             "src/audit/overlay_proof_command.rs",
+            "src/audit/proof_traffic_overlay_handshake.rs",
             "tests/proof_orch_clean_overlay_e2e.rs",
+            "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
             // AC1: required runbook sections
+            "## What this packet verifier aligns",
             "## Prerequisites",
             "## Command examples",
+            "## Installed RCH capability gate",
             "## Reservation expectations",
             "## Stale-progress cancellation guidance",
             "## Peer-dirty blocker receipts",
@@ -220,7 +332,27 @@ fn runbook_documents_prereqs_commands_reservations_and_handoffs() {
             &command,
             // peer-dirty blocker receipt lines
             "# BLOCKED: clean-overlay refused; no RCH proof command emitted",
+            "# BLOCKED: installed RCH clean-overlay capability unsupported; no proof command emitted",
             "# REPORT-ONLY: clean-overlay dry run; no RCH proof command emitted",
+            "rch exec --help",
+            "capability_probe_version",
+            "clean_overlay_supported",
+            "missing_flags",
+            "capability_findings",
+            "admitted",
+            "report_only",
+            "retry_condition",
+            "terminal_execution_evidence",
+            "rch_worker_or_refusal",
+            "dirty_frontier",
+            "rollback_action",
+            "report-only mode never masks an unsupported installed client",
+            "With peer dirt present, do not issue that ordinary RCH command.",
+            "Every non-admitted reproduction is the same deterministic blocker",
+            "terminal execution evidence",
+            "blocked-by-capability-drift",
+            "does not execute or prove behavioral correctness",
+            "focused behavioral tests are separate evidence",
             // AGENTS alignment + no-local-fallback language
             "Main only — no branches, no worktrees, no scratch clones, no destructive cleanup.",
             "No local Cargo fallback",
@@ -249,7 +381,16 @@ fn readme_and_agents_carry_the_clean_overlay_markers() {
     let readme = read_repo_file(README_PATH);
     let agents = read_repo_file(AGENTS_PATH);
     for doc in [&readme, &agents] {
-        assert_contains_all(doc, &[CATEGORY, LANE_ID, CONTRACT_PATH]);
+        assert_contains_all(
+            doc,
+            &[
+                CATEGORY,
+                LANE_ID,
+                CONTRACT_PATH,
+                "installed RCH clean-overlay capability evidence",
+                "focused tests are separate evidence",
+            ],
+        );
     }
 }
 
@@ -276,10 +417,40 @@ fn proof_manifest_maps_the_lane_to_its_guarantee_without_overclaiming() {
         Some("artifact-contract-medium")
     );
     assert_eq!(lane["command"].as_str(), Some(command.as_str()));
+    assert_eq!(
+        lane["covers"].as_str(),
+        contract["proof_lane"]["covers"].as_str(),
+        "artifact and manifest covers scopes drifted"
+    );
+    assert_eq!(
+        lane["explicit_not_covered"].as_str(),
+        contract["proof_lane"]["explicit_not_covered"].as_str(),
+        "artifact and manifest no-claim scopes drifted"
+    );
     let source_paths = string_set(lane, "source_paths");
-    for required in [CONTRACT_PATH, DOCS_PATH, README_PATH, AGENTS_PATH] {
+    for required in [
+        CONTRACT_PATH,
+        DOCS_PATH,
+        README_PATH,
+        AGENTS_PATH,
+        "src/audit/proof_traffic_overlay_handshake.rs",
+        "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
+    ] {
         assert!(source_paths.contains(required), "lane missing {required}");
     }
+    assert!(
+        string_field(lane, "covers").contains("installed-capability admission")
+            && string_field(lane, "covers").contains("receipt-only blocked reproduction")
+    );
+    assert!(
+        string_field(lane, "explicit_not_covered")
+            .contains("behavioral correctness of the referenced parser")
+            && string_field(lane, "explicit_not_covered").contains("terminal execution evidence")
+    );
+    let blockers = string_set(lane, "common_unrelated_blockers");
+    assert!(blockers.contains("installed RCH clean-overlay capability drift"));
+    assert!(blockers.contains("missing installed capability probe identity"));
+    assert!(string_field(lane, "escalation_notes").contains("terminal execution evidence"));
     for forbidden in [
         "release-readiness",
         "workspace-health",
@@ -287,6 +458,7 @@ fn proof_manifest_maps_the_lane_to_its_guarantee_without_overclaiming() {
         "live-rch-fleet-availability",
         "performance-improvement",
         "local-cargo-fallback",
+        "peer-dirt-exclusion-without-supported-admitted-terminal-receipt",
     ] {
         assert!(
             string_set(&lane["proof_reuse_policy"], "non_citeable_claim_scopes")
@@ -297,6 +469,11 @@ fn proof_manifest_maps_the_lane_to_its_guarantee_without_overclaiming() {
 
     let guarantee = find_by_id(array(&manifest, "guarantees"), "guarantee_id", LANE_ID);
     assert!(string_set(guarantee, "lane_ids").contains(LANE_ID));
+    assert!(
+        string_field(guarantee, "description").contains("installed-capability admission")
+            && string_field(guarantee, "description")
+                .contains("referenced behavioral tests are separate evidence")
+    );
 }
 
 #[test]
@@ -325,7 +502,9 @@ fn proof_status_snapshot_maps_the_claim_as_yellow_scoped() {
     assert!(string_set(claim, "proof_commands").contains(&command));
     let notes = string_field(claim, "notes");
     assert!(
-        notes.contains("does not prove broad workspace health")
+        notes.contains("behavioral correctness of the referenced parser")
+            && notes.contains("peer-dirt exclusion")
+            && notes.contains("admitted command and terminal execution evidence")
             && notes.contains("local Cargo fallback"),
         "status notes must keep the no-claim boundaries"
     );

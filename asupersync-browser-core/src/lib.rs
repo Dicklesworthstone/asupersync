@@ -28,6 +28,7 @@ use crate::types::{
     BrowserOperatorConsoleSnapshot, decode_json_payload, decode_optional_consumer_version,
     encode_json_payload,
 };
+use asupersync::io::{FetchAuthority, FetchMethod};
 use asupersync::types::WasmDispatcherDiagnostics;
 use asupersync::types::{
     WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
@@ -48,8 +49,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 #[cfg(target_arch = "wasm32")]
 use web_sys::{
-    AbortController, BinaryType, CloseEvent, Event, MessageEvent, RequestInit, Response, WebSocket,
-    WorkerGlobalScope,
+    AbortController, BinaryType, CloseEvent, Event, MessageEvent, RequestCredentials, RequestInit,
+    Response, Url, WebSocket, WorkerGlobalScope,
 };
 
 thread_local! {
@@ -92,6 +93,28 @@ struct BrowserWebSocketCancelRequest {
     socket: WasmHandleRef,
     kind: String,
     message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserFetchAuthorityConfig {
+    #[serde(default)]
+    allowed_origins: Vec<String>,
+    #[serde(default)]
+    allowed_methods: Vec<String>,
+    #[serde(default)]
+    allow_credentials: bool,
+    #[serde(default)]
+    max_header_count: usize,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserRuntimeCreateRequest {
+    #[serde(default)]
+    fetch_authority: BrowserFetchAuthorityConfig,
+    #[serde(default)]
+    consumer_version: Option<WasmAbiVersion>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -173,25 +196,151 @@ fn cleanup_released_host_state() {
     cleanup_released_websockets();
 }
 
+#[cfg(target_arch = "wasm32")]
+fn canonicalize_browser_http_url(raw: &str) -> Result<(String, String), String> {
+    let url = Url::new(raw).map_err(|error| {
+        format!(
+            "fetch URL is not a valid absolute browser URL: {}",
+            js_value_message(&error)
+        )
+    })?;
+    if !matches!(url.protocol().as_str(), "http:" | "https:") {
+        return Err(format!(
+            "fetch URL must use http or https, got {}",
+            url.protocol()
+        ));
+    }
+    if !url.username().is_empty() || !url.password().is_empty() {
+        return Err("fetch URL must not contain embedded credentials".to_string());
+    }
+    let origin = url.origin();
+    if origin == "null" {
+        return Err("fetch URL must have a tuple origin".to_string());
+    }
+    Ok((url.href(), origin))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn canonicalize_browser_http_url(raw: &str) -> Result<(String, String), String> {
+    let trimmed = raw.trim();
+    let scheme_end = trimmed
+        .find("://")
+        .ok_or_else(|| "fetch URL must be absolute".to_string())?;
+    let scheme = trimmed[..scheme_end].to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") {
+        return Err(format!("fetch URL must use http or https, got {scheme}"));
+    }
+
+    let rest = trimmed[scheme_end + 3..].replace('\\', "/");
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return Err("fetch URL must include a host".to_string());
+    }
+    if authority.contains('@') {
+        return Err("fetch URL must not contain embedded credentials".to_string());
+    }
+
+    let (host, port) = if let Some(ipv6) = authority.strip_prefix('[') {
+        let closing = ipv6
+            .find(']')
+            .ok_or_else(|| "fetch URL contains an unterminated IPv6 host".to_string())?;
+        let host = format!("[{}]", ipv6[..closing].to_ascii_lowercase());
+        let suffix = &ipv6[closing + 1..];
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(
+                suffix
+                    .strip_prefix(':')
+                    .ok_or_else(|| "fetch URL has an invalid IPv6 authority".to_string())?,
+            )
+        };
+        (host, port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (host.to_ascii_lowercase(), Some(port))
+    } else {
+        (authority.to_ascii_lowercase(), None)
+    };
+    if host.is_empty() {
+        return Err("fetch URL must include a host".to_string());
+    }
+
+    let port = port
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .map_err(|_| "fetch URL has an invalid port".to_string())
+        })
+        .transpose()?;
+    let include_port =
+        port.filter(|value| !matches!((scheme.as_str(), value), ("http", 80) | ("https", 443)));
+    let canonical_authority =
+        include_port.map_or_else(|| host.clone(), |value| format!("{host}:{value}"));
+    let suffix = &rest[authority_end..];
+    let canonical_suffix = if suffix.is_empty() {
+        "/".to_string()
+    } else if suffix.starts_with(['?', '#']) {
+        format!("/{suffix}")
+    } else {
+        suffix.to_string()
+    };
+    let origin = format!("{scheme}://{canonical_authority}");
+    Ok((format!("{origin}{canonical_suffix}"), origin))
+}
+
 fn normalize_fetch_method(method: &str) -> Result<String, String> {
     let normalized = method.trim().to_ascii_uppercase();
     if normalized.is_empty() {
         return Err("fetch method must not be empty".to_string());
     }
-    match normalized.as_str() {
-        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" => Ok(normalized),
-        _ => Err(format!("unsupported fetch method: {normalized}")),
+    if FetchMethod::from_http_token(&normalized).is_some() {
+        Ok(normalized)
+    } else {
+        Err(format!("unsupported fetch method: {normalized}"))
     }
 }
 
 fn normalize_fetch_request(request: WasmFetchRequest) -> Result<WasmFetchRequest, String> {
+    if request.url.trim().is_empty() {
+        return Err("fetch URL must not be empty".to_string());
+    }
     let method = normalize_fetch_method(&request.method)?;
+    let (url, _) = canonicalize_browser_http_url(&request.url)?;
     if matches!(method.as_str(), "GET" | "HEAD") && request.body.is_some() {
         return Err(format!(
             "fetch method {method} does not permit a request body"
         ));
     }
-    Ok(WasmFetchRequest { method, ..request })
+    Ok(WasmFetchRequest {
+        method,
+        url,
+        ..request
+    })
+}
+
+fn canonicalize_fetch_authority(
+    config: BrowserFetchAuthorityConfig,
+) -> Result<FetchAuthority, String> {
+    let mut authority = FetchAuthority::deny_all().with_max_header_count(config.max_header_count);
+    for origin in config.allowed_origins {
+        let canonical_origin = if origin == "*" {
+            origin
+        } else {
+            canonicalize_browser_http_url(&origin)?.1
+        };
+        authority = authority.grant_origin(canonical_origin);
+    }
+    for method in config.allowed_methods {
+        let normalized = normalize_fetch_method(&method)?;
+        let method = FetchMethod::from_http_token(&normalized)
+            .ok_or_else(|| format!("unsupported fetch authority method: {normalized}"))?;
+        authority = authority.grant_method(method);
+    }
+    if config.allow_credentials {
+        authority = authority.with_credentials_allowed();
+    }
+    Ok(authority)
 }
 
 const fn fetch_pending_outcome(handle: WasmHandleRef) -> WasmAbiOutcomeEnvelope {
@@ -385,6 +534,11 @@ async fn run_browser_fetch(
     let init = RequestInit::new();
     init.set_method(&request.method);
     init.set_signal(Some(&signal));
+    init.set_credentials(if request.credentials {
+        RequestCredentials::Include
+    } else {
+        RequestCredentials::Omit
+    });
     if let Some(body) = request.body {
         let body = js_sys::Uint8Array::from(body.as_slice());
         init.set_body(&body.into());
@@ -692,9 +846,21 @@ pub fn dispatcher_diagnostics_for_tests() -> WasmDispatcherDiagnostics {
     DISPATCHER.with(|dispatcher| dispatcher.borrow().diagnostic_snapshot())
 }
 
-fn runtime_create_impl(consumer_version_json: Option<String>) -> Result<String, String> {
-    let consumer_version = parse_consumer_version(consumer_version_json)?;
-    let handle = with_dispatcher(|dispatcher| dispatcher.runtime_create(consumer_version))?;
+fn runtime_create_impl(request_json: Option<String>) -> Result<String, String> {
+    let request: BrowserRuntimeCreateRequest = request_json.map_or_else(
+        || Ok(BrowserRuntimeCreateRequest::default()),
+        |request_json| parse_json(&request_json, "runtime_create.request"),
+    )?;
+    let fetch_authority = canonicalize_fetch_authority(request.fetch_authority)?;
+    let consumer_version = request.consumer_version;
+    let handle = with_dispatcher(|dispatcher| {
+        let handle = dispatcher.runtime_create(consumer_version)?;
+        if let Err(error) = dispatcher.register_runtime_fetch_authority(&handle, fetch_authority) {
+            let _ = dispatcher.runtime_close(&handle, consumer_version);
+            return Err(error);
+        }
+        Ok(handle)
+    })?;
     encode_json(&handle, "runtime_create.response")
 }
 
@@ -910,6 +1076,45 @@ fn abi_version_impl() -> Result<String, String> {
 
 const fn abi_fingerprint_impl() -> u64 {
     WASM_ABI_SIGNATURE_FINGERPRINT_V1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BrowserFetchAuthorityConfig, canonicalize_browser_http_url, canonicalize_fetch_authority,
+    };
+    use asupersync::io::FetchMethod;
+
+    #[test]
+    fn fetch_url_canonicalization_matches_browser_special_url_boundaries() {
+        let (url, origin) =
+            canonicalize_browser_http_url(r"HTTPS://API.EXAMPLE.COM:443\records?limit=1")
+                .expect("special URL must canonicalize");
+        assert_eq!(url, "https://api.example.com/records?limit=1");
+        assert_eq!(origin, "https://api.example.com");
+
+        let error = canonicalize_browser_http_url("https://user:secret@api.example.com/data")
+            .expect_err("embedded credentials must fail closed");
+        assert!(error.contains("embedded credentials"));
+    }
+
+    #[test]
+    fn fetch_authority_origins_and_methods_are_canonicalized_once() {
+        let authority = canonicalize_fetch_authority(BrowserFetchAuthorityConfig {
+            allowed_origins: vec!["HTTPS://API.EXAMPLE.COM:443/base".to_string()],
+            allowed_methods: vec![" get ".to_string()],
+            allow_credentials: false,
+            max_header_count: 0,
+        })
+        .expect("authority must canonicalize");
+
+        assert_eq!(
+            authority.allowed_origins,
+            vec!["https://api.example.com".to_string()]
+        );
+        assert_eq!(authority.allowed_methods, vec![FetchMethod::Get]);
+        assert!(!authority.allow_credentials);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

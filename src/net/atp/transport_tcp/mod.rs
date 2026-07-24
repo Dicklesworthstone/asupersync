@@ -51,6 +51,7 @@ use crate::atp::safety::{
     portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
     validate_portable_relative_path,
 };
+use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
@@ -62,6 +63,7 @@ use crate::net::atp::transport_common::metadata::{
 };
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
+    DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode,
     DirectoryMetadataManifest, EntryDigest, EntryMetadata, FileKind, FilterSet, MirrorError,
     MirrorPolicy, SourceEntry, StagedEntryReceive, StreamingError, apply_entry_metadata,
     capture_directory_metadata_manifest, flat_merkle_root_from_digests, hash_file_streaming,
@@ -126,8 +128,6 @@ const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
 /// once. This bounds child task fan-out while preventing one slow peer from
 /// monopolizing the accept loop.
 pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
-
-const DELTA_CHUNK_SCHEMA: &str = "asupersync.atp.tcp.delta-chunk-manifest.v1";
 
 /// Transport tuning knobs.
 ///
@@ -292,6 +292,7 @@ struct HelloAck {
 /// trees slow on the QUIC tier (mirrors the RaptorQ tier's E-15 coalescing,
 /// plus per-member metadata because this wire family preserves metadata).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PackedMember {
     /// Path of this file relative to the transfer root.
     pub rel_path: String,
@@ -309,6 +310,7 @@ pub struct PackedMember {
 
 /// One file within a transfer manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestEntry {
     /// Stable index within the transfer (manifest order).
     pub index: u32,
@@ -335,6 +337,7 @@ pub struct ManifestEntry {
 
 /// Transfer manifest carried in the `ObjectManifest` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TransferManifest {
     /// Stable transfer identifier (hex).
     pub transfer_id: String,
@@ -367,85 +370,9 @@ pub struct TransferManifest {
     pub delta_manifest: Option<DeltaManifestWire>,
 }
 
-/// Sender-side chunk manifest used by receiver-driven delta planning.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeltaManifestWire {
-    /// Stable schema tag for fail-closed receiver decoding.
-    pub schema: String,
-    /// Planner tree id. Bound to the transfer root name.
-    pub tree_id: String,
-    /// Fixed chunk size used to derive all chunk refs.
-    pub chunk_size: usize,
-    /// Total logical bytes represented by `chunks`.
-    pub total_size_bytes: u64,
-    /// Planner Merkle root over ordered content-addressed chunks.
-    pub merkle_root_hex: String,
-    /// Chunk refs in logical transfer order.
-    pub chunks: Vec<DeltaChunkWire>,
-}
-
-/// One chunk ref in the sender delta manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DeltaChunkWire {
-    /// Planner chunk index in logical transfer order.
-    pub index: u32,
-    /// Manifest entry index this chunk belongs to.
-    pub entry_index: u32,
-    /// Transfer-relative path for diagnostics and receiver assembly.
-    pub rel_path: String,
-    /// Chunk offset within `rel_path`.
-    pub entry_offset: u64,
-    /// Chunk offset within the logical transfer stream.
-    pub stream_offset: u64,
-    /// Chunk length in bytes.
-    pub size_bytes: u64,
-    /// Hex-encoded domain-separated [`ContentId`] hash for the chunk bytes.
-    pub content_id_hex: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum DeltaWireMode {
-    FullObject,
-    DeltaChunks,
-    AlreadyInSync,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct DeltaObjectRequest {
-    mode: DeltaWireMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fallback_reason: Option<String>,
-    sender_merkle_root_hex: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    receiver_merkle_root_hex: Option<String>,
-    missing_bytes: u64,
-    shared_chunks: u64,
-    stale_chunks: u64,
-    missing_chunks: Vec<DeltaChunkWire>,
-}
-
-impl DeltaObjectRequest {
-    fn full(
-        sender_merkle_root_hex: impl Into<String>,
-        receiver_merkle_root_hex: Option<String>,
-        fallback_reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            mode: DeltaWireMode::FullObject,
-            fallback_reason: Some(fallback_reason.into()),
-            sender_merkle_root_hex: sender_merkle_root_hex.into(),
-            receiver_merkle_root_hex,
-            missing_bytes: 0,
-            shared_chunks: 0,
-            stale_chunks: 0,
-            missing_chunks: Vec::new(),
-        }
-    }
-}
-
 /// Receipt returned by the receiver in the `Proof` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReceiveReceipt {
     /// Whether the receiver committed every integrity-verified entry.
     ///
@@ -654,7 +581,7 @@ mod unused_delta_legacy {
     fn delta_wire_to_manifest(
         wire: &DeltaManifestWire,
     ) -> Result<PersistentChunkManifest, TransportError> {
-        if wire.schema != DELTA_CHUNK_SCHEMA {
+        if wire.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
             return Err(TransportError::Frame(format!(
                 "unsupported delta manifest schema: {}",
                 wire.schema
@@ -781,7 +708,7 @@ mod unused_delta_legacy {
         let manifest = PersistentChunkManifest::new(tree_id.to_string(), refs)
             .map_err(|err| TransportError::Frame(format!("build delta manifest: {err}")))?;
         let wire = DeltaManifestWire {
-            schema: DELTA_CHUNK_SCHEMA.to_string(),
+            schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
             tree_id: tree_id.to_string(),
             chunk_size,
             total_size_bytes: manifest.total_size_bytes,
@@ -1802,7 +1729,7 @@ fn decode_hex_32(hex_value: &str, label: &str) -> Result<[u8; 32], TransportErro
 fn planner_manifest_from_wire(
     manifest: &DeltaManifestWire,
 ) -> Result<PersistentChunkManifest, TransportError> {
-    if manifest.schema != DELTA_CHUNK_SCHEMA {
+    if manifest.schema != ATP_DELTA_CHUNK_MANIFEST_SCHEMA {
         return Err(TransportError::Frame(format!(
             "unsupported delta manifest schema: {}",
             manifest.schema
@@ -1889,7 +1816,7 @@ async fn build_delta_manifest_from_entries(
     let planner = PersistentChunkManifest::new(tree_id.clone(), planner_chunks)
         .map_err(|err| TransportError::Frame(format!("build sender delta manifest: {err}")))?;
     Ok(DeltaManifestWire {
-        schema: DELTA_CHUNK_SCHEMA.to_string(),
+        schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
         tree_id,
         chunk_size,
         total_size_bytes: planner.total_size_bytes,
@@ -4746,6 +4673,22 @@ mod tests {
 
     #[test]
     fn manifest_json_roundtrips() {
+        let delta_manifest = DeltaManifestWire {
+            schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
+            tree_id: "data".to_string(),
+            chunk_size: 64 * 1024,
+            total_size_bytes: 9,
+            merkle_root_hex: "11".repeat(32),
+            chunks: vec![DeltaChunkWire {
+                index: 0,
+                entry_index: 0,
+                rel_path: "a/b.txt".to_string(),
+                entry_offset: 0,
+                stream_offset: 0,
+                size_bytes: 9,
+                content_id_hex: "22".repeat(32),
+            }],
+        };
         let manifest = TransferManifest {
             transfer_id: "abc".to_string(),
             root_name: "data".to_string(),
@@ -4762,7 +4705,7 @@ mod tests {
                 metadata: None,
                 members: Vec::new(),
             }],
-            delta_manifest: None,
+            delta_manifest: Some(delta_manifest),
         };
         let json = serde_json::to_vec(&manifest).unwrap();
         assert!(
@@ -4771,6 +4714,25 @@ mod tests {
         );
         let back: TransferManifest = serde_json::from_slice(&json).unwrap();
         assert_eq!(manifest, back);
+    }
+
+    #[test]
+    fn delta_object_request_uses_live_tcp_object_request_frame() {
+        let request = DeltaObjectRequest {
+            mode: DeltaWireMode::AlreadyInSync,
+            fallback_reason: None,
+            sender_merkle_root_hex: "33".repeat(32),
+            receiver_merkle_root_hex: Some("44".repeat(32)),
+            missing_bytes: 0,
+            shared_chunks: 1,
+            stale_chunks: 0,
+            missing_chunks: Vec::new(),
+        };
+
+        let frame = json_frame(FrameType::ObjectRequest, &request).expect("frame delta request");
+        assert_eq!(frame.frame_type(), FrameType::ObjectRequest);
+        let decoded: DeltaObjectRequest = parse_json(&frame).expect("parse delta request frame");
+        assert_eq!(decoded, request);
     }
 
     #[test]

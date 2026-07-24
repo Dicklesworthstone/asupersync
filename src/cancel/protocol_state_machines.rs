@@ -134,7 +134,7 @@ pub enum RegionEvent {
     FinalizerStarted,
     /// A finalizer completed.
     FinalizerCompleted,
-    /// Request region close (must be quiesced).
+    /// Request region close. Active tasks block close; pending finalizers enter finalization.
     RequestClose,
 }
 
@@ -330,14 +330,20 @@ impl CancelStateMachine for RegionStateMachine {
                 },
                 RegionEvent::RequestClose,
             ) => {
-                if *active_tasks > 0 || *pending_finalizers > 0 {
+                if *active_tasks > 0 {
                     return TransitionResult::Invalid {
-                        reason: "Cannot close active region with pending work".to_string(),
+                        reason: "Cannot close active region with running tasks".to_string(),
                         current_state: format!("{:?}", self.state),
                         attempted_transition: format!("{event:?}"),
                     };
                 }
-                RegionState::Finalized
+                if *pending_finalizers > 0 {
+                    RegionState::Finalizing {
+                        running_finalizers: *pending_finalizers,
+                    }
+                } else {
+                    RegionState::Finalized
+                }
             }
 
             // Cancelling state transitions
@@ -1691,6 +1697,24 @@ impl CancelProtocolValidator {
         }
     }
 
+    /// Record a region invariant violation without invoking a tracing subscriber.
+    ///
+    /// Runtime close paths use this while holding their state lock, then emit
+    /// the closed diagnostic after releasing the validator lock.
+    pub(crate) fn record_region_invariant_violation_without_logging(
+        &mut self,
+        region_id: RegionId,
+        invariant: &str,
+        context: String,
+    ) -> TransitionResult {
+        let result = TransitionResult::InvariantViolation {
+            invariant: invariant.to_string(),
+            context: format!("region {region_id:?}: {context}"),
+        };
+        self.violation_count += 1;
+        result
+    }
+
     fn record_task_transition(
         &mut self,
         task_id: TaskId,
@@ -2436,6 +2460,11 @@ mod tests {
             TransitionResult::Valid
         );
         assert_eq!(machine.active_task_count(), 1);
+        assert!(matches!(
+            machine.transition(RegionEvent::RequestClose, &context),
+            TransitionResult::Invalid { .. }
+        ));
+        assert_eq!(machine.active_task_count(), 1);
 
         assert_eq!(
             machine.transition(RegionEvent::TaskCompleted, &context),
@@ -2478,6 +2507,42 @@ mod tests {
                 },
                 &context,
             ),
+            TransitionResult::Valid
+        );
+        assert!(matches!(
+            machine.current_state(),
+            RegionState::Finalizing {
+                running_finalizers: 1
+            }
+        ));
+        assert_eq!(
+            machine.transition(RegionEvent::FinalizerCompleted, &context),
+            TransitionResult::Valid
+        );
+        assert!(matches!(machine.current_state(), RegionState::Finalized));
+    }
+
+    #[test]
+    fn region_close_with_only_pending_finalizers_enters_finalizing() {
+        let region_id = RegionId::new_for_test(13, 0);
+        let mut machine = RegionStateMachine::new(region_id, ValidationLevel::Full);
+        let context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        assert_eq!(
+            machine.transition(RegionEvent::Activate, &context),
+            TransitionResult::Valid
+        );
+        assert_eq!(
+            machine.transition(RegionEvent::FinalizerRegistered, &context),
+            TransitionResult::Valid
+        );
+        assert_eq!(
+            machine.transition(RegionEvent::RequestClose, &context),
             TransitionResult::Valid
         );
         assert!(matches!(

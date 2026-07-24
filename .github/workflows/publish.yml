@@ -47,7 +47,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: nightly-2026-02-05
+  # Keep in sync with rust-toolchain.toml (issue #53: CI must exercise the
+  # same pinned nightly that local/rch/downstream builds resolve).
+  RUST_TOOLCHAIN: nightly-2026-07-05
   WASM_RELEASE_CONTRACT_ID: wasm-release-channel-strategy-v1
   WASM_RELEASE_BEAD_ID: asupersync-umelq.15.2
 

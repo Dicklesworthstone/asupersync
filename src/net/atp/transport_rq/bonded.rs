@@ -166,6 +166,7 @@ fn manifest_from_bonded_descriptor(descriptor: &BondTransferDescriptor) -> Trans
         total_bytes: descriptor.total_bytes,
         merkle_root_hex: descriptor.merkle_root_hex.clone(),
         metadata: descriptor.metadata.clone(),
+        delta_manifest: None,
         entries: descriptor
             .entries
             .iter()
@@ -1970,6 +1971,7 @@ mod tests {
             total_bytes,
             merkle_root_hex,
             metadata: Some(metadata),
+            delta_manifest: None,
             entries,
         };
         BondTransferDescriptor::from_manifest(

@@ -15,7 +15,7 @@ Cargo lane can fail before it reaches the owned file, or RCH can refuse before a
 worker is assigned. A refusal, stale-progress job, or unsupported command flag
 is not green evidence.
 
-The current installed `rch exec --help` surface for version `1.0.41` does not
+The current installed `rch exec --help` surface for version `1.0.49` does not
 expose the clean-overlay execution flags documented by the clean-overlay
 runbook examples in `docs/clean_overlay_proof_orchestration_runbook.md`:
 
@@ -66,6 +66,8 @@ Every proof-traffic operator report should include:
 - `target_dir`
 - `selected_paths`
 - `capability_probe_version`
+- `clean_overlay_supported`
+- `missing_flags`
 - `capability_findings`
 - `rch_worker_or_refusal`
 - `retry_condition`
@@ -140,12 +142,14 @@ It admits a proof command only when all of the following are true:
 - selected deleted paths are absent,
 - peer-dirty unselected paths are absent from the enforced proof,
 - installed `rch exec` supports the clean-overlay flags required by the rendered
-  command,
+  command, as parsed from option declarations in captured help text,
+- the installed capability probe has a non-empty version/evidence identity;
+  prose and example mentions do not count as option declarations,
 - the request is not report-only.
 
 Unsupported backend capability emits `blocked-by-capability-drift` and a blocker
 marker instead of an RCH/Cargo command. This is the current installed state for
-`rch 1.0.41`, whose help text lacks `--base`, `--clean-overlay`,
+`rch 1.0.49`, whose help text lacks `--base`, `--clean-overlay`,
 `--overlay-path`, and `--no-overlay`.
 
 Peer-dirty and unselected paths fail closed in enforced mode. The contract uses
@@ -153,10 +157,19 @@ a poison peer path fixture to prove that an unowned path cannot appear in an
 admitted command. Report-only mode may name excluded paths in Markdown/JSON, but
 still emits no proof command and makes no proof claim.
 
+Capability support and admission are still pre-execution facts. They do not
+prove that peer dirt was excluded from a completed build. That narrower claim
+requires a supported capability snapshot, an admitted command, and terminal
+execution evidence with a durable worker transcript or receipt reference.
+
 The A3 report includes `selected_paths`, `included_paths`, `excluded_paths`,
 `reservation_evidence`, `capability_probe_version`, `clean_overlay_supported`,
-`missing_flags`, `capability_findings`, `rendered_command`, retry condition, and
-no-claim boundaries. Agent Mail and `br` bodies are structured-field-first.
+`missing_flags`, `capability_findings`, `rendered_command`, `admitted`,
+`report_only`, retry condition, terminal execution evidence,
+`rch_worker_or_refusal`, dirty-frontier/rollback guidance, and no-claim
+boundaries. Agent Mail and `br` bodies are structured-field-first. Generated
+handshake bodies set terminal evidence to `none` because they are pre-execution
+admission receipts; an operator must enrich the handoff after terminal output.
 
 No handshake path uses local Cargo fallback, branch creation, worktree creation,
 scratch clones, file deletion, `git clean`, or `git reset`.
@@ -255,6 +268,9 @@ The final signoff preserves the proof-traffic controller's fail-closed policy:
 capability drift blocks clean-overlay command emission, parked or refused proof
 attempts remain `rerun-required`, and blocked/stale RCH rows are handoff
 evidence only. No proof-traffic path authorizes local Cargo fallback or peer build cancellation.
+The aggregate also does not prove peer-dirt exclusion without supported
+capability evidence, an admitted command, and terminal execution evidence with
+a durable worker transcript or receipt reference.
 
 The closeout checklist requires a live dependency-cycle check with
 `br dep cycles` before the parent can be closed. The expected signal is no

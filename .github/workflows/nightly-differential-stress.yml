@@ -25,7 +25,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_TOOLCHAIN: nightly-2026-02-05
+  # Keep in sync with rust-toolchain.toml (issue #53: CI must exercise the
+  # same pinned nightly that local/rch/downstream builds resolve).
+  RUST_TOOLCHAIN: nightly-2026-07-05
 
 jobs:
   nightly-differential-stress:

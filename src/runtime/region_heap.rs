@@ -5,9 +5,11 @@
 //!
 //! # Design
 //!
-//! The region heap uses a bump allocator for fast-path allocation with fallback
-//! to the global allocator. Memory is reclaimed only when the region reaches
-//! quiescence (all tasks terminal, finalizers complete, obligations resolved).
+//! The region heap currently allocates via direct type-erased boxing on the
+//! global allocator; a bump-allocation fast path within pre-allocated chunks
+//! is a planned enhancement (see `RegionHeap`'s Memory Model notes). Memory is
+//! reclaimed only when the region reaches quiescence (all tasks terminal,
+//! finalizers complete, obligations resolved).
 //!
 //! # Determinism
 //!

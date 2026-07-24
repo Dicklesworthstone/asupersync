@@ -42,7 +42,7 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, error, trace};
+use crate::tracing_compat::{debug, debug_span, trace};
 use crate::types::policy::PolicyAction;
 use crate::types::task_context::{
     CancelWakeEffects, CancelWaker, CancellationEffects, CxInner, MAX_MASK_DEPTH,
@@ -52,7 +52,7 @@ use crate::types::{
     CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, TaskId, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
-use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
+use crate::util::{Arena, ArenaIndex, DetEntropy, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
@@ -294,6 +294,70 @@ pub enum FinalizerHistoryEvent {
     },
 }
 
+/// One-shot accounting token for a finalizer handed to an external driver.
+///
+/// The driver must execute or otherwise retire the associated [`Finalizer`],
+/// then pass this receipt to
+/// [`RuntimeState::complete_manual_finalizer`] or
+/// [`RuntimeState::abandon_manual_finalizer`]. Dropping an unsettled receipt is
+/// fail-closed: the owning region remains in `Finalizing`, and no lower
+/// finalizer can be handed out.
+#[derive(Debug)]
+#[must_use = "an externally driven finalizer must be completed or abandoned"]
+pub struct ManualFinalizerReceipt {
+    runtime_instance_id: u64,
+    region_id: RegionId,
+    finalizer_id: u64,
+    settled: bool,
+}
+
+impl ManualFinalizerReceipt {
+    /// Returns the region that owns the externally driven finalizer.
+    #[must_use]
+    pub const fn region_id(&self) -> RegionId {
+        self.region_id
+    }
+
+    /// Returns the runtime-local identifier of the externally driven finalizer.
+    #[must_use]
+    pub const fn finalizer_id(&self) -> u64 {
+        self.finalizer_id
+    }
+
+    /// Returns whether this receipt has already been completed or abandoned.
+    #[must_use]
+    pub const fn is_settled(&self) -> bool {
+        self.settled
+    }
+}
+
+/// Failure returned while settling a [`ManualFinalizerReceipt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualFinalizerReceiptError {
+    /// The receipt was already completed or abandoned.
+    AlreadySettled,
+    /// The receipt belongs to a different [`RuntimeState`] instance.
+    WrongRuntime,
+    /// The receipt no longer names the region's active manual finalizer.
+    NotActive,
+}
+
+impl fmt::Display for ManualFinalizerReceiptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadySettled => f.write_str("manual finalizer receipt is already settled"),
+            Self::WrongRuntime => {
+                f.write_str("manual finalizer receipt belongs to a different runtime")
+            }
+            Self::NotActive => {
+                f.write_str("manual finalizer receipt is not the active receipt for its region")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManualFinalizerReceiptError {}
+
 /// Auditable events proving that losing race participants are drained.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoserDrainHistoryEvent {
@@ -531,6 +595,7 @@ pub struct TaskCompletionObserver {
     payload: Option<TaskCompletionObserverPayload>,
     panic_count: Option<Arc<AtomicU64>>,
     retired_cancel_wakers: TaskCompletionRetirements,
+    epoch_telemetry: Option<super::epoch_tracker::EpochTelemetryDispatch>,
 }
 
 enum TaskCompletionObserverPayload {
@@ -571,6 +636,7 @@ impl TaskCompletionObserver {
             }),
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
+            epoch_telemetry: None,
         }
     }
 
@@ -579,6 +645,14 @@ impl TaskCompletionObserver {
             payload: Some(TaskCompletionObserverPayload::UnknownTask { task_id }),
             panic_count: Some(Arc::clone(panic_count)),
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
+            epoch_telemetry: None,
+        }
+    }
+
+    fn attach_epoch_telemetry(&mut self, telemetry: super::epoch_tracker::EpochTelemetryDispatch) {
+        if !telemetry.is_empty() {
+            debug_assert!(self.epoch_telemetry.is_none());
+            self.epoch_telemetry = Some(telemetry);
         }
     }
 
@@ -603,6 +677,9 @@ impl TaskCompletionObserver {
         // The caller has released runtime-state locks before observer dispatch.
         // Retire arbitrary RawWaker payloads at this callback boundary.
         retired_cancel_wakers.retire();
+        if let Some(epoch_telemetry) = self.epoch_telemetry.take() {
+            epoch_telemetry.dispatch();
+        }
         let observer_panicked = match payload {
             TaskCompletionObserverPayload::Completed {
                 metrics,
@@ -683,6 +760,199 @@ impl Drop for TaskCompletionObserver {
     }
 }
 
+/// Origin of a task-spawn observation.
+///
+/// This is deliberately narrower than a public spawn taxonomy. It only
+/// selects the diagnostic fields and whether admission also emits the
+/// mailbox/local `TaskAdmitted` trace event.
+#[derive(Clone, Copy)]
+pub(crate) enum TaskSpawnSource {
+    Direct,
+    Scope,
+    Mailbox,
+    Local,
+}
+
+impl TaskSpawnSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Scope => "scope",
+            Self::Mailbox => "mailbox",
+            Self::Local => "local",
+        }
+    }
+
+    const fn emits_admitted_trace(self) -> bool {
+        matches!(self, Self::Mailbox | Self::Local)
+    }
+}
+
+/// Owned one-shot task-spawn observer effects.
+///
+/// Creation and admission paths build this token while runtime state is
+/// locked, but must not dispatch it until the stored task and its executable
+/// lane are visible. Dispatch consumes the token, contains metrics/tracing
+/// panics, and retires the arbitrary metrics provider behind a separate unwind
+/// boundary. Legacy state-threaded paths that own no scheduler lane may place
+/// the token at the front of the stored future so first poll becomes the
+/// out-of-lock delivery boundary.
+#[must_use = "task spawn effects must be dispatched after executable publication"]
+pub struct TaskSpawnEffects {
+    payload: Option<TaskSpawnEffectsPayload>,
+    panic_count: Option<Arc<AtomicU64>>,
+    epoch_telemetry: Option<super::epoch_tracker::EpochTelemetryDispatch>,
+}
+
+struct TaskSpawnEffectsPayload {
+    metrics: Arc<dyn MetricsProvider>,
+    trace: TraceBufferHandle,
+    task_id: TaskId,
+    region_id: RegionId,
+    spawned_at: Time,
+    logical_time: Option<LogicalTime>,
+    budget: Budget,
+    source: TaskSpawnSource,
+}
+
+impl TaskSpawnEffects {
+    fn new(
+        metrics: Arc<dyn MetricsProvider>,
+        trace: TraceBufferHandle,
+        task_id: TaskId,
+        region_id: RegionId,
+        spawned_at: Time,
+        logical_time: Option<LogicalTime>,
+        budget: Budget,
+        source: TaskSpawnSource,
+        panic_count: &Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            payload: Some(TaskSpawnEffectsPayload {
+                metrics,
+                trace,
+                task_id,
+                region_id,
+                spawned_at,
+                logical_time,
+                budget,
+                source,
+            }),
+            panic_count: Some(Arc::clone(panic_count)),
+            epoch_telemetry: None,
+        }
+    }
+
+    fn attach_epoch_telemetry(&mut self, telemetry: super::epoch_tracker::EpochTelemetryDispatch) {
+        if !telemetry.is_empty() {
+            debug_assert!(self.epoch_telemetry.is_none());
+            self.epoch_telemetry = Some(telemetry);
+        }
+    }
+
+    /// Delivers the spawn trace/metric/diagnostic once, outside runtime locks.
+    ///
+    /// The trace and metric preserve their historical order. Mailbox and local
+    /// admissions then emit `TaskAdmitted`; the publication diagnostic follows
+    /// last.
+    /// A panic skips the remaining callbacks rather than retrying and risking
+    /// duplicate spawn observations.
+    pub fn dispatch(mut self) {
+        let Some(panic_count) = self.panic_count.take() else {
+            return;
+        };
+        let Some(payload) = self.payload.take() else {
+            return;
+        };
+        let TaskSpawnEffectsPayload {
+            metrics,
+            trace,
+            task_id,
+            region_id,
+            spawned_at,
+            logical_time,
+            budget,
+            source,
+        } = payload;
+
+        if let Some(epoch_telemetry) = self.epoch_telemetry.take() {
+            epoch_telemetry.dispatch();
+        }
+
+        let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            trace.record_event(|seq| {
+                let event = TraceEvent::spawn(seq, spawned_at, task_id, region_id);
+                match logical_time.clone() {
+                    Some(logical_time) => event.with_logical_time(logical_time),
+                    None => event,
+                }
+            });
+            metrics.task_spawned(region_id, task_id);
+            if source.emits_admitted_trace() {
+                trace.record_event(|seq| {
+                    let event = TraceEvent::task_admitted(seq, spawned_at, task_id, region_id);
+                    match logical_time {
+                        Some(logical_time) => event.with_logical_time(logical_time),
+                        None => event,
+                    }
+                });
+            }
+
+            let _span = debug_span!(
+                "task_spawn",
+                task_id = ?task_id,
+                region_id = ?region_id,
+                initial_state = "Created",
+                budget_deadline = ?budget.deadline,
+                budget_poll_quota = budget.poll_quota,
+                budget_cost_quota = ?budget.cost_quota,
+                budget_priority = budget.priority,
+                budget_source = source.as_str(),
+            )
+            .entered();
+            debug!(
+                task_id = ?task_id,
+                region_id = ?region_id,
+                initial_state = "Created",
+                poll_quota = budget.poll_quota,
+                budget_source = source.as_str(),
+                "task published for execution"
+            );
+            let _ = (budget, source.as_str());
+        }));
+        let callback_panicked = if let Err(payload) = callback_result {
+            // Panic payload destruction is an arbitrary user boundary too.
+            std::mem::forget(payload);
+            true
+        } else {
+            false
+        };
+        let retirement_panicked = if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(metrics)))
+        {
+            std::mem::forget(payload);
+            true
+        } else {
+            false
+        };
+        if callback_panicked || retirement_panicked {
+            panic_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for TaskSpawnEffects {
+    fn drop(&mut self) {
+        let Some(payload) = self.payload.take() else {
+            return;
+        };
+        // Abandonment can occur beneath a caller-owned runtime-state lock or
+        // during unwind. The payload may own the final Arc to an arbitrary
+        // metrics provider, so leak only this undispatched observer payload.
+        std::mem::forget(payload);
+    }
+}
+
 /// Outcome of [`RuntimeState::admit_spawn_request`].
 ///
 /// Not `Debug`: the denied arm carries the request parts, whose erased
@@ -700,6 +970,9 @@ pub enum SpawnAdmission {
         /// publishes the ready or cancel lane under the admission gate; the
         /// returned Wakers run only after scheduler locks are released.
         cancel_publication: crate::runtime::spawn_mailbox::AdmissionPublication,
+        /// One-shot spawn observer delivery, dispatched only after the task's
+        /// runnable lane has been physically published.
+        spawn_effects: TaskSpawnEffects,
     },
     /// The request was denied; the caller must resolve it after releasing
     /// the state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
@@ -734,6 +1007,9 @@ pub enum LocalSpawnAdmission {
         /// then publish its callback-free runnable lane through this token and
         /// dispatch the returned Wakers after releasing scheduler locks.
         cancel_publication: crate::runtime::spawn_mailbox::AdmissionPublication,
+        /// One-shot spawn observer delivery, dispatched only after thread-local
+        /// storage and the owner-local runnable lane are both visible.
+        spawn_effects: TaskSpawnEffects,
     },
     /// Denied; the caller must resolve the request after releasing the
     /// state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
@@ -1109,6 +1385,9 @@ pub struct RuntimeState {
     /// Callback-free count of panics caught while dispatching the direct
     /// task-completion metrics/trace observer token.
     task_completion_observer_panics: Arc<AtomicU64>,
+    /// Callback-free count of panics caught while dispatching a one-shot task
+    /// spawn metrics/trace observer token.
+    task_spawn_observer_panics: Arc<AtomicU64>,
     /// I/O driver for reactor integration.
     ///
     /// When present, the runtime can wait on I/O events via the reactor.
@@ -1199,6 +1478,12 @@ pub struct RuntimeState {
     /// finalizer task may be active for a region at a time, and lower LIFO
     /// finalizers must wait until it completes.
     active_async_finalizers: HashMap<RegionId, TaskId>,
+    /// Regions whose top finalizer is currently owned by an external driver.
+    ///
+    /// The runtime-local finalizer id is the one-shot receipt identity. A
+    /// region remains here until the driver explicitly completes or abandons
+    /// the receipt; dropping the receipt therefore fails closed.
+    active_manual_finalizers: HashMap<RegionId, u64>,
     /// Append-only finalizer lifecycle history for post-run oracle hydration.
     finalizer_history: Vec<FinalizerHistoryEvent>,
     /// Append-only loser-drain evidence for post-run oracle hydration.
@@ -1251,6 +1536,10 @@ impl std::fmt::Debug for RuntimeState {
                 "task_completion_observer_panics",
                 &self.task_completion_observer_panics.load(Ordering::Relaxed),
             )
+            .field(
+                "task_spawn_observer_panics",
+                &self.task_spawn_observer_panics.load(Ordering::Relaxed),
+            )
             .field("io_driver", &self.io_driver)
             .field("timer_driver", &self.timer_driver)
             .field("logical_clock_mode", &self.logical_clock_mode)
@@ -1292,6 +1581,10 @@ impl std::fmt::Debug for RuntimeState {
             .field(
                 "active_async_finalizers",
                 &self.active_async_finalizers.len(),
+            )
+            .field(
+                "active_manual_finalizers",
+                &self.active_manual_finalizers.len(),
             )
             .field("finalizer_history_len", &self.finalizer_history.len())
             .field(
@@ -1338,6 +1631,7 @@ impl RuntimeState {
             trace: TraceBufferHandle::new(trace_capacity),
             metrics,
             task_completion_observer_panics: Arc::new(AtomicU64::new(0)),
+            task_spawn_observer_panics: Arc::new(AtomicU64::new(0)),
             io_driver: None,
             timer_driver: None,
             logical_clock_mode: LogicalClockMode::Lamport,
@@ -1366,6 +1660,7 @@ impl RuntimeState {
             pending_finalizer_ids: HashMap::new(),
             async_finalizer_tasks: HashMap::new(),
             active_async_finalizers: HashMap::new(),
+            active_manual_finalizers: HashMap::new(),
             finalizer_history: Vec::new(),
             loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
@@ -1866,6 +2161,17 @@ impl RuntimeState {
     #[must_use]
     pub fn task_completion_observer_panic_count(&self) -> u64 {
         self.task_completion_observer_panics.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of task-spawn observer dispatches whose metrics
+    /// callback, tracing callback, or final provider destructor panicked.
+    ///
+    /// The counter is atomic and callback-free, so a hostile observer cannot
+    /// recursively trigger another observation while this value is updated.
+    #[inline]
+    #[must_use]
+    pub fn task_spawn_observer_panic_count(&self) -> u64 {
+        self.task_spawn_observer_panics.load(Ordering::Relaxed)
     }
 
     /// Sets the metrics provider for this runtime.
@@ -2700,6 +3006,7 @@ impl RuntimeState {
             crate::runtime::TaskHandle<T>,
             crate::cx::Cx,
             crate::channel::oneshot::Sender<Result<T, crate::runtime::task_handle::JoinError>>,
+            TaskSpawnEffects,
         ),
         SpawnError,
     >
@@ -2827,21 +3134,14 @@ impl RuntimeState {
             record.set_cx(cx.clone());
         });
 
-        self.record_task_spawn(task_id, region);
-
-        // Trace task creation
-        debug!(
-            task_id = ?task_id,
-            region_id = ?region,
-            initial_state = "Created",
-            poll_quota = budget.poll_quota,
-            "task created via RuntimeState"
-        );
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+        let spawn_effects =
+            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Direct, now);
 
         // Create the TaskHandle
         let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
 
-        Ok((task_id, handle, cx, result_tx))
+        Ok((task_id, handle, cx, result_tx, spawn_effects))
     }
 
     /// Creates a task and stores its future for polling.
@@ -2884,21 +3184,26 @@ impl RuntimeState {
 
         // Use system Cx for legacy compatibility - no authorization check
         let system_cx = self.create_system_cx();
-        let (task_id, handle, cx, result_tx) =
+        let (task_id, handle, cx, result_tx, spawn_effects) =
             self.create_task_infrastructure(&system_cx, region, budget, false)?;
 
         // Wrap the future to send the result through the channel. Panics must
         // surface as `JoinError::Panicked` rather than silently closing the
         // channel and looking like cancellation to the join handle.
         let wrapped_future = async move {
+            // This legacy state-threaded API does not own a scheduler lane.
+            // First poll proves the stored task was published and runs outside
+            // the caller's runtime-state lock.
+            spawn_effects.dispatch();
             match (CatchUnwind { inner: future }).await {
                 Ok(result) => {
                     let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
-                    let panic_payload =
-                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
                     let _ = result_tx.send(
                         &cx,
                         Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
@@ -2912,10 +3217,53 @@ impl RuntimeState {
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
-        // Notify epoch tracker of task creation
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
-
         Ok((task_id, handle))
+    }
+
+    /// Creates and stores a direct task while returning its one-shot spawn
+    /// effects to the caller.
+    ///
+    /// This is for runtime owners that also own the scheduler publication
+    /// boundary. They must inject the returned task into a ready/cancel lane,
+    /// release scheduler locks, and then dispatch the returned effects.
+    pub(crate) fn create_task_with_deferred_spawn_effects<F, T>(
+        &mut self,
+        region: RegionId,
+        budget: Budget,
+        future: F,
+    ) -> Result<(TaskId, crate::runtime::TaskHandle<T>, TaskSpawnEffects), SpawnError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use crate::runtime::task_handle::JoinError;
+
+        let system_cx = self.create_system_cx();
+        let (task_id, handle, cx, result_tx, spawn_effects) =
+            self.create_task_infrastructure(&system_cx, region, budget, false)?;
+        let wrapped_future = async move {
+            match (CatchUnwind { inner: future }).await {
+                Ok(result) => {
+                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
+                    crate::types::Outcome::Ok(())
+                }
+                Err(payload) => {
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
+                    let _ = result_tx.send(
+                        &cx,
+                        Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
+                    );
+                    crate::types::Outcome::Panicked(panic_payload)
+                }
+            }
+        };
+
+        self.tasks
+            .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+
+        Ok((task_id, handle, spawn_effects))
     }
 
     /// Admits one spawn-mailbox request into the runtime
@@ -3123,11 +3471,9 @@ impl RuntimeState {
         let cancel_publication =
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
-        self.record_task_spawn(task_id, region);
-        self.record_task_trace_event(task_id, |seq| {
-            TraceEvent::task_admitted(seq, now, task_id, region)
-        });
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+        let spawn_effects =
+            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Mailbox, now);
 
         // Successor state (task list + stored future) is visible; release
         // the pending-spawn credit last.
@@ -3137,6 +3483,7 @@ impl RuntimeState {
             task_id,
             priority: budget.priority,
             cancel_publication,
+            spawn_effects,
         }
     }
 
@@ -3203,11 +3550,9 @@ impl RuntimeState {
         let cancel_publication =
             crate::runtime::spawn_mailbox::AdmissionPublication::new(cx_inner, admitted_slot);
 
-        self.record_task_spawn(task_id, region);
-        self.record_task_trace_event(task_id, |seq| {
-            TraceEvent::task_admitted(seq, now, task_id, region)
-        });
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+        let spawn_effects =
+            self.prepare_task_spawn_effects(task_id, region, budget, TaskSpawnSource::Local, now);
 
         // The task is already visible in the region's task list
         // (admission core ran `add_task`), so the pending credit can be
@@ -3219,6 +3564,7 @@ impl RuntimeState {
             priority: budget.priority,
             stored,
             cancel_publication,
+            spawn_effects,
         }
     }
 
@@ -3262,21 +3608,23 @@ impl RuntimeState {
 
         self.verify_spawn_authorization(caller_cx, region)?;
 
-        let (task_id, handle, cx, result_tx) =
+        let (task_id, handle, cx, result_tx, spawn_effects) =
             self.create_task_infrastructure(caller_cx, region, budget, false)?;
 
         // Wrap the future to send the result through the channel. Panics must
         // surface as `JoinError::Panicked` rather than silently closing the
         // channel and looking like cancellation to the join handle.
         let wrapped_future = async move {
+            spawn_effects.dispatch();
             match (CatchUnwind { inner: future }).await {
                 Ok(result) => {
                     let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
-                    let panic_payload =
-                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
                     let _ = result_tx.send(
                         &cx,
                         Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
@@ -3289,9 +3637,6 @@ impl RuntimeState {
         // Store the wrapped future with task_id for poll tracing
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
-
-        // Notify epoch tracker of task creation
-        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         Ok((task_id, handle))
     }
@@ -3324,6 +3669,14 @@ impl RuntimeState {
             .notify_epoch_transition(module, from_epoch, to_epoch, now);
     }
 
+    /// Creates one bounded epoch telemetry delivery token for use after
+    /// publishing the associated mutation and releasing runtime locks. The
+    /// token does not remove receipts from the outbox until it is dispatched.
+    #[must_use]
+    pub fn take_epoch_telemetry(&self) -> super::epoch_tracker::EpochTelemetryDispatch {
+        self.epoch_tracker.drain_telemetry()
+    }
+
     fn record_task_trace_event<F>(&self, task_id: TaskId, build: F)
     where
         F: FnOnce(u64) -> TraceEvent,
@@ -3339,10 +3692,27 @@ impl RuntimeState {
         });
     }
 
-    pub(crate) fn record_task_spawn(&self, task_id: TaskId, region: RegionId) {
-        let now = self.current_runtime_time();
-        self.record_task_trace_event(task_id, |seq| TraceEvent::spawn(seq, now, task_id, region));
-        self.metrics.task_spawned(region, task_id);
+    pub(crate) fn prepare_task_spawn_effects(
+        &self,
+        task_id: TaskId,
+        region: RegionId,
+        budget: Budget,
+        source: TaskSpawnSource,
+        spawned_at: Time,
+    ) -> TaskSpawnEffects {
+        let mut effects = TaskSpawnEffects::new(
+            Arc::clone(&self.metrics),
+            self.trace_handle(),
+            task_id,
+            region,
+            spawned_at,
+            self.logical_time_for_task(task_id),
+            budget,
+            source,
+            &self.task_spawn_observer_panics,
+        );
+        effects.attach_epoch_telemetry(self.take_epoch_telemetry());
+        effects
     }
 
     fn prepare_task_completion_observer(
@@ -4722,7 +5092,7 @@ impl RuntimeState {
                 );
             }
 
-            self.record_finalizer_run(finalizer_id);
+            self.record_finalizer_run(owner, finalizer_id);
         }
 
         // Abort any pending obligations held by this task to prevent
@@ -4754,6 +5124,8 @@ impl RuntimeState {
         // Advance region state if possible (e.g. if this was the last task)
         self.advance_region_state(owner);
 
+        let mut observer = observer;
+        observer.attach_epoch_telemetry(self.take_epoch_telemetry());
         TaskCompletionEffects {
             waiters,
             observer,
@@ -4765,11 +5137,16 @@ impl RuntimeState {
     // Async Finalizer Scheduling
     // =========================================================================
 
-    /// Drains async finalizers for regions that are ready to run them.
+    /// Drains finalizers for regions that are ready to run them.
     ///
-    /// This runs sync finalizers inline and schedules at most one async
-    /// finalizer per region (respecting the async barrier).
-    pub fn drain_ready_async_finalizers(&mut self) -> SmallVec<[(TaskId, u8); 2]> {
+    /// Both sync and async finalizers cross the task-publication boundary. In
+    /// particular, a sync finalizer must not run here: production callers hold
+    /// the runtime-state mutex while invoking this method. Scheduling at most
+    /// one finalizer task per region preserves the LIFO barrier while ensuring
+    /// arbitrary user code is first polled after that mutex has been released.
+    pub fn drain_ready_async_finalizers(
+        &mut self,
+    ) -> SmallVec<[(TaskId, u8, TaskSpawnEffects); 2]> {
         if self.finalizing_regions.is_empty() {
             return SmallVec::new();
         }
@@ -4777,7 +5154,9 @@ impl RuntimeState {
         let mut regions_to_process = SmallVec::<[RegionId; 8]>::new();
 
         for &region_id in &self.finalizing_regions {
-            if self.active_async_finalizers.contains_key(&region_id) {
+            if self.active_async_finalizers.contains_key(&region_id)
+                || self.active_manual_finalizers.contains_key(&region_id)
+            {
                 continue;
             }
             if let Some(region) = self.regions.get(region_id.arena_index()) {
@@ -4788,18 +5167,24 @@ impl RuntimeState {
         }
 
         for region_id in regions_to_process {
-            let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(region_id)
+            let Some((finalizer_id, finalizer)) = self.take_next_finalizer_tracked(region_id)
             else {
                 continue;
             };
-            let Finalizer::Async(future) = finalizer else {
-                continue;
+            let future: BoxedAsyncFinalizer = match finalizer {
+                Finalizer::Sync(finalizer) => Box::pin(async move { finalizer() }),
+                Finalizer::Async(future) => future,
             };
             match self.spawn_finalizer_task(region_id, finalizer_id, future) {
-                Ok((task_id, priority)) => scheduled.push((task_id, priority)),
+                Ok((task_id, priority, spawn_effects)) => {
+                    scheduled.push((task_id, priority, spawn_effects));
+                }
                 Err(future) => {
-                    // Preserve the async barrier when task admission fails so
-                    // the region cannot close with cleanup silently dropped.
+                    // Preserve the barrier when task admission fails so the
+                    // region cannot close with cleanup silently dropped. A
+                    // wrapped sync callback is intentionally requeued as an
+                    // async finalizer: the wrapper is now its lock-free
+                    // execution boundary.
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         region.add_finalizer(Finalizer::Async(future));
                     }
@@ -4814,12 +5199,196 @@ impl RuntimeState {
         scheduled
     }
 
+    /// Executes failed-start async finalizers without promoting them to tasks.
+    ///
+    /// `CompiledApp::start` is a legacy state-threaded bootstrap API: on a
+    /// partial-start error it must synchronously retire the temporary region
+    /// tree before returning, but it owns no scheduler lane or post-lock
+    /// callback boundary. Creating a normal finalizer task here would either
+    /// emit its spawn observer before executable publication or execute an
+    /// observed task with no published lane. This narrow rollback path instead
+    /// preserves finalizer LIFO/accounting while polling the raw finalizer once.
+    /// A pending finalizer is fail-closed as cancelled, matching the old
+    /// bootstrap behavior that force-completed its one-poll task immediately.
+    pub(crate) fn drive_failed_start_async_finalizer_inline(
+        &mut self,
+        region_id: RegionId,
+    ) -> bool {
+        if self
+            .regions
+            .get(region_id.arena_index())
+            .is_none_or(|region| region.state() != crate::record::region::RegionState::Finalizing)
+        {
+            return false;
+        }
+        if self.active_async_finalizers.contains_key(&region_id)
+            || self.active_manual_finalizers.contains_key(&region_id)
+        {
+            return false;
+        }
+        let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(region_id) else {
+            return false;
+        };
+        let Finalizer::Async(future) = finalizer else {
+            return false;
+        };
+
+        self.validate_live_region_protocol_transition(
+            region_id,
+            RegionEvent::FinalizerStarted,
+            "failed-start inline async finalizer",
+        );
+
+        let deadline = self
+            .current_runtime_time()
+            .saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
+        let cleanup_task = next_bootstrap_task_id();
+        let cleanup_budget = finalizer_budget().with_deadline(deadline);
+        let cleanup_cx = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Failed-start rollback is synchronous and one-poll only. Give it
+            // runtime time/trace context and deterministic rollback entropy,
+            // but deliberately no
+            // spawn gateway, pending-spawn counter, I/O driver, or blocking
+            // pool: work admitted through any of those handles could outlive
+            // this call or keep the closing subtree non-quiescent.
+            let entropy_seed = DetEntropy::mix_seed(
+                region_id
+                    .as_u64()
+                    .wrapping_add(finalizer_id.rotate_left(29)),
+            );
+            let entropy: Arc<dyn EntropySource> = Arc::new(DetEntropy::new(entropy_seed));
+            let logical_clock = self
+                .logical_clock_mode
+                .build_handle(self.timer_driver_handle());
+            let cx = crate::cx::Cx::new_with_drivers(
+                region_id,
+                cleanup_task,
+                cleanup_budget,
+                None,
+                None,
+                None,
+                self.timer_driver_handle(),
+                Some(entropy),
+            )
+            .with_logical_clock(logical_clock);
+            cx.set_trace_buffer(self.trace_handle());
+            cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+            cx
+        })) {
+            Ok(cx) => cx,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                {
+                    std::mem::forget(payload);
+                }
+                if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    region.record_close_outcome(Outcome::Panicked(
+                        crate::types::PanicPayload::new(message),
+                    ));
+                }
+                self.record_finalizer_run(region_id, finalizer_id);
+                return true;
+            }
+        };
+        let current_guard = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::cx::Cx::set_current(Some(cleanup_cx.clone()))
+        })) {
+            Ok(guard) => guard,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+                {
+                    std::mem::forget(payload);
+                }
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(cleanup_cx)))
+                {
+                    std::mem::forget(payload);
+                }
+                if let Some(region) = self.regions.get(region_id.arena_index()) {
+                    region.record_close_outcome(Outcome::Panicked(
+                        crate::types::PanicPayload::new(message),
+                    ));
+                }
+                self.record_finalizer_run(region_id, finalizer_id);
+                return true;
+            }
+        };
+        let mut masked = MaskedFinalizer::new(future, Arc::clone(&cleanup_cx.inner));
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+        let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::pin::Pin::new(&mut masked).poll(&mut poll_cx)
+        }));
+        let polled_outcome: Outcome<(), Error> = match poll_result {
+            Ok(Poll::Ready(())) => Outcome::Ok(()),
+            Ok(Poll::Pending) => Outcome::Cancelled(CancelReason::shutdown()),
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
+        let close_outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(masked);
+        })) {
+            Ok(()) => polled_outcome,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
+
+        let retirements = TaskCompletionRetirements::new({
+            let mut inner = cleanup_cx.inner.write();
+            inner.take_cancel_wakers()
+        });
+        // This state-threaded rollback path has no post-lock RawWaker
+        // retirement boundary. Abandon only those detached wake targets; the
+        // restricted cleanup Cx itself owns exclusively runtime-internal
+        // handles and can be retired here without retaining a mailbox/driver
+        // graph per failed start.
+        drop(retirements);
+        let close_outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(current_guard);
+        })) {
+            Ok(()) => close_outcome,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
+        let close_outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(cleanup_cx);
+        })) {
+            Ok(()) => close_outcome,
+            Err(payload) => {
+                let message = payload_to_string(&payload);
+                std::mem::forget(payload);
+                Outcome::Panicked(crate::types::PanicPayload::new(message))
+            }
+        };
+
+        if let Some(region) = self.regions.get(region_id.arena_index()) {
+            region.record_close_outcome(close_outcome);
+        }
+        self.record_finalizer_run(region_id, finalizer_id);
+        true
+    }
+
     fn spawn_finalizer_task(
         &mut self,
         region_id: RegionId,
         finalizer_id: u64,
         future: BoxedAsyncFinalizer,
-    ) -> Result<(TaskId, u8), BoxedAsyncFinalizer> {
+    ) -> Result<(TaskId, u8, TaskSpawnEffects), BoxedAsyncFinalizer> {
         // EDGE CASE VALIDATION: Check async finalizer barrier consistency before spawning
         // This prevents concurrent async finalizers from the same region, which violates LIFO ordering
         debug_assert!(
@@ -4827,6 +5396,11 @@ impl RuntimeState {
             "br-asupersync-mg70eb: async finalizer barrier violation - region already has active async finalizer \
              (region={:?})",
             region_id
+        );
+        debug_assert!(
+            !self.active_manual_finalizers.contains_key(&region_id),
+            "async finalizer scheduled while an external driver owns the region barrier \
+             (region={region_id:?})"
         );
 
         let deadline = self
@@ -4853,7 +5427,7 @@ impl RuntimeState {
         );
 
         let system_cx = self.create_system_cx();
-        let Ok((task_id, _handle, cx, result_tx)) =
+        let Ok((task_id, _handle, cx, result_tx, spawn_effects)) =
             self.create_task_infrastructure::<()>(&system_cx, region_id, budget, true)
         else {
             // EDGE CASE VALIDATION: Log task creation failure for debugging
@@ -4875,8 +5449,9 @@ impl RuntimeState {
                     Outcome::Ok(())
                 }
                 Err(payload) => {
-                    let panic_payload =
-                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let message = payload_to_string(&payload);
+                    std::mem::forget(payload);
+                    let panic_payload = crate::types::outcome::PanicPayload::new(message);
                     let _ = result_tx.send(
                         &cx,
                         Err::<(), JoinError>(JoinError::Panicked(panic_payload.clone())),
@@ -4908,7 +5483,7 @@ impl RuntimeState {
             RegionEvent::FinalizerStarted,
             "async finalizer start",
         );
-        Ok((task_id, budget.priority))
+        Ok((task_id, budget.priority, spawn_effects))
     }
 
     // =========================================================================
@@ -5040,13 +5615,22 @@ impl RuntimeState {
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
     }
 
-    fn record_finalizer_run(&mut self, id: u64) {
+    fn record_finalizer_run(&mut self, region: RegionId, id: u64) {
+        self.validate_live_region_protocol_transition(
+            region,
+            RegionEvent::FinalizerCompleted,
+            "finalizer completion",
+        );
         let now = self.current_runtime_time();
         self.finalizer_history
             .push(FinalizerHistoryEvent::Ran { id, time: now });
     }
 
     fn record_finalizer_close(&mut self, region: RegionId) {
+        debug_assert!(
+            !self.active_manual_finalizers.contains_key(&region),
+            "region closed with an unsettled manual finalizer receipt: {region:?}"
+        );
         let now = self.current_runtime_time();
         self.pending_finalizer_ids.remove(&region);
         self.finalizer_history
@@ -5126,10 +5710,19 @@ impl RuntimeState {
     /// handler to run. Finalizers are returned in LIFO order.
     ///
     /// # Returns
-    /// The next finalizer to run, or `None` if all finalizers have been executed.
-    pub fn pop_region_finalizer(&mut self, region_id: RegionId) -> Option<Finalizer> {
-        self.pop_tracked_finalizer(region_id)
-            .map(|(_, finalizer)| finalizer)
+    /// The next finalizer and its one-shot completion receipt, or `None` if the
+    /// stack is empty or another manual finalizer is still active.
+    pub fn pop_region_finalizer(
+        &mut self,
+        region_id: RegionId,
+    ) -> Option<(Finalizer, ManualFinalizerReceipt)> {
+        if self.active_manual_finalizers.contains_key(&region_id)
+            || self.active_async_finalizers.contains_key(&region_id)
+        {
+            return None;
+        }
+        let (finalizer_id, finalizer) = self.pop_tracked_finalizer(region_id)?;
+        Some(self.handoff_manual_finalizer(region_id, finalizer_id, finalizer))
     }
 
     /// Returns the number of pending finalizers for a region.
@@ -5151,15 +5744,116 @@ impl RuntimeState {
     /// Runs synchronous finalizers for a region until an async finalizer is encountered or the stack is empty.
     ///
     /// This method pops and executes sync finalizers in LIFO order.
-    /// If an async finalizer is encountered, it is returned immediately (and not executed).
-    /// The caller must schedule/await the async finalizer before calling this method again
-    /// to process remaining finalizers.
+    /// If an async finalizer is encountered, it and a one-shot receipt are
+    /// returned immediately. The caller must await the finalizer and settle the
+    /// receipt before calling this method again to process lower finalizers.
     ///
     /// # Returns
-    /// An async finalizer that needs to be scheduled, or `None` if the stack is empty.
-    pub fn run_sync_finalizers(&mut self, region_id: RegionId) -> Option<Finalizer> {
-        self.run_sync_finalizers_tracked(region_id)
-            .map(|(_, finalizer)| finalizer)
+    /// An async finalizer and its receipt, or `None` if the stack is empty or a
+    /// previous manual receipt is still active.
+    pub fn run_sync_finalizers(
+        &mut self,
+        region_id: RegionId,
+    ) -> Option<(Finalizer, ManualFinalizerReceipt)> {
+        if self.active_manual_finalizers.contains_key(&region_id)
+            || self.active_async_finalizers.contains_key(&region_id)
+        {
+            return None;
+        }
+        let (finalizer_id, finalizer) = self.run_sync_finalizers_tracked(region_id)?;
+        Some(self.handoff_manual_finalizer(region_id, finalizer_id, finalizer))
+    }
+
+    fn handoff_manual_finalizer(
+        &mut self,
+        region_id: RegionId,
+        finalizer_id: u64,
+        finalizer: Finalizer,
+    ) -> (Finalizer, ManualFinalizerReceipt) {
+        self.validate_live_region_protocol_transition(
+            region_id,
+            RegionEvent::FinalizerStarted,
+            "manual finalizer handoff",
+        );
+        let previous = self
+            .active_manual_finalizers
+            .insert(region_id, finalizer_id);
+        debug_assert!(
+            previous.is_none(),
+            "region {region_id:?} already had an active manual finalizer receipt: {previous:?}"
+        );
+        (
+            finalizer,
+            ManualFinalizerReceipt {
+                runtime_instance_id: self.instance_id,
+                region_id,
+                finalizer_id,
+                settled: false,
+            },
+        )
+    }
+
+    /// Records successful retirement of an externally driven finalizer.
+    ///
+    /// The receipt is one-shot. A second settlement attempt returns
+    /// [`ManualFinalizerReceiptError::AlreadySettled`] without emitting a
+    /// duplicate completion event.
+    pub fn complete_manual_finalizer(
+        &mut self,
+        receipt: &mut ManualFinalizerReceipt,
+    ) -> Result<(), ManualFinalizerReceiptError> {
+        self.settle_manual_finalizer(receipt, false)
+    }
+
+    /// Abandons an externally driven finalizer and releases its close barrier.
+    ///
+    /// Abandonment records a cancelled close outcome before terminal finalizer
+    /// accounting. It does not claim that the callback completed successfully.
+    pub fn abandon_manual_finalizer(
+        &mut self,
+        receipt: &mut ManualFinalizerReceipt,
+    ) -> Result<(), ManualFinalizerReceiptError> {
+        self.settle_manual_finalizer(receipt, true)
+    }
+
+    fn settle_manual_finalizer(
+        &mut self,
+        receipt: &mut ManualFinalizerReceipt,
+        abandoned: bool,
+    ) -> Result<(), ManualFinalizerReceiptError> {
+        if receipt.settled {
+            return Err(ManualFinalizerReceiptError::AlreadySettled);
+        }
+        if receipt.runtime_instance_id != self.instance_id {
+            return Err(ManualFinalizerReceiptError::WrongRuntime);
+        }
+        if self.active_manual_finalizers.get(&receipt.region_id) != Some(&receipt.finalizer_id) {
+            return Err(ManualFinalizerReceiptError::NotActive);
+        }
+
+        if abandoned && let Some(region) = self.regions.get(receipt.region_id.arena_index()) {
+            region.record_close_outcome(Outcome::Cancelled(CancelReason::user(
+                "manual finalizer abandoned",
+            )));
+        }
+        self.record_finalizer_run(receipt.region_id, receipt.finalizer_id);
+        self.active_manual_finalizers.remove(&receipt.region_id);
+        receipt.settled = true;
+        Ok(())
+    }
+
+    fn take_next_finalizer_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
+        if let Some(region) = self.regions.get(region_id.arena_index()) {
+            debug_assert_eq!(
+                region.state(),
+                crate::record::region::RegionState::Finalizing,
+                "br-asupersync-5mty2b: finalizers may only leave the runtime-state lock in Finalizing state \
+                 (region={:?}, current_state={:?})",
+                region_id,
+                region.state()
+            );
+        }
+        self.pop_tracked_finalizer(region_id)
     }
 
     fn run_sync_finalizers_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
@@ -5212,11 +5906,11 @@ impl RuntimeState {
                     {
                         // Log but continue — a panicking finalizer must not
                         // block region close or skip sibling finalizers.
+                        let message = payload_to_string(&payload);
+                        std::mem::forget(payload);
                         if let Some(region) = self.regions.get(region_id.arena_index()) {
                             region.record_close_outcome(Outcome::Panicked(
-                                crate::types::outcome::PanicPayload::new(payload_to_string(
-                                    &payload,
-                                )),
+                                crate::types::outcome::PanicPayload::new(message),
                             ));
                         }
                     }
@@ -5235,7 +5929,7 @@ impl RuntimeState {
                         );
                     }
 
-                    self.record_finalizer_run(finalizer_id);
+                    self.record_finalizer_run(region_id, finalizer_id);
                 }
                 Finalizer::Async(_) => {
                     // VALIDATION GAP FIX: Validate async finalizers also respect state transitions
@@ -5336,6 +6030,13 @@ impl RuntimeState {
             return false;
         }
 
+        // An external driver owns the top LIFO finalizer until it explicitly
+        // completes or abandons the one-shot receipt. A dropped receipt keeps
+        // this barrier active so close cannot silently skip cleanup.
+        if self.active_manual_finalizers.contains_key(&region_id) {
+            return false;
+        }
+
         // All tasks must be fully completed and cleaned up.
         // We cannot just check if they are terminal, because their `task_completed`
         // cleanup might not have run yet, and closing the region clears the heap prematurely.
@@ -5408,9 +6109,19 @@ impl RuntimeState {
                             created_at: region.created_at,
                             validation_level: CancelValidationLevel::Basic,
                         };
+                        // Child draining is not a region-protocol event: that
+                        // validator intentionally has no child-count state.
+                        // Project cancellation or normal close exactly once,
+                        // here at the runtime's actual finalization boundary.
+                        let finalization_event =
+                            region
+                                .cancel_reason()
+                                .map_or(RegionEvent::RequestClose, |reason| RegionEvent::Cancel {
+                                    reason: reason.to_string(),
+                                });
                         let validation_result = self.validate_region_protocol_transition(
                             region_id,
-                            RegionEvent::RequestClose, // Use RequestClose for finalization
+                            finalization_event,
                             &context,
                         );
                         if matches!(
@@ -5455,34 +6166,10 @@ impl RuntimeState {
                     if region.child_count() > 0
                         && region.state() == crate::record::region::RegionState::Closing
                     {
-                        // Validate protocol transition to Draining
-                        let context = RegionContext {
-                            region_id,
-                            parent_region: region.parent,
-                            created_at: region.created_at,
-                            validation_level: CancelValidationLevel::Basic,
-                        };
-                        let validation_result = self.validate_region_protocol_transition(
-                            region_id,
-                            RegionEvent::Cancel {
-                                reason: "draining children".to_string(),
-                            },
-                            &context,
-                        );
-                        if matches!(
-                            validation_result,
-                            TransitionResult::Invalid { .. }
-                                | TransitionResult::InvariantViolation { .. }
-                        ) {
-                            log_cancel_protocol_violation(
-                                "region drain transition",
-                                &validation_result,
-                            );
-                            // Protocol violation detected - invalidate region snapshot cache
-                            self.read_biased_draining_region_snapshot.invalidate();
-                            // Continue with transition but log violation
-                        }
-
+                        // RegionStateMachine has no child-count dimension, so
+                        // keep this runtime-only transition out of its event
+                        // projection. Finalization above emits the eventual
+                        // Cancel or RequestClose after every child has closed.
                         let old_state = region.state();
                         region.begin_drain();
                         let new_state = region.state();
@@ -5503,23 +6190,23 @@ impl RuntimeState {
                     }
                 }
                 crate::record::region::RegionState::Finalizing => {
-                    if self.active_async_finalizers.contains_key(&region_id) {
+                    if self.active_async_finalizers.contains_key(&region_id)
+                        || self.active_manual_finalizers.contains_key(&region_id)
+                    {
                         break;
                     }
 
-                    // Run sync finalizers (requires mut self).
-                    // If we hit an async finalizer, reinsert it and wait for a scheduler.
-                    if let Some((finalizer_id, async_finalizer)) =
-                        self.run_sync_finalizers_tracked(region_id)
+                    // Region progression is frequently called beneath the
+                    // scheduler's runtime-state mutex and from RegionRunner's
+                    // destructor. Never invoke a user finalizer here. The
+                    // scheduler drains the top LIFO entry into a masked task,
+                    // then polls it only after releasing the state mutex.
+                    if self
+                        .regions
+                        .get(region_id.arena_index())
+                        .is_some_and(|region| !region.finalizers_empty())
                     {
-                        if let Some(region) = self.regions.get(region_id.arena_index()) {
-                            region.add_finalizer(async_finalizer);
-                        }
-                        self.pending_finalizer_ids
-                            .entry(region_id)
-                            .or_default()
-                            .push(finalizer_id);
-                        break; // Async finalizer pending; stop advancing
+                        break;
                     }
 
                     // If finalizing and obligations remain with no tracked tasks, mark leaks.
@@ -5546,55 +6233,43 @@ impl RuntimeState {
 
                     // Check if we can complete close
                     if self.can_region_complete_close(region_id) {
-                        // Validate protocol transition to Closed
+                        // Every registered finalizer emits its own completion
+                        // transition when it actually retires. Closing a region
+                        // before that accounting reaches Finalized is a protocol
+                        // invariant violation, not an implicit extra completion.
                         let closed = {
                             let Some(region) = self.regions.get(region_id.arena_index()) else {
                                 break;
                             };
-                            let context = RegionContext {
-                                region_id,
-                                parent_region: region.parent,
-                                created_at: region.created_at,
-                                validation_level: CancelValidationLevel::Basic,
-                            };
-                            // An empty region (no draining tasks, no running
-                            // finalizers) is driven straight to the validator's
-                            // terminal `Finalized` state by the earlier
-                            // `RequestClose`/`Cancel` transition in this same
-                            // close progression. In that case the close-complete
-                            // step must NOT re-issue `FinalizerCompleted`: the
-                            // region is already finalized, and feeding a further
-                            // event to the terminal state would (correctly) be
-                            // rejected by the validator, registering a spurious
-                            // protocol violation. Only validate the
-                            // `FinalizerCompleted` transition when the validator
-                            // has not already reached `Finalized`.
-                            let already_finalized =
-                                matches!(
-                                self.cancel_protocol_validator
-                                    .lock()
-                                    .region_state(region_id),
-                                Some(crate::cancel::protocol_state_machines::RegionState::Finalized)
-                            );
-                            if !already_finalized {
-                                let validation_result = self.validate_region_protocol_transition(
-                                    region_id,
-                                    RegionEvent::FinalizerCompleted, // Use FinalizerCompleted for close
-                                    &context,
+                            let validation_result = {
+                                let mut validator = self.cancel_protocol_validator.lock();
+                                let validator_state = validator.region_state(region_id).cloned();
+                                let already_finalized = matches!(
+                                    validator_state,
+                                    Some(
+                                        crate::cancel::protocol_state_machines::RegionState::Finalized
+                                    )
                                 );
-                                if matches!(
-                                    validation_result,
-                                    TransitionResult::Invalid { .. }
-                                        | TransitionResult::InvariantViolation { .. }
-                                ) {
-                                    log_cancel_protocol_violation(
-                                        "region close completion",
-                                        &validation_result,
-                                    );
-                                    // Protocol violation detected - invalidate region snapshot cache
-                                    self.read_biased_draining_region_snapshot.invalidate();
-                                    // Continue with transition but log violation
+                                if already_finalized {
+                                    TransitionResult::Valid
+                                } else {
+                                    validator.record_region_invariant_violation_without_logging(
+                                        region_id,
+                                        "runtime region close requires terminal finalizer accounting",
+                                        format!("validator state at close: {validator_state:?}"),
+                                    )
                                 }
+                            };
+                            if matches!(
+                                validation_result,
+                                TransitionResult::Invalid { .. }
+                                    | TransitionResult::InvariantViolation { .. }
+                            ) {
+                                log_cancel_protocol_violation(
+                                    "region close completion",
+                                    &validation_result,
+                                );
+                                self.read_biased_draining_region_snapshot.invalidate();
                             }
 
                             let old_state = region.state();
@@ -7245,6 +7920,112 @@ pub(crate) mod completion_observer_test_support {
 }
 
 #[cfg(test)]
+pub(crate) mod spawn_observer_test_support {
+    use super::*;
+    use crate::sync::ContendedMutex;
+    use std::sync::{Mutex, Weak};
+
+    /// Reentrant, persistently panicking provider for spawn-publication tests.
+    pub struct PanickingSpawnMetrics {
+        state: Mutex<Option<Weak<ContendedMutex<RuntimeState>>>>,
+        spawn_attempts: AtomicUsize,
+        reentry_successes: AtomicUsize,
+        task_records_observed: AtomicUsize,
+        stored_futures_observed: AtomicUsize,
+        runnable_publications_observed: AtomicUsize,
+    }
+
+    impl PanickingSpawnMetrics {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(None),
+                spawn_attempts: AtomicUsize::new(0),
+                reentry_successes: AtomicUsize::new(0),
+                task_records_observed: AtomicUsize::new(0),
+                stored_futures_observed: AtomicUsize::new(0),
+                runnable_publications_observed: AtomicUsize::new(0),
+            })
+        }
+
+        pub(crate) fn attach_state(&self, state: &Arc<ContendedMutex<RuntimeState>>) {
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(state));
+        }
+
+        pub(crate) fn spawn_attempts(&self) -> usize {
+            self.spawn_attempts.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn reentry_successes(&self) -> usize {
+            self.reentry_successes.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn task_records_observed(&self) -> usize {
+            self.task_records_observed.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn stored_futures_observed(&self) -> usize {
+            self.stored_futures_observed.load(Ordering::Relaxed)
+        }
+
+        pub(crate) fn runnable_publications_observed(&self) -> usize {
+            self.runnable_publications_observed.load(Ordering::Relaxed)
+        }
+    }
+
+    impl MetricsProvider for PanickingSpawnMetrics {
+        fn task_spawned(&self, _: RegionId, task_id: TaskId) {
+            self.spawn_attempts.fetch_add(1, Ordering::Relaxed);
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if let Some(state) = state
+                && let Ok(mut runtime) = state.try_lock()
+            {
+                self.reentry_successes.fetch_add(1, Ordering::Relaxed);
+                if let Some(task) = runtime.task(task_id) {
+                    self.task_records_observed.fetch_add(1, Ordering::Relaxed);
+                    if task
+                        .cx_inner
+                        .as_ref()
+                        .is_some_and(|inner| inner.read().runnable_publication.is_published())
+                    {
+                        self.runnable_publications_observed
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if runtime.get_stored_future(task_id).is_some() {
+                    self.stored_futures_observed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            panic!("adversarial task-spawn metrics callback");
+        }
+
+        fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+        fn region_closed(&self, _: RegionId, _: Duration) {}
+        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+        fn deadline_exceeded(&self, _: RegionId) {}
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+        fn deadline_violation(&self, _: &str, _: Duration) {}
+        fn deadline_remaining(&self, _: &str, _: Duration) {}
+        fn checkpoint_interval(&self, _: &str, _: Duration) {}
+        fn task_stuck_detected(&self, _: &str) {}
+        fn obligation_created(&self, _: RegionId) {}
+        fn obligation_discharged(&self, _: RegionId) {}
+        fn obligation_leaked(&self, _: RegionId) {}
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 mod tests {
     use super::*;
@@ -7485,6 +8266,56 @@ mod tests {
     }
 
     #[test]
+    fn task_spawn_observer_sees_stored_task_and_contains_reentrant_panic() {
+        use super::spawn_observer_test_support::PanickingSpawnMetrics;
+
+        let metrics = PanickingSpawnMetrics::new();
+        let state = Arc::new(ContendedMutex::new(
+            "runtime_state",
+            RuntimeState::new_with_metrics(metrics.clone()),
+        ));
+        metrics.attach_state(&state);
+
+        let spawn_effects = {
+            let mut runtime = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let (task_id, _handle, spawn_effects) = runtime
+                .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async {})
+                .expect("create task");
+
+            assert_eq!(
+                metrics.spawn_attempts(),
+                0,
+                "task creation must not invoke spawn observers beneath the state lock"
+            );
+            assert!(runtime.task(task_id).is_some(), "task record is visible");
+            assert!(
+                runtime.get_stored_future(task_id).is_some(),
+                "stored future is visible before observer delivery"
+            );
+            spawn_effects
+        };
+
+        let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spawn_effects.dispatch();
+        }));
+        assert!(dispatched.is_ok(), "spawn observer panic must be contained");
+        assert_eq!(metrics.spawn_attempts(), 1);
+        assert_eq!(metrics.reentry_successes(), 1);
+        assert_eq!(metrics.task_records_observed(), 1);
+        assert_eq!(metrics.stored_futures_observed(), 1);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .task_spawn_observer_panic_count(),
+            1
+        );
+    }
+
+    #[test]
     fn task_completion_observer_is_deferred_one_shot_and_reentrant() {
         use super::completion_observer_test_support::PanickingCompletionMetrics;
         use crate::sync::ContendedMutex;
@@ -7505,9 +8336,7 @@ mod tests {
                 let mut runtime = state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let (task_id, _handle) = runtime
-                    .create_task(root, Budget::INFINITE, async {})
-                    .expect("create task");
+                let task_id = insert_task(&mut runtime, root);
                 runtime
                     .task_mut(task_id)
                     .expect("task record")
@@ -7570,9 +8399,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -7614,9 +8441,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -7666,9 +8491,7 @@ mod tests {
                 let mut runtime = state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let (task_id, _handle) = runtime
-                    .create_task(root, Budget::INFINITE, async {})
-                    .expect("create task");
+                let task_id = insert_task(&mut runtime, root);
                 runtime
                     .task_mut(task_id)
                     .expect("task record")
@@ -7712,9 +8535,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -7761,9 +8582,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime.create_root_region(Budget::INFINITE);
-            let (task_id, _handle) = runtime
-                .create_task(root, Budget::INFINITE, async {})
-                .expect("create task");
+            let task_id = insert_task(&mut runtime, root);
             runtime
                 .task_mut(task_id)
                 .expect("task record")
@@ -7894,12 +8713,29 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(PanickingLayer {
             attempts: Arc::clone(&attempts),
         });
+        let telemetry_before = state.epoch_tracker.telemetry_statistics();
+        assert!(
+            telemetry_before.pending > 0,
+            "task completion must carry its pending epoch telemetry"
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tracing::subscriber::with_default(subscriber, || observer.dispatch());
         }));
 
         assert!(result.is_ok(), "subscriber panic must not escape dispatch");
-        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            2,
+            "epoch telemetry and the completion debug event each reach their own containment boundary"
+        );
+        assert_eq!(
+            state
+                .epoch_tracker
+                .telemetry_statistics()
+                .dispatch_panic_count,
+            telemetry_before.dispatch_panic_count + 1,
+            "the epoch telemetry boundary must count its contained subscriber panic"
+        );
         assert_eq!(state.task_completion_observer_panic_count(), 1);
     }
 
@@ -8128,6 +8964,39 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn run_ready_finalizer_tasks(state: &mut RuntimeState) -> usize {
+        let mut ran = 0;
+        loop {
+            let scheduled = state.drain_ready_async_finalizers();
+            if scheduled.is_empty() {
+                return ran;
+            }
+
+            for (task_id, _priority, spawn_effects) in scheduled {
+                spawn_effects.dispatch();
+                let mut stored = state
+                    .remove_stored_future(task_id)
+                    .expect("scheduled finalizer must own a stored task");
+                let waker = Waker::noop().clone();
+                let mut poll_cx = Context::from_waker(&waker);
+                let outcome = match stored.poll(&mut poll_cx) {
+                    Poll::Ready(Outcome::Ok(())) => Outcome::Ok(()),
+                    Poll::Ready(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
+                    Poll::Ready(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
+                    Poll::Ready(Outcome::Err(())) => {
+                        panic!("finalizer task must not resolve with unit error")
+                    }
+                    Poll::Pending => panic!("focused finalizer must complete on its first poll"),
+                };
+                assert!(state.complete_task(task_id, outcome));
+                let (waiters, observer) = state.task_completed(task_id).into_parts();
+                assert!(waiters.is_empty());
+                observer.dispatch();
+                ran += 1;
+            }
+        }
+    }
+
     #[test]
     fn epoch_tracker_advances_monotonically_per_runtime_module() {
         init_test("epoch_tracker_advances_monotonically_per_runtime_module");
@@ -8278,7 +9147,7 @@ mod tests {
                         if g.cancel_waker_registry_closed {
                             None
                         } else {
-                            std::mem::replace(&mut g.cancel_waker, Some(cancel_waker))
+                            g.cancel_waker.replace(cancel_waker)
                         }
                     };
                     drop(retired);
@@ -8324,6 +9193,7 @@ mod tests {
             unlocked_drops: Arc<AtomicUsize>,
         }
 
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for DropProbe {
             fn wake(self: Arc<Self>) {}
         }
@@ -8390,6 +9260,7 @@ mod tests {
             drops: Arc<AtomicUsize>,
         }
 
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for DropProbe {
             fn wake(self: Arc<Self>) {}
         }
@@ -9153,9 +10024,12 @@ mod tests {
         let mut state = RuntimeState::new_with_metrics(metrics.clone());
         let root = state.create_root_region(Budget::INFINITE);
 
-        let _ = state
-            .create_task(root, Budget::INFINITE, async { 1_u8 })
+        let (_task_id, _handle, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
+        // This focused state test models the publication owner immediately
+        // after the stored future becomes visible.
+        spawn_effects.dispatch();
         let reason = CancelReason::timeout();
         let effects = state.cancel_request(root, &reason, None);
         let (_tasks, wake_effects) = effects.into_parts();
@@ -9235,9 +10109,12 @@ mod tests {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
 
-        let _ = state
-            .create_task(root, Budget::INFINITE, async { 1_u8 })
+        let (_, _, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async { 1_u8 })
             .expect("task spawn");
+        // This focused state fixture models the executable-lane publication
+        // boundary before releasing the deferred observer effects.
+        spawn_effects.dispatch();
 
         let events = state.trace.snapshot();
         let spawn_event = events
@@ -9336,9 +10213,12 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
 
-        let (task_id, _handle) = state
-            .create_task(region, Budget::INFINITE, async { 42 })
+        let (task_id, _handle, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async { 42 })
             .expect("task create");
+        // Preserve the snapshot's published-task contract: spawn observers
+        // become visible only after the fixture models lane publication.
+        spawn_effects.dispatch();
 
         let obl_idx = state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
@@ -9418,9 +10298,10 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
 
-        let (task_id, _handle) = state
-            .create_task(region, Budget::INFINITE, async { 42 })
+        let (task_id, _handle, spawn_effects) = state
+            .create_task_with_deferred_spawn_effects(region, Budget::INFINITE, async { 42 })
             .expect("task create");
+        spawn_effects.dispatch();
 
         let obligation_idx = state.obligations.insert(ObligationRecord::new(
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
@@ -10634,10 +11515,13 @@ mod tests {
         }
 
         // Pop and execute in LIFO order
-        while let Some(finalizer) = state.pop_region_finalizer(region) {
+        while let Some((finalizer, mut receipt)) = state.pop_region_finalizer(region) {
             if let Finalizer::Sync(f) = finalizer {
                 f();
             }
+            state
+                .complete_manual_finalizer(&mut receipt)
+                .expect("manual finalizer receipt should complete");
         }
 
         // Should be 3, 2, 1 (LIFO)
@@ -10677,7 +11561,9 @@ mod tests {
         }
 
         // First pass: runs the top Sync(empty), stops at Async
-        let async_finalizer = state.run_sync_finalizers(region);
+        let (async_finalizer, mut receipt) = state
+            .run_sync_finalizers(region)
+            .expect("async finalizer should be handed off");
 
         // The first sync finalizer (bottom of stack) should NOT have run yet due to async barrier
         let sync_flag = sync_called.load(std::sync::atomic::Ordering::SeqCst);
@@ -10688,15 +11574,24 @@ mod tests {
             sync_flag
         );
 
-        // One async finalizer should be returned
-        crate::assert_with_log!(
-            async_finalizer.is_some(),
-            "async finalizer returned",
-            true,
-            async_finalizer.is_some()
-        );
-        let is_async = matches!(async_finalizer, Some(Finalizer::Async(_)));
+        let is_async = matches!(async_finalizer, Finalizer::Async(_));
         crate::assert_with_log!(is_async, "is async", true, is_async);
+
+        // The active receipt is a barrier: lower LIFO finalizers cannot run.
+        let blocked = state.run_sync_finalizers(region);
+        crate::assert_with_log!(
+            blocked.is_none(),
+            "manual receipt blocks lower finalizers",
+            true,
+            blocked.is_none()
+        );
+
+        if let Finalizer::Async(future) = async_finalizer {
+            futures_lite::future::block_on(future);
+        }
+        state
+            .complete_manual_finalizer(&mut receipt)
+            .expect("async receipt should complete");
 
         // Second pass: runs the remaining Sync(flag=true)
         let remaining = state.run_sync_finalizers(region);
@@ -10715,6 +11610,134 @@ mod tests {
         let empty = state.region_finalizers_empty(region);
         crate::assert_with_log!(empty, "finalizers cleared", true, empty);
         crate::test_complete!("run_sync_finalizers_executes_and_returns_async");
+    }
+
+    #[test]
+    fn manual_finalizer_receipt_rejects_wrong_runtime_and_duplicate_completion() {
+        init_test("manual_finalizer_receipt_rejects_wrong_runtime_and_duplicate_completion");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        state.register_sync_finalizer(region, || {});
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
+        let (finalizer, mut receipt) = state
+            .pop_region_finalizer(region)
+            .expect("manual sync finalizer should be handed off");
+        let Finalizer::Sync(finalizer) = finalizer else {
+            panic!("registered sync finalizer changed kind");
+        };
+        finalizer();
+
+        let mut other_state = RuntimeState::new();
+        assert_eq!(
+            other_state.complete_manual_finalizer(&mut receipt),
+            Err(ManualFinalizerReceiptError::WrongRuntime)
+        );
+        assert!(
+            !state.can_region_complete_close(region),
+            "wrong-runtime settlement must leave the owning close barrier active"
+        );
+
+        state
+            .complete_manual_finalizer(&mut receipt)
+            .expect("owning runtime should accept completion");
+        assert!(receipt.is_settled());
+        assert_eq!(
+            state.complete_manual_finalizer(&mut receipt),
+            Err(ManualFinalizerReceiptError::AlreadySettled)
+        );
+        assert_eq!(
+            state
+                .finalizer_history
+                .iter()
+                .filter(|event| matches!(event, FinalizerHistoryEvent::Ran { .. }))
+                .count(),
+            1,
+            "duplicate settlement must not emit a second completion"
+        );
+        assert!(state.can_region_complete_close(region));
+        crate::test_complete!(
+            "manual_finalizer_receipt_rejects_wrong_runtime_and_duplicate_completion"
+        );
+    }
+
+    #[test]
+    fn manual_finalizer_receipt_drop_fails_closed() {
+        init_test("manual_finalizer_receipt_drop_fails_closed");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        state.register_sync_finalizer(region, || {});
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
+        {
+            let (finalizer, _receipt) = state
+                .pop_region_finalizer(region)
+                .expect("manual finalizer should be handed off");
+            let Finalizer::Sync(finalizer) = finalizer else {
+                panic!("registered sync finalizer changed kind");
+            };
+            finalizer();
+        }
+
+        assert!(
+            !state.can_region_complete_close(region),
+            "dropping an unsettled receipt must block region close"
+        );
+        assert!(
+            state.pop_region_finalizer(region).is_none(),
+            "dropping the receipt must also preserve the LIFO barrier"
+        );
+        assert!(
+            state
+                .finalizer_history
+                .iter()
+                .all(|event| !matches!(event, FinalizerHistoryEvent::Ran { .. })),
+            "an unsettled receipt must not forge completion history"
+        );
+        crate::test_complete!("manual_finalizer_receipt_drop_fails_closed");
+    }
+
+    #[test]
+    fn manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled() {
+        init_test("manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        state.register_sync_finalizer(region, || {});
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
+        let (_finalizer, mut receipt) = state
+            .pop_region_finalizer(region)
+            .expect("manual finalizer should be handed off");
+        state
+            .abandon_manual_finalizer(&mut receipt)
+            .expect("explicit abandonment should settle the receipt");
+
+        assert!(receipt.is_settled());
+        assert!(state.can_region_complete_close(region));
+        assert!(
+            matches!(
+                state.region_close_outcome(region),
+                Some(Outcome::Cancelled(_))
+            ),
+            "abandonment must leave a non-success close outcome"
+        );
+        assert_eq!(
+            state.abandon_manual_finalizer(&mut receipt),
+            Err(ManualFinalizerReceiptError::AlreadySettled)
+        );
+        crate::test_complete!("manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled");
     }
 
     #[test]
@@ -10952,12 +11975,20 @@ mod tests {
 
         {
             let validator = runtime.state.cancel_protocol_validator().lock();
+            let (regions, tasks, ..) = validator.stats();
             crate::assert_with_log!(
-                validator.region_state(region).cloned() == Some(ValidatorRegionState::Finalized),
-                "validator saw finalizer completion",
-                "Finalized",
+                validator.region_state(region).is_none(),
+                "closed region validator retired",
+                true,
                 format!("{:?}", validator.region_state(region))
             );
+            crate::assert_with_log!(
+                regions == 0,
+                "closed region validator count",
+                0usize,
+                regions
+            );
+            crate::assert_with_log!(tasks == 0, "retired task validator count", 0usize, tasks);
             crate::assert_with_log!(
                 validator.violation_count() == 0,
                 "no completion violations",
@@ -10969,6 +12000,109 @@ mod tests {
         crate::test_complete!(
             "lab_runtime_validator_tracks_async_finalizer_registration_start_and_completion"
         );
+    }
+
+    #[test]
+    fn runtime_validator_counts_each_sync_finalizer_completion() {
+        init_test("runtime_validator_counts_each_sync_finalizer_completion");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let first_order = Arc::clone(&order);
+        let second_order = Arc::clone(&order);
+        assert!(state.register_sync_finalizer(region, move || first_order.lock().push(1)));
+        assert!(state.register_sync_finalizer(region, move || second_order.lock().push(2)));
+
+        let region_record = state.region(region).expect("region missing");
+        assert!(region_record.begin_close(None));
+        state.advance_region_state(region);
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 2);
+
+        assert_eq!(
+            *order.lock(),
+            vec![2, 1],
+            "finalizers execute in LIFO order"
+        );
+        assert!(state.region(region).is_none(), "closed root is retired");
+        let validator = state.cancel_protocol_validator().lock();
+        let (regions, .., violations) = validator.stats();
+        assert!(validator.region_state(region).is_none());
+        assert_eq!(regions, 0);
+        assert_eq!(violations, 0);
+        crate::test_complete!("runtime_validator_counts_each_sync_finalizer_completion");
+    }
+
+    #[test]
+    fn runtime_validator_counts_mixed_finalizer_completions() {
+        use crate::cancel::protocol_state_machines::RegionState as ValidatorRegionState;
+
+        init_test("runtime_validator_counts_mixed_finalizer_completions");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let sync_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sync_ran_in_finalizer = Arc::clone(&sync_ran);
+
+        assert!(state.register_sync_finalizer(region, move || {
+            sync_ran_in_finalizer.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        assert!(state.register_async_finalizer(region, async {}));
+        assert!(state.register_async_finalizer(region, async {}));
+
+        let region_record = state.region(region).expect("region missing");
+        assert!(region_record.begin_close(None));
+        state.advance_region_state(region);
+
+        let first = state.drain_ready_async_finalizers();
+        assert_eq!(first.len(), 1);
+        let first_task = first[0].0;
+        state
+            .task_mut(first_task)
+            .expect("first async finalizer task missing")
+            .complete(Outcome::Ok(()));
+        let _waiters = state
+            .task_completed(first_task)
+            .into_waiters_without_observers();
+
+        {
+            let validator = state.cancel_protocol_validator().lock();
+            assert_eq!(
+                validator.region_state(region),
+                Some(&ValidatorRegionState::Finalizing {
+                    running_finalizers: 2,
+                })
+            );
+            assert_eq!(validator.violation_count(), 0);
+        }
+
+        let second = state.drain_ready_async_finalizers();
+        assert_eq!(second.len(), 1);
+        let second_task = second[0].0;
+        state
+            .task_mut(second_task)
+            .expect("second async finalizer task missing")
+            .complete(Outcome::Ok(()));
+        let _waiters = state
+            .task_completed(second_task)
+            .into_waiters_without_observers();
+
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
+
+        assert!(sync_ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(state.region(region).is_none(), "closed root is retired");
+        let ran_ids: Vec<_> = state
+            .finalizer_history
+            .iter()
+            .filter_map(|event| match event {
+                FinalizerHistoryEvent::Ran { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ran_ids, vec![2, 1, 0]);
+        let validator = state.cancel_protocol_validator().lock();
+        assert!(validator.region_state(region).is_none());
+        assert_eq!(validator.violation_count(), 0);
+        crate::test_complete!("runtime_validator_counts_mixed_finalizer_completions");
     }
 
     #[test]
@@ -11011,11 +12145,18 @@ mod tests {
 
         {
             let validator = state.cancel_protocol_validator().lock();
+            let (regions, ..) = validator.stats();
             crate::assert_with_log!(
-                validator.region_state(child).cloned() == Some(ValidatorRegionState::Finalized),
-                "child region finalized in validator",
-                "Finalized",
+                validator.region_state(child).is_none(),
+                "closed child validator retired",
+                true,
                 format!("{:?}", validator.region_state(child))
+            );
+            crate::assert_with_log!(
+                regions == 1,
+                "only open root validator remains",
+                1usize,
+                regions
             );
             crate::assert_with_log!(
                 validator.violation_count() == 0,
@@ -11177,6 +12318,8 @@ mod tests {
         let _waiters = state
             .task_completed(task_id)
             .into_waiters_without_observers();
+
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
         crate::assert_with_log!(
             sync_runs.load(std::sync::atomic::Ordering::SeqCst) == 1,
@@ -11866,13 +13009,7 @@ mod tests {
             true,
             root_began_close
         );
-        let root_began_finalize = finalizer_root_record.begin_finalize();
-        crate::assert_with_log!(
-            root_began_finalize,
-            "parent begin finalize before finalizer drain",
-            true,
-            root_began_finalize
-        );
+        finalizer_drain.advance_region_state(finalizer_root);
         let finalizer_direct = log_quiescence_observation(
             &finalizer_drain,
             finalizer_root,
@@ -11903,6 +13040,7 @@ mod tests {
         );
 
         finalizer_drain.advance_region_state(finalizer_root);
+        assert_eq!(run_ready_finalizer_tasks(&mut finalizer_drain), 1);
         let closed_direct = log_quiescence_observation(
             &finalizer_drain,
             finalizer_root,
@@ -12383,17 +13521,18 @@ mod tests {
             finalizer_ran
         );
 
-        // Phase 3: Second task completes → triggers advance_region_state
-        // → Finalizing (no children, no tasks) → runs sync finalizers → Closed
+        // Phase 3: Second task completion reaches Finalizing. The finalizer
+        // then crosses the scheduler-task boundary before the region closes.
         state
             .task_mut(task2)
             .expect("task2")
             .complete(Outcome::Cancelled(CancelReason::timeout()));
         let (_waiters, observer) = state.task_completed(task2).into_parts();
         observer.dispatch();
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
-        // Region should transition through Finalizing → Closed
-        // (sync finalizers are run inline by advance_region_state)
+        // Region should transition through Finalizing → Closed after the
+        // scheduled sync finalizer task completes.
         let region_state_removed = state.regions.get(root.arena_index()).is_none();
         crate::assert_with_log!(
             region_state_removed,
@@ -12534,9 +13673,9 @@ mod tests {
 
         let region_record = state.regions.get(region.arena_index()).expect("region");
         assert!(region_record.begin_close(None));
-        assert!(region_record.begin_finalize());
 
         state.advance_region_state(region);
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
         crate::assert_with_log!(
             state.region_was_closed(region),
@@ -12578,6 +13717,7 @@ mod tests {
             .expect("task")
             .complete(Outcome::Ok(()));
         let _waiters = state.task_completed(task).into_waiters_without_observers();
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 1);
 
         crate::assert_with_log!(
             state.region_was_closed(region),
@@ -12624,10 +13764,10 @@ mod tests {
         // Begin close sequence
         let region_record = state.regions.get(region.arena_index()).expect("region");
         assert!(region_record.begin_close(None));
-        assert!(region_record.begin_finalize());
 
         // Advance region state to run finalizers
         state.advance_region_state(region);
+        assert_eq!(run_ready_finalizer_tasks(&mut state), 2);
 
         // Verify the region closed (transitions to Closed state)
         crate::assert_with_log!(
@@ -12762,6 +13902,20 @@ mod tests {
             cancelled
         );
 
+        {
+            let validator = runtime.state.cancel_protocol_validator().lock();
+            let cancel_requested = matches!(
+                validator.task_state(task_id),
+                Some(crate::cancel::protocol_state_machines::TaskState::CancelRequested)
+            );
+            crate::assert_with_log!(
+                cancel_requested,
+                "validator should observe RequestCancel before retirement",
+                true,
+                cancel_requested
+            );
+        }
+
         runtime
             .scheduler
             .lock()
@@ -12770,16 +13924,15 @@ mod tests {
         runtime.run_until_quiescent();
 
         let validator = runtime.state.cancel_protocol_validator().lock();
-        let validator_cancelled = matches!(
-            validator.task_state(task_id),
-            Some(crate::cancel::protocol_state_machines::TaskState::Cancelled)
-        );
+        let (_, tasks, ..) = validator.stats();
+        let validator_retired = validator.task_state(task_id).is_none();
         crate::assert_with_log!(
-            validator_cancelled,
-            "validator should observe RequestCancel -> DrainComplete",
+            validator_retired,
+            "terminal task validator should be retired",
             true,
-            validator_cancelled
+            validator_retired
         );
+        crate::assert_with_log!(tasks == 0, "retired task validator count", 0usize, tasks);
         crate::assert_with_log!(
             validator.violation_count() == 0,
             "validator should not record protocol violations",
@@ -12977,7 +14130,14 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
         let task = insert_task(&mut state, region);
-        state.record_task_spawn(task, region);
+        let spawn_effects = state.prepare_task_spawn_effects(
+            task,
+            region,
+            Budget::INFINITE,
+            TaskSpawnSource::Direct,
+            state.current_runtime_time(),
+        );
+        spawn_effects.dispatch();
 
         // Create obligation
         let _obl = state

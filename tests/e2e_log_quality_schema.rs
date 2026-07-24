@@ -270,6 +270,7 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
         "scripts/test_combinators.sh",
         "scripts/test_cancel_attribution.sh",
         "scripts/test_scheduler_wakeup_e2e.sh",
+        "scripts/run_dependency_sovereignty_e2e.sh",
         "scripts/test_wasm_packaged_bootstrap_e2e.sh",
         "scripts/test_wasm_packaged_cancellation_e2e.sh",
         "scripts/test_wasm_cross_framework_e2e.sh",
@@ -645,4 +646,239 @@ fn verify_matrix_rejects_non_positive_retention_days() {
         stderr.contains("ARTIFACT_RETENTION_DAYS_LOCAL must be greater than 0"),
         "expected retention policy error, got stderr:\n{stderr}"
     );
+}
+
+#[test]
+fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
+    let runner = fs::read_to_string("scripts/run_dependency_sovereignty_e2e.sh")
+        .expect("read dependency-sovereignty runner");
+    let orchestrator = fs::read_to_string("scripts/run_all_e2e.sh").expect("read E2E orchestrator");
+
+    for token in [
+        "summary.json",
+        "events.ndjson",
+        "scenarios.ndjson",
+        "validation_stages.ndjson",
+        "artifact_manifest.ndjson",
+        "environment.json",
+        "repro_manifest.json",
+        "latest.json",
+        "latest_success.json",
+        "RCH_REQUIRE_REMOTE=1",
+        "local Cargo fallback refused",
+        "ASSERTION_FAILURE",
+        "COMMAND_FAILURE",
+        "TIMEOUT",
+        "SIGNAL",
+        "UNSUPPORTED_PLATFORM",
+        "BLOCKED_RCH",
+        "LOCAL_FALLBACK",
+        "CORRUPT_SUMMARY",
+        "MISSING_ARTIFACT",
+        "REPLAY_FAILURE",
+        "CLEANUP_FAILURE",
+        "VER_A2_CANARY_SECRET_DO_NOT_RETAIN",
+        "artifacts/dependency_failure_injection_matrix_v1.json",
+        "failure-injection-contract",
+        "dependency_failure_injection_matrix_contract",
+        "ver-a4-failure-injection-contract",
+        "artifacts/dependency_real_service_fixture_matrix_v1.json",
+        "real-service-fixture-contract",
+        "dependency_real_service_fixture_contract",
+        "ver-a3-real-service-fixture-contract",
+        "artifacts/dependency_feature_platform_consumer_matrix_v1.json",
+        "feature-platform-consumer-contract",
+        "dependency_feature_platform_consumer_matrix_contract",
+        "ver-a5-feature-platform-consumer-contract",
+        "artifacts/dependency_verification_final_signoff_v1.json",
+        "aggregate-signoff-contract",
+        "dependency_verification_final_signoff_contract",
+        "ver-a6-aggregate-signoff-contract",
+    ] {
+        assert!(
+            runner.contains(token),
+            "dependency-sovereignty runner missing contract token: {token}"
+        );
+    }
+
+    for token in [
+        "[dependency-sovereignty]=\"run_dependency_sovereignty_e2e.sh\"",
+        "[dependency-sovereignty]=\"target/e2e-results/dependency-sovereignty\"",
+        "[dependency-sovereignty]=\"E2E-SUITE-DEPENDENCY-SOVEREIGNTY\"",
+    ] {
+        assert!(
+            orchestrator.contains(token),
+            "run_all_e2e.sh missing dependency-sovereignty registration: {token}"
+        );
+    }
+}
+
+#[test]
+fn dependency_sovereignty_runner_rejects_invalid_cli_boundaries() {
+    let cases = [
+        vec!["--scenario", "not-a-scenario"],
+        vec!["--run-id", "../escape"],
+        vec!["--timeout", "0"],
+    ];
+
+    for args in cases {
+        let output = Command::new("bash")
+            .arg("scripts/run_dependency_sovereignty_e2e.sh")
+            .args(&args)
+            .current_dir(repo_root())
+            .output()
+            .expect("run dependency-sovereignty invalid CLI case");
+        assert_eq!(
+            output.status.code(),
+            Some(64),
+            "invalid args {args:?} must fail with usage status 64\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn dependency_sovereignty_smoke_emits_complete_redacted_bundle() {
+    let output_root = repo_root()
+        .join("target")
+        .join("e2e-results")
+        .join("dependency-sovereignty-contract");
+    let run_id = format!("contract-{}", std::process::id());
+    let run_dir = output_root.join(&run_id);
+    let output = Command::new("bash")
+        .arg("scripts/run_dependency_sovereignty_e2e.sh")
+        .arg("--run-id")
+        .arg(&run_id)
+        .env("DEPENDENCY_SOVEREIGNTY_OUTPUT_ROOT", &output_root)
+        .env("TEST_SEED", "4242")
+        .current_dir(repo_root())
+        .output()
+        .expect("run dependency-sovereignty smoke");
+
+    assert!(
+        output.status.success(),
+        "dependency-sovereignty smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let required_files = [
+        "summary.json",
+        "events.ndjson",
+        "scenarios.ndjson",
+        "validation_stages.ndjson",
+        "artifact_manifest.ndjson",
+        "environment.json",
+        "repro_manifest.json",
+        "catalog/ver-a2-catalog.stdout.log",
+        "catalog/ver-a2-catalog.stderr.log",
+        "runner-contract/ver-a2-runner-contract.stdout.log",
+        "runner-contract/ver-a2-runner-contract.stderr.log",
+    ];
+    for relative in required_files {
+        let path = run_dir.join(relative);
+        assert!(
+            path.is_file(),
+            "dependency-sovereignty bundle missing {}",
+            path.display()
+        );
+    }
+
+    let summary: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("summary.json")).expect("read suite summary"),
+    )
+    .expect("parse suite summary");
+    assert_eq!(summary["schema_version"], "e2e-suite-summary-v3");
+    assert_eq!(summary["status"], "passed");
+    assert_eq!(summary["counts"]["total"], 2);
+    assert_eq!(summary["counts"]["passed"], 2);
+    assert_eq!(summary["counts"]["failed"], 0);
+    assert!(
+        summary["artifact_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("summary.json"))
+    );
+
+    let scenarios = fs::read_to_string(run_dir.join("scenarios.ndjson"))
+        .expect("read scenario event rows")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("parse scenario event row"))
+        .collect::<Vec<_>>();
+    assert_eq!(scenarios.len(), 2);
+    for row in &scenarios {
+        for field in [
+            "schema_version",
+            "run_id",
+            "bead_id",
+            "track_id",
+            "capability_ids",
+            "scenario_id",
+            "step_id",
+            "validation_surface",
+            "profile_family",
+            "feature_flags",
+            "seed_or_fixture_id",
+            "config_snapshot_ref",
+            "command",
+            "expected_outcome",
+            "observed_outcome",
+            "exit_code",
+            "signal",
+            "monotonic_elapsed_ms",
+            "artifacts",
+            "rch",
+            "evidence_owner",
+            "service_tool_versions",
+            "redaction_policy",
+            "cleanup_result",
+            "replay_pointer",
+        ] {
+            assert!(
+                row.get(field).is_some(),
+                "scenario event missing required field {field}: {row}"
+            );
+        }
+        assert_eq!(row["observed_outcome"], "PASSED");
+        assert_eq!(row["cleanup_result"], "passed");
+    }
+
+    let classifier_log =
+        fs::read_to_string(run_dir.join("runner-contract/ver-a2-runner-contract.stdout.log"))
+            .expect("read classifier log");
+    for fixture in [
+        "happy-path",
+        "assertion-failure",
+        "command-failure",
+        "timeout",
+        "signal",
+        "unsupported-platform",
+        "blocked-rch",
+        "local-fallback",
+        "corrupt-summary",
+        "missing-artifact",
+        "replay-failure",
+        "cleanup-failure",
+        "redaction-canary",
+    ] {
+        assert!(
+            classifier_log.contains(&format!("fixture={fixture}")),
+            "classifier log missing fixture {fixture}"
+        );
+    }
+    assert!(
+        !classifier_log.contains("VER_A2_CANARY_SECRET_DO_NOT_RETAIN"),
+        "redaction canary leaked into retained classifier log"
+    );
+
+    for pointer in ["latest.json", "latest_success.json"] {
+        let path = output_root.join(pointer);
+        let value: Value = serde_json::from_str(
+            &fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        )
+        .expect("parse dependency-sovereignty pointer");
+        assert_eq!(value["run_id"], run_id);
+        assert_eq!(value["status"], "passed");
+    }
 }

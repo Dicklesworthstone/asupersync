@@ -23,7 +23,7 @@
 use crate::types::{
     CancelPhase, CancelReason, CancelWitness, CancelWitnessError, RegionId, TaskId, Time,
 };
-use crate::util::det_hash::{DetHashMap, DetHashSet};
+use crate::util::det_hash::{DetBuildHasher, DetHashMap, DetHashSet};
 use parking_lot::RwLock;
 use std::backtrace::Backtrace;
 use std::collections::VecDeque;
@@ -318,10 +318,20 @@ impl fmt::Display for CancelCorrectnessViolation {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CompletedTaskCache {
     task_ids: DetHashSet<TaskId>,
     order: VecDeque<TaskId>,
+}
+
+impl Default for CompletedTaskCache {
+    fn default() -> Self {
+        // GH#55: fixed-seed hashing for feature-independent lab determinism.
+        Self {
+            task_ids: DetHashSet::with_hasher(DetBuildHasher::for_lab()),
+            order: VecDeque::new(),
+        }
+    }
 }
 
 impl CompletedTaskCache {
@@ -454,7 +464,10 @@ impl CancelCorrectnessOracle {
     pub fn new(config: CancelCorrectnessConfig) -> Self {
         Self {
             config,
-            task_states: RwLock::new(DetHashMap::default()),
+            // GH#55: fixed-seed hashing keeps the lab oracle deterministic
+            // even without the `test-internals` feature. Keys are internal
+            // TaskIds, so the documented HashDoS concern does not apply.
+            task_states: RwLock::new(DetHashMap::with_hasher(DetBuildHasher::for_lab())),
             completed_tasks: RwLock::new(CompletedTaskCache::default()),
             violations: RwLock::new(VecDeque::new()),
             witnesses_processed: AtomicU64::new(0),

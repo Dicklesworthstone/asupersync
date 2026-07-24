@@ -256,6 +256,28 @@ impl DetBuildHasher {
             seed: DetHasher::for_production().state,
         }
     }
+
+    /// Creates a builder whose hashing is deterministically derived from an
+    /// explicit seed, independent of build features.
+    ///
+    /// This is the constructor lab-runtime state must use (GH#55): the lab
+    /// scheduler's collections are seeded from `LabConfig::seed`, so two runs
+    /// with the same lab seed hash — and therefore iterate — identically even
+    /// in builds without the `test-internals` feature. Determinism is a
+    /// correctness property of the lab runtime, not a diagnostics feature.
+    ///
+    /// **Security**: Only use for trusted, internal key spaces (TaskId,
+    /// RegionId, io tokens, ...). The derivation is public, so collision
+    /// attacks are trivial if keys are attacker-controlled.
+    #[inline]
+    #[must_use]
+    pub fn with_seed(seed: u64) -> Self {
+        let mut hasher = DetHasher::for_lab();
+        hasher.write_u64(seed);
+        Self {
+            seed: hasher.finish(),
+        }
+    }
 }
 
 impl BuildHasher for DetBuildHasher {
@@ -731,5 +753,61 @@ mod tests {
                 "Default production builders should use independent random seeds"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // GH#55: lab determinism must not depend on the `test-internals` feature.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn with_seed_builders_hash_identically_for_identical_seeds() {
+        let a = DetBuildHasher::with_seed(0xdead_beef);
+        let b = DetBuildHasher::with_seed(0xdead_beef);
+        for key in [0u64, 1, 42, u64::MAX] {
+            let mut ha = a.build_hasher();
+            let mut hb = b.build_hasher();
+            ha.write_u64(key);
+            hb.write_u64(key);
+            assert_eq!(
+                ha.finish(),
+                hb.finish(),
+                "identical seeds must hash identically in every build configuration"
+            );
+        }
+    }
+
+    #[test]
+    fn with_seed_builders_diverge_for_different_seeds() {
+        let a = DetBuildHasher::with_seed(1);
+        let b = DetBuildHasher::with_seed(2);
+        let mut ha = a.build_hasher();
+        let mut hb = b.build_hasher();
+        ha.write_u64(7);
+        hb.write_u64(7);
+        assert_ne!(
+            ha.finish(),
+            hb.finish(),
+            "distinct lab seeds should produce distinct hash streams"
+        );
+    }
+
+    #[test]
+    fn with_seed_sets_iterate_identically_for_identical_seeds() {
+        // Regression for GH#55: `DetHashSet::default()` iterates in a
+        // different order per instance in builds without `test-internals`.
+        // Seed-derived construction must iterate identically regardless of
+        // features — the lab scheduler relies on this for replayability.
+        let order = |seed: u64| -> Vec<u64> {
+            let mut set: DetHashSet<u64> = DetHashSet::with_hasher(DetBuildHasher::with_seed(seed));
+            for id in 0..64u64 {
+                set.insert(id);
+            }
+            set.iter().copied().collect()
+        };
+        assert_eq!(
+            order(42),
+            order(42),
+            "identical inserts must iterate identically in lab paths"
+        );
     }
 }

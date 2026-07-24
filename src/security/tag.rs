@@ -31,6 +31,10 @@ pub const TAG_SIZE: usize = 32;
 /// Domain separator for symbol authentication tags.
 const AUTH_TAG_DOMAIN: &[u8] = b"asupersync::security::AuthenticationTag::v1";
 
+/// Domain separator for callers that authenticate an explicitly framed payload.
+const DOMAIN_PAYLOAD_TAG_DOMAIN: &[u8] =
+    b"asupersync::security::AuthenticationTag::domain-payload::v1";
+
 /// A cryptographic tag verifying a symbol.
 #[derive(Clone, Copy, Eq, Hash)]
 #[allow(clippy::derived_hash_with_manual_eq)] // PartialEq is deliberately constant-time.
@@ -52,6 +56,21 @@ impl AuthenticationTag {
         Self { bytes }
     }
 
+    /// Computes a tag for an explicitly domain-separated, length-framed payload.
+    ///
+    /// This crate-internal primitive is used for authenticated control envelopes
+    /// whose bytes are not naturally represented as a [`Symbol`]. Callers own
+    /// the semantic domain; this layer additionally frames both the domain and
+    /// payload lengths so distinct tuples cannot collide by concatenation.
+    #[must_use]
+    pub(crate) fn compute_for_domain_payload(key: &AuthKey, domain: &[u8], payload: &[u8]) -> Self {
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+        Self::update_domain_payload_mac(&mut mac, domain, payload);
+        let bytes: [u8; TAG_SIZE] = mac.finalize().into_bytes().into();
+        Self { bytes }
+    }
+
     fn update_mac(mac: &mut HmacSha256, symbol: &Symbol) {
         mac.update(AUTH_TAG_DOMAIN);
         mac.update(&symbol.id().object_id().as_u128().to_le_bytes());
@@ -65,6 +84,14 @@ impl AuthenticationTag {
         if !symbol.data().is_empty() {
             mac.update(symbol.data());
         }
+    }
+
+    fn update_domain_payload_mac(mac: &mut HmacSha256, domain: &[u8], payload: &[u8]) {
+        mac.update(DOMAIN_PAYLOAD_TAG_DOMAIN);
+        mac.update(&(domain.len() as u64).to_le_bytes());
+        mac.update(domain);
+        mac.update(&(payload.len() as u64).to_le_bytes());
+        mac.update(payload);
     }
 
     /// Verifies that this tag matches the computed tag for the symbol and key.
@@ -99,6 +126,23 @@ impl AuthenticationTag {
 
         // Both conditions must be true: valid HMAC AND not zero
         // Use constant-time AND operation
+        (hmac_valid & is_not_zero).into()
+    }
+
+    /// Verifies a tag produced by [`Self::compute_for_domain_payload`].
+    #[must_use]
+    pub(crate) fn verify_domain_payload(
+        &self,
+        key: &AuthKey,
+        domain: &[u8],
+        payload: &[u8],
+    ) -> bool {
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+        Self::update_domain_payload_mac(&mut mac, domain, payload);
+        let expected_bytes = mac.finalize().into_bytes();
+        let hmac_valid = self.bytes.ct_eq(expected_bytes.as_slice());
+        let is_not_zero = Choice::from((!self.is_zero()) as u8);
         (hmac_valid & is_not_zero).into()
     }
 

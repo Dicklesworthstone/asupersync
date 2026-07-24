@@ -96,6 +96,8 @@ pub use reflection::{
     ReflectionDescribeServiceResponse, ReflectionListServicesRequest,
     ReflectionListServicesResponse, ReflectionService,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::GrpcTransportRequest;
 pub use server::{
     CallContext, CallContextWithCx, Interceptor, Server, ServerBuilder, ServerConfig,
     format_grpc_timeout, parse_grpc_timeout,

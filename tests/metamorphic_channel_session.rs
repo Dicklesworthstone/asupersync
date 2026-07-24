@@ -134,7 +134,7 @@ fn mr_obligation_conservation() {
                 match operation {
                     SessionOperation::ReserveMpsc { channel_id } => {
                         if let Some((sender, _)) = state.mpsc_channels.get(channel_id) {
-                            if let Ok(permit) = sender.try_reserve() {
+                            if let Ok(permit) = sender.try_reserve(&cx) {
                                 permits_reserved += 1;
                                 let _proof = permit.abort();
                                 proofs_generated += 1;
@@ -147,7 +147,7 @@ fn mr_obligation_conservation() {
                         value,
                     } => {
                         if let Some((sender, _)) = state.mpsc_channels.get(permit_id) {
-                            if let Ok(permit) = sender.try_reserve() {
+                            if let Ok(permit) = sender.try_reserve(&cx) {
                                 permits_reserved += 1;
                                 prop_assert!(
                                     permit.send(*value).is_ok(),
@@ -159,7 +159,7 @@ fn mr_obligation_conservation() {
                     },
                     SessionOperation::AbortMpsc { permit_id } => {
                         if let Some((sender, _)) = state.mpsc_channels.get(permit_id) {
-                            if let Ok(permit) = sender.try_reserve() {
+                            if let Ok(permit) = sender.try_reserve(&cx) {
                                 permits_reserved += 1;
                                 let _proof = permit.abort();
                                 proofs_generated += 1;
@@ -230,6 +230,7 @@ fn mr_channel_state_consistency() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
+            let cx = Cx::for_testing();
             let (sender, receiver) = tracked_channel::<i32>(5);
 
             let _initial_closed = sender.is_closed();
@@ -246,7 +247,7 @@ fn mr_channel_state_consistency() {
                 prop_assert!(sender.is_closed()); // State should remain closed
 
                 // Any reserve attempt should fail
-                match sender.try_reserve() {
+                match sender.try_reserve(&cx) {
                     Ok(_) => prop_assert!(false, "Reserve should fail on closed channel"),
                     Err(_) => {}, // Expected
                 }
@@ -286,7 +287,7 @@ fn mr_proof_type_preservation() {
 
                 // Test MPSC abort proof type
                 let (sender2, _receiver2) = tracked_channel::<()>(10);
-                if let Ok(permit) = sender2.try_reserve() {
+                if let Ok(permit) = sender2.try_reserve(&cx) {
                     let proof = permit.abort();
                     let _: AbortedProof<SendPermit> = proof; // Type verified by compilation
                 }
@@ -452,7 +453,7 @@ fn mr_permit_lifecycle_invariant() {
             for value in values.iter().take(5) {
                 // Test MPSC permit lifecycle
                 let (sender, _receiver) = tracked_channel(10);
-                if let Ok(permit) = sender.try_reserve() {
+                if let Ok(permit) = sender.try_reserve(&cx) {
                     // Permit exists and can be consumed exactly once
                     match permit.send(*value) {
                         Ok(_proof) => {
@@ -492,6 +493,7 @@ fn mr_channel_capacity_consistency() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
+            let cx = Cx::for_testing();
             let capacity = 3;
             let (sender, _receiver) = tracked_channel::<i32>(capacity);
 
@@ -500,7 +502,7 @@ fn mr_channel_capacity_consistency() {
 
             // Try to send more than capacity
             for i in 0..send_count {
-                match sender.try_reserve() {
+                match sender.try_reserve(&cx) {
                     Ok(permit) => match permit.send(i as i32) {
                         Ok(_) => successful_sends += 1,
                         Err(_) => failed_sends += 1,
@@ -568,7 +570,7 @@ fn mr_session_type_safety() {
             let (sender, _receiver) = tracked_channel(10);
 
             // Valid protocol: reserve → send
-            if let Ok(permit) = sender.try_reserve() {
+            if let Ok(permit) = sender.try_reserve(&cx) {
                 match permit.send(value) {
                     Ok(_proof) => {},
                     Err(_) => {},
@@ -576,7 +578,7 @@ fn mr_session_type_safety() {
             }
 
             // Valid protocol: reserve → abort
-            if let Ok(permit) = sender.try_reserve() {
+            if let Ok(permit) = sender.try_reserve(&cx) {
                 let _proof = permit.abort();
             }
 

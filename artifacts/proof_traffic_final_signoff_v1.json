@@ -4,6 +4,7 @@
   "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
   "status": "contract_guarded",
   "generated_at": "2026-06-15T07:11:28Z",
+  "revised_at": "2026-07-16T07:05:00Z",
   "source_of_truth": {
     "signoff_artifact": "artifacts/proof_traffic_final_signoff_v1.json",
     "operator_doc": "docs/proof_traffic_control.md",
@@ -55,11 +56,12 @@
       "primary_artifact": "artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json",
       "contract_test": "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
       "evidence_status": "landed",
-      "current_interpretation": "The handshake admits clean-overlay proof commands only when owned reservations, peer exclusion, and installed RCH capability evidence all satisfy the gate.",
+      "current_interpretation": "The pre-execution handshake admits clean-overlay proof commands only when owned reservations, absence of peer-dirty unselected paths, and installed RCH capability evidence all satisfy the gate; admission alone does not prove peer-dirt exclusion.",
       "no_claim_boundaries": [
         "does_not_prove_broad_workspace_health",
         "does_not_prove_runtime_correctness",
         "does_not_prove_live_rch_fleet_availability",
+        "does_not_prove_peer_dirt_exclusion_without_terminal_execution_evidence",
         "does_not_grant_peer_build_cancellation_authority",
         "does_not_approve_local_cargo_fallback"
       ]
@@ -127,6 +129,7 @@
     "does_not_prove_runtime_correctness",
     "does_not_prove_performance_improvement",
     "does_not_prove_live_rch_fleet_availability",
+    "does_not_prove_peer_dirt_exclusion_without_supported_capability_admitted_command_and_terminal_execution_evidence",
     "does_not_approve_local_cargo_fallback",
     "does_not_grant_peer_build_cancellation_authority",
     "does_not_grant_file_deletion_or_branch_worktree_permission"

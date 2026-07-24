@@ -57,14 +57,97 @@ Apply netem on BOTH veth ends (symmetric). Use `netem ... rate <r>` (or tbf) for
 
 ## Crypto tiers (apples-to-apples; pick per run)
 - `nocrypto`: atp-lab (`--rq-allow-unauthenticated-lab`) vs rsync **daemon** (rsync://, no ssh).
-- `auth`: atp-rq `--rq-auth-key-hex` (HMAC) vs rsync over ssh (aes128-gcm). [needs AUTH-1]
+- `auth`: atp-rq with a fresh HMAC key delivered through `--rq-auth-key-stdin` vs rsync over
+  ssh (aes128-gcm). The key must stay out of argv, environments, time-command records, and
+  result artifacts. [needs AUTH-1]
 - `encrypted`: atp-quic (TLS-1.3) vs rsync over ssh. [needs QUIC.1; full encryption parity]
 
+## Authenticated unchanged-object delta acceptance profile
+
+`authenticated-delta-unchanged-v1` is an acceptance lane outside the ATP-vs-
+rsync scorecard. It admits only one nonempty, non-symlink regular file through
+`500M`, `auth/atp-rq-auth`, and `encrypted/atp-quic-tls13`. The 5G and tree
+workloads, nocrypto, rsync, and every other method are rejected. The size cap
+keeps both RQ and QUIC manifests below the 4,096-chunk protocol bound.
+
+The runner copies the exact source file and portable metadata into the receiver
+destination before timing, then performs one measured identical-source transfer
+with delta enabled. RQ uses its fresh protected-stdin key. QUIC retains TLS 1.3
+transport protection and additionally receives a fresh protected-stdin key for
+the session-bound manifest proof; TLS protects the bound request/proof frames.
+The primary `auth_posture` continues to describe transport/symbol security;
+`delta_control_auth_posture` describes the combined TLS/session/HMAC receiver-
+state authorization.
+
+Acceptance is fail-closed and requires exactly one sender and receiver JSON
+report, the expected transport, nonempty matching transfer IDs, zero endpoint
+statuses, `committed=true`, `files=1`, sender SHA/Merkle success, zero top-level
+and nested payload/symbol/feedback counters, and zero QUIC decode counters. The
+destination SHA and its device/inode/size/mode/owner/mtime stamp must remain
+unchanged. Isolated veth accounting must satisfy
+`0 < control_wire_bytes < source_bytes`; zero ATP payload does not mean zero
+authenticated-control or TLS wire traffic.
+
+Profile, stable case ID, git HEAD, full verified binary/archive SHA-256 digests,
+producer workflow run/attempt, SHA success, stream count, and both auth postures
+participate in resume matching. Default artifact names are profile-specific,
+and explicit result files containing another or missing profile are rejected.
+Failed and stale attempts remain available in append-only results; the current
+plan requires exactly one fully accepted row for each current
+case/git/artifact identity and rejects malformed successful rows. These rows
+must never enter `score_matrix.py`.
+
+This profile proves only that an identical pre-seeded single file negotiates
+`AlreadyInSync` over authenticated framed control, both endpoints close
+successfully, payload counters remain zero, and the destination remains
+unchanged. Recorded wall time and wire bytes are diagnostic only. It does not
+prove zero total wire traffic, throughput or bandwidth improvement, rsync
+superiority/inferiority, changed-chunk reuse, `DeltaChunks`, tree/rename
+behavior, lossy-link resilience, broad transport correctness, release
+readiness, broad workspace health, reproducible builds, or privileged-execution
+safety.
+
+Real execute-mode evidence for this profile must use the commit-bound ATP packet
+produced by the `commit-bound-atp-binary` GitHub Actions job for the checkout's
+exact `main` HEAD. The packet contains a run-unique x86_64 GNU release archive,
+an outer checksum, a byte-identical standalone copy of the archive's embedded
+provenance, and an offline GitHub SLSA attestation bundle. Before creating an
+output directory, generating a workload, changing namespaces/netem, or starting
+a cell, `matrix_bench.sh` must fail closed unless all of the following bind to
+the current checkout and passed executable:
+
+- the outer archive checksum and signed GitHub attestation, including exact
+  repository, signer workflow, `refs/heads/main`, source SHA, and hosted-runner
+  posture;
+- the exact three regular archive members, authoritative embedded provenance,
+  clean source SHA/tree, locked build command, Cargo.lock digest, explicit
+  `x86_64-unknown-linux-gnu` target, Linux/X64 producer, and ELF64 x86-64 ABI;
+- the inner checksum, recorded binary size/digest/version, and the passed
+  executable's bytes, group/world-nonwritable permissions, and successful
+  `--version` probe;
+- the exact canonical `run_matrix_cell.sh` command and checked-in bytes of both
+  matrix scripts at the same source commit.
+
+Dry-run planning remains artifact-free. Checksum or filename matching without
+the signed archive attestation is not admissible execution evidence. The
+producer manifest explicitly makes no performance, matrix-execution, broad
+workspace-health, release-readiness, runtime-correctness, reproducible-build,
+consumer-verification, or privileged-execution-safety claim.
+
 ## Output
-- `JSONL`: one row per (workload, regime, method, rep): all metrics above + binary sha prefix +
-  netem params + git HEAD. (artifacts/ is gitignored → write under a tracked path or attach to ledger.)
+- `JSONL`: one row per (workload, regime, method, rep): all metrics above + explicit
+  `cell_profile`, stable `case_id`, `auth_posture`,
+  `delta_control_auth_posture`, netem params, and git HEAD. Authenticated-delta
+  rows additionally carry the full verified binary/archive SHA-256 digests and
+  producer workflow run/attempt.
+  Acceptance rows additionally require `delta_mode_observed`,
+  `delta_acceptance_ok`, exact sender/receiver payload and symbol counters,
+  `control_wire_bytes`, `payload_file_identity_unchanged`, and
+  `performance_claim:false`. (artifacts/ is gitignored → write under a tracked
+  path or attach to ledger.)
 - `score_matrix.py`: JSONL → per-cell median + cv + atp/rsync wall & RSS ratios + per-regime geomean
-  + a markdown scorecard. Headline = atp-vs-rsync ONLY.
+  + a markdown scorecard. Missing/mismatched current QUIC auth postures are quarantined before
+  median grouping. Headline = atp-vs-rsync ONLY.
 
 ## Files
 - `scripts/atp_bench/matrix_bench.sh` — the harness (gen + regimes + run + measure + JSONL).

@@ -29,17 +29,27 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 
 ## TL;DR
 
-**The Problem**: Rust's async ecosystem gives you *tools* but not *guarantees*. Cancellation silently drops data. Spawned tasks can orphan. Cleanup is best-effort. Testing concurrent code is non-deterministic. You write correct code by convention, and discover bugs in production.
+**The Problem**: Conventional executor APIs leave important lifecycle contracts
+to composition and discipline. Cancellation can abandon partial effects,
+detached tasks can outlive their owner, cleanup may be best-effort, and schedule
+dependent failures can be difficult to reproduce.
 
-**The Solution**: Asupersync is an async runtime where **correctness is structural, not conventional**. Tasks are owned by regions that close to quiescence. Cancellation is a protocol with bounded cleanup. Runtime-managed effects require capabilities, with host-boundary exceptions documented explicitly. The lab runtime makes concurrency deterministic and replayable.
+**The Solution**: Asupersync makes its core task-ownership and runtime-tracked
+effect contracts **structural rather than conventional**. Tasks are owned by
+regions that close to quiescence. Cancellation is an explicit
+request → drain → finalize protocol, with budgeted bounds on covered,
+cooperative paths; non-cooperative code and foreign calls do not acquire a
+universal shutdown bound. Runtime-managed effects require capabilities, with
+host-boundary exceptions documented explicitly. The lab runtime makes
+controlled schedules deterministic and replayable.
 
 ### Why Asupersync?
 
 | Guarantee | What It Means |
 |-----------|---------------|
 | **No orphan tasks** | Every spawned task is owned by a region; region close waits for all children |
-| **Cancel-correctness** | Cancellation is request → drain → finalize, never silent data loss |
-| **Bounded cleanup** | Cleanup budgets are *sufficient conditions*, not hopes |
+| **Cancel-correctness** | Covered primitives use request → drain → finalize and publish their partial-effect boundaries; this is not a blanket guarantee for arbitrary I/O or adapters |
+| **Scoped cleanup bounds** | Budgets are sufficient conditions only where a concrete responsiveness bound is published; non-cooperative work can still delay quiescence indefinitely |
 | **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
 | **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
 | **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
@@ -97,7 +107,7 @@ async fn worker_b(cx: &Cx) -> Outcome<(), Error> {
 
 // Lab runtime: deterministic testing uses explicit run reports.
 #[test]
-fn test_cancellation_is_bounded() {
+fn test_cancellation_protocol_invariants() {
     let mut lab = LabRuntime::new(LabConfig::new(42));
 
     // Enqueue work into `lab.state` / `lab.scheduler`, then drive to quiescence.
@@ -311,7 +321,7 @@ The lab runtime provides:
 - **Virtual time**: sleeps complete instantly, time is controlled
 - **Deterministic scheduling**: same seed → same execution
 - **Trace capture/replay**: debug production issues locally
-- **Schedule exploration**: DPOR-class coverage of interleavings
+- **Schedule exploration**: race-guided deterministic seed exploration with Mazurkiewicz/Foata trace-class deduplication
 
 Concurrency bugs become reproducible test failures.
 
@@ -323,9 +333,11 @@ Asupersync deliberately uses mathematically rigorous machinery where it buys rea
 
 ### Formal Semantics and Lean-Checked Core Invariants
 
-The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) and a Lean project (`formal/lean/Asupersync.lean`) that checks the six non-negotiable runtime invariants recorded in `formal/lean/coverage/invariant_status_inventory.json`: structured concurrency single-owner, region-close quiescence, cancellation protocol, race loser drain, obligation no leaks, and no ambient authority.
+The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) and a Lean project (`formal/lean/Asupersync.lean`) that checks six invariants of that abstract model, recorded in `formal/lean/coverage/invariant_status_inventory.json`: structured concurrency single-owner, region-close quiescence, cancellation protocol, race loser drain, obligation no leaks, and no ambient authority.
 
-The proof posture is exact: these are Lean-checked core invariants with theorem and executable-test linkage. This is not a blanket mechanized proof of every adapter, protocol implementation, platform backend, or distributed runtime transport path. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
+The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
+
+Some checked artifacts retain the legacy marker `Lean-checked core invariants cover the six non-negotiable runtime invariants`. In this README that phrase means coverage of the six abstract-model rows only; it does not assert a Rust refinement proof.
 
 The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
 
@@ -361,9 +373,9 @@ The memory-residency replay e2e contract is [`artifacts/memory_residency_replay_
 
 The memory-residency operator safety contract is [`artifacts/memory_residency_operator_safety_contract_v1.json`](./artifacts/memory_residency_operator_safety_contract_v1.json), checked by [`tests/memory_residency_operator_safety_contract.rs`](./tests/memory_residency_operator_safety_contract.rs), and documented in [`docs/proof/memory_residency_operator_safety.md`](./docs/proof/memory_residency_operator_safety.md). Its focused manifest lane is `memory-residency-operator-safety-contract`; cite it only for enablement prerequisites, fail-closed M1-M4 safety gates, rollback guidance, Agent Mail handoff fields, closeout checklist, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries. It does not prove release readiness, broad workspace health, allocator replacement, performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval.
 
-The clean-overlay proof orchestration contract is [`artifacts/clean_overlay_proof_orchestration_v1.json`](./artifacts/clean_overlay_proof_orchestration_v1.json), checked by [`tests/clean_overlay_proof_orchestration_contract.rs`](./tests/clean_overlay_proof_orchestration_contract.rs), and documented in [`docs/clean_overlay_proof_orchestration_runbook.md`](./docs/clean_overlay_proof_orchestration_runbook.md). Its focused manifest lane is `clean-overlay-proof-orchestration-contract`; cite it only for the shared-`main` clean-overlay operator runbook — prerequisites, command examples, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty blocker receipts, non-destructive cleanup/rollback, Agent Mail and `br` comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries. It does not prove release readiness, broad workspace health, runtime correctness outside the cited A1-A3 clean-overlay surfaces, performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval.
+The clean-overlay proof orchestration contract is [`artifacts/clean_overlay_proof_orchestration_v1.json`](./artifacts/clean_overlay_proof_orchestration_v1.json), checked by [`tests/clean_overlay_proof_orchestration_contract.rs`](./tests/clean_overlay_proof_orchestration_contract.rs), and documented in [`docs/clean_overlay_proof_orchestration_runbook.md`](./docs/clean_overlay_proof_orchestration_runbook.md). Its focused manifest lane is `clean-overlay-proof-orchestration-contract`; cite it only for shared-`main` operator-packet documentation and reference alignment — prerequisites, installed RCH clean-overlay capability evidence and fail-closed command admission, command examples, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty and capability-drift blocker receipts, non-destructive cleanup/rollback, Agent Mail and `br` comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries. The referenced planner refuses enforced attempts while unselected peer dirt is present. No overlay command may be emitted unless captured `rch exec --help` evidence declares `--base`, `--clean-overlay`, `--overlay-path`, and `--no-overlay`; unsupported clients and blocked manifests emit only deterministic receipts. The A4 verifier does not prove behavioral correctness of those referenced A1-A3 surfaces; their focused tests are separate evidence. It does not prove release readiness, broad workspace health, performance improvement, live RCH fleet availability, permission to delete files, local Cargo fallback approval, or that peer dirt was excluded without supported installed capability evidence plus an admitted command and terminal execution evidence.
 
-The proof-traffic final signoff is [`artifacts/proof_traffic_final_signoff_v1.json`](./artifacts/proof_traffic_final_signoff_v1.json), checked by [`tests/proof_traffic_final_signoff_contract.rs`](./tests/proof_traffic_final_signoff_contract.rs), and documented in [`docs/proof_traffic_control.md`](./docs/proof_traffic_control.md). Its focused manifest lane is `proof-traffic-final-signoff`; cite it only for A1-A5 proof-traffic evidence aggregation, the capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds.
+The proof-traffic final signoff is [`artifacts/proof_traffic_final_signoff_v1.json`](./artifacts/proof_traffic_final_signoff_v1.json), checked by [`tests/proof_traffic_final_signoff_contract.rs`](./tests/proof_traffic_final_signoff_contract.rs), and documented in [`docs/proof_traffic_control.md`](./docs/proof_traffic_control.md). Its focused manifest lane is `proof-traffic-final-signoff`; cite it only for A1-A5 proof-traffic evidence aggregation, the capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds.
 
 The fourth-wave governor proof map is anchored by [`docs/fourth_wave_swarm_governor_runbook.md`](./docs/fourth_wave_swarm_governor_runbook.md) and checked by `fourth-wave-governor-signoff-runbook` in [`tests/fourth_wave_swarm_governor_runbook_contract.rs`](./tests/fourth_wave_swarm_governor_runbook_contract.rs). The final aggregate signoff is [`artifacts/fourth_wave_governor_final_signoff_v1.json`](./artifacts/fourth_wave_governor_final_signoff_v1.json), checked by `fourth-wave-governor-final-signoff` in [`tests/fourth_wave_governor_final_signoff_contract.rs`](./tests/fourth_wave_governor_final_signoff_contract.rs). The proof-status dashboard separates `fourth-wave-governor-schema-contract`, `fourth-wave-governor-policy-engine`, `fourth-wave-swarm-replay-corpus`, `fourth-wave-runtime-bridge-contract`, and the fourth-wave benchmark no-claim contract. The fourth-wave final aggregated signoff is a scoped executable operator report only: the benchmark contract records no fresh benchmark result and does not prove p95 improvement, throughput improvement, no regression, production-on-by-default control, broad workspace health, or RCH fleet availability.
 
@@ -416,9 +428,11 @@ Why it helps: structural degradation is detected before hard deadlock/disconnect
 
 ### DPOR-Style Schedule Exploration (Mazurkiewicz Traces, Foata Fingerprints)
 
-The Lab runtime includes a DPOR-style schedule explorer (`src/lab/explorer.rs`) that treats executions as traces modulo commutation of independent events (Mazurkiewicz equivalence). Instead of "run it 10,000 times and pray", it tracks coverage by equivalence class fingerprints and can prioritize exploration based on trace topology.
+The Lab runtime includes a DPOR-style schedule explorer (`src/lab/explorer.rs`) that treats executions as traces modulo commutation of independent events (Mazurkiewicz equivalence). Instead of a blind seed sweep, it tracks observed equivalence-class fingerprints and uses detected races to prioritize derived deterministic seeds. It does not restore an exact execution prefix and force an alternative enabled transition, so the observed class count is a campaign metric rather than a completeness guarantee.
 
-Result: deterministic, replayable concurrency debugging with *coverage semantics* rather than vibes.
+Result: deterministic, replayable, race-informed schedule fuzzing with explicit
+coverage telemetry. It is useful bug-finding machinery, not certified DPOR
+coverage of every reachable equivalence class.
 
 ### Anytime-Valid Invariant Monitoring via e-processes
 
@@ -461,19 +475,21 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
 | Feature | Asupersync | async-std | smol |
 |---------|------------|-----------|------|
 | **Structured concurrency** | ✅ Enforced | ❌ Manual | ❌ Manual |
-| **Cancel-correctness** | ✅ Protocol | ⚠️ Drop-based | ⚠️ Drop-based |
+| **Cancel-correctness** | ⚠️ Protocol on covered surfaces; adapter boundaries are lane-scoped | ⚠️ Drop-based | ⚠️ Drop-based |
 | **No orphan tasks** | ✅ Guaranteed | ❌ spawn detaches | ❌ spawn detaches |
-| **Bounded cleanup** | ✅ Budgeted | ❌ Best-effort | ❌ Best-effort |
+| **Bounded cleanup** | ⚠️ Published cooperative-path bounds only | ❌ Best-effort | ❌ Best-effort |
 | **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools |
-| **Obligation tracking** | ✅ Linear tokens | ❌ None | ❌ None |
+| **Obligation tracking** | ✅ Runtime-tracked affine tokens with leak detection | ❌ None | ❌ None |
 | **Ecosystem** | ✅ Broad support-class-scoped built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed primitives; adapter lanes stay explicitly bounded) | ⚠️ Medium | ⚠️ Small |
-| **Maturity** | ✅ Feature-complete runtime surface, actively hardened | ✅ Production | ✅ Production |
+| **Maturity** | ⚠️ Experimental, pre-1.0, actively hardened; broad replacement is not independently established | ✅ Production | ✅ Production |
 
-**When to use Asupersync:**
-- Systems that want a broad, integrated async stack without pulling in Tokio
-- Systems where cancel-correctness is non-negotiable (financial, medical, infrastructure)
-- Projects that need deterministic concurrency testing
-- Distributed systems with structured shutdown requirements
+**When to evaluate Asupersync:**
+- Internal or experimental systems that can validate every selected adapter and
+  cancellation boundary against their own workload
+- Projects that benefit from region ownership, runtime-visible obligations, and
+  deterministic schedule reproduction
+- Research and migration prototypes comparing structured shutdown behavior
+  against established runtimes
 
 **When to consider alternatives:**
 - You need strict drop-in compatibility with libraries that are hard-wired to Tokio runtime traits
@@ -1273,8 +1289,8 @@ deterministic lab runtime.
 ### Why Spork Is Strictly Stronger
 
 - Determinism: the lab runtime makes OTP-style debugging reproducible (seeded schedules, trace capture/replay, schedule exploration).
-- Cancel-correctness: cancellation is a protocol (request -> drain -> finalize), so OTP-style shutdown has explicit budgets and bounded cleanup.
-- No silent leaks: regions cannot close with live children or unresolved obligations (permits/acks/leases), so "forgot to reply" and "stale name" become structural failures (or test-oracle failures), not production mysteries.
+- Cancel-correctness: cancellation is a protocol (request -> drain -> finalize), so covered OTP-style shutdown paths carry explicit budgets and can publish concrete cleanup bounds; non-cooperative paths retain the no-universal-bound caveat above.
+- No silent leaks for runtime-tracked obligations: regions cannot close with live children or unresolved registered permits/acks/leases, so "forgot to reply" and "stale name" become runtime or test-oracle failures instead of silent success.
 
 ### Where To Look In The Repo
 
@@ -1296,8 +1312,8 @@ Asupersync has formal semantics backing its engineering.
 | **Outcomes** | Severity lattice: `Ok < Err < Cancelled < Panicked` | Monotone aggregation, no "recovery" from worse states |
 | **Concurrency** | Near-semiring: `join (⊗)` and `race (⊕)` with laws | Lawful rewrites, DAG optimization |
 | **Budgets** | Tropical semiring: `(ℝ∪{∞}, min, +)` | Critical path computation, budget propagation |
-| **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
-| **Traces** | Mazurkiewicz equivalence (partial orders) | Optimal DPOR, stable replay |
+| **Obligations** | Linear-logic discipline: resources resolved exactly once (Rust is affine, so enforcement is `#[must_use]` + runtime leak detection, not purely static) | Leaked obligations are loudly detected at region close instead of silently dropped |
+| **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Completeness theorem: sufficient budgets guarantee termination |
 | **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption control without fairness blind spots |
 | **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that cancellation drain reaches quiescence |
@@ -1309,7 +1325,7 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 
 ## "Alien Artifact" Quality Algorithms
 
-Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it buys real guarantees (determinism, cancel-correctness, bounded cleanup, and reproducible concurrency debugging). The mechanisms below exist in the codebase today, but their support posture is not uniform:
+Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it supports concrete, scoped claims such as controlled-schedule determinism, covered-surface cancel-correctness, published cleanup bounds, and reproducible concurrency debugging. The mechanisms below exist in the codebase today, but their support posture is not uniform:
 
 | Mechanism | Current status |
 |-----------|----------------|
@@ -1791,10 +1807,10 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: dynamic QPACK field-section/table, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling are supported in the native opt-in state machine. Static-only remains the default, and this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
-| DPOR schedule exploration | ✅ Implemented |
+| DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab baseline plus production TCP loopback RemoteRuntime lifecycle proof shipped; deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
-| Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
+| Formal methods (TLA+ export + Lean-checked model-invariant coverage) | ⚠️ Partial implementation (Lean checks six abstract-model invariants; no production-Rust refinement proof or blanket adapter/protocol proof) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |
 | Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported |
@@ -1826,7 +1842,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 native core with default static-only QPACK plus opt-in dynamic field-section context; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete for live per-actor supervision (`src/actor.rs` drives restart-on-failure with backoff/intensity); the Spork `CompiledSupervisor` tree computes restart *plans* but its tree-level live restart loop is pending (`asupersync-8y37kz.2` / `asupersync-u2vgjg`) |
 | **Phase 4** | Distributed structured concurrency | ✅ Core primitives complete; production remote network adapters remain support-class scoped |
-| **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean-checked core invariants exist; broader adapter/protocol/runtime refinement proof remains active and lane-specific) |
+| **Phase 5** | Schedule exploration + formal tooling | ⚠️ Partial (DPOR-style race-guided seed exploration, TLA+ export, and Lean-checked model invariants exist; exact-prefix DPOR and a production-Rust-to-model refinement proof do not) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |
 
 ---
@@ -1893,7 +1909,7 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check_ol11aa3 ca
 
 | Gate | Direct-main trigger | Direct-main enforcement | PR workflow enforcement | Required artifact |
 |------|---------------------|-------------------------|-------------------------|-------------------|
-| Baseline benchmarks | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` benchmark command from the signoff contract and compare against `artifacts/baseline.json`. | **CI-blocking** for PRs. Fails if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
+| Baseline benchmarks | Every substantive direct-main change before commit/push | Run the canonical `methodology_baselines` command from the signoff contract. Its post-benchmark gate compares every tracked p50 against `artifacts/baseline.json` at a fixed **5%** threshold in the same remote process. | **CI-blocking** for PRs. Fails if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
 | Flamegraph | Direct-main changes under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | Generate and commit `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`. Pressure-control work that cites `scheduler_tail_pressure` uses this artifact only as attribution for the `methodology_baselines` scheduler-adjacent rows, not as a throughput or regression-closure claim. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`; PR lane: `artifacts/flamegraphs/pr-<N>.svg`. |
 | Golden checksums | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` golden benchmark and integration test commands. | **CI-blocking** for PRs. Fails on any `[GOLDEN] MISMATCH` or failing `golden_outputs` integration test. | `artifacts/golden_checksums.json` when intentionally updated. |
 | Proof notes | Direct-main changes under `src/obligation/` or `src/safety/`, or any changed `.rs` file containing an `unsafe { ... }` block | Commit `artifacts/proof_notes/main-<bead-or-short-sha>.md` and validate it is substantive. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/proof_notes/main-<bead-or-short-sha>.md`; PR lane: `artifacts/proof_notes/pr-<N>.md`. |
@@ -1902,22 +1918,42 @@ The PR workflow `summary` job (`needs: [baseline-gate, flamegraph-gate, golden-c
 
 ### Direct-main preflight commands
 
-Run only the gates that apply to the files you are landing. All cargo work stays behind `rch exec --` and is scoped to the `asupersync` crate:
+Run only the gates that apply to the files you are landing. All cargo work stays behind strict `RCH_REQUIRE_REMOTE=1 rch exec --` execution, has no local fallback, and is scoped to the `asupersync` crate. The Phase 6 baseline bench maps Criterion's live `median.point_estimate` to the tracked `p50_ns` after measurement in the same remote process, fails closed when any tracked row is missing, duplicated, malformed, or more than 5% slower, and leaves newly added candidate rows outside the gate until they are deliberately added to `artifacts/baseline.json`:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines cargo bench -p asupersync --bench methodology_baselines --features test-internals -- --noplot
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines ASUPERSYNC_PHASE6_BASELINE=artifacts/baseline.json ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT=5 cargo bench -p asupersync --bench methodology_baselines --features test-internals,criterion-benches -- --noplot
 ```
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals -- --noplot
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals,criterion-benches -- --noplot
+```
+
+An intentional golden change uses a separate reviewed-update flow. Commit the
+behavior change first, ensure the tracked tree is clean, and generate a complete
+candidate from that exact commit. Update mode rejects a missing or mismatched
+reviewed SHA, tracked dirt, partial scenario runs, stale extra rows, sentinel or
+malformed hashes, and incomplete provenance. It atomically writes the candidate
+under Criterion's artifact directory so RCH retrieves it without mutating the
+tracked registry on the worker:
+
+```bash
+GOLDEN_REVIEWED_SHA=$(git rev-parse HEAD)
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env GOLDEN_UPDATE=1 GOLDEN_REVIEWED_GIT_SHA=${GOLDEN_REVIEWED_SHA} CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update cargo bench -p asupersync --bench golden_output --features test-internals,criterion-benches -- --noplot
+```
+
+Review
+`${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_update/criterion/golden-update/golden_checksums.json`
+against `artifacts/golden_checksums.json`, then replace the tracked registry in a
+separate commit only if every behavioral change and provenance row is intended.
+Normal verification never accepts a missing registry, a `GENERATE` sentinel, or
+missing/extra scenario keys.
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -j 4 -p asupersync --test golden_outputs --features test-internals -- --nocapture
 ```
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -p asupersync --test golden_outputs --features test-internals -- --nocapture
-```
-
-```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_flamegraph cargo flamegraph --package asupersync --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg
+RCH_BUILD_TIMEOUT_SEC=5400 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_flamegraph cargo flamegraph --package asupersync --freq 997 --features test-internals,criterion-benches --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg
 ```
 
 ```bash
@@ -1928,7 +1964,7 @@ rch exec -- bash -lc 'test -f artifacts/proof_notes/main-<bead-or-short-sha>.md 
 
 All four gates are live today, but their enforcement lane matters. The PR workflow is **PR-only and CI-blocking** for pull-request/release-review events. Normal agent work on `main` is **locally enforced** by the `rch` preflight commands above plus the required committed artifacts. Push-on-main GitHub enforcement is not currently enabled, and the signoff contract records that explicitly.
 
-Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by re-running with `GOLDEN_UPDATE=1` and committing the new checksums (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
+Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by committing the reviewed behavior change, running the fail-closed golden candidate flow above from that clean commit, reviewing the retrieved exact-set candidate, and committing the promoted registry separately (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
 
 If you are landing a change that touches a hot-path or safety-critical directory, generate the artifact (flamegraph or proof note) before committing the change to `main`. Re-running validation without committing the required artifact does not satisfy the direct-main gate.
 

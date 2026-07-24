@@ -150,7 +150,7 @@ proptest! {
         for op in operations {
             match op {
                 ChannelOp::ReserveSend(value) => {
-                    if let Ok(permit) = tx.try_reserve() {
+                    if let Ok(permit) = tx.try_reserve(&cx) {
                         reserve_count += 1;
                         if permit.send(value).is_ok() {
                             send_count += 1;
@@ -169,7 +169,7 @@ proptest! {
                     }
                 },
                 ChannelOp::ReserveAbort => {
-                    if let Ok(permit) = tx.try_reserve() {
+                    if let Ok(permit) = tx.try_reserve(&cx) {
                         reserve_count += 1;
                         let _ = permit.abort();
                         abort_count += 1;
@@ -213,7 +213,7 @@ proptest! {
 
         for value in values {
             // Test reserve→send path
-            let permit1 = tx.try_reserve().unwrap();
+            let permit1 = tx.try_reserve(&cx).unwrap();
             let proof1 = permit1.send(value).unwrap();
             prop_assert_eq!(proof1.kind(), asupersync::record::ObligationKind::SendPermit);
 
@@ -254,16 +254,17 @@ proptest! {
 proptest! {
     #[test]
     fn mr3_channel_state_consistency(capacity in 1usize..=10) {
+        let cx = test_cx();
         let (tx, _rx) = tracked_channel::<i32>(capacity);
 
         // Original state: should be able to reserve up to capacity
         let mut original_permits = Vec::new();
         for _ in 0..capacity {
-            original_permits.push(tx.try_reserve().unwrap());
+            original_permits.push(tx.try_reserve(&cx).unwrap());
         }
 
         // Should be at capacity now
-        prop_assert!(tx.try_reserve().is_err(), "Channel should be at capacity");
+        prop_assert!(tx.try_reserve(&cx).is_err(), "Channel should be at capacity");
 
         // Abort all permits to restore original state
         for permit in original_permits {
@@ -273,11 +274,11 @@ proptest! {
         // MR3: After abort sequence, state should be identical to original
         let mut restored_permits = Vec::new();
         for _ in 0..capacity {
-            restored_permits.push(tx.try_reserve().unwrap());
+            restored_permits.push(tx.try_reserve(&cx).unwrap());
         }
 
         // Should again be at capacity
-        prop_assert!(tx.try_reserve().is_err(), "Channel should be at capacity after restore");
+        prop_assert!(tx.try_reserve(&cx).is_err(), "Channel should be at capacity after restore");
 
         // Clean up
         for permit in restored_permits {
@@ -335,7 +336,7 @@ proptest! {
 
         // Test MPSC disconnected error via reserve→send
         let (tx1, rx1) = tracked_channel::<i32>(1);
-        let permit1 = tx1.try_reserve().unwrap();
+        let permit1 = tx1.try_reserve(&cx).unwrap();
         drop(rx1);
         let err1 = permit1.send(value).unwrap_err();
 
@@ -466,6 +467,7 @@ proptest! {
         capacity in 1usize..=10,
         attempt_count in 1usize..=50
     ) {
+        let cx = test_cx();
         let (tx, _rx) = tracked_channel::<i32>(capacity);
 
         let mut successful_reserves = 0;
@@ -473,7 +475,7 @@ proptest! {
 
         // Attempt more reserves than capacity allows
         for _ in 0..attempt_count {
-            match tx.try_reserve() {
+            match tx.try_reserve(&cx) {
                 Ok(permit) => {
                     successful_reserves += 1;
                     permits.push(permit);
@@ -532,10 +534,11 @@ proptest! {
 
 #[test]
 fn mr10_drop_safety_mpsc_panic() {
+    let cx = test_cx();
     let (tx, _rx) = tracked_channel::<i32>(1);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let permit = tx.try_reserve().unwrap();
+        let permit = tx.try_reserve(&cx).unwrap();
         drop(permit); // Should panic
     }));
 
@@ -624,7 +627,7 @@ proptest! {
         for op in operations {
             match op {
                 ChannelOp::ReserveSend(value) => {
-                    if let Ok(permit) = tx.try_reserve() {
+                    if let Ok(permit) = tx.try_reserve(&cx) {
                         reserve_count += 1;
                         if permit.send(value).is_ok() {
                             send_count += 1;
@@ -645,7 +648,7 @@ proptest! {
                     }
                 },
                 ChannelOp::ReserveAbort => {
-                    if let Ok(permit) = tx.try_reserve() {
+                    if let Ok(permit) = tx.try_reserve(&cx) {
                         reserve_count += 1;
                         let _ = permit.abort();
                         abort_count += 1;

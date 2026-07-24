@@ -294,6 +294,14 @@ pub struct Connection {
     send_window: i32,
     /// Connection-level receive window.
     recv_window: i32,
+    /// Configured connection-level receive-window target.
+    ///
+    /// Unlike the per-stream initial window, HTTP/2 has no SETTINGS field for
+    /// this value. A server enlarges it by sending a connection-level
+    /// WINDOW_UPDATE immediately after its initial SETTINGS. Keeping the
+    /// target here makes automatic replenishment return to the advertised
+    /// capacity instead of silently falling back to 65,535 bytes.
+    initial_recv_window: i32,
     /// Last stream ID processed.
     last_stream_id: u32,
     /// Smallest last-stream-id advertised by received GOAWAY frames.
@@ -371,6 +379,7 @@ impl Connection {
             hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
+            initial_recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             last_stream_id: 0,
             received_goaway_last_stream_id: None,
             sent_goaway_last_stream_id: None,
@@ -424,6 +433,7 @@ impl Connection {
             hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
+            initial_recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             last_stream_id: 0,
             received_goaway_last_stream_id: None,
             sent_goaway_last_stream_id: None,
@@ -485,6 +495,47 @@ impl Connection {
     #[must_use]
     pub fn recv_window(&self) -> i32 {
         self.recv_window
+    }
+
+    /// Enlarge the connection-level receive window used for newly accepted
+    /// traffic and automatic WINDOW_UPDATE replenishment.
+    ///
+    /// HTTP/2 fixes the initial connection window at 65,535 bytes and does
+    /// not define a SETTINGS parameter for changing it. Values above that
+    /// baseline are therefore advertised with a stream-0 WINDOW_UPDATE. A
+    /// smaller value cannot be advertised to the peer and is rejected rather
+    /// than creating asymmetric flow-control state.
+    ///
+    /// This must be called while the connection is still handshaking, before
+    /// any peer DATA can have consumed receive credit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a flow-control error when `size` is below the protocol baseline,
+    /// exceeds the 31-bit window limit, or when traffic has already advanced
+    /// the connection beyond its handshake state.
+    pub fn set_initial_connection_recv_window(&mut self, size: u32) -> Result<(), H2Error> {
+        if !matches!(self.state, ConnectionState::Handshaking)
+            || self.recv_window != DEFAULT_CONNECTION_WINDOW_SIZE
+        {
+            return Err(H2Error::flow_control(
+                "initial connection receive window must be configured before peer traffic",
+            ));
+        }
+        if size < DEFAULT_INITIAL_WINDOW_SIZE {
+            return Err(H2Error::flow_control(
+                "initial connection receive window cannot be below 65535",
+            ));
+        }
+        let target = i32::try_from(size).map_err(|_| {
+            H2Error::flow_control("initial connection receive window exceeds 31-bit maximum")
+        })?;
+        self.initial_recv_window = target;
+        let increment = size - DEFAULT_INITIAL_WINDOW_SIZE;
+        if increment != 0 {
+            self.send_connection_window_update(increment)?;
+        }
+        Ok(())
     }
 
     /// Get a stream by ID.
@@ -1005,9 +1056,9 @@ impl Connection {
         // BEFORE any stream-level operations that might return early with a stream error.
         // If we don't do this, DATA frames on closed streams will permanently leak
         // connection window capacity, leading to connection deadlocks.
-        let low_watermark = DEFAULT_CONNECTION_WINDOW_SIZE / 2;
+        let low_watermark = self.initial_recv_window / 2;
         if self.recv_window < low_watermark {
-            let increment = i64::from(DEFAULT_CONNECTION_WINDOW_SIZE) - i64::from(self.recv_window);
+            let increment = i64::from(self.initial_recv_window) - i64::from(self.recv_window);
             let increment = u32::try_from(increment)
                 .map_err(|_| H2Error::flow_control("window increment too large"))?;
             self.send_connection_window_update(increment)?;
@@ -2365,6 +2416,91 @@ mod tests {
 
     fn test_response_headers(status: &str) -> Bytes {
         encode_test_headers(&[(":status", status)])
+    }
+
+    #[test]
+    fn initial_connection_recv_window_queues_stream_zero_credit() {
+        let mut conn = Connection::server(Settings::default());
+        conn.queue_initial_settings();
+
+        conn.set_initial_connection_recv_window(1024 * 1024)
+            .expect("valid enlarged connection window");
+
+        assert_eq!(conn.recv_window(), 1024 * 1024);
+        assert_eq!(conn.initial_recv_window, 1024 * 1024);
+        assert!(matches!(conn.next_frame(), Some(Frame::Settings(_))));
+        match conn.next_frame() {
+            Some(Frame::WindowUpdate(frame)) => {
+                assert_eq!(frame.stream_id, 0);
+                assert_eq!(
+                    frame.increment,
+                    1024 * 1024 - DEFAULT_CONNECTION_WINDOW_SIZE as u32
+                );
+            }
+            other => panic!("expected initial connection WINDOW_UPDATE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn initial_connection_recv_window_rejects_unadvertisable_or_late_values() {
+        let mut too_small = Connection::server(Settings::default());
+        let error = too_small
+            .set_initial_connection_recv_window(32 * 1024)
+            .expect_err("connection window below protocol baseline must fail");
+        assert_eq!(error.code, ErrorCode::FlowControlError);
+
+        let mut too_large = Connection::server(Settings::default());
+        let error = too_large
+            .set_initial_connection_recv_window(0x8000_0000)
+            .expect_err("connection window above 31-bit limit must fail");
+        assert_eq!(error.code, ErrorCode::FlowControlError);
+
+        let mut late = Connection::server(Settings::default());
+        late.state = ConnectionState::Open;
+        let error = late
+            .set_initial_connection_recv_window(1024 * 1024)
+            .expect_err("connection window must be configured during handshake");
+        assert_eq!(error.code, ErrorCode::FlowControlError);
+    }
+
+    #[test]
+    fn enlarged_connection_recv_window_replenishes_to_configured_target() {
+        const WINDOW: u32 = 1024 * 1024;
+        let mut settings = Settings::default();
+        settings.initial_window_size = WINDOW;
+        let mut conn = Connection::server(settings);
+        conn.set_initial_connection_recv_window(WINDOW)
+            .expect("configure enlarged connection window");
+        while conn.next_frame().is_some() {}
+
+        conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .expect("peer settings");
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/large-upload"),
+            false,
+            true,
+        )))
+        .expect("open request stream");
+
+        let payload = Bytes::from(vec![0u8; 600 * 1024]);
+        conn.process_frame(Frame::Data(DataFrame::new(1, payload, false)))
+            .expect("data within enlarged windows");
+
+        assert_eq!(conn.recv_window(), WINDOW as i32);
+        let mut saw_connection_update = false;
+        while let Some(frame) = conn.next_frame() {
+            if let Frame::WindowUpdate(update) = frame {
+                if update.stream_id == 0 {
+                    assert_eq!(update.increment, 600 * 1024);
+                    saw_connection_update = true;
+                }
+            }
+        }
+        assert!(
+            saw_connection_update,
+            "connection credit must be replenished"
+        );
     }
 
     #[test]

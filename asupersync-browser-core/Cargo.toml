@@ -31,12 +31,16 @@ web-sys = { version = "0.3", features = [
     "AbortController",
     "AbortSignal",
     "RequestInit",
+    "RequestCredentials",
     "Response",
+    "Url",
     "BinaryType",
     "CloseEvent",
     "Event",
     "MessageEvent",
     "WebSocket",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
     "console",
 ] }
 

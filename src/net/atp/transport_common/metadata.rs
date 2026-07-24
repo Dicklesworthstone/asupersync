@@ -285,6 +285,7 @@ impl SymlinkTargetSemantics {
 
 /// Versioned symlink target information carried by metadata commitment v2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SymlinkTargetInfo {
     /// Declared Windows link type. POSIX dangling links may leave this unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,6 +301,7 @@ pub struct SymlinkTargetInfo {
 /// unsupported platform) simply omits them, and the whole struct is omitted from
 /// the manifest when [`EntryMetadata::is_bare`] holds.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntryMetadata {
     /// File kind (regular / symlink / directory).
     #[serde(default)]
@@ -396,6 +398,7 @@ impl EntryMetadata {
 
 /// Metadata for one non-root directory in a transfer tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectoryMetadataEntry {
     /// Portable path relative to the transfer root.
     pub rel_path: String,
@@ -406,6 +409,7 @@ pub struct DirectoryMetadataEntry {
 /// Metadata for the transfer root and non-empty directories that are otherwise
 /// implicit in file paths.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectoryMetadataManifest {
     /// Transfer-root directory metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]

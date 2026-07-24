@@ -18,14 +18,14 @@ use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 /// `runtime_create` ABI symbol.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = runtime_create))]
 #[cfg(target_arch = "wasm32")]
-pub fn runtime_create(consumer_version_json: Option<String>) -> Result<String, JsValue> {
-    runtime_create_impl(consumer_version_json).map_err(into_js_error)
+pub fn runtime_create(request_json: Option<String>) -> Result<String, JsValue> {
+    runtime_create_impl(request_json).map_err(into_js_error)
 }
 
 /// Host adapter for `runtime_create`.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn runtime_create(consumer_version_json: Option<String>) -> Result<String, String> {
-    runtime_create_impl(consumer_version_json)
+pub fn runtime_create(request_json: Option<String>) -> Result<String, String> {
+    runtime_create_impl(request_json)
 }
 
 /// `browser_operator_snapshot` ABI symbol.

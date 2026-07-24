@@ -83,6 +83,199 @@ jobs:
           echo "ATP_MATRIX_JSON"
         } >> "$GITHUB_OUTPUT"
 
+  # Produce a clean-checkout executable for privileged matrix runners that
+  # cannot admit a peer-dirty shared-main workspace. The artifact name and
+  # manifest bind the binary to the exact push SHA; the tar archive preserves
+  # its executable bit across GitHub artifact download/extraction.
+  commit-bound-atp-binary:
+    name: Build Commit-Bound ATP Binary (linux-x86_64)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      CARGO_INCREMENTAL: 0
+      ATP_BUILD_TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+    - name: Checkout exact source revision
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+
+    - name: Setup pinned Rust toolchain
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+      with:
+        toolchain: nightly-2026-07-05
+        targets: x86_64-unknown-linux-gnu
+
+    - name: Verify clean commit-bound checkout
+      run: |
+        test "$RUNNER_OS" = "Linux"
+        test "$RUNNER_ARCH" = "X64"
+        test "$(uname -m)" = "x86_64"
+        test -n "${ImageOS:-}"
+        test -n "${ImageVersion:-}"
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        test -z "$(git status --porcelain --untracked-files=all)"
+        test "$(rustc -vV | sed -n 's/^host: //p')" = "$ATP_BUILD_TARGET"
+
+    - name: Build ATP matrix binary
+      run: |
+        cargo build --locked --release \
+          --target "$ATP_BUILD_TARGET" \
+          --bin atp \
+          --features atp-cli
+        test -z "$(git status --porcelain --untracked-files=all)"
+
+    - name: Package binary and provenance
+      id: package
+      env:
+        ARTIFACT_ROOT: artifacts/commit-bound-atp
+      run: |
+        payload_dir="$ARTIFACT_ROOT/payload"
+        archive_name="atp-linux-x86_64-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
+        attestation_bundle_name="attestation-bundle-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jsonl"
+        export ATP_ARCHIVE_NAME="$archive_name"
+        export ATP_ATTESTATION_BUNDLE_NAME="$attestation_bundle_name"
+        mkdir -p "$payload_dir"
+        install -m 0755 "target/$ATP_BUILD_TARGET/release/atp" "$payload_dir/atp-linux-x86_64"
+        file_output="$(file -b "$payload_dir/atp-linux-x86_64")"
+        [[ "$file_output" == *"ELF 64-bit LSB"* && "$file_output" == *"x86-64"* ]]
+        "$payload_dir/atp-linux-x86_64" --version
+        git diff --quiet --exit-code
+        git diff --cached --quiet --exit-code
+
+        python3 - <<'PY'
+        import hashlib
+        import json
+        import os
+        import pathlib
+        import subprocess
+
+        artifact_root = pathlib.Path(os.environ["ARTIFACT_ROOT"])
+        binary = artifact_root / "payload" / "atp-linux-x86_64"
+        lockfile = pathlib.Path("Cargo.lock")
+        manifest = {
+            "schema": "asupersync-commit-bound-atp-binary-v1",
+            "source": {
+                "repository": os.environ["GITHUB_REPOSITORY"],
+                "git_sha": os.environ["GITHUB_SHA"],
+                "git_tree": subprocess.check_output(
+                    ["git", "rev-parse", "HEAD^{tree}"], text=True
+                ).strip(),
+                "clean_checkout_verified": True,
+                "git_ref": os.environ["GITHUB_REF"],
+            },
+            "build": {
+                "command": (
+                    "cargo build --locked --release --target "
+                    "x86_64-unknown-linux-gnu --bin atp --features atp-cli"
+                ),
+                "target": os.environ["ATP_BUILD_TARGET"],
+                "rustc": subprocess.check_output(["rustc", "-Vv"], text=True).strip(),
+                "cargo": subprocess.check_output(["cargo", "-V"], text=True).strip(),
+                "cargo_lock_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+                "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+                "workflow_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+                "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
+                "runner_os": os.environ["RUNNER_OS"],
+                "runner_arch": os.environ["RUNNER_ARCH"],
+                "runner_image_os": os.environ["ImageOS"],
+                "runner_image_version": os.environ["ImageVersion"],
+            },
+            "abi": {
+                "build_host_glibc": subprocess.check_output(
+                    ["getconf", "GNU_LIBC_VERSION"], text=True
+                ).strip(),
+                "file_description": subprocess.check_output(
+                    ["file", "-b", str(binary)], text=True
+                ).strip(),
+                "machine": os.uname().machine,
+            },
+            "artifact": {
+                "archive_attestation_required": True,
+                "archive_name": os.environ["ATP_ARCHIVE_NAME"],
+            },
+            "binary": {
+                "name": binary.name,
+                "size_bytes": binary.stat().st_size,
+                "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "version_output": subprocess.check_output(
+                    [str(binary), "--version"], text=True
+                ).strip(),
+            },
+            "verification": {
+                "archive_attestation_required": True,
+                "attestation_bundle": os.environ["ATP_ATTESTATION_BUNDLE_NAME"],
+                "attestation_predicate_type": "https://slsa.dev/provenance/v1",
+                "embedded_provenance_authoritative": True,
+                "required_signer_workflow": (
+                    "Dicklesworthstone/asupersync/.github/workflows/atp-proof-lanes.yml"
+                ),
+                "required_source_ref": "refs/heads/main",
+            },
+            "claims": {
+                "performance": False,
+                "matrix_execution": False,
+                "broad_workspace_health": False,
+                "consumer_verification": False,
+                "privileged_execution_safety": False,
+                "release_readiness": False,
+                "reproducible_build": False,
+                "runtime_correctness": False,
+            },
+        }
+        rendered = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        (artifact_root / "payload" / "provenance.json").write_text(rendered)
+        (artifact_root / "provenance.json").write_text(rendered)
+        PY
+
+        (
+          cd "$payload_dir"
+          sha256sum atp-linux-x86_64 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+        )
+        archive="$ARTIFACT_ROOT/$archive_name"
+        tar -C "$payload_dir" -czf "$archive" \
+          atp-linux-x86_64 provenance.json SHA256SUMS
+        (
+          cd "$ARTIFACT_ROOT"
+          sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
+        )
+        printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+
+    - name: Attest commit-bound archive provenance
+      id: attest-archive
+      uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+      with:
+        subject-path: ${{ steps.package.outputs.archive }}
+
+    - name: Retain offline attestation bundle
+      env:
+        ATTESTATION_BUNDLE_PATH: ${{ steps.attest-archive.outputs.bundle-path }}
+      run: |
+        test -s "$ATTESTATION_BUNDLE_PATH"
+        install -m 0644 "$ATTESTATION_BUNDLE_PATH" \
+          "artifacts/commit-bound-atp/attestation-bundle-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jsonl"
+
+    - name: Upload commit-bound ATP binary
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: atp-linux-x86_64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          artifacts/commit-bound-atp/*.tar.gz
+          artifacts/commit-bound-atp/*.sha256
+          artifacts/commit-bound-atp/attestation-bundle-*.jsonl
+          artifacts/commit-bound-atp/provenance.json
+        if-no-files-found: error
+        retention-days: 30
+        compression-level: 0
+
   # Fast smoke lanes (< 10 minutes total)
   smoke-lanes:
     name: "Smoke: ${{ matrix.lane.name }} (${{ matrix.platform }})"
@@ -98,7 +291,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
       with:
         toolchain: nightly
         components: rustfmt, clippy
@@ -143,7 +336,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
       with:
         toolchain: nightly
         components: rustfmt, clippy
@@ -201,7 +394,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
       with:
         toolchain: nightly
         components: rustfmt, clippy

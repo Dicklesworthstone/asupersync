@@ -1,9 +1,11 @@
 {
   "bead_id": "asupersync-2oh2u.2.3",
   "title": "[T2.3] I/O Utility Operators Parity Contracts",
-  "version": 1,
-  "generated_at": "2026-03-03",
+  "version": 2,
+  "generated_at": "2026-07-23",
   "generated_by": "SapphireHill",
+  "corrected_by": "GreenCove",
+  "corrective_bead_id": "asupersync-copy-future-drop-loses-readahead-83a6ny",
   "source_markdown": "docs/tokio_io_utility_operators_parity.md",
   "domains": ["io", "copy", "split", "lines", "buffering", "stream-adapters"],
   "operator_categories": [
@@ -34,9 +36,10 @@
     {"id": "ADAPT-4", "category": "stream-adapters", "description": "ReaderStream handles zero-byte reads correctly"}
   ],
   "cancel_safety": [
-    {"operator": "copy", "cancel_safe": true, "behavior": "Committed bytes remain in writer"},
-    {"operator": "copy_buf", "cancel_safe": true, "behavior": "Committed bytes remain in writer"},
-    {"operator": "copy_bidirectional", "cancel_safe": true, "behavior": "Each direction independent"},
+    {"operator": "copy", "cancel_safe": false, "behavior": "Future drop can discard private read-ahead after the reader advances"},
+    {"operator": "copy_buf", "cancel_safe": true, "behavior": "Uncommitted bytes remain in the caller-owned reader buffer"},
+    {"operator": "copy_with_progress", "cancel_safe": false, "behavior": "Committed progress is accurate, but future drop can discard private read-ahead"},
+    {"operator": "copy_bidirectional", "cancel_safe": false, "behavior": "Future drop can discard private read-ahead independently in either direction"},
     {"operator": "SplitStream::split", "cancel_safe": true, "behavior": "Structural only"},
     {"operator": "Lines::poll_next", "cancel_safe": true, "behavior": "Buffer preserved"},
     {"operator": "BufReader::poll_fill_buf", "cancel_safe": true, "behavior": "Buffer preserved"},
@@ -56,7 +59,7 @@
   "summary": {
     "total_operators": 13,
     "total_invariants": 16,
-    "cancel_safe_count": 10,
+    "cancel_safe_count": 8,
     "obligation_leak_free": true,
     "high_severity_gaps": 2,
     "medium_severity_gaps": 1,

@@ -30,6 +30,7 @@ use asupersync::messaging::{
 };
 use asupersync::remote::NodeId;
 use asupersync::runtime::yield_now;
+use asupersync::security::AuthKey;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -669,8 +670,13 @@ fn schedule_replication_reorder(
                 source
                     .add_task(TaskId::new_for_test(71, 0))
                     .expect("source task");
+                let snapshot_auth_key = AuthKey::from_seed(0xFAB1_CE70);
                 let transfer = federation
-                    .export_replication_transfer(&mut source, Time::from_secs(1))
+                    .export_replication_transfer(
+                        &mut source,
+                        Time::from_secs(1),
+                        &snapshot_auth_key,
+                    )
                     .expect("export transfer");
                 let catch_up = federation
                     .plan_replication_catch_up(transfer.sequence, 0)
@@ -678,7 +684,7 @@ fn schedule_replication_reorder(
                 let mut target =
                     RegionBridge::new_local(RegionId::new_for_test(70, 0), None, Budget::new());
                 let snapshot = federation
-                    .apply_replication_transfer(&mut target, &transfer)
+                    .apply_replication_transfer(&mut target, &transfer, &snapshot_auth_key)
                     .expect("apply transfer");
 
                 let not_quiescent_before_drain = {

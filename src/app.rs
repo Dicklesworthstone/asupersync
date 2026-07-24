@@ -33,10 +33,9 @@ use crate::supervision::{
     ChildSpec, CompiledSupervisor, RestartPolicy, StartTieBreak, SupervisorBuilder,
     SupervisorCompileError, SupervisorHandle, SupervisorSpawnError,
 };
-use crate::types::{Budget, CancelKind, CancelReason, RegionId, TaskId};
+use crate::types::{Budget, CancelKind, CancelReason, RegionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::task::{Context, Poll, Waker};
 
 /// Schema discriminator for the declarative AppSpec v1 contract.
 pub const APPSPEC_V1_SCHEMA_VERSION: &str = "asupersync.appspec.v1";
@@ -1518,38 +1517,6 @@ impl CompiledApp {
         completed
     }
 
-    fn drive_bootstrap_task_once(state: &mut RuntimeState, task_id: TaskId) -> bool {
-        let task_cx = state.task(task_id).and_then(|record| record.cx.clone());
-        let Some(task_cx) = task_cx else {
-            return false;
-        };
-        let Some(mut stored) = state.remove_stored_future(task_id) else {
-            return false;
-        };
-
-        let waker = Waker::noop();
-        let mut poll_cx = Context::from_waker(waker);
-        let _guard = Cx::set_current(Some(task_cx));
-
-        match stored.poll(&mut poll_cx) {
-            Poll::Ready(outcome) => {
-                let task_outcome = outcome
-                    .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let _ = state.complete_task(task_id, task_outcome);
-                // As in force_complete_tree_tasks, this failed-start-only
-                // bootstrap path cannot release a caller-owned outer lock.
-                let _waiters = state
-                    .task_completed(task_id)
-                    .into_waiters_without_observers();
-                true
-            }
-            Poll::Pending => {
-                state.store_spawned_task(task_id, stored);
-                false
-            }
-        }
-    }
-
     fn cleanup_failed_start(state: &mut RuntimeState, root_region: RegionId) {
         let cancel_effects = state.cancel_request(root_region, &CancelReason::shutdown(), None);
         Self::force_complete_tree_tasks(state, root_region);
@@ -1562,19 +1529,15 @@ impl CompiledApp {
 
             let mut regions = Self::collect_region_tree(state, root_region);
             regions.sort_by_key(|(_, depth)| std::cmp::Reverse(*depth));
-            for (region_id, _) in regions {
+            for &(region_id, _) in &regions {
                 if let Some(region) = state.region(region_id) {
                     region.begin_close(None);
                 }
                 state.advance_region_state(region_id);
             }
 
-            let scheduled_finalizers = state.drain_ready_async_finalizers();
-            if !scheduled_finalizers.is_empty() {
-                made_progress = true;
-            }
-            for (task_id, _) in scheduled_finalizers {
-                made_progress |= Self::drive_bootstrap_task_once(state, task_id);
+            for (region_id, _) in regions {
+                made_progress |= state.drive_failed_start_async_finalizer_inline(region_id);
             }
 
             // Failed-start cleanup runs before any scheduler worker can poll
@@ -2219,7 +2182,7 @@ mod tests {
     use crate::runtime::SpawnError;
     use crate::runtime::state::RuntimeState;
     use crate::supervision::{ChildSpec, NameRegistrationPolicy, SupervisionStrategy};
-    use crate::types::Budget;
+    use crate::types::{Budget, TaskId};
     use serde_json::{Value, json};
     use std::sync::Arc;
 
@@ -3120,7 +3083,9 @@ mod tests {
     #[test]
     fn app_start_spawn_failure_drains_async_finalizers() {
         init_test("app_start_spawn_failure_drains_async_finalizers");
-        let mut state = RuntimeState::new();
+        let metrics =
+            crate::runtime::state::spawn_observer_test_support::PanickingSpawnMetrics::new();
+        let mut state = RuntimeState::new_with_metrics(metrics.clone());
         let root = state.create_root_region(Budget::INFINITE);
         let cx = Cx::new(
             root,
@@ -3130,6 +3095,8 @@ mod tests {
 
         let finalizer_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finalizer_ran_clone = Arc::clone(&finalizer_ran);
+        let rollback_spawn_denied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rollback_spawn_denied_clone = Arc::clone(&rollback_spawn_denied);
         let failing_child = ChildSpec {
             name: "broken".into(),
             start: Box::new(
@@ -3138,7 +3105,17 @@ mod tests {
                       _cx: &Cx| {
                     let registered = state.register_async_finalizer(scope.region_id(), {
                         let finalizer_ran = Arc::clone(&finalizer_ran_clone);
+                        let rollback_spawn_denied = Arc::clone(&rollback_spawn_denied_clone);
                         async move {
+                            let rollback_cx = Cx::current()
+                                .expect("failed-start finalizer should receive an ambient Cx");
+                            rollback_spawn_denied.store(
+                                matches!(
+                                    rollback_cx.spawn(|_| async {}),
+                                    Err(SpawnError::RuntimeUnavailable)
+                                ),
+                                std::sync::atomic::Ordering::SeqCst,
+                            );
                             finalizer_ran.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     });
@@ -3162,6 +3139,15 @@ mod tests {
             finalizer_ran.load(std::sync::atomic::Ordering::SeqCst),
             "failed app start should still drain registered async finalizers"
         );
+        assert!(
+            rollback_spawn_denied.load(std::sync::atomic::Ordering::SeqCst),
+            "failed-start rollback must deny work that could keep its closing subtree live"
+        );
+        assert_eq!(
+            metrics.spawn_attempts(),
+            0,
+            "failed-start inline finalizers are rollback callbacks, not unpublished tasks"
+        );
         assert_eq!(
             state.live_task_count(),
             0,
@@ -3178,6 +3164,11 @@ mod tests {
                 .map(crate::record::RegionRecord::child_count),
             Some(0),
             "parent root should not retain leaked app descendants"
+        );
+        assert_eq!(
+            state.cancel_protocol_validator().lock().violation_count(),
+            0,
+            "failed-start finalization should stay validator-aligned"
         );
 
         crate::test_complete!("app_start_spawn_failure_drains_async_finalizers");

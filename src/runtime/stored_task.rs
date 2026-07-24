@@ -9,6 +9,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Poll tracing is an observer boundary, not part of task execution. A hostile
+/// subscriber must not prevent the stored future's first poll (which may own a
+/// deferred spawn-publication receipt) or turn a completed poll into a panic.
+#[inline]
+fn emit_poll_trace(diagnostic: impl FnOnce()) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(diagnostic)) {
+        std::mem::forget(payload);
+    }
+}
+
 /// A type-erased future stored in the runtime.
 ///
 /// This type holds a boxed future that has been wrapped to send its result
@@ -86,12 +96,14 @@ impl StoredTask {
         let budget_remaining = self.polls_remaining.take().unwrap_or(0);
 
         if let Some(task_id) = self.task_id {
-            trace!(
-                task_id = ?task_id,
-                poll_number = poll_number,
-                budget_remaining = budget_remaining,
-                "task poll started"
-            );
+            emit_poll_trace(|| {
+                trace!(
+                    task_id = ?task_id,
+                    poll_number = poll_number,
+                    budget_remaining = budget_remaining,
+                    "task poll started"
+                );
+            });
             let _ = (task_id, poll_number, budget_remaining);
         }
 
@@ -102,12 +114,14 @@ impl StoredTask {
                 Poll::Ready(_) => "Ready",
                 Poll::Pending => "Pending",
             };
-            trace!(
-                task_id = ?task_id,
-                poll_number = poll_number,
-                poll_result = poll_result,
-                "task poll completed"
-            );
+            emit_poll_trace(|| {
+                trace!(
+                    task_id = ?task_id,
+                    poll_number = poll_number,
+                    poll_result = poll_result,
+                    "task poll completed"
+                );
+            });
             let _ = (task_id, poll_number, poll_result);
         }
 
@@ -200,12 +214,14 @@ impl LocalStoredTask {
         let budget_remaining = self.polls_remaining.take().unwrap_or(0);
 
         if let Some(task_id) = self.task_id {
-            trace!(
-                task_id = ?task_id,
-                poll_number = poll_number,
-                budget_remaining = budget_remaining,
-                "local task poll started"
-            );
+            emit_poll_trace(|| {
+                trace!(
+                    task_id = ?task_id,
+                    poll_number = poll_number,
+                    budget_remaining = budget_remaining,
+                    "local task poll started"
+                );
+            });
             let _ = (task_id, poll_number, budget_remaining);
         }
 
@@ -216,12 +232,14 @@ impl LocalStoredTask {
                 Poll::Ready(_) => "Ready",
                 Poll::Pending => "Pending",
             };
-            trace!(
-                task_id = ?task_id,
-                poll_number = poll_number,
-                poll_result = poll_result,
-                "local task poll completed"
-            );
+            emit_poll_trace(|| {
+                trace!(
+                    task_id = ?task_id,
+                    poll_number = poll_number,
+                    poll_result = poll_result,
+                    "local task poll completed"
+                );
+            });
             let _ = (task_id, poll_number, poll_result);
         }
 

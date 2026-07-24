@@ -1537,7 +1537,7 @@ mod tests {
         DETERMINISTIC_HOOK_TEST_LOCK
             .get_or_init(|| StdMutex::new(()))
             .lock()
-            .expect("deterministic hook test lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn reset_scripted_time_state() {
@@ -2566,7 +2566,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (retired, _timeout) = condvar
-                .wait_timeout_while(retired, Duration::from_secs(1), |retired| !*retired)
+                .wait_timeout_while(retired, Duration::from_secs(30), |retired| !*retired)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *retired
         };
@@ -3053,30 +3053,35 @@ mod tests {
             // Test synchronous completion signaling
             let completion_time = Arc::new(Mutex::new(None::<Instant>));
             let completion_time_clone = completion_time.clone();
+            let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
 
             let handle = pool.spawn(move || {
-                thread::sleep(Duration::from_millis(100));
+                started_tx.send(()).expect("test receives task start");
+                release_rx.recv().expect("test releases task completion");
                 *completion_time_clone.lock() = Some(Instant::now());
             });
 
-            let start_time = Instant::now();
+            started_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("blocking task should start under remote test load");
 
-            // Verify task is not initially done
+            // The task has started but is held before recording completion, so
+            // this assertion cannot race a fast or descheduled worker.
             assert!(!handle.is_done());
+            assert!(
+                !handle.wait_timeout(Duration::ZERO),
+                "release-gated task must remain pending"
+            );
+            release_tx
+                .send(())
+                .expect("blocking task remains available for completion");
 
             // Wait for completion
             assert!(handle.wait_timeout(Duration::from_secs(5)));
 
             // Verify task is now done
             assert!(handle.is_done());
-
-            // Verify completion timing
-            let end_time = Instant::now();
-            let elapsed = end_time.duration_since(start_time);
-            assert!(
-                elapsed >= Duration::from_millis(100),
-                "Should wait at least 100ms"
-            );
 
             // Verify completion was signaled at the right time
             let recorded_completion = completion_time.lock();

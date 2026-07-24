@@ -925,7 +925,7 @@ fn live_session_snapshot_reports_tracked_subchannel_pressure() {
     assert_eq!(initial.subchannels[0].channel_id, 501);
     assert_eq!(initial.subchannels[0].channel_kind, "mpsc");
 
-    let permit = tx.try_reserve().expect("tracked reserve succeeds");
+    let permit = tx.try_reserve(&cx).expect("tracked reserve succeeds");
     let reserved = permit.telemetry_snapshot(501);
     assert_eq!(reserved.channel_kind, "session");
     assert_eq!(reserved.subchannel_kind, "mpsc");
@@ -937,7 +937,7 @@ fn live_session_snapshot_reports_tracked_subchannel_pressure() {
     assert_eq!(aborted.cancellation_count, 1);
     assert_eq!(aborted.receiver_health, "open");
 
-    let permit = tx.try_reserve().expect("tracked reserve after abort");
+    let permit = tx.try_reserve(&cx).expect("tracked reserve after abort");
     permit.send(9).expect("tracked send succeeds");
     let ready = tx.telemetry_snapshot(501);
     assert_eq!(ready.queued_messages, 1);

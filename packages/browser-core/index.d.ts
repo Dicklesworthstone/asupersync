@@ -120,10 +120,31 @@ export interface TaskCancelRequest {
   message?: string;
 }
 
+export type FetchMethod =
+  | "GET"
+  | "POST"
+  | "PUT"
+  | "PATCH"
+  | "DELETE"
+  | "HEAD"
+  | "OPTIONS";
+
+export interface FetchAuthority {
+  allowedOrigins?: string[];
+  allowedMethods?: FetchMethod[];
+  allowCredentials?: boolean;
+  maxHeaderCount?: number;
+}
+
+export interface RuntimeCreateOptions {
+  fetchAuthority?: FetchAuthority;
+}
+
 export interface FetchRequest {
   scope: RegionHandleLike;
   url: string;
-  method: string;
+  method: FetchMethod;
+  credentials?: boolean;
   body?: Uint8Array | ArrayBuffer | ArrayBufferView | number[];
 }
 
@@ -259,6 +280,7 @@ export declare function init(input?: InitInput): Promise<unknown>;
 export default init;
 
 export declare function runtime_create(
+  options?: RuntimeCreateOptions,
   consumerVersion?: AbiVersion | null,
 ): Outcome<RuntimeHandle>;
 export declare function runtime_close(
@@ -357,7 +379,7 @@ export declare const abiMetadata: AbiMetadata;
 
 export declare const rawBindings: Readonly<{
   init: typeof init;
-  runtime_create(consumerVersionJson?: string): string;
+  runtime_create(requestJson?: string): string;
   runtime_close(handleJson: string, consumerVersionJson?: string): string;
   scope_enter(requestJson: string, consumerVersionJson?: string): string;
   scope_close(handleJson: string, consumerVersionJson?: string): string;

@@ -29,10 +29,32 @@ bit-for-bit SHA-256 verification of every single transfer.
 - **Verification**: a SHA-256 manifest is generated at payload creation; after
   EVERY transfer the receiver runs `sha256sum -c` over the manifest. A failed
   verification fails the run (recorded, not discarded).
-- **RQ/QUIC symbol authentication**: `atp-rq` and `atp-quic` use a 32-byte
-  symbol-auth key. The harness generates one with `atp rq-keygen` per run unless
-  `--atp-rq-auth-key-hex` is supplied; the key is injected through
-  `ATP_RQ_AUTH_KEY_HEX` and is not written to `conditions.json`.
+- **RQ symbol authentication**: `atp-rq` uses a 32-byte symbol-auth key. The
+  harness generates one with `atp rq-keygen` per run. To supply an operator key,
+  pass `--atp-rq-auth-key-stdin` and pipe exactly one 64-hex-character line into
+  the harness. Each local and remote ATP process receives the key through its
+  own stdin; in new runs, the key is absent from process arguments,
+  environments, SSH command strings, `/usr/bin/time` command records, and
+  result artifacts. `atp-quic` instead authenticates every symbol datagram
+  through QUIC's TLS 1.3 AEAD and neither needs nor accepts the RQ stdin key.
+  The legacy `ATP_RQ_AUTH_KEY_HEX` and `RQ_AUTH_KEY_HEX` environment inputs are
+  rejected.
+
+  Before each secret-bearing fleet SSH session, the harness checks the exact
+  effective host, options, and remote command with a public stdin canary.
+  Ordinary aliases, ProxyJump, and bastions remain supported. Effective paths
+  that target fd 0, as well as tokenized (`%...`) identity/certificate paths
+  whose final expansion cannot be proven safe, fail closed.
+
+  Artifacts retained from older harness versions can still contain raw
+  key-designated values because `/usr/bin/time` recorded the former argv. Audit
+  matrix-cell `send.time` / `recv.time`, fleet receiver `recv_time.txt`, and the
+  sender `time.txt` beneath each retained `atp_bench_one.*` temp directory.
+  Treat those values as expired and compromised, never reuse them, and audit
+  both local and fleet retention before sharing old results. This harness
+  neither rewrites nor deletes existing artifacts. Its Bash
+  overwrite-and-unset cleanup is best effort; it is not a claim of
+  cryptographic heap zeroization.
 - **Crypto-symmetric reporting**: `report.py` only headlines apples-to-apples
   speedup pairs: `atp-quic`/`atp-rq` against rsync-over-ssh, and the plaintext
   `atp-tcp` control against `rsyncd`.
@@ -75,19 +97,20 @@ plaintext regression/control comparison while RQ/QUIC work continues.
 --atp-rq-symbol-size 1024
 --atp-rq-repair-overhead 1.15
 --atp-rq-tail-drain-ms 2
---atp-rq-auth-key-hex <64-char-hex> # optional; default is per-run generated
+--atp-rq-auth-key-stdin              # optional; read one 64-hex line before setup
 --atp-quic-server-name <name-or-ip> # optional; default is receiver host/IP
 --atp-quic-handshake-timeout-ms 30000
 ```
 
-Those values are recorded in `conditions.json` for every run. `atp-quic` reuses
-the RQ symbol size, repair overhead, tail-drain, and symbol-auth key so the
-encrypted ATP row exercises the same FEC/auth posture under QUIC/TLS. Sweep them
-when working on throughput: larger symbols reduce coding overhead, more streams
-can help fill the RQ path, and repair overhead trades network bytes for fewer
-decode round trips. Tail drain is the receiver-side quiet window after each
-fountain round marker; increasing it can prevent false `NeedMore` rounds on
-high-RTT paths where control traffic beats queued symbols to user space.
+Those non-secret values are recorded in `conditions.json` for every run.
+`atp-quic` reuses the RQ symbol size, repair overhead, and tail-drain tuning, but
+its authentication boundary is TLS rather than the separate RQ symbol key.
+Sweep the tuning values when working on throughput: larger symbols reduce coding
+overhead, more streams can help fill the RQ path, and repair overhead trades
+network bytes for fewer decode round trips. Tail drain is the receiver-side
+quiet window after each fountain round marker; increasing it can prevent false
+`NeedMore` rounds on high-RTT paths where control traffic beats queued symbols
+to user space.
 
 When `atp-quic` is requested, `run_bench.sh` generates a short-lived self-signed
 certificate/key on the receiver under `<base>/runs/<run-id>/quic_tls/`, copies

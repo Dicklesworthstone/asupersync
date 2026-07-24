@@ -366,8 +366,25 @@ impl Semaphore {
             state.waiter_tail = None;
             std::mem::take(&mut state.waiters)
         };
+        // Isolate each detached wake so one hostile safe Waker cannot strand the
+        // later waiters: they have already been removed from the slab and must
+        // be woken to observe the closed state (br-asupersync-dl9wc3). Retain
+        // the first panic, finish the fanout, then resume it once so exactly one
+        // payload propagates and no second panic is raised mid-unwind.
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         for (_, waiter) in taken {
-            waiter.waker.wake_by_ref();
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    waiter.waker.wake_by_ref();
+                }))
+            {
+                if first_panic.is_none() {
+                    first_panic = Some(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -426,11 +443,6 @@ impl Semaphore {
             });
         }
 
-        // Check lock ordering before acquisition (debug builds only)
-        if let Some(rank) = self.rank {
-            lock_ordering::check_acquire(self.name, rank);
-        }
-
         let mut state = self.state.lock();
         let result = if state.closed {
             Err(TryAcquireError)
@@ -438,6 +450,15 @@ impl Semaphore {
             // Strict FIFO
             Err(TryAcquireError)
         } else if state.permits >= count {
+            // Enforce lock ordering only on the success path, under the state
+            // guard and immediately before the transition, mirroring the async
+            // acquisition path. A failed try_acquire (closed, FIFO-blocked, or
+            // insufficient permits) must return Err rather than panic ASUP-E205
+            // or record a phantom acquisition edge (br-asupersync-btp04i).
+            if let Some(rank) = self.rank {
+                lock_ordering::check_acquire(self.name, rank);
+            }
+
             state.permits -= count;
             // Relaxed: permits_shadow is an advisory fast-path hint. A stale
             // read in available_permits() just skips the fast path or causes a
@@ -1271,6 +1292,20 @@ mod tests {
 
         fn wake_by_ref(self: &Arc<Self>) {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A hostile-but-safe Waker that panics on wake, used to prove fanout paths
+    /// isolate one panicking peer from the others.
+    struct PanickingWaker;
+
+    impl std::task::Wake for PanickingWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("hostile semaphore waker panics on wake");
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("hostile semaphore waker panics on wake");
         }
     }
 
@@ -2514,6 +2549,169 @@ mod tests {
             after_drop.is_ok()
         );
         crate::test_complete!("owned_try_acquire_keeps_lock_order_until_owned_drop");
+    }
+
+    /// br-asupersync-btp04i: a synchronous `try_acquire` that fails eligibility
+    /// (closed, FIFO-blocked, or insufficient permits) must return
+    /// Err(TryAcquireError), not panic ASUP-E205 or record a phantom
+    /// acquisition edge, even when the caller already holds a higher-ranked
+    /// (Tasks) permit. An *available* lower-ranked acquisition must still
+    /// enforce the ordering panic.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn failed_try_acquire_returns_err_without_false_lock_order_panic() {
+        init_test("failed_try_acquire_returns_err_without_false_lock_order_panic");
+        lock_ordering::clear_held_locks();
+
+        // Hold a higher-ranked Tasks permit for the duration of the failing
+        // lower-ranked (Regions) tries.
+        let tasks = Semaphore::with_name("tasks", 1);
+        let tasks_permit = tasks.try_acquire(1).expect("tasks permit acquires");
+
+        // (1) Insufficient permits: a Regions semaphore with none available.
+        let empty = Semaphore::with_name("regions_table", 0);
+        let unavailable = empty.try_acquire(1).is_err();
+        crate::assert_with_log!(
+            unavailable,
+            "unavailable lower-ranked try_acquire returns Err, not ASUP-E205",
+            true,
+            unavailable
+        );
+
+        // (2) Closed: a closed Regions semaphore rejects without panicking.
+        let closed = Semaphore::with_name("regions_table", 5);
+        closed.close();
+        let closed_err = closed.try_acquire(1).is_err();
+        crate::assert_with_log!(
+            closed_err,
+            "closed lower-ranked try_acquire returns Err, not ASUP-E205",
+            true,
+            closed_err
+        );
+
+        // (3) FIFO-blocked: a queued waiter fronts the Regions semaphore even
+        // though a permit is now available; the try must yield to FIFO, not
+        // panic.
+        let fifo = Semaphore::with_name("regions_table", 0);
+        let cx = test_cx();
+        let mut waiter = fifo.acquire(&cx, 1);
+        let parked = poll_once(&mut waiter).is_none();
+        crate::assert_with_log!(
+            parked,
+            "waiter parks on the empty Regions semaphore",
+            true,
+            parked
+        );
+        fifo.add_permits(1);
+        let fifo_blocked = fifo.try_acquire(1).is_err();
+        crate::assert_with_log!(
+            fifo_blocked,
+            "FIFO-blocked lower-ranked try_acquire returns Err, not ASUP-E205",
+            true,
+            fifo_blocked
+        );
+        drop(waiter);
+
+        // (4) Available: acquiring from a fresh, available Regions semaphore
+        // while holding Tasks IS a backwards ordering violation and must still
+        // panic ASUP-E205.
+        let available = Semaphore::with_name("regions_table", 1);
+        let enforced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = available.try_acquire(1);
+        }))
+        .is_err();
+        crate::assert_with_log!(
+            enforced,
+            "available lower-ranked try_acquire still enforces ordering panic",
+            true,
+            enforced
+        );
+
+        drop(tasks_permit);
+        lock_ordering::clear_held_locks();
+
+        // The rejected acquisition must not have consumed a permit or recorded
+        // an edge: with Tasks released, it acquires cleanly.
+        let reacquired = available.try_acquire(1).is_ok();
+        crate::assert_with_log!(
+            reacquired,
+            "rejected try_acquire left the permit available (no phantom state)",
+            true,
+            reacquired
+        );
+        lock_ordering::clear_held_locks();
+        crate::test_complete!("failed_try_acquire_returns_err_without_false_lock_order_panic");
+    }
+
+    /// br-asupersync-dl9wc3: close() detaches the entire waiter slab under the
+    /// state lock and then wakes each waiter. A first safe Waker panic must not
+    /// strand the later detached waiters -- they have been removed from the slab
+    /// and can only observe Closed if they are woken. Every later waiter must be
+    /// notified, the first panic is resumed once, and every future then polls to
+    /// Closed.
+    #[test]
+    fn close_wake_panic_still_notifies_all_detached_waiters_then_resumes() {
+        init_test("close_wake_panic_still_notifies_all_detached_waiters_then_resumes");
+
+        // Zero permits, so all acquisitions park in the waiter slab.
+        let sem = Semaphore::with_name("close_fanout", 0);
+        let cx = test_cx();
+        let mut fut_a = sem.acquire(&cx, 1);
+        let mut fut_b = sem.acquire(&cx, 1);
+        let mut fut_c = sem.acquire(&cx, 1);
+
+        // A registers a panicking Waker; B and C register counting Wakers.
+        let panic_waker = Waker::from(Arc::new(PanickingWaker));
+        let counter_b = CountingWaker::new();
+        let counter_c = CountingWaker::new();
+        let waker_b = Waker::from(Arc::clone(&counter_b));
+        let waker_c = Waker::from(Arc::clone(&counter_c));
+
+        let a_parked = poll_once_with_waker(&mut fut_a, &panic_waker).is_none();
+        let b_parked = poll_once_with_waker(&mut fut_b, &waker_b).is_none();
+        let c_parked = poll_once_with_waker(&mut fut_c, &waker_c).is_none();
+        crate::assert_with_log!(a_parked, "waiter A parks", true, a_parked);
+        crate::assert_with_log!(b_parked, "waiter B parks", true, b_parked);
+        crate::assert_with_log!(c_parked, "waiter C parks", true, c_parked);
+
+        // close() wakes every detached waiter; A's Waker panics, but the fanout
+        // must still reach B and C before the first panic is resumed.
+        let closed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sem.close()));
+        crate::assert_with_log!(
+            closed.is_err(),
+            "close resumes the first wake panic",
+            true,
+            closed.is_err()
+        );
+
+        crate::assert_with_log!(
+            counter_b.count() >= 1,
+            "later waiter B still woken despite earlier panic",
+            true,
+            counter_b.count() >= 1
+        );
+        crate::assert_with_log!(
+            counter_c.count() >= 1,
+            "later waiter C still woken despite earlier panic",
+            true,
+            counter_c.count() >= 1
+        );
+
+        // Every future now observes Closed when polled.
+        let a = poll_until_ready(&mut fut_a);
+        let b = poll_until_ready(&mut fut_b);
+        let c = poll_until_ready(&mut fut_c);
+        crate::assert_with_log!(
+            matches!(a, Err(AcquireError::Closed))
+                && matches!(b, Err(AcquireError::Closed))
+                && matches!(c, Err(AcquireError::Closed)),
+            "all detached waiters observe Closed",
+            true,
+            matches!(a, Err(AcquireError::Closed))
+                && matches!(b, Err(AcquireError::Closed))
+                && matches!(c, Err(AcquireError::Closed))
+        );
+        crate::test_complete!("close_wake_panic_still_notifies_all_detached_waiters_then_resumes");
     }
 
     #[test]

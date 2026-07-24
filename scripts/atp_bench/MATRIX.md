@@ -48,12 +48,148 @@ runner picks the method per `(tier)`:
 | tier | atp method | rsync method (optimally tuned) |
 |---|---|---|
 | `nocrypto`  | `atp-rq-lab` (`--rq-allow-unauthenticated-lab`) | `rsyncd` (plaintext daemon) |
-| `auth`      | `atp-rq-auth` (`--rq-auth-key-hex`)            | `rsync-ssh-aes128gcm` |
-| `encrypted` | `atp-quic-tls13` (TLS-1.3 + symbol auth)       | `rsync-ssh-aes128gcm` |
+| `auth`      | `atp-rq-auth` (fresh key over protected stdin) | `rsync-ssh-aes128gcm` |
+| `encrypted` | `atp-quic-tls13` (TLS-1.3 transport auth)      | `rsync-ssh-aes128gcm` |
+
+Every authenticated RQ cell generates a fresh 32-byte key before the timed
+transfer and gives the receiver and sender one copy each through
+`--rq-auth-key-stdin`. The key never enters a process argument, environment,
+`/usr/bin/time` command record, or result artifact. The old `RQ_AUTH_KEY_HEX`
+and `ATP_RQ_AUTH_KEY_HEX` environment inputs are rejected. QUIC cells do not
+receive an RQ key in the default whole-object scorecard: TLS 1.3 already
+authenticates every symbol datagram at the transport layer. The separate
+authenticated-delta profile below keeps TLS and additionally delivers a fresh
+protected key to both QUIC endpoints. The key HMAC-authenticates the sender's
+session-bound manifest proof; TLS 1.3 authenticates and encrypts the bound
+request/proof frames that authorize live receiver-state inspection.
+
+This protection applies to newly produced artifacts. Older retained matrix-cell
+`send.time` / `recv.time`, fleet receiver `recv_time.txt`, and sender
+`atp_bench_one.*/time.txt` files may contain raw key-designated values from the
+former argv-based interface. Treat them as expired and compromised, do not
+reuse them, and audit both local and fleet retention before sharing historical
+results. The current harness does not rewrite or delete old artifacts, and its
+Bash overwrite-and-unset cleanup is best effort rather than cryptographic heap
+zeroization.
+
+The resume key includes `cell_profile`, stable `case_id`, git HEAD, the verified
+binary and attested-archive SHA-256 digests, producer workflow run/attempt, SHA
+success, stream count, and the exact transport/control authentication postures.
+Within a profile-compatible result file, stale git, artifact, or posture rows
+are rerun. Failed and stale attempts remain in append-only results for
+diagnosis; the acceptance report selects the current case/git/artifact identity,
+rejects malformed `status=ok` rows, and requires exactly one accepted attempt
+per planned cell. Profile-specific default result files and a mixed-or-missing-
+profile preflight prevent unchanged-object acceptance rows from entering
+`score_matrix.py` medians. This does not make old `.time` artifacts safe to
+share; the retention warning above still applies.
 
 rsync is always `-aW --inplace --no-compress` (whole-file, in-place, no `-z` on
 incompressible payloads), and over ssh uses `-c aes128-gcm@openssh.com`. This is
 the toughest-possible rsync, per the integrity standard.
+
+## Authenticated unchanged-object delta acceptance (not scored)
+
+This separate profile runs exactly the strict RQ and QUIC ATP methods against a
+locally pre-seeded, byte-identical regular file. The preseed is outside the
+timed interval. The measured transfer leaves delta enabled and must negotiate
+`AlreadyInSync` on the live framed control connection. QUIC retains TLS 1.3 and
+also receives the fresh control key through protected stdin. That key proves
+sender possession over the session-bound manifest; the subsequent bound
+request and proof remain authenticated by TLS.
+
+Execute mode for this profile refuses an unbound local binary. It requires the
+commit-bound packet emitted by the `commit-bound-atp-binary` job in
+`.github/workflows/atp-proof-lanes.yml` for the checkout's exact `main` HEAD.
+Dry-run planning does not require the packet. The producer uses a clean
+`ubuntu-24.04` checkout, the pinned project toolchain, an explicit
+`x86_64-unknown-linux-gnu` release target, and a run-unique archive. GitHub signs
+that archive with a SLSA provenance attestation; the uploaded packet retains an
+offline bundle so verification does not depend on root's GitHub credentials.
+
+Download the successful commit-bound job artifact for the exact source SHA,
+then extract only the executable from its attested archive:
+
+```bash
+set -euo pipefail
+SOURCE_SHA=$(git rev-parse HEAD)
+RUN_ID=$(gh run list --workflow atp-proof-lanes.yml --branch main --event push \
+  --commit "$SOURCE_SHA" --limit 1 \
+  --json databaseId --jq '.[0].databaseId')
+ARTIFACT_PREFIX="atp-linux-x86_64-$SOURCE_SHA-$RUN_ID-"
+ARTIFACT=$(gh api --paginate \
+  "repos/Dicklesworthstone/asupersync/actions/runs/$RUN_ID/artifacts?per_page=100" \
+  --jq '.artifacts[] | select(.expired == false) | .name' \
+  | awk -v prefix="$ARTIFACT_PREFIX" 'index($0, prefix) == 1' \
+  | sort -t- -k6,6n | tail -n1)
+test -n "$ARTIFACT"
+RUN_ATTEMPT="${ARTIFACT##*-}"
+case "$RUN_ATTEMPT" in (*[!0-9]*|'') false ;; esac
+PACKET="/tmp/atp-commit-bound-$SOURCE_SHA-$RUN_ID-$RUN_ATTEMPT"
+mkdir "$PACKET"
+gh run download "$RUN_ID" --name "$ARTIFACT" --dir "$PACKET"
+
+ARCHIVE="$PACKET/$ARTIFACT.tar.gz"
+ARCHIVE_SHA256="$ARCHIVE.sha256"
+PROVENANCE="$PACKET/provenance.json"
+ATTESTATION_BUNDLE="$PACKET/attestation-bundle-$SOURCE_SHA-$RUN_ID-$RUN_ATTEMPT.jsonl"
+tar --extract --gzip --keep-old-files --directory "$PACKET" \
+  --file "$ARCHIVE" atp-linux-x86_64
+BIN="$PACKET/atp-linux-x86_64"
+```
+
+The matrix gate reruns all verification itself before any output directory,
+workload, namespace, or netem mutation. It verifies the exact outer checksum,
+the offline GitHub attestation identity/ref/SHA, the archive's exact regular-file
+member set, embedded-versus-standalone provenance equality, source SHA and tree,
+Cargo.lock, target/ABI metadata, inner binary checksum/size, the extracted
+binary's bytes and permissions, and the binary's recorded `--version` output.
+The embedded provenance is authoritative; the standalone copy must match it
+byte-for-byte. It also requires the exact canonical cell-runner command and
+checks that both matrix scripts match that same source commit before entering
+the privileged path.
+
+```bash
+sudo env BIN="$BIN" ATP_MATRIX_TIMEOUT=90 \
+  ATP_MATRIX_BINARY_ARCHIVE="$ARCHIVE" \
+  ATP_MATRIX_BINARY_ARCHIVE_SHA256="$ARCHIVE_SHA256" \
+  ATP_MATRIX_BINARY_PROVENANCE="$PROVENANCE" \
+  ATP_MATRIX_BINARY_ATTESTATION_BUNDLE="$ATTESTATION_BUNDLE" \
+  bash scripts/atp_bench/matrix_bench.sh \
+    --cell-profile authenticated-delta-unchanged-v1 \
+    --execute --generate-workloads \
+    --workloads 5M \
+    --regimes perfect \
+    --tiers auth,encrypted \
+    --reps 1 \
+    --fail-on-mismatch \
+    --run-cell-command 'bash scripts/atp_bench/run_matrix_cell.sh'
+```
+
+The profile rejects trees, symlinks, empty files, `5G`, nocrypto, rsync, and all
+other methods. It accepts only flat workloads through `500M`, which remain
+within both transports' 4,096-chunk manifest bound. Each endpoint must exit zero
+naturally; sender/receiver transfer IDs must match; commit, SHA, and Merkle bits
+must pass; top-level and nested payload/symbol/feedback counters must all be
+zero; QUIC decode counters must be zero; and the destination file's device,
+inode, size, mode, owner, and mtime must remain unchanged. The isolated veth
+counter must show `0 < control_wire_bytes < source_bytes`: authenticated control
+and TLS still use wire bytes, while ATP payload counters remain zero.
+
+Results go to `authenticated_delta_unchanged_results.jsonl` by default and are
+validated into `authenticated_delta_unchanged_acceptance.md`; never append them
+to headline results or pass them to `score_matrix.py`.
+
+This profile proves only that an identical pre-seeded single file negotiates
+`AlreadyInSync` over authenticated framed control, both endpoints close
+successfully, payload counters remain zero, and the destination remains
+unchanged. Recorded wall time and wire bytes are diagnostic only. It does not
+prove zero total wire traffic, throughput or bandwidth improvement, rsync
+superiority/inferiority, changed-chunk reuse, `DeltaChunks`, tree/rename
+behavior, lossy-link resilience, broad transport correctness, release
+readiness, broad workspace health, reproducible builds, or privileged-execution
+safety. The attestation authenticates the archive and producer identity; it is
+not any of those broader claims.
 
 ## Score
 

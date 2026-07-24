@@ -984,6 +984,7 @@ mod tests {
             total_bytes: 18,
             merkle_root_hex: "abc123".to_string(),
             metadata: Some(metadata.clone()),
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "a.bin".to_string(),

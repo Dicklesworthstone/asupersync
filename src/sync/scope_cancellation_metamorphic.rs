@@ -68,7 +68,7 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
     let region = state.create_root_region(Budget::INFINITE);
 
     let system_cx = state.create_system_cx();
-    let (task_id, mut handle, child_cx, result_tx) = state
+    let (task_id, mut handle, child_cx, result_tx, spawn_effects) = state
         .create_task_infrastructure::<Outcome<(), ()>>(&system_cx, region, Budget::INFINITE, false)
         .expect("task infrastructure creation should succeed");
     let fut = YieldOnceThenCheckpoint {
@@ -79,6 +79,7 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
     // (br-asupersync-qg5th0): a task that observed cancellation must still
     // be able to publish its cancellation-aware payload.
     let wrapped = async move {
+        spawn_effects.dispatch();
         match (crate::cx::scope::CatchUnwind { inner: fut }).await {
             Ok(v) => {
                 let _ = result_tx.send_blocking(Ok(v));
