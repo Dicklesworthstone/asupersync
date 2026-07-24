@@ -1806,6 +1806,13 @@ impl LabRuntime {
         // `schedule_cancel(task_id, priority)` far below, which the current
         // nightly no longer back-infers through the `&mut tasks`/`&mut delegated`
         // shared `target` binding (E0282).
+        //
+        // The break is configuration-dependent, not universal: it first showed
+        // up building asupersync as a *path dependency of FrankenSQLite*, whose
+        // narrower downstream feature set gives inference less to work with than
+        // this crate's own `cargo check`. So a green build here does NOT prove
+        // the annotation is redundant — drop it and the downstream consumer is
+        // what breaks, not us.
         let mut tasks: Vec<(
             TaskId,
             u8,
