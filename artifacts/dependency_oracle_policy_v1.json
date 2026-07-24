@@ -1,0 +1,1324 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-oracle-policy-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.3",
+  "policy_as_of_release": "0.3.9",
+  "policy_as_of_date_utc": "2026-07-24",
+  "policy_scope": {
+    "purpose": "Govern differential-oracle placement, retention, quarantine, expiry, and retirement for every dependency-sovereignty replacement campaign.",
+    "current_incumbent_rule": "A package that is still an incumbent production edge is not yet a retained oracle. Post-cutover oracle rules become mandatory before the production edge is removed.",
+    "cutover_rule": "No dependency may move from incumbent production use to retained-oracle use until this registry row is activated with concrete release and expiry values and all lane checks pass.",
+    "default_retention_limit_releases": 2,
+    "unknown_state": "fail-closed",
+    "ordinary_workspace_profiles": [
+      "workspace-normal",
+      "workspace-dev",
+      "workspace-build",
+      "workspace-release"
+    ]
+  },
+  "profile_definitions": [
+    {
+      "profile_id": "workspace-normal",
+      "meaning": "Normal production dependency graph of an asupersync consumer."
+    },
+    {
+      "profile_id": "workspace-dev",
+      "meaning": "Asupersync workspace dev-dependency and ordinary test graph."
+    },
+    {
+      "profile_id": "workspace-build",
+      "meaning": "Host build-script and proc-macro graph used by ordinary checks, tests, or releases."
+    },
+    {
+      "profile_id": "workspace-release",
+      "meaning": "Published or packaged release graph and its release verification lanes."
+    },
+    {
+      "profile_id": "workspace-fuzz-quarantine",
+      "meaning": "Explicit fuzz-only graph excluded from production and ordinary workspace claims."
+    },
+    {
+      "profile_id": "external-cargo-harness",
+      "meaning": "Separate Cargo project not included in the asupersync workspace or release graph."
+    },
+    {
+      "profile_id": "downstream-project",
+      "meaning": "Oracle execution owned by a downstream repository that already depends on asupersync."
+    },
+    {
+      "profile_id": "neutral-synthesized-consumer",
+      "meaning": "Cycle-safe external consumer that depends on both systems under comparison."
+    },
+    {
+      "profile_id": "frozen-fixture-only",
+      "meaning": "Immutable vectors or transcripts consumed without resolving or building the incumbent package."
+    }
+  ],
+  "oracle_classes": [
+    {
+      "class_id": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "description": "A bounded pure-Rust reference may remain in workspace dev or fuzz lanes when feature unification cannot contaminate production and the retention window is no more than two releases.",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "max_retention_releases": 2,
+      "requires_feature_unification_check": true,
+      "requires_cycle_check": true,
+      "requires_corpus_provenance": true,
+      "requires_secret_redaction": false
+    },
+    {
+      "class_id": "NATIVE_OR_C_ORACLE",
+      "description": "An oracle with active native, C, C++, assembly, configure/make, bundled-library, or prohibited host-build exposure must leave every ordinary asupersync workspace graph after cutover.",
+      "allowed_profiles": [
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release",
+        "workspace-fuzz-quarantine"
+      ],
+      "max_retention_releases": 2,
+      "requires_feature_unification_check": true,
+      "requires_cycle_check": true,
+      "requires_corpus_provenance": true,
+      "requires_secret_redaction": false
+    },
+    {
+      "class_id": "REVERSE_DEPENDENCY_ORACLE",
+      "description": "A downstream project that already depends on asupersync must own the comparison, or the comparison must run in a neutral synthesized consumer; it may never return as an asupersync dev dependency.",
+      "allowed_profiles": [
+        "downstream-project",
+        "neutral-synthesized-consumer",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release",
+        "workspace-fuzz-quarantine"
+      ],
+      "max_retention_releases": 2,
+      "requires_feature_unification_check": true,
+      "requires_cycle_check": true,
+      "requires_corpus_provenance": true,
+      "requires_secret_redaction": false
+    },
+    {
+      "class_id": "SECURITY_PROTOCOL_ORACLE",
+      "description": "A protocol, credential, telemetry, or security parser reference is quarantined and must carry corpus provenance, strict secret redaction, resource bounds, and either bounded expiry or permanent-KEEP owner justification.",
+      "allowed_profiles": [
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "max_retention_releases": 2,
+      "requires_feature_unification_check": true,
+      "requires_cycle_check": true,
+      "requires_corpus_provenance": true,
+      "requires_secret_redaction": true
+    }
+  ],
+  "registry_required_fields": [
+    "oracle_id",
+    "replacement_candidate_ids",
+    "replaced_package_ids",
+    "oracle_class",
+    "lifecycle_state",
+    "current_graph_state",
+    "allowed_profiles",
+    "forbidden_profiles",
+    "native_status",
+    "unsafe_status",
+    "harness_location",
+    "fixture_source",
+    "fixture_license",
+    "introduction_release",
+    "expiry_release",
+    "expiry_date_utc",
+    "max_retention_releases",
+    "retirement_bead",
+    "owner",
+    "feature_unification_check",
+    "cycle_safety",
+    "corpus_provenance",
+    "secret_redaction",
+    "extension_signoff",
+    "no_claim_boundary"
+  ],
+  "oracle_registry": [
+    {
+      "oracle_id": "hex-reference",
+      "replacement_candidate_ids": [
+        "hex-codec"
+      ],
+      "replaced_package_ids": [
+        "hex"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/hex",
+      "fixture_source": "capture-from-hex-reference-at-cutover-with-content-hash",
+      "fixture_license": "record-upstream-SPDX-and-redistribution-receipt-before-activation",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-d24mms.9.5",
+      "owner": "bead:asupersync-d24mms.9.5",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; re-resolve-all-profiles-before-activation",
+      "corpus_provenance": "independent-vectors-plus-reference-output-hashes-required",
+      "secret_redaction": "not-applicable",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Agreement with hex does not prove correctness outside the exercised corpus."
+    },
+    {
+      "oracle_id": "base64-reference",
+      "replacement_candidate_ids": [
+        "base64-codec"
+      ],
+      "replaced_package_ids": [
+        "base64"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "default-unsafe-simd-disabled-currently; re-audit-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/base64",
+      "fixture_source": "RFC4648-vectors-and-reference-output-hashes",
+      "fixture_license": "RFC-vectors-public-reference; record-upstream-SPDX-for-derived-corpus",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-d24mms.10.6",
+      "owner": "bead:asupersync-d24mms.10.6",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; re-resolve-all-profiles-before-activation",
+      "corpus_provenance": "RFC4648-source-ids-and-reference-version-hash-required",
+      "secret_redaction": "required-for-credential-and-certificate-fixtures",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Reference agreement does not establish constant-time behavior or credential secrecy."
+    },
+    {
+      "oracle_id": "futures-lite-reference",
+      "replacement_candidate_ids": [
+        "future-utilities",
+        "public-stream-migration"
+      ],
+      "replaced_package_ids": [
+        "futures-lite"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "external-cargo-harness"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-and-transitive-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/futures_lite",
+      "fixture_source": "deterministic-schedule-corpus-and-reference-result-hashes",
+      "fixture_license": "record-upstream-SPDX-and-test-corpus-provenance-before-activation",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-d24mms.6.10",
+      "owner": "bead:asupersync-d24mms.6.10",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "reference-executor-must-not-enter-production-or-own-runtime-graph",
+      "corpus_provenance": "seeded-schedules-and-versioned-reference-results-required",
+      "secret_redaction": "not-applicable",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Differential completion values do not prove cancellation safety, fairness, or quiescence."
+    },
+    {
+      "oracle_id": "slab-reference",
+      "replacement_candidate_ids": [
+        "token-slab"
+      ],
+      "replaced_package_ids": [
+        "slab"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/slab",
+      "fixture_source": "seeded-operation-traces-with-reference-index-results",
+      "fixture_license": "record-upstream-SPDX-and-generated-trace-license",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-d24mms.8",
+      "owner": "bead:asupersync-d24mms.8",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; re-resolve-all-profiles-before-activation",
+      "corpus_provenance": "operation-seed-and-reference-version-required",
+      "secret_redaction": "not-applicable",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Index parity does not prove leak freedom or stale-handle safety."
+    },
+    {
+      "oracle_id": "visibility-reference",
+      "replacement_candidate_ids": [
+        "visibility-attribute"
+      ],
+      "replaced_package_ids": [
+        "visibility"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "proc-macro-host-surface-audit-required",
+      "harness_location": "repo://tests/dependency_oracles/visibility",
+      "fixture_source": "compile-pass-and-compile-fail-diagnostic-goldens",
+      "fixture_license": "generated-project-fixtures-owned-by-asupersync",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-d24mms.7",
+      "owner": "bead:asupersync-d24mms.7",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "proc-macro-reference-must-not-create-publish-cycle",
+      "corpus_provenance": "checked-source-snippets-and-compiler-version-required",
+      "secret_redaction": "not-applicable",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Matching macro expansion does not prove identical compiler diagnostics across toolchains."
+    },
+    {
+      "oracle_id": "bincode-next-reference",
+      "replacement_candidate_ids": [
+        "typed-symbol-bincode-codec"
+      ],
+      "replaced_package_ids": [
+        "bincode-next"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-and-serde-graph-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/bincode",
+      "fixture_source": "versioned-historical-bytes-and-reference-roundtrip-hashes",
+      "fixture_license": "record-upstream-SPDX-and-fixture-origin-before-activation",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.3.5",
+      "owner": "bead:asupersync-5z2scg.3.5",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; generic-serde-surface-remains-explicit",
+      "corpus_provenance": "schema-version-byte-hash-and-producer-version-required",
+      "secret_redaction": "required-for-any-credential-bearing-artifact",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Round-trip agreement does not prove historical migration completeness."
+    },
+    {
+      "oracle_id": "messagepack-reference",
+      "replacement_candidate_ids": [
+        "typed-symbol-msgpack-codec"
+      ],
+      "replaced_package_ids": [
+        "rmp",
+        "rmp-serde"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-and-serde-graph-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/messagepack",
+      "fixture_source": "MessagePack-spec-vectors-and-versioned-reference-bytes",
+      "fixture_license": "record-spec-and-upstream-SPDX-provenance-before-activation",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.3.5",
+      "owner": "bead:asupersync-5z2scg.3.5",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; generic-serde-surface-remains-explicit",
+      "corpus_provenance": "spec-source-schema-version-byte-hash-and-producer-version-required",
+      "secret_redaction": "required-for-any-credential-bearing-artifact",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Byte agreement does not prove every downstream Serde data model is supported."
+    },
+    {
+      "oracle_id": "toml-reference",
+      "replacement_candidate_ids": [
+        "config-schema-migration"
+      ],
+      "replaced_package_ids": [
+        "toml"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-and-dev-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-parser-graph-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/toml",
+      "fixture_source": "accepted-config-corpus-and-versioned-reference-AST",
+      "fixture_license": "repository-config-corpus-owned-by-asupersync; record-upstream-SPDX",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.4.5",
+      "owner": "bead:asupersync-5z2scg.4.5",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; config-feature-matrix-must-remain-sparse",
+      "corpus_provenance": "path-content-hash-parser-version-and-expected-diagnostic-required",
+      "secret_redaction": "required-for-config-secrets",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Reference parsing does not authorize dropping accepted TOML syntax or comments."
+    },
+    {
+      "oracle_id": "serde-yaml-reference",
+      "replacement_candidate_ids": [
+        "config-schema-migration"
+      ],
+      "replaced_package_ids": [
+        "serde_yaml"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-and-dev-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-parser-graph-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/yaml",
+      "fixture_source": "accepted-scenario-corpus-and-versioned-reference-AST",
+      "fixture_license": "repository-scenario-corpus-owned-by-asupersync; record-upstream-SPDX",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.5.5",
+      "owner": "bead:asupersync-5z2scg.5.5",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; scenario-feature-matrix-must-remain-sparse",
+      "corpus_provenance": "path-content-hash-parser-version-and-expected-diagnostic-required",
+      "secret_redaction": "required-for-scenario-embedded-credentials",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Reference parsing does not authorize silent YAML data loss or unsupported syntax."
+    },
+    {
+      "oracle_id": "clap-reference",
+      "replacement_candidate_ids": [
+        "cli-parser"
+      ],
+      "replaced_package_ids": [
+        "clap",
+        "clap_builder",
+        "clap_derive"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "proc-macro-host-surface-audit-required",
+      "harness_location": "repo://tests/dependency_oracles/clap",
+      "fixture_source": "byte-exact-argv-help-version-and-error-goldens",
+      "fixture_license": "generated-cli-goldens-owned-by-asupersync; record-upstream-SPDX",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.7.10",
+      "owner": "bead:asupersync-5z2scg.7.10",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "derive-reference-must-not-enter-published-or-build-graph",
+      "corpus_provenance": "binary-id-argv-bytes-width-color-locale-and-reference-version-required",
+      "secret_redaction": "required-for-credential-bearing-argv",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "CLI snapshot agreement does not prove shell integration or installed-package usability."
+    },
+    {
+      "oracle_id": "regex-reference",
+      "replacement_candidate_ids": [
+        "regex-scanners"
+      ],
+      "replaced_package_ids": [
+        "regex",
+        "regex-automata",
+        "regex-syntax"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-and-transitive-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/regex",
+      "fixture_source": "accepted-pattern-corpus-adversarial-inputs-and-reference-match-traces",
+      "fixture_license": "generated-pattern-corpus-owned-by-asupersync; record-upstream-SPDX",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.8.6",
+      "owner": "bead:asupersync-5z2scg.8.6",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "no-reverse-cycle-known; privacy-feature-graph-must-remain-explicit",
+      "corpus_provenance": "pattern-input-reference-version-match-spans-and-resource-limits-required",
+      "secret_redaction": "required-for-privacy-and-telemetry-inputs",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Match parity does not prove linear-time behavior, bounded memory, or privacy completeness."
+    },
+    {
+      "oracle_id": "nkeys-reference",
+      "replacement_candidate_ids": [
+        "nkey-codec"
+      ],
+      "replaced_package_ids": [
+        "nkeys"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "cryptographic-transitive-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/nkeys",
+      "fixture_source": "NATS-reference-vectors-pinned-server-transcripts-and-public-key-corpus",
+      "fixture_license": "record-NATS-vector-and-upstream-SPDX-provenance-before-activation",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-dep-p4-nkeys-poc60v.6",
+      "owner": "bead:asupersync-dep-p4-nkeys-poc60v.6",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "NATS-reference-client-must-not-enter-production-identity-graph",
+      "corpus_provenance": "vector-origin-server-version-key-kind-and-byte-hash-required",
+      "secret_redaction": "required; only synthetic seeds may enter fixtures and logs",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Agreement with nkeys does not prove signer authorization, secret zeroization, or cryptographic soundness."
+    },
+    {
+      "oracle_id": "prost-reference",
+      "replacement_candidate_ids": [
+        "proto-codec",
+        "otlp-metrics"
+      ],
+      "replaced_package_ids": [
+        "prost",
+        "prost-derive"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-and-satellite-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "proc-macro-and-transitive-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/protobuf",
+      "fixture_source": "protobuf-conformance-vectors-cross-language-bytes-and-generated-message-corpus",
+      "fixture_license": "record-protobuf-conformance-and-upstream-SPDX-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.1.5",
+      "owner": "bead:asupersync-5z2scg.1.5",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "generated-code-oracle-must-not-reenter-owned-codegen-or-published-graph",
+      "corpus_provenance": "schema-source-language-runtime-version-byte-hash-and-expected-result-required",
+      "secret_redaction": "required-for-OTLP-attributes-and-credential-metadata",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Wire agreement does not prove arbitrary downstream schema ergonomics or resource safety."
+    },
+    {
+      "oracle_id": "time-chrono-reference",
+      "replacement_candidate_ids": [
+        "rfc3339-formatter",
+        "chrono-time"
+      ],
+      "replaced_package_ids": [
+        "chrono",
+        "time"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-and-dev-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "target-dependent-timezone-boundary-must-be-audited",
+      "unsafe_status": "upstream-and-platform-transitive-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/time",
+      "fixture_source": "RFC3339-IANA-edge-corpus-database-boundaries-and-reference-results",
+      "fixture_license": "record-RFC-IANA-and-upstream-SPDX-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.6.8",
+      "owner": "bead:asupersync-5z2scg.6.8",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "timezone-and-serde-features-must-not-contaminate-minimal-profile",
+      "corpus_provenance": "timestamp-source-offset-calendar-rule-reference-version-and-result-required",
+      "secret_redaction": "not-applicable",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Reference agreement does not prove clock capability correctness or every civil-time rule."
+    },
+    {
+      "oracle_id": "parking-lot-reference",
+      "replacement_candidate_ids": [
+        "parking-lot-wrapper"
+      ],
+      "replaced_package_ids": [
+        "parking_lot",
+        "parking_lot_core"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "external-cargo-harness"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "platform-boundary-transitives-must-be-audited",
+      "unsafe_status": "upstream-algorithmic-unsafe-present",
+      "harness_location": "repo://tests/dependency_oracles/parking_lot",
+      "fixture_source": "deterministic-lock-schedules-stress-seeds-and-latency-baselines",
+      "fixture_license": "generated-schedules-owned-by-asupersync; record-upstream-SPDX",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-0h6myr.1.10",
+      "owner": "bead:asupersync-0h6myr.1.10",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "reference-locks-must-not-enter-owned-sync-implementation",
+      "corpus_provenance": "schedule-seed-host-core-count-and-reference-version-required",
+      "secret_redaction": "not-applicable",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Behavioral agreement does not prove fairness, liveness, or performance parity."
+    },
+    {
+      "oracle_id": "lz4-reference",
+      "replacement_candidate_ids": [
+        "lz4-codec"
+      ],
+      "replaced_package_ids": [
+        "lz4_flex"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-and-dev-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none",
+      "unsafe_status": "upstream-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/lz4",
+      "fixture_source": "LZ4-block-frame-vectors-historical-traces-and-reference-bytes",
+      "fixture_license": "record-LZ4-spec-and-upstream-SPDX-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-0h6myr.4.5",
+      "owner": "bead:asupersync-0h6myr.4.5",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "reference-codec-must-not-enter-trace-production-graph",
+      "corpus_provenance": "producer-version-format-version-content-hash-and-limit-profile-required",
+      "secret_redaction": "required-for-traces-containing-sensitive-fields",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Decompression agreement does not prove resource bounds or historical replay completeness."
+    },
+    {
+      "oracle_id": "deflate-reference",
+      "replacement_candidate_ids": [
+        "deflate-codec"
+      ],
+      "replaced_package_ids": [
+        "flate2",
+        "miniz_oxide"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-and-dev-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "backend-feature-selection-must-remain-pure-rust",
+      "unsafe_status": "upstream-and-backend-audit-required-before-activation",
+      "harness_location": "repo://tests/dependency_oracles/deflate",
+      "fixture_source": "RFC1950-RFC1951-RFC1952-vectors-multi-producer-corpus-and-reference-bytes",
+      "fixture_license": "record-RFC-corpus-producer-and-upstream-SPDX-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-0h6myr.5.7",
+      "owner": "bead:asupersync-0h6myr.5.7",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "native-flate2-backends-forbidden-in-workspace-oracle-profiles",
+      "corpus_provenance": "RFC-source-producer-version-content-hash-wrapper-and-limit-profile-required",
+      "secret_redaction": "required-for-compressed-user-content-fixtures",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Codec agreement does not prove bounded memory, compression quality, or all producer compatibility."
+    },
+    {
+      "oracle_id": "sysinfo-reference",
+      "replacement_candidate_ids": [
+        "host-introspection"
+      ],
+      "replaced_package_ids": [
+        "sysinfo"
+      ],
+      "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-production-edge",
+      "allowed_profiles": [
+        "workspace-dev",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "platform-FFI-transitives-must-be-audited-per-target",
+      "unsafe_status": "upstream-platform-unsafe-present",
+      "harness_location": "repo://tests/dependency_oracles/sysinfo",
+      "fixture_source": "cross-platform-host-snapshots-and-independent-OS-command-captures",
+      "fixture_license": "generated-host-snapshots-owned-by-asupersync; record-upstream-SPDX",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-3u3tej.2.7",
+      "owner": "bead:asupersync-3u3tej.2.7",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "host-oracle-must-not-be-used-by-production-process-control",
+      "corpus_provenance": "host-OS-arch-kernel-command-version-and-capture-hash-required",
+      "secret_redaction": "required-for-hostnames-usernames-process-arguments-and-paths",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Host metric agreement does not prove accuracy on unexercised kernels or machines."
+    },
+    {
+      "oracle_id": "x509-parser-security-reference",
+      "replacement_candidate_ids": [
+        "x509-residual-parser"
+      ],
+      "replaced_package_ids": [
+        "x509-parser"
+      ],
+      "oracle_class": "SECURITY_PROTOCOL_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-edge",
+      "allowed_profiles": [
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none-known; full-parser-graph-audit-required",
+      "unsafe_status": "security-parser-and-transitive-audit-required",
+      "harness_location": "external-harness://dependency-oracles/x509",
+      "fixture_source": "independent-DER-vectors-browser-PKI-corpus-and-pre-cutover-validation-transcripts",
+      "fixture_license": "record-each-certificate-corpus-license-and-redistribution-status",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-0h6myr.3.9",
+      "owner": "bead:asupersync-0h6myr.3.9",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "security-parser-oracle-must-not-reenter-production-TLS-validation",
+      "corpus_provenance": "certificate-source-license-byte-hash-expected-policy-and-validator-version-required",
+      "secret_redaction": "required; private-keys-live-certificates-and-identifying-subject-data-forbidden",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Agreement between parsers does not prove certificate-path validation or resistance to all malicious DER."
+    },
+    {
+      "oracle_id": "otlp-generated-security-reference",
+      "replacement_candidate_ids": [
+        "proto-codec",
+        "otlp-metrics"
+      ],
+      "replaced_package_ids": [
+        "opentelemetry-proto",
+        "tonic",
+        "tonic-prost"
+      ],
+      "oracle_class": "SECURITY_PROTOCOL_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-fuzz-and-dev-quarantine-edge",
+      "allowed_profiles": [
+        "workspace-fuzz-quarantine",
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release"
+      ],
+      "native_status": "none-known; runtime-and-host-graph-audit-required",
+      "unsafe_status": "tokio-tonic-runtime-quarantine-and-transitive-audit-required",
+      "harness_location": "repo://fuzz/otlp-wire-reference",
+      "fixture_source": "OpenTelemetry-proto-schemas-generated-messages-and-real-collector-transcripts",
+      "fixture_license": "record-OpenTelemetry-schema-and-upstream-SPDX-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-5z2scg.2.10",
+      "owner": "bead:asupersync-5z2scg.2.10",
+      "feature_unification_check": "required-before-activation",
+      "cycle_safety": "tonic-and-tokio-must-remain-fuzz-quarantined-and-absent-from-production-profiles",
+      "corpus_provenance": "schema-revision-collector-version-byte-hash-signal-type-and-limit-profile-required",
+      "secret_redaction": "required-for-resource-attributes-trace-baggage-log-bodies-and-auth-metadata",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Generated-message agreement does not prove collector interoperability or production no-Tokio graphs."
+    },
+    {
+      "oracle_id": "rdkafka-librdkafka-external-reference",
+      "replacement_candidate_ids": [
+        "kafka-native-client"
+      ],
+      "replaced_package_ids": [
+        "rdkafka",
+        "rdkafka-sys",
+        "librdkafka"
+      ],
+      "oracle_class": "NATIVE_OR_C_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-edge-until-conditional-cutover",
+      "allowed_profiles": [
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release",
+        "workspace-fuzz-quarantine"
+      ],
+      "native_status": "active-configure-make-C-library",
+      "unsafe_status": "FFI-and-upstream-native-memory-safety-boundary",
+      "harness_location": "external-harness://dependency-oracles/kafka",
+      "fixture_source": "pre-cutover-wire-transcripts-broker-matrix-and-external-harness-results",
+      "fixture_license": "record-rdkafka-librdkafka-broker-and-transcript-license-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+      "owner": "bead:asupersync-dep-p7-kafka-removal-sarszu.2.15",
+      "feature_unification_check": "external-harness-must-have-separate-lockfile-and-target-dir",
+      "cycle_safety": "external-harness-only-after-cutover; no-asupersync-workspace-membership",
+      "corpus_provenance": "broker-version-security-mode-wire-hash-config-and-reference-version-required",
+      "secret_redaction": "required-for-SASL-credentials-certificates-record-payloads-and-broker-addresses",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "External agreement does not certify librdkafka, brokers, or the owned client as memory-safe or protocol-complete."
+    },
+    {
+      "oracle_id": "rusqlite-libsqlite-external-reference",
+      "replacement_candidate_ids": [
+        "sqlite-cycle-safe-integration"
+      ],
+      "replaced_package_ids": [
+        "rusqlite",
+        "libsqlite3-sys",
+        "sqlite3"
+      ],
+      "oracle_class": "NATIVE_OR_C_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-edge-until-conditional-cutover",
+      "allowed_profiles": [
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release",
+        "workspace-fuzz-quarantine"
+      ],
+      "native_status": "active-bundled-C-library",
+      "unsafe_status": "FFI-and-upstream-native-memory-safety-boundary",
+      "harness_location": "external-harness://dependency-oracles/sqlite",
+      "fixture_source": "pre-cutover-database-images-operation-transcripts-and-external-harness-results",
+      "fixture_license": "record-SQLite-rusqlite-database-fixture-and-transcript-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-ym2wtv.4",
+      "owner": "bead:asupersync-ym2wtv.4",
+      "feature_unification_check": "external-harness-must-have-separate-lockfile-and-target-dir",
+      "cycle_safety": "external-harness-only-after-cutover; never-add-FrankenSQLite-to-asupersync-workspace",
+      "corpus_provenance": "SQLite-version-schema-journal-mode-operation-seed-and-database-hash-required",
+      "secret_redaction": "required-for-database-content-paths-and-bound-values",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Parity does not certify SQLite C code or prove every extension and durability mode."
+    },
+    {
+      "oracle_id": "sqlparser-native-exposure-reference",
+      "replacement_candidate_ids": [
+        "sqlite-cycle-safe-integration"
+      ],
+      "replaced_package_ids": [
+        "sqlparser",
+        "psm",
+        "stacker"
+      ],
+      "oracle_class": "NATIVE_OR_C_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "incumbent-optional-production-edge-until-conditional-cutover",
+      "allowed_profiles": [
+        "external-cargo-harness",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release",
+        "workspace-fuzz-quarantine"
+      ],
+      "native_status": "active-native-stack-probing-through-psm-stacker-path",
+      "unsafe_status": "native-stack-and-upstream-parser-boundary",
+      "harness_location": "external-harness://dependency-oracles/sqlparser",
+      "fixture_source": "pre-cutover-SQL-corpus-ASTs-errors-and-external-harness-results",
+      "fixture_license": "record-SQL-corpus-and-upstream-SPDX-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-ym2wtv.4",
+      "owner": "bead:asupersync-ym2wtv.4",
+      "feature_unification_check": "external-harness-must-have-separate-lockfile-and-target-dir",
+      "cycle_safety": "external-harness-only-after-cutover; parser-must-not-return-through-dev-dependencies",
+      "corpus_provenance": "dialect-input-hash-reference-version-AST-or-error-and-limit-profile-required",
+      "secret_redaction": "required-for-SQL-literals-identifiers-and-database-metadata",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "AST agreement does not prove authorization, query safety, or dialect completeness."
+    },
+    {
+      "oracle_id": "frankensqlite-reverse-dependency-reference",
+      "replacement_candidate_ids": [
+        "sqlite-cycle-safe-integration"
+      ],
+      "replaced_package_ids": [
+        "frankensqlite",
+        "fsqlite",
+        "asupersync"
+      ],
+      "oracle_class": "REVERSE_DEPENDENCY_ORACLE",
+      "lifecycle_state": "planned",
+      "current_graph_state": "downstream-project-already-depends-on-asupersync; absent-from-asupersync-workspace",
+      "allowed_profiles": [
+        "downstream-project",
+        "neutral-synthesized-consumer",
+        "frozen-fixture-only"
+      ],
+      "forbidden_profiles": [
+        "workspace-normal",
+        "workspace-dev",
+        "workspace-build",
+        "workspace-release",
+        "workspace-fuzz-quarantine"
+      ],
+      "native_status": "defined-by-engine-pair-and-recorded-per-run",
+      "unsafe_status": "defined-by-engine-pair-and-recorded-per-run",
+      "harness_location": "downstream://frankensqlite/asupersync-parity-or-neutral-consumer",
+      "fixture_source": "versioned-neutral-conformance-vectors-and-dual-engine-result-packets",
+      "fixture_license": "record-each-engine-vector-and-generated-database-license-provenance",
+      "introduction_release": "CUTOVER_RELEASE",
+      "expiry_release": "CUTOVER_RELEASE_PLUS_2_MAX",
+      "expiry_date_utc": null,
+      "max_retention_releases": 2,
+      "retirement_bead": "asupersync-ym2wtv.4",
+      "owner": "bead:asupersync-ym2wtv.4",
+      "feature_unification_check": "neutral-consumer-must-use-independent-lockfile-and-report-both-engine-graphs",
+      "cycle_safety": "must-not-enter-asupersync-workspace-or-dev-dependencies",
+      "corpus_provenance": "vector-schema-engine-versions-database-hashes-and-result-hashes-required",
+      "secret_redaction": "required-for-database-content-paths-and-bound-values",
+      "extension_signoff": {
+        "status": "none",
+        "approved_by": null,
+        "approved_at_utc": null,
+        "new_expiry_release": null,
+        "reason": null
+      },
+      "no_claim_boundary": "Dual-engine agreement does not prove durability, cancellation, or all SQLite semantics beyond the matrix."
+    }
+  ],
+  "summary": {
+    "oracle_count": 24,
+    "counts_by_class": {
+      "PURE_RUST_IN_WORKSPACE_ORACLE": 18,
+      "NATIVE_OR_C_ORACLE": 3,
+      "REVERSE_DEPENDENCY_ORACLE": 1,
+      "SECURITY_PROTOCOL_ORACLE": 2
+    },
+    "counts_by_lifecycle_state": {
+      "planned": 24,
+      "active": 0,
+      "retired": 0,
+      "permanent_keep": 0
+    },
+    "active_expired_without_extension": 0,
+    "native_or_reverse_allowed_in_ordinary_workspace_profiles": 0
+  },
+  "validation": {
+    "scenario_id": "dependency_oracle_policy_contract_v1",
+    "seed_or_fixture": "artifacts/dependency_oracle_policy_v1.json",
+    "artifact_path": "artifacts/dependency_oracle_policy_v1.json",
+    "expected_outcome": "pass",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_oracle_policy\" cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture",
+    "aggregate_e2e_owner": "asupersync-dep-p1-foundations-upksjk.6.2",
+    "aggregate_signoff_owner": "asupersync-dep-p1-foundations-upksjk.6.6",
+    "required_negative_fixtures": [
+      "missing-retirement-disposition",
+      "native-oracle-in-workspace-dev",
+      "reverse-dependency-in-workspace-dev",
+      "expired-active-oracle-without-extension",
+      "approved-extension-with-stale-expiry",
+      "security-oracle-without-redaction",
+      "pure-rust-oracle-without-feature-unification-check",
+      "allowed-and-forbidden-profile-overlap",
+      "unknown-graph-profile"
+    ],
+    "explicit_no_claims": [
+      "This policy does not prove either implementation is correct.",
+      "This policy does not prove native code is safe or absent before a conditional production cutover.",
+      "This policy does not prove broad workspace health, release readiness, performance parity, or interoperability.",
+      "Planned harness URIs are ownership contracts, not evidence that the harness already exists."
+    ]
+  }
+}
