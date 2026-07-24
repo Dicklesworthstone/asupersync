@@ -56,7 +56,7 @@ use crate::util::{Arena, ArenaIndex, DetEntropy, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -1518,7 +1518,16 @@ pub struct RuntimeState {
     /// `advance_region_state`, which may run finalizers that acquire new obligations.
     /// This violates the quiescence invariant. We defer region state advancement
     /// until after leak handling completes to prevent reentrancy.
-    deferred_region_advancements: HashSet<RegionId>,
+    ///
+    /// This is a `BTreeSet`, not a `HashSet`, on purpose (GH#55): the deferred
+    /// regions are drained and advanced in iteration order, and
+    /// `advance_region_state` closes regions and walks the parent chain, waking
+    /// and cancelling tasks as it goes. Draining a hash set would apply those
+    /// advancements in ambient-hash-seed order, making lab replay diverge
+    /// between runs with the same `LabConfig::seed`. Ordering by `RegionId`
+    /// keeps the drain deterministic by construction rather than by remembering
+    /// to sort at each use site.
+    deferred_region_advancements: BTreeSet<RegionId>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -1677,7 +1686,7 @@ impl RuntimeState {
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor,
             swarm_pressure_governor,
-            deferred_region_advancements: HashSet::new(),
+            deferred_region_advancements: BTreeSet::new(),
         }
     }
 
@@ -3935,9 +3944,7 @@ impl RuntimeState {
         // This prevents reentrancy during finalizer execution that could violate
         // the quiescence invariant.
         if self.handling_leaks == 0 && !self.deferred_region_advancements.is_empty() {
-            let deferred_regions: Vec<RegionId> =
-                self.deferred_region_advancements.drain().collect();
-            for region_id in deferred_regions {
+            for region_id in self.take_deferred_region_advancements() {
                 self.advance_region_state(region_id);
             }
         }
@@ -6062,6 +6069,20 @@ impl RuntimeState {
         }
 
         true
+    }
+
+    /// Takes the regions whose advancement was deferred during leak handling,
+    /// in ascending `RegionId` order.
+    ///
+    /// GH#55: the returned order is the order in which regions are closed and
+    /// their parent chains walked, so it feeds directly into wake and cancel
+    /// ordering. It must depend only on the region identities themselves —
+    /// never on an ambient hash seed — or two lab runs with the same
+    /// `LabConfig::seed` can diverge.
+    fn take_deferred_region_advancements(&mut self) -> Vec<RegionId> {
+        std::mem::take(&mut self.deferred_region_advancements)
+            .into_iter()
+            .collect()
     }
 
     /// Advances the region state machine if possible.
@@ -9856,6 +9877,51 @@ mod tests {
         );
 
         crate::test_complete!("advance_region_state_noop_does_not_advance_region_epoch");
+    }
+
+    /// GH#55: deferred region advancements must drain in a deterministic
+    /// order that depends only on `RegionId`.
+    ///
+    /// The drained order is the order in which regions are closed and their
+    /// parent chains walked, so it feeds wake/cancel ordering directly. When
+    /// this collection was a `HashSet`, the drain order came from the ambient
+    /// hash seed, so two lab runs with the same `LabConfig::seed` could apply
+    /// these advancements in different orders and diverge.
+    #[test]
+    fn deferred_region_advancements_drain_in_region_id_order() {
+        init_test("deferred_region_advancements_drain_in_region_id_order");
+
+        let mut state = RuntimeState::new();
+        let regions: Vec<RegionId> = (0..8)
+            .map(|slot| RegionId::from_arena(ArenaIndex::new(slot, 0)))
+            .collect();
+
+        // Insert in an order that is neither ascending nor descending, so a
+        // drain that preserved insertion order would also fail this.
+        let mut ascending = regions.clone();
+        ascending.sort_unstable();
+        for region in [3usize, 7, 0, 5, 1, 6, 2, 4] {
+            state.deferred_region_advancements.insert(regions[region]);
+        }
+
+        let drained = state.take_deferred_region_advancements();
+        crate::assert_with_log!(
+            drained == ascending,
+            "deferred region advancements must drain in ascending RegionId order",
+            format!("{ascending:?}"),
+            format!("{drained:?}")
+        );
+
+        // Taking must also clear the set, so a later leak-handling pass does
+        // not re-advance regions that were already advanced.
+        crate::assert_with_log!(
+            state.deferred_region_advancements.is_empty(),
+            "taking deferred advancements must clear the set",
+            true,
+            state.deferred_region_advancements.is_empty()
+        );
+
+        crate::test_complete!("deferred_region_advancements_drain_in_region_id_order");
     }
 
     fn insert_task(state: &mut RuntimeState, region: RegionId) -> TaskId {

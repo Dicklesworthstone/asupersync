@@ -1,0 +1,985 @@
+{
+  "schema_version": 1,
+  "artifact_id": "otlp-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.2.1",
+  "capability_id": "CAP-OTLP-ECOSYSTEM",
+  "captured_date_utc": "2026-07-24",
+  "baseline_revision": "da06fe447d5e1d0b03a0be0c2b76d1db44a3c8d4",
+  "authority_revision": "673a905631c5580cdc8037315569b72bd636ecca",
+  "authority": {
+    "adr_id": "DEP-ADR-003",
+    "adr_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.3",
+    "adr_path": "docs/adr/dep_plan_adr_003_otlp_ecosystem.md",
+    "adr_registry_path": "artifacts/dependency_api_adr_registry_v1.json",
+    "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+    "decision": "ADDITIVE_COEXISTENCE",
+    "disposition": "KEEP_UNTIL_PARITY",
+    "cutover_state": "KEEP_INCUMBENT",
+    "dependency_exit_allowed": false
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "allowed_inventory_states": [
+      "FROZEN",
+      "EXPLICIT_UNSUPPORTED"
+    ],
+    "allowed_evidence_states": [
+      "EXECUTED",
+      "SOURCE_BASELINED",
+      "PARTIAL_EXECUTED",
+      "PLANNED",
+      "BLOCKED_GAP",
+      "BLOCKED_INERT_FIXTURE",
+      "BLOCKED_RCH_POLICY",
+      "EXPLICIT_UNSUPPORTED"
+    ],
+    "unknown_rows": 0,
+    "default_action": "Preserve the incumbent dependency and every accepted capability unless final A10 evidence proves all cutover gates."
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "e0f52d8ccdf5db535df81f66e7e8dcb61583bd36e9e7638349225600a36197dc",
+      "line_count": 4664
+    },
+    {
+      "path": "src/observability/mod.rs",
+      "sha256": "099e1e6e581cd9239cd19de1590323b5ec061591c25096026b76b4a247296d06",
+      "line_count": 1126
+    },
+    {
+      "path": "src/observability/otel.rs",
+      "sha256": "c6cc312af370ee4485bedeb49aa0d900ed649b813c849179c68f5d03944de311",
+      "line_count": 9427
+    },
+    {
+      "path": "src/observability/otlp_trace_exporter.rs",
+      "sha256": "8ffc4eb8c89f8a8c8e939a2c957098f1656106baa5e26e1cbf766079efb0b3d4",
+      "line_count": 1046
+    },
+    {
+      "path": "src/observability/otel_structured_concurrency.rs",
+      "sha256": "0db1b84659dc7a72e46e056bb554acae1e33e52b1ed8b3530fe39847c6d03959",
+      "line_count": 795
+    },
+    {
+      "path": "src/observability/metrics.rs",
+      "sha256": "1a5d3a65f5b7b91cba70666da93aa844df9715ce424a08334b1ed4d19367b9c0",
+      "line_count": 2907
+    },
+    {
+      "path": "src/observability/w3c_trace_context.rs",
+      "sha256": "c99618f9c888f88ac2f81c34242c56cc305e1421dd6cf9ce162e8169e7c7a15f",
+      "line_count": 966
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_003_otlp_ecosystem.md",
+      "sha256": "08825bc11dc00d68c96416c231449ce19b6e5c26a12511caa14c0c92bc694cce",
+      "line_count": 202
+    },
+    {
+      "path": "examples/prometheus_metrics.rs",
+      "sha256": "208152b8eac8fd17725c742b8897b45ae9a6acc6facf63abc4c7ed1099eeec52",
+      "line_count": 158
+    },
+    {
+      "path": "tests/otel_metrics.rs",
+      "sha256": "8f81d4f0be546ab50aa5ad0ed52018ccd22a333c231e504962eb6bb60484ccfc",
+      "line_count": 849
+    },
+    {
+      "path": "tests/otlp_trace_exporter_load_shedding.rs",
+      "sha256": "57ac93d9ea5d4f7d18d41e5a92adeb5681b7a734b74ee4109883518c8759a99d",
+      "line_count": 596
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+      "sha256": "51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a",
+      "line_count": 29
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6",
+      "line_count": 354
+    }
+  ],
+  "feature_profiles": [
+    {
+      "profile_id": "OTLP-PROFILE-DEFAULT",
+      "cargo_features": [],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXECUTED",
+      "supported_surfaces": [
+        "dependency-free metrics registry",
+        "owned in-process trace pipeline",
+        "W3C Trace Context and Baggage"
+      ],
+      "exclusions": [
+        "observability::otel",
+        "owned OTLP/HTTP logs transport"
+      ],
+      "executable_baseline_id": "OTLP-BASELINE-TRACE"
+    },
+    {
+      "profile_id": "OTLP-PROFILE-METRICS",
+      "cargo_features": [
+        "metrics"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXECUTED",
+      "supported_surfaces": [
+        "OtelMetrics external Meter bridge",
+        "owned logs protobuf encoder",
+        "owned OTLP/HTTP transport",
+        "privacy and cardinality policy"
+      ],
+      "exclusions": [
+        "owned production metrics protobuf request builder",
+        "owned production traces protobuf request builder"
+      ],
+      "executable_baseline_id": "OTLP-BASELINE-METRICS"
+    },
+    {
+      "profile_id": "OTLP-PROFILE-METRICS-TRACING",
+      "cargo_features": [
+        "metrics",
+        "tracing-integration"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "PLANNED",
+      "supported_surfaces": [
+        "real span_semantics module",
+        "metrics profile surfaces"
+      ],
+      "exclusions": [
+        "production otlp_request_builder without test or fuzz"
+      ],
+      "executable_baseline_id": "OTLP-BASELINE-SPARSE-MATRIX"
+    },
+    {
+      "profile_id": "OTLP-PROFILE-METRICS-COMPRESSION",
+      "cargo_features": [
+        "metrics",
+        "compression"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "PLANNED",
+      "supported_surfaces": [
+        "gzip OTLP/HTTP request bodies",
+        "metrics profile surfaces"
+      ],
+      "exclusions": [
+        "compression enabled by default"
+      ],
+      "executable_baseline_id": "OTLP-BASELINE-SPARSE-MATRIX"
+    },
+    {
+      "profile_id": "OTLP-PROFILE-FUZZ",
+      "cargo_features": [
+        "fuzz"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "BLOCKED_RCH_POLICY",
+      "supported_surfaces": [
+        "reference generated OTLP messages",
+        "otlp_request_builder when tracing-integration and metrics are also active"
+      ],
+      "exclusions": [
+        "default or metrics production no-Tokio guarantee"
+      ],
+      "executable_baseline_id": "OTLP-GRAPH-FUZZ"
+    }
+  ],
+  "adr_public_surface_groups": [
+    {
+      "module_path": "asupersync::observability",
+      "feature_gate": null,
+      "symbols": [
+        "Counter",
+        "Gauge",
+        "Histogram",
+        "MetricValue",
+        "Metrics",
+        "MetricsProvider",
+        "NoOpMetrics",
+        "OutcomeKind"
+      ]
+    },
+    {
+      "module_path": "asupersync::observability",
+      "feature_gate": null,
+      "symbols": [
+        "LoadSheddingTraceExporter",
+        "OTLP_TAIL_SAMPLING_E2E_BEAD_ID",
+        "OTLP_TAIL_SAMPLING_SCOPE_BEAD_ID",
+        "OTLP_TAIL_SAMPLING_SCOPE_CONTRACT_VERSION",
+        "OtlpSpan",
+        "OtlpTailSamplingScope",
+        "OtlpTailSamplingSupportClass",
+        "SpanBatch",
+        "TraceExporter",
+        "otlp_tail_based_sampling_scope"
+      ]
+    },
+    {
+      "module_path": "asupersync::observability",
+      "feature_gate": null,
+      "symbols": [
+        "EntityId",
+        "OtelStructuredConcurrencyConfig",
+        "SpanStorage",
+        "SpanType"
+      ]
+    },
+    {
+      "module_path": "asupersync::observability",
+      "feature_gate": null,
+      "symbols": [
+        "TraceContextError",
+        "TraceFlags",
+        "TraceId",
+        "W3CBaggage",
+        "W3CPropagationContext",
+        "W3CTraceContext",
+        "extract_from_http",
+        "extract_baggage_from_http",
+        "extract_propagation_from_http",
+        "inject_to_http",
+        "inject_to_grpc",
+        "inject_baggage_to_http"
+      ]
+    },
+    {
+      "module_path": "asupersync::observability",
+      "feature_gate": "metrics",
+      "symbols": [
+        "CardinalityOverflow",
+        "ExportError",
+        "InMemoryExporter",
+        "InMemoryLogsExporter",
+        "LoadSheddingLogsExporter",
+        "LogAttributes",
+        "LogsExporter",
+        "LogsSnapshot",
+        "MetricsConfig",
+        "MetricsExporter",
+        "MetricsSnapshot",
+        "MultiExporter",
+        "MultiLogsExporter",
+        "NullExporter",
+        "NullLogsExporter",
+        "OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES",
+        "OTLP_LOGS_MAX_ATTRIBUTES",
+        "OTLP_LOGS_SCHEMA_URL",
+        "OTLP_LOGS_SCOPE_NAME",
+        "OtelMetrics",
+        "OtlpLogRecord",
+        "OtlpLogsHttpExporter",
+        "SamplingConfig",
+        "StdoutExporter",
+        "log_level_to_otlp_severity"
+      ]
+    },
+    {
+      "module_path": "asupersync::observability::otel",
+      "feature_gate": "metrics",
+      "symbols": [
+        "BoundedExportQueue",
+        "CounterDataPoint",
+        "GaugeDataPoint",
+        "HistogramDataPoint",
+        "LoadSheddingExporter",
+        "LoadSheddingStats",
+        "MetricLabels",
+        "OtlpError",
+        "OtlpHttpExporter",
+        "OtlpResourceBuilder",
+        "PrivacyConfig",
+        "SpanConfig",
+        "create_otlp_resource_attributes"
+      ]
+    }
+  ],
+  "module_public_items": [
+    {
+      "source_path": "src/observability/metrics.rs",
+      "items": [
+        "Counter",
+        "DEFAULT_METRIC_CARDINALITY_CAP",
+        "Gauge",
+        "Histogram",
+        "HistogramSnapshot",
+        "MetricValue",
+        "Metrics",
+        "MetricsProvider",
+        "NoOpMetrics",
+        "OutcomeKind",
+        "Summary"
+      ]
+    },
+    {
+      "source_path": "src/observability/otel.rs",
+      "items": [
+        "BoundedExportQueue",
+        "CardinalityOverflow",
+        "CounterDataPoint",
+        "ExportError",
+        "GaugeDataPoint",
+        "HistogramDataPoint",
+        "InMemoryExporter",
+        "InMemoryLogsExporter",
+        "LoadSheddingExporter",
+        "LoadSheddingLogsExporter",
+        "LoadSheddingStats",
+        "LogAttributes",
+        "LogsExporter",
+        "LogsSnapshot",
+        "MetricLabels",
+        "MetricsConfig",
+        "MetricsExporter",
+        "MetricsSnapshot",
+        "MultiExporter",
+        "MultiLogsExporter",
+        "NullExporter",
+        "NullLogsExporter",
+        "OTLP_LOGS_MAX_ATTRIBUTES",
+        "OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES",
+        "OTLP_LOGS_SCHEMA_URL",
+        "OTLP_LOGS_SCOPE_NAME",
+        "OtelMetrics",
+        "OtlpError",
+        "OtlpHttpExporter",
+        "OtlpLogRecord",
+        "OtlpLogsHttpExporter",
+        "OtlpResourceBuilder",
+        "PrivacyConfig",
+        "SamplingConfig",
+        "SpanConfig",
+        "StdoutExporter",
+        "create_otlp_resource_attributes",
+        "log_level_to_otlp_severity",
+        "otlp_request_builder",
+        "span_semantics"
+      ]
+    },
+    {
+      "source_path": "src/observability/otlp_trace_exporter.rs",
+      "items": [
+        "BoundedExportQueue",
+        "ExportError",
+        "InMemoryOtlpHttpExporter",
+        "LoadSheddingStats",
+        "LoadSheddingTraceExporter",
+        "OTLP_TAIL_SAMPLING_E2E_BEAD_ID",
+        "OTLP_TAIL_SAMPLING_SCOPE_BEAD_ID",
+        "OTLP_TAIL_SAMPLING_SCOPE_CONTRACT_VERSION",
+        "OtlpBrownoutAction",
+        "OtlpBrownoutPolicySnapshot",
+        "OtlpSpan",
+        "OtlpTailSamplingScope",
+        "OtlpTailSamplingSupportClass",
+        "SpanBatch",
+        "TraceExporter",
+        "otlp_tail_based_sampling_scope"
+      ]
+    },
+    {
+      "source_path": "src/observability/otel_structured_concurrency.rs",
+      "items": [
+        "ActiveSpan",
+        "EntityId",
+        "OtelStructuredConcurrencyConfig",
+        "PendingSpan",
+        "SpanLeak",
+        "SpanStorage",
+        "SpanStorageStats",
+        "SpanType"
+      ]
+    },
+    {
+      "source_path": "src/observability/w3c_trace_context.rs",
+      "items": [
+        "SpanId",
+        "TraceContextError",
+        "TraceFlags",
+        "TraceId",
+        "W3CBaggage",
+        "W3CPropagationContext",
+        "W3CTraceContext",
+        "extract_baggage_from_http",
+        "extract_from_http",
+        "extract_propagation_from_http",
+        "inject_baggage_to_http",
+        "inject_to_grpc",
+        "inject_to_http"
+      ]
+    }
+  ],
+  "signals_and_integrations": [
+    {
+      "signal_id": "logs",
+      "authority_state": "SHIPPED_OWNED",
+      "inventory_state": "FROZEN",
+      "feature_gate": "metrics",
+      "production_path": "LogsSnapshot::to_otlp_protobuf -> OtlpLogsHttpExporter::export_async -> OtlpHttpExporter::send_otlp_protobuf",
+      "ecosystem_role": "No external OpenTelemetry logs feature is required.",
+      "owner_bead": "asupersync-5z2scg.2.5"
+    },
+    {
+      "signal_id": "metrics",
+      "authority_state": "SHIPPED_VIA_DEPENDENCY",
+      "inventory_state": "FROZEN",
+      "feature_gate": "metrics",
+      "production_path": "OtelMetrics records into a caller-supplied Meter; the embedder SDK owns collection and export.",
+      "ecosystem_role": "Only production collector-bound path for metrics.",
+      "owner_bead": "asupersync-5z2scg.2.3"
+    },
+    {
+      "signal_id": "traces",
+      "authority_state": "SHIPPED_OWNED_INPROCESS",
+      "inventory_state": "FROZEN",
+      "feature_gate": null,
+      "production_path": "Owned bounded in-process trace pipeline; collector-bound spans use the embedder BoxedTracer SDK path.",
+      "ecosystem_role": "Only production collector-bound path for traces.",
+      "owner_bead": "asupersync-5z2scg.2.4"
+    },
+    {
+      "signal_id": "external_meter_bridge",
+      "authority_state": "SHIPPED_VIA_DEPENDENCY",
+      "inventory_state": "FROZEN",
+      "feature_gate": "metrics",
+      "production_path": "OtelMetrics::new, new_with_resource_detection, and new_with_config accept a caller-supplied opentelemetry::metrics::Meter.",
+      "ecosystem_role": "Preserves arbitrary downstream MeterProvider implementations.",
+      "owner_bead": "asupersync-5z2scg.2.11"
+    }
+  ],
+  "wire_contract": {
+    "protocol": "OTLP over HTTP",
+    "encoding": "protobuf",
+    "content_type": "application/x-protobuf",
+    "grpc_supported": false,
+    "endpoint_policy": "Caller-supplied signal URL is used verbatim; no /v1 path is appended.",
+    "schema_url": "https://opentelemetry.io/schemas/1.37.0",
+    "scope_name": "asupersync.observability.otel",
+    "temporality": "Cumulative only",
+    "status_semantics": "2xx success; 408, 429, and 502-504 retryable; 405 and other non-retryable 4xx/5xx drop; 415 permits one uncompressed retry.",
+    "retry_jitter": "Deterministic"
+  },
+  "configuration_contracts": [
+    {
+      "name": "endpoint",
+      "owner_bead": "asupersync-5z2scg.2.2",
+      "contract": "Caller-supplied full signal URL is used verbatim."
+    },
+    {
+      "name": "timeout",
+      "owner_bead": "asupersync-5z2scg.2.2",
+      "contract": "Per-attempt timeout defaults to 10 seconds; expiry is non-retryable and bounded."
+    },
+    {
+      "name": "retry",
+      "owner_bead": "asupersync-5z2scg.2.7",
+      "contract": "Defaults are 3 retries, 100ms initial delay, 30s maximum delay, deterministic exponential backoff, and Retry-After precedence."
+    },
+    {
+      "name": "compression",
+      "owner_bead": "asupersync-5z2scg.2.2",
+      "contract": "Gzip defaults off; requesting it without the compression feature is a hard error."
+    },
+    {
+      "name": "auth",
+      "owner_bead": "asupersync-5z2scg.2.2",
+      "contract": "Bearer, API-key, and custom headers are supported and treated as secrets."
+    },
+    {
+      "name": "tls",
+      "owner_bead": "asupersync-5z2scg.2.2",
+      "contract": "TLS is fail-closed with no HTTPS-to-HTTP or silent CA fallback."
+    },
+    {
+      "name": "resource_attributes",
+      "owner_bead": "asupersync-5z2scg.2.8",
+      "contract": "Precedence is built-in defaults, OTEL_RESOURCE_ATTRIBUTES, then programmatic values; hostname detection is opt-in."
+    },
+    {
+      "name": "scope_attributes",
+      "owner_bead": "asupersync-5z2scg.2.8",
+      "contract": "Pinned scope and schema defaults are overridable per log snapshot."
+    },
+    {
+      "name": "cardinality",
+      "owner_bead": "asupersync-5z2scg.2.8",
+      "contract": "Metric names and label combinations are bounded with Drop, Aggregate, or Warn overflow and observable counts."
+    },
+    {
+      "name": "privacy_redaction",
+      "owner_bead": "asupersync-5z2scg.2.8",
+      "contract": "Drop lists, glob allowlist, custom regex, and built-in PII detectors cover all signals; redaction may widen only."
+    },
+    {
+      "name": "attribute_caps",
+      "owner_bead": "asupersync-5z2scg.2.5",
+      "contract": "Logs allow 128 attributes and 4096 value bytes with counted drops."
+    },
+    {
+      "name": "sampling",
+      "owner_bead": "asupersync-5z2scg.2.4",
+      "contract": "Metric sampling and head-based trace sampling are deterministic."
+    },
+    {
+      "name": "load_shedding",
+      "owner_bead": "asupersync-5z2scg.2.7",
+      "contract": "Bounded queues count drops; metrics drop newest, traces drop oldest, and trace brownout is explicit."
+    }
+  ],
+  "child_capability_rows": [
+    {
+      "owner_bead": "asupersync-5z2scg.2.1",
+      "scope": "Frozen profiles, public API, integrations, versions, journeys, baselines, and zero-unknown routing.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXECUTED",
+      "evidence": [
+        "artifacts/otlp_capability_inventory_v1.json",
+        "docs/otlp_capability_inventory.md",
+        "tests/otlp_capability_inventory_contract.rs"
+      ],
+      "no_claim": "Inventory proof is not runtime parity or collector interoperability."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.2",
+      "scope": "Endpoint, TLS, auth, timeout, compression, diagnostics, and explicit Cx ownership.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED",
+      "evidence": [
+        "src/observability/otel.rs"
+      ],
+      "no_claim": "Source inventory does not prove every transport or security failure path."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.3",
+      "scope": "Metrics models, Meter bridge, temporality, aggregation, cardinality, and limits.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXECUTED",
+      "evidence": [
+        "tests/otel_metrics.rs",
+        "OTLP-BASELINE-METRICS"
+      ],
+      "no_claim": "The integration suite does not prove an owned production metrics wire encoder."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.4",
+      "scope": "Trace mapping, lineage, head sampling, brownout, queue limits, and explicit tail-sampling support class.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXECUTED",
+      "evidence": [
+        "tests/otlp_trace_exporter_load_shedding.rs",
+        "OTLP-BASELINE-TRACE"
+      ],
+      "no_claim": "The owned in-process exporter does not prove collector-bound trace wire interoperability."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.5",
+      "scope": "Logs and events mapping, severity, body, context, attributes, schema, scope, and limits.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED",
+      "evidence": [
+        "src/observability/otel.rs"
+      ],
+      "no_claim": "The string-body encoder has not been differentially compared to the reference proto."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.6",
+      "scope": "Owned protobuf request and response types plus production transport integration.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "BLOCKED_GAP",
+      "evidence": [
+        "OTLP-GAP-01",
+        "OTLP-GAP-05"
+      ],
+      "no_claim": "Test/fuzz-generated metrics and trace messages are not a production owned encoder."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.7",
+      "scope": "Bounded batching, retry, backpressure, cancellation, flush, shutdown, and drop accounting.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PARTIAL_EXECUTED",
+      "evidence": [
+        "tests/otlp_trace_exporter_load_shedding.rs",
+        "OTLP-BASELINE-TRACE",
+        "OTLP-GAP-02"
+      ],
+      "no_claim": "Trace queue accounting does not prove all-signal async HTTP lifecycle correctness."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.8",
+      "scope": "Resource and scope attributes, schema URL, cardinality, and shared PII redaction.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PARTIAL_EXECUTED",
+      "evidence": [
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+        "OTLP-BASELINE-DOWNSTREAM",
+        "OTLP-GAP-03"
+      ],
+      "no_claim": "A PrivacyConfig consumer smoke test does not prove every signal is redacted on the wire."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.9",
+      "scope": "Real multi-signal collector and reference-SDK interop, failure matrix, fuzz, and forensic logs.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "BLOCKED_INERT_FIXTURE",
+      "evidence": [
+        "OTLP-COLLECTOR-0.88.0",
+        "OTLP-COLLECTOR-0.90.0",
+        "OTLP-GAP-06"
+      ],
+      "no_claim": "Named versions in undeclared audit files are not live collector evidence."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.10",
+      "scope": "Aggregate capability, performance, graph, rollback, no-loss, and conditional cutover signoff.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PLANNED",
+      "evidence": [
+        "OTLP-GRAPH-DEFAULT",
+        "OTLP-GRAPH-METRICS",
+        "OTLP-GRAPH-FUZZ"
+      ],
+      "no_claim": "A10 must KEEP the incumbent while any row is planned, partial, or blocked."
+    },
+    {
+      "owner_bead": "asupersync-5z2scg.2.11",
+      "scope": "External OpenTelemetry SDK/provider adapter and downstream ecosystem journeys.",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PARTIAL_EXECUTED",
+      "evidence": [
+        "tests/otel_metrics.rs",
+        "examples/prometheus_metrics.rs",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ],
+      "no_claim": "The standalone consumer does not yet instantiate OtelMetrics from its own SdkMeterProvider."
+    }
+  ],
+  "reference_versions": [
+    {
+      "reference_id": "OTEL-API-0.32.0",
+      "kind": "reference-sdk-api",
+      "name": "opentelemetry",
+      "version": "0.32.0",
+      "evidence_state": "EXECUTED",
+      "source": "Cargo.lock",
+      "owner_bead": "asupersync-5z2scg.2.11"
+    },
+    {
+      "reference_id": "OTEL-SDK-0.32.1",
+      "kind": "reference-sdk-provider",
+      "name": "opentelemetry_sdk",
+      "version": "0.32.1",
+      "evidence_state": "EXECUTED",
+      "source": "Cargo.lock and tests/otel_metrics.rs",
+      "owner_bead": "asupersync-5z2scg.2.11"
+    },
+    {
+      "reference_id": "OTEL-PROTO-0.32.0",
+      "kind": "reference-generated-proto",
+      "name": "opentelemetry-proto",
+      "version": "0.32.0",
+      "evidence_state": "BLOCKED_RCH_POLICY",
+      "source": "Cargo.lock",
+      "owner_bead": "asupersync-5z2scg.2.6"
+    },
+    {
+      "reference_id": "PROST-0.14.4",
+      "kind": "protobuf-runtime",
+      "name": "prost",
+      "version": "0.14.4",
+      "evidence_state": "EXECUTED",
+      "source": "Cargo.lock and standalone consumer lockfile",
+      "owner_bead": "asupersync-5z2scg.2.6"
+    },
+    {
+      "reference_id": "OTEL-PROMETHEUS-0.17",
+      "kind": "documented-exporter",
+      "name": "opentelemetry-prometheus",
+      "version": "0.17",
+      "evidence_state": "PLANNED",
+      "source": "examples/prometheus_metrics.rs documentation only",
+      "owner_bead": "asupersync-5z2scg.2.11"
+    },
+    {
+      "reference_id": "OTLP-COLLECTOR-0.88.0",
+      "kind": "real-collector-version",
+      "name": "opentelemetry-collector",
+      "version": "0.88.0",
+      "evidence_state": "BLOCKED_INERT_FIXTURE",
+      "source": "src/observability/otlp_405_allow_header_audit_test.rs and src/observability/otlp_410_gone_audit_test.rs",
+      "owner_bead": "asupersync-5z2scg.2.9"
+    },
+    {
+      "reference_id": "OTLP-COLLECTOR-0.90.0",
+      "kind": "real-collector-version",
+      "name": "opentelemetry-collector",
+      "version": "0.90.0",
+      "evidence_state": "BLOCKED_INERT_FIXTURE",
+      "source": "src/observability/otlp_410_gone_audit_test.rs",
+      "owner_bead": "asupersync-5z2scg.2.9"
+    }
+  ],
+  "user_journeys": [
+    {
+      "journey_id": "OTLP-JOURNEY-OWNED-LOGS",
+      "description": "Encode log records with owned prost messages and send them through explicit-Cx OTLP/HTTP.",
+      "owner_beads": [
+        "asupersync-5z2scg.2.5",
+        "asupersync-5z2scg.2.6",
+        "asupersync-5z2scg.2.9"
+      ],
+      "evidence_state": "SOURCE_BASELINED",
+      "baseline_ids": [],
+      "required_completion": "Owned encoder differential proof and live collector acceptance."
+    },
+    {
+      "journey_id": "OTLP-JOURNEY-OWNED-TRACES",
+      "description": "Use the default-feature bounded in-process trace exporter with deterministic sampling and brownout.",
+      "owner_beads": [
+        "asupersync-5z2scg.2.4",
+        "asupersync-5z2scg.2.7"
+      ],
+      "evidence_state": "EXECUTED",
+      "baseline_ids": [
+        "OTLP-BASELINE-TRACE"
+      ],
+      "required_completion": "Preserve default reachability and explicit tail-sampling support class."
+    },
+    {
+      "journey_id": "OTLP-JOURNEY-EXTERNAL-PROVIDER",
+      "description": "Supply a Meter from an external SdkMeterProvider to OtelMetrics and preserve long-path PrivacyConfig access.",
+      "owner_beads": [
+        "asupersync-5z2scg.2.3",
+        "asupersync-5z2scg.2.8",
+        "asupersync-5z2scg.2.11"
+      ],
+      "evidence_state": "PARTIAL_EXECUTED",
+      "baseline_ids": [
+        "OTLP-BASELINE-METRICS",
+        "OTLP-BASELINE-DOWNSTREAM"
+      ],
+      "required_completion": "The standalone downstream crate must instantiate OtelMetrics from its own provider."
+    },
+    {
+      "journey_id": "OTLP-JOURNEY-PROMETHEUS-LOCAL",
+      "description": "Record through OtelMetrics while an embedder SDK owns collection; retain the dependency-free Prometheus text registry as a separate local path.",
+      "owner_beads": [
+        "asupersync-5z2scg.2.3",
+        "asupersync-5z2scg.2.11"
+      ],
+      "evidence_state": "PARTIAL_EXECUTED",
+      "baseline_ids": [
+        "OTLP-BASELINE-PROMETHEUS-EXAMPLE"
+      ],
+      "required_completion": "Compile a real pinned Prometheus exporter consumer instead of relying on the documented 0.17 snippet."
+    },
+    {
+      "journey_id": "OTLP-JOURNEY-COLLECTOR-FAILURE",
+      "description": "Handle partial success, throttle, Retry-After, auth failure, TLS failure, unsupported media type, and terminal HTTP responses.",
+      "owner_beads": [
+        "asupersync-5z2scg.2.2",
+        "asupersync-5z2scg.2.7",
+        "asupersync-5z2scg.2.9"
+      ],
+      "evidence_state": "BLOCKED_INERT_FIXTURE",
+      "baseline_ids": [],
+      "required_completion": "Activate valid fixtures and run named real collector versions without mocks."
+    },
+    {
+      "journey_id": "OTLP-JOURNEY-BOUNDED-SHUTDOWN",
+      "description": "Cancel, flush, drain, and shut down bounded queues without task, obligation, batch, or retry-loop leaks.",
+      "owner_beads": [
+        "asupersync-5z2scg.2.7",
+        "asupersync-5z2scg.2.9"
+      ],
+      "evidence_state": "PARTIAL_EXECUTED",
+      "baseline_ids": [
+        "OTLP-BASELINE-TRACE"
+      ],
+      "required_completion": "Prove task and obligation leak freedom plus region quiescence for every signal and HTTP retry path."
+    }
+  ],
+  "known_gaps": [
+    {
+      "gap_id": "OTLP-GAP-01",
+      "summary": "No owned production wire encoder exists for metrics or traces.",
+      "upstream_owner": "asupersync-5z2scg.2",
+      "program_child_owner": "asupersync-5z2scg.2.6",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "OTLP-GAP-02",
+      "summary": "Synchronous HTTP exporter trait methods reject use because real sends need explicit Cx.",
+      "upstream_owner": "asupersync-5z2scg.2",
+      "program_child_owner": "asupersync-5z2scg.2.7",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "OTLP-GAP-03",
+      "summary": "new_with_resource_detection constructs and discards resource attributes.",
+      "upstream_owner": "asupersync-5z2scg.2",
+      "program_child_owner": "asupersync-5z2scg.2.8",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "OTLP-GAP-04",
+      "summary": "OTEL_EXPORTER_OTLP_* and scheduled collection are unsupported.",
+      "upstream_owner": "asupersync-5z2scg.2",
+      "program_child_owner": "asupersync-5z2scg.2.2",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "OTLP-GAP-05",
+      "summary": "Owned logs encode only string OTLP AnyValue bodies.",
+      "upstream_owner": "asupersync-5z2scg.2",
+      "program_child_owner": "asupersync-5z2scg.2.5",
+      "evidence_state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "OTLP-GAP-06",
+      "summary": "The quarantined OTLP audit cluster contains tracked files that are not compiled and cannot count as evidence.",
+      "upstream_owner": "asupersync-lf1a77",
+      "program_child_owner": "asupersync-5z2scg.2.9",
+      "evidence_state": "BLOCKED_INERT_FIXTURE"
+    },
+    {
+      "gap_id": "OTLP-GAP-07",
+      "summary": "Tail-based sampling is explicitly unsupported.",
+      "upstream_owner": "asupersync-5z2scg.2",
+      "program_child_owner": "asupersync-5z2scg.2.4",
+      "evidence_state": "EXPLICIT_UNSUPPORTED"
+    }
+  ],
+  "baseline_runs": [
+    {
+      "baseline_id": "OTLP-BASELINE-METRICS",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_inventory_metrics\" cargo test -p asupersync --test otel_metrics --features metrics -- --nocapture",
+      "revision": "da06fe447d5e1d0b03a0be0c2b76d1db44a3c8d4",
+      "evidence_state": "EXECUTED",
+      "exit_code": 0,
+      "result": "33 passed; 0 failed; 0 ignored",
+      "remote_elapsed_ms": 189047
+    },
+    {
+      "baseline_id": "OTLP-BASELINE-TRACE",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_inventory_trace\" cargo test -p asupersync --test otlp_trace_exporter_load_shedding -- --nocapture",
+      "revision": "da06fe447d5e1d0b03a0be0c2b76d1db44a3c8d4",
+      "evidence_state": "EXECUTED",
+      "exit_code": 0,
+      "result": "9 passed; 0 failed; 0 ignored; exported 2048 plus dropped 30720 equals submitted 32768 spans",
+      "remote_elapsed_ms": 193951
+    },
+    {
+      "baseline_id": "OTLP-BASELINE-DOWNSTREAM",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_inventory_downstream\" cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked --features metrics-profile -- --nocapture",
+      "revision": "da06fe447d5e1d0b03a0be0c2b76d1db44a3c8d4",
+      "evidence_state": "EXECUTED",
+      "exit_code": 0,
+      "result": "8 passed; 0 failed; doc tests 0 passed and 0 failed",
+      "remote_elapsed_ms": 336753
+    },
+    {
+      "baseline_id": "OTLP-BASELINE-PROMETHEUS-EXAMPLE",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_inventory_prometheus_example\" cargo check -p asupersync --example prometheus_metrics --features metrics",
+      "revision": "da06fe447d5e1d0b03a0be0c2b76d1db44a3c8d4",
+      "evidence_state": "EXECUTED",
+      "exit_code": 0,
+      "result": "dev profile finished successfully",
+      "remote_elapsed_ms": 132174
+    },
+    {
+      "baseline_id": "OTLP-GRAPH-DEFAULT",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_inventory_tokio_default\" cargo tree -e normal -p asupersync -i tokio",
+      "revision": "6cbe6e5aa51e5d31207faac347c1702cbad9782e",
+      "evidence_state": "BLOCKED_RCH_POLICY",
+      "exit_code": 1,
+      "result": "[RCH-E301] installed RCH classified cargo tree as non-compilation and refused local fallback; expected proof outcome remains warning: nothing to print"
+    },
+    {
+      "baseline_id": "OTLP-GRAPH-METRICS",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_inventory_tokio_metrics\" cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "revision": "6cbe6e5aa51e5d31207faac347c1702cbad9782e",
+      "evidence_state": "BLOCKED_RCH_POLICY",
+      "exit_code": 1,
+      "result": "[RCH-E301] installed RCH classified cargo tree as non-compilation and refused local fallback; expected proof outcome remains warning: nothing to print"
+    },
+    {
+      "baseline_id": "OTLP-GRAPH-FUZZ",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_inventory_tokio_fuzz\" cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "revision": "6cbe6e5aa51e5d31207faac347c1702cbad9782e",
+      "evidence_state": "BLOCKED_RCH_POLICY",
+      "exit_code": 1,
+      "result": "[RCH-E301] installed RCH classified cargo tree as non-compilation and refused local fallback; expected proof outcome is the quarantined opentelemetry-proto to tonic and tokio path"
+    },
+    {
+      "baseline_id": "OTLP-BASELINE-SPARSE-MATRIX",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_sparse_matrix\" cargo check -p asupersync --no-default-features --features '<profile>'",
+      "revision": "da06fe447d5e1d0b03a0be0c2b76d1db44a3c8d4",
+      "evidence_state": "PLANNED",
+      "exit_code": null,
+      "result": "Owned by signal and aggregate children; no execution claimed by A1"
+    },
+    {
+      "baseline_id": "OTLP-BASELINE-REAL-COLLECTOR",
+      "command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario otlp_multisignal",
+      "revision": "da06fe447d5e1d0b03a0be0c2b76d1db44a3c8d4",
+      "evidence_state": "PLANNED",
+      "exit_code": null,
+      "result": "Owned by A9; no live collector execution claimed by A1"
+    }
+  ],
+  "final_cutover_mapping": {
+    "owner_bead": "asupersync-5z2scg.2.10",
+    "current_decision": "KEEP",
+    "dependency_exit_allowed": false,
+    "required_child_rows": [
+      "asupersync-5z2scg.2.1",
+      "asupersync-5z2scg.2.2",
+      "asupersync-5z2scg.2.3",
+      "asupersync-5z2scg.2.4",
+      "asupersync-5z2scg.2.5",
+      "asupersync-5z2scg.2.6",
+      "asupersync-5z2scg.2.7",
+      "asupersync-5z2scg.2.8",
+      "asupersync-5z2scg.2.9",
+      "asupersync-5z2scg.2.10",
+      "asupersync-5z2scg.2.11"
+    ],
+    "gate": "All child rows, three signals, external provider journey, real collector matrix, no-Tokio graph lanes, performance, rollback, and no-loss evidence must be terminal and same-or-better. Otherwise KEEP."
+  },
+  "summary": {
+    "source_pin_count": 14,
+    "feature_profile_count": 5,
+    "adr_public_surface_group_count": 6,
+    "adr_public_symbol_count": 72,
+    "module_public_item_count": 88,
+    "signal_and_integration_count": 4,
+    "configuration_contract_count": 13,
+    "child_capability_row_count": 11,
+    "reference_version_count": 7,
+    "real_collector_version_count": 2,
+    "user_journey_count": 6,
+    "known_gap_count": 7,
+    "executed_baseline_count": 4,
+    "blocked_rch_policy_count": 3,
+    "unknown_row_count": 0
+  },
+  "no_claim_boundary": [
+    "This inventory freezes surfaces, ownership, version pins, journeys, and evidence state; it does not implement any missing capability.",
+    "The four green executable baselines do not prove live collector interoperability, metrics or traces owned-wire parity, all-signal lifecycle correctness, performance, broad workspace health, or release readiness.",
+    "Collector 0.88.0 and 0.90.0 are named compatibility targets found only in inert audit fixtures; neither version was launched or contacted.",
+    "The three cargo-tree attempts are blocked RCH evidence, not no-Tokio passes, and no local fallback was used.",
+    "No dependency, feature, signal, public API, security default, redaction rule, or user journey may be removed on the authority of this artifact."
+  ]
+}
