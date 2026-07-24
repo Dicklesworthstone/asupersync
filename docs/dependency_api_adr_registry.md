@@ -55,7 +55,7 @@ Every resolved row names:
 - the exact preserved public symbols, per module path and feature gate, with
   the source file each lives in;
 - the preserved Cargo feature definitions, verbatim from the manifest;
-- the preserved signals, wire contract, and configuration semantics;
+- the preserved surfaces, wire contract, and configuration semantics;
 - known gaps with owning beads;
 - security, cancellation, and platform invariants;
 - external ecosystem integration points and their removal preconditions;
@@ -85,15 +85,15 @@ the observability re-exports.
 <!-- BEGIN GENERATED ADR SUMMARY -->
 - Artifact: `dependency-api-adr-registry-v1` (schema 1)
 - Phase: `asupersync-dep-p3-api-adrs-h3jspm`; aggregate terminal `asupersync-dep-p3-api-adrs-h3jspm.13`.
-- Roster: 12 ADRs; RESOLVED=1; PENDING=11.
-- Negative fixtures: 5.
+- Roster: 12 ADRs; RESOLVED=2; PENDING=10.
+- Negative fixtures: 7.
 
 | ADR | Bead | Capabilities | State | Decision | Cutover |
 |---|---|---|---|---|---|
 | `DEP-ADR-001` | `asupersync-dep-p3-api-adrs-h3jspm.1` | `CAP-SERDE-GENERIC`, `CAP-PERSISTED-TRACE-SNAPSHOT` | PENDING | - | - |
 | `DEP-ADR-002` | `asupersync-dep-p3-api-adrs-h3jspm.2` | `CAP-PROTOBUF-GENERIC` | PENDING | - | - |
 | `DEP-ADR-003` | `asupersync-dep-p3-api-adrs-h3jspm.3` | `CAP-OTLP-ECOSYSTEM` | RESOLVED | ADDITIVE_COEXISTENCE | KEEP_INCUMBENT |
-| `DEP-ADR-004` | `asupersync-dep-p3-api-adrs-h3jspm.4` | `CAP-CONFIG-TOML-JSON`, `CAP-SCENARIO-YAML-JSON` | PENDING | - | - |
+| `DEP-ADR-004` | `asupersync-dep-p3-api-adrs-h3jspm.4` | `CAP-CONFIG-TOML-JSON`, `CAP-SCENARIO-YAML-JSON` | RESOLVED | ADDITIVE_COEXISTENCE | KEEP_INCUMBENT |
 | `DEP-ADR-005` | `asupersync-dep-p3-api-adrs-h3jspm.5` | `CAP-CLI-ASUPERSYNC`, `CAP-CLI-ATP`, `CAP-CLI-ATPD`, `CAP-CLI-OFFLINE-TUNER` | PENDING | - | - |
 | `DEP-ADR-006` | `asupersync-dep-p3-api-adrs-h3jspm.6` | `CAP-HTTP-COMPRESSION` | PENDING | - | - |
 | `DEP-ADR-007` | `asupersync-dep-p3-api-adrs-h3jspm.7` | `CAP-NKEY-AUTH` | PENDING | - | - |

@@ -40,13 +40,20 @@
     "BLOCKED_PENDING_EVIDENCE",
     "KEEP_INCUMBENT"
   ],
-  "allowed_signal_states": [
-    "SHIPPED_OWNED_WIRE",
-    "SHIPPED_ECOSYSTEM_WIRE",
+  "allowed_surface_states": [
+    "SHIPPED_OWNED",
+    "SHIPPED_VIA_DEPENDENCY",
     "SHIPPED_OWNED_INPROCESS",
-    "TEST_FUZZ_ONLY_WIRE",
+    "TEST_ONLY",
     "NOT_SHIPPED"
   ],
+  "surface_state_meanings": {
+    "SHIPPED_OWNED": "Implemented in asupersync's own code and reachable in a production build.",
+    "SHIPPED_VIA_DEPENDENCY": "Reachable in production, but the working path runs through the third-party dependency under review. Removing that dependency removes the capability.",
+    "SHIPPED_OWNED_INPROCESS": "Owned code exists and is reachable, but it stops at the process boundary; there is no production path to the external consumer.",
+    "TEST_ONLY": "The code exists but is gated to test or fuzz builds, so it is not a production capability and may not be cited as one.",
+    "NOT_SHIPPED": "Does not exist today. Recorded so an ADR cannot silently imply that it does."
+  },
   "required_adr_fields": [
     "adr_id",
     "bead_id",
@@ -58,7 +65,7 @@
     "alternatives_considered",
     "preserved_public_symbols",
     "preserved_feature_flags",
-    "preserved_signals",
+    "preserved_surfaces",
     "preserved_wire_contract",
     "preserved_config_semantics",
     "known_gaps",
@@ -100,7 +107,7 @@
       "adr_id": "DEP-ADR-004",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.4",
       "title": "Additive canonical JSON while preserving accepted TOML config and YAML scenarios",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-005",
@@ -338,10 +345,10 @@
           "no_tokio_guarantee": "Explicitly EXCLUDED from the no-Tokio production guarantee. Proof lane `fuzz-tokio-quarantine-tree` expects the `opentelemetry-proto` -> `tonic`/`tonic-prost` -> `tokio` path and treats it as an accepted, documented quarantine edge."
         }
       ],
-      "preserved_signals": [
+      "preserved_surfaces": [
         {
-          "signal": "logs",
-          "state": "SHIPPED_OWNED_WIRE",
+          "surface": "logs",
+          "state": "SHIPPED_OWNED",
           "feature_gate": "metrics",
           "implementation": "src/observability/otel.rs",
           "wire_encoder": "LogsSnapshot::to_otlp_protobuf via the ungated internal `otlp_logs_proto` prost message set",
@@ -364,8 +371,8 @@
           "note": "The only signal with a complete owned production path from snapshot to wire. Implemented WITHOUT the ecosystem crates' logs feature. `otlp-logs-omission` is a named historical loss fixture; this signal may not be dropped."
         },
         {
-          "signal": "metrics",
-          "state": "SHIPPED_ECOSYSTEM_WIRE",
+          "surface": "metrics",
+          "state": "SHIPPED_VIA_DEPENDENCY",
           "feature_gate": "metrics",
           "implementation": "src/observability/otel.rs",
           "wire_encoder": "none in production; `otlp_request_builder::metrics_request_from_snapshot` is gated to test/fuzz",
@@ -385,7 +392,7 @@
           "note": "`OtelMetrics` records into real `opentelemetry` instruments obtained from a caller-supplied `Meter`. Production metrics therefore leave the process through the embedder's SDK pipeline, not through asupersync. The dependency-free `observability::metrics` registry and its Prometheus exposition text format remain available at default features as a separate, non-OTLP path."
         },
         {
-          "signal": "traces",
+          "surface": "traces",
           "state": "SHIPPED_OWNED_INPROCESS",
           "feature_gate": null,
           "implementation": "src/observability/otlp_trace_exporter.rs and src/observability/otel_structured_concurrency.rs",
@@ -403,8 +410,8 @@
           "note": "The owned trace pipeline ships ungated with bounded queues, head-based sampling, and brownout policy, but the only shipped `TraceExporter` implementation buffers in memory. Spans that actually reach a collector do so through the embedder's SDK via `SpanStorage` and `BoxedTracer`. Tail-based sampling is explicitly and deliberately unsupported, pinned by `otlp_tail_based_sampling_scope`."
         },
         {
-          "signal": "external_meter_bridge",
-          "state": "SHIPPED_ECOSYSTEM_WIRE",
+          "surface": "external_meter_bridge",
+          "state": "SHIPPED_VIA_DEPENDENCY",
           "feature_gate": "metrics",
           "implementation": "src/observability/otel.rs",
           "wire_encoder": "not applicable",
@@ -685,7 +692,9 @@
         "dependency_exit_allowed": false,
         "cutover_state": "KEEP_INCUMBENT",
         "disposition": "KEEP_UNTIL_PARITY",
-        "primary_authority": "asupersync-5z2scg.2",
+        "primary_authorities": [
+          "asupersync-5z2scg.2"
+        ],
         "secondary_compatibility_consumers": [
           "asupersync-5z2scg.8",
           "asupersync-dep-p3-api-adrs-h3jspm.13"
@@ -708,6 +717,585 @@
       },
       "doc_path": "docs/adr/dep_plan_adr_003_otlp_ecosystem.md",
       "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the owned logs encoder is byte-compatible with any reference implementation, that a live collector accepts asupersync output, that metrics, traces, or logs parity has been measured, that performance is unchanged, that the workspace is healthy, or that any dependency may be removed. Agreement on the metrics signal alone, or on generated-message shapes alone, does not prove traces, logs, provider ecosystem, lifecycle, or real collector parity."
+    },
+    {
+      "adr_id": "DEP-ADR-004",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.4",
+      "title": "Additive canonical JSON while preserving accepted TOML config and YAML scenarios",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-CONFIG-TOML-JSON",
+        "CAP-SCENARIO-YAML-JSON"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "decision_summary": "TOML runtime/CLI configuration and YAML lab scenarios are operator- and author-facing accepted inputs and stay accepted. Canonical JSON is additive output and an additional accepted input; it never becomes the only accepted form. `toml` and `serde_yaml` remain KEEP_UNTIL_PARITY. Two facts from the claim-time source read shape this. First, the parsing surfaces are thinner than they look: the `Scenario` type contains no YAML code at all, only serde derives, and every YAML parse happens at a call site in a binary or a test, so `serde_yaml` never appears in a library public signature. Second, `serde_json` is already a non-optional dependency and `Scenario` already round-trips JSON, so scenario JSON is not a new capability. What genuinely does not exist is JSON configuration loading and any shared canonical-JSON encoder; both are recorded NOT_SHIPPED so this ADR cannot be read as implying they are present.",
+      "alternatives_considered": [
+        {
+          "option": "Migrate configuration and scenarios to canonical versioned JSON and stop accepting TOML and YAML.",
+          "rejected_because": "Both are accepted operator and author inputs with a live corpus: thirteen scenario YAML files across `examples/scenarios/`, `frankenlab/examples/scenarios/`, and `tools/demos/`, plus a documented `getting_started` journey that runs them. Dropping acceptance is direct user-journey loss and the no-loss gate rejects it."
+        },
+        {
+          "option": "Keep TOML and YAML, but make canonical JSON the primary on-disk format and demote the others to legacy.",
+          "rejected_because": "There is no canonical-JSON encoder in the crate to promote. `Scenario::to_json` uses `serde_json::to_string_pretty`, which is pretty-printed rather than byte-canonical, and the only canonicalization convention in the codebase is incidental `BTreeMap` key ordering plus insta snapshot goldens. Promoting a format that does not yet exist would freeze an aspiration."
+        },
+        {
+          "option": "Replace `serde_yaml` with an owned YAML parser now, since it is only used at three call sites.",
+          "rejected_because": "Call-site count understates the obligation. The accepted grammar is whatever `serde_yaml` 0.9 accepts across the live corpus — anchors, aliases, merge keys, tags, number and Unicode handling, and duplicate-key policy — and none of that is specified anywhere yet. `asupersync-5z2scg.5.1` owns establishing the accepted subset from evidence. Until that exists, an owned parser cannot be shown to preserve the capability."
+        },
+        {
+          "option": "Replace `toml` with the existing hand-rolled parser in `src/config.rs`, which already reads a TOML-shaped format.",
+          "rejected_because": "`src/config.rs` is not a TOML parser. It makes zero `toml::` calls and hand-splits lines on `=` with `[section]` headers, lowercasing section names and stripping `#` and `//` comments. It accepts a narrower, different grammar with different error semantics. Routing real TOML through it would silently narrow accepted input."
+        },
+        {
+          "option": "Add JSON configuration loading in this ADR.",
+          "rejected_because": "This bead is decision-only. The decision authorizes JSON config as additive, but the implementation, its precedence semantics, and its round-trip evidence belong to `asupersync-5z2scg.4` and its children."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::runtime::env_config",
+          "feature_gate": "config-file",
+          "source_file": "src/runtime/env_config.rs",
+          "symbols": [
+            "RuntimeTomlConfig",
+            "SchedulerToml",
+            "BlockingToml",
+            "apply_toml_config",
+            "parse_toml_str",
+            "parse_toml_file"
+          ],
+          "note": "The only place the `toml` crate parses runtime configuration. Both tables and every field are optional, so empty and partial documents are accepted; that tolerance is part of the contract."
+        },
+        {
+          "module_path": "asupersync::runtime::env_config",
+          "feature_gate": null,
+          "source_file": "src/runtime/env_config.rs",
+          "symbols": [
+            "EnvReader",
+            "SystemEnvReader",
+            "apply_env_overrides"
+          ],
+          "note": "Ungated, and part of the TOML contract because `parse_toml_file` takes an `&dyn EnvReader` and because these implement the precedence rule."
+        },
+        {
+          "module_path": "asupersync::runtime::builder",
+          "feature_gate": "config-file",
+          "source_file": "src/runtime/builder.rs",
+          "symbols": [
+            "from_toml",
+            "from_toml_str"
+          ],
+          "note": "Public entry points on `RuntimeBuilder`, also reachable as `asupersync::runtime::RuntimeBuilder` and `asupersync::prelude::RuntimeBuilder`. Failures map to `ErrorKind::ConfigError`."
+        },
+        {
+          "module_path": "asupersync::cli::atp_config",
+          "feature_gate": "cli",
+          "source_file": "src/cli/atp_config.rs",
+          "symbols": [
+            "ConfigVersion",
+            "ReceiveSafetyPolicy",
+            "ProofRetentionPolicy",
+            "AtpInstallConfig",
+            "ConfigSource",
+            "AtpConfigManager",
+            "ConfigPaths",
+            "ConfigScope",
+            "ConfigSourceInfo",
+            "ConfigResolution",
+            "ConfigValueSource",
+            "ConfigError"
+          ],
+          "note": "Operator-facing ATP configuration: layered scopes, source attribution, and an explain-resolution surface. TOML is both read and written here, so round-trip fidelity is a user-visible contract."
+        },
+        {
+          "module_path": "asupersync::config",
+          "feature_gate": null,
+          "source_file": "src/config.rs",
+          "symbols": [
+            "ConfigLoader",
+            "ConfigError",
+            "RaptorQConfig",
+            "RuntimeProfile",
+            "ServerConfig",
+            "ServerProfile",
+            "EncodingConfig",
+            "TransportConfig",
+            "BackoffConfig",
+            "AdaptiveConfig",
+            "PathSelectionStrategy",
+            "ResourceConfig",
+            "TimeoutConfig",
+            "SecurityConfig"
+          ],
+          "note": "Ungated RaptorQ configuration with its own hand-rolled INI-style parser and an env prefix of RAPTORQ_. Frozen here because the capability registry names this file as a source owner, but see OTLP-unrelated gap CFG-GAP-01: it is not a `toml`-crate surface."
+        },
+        {
+          "module_path": "asupersync::lab::scenario",
+          "feature_gate": null,
+          "source_file": "src/lab/scenario.rs",
+          "symbols": [
+            "SCENARIO_SCHEMA_VERSION",
+            "Scenario",
+            "SUPPORTED_EXPECTED_INVARIANTS",
+            "LabSection",
+            "ChaosSection",
+            "NetworkSection",
+            "NetworkPreset",
+            "LinkConditions",
+            "LatencySpec",
+            "FaultEvent",
+            "FaultAction",
+            "Participant",
+            "CancellationSection",
+            "CancellationStrategy",
+            "ResourceCapsSection",
+            "MinimizationSection",
+            "GoldenProjectionFormat",
+            "GoldenProjectionSection",
+            "IncludeRef",
+            "ValidationError",
+            "from_json",
+            "to_json",
+            "to_lab_config",
+            "validate"
+          ],
+          "note": "The scenario schema itself, ungated and free of any YAML dependency. Five of these types are NOT re-exported at `asupersync::lab` and are reachable only by the long `asupersync::lab::scenario::` path; both paths are frozen. `ValidationError` is re-exported under the renamed alias `ScenarioValidationError`."
+        },
+        {
+          "module_path": "asupersync::lab::scenario_runner",
+          "feature_gate": null,
+          "source_file": "src/lab/scenario_runner.rs",
+          "symbols": [
+            "ScenarioRunnerError",
+            "TraceCertificateSnapshot",
+            "FaultInjectionLogEntry",
+            "FaultEffectSummary",
+            "MinimizedCounterexamplePacket",
+            "ScenarioRunResult",
+            "FilteredOracleReport",
+            "ScenarioExplorationResult",
+            "ExplorationRunSummary",
+            "ScenarioRunner"
+          ],
+          "note": "Scenario execution, seed exploration, and replay validation. Also ungated and YAML-free."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "config-file",
+          "cargo_definition": "config-file = [\"dep:toml\"]",
+          "effect": "Enables `RuntimeBuilder::from_toml` / `from_toml_str` and the `runtime::env_config` TOML surface. Not in the default feature set.",
+          "must_remain": true,
+          "no_tokio_guarantee": "`toml` is a pure-Rust parser with no tokio edge."
+        },
+        {
+          "name": "dependency-ledger",
+          "cargo_definition": "dependency-ledger = [\"dep:toml\"]",
+          "effect": "Reuses the same optional TOML parser for the marginal-ledger generator binary; deliberately does not enter production graphs.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Same pure-Rust parser; internal tooling only."
+        },
+        {
+          "name": "cli",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "effect": "The only feature that enables `serde_yaml`, and it also pulls in `config-file`. Frozen verbatim because the YAML scenario capability and the TOML config capability both depend on this composition.",
+          "must_remain": true,
+          "no_tokio_guarantee": "None of these edges introduce tokio."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "toml_runtime_config",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "config-file",
+          "implementation": "src/runtime/env_config.rs",
+          "wire_encoder": "toml crate 1.0",
+          "transport": "local file or in-memory string",
+          "public_entry_points": [
+            "RuntimeTomlConfig",
+            "SchedulerToml",
+            "BlockingToml",
+            "parse_toml_str",
+            "parse_toml_file",
+            "apply_toml_config"
+          ],
+          "note": "Accepts the twelve `[scheduler]` keys and the two `[blocking]` keys, all optional, with both tables defaulted. Field renaming happens on apply, not on parse."
+        },
+        {
+          "surface": "toml_cli_config",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/cli/atp_config.rs",
+          "wire_encoder": "toml crate 1.0, read and write",
+          "transport": "layered config files across standard paths",
+          "public_entry_points": [
+            "AtpInstallConfig",
+            "AtpConfigManager",
+            "ConfigPaths",
+            "ConfigResolution",
+            "ConfigValueSource"
+          ],
+          "note": "Serializes back out with `to_string_pretty`, so this is the surface where comment and formatting loss would actually be observed by an operator."
+        },
+        {
+          "surface": "ini_style_raptorq_config",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/config.rs",
+          "wire_encoder": "hand-rolled line parser, not the toml crate",
+          "transport": "local file, env prefix RAPTORQ_",
+          "public_entry_points": [
+            "ConfigLoader",
+            "ConfigError",
+            "RaptorQConfig",
+            "RuntimeProfile"
+          ],
+          "note": "Already owned and dependency-free. It is NOT a TOML implementation and must not be treated as evidence that an owned TOML parser exists."
+        },
+        {
+          "surface": "yaml_scenario_input",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "cli",
+          "implementation": "src/lab/scenario.rs",
+          "wire_encoder": "serde_yaml 0.9, invoked at call sites rather than inside the library types",
+          "transport": "local scenario files",
+          "public_entry_points": [
+            "Scenario",
+            "SCENARIO_SCHEMA_VERSION",
+            "IncludeRef",
+            "ValidationError",
+            "validate"
+          ],
+          "note": "The accepted grammar is whatever serde_yaml 0.9 accepts over the live corpus; it has never been specified. `asupersync-5z2scg.5.1` owns pinning it. Include refs are security-validated: .yaml/.yml extension, length cap, restricted charset."
+        },
+        {
+          "surface": "json_scenario_io",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/lab/scenario.rs",
+          "wire_encoder": "serde_json, non-optional dependency",
+          "transport": "in-memory string",
+          "public_entry_points": [
+            "from_json",
+            "to_json",
+            "GoldenProjectionFormat",
+            "GoldenProjectionSection"
+          ],
+          "note": "Scenario JSON already round-trips today, so JSON scenario support is not a new capability. `to_json` is pretty-printed, not byte-canonical."
+        },
+        {
+          "surface": "scenario_execution",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/lab/scenario_runner.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "ScenarioRunner",
+            "ScenarioRunResult",
+            "FilteredOracleReport",
+            "ScenarioExplorationResult",
+            "ExplorationRunSummary"
+          ],
+          "note": "Run, explore-seeds, and validate-replay are the behaviors any format change must keep bit-identical."
+        },
+        {
+          "surface": "json_runtime_config_loading",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "There is no `RuntimeBuilder::from_json`, no JSON path in env_config, and no JSON loading in the ATP or atpd config surfaces. This ADR authorizes adding it additively; it does not claim it exists."
+        },
+        {
+          "surface": "canonical_json_encoder",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No shared canonical-JSON type, trait, or helper exists. The de-facto convention is BTreeMap key ordering plus insta goldens. Whoever implements canonical JSON is introducing it, not adopting it."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "local file formats, not a network protocol",
+        "encoding": "TOML 1.0 for runtime and CLI configuration; YAML 1.2 as accepted by serde_yaml 0.9 for scenarios; JSON for scenario round-trip and, additively, for configuration",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Config precedence is file (lowest), then environment, then programmatic (highest). That order is the contract and may not be reordered.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "not applicable",
+        "collector_interop": "not applicable",
+        "schema_versioning": "Scenarios carry `schema_version`, defaulted via serde so older documents keep loading. `SCENARIO_SCHEMA_VERSION` is 1. Runtime TOML has no version field today; adding one must be backward-compatible.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "precedence",
+          "surface": "RuntimeBuilder::from_toml then with_env_overrides then programmatic setters",
+          "contract": "File is lowest, environment overrides file, programmatic overrides both. Covered today by focused unit tests and must not be reordered or made format-dependent."
+        },
+        {
+          "name": "partial_and_empty_documents",
+          "surface": "RuntimeTomlConfig",
+          "contract": "Both tables and all fields are optional. An empty document is valid and yields defaults. Making any field mandatory is accepted-input loss."
+        },
+        {
+          "name": "unknown_field_policy",
+          "surface": "RuntimeTomlConfig / Scenario",
+          "contract": "Current behavior is whatever serde derives produce without a deny-unknown-fields attribute. Tightening this is a narrowing change and requires its own evidence."
+        },
+        {
+          "name": "thread_name_prefix_validation",
+          "surface": "apply_toml_config",
+          "contract": "Validated on apply with an actionable error rather than silently accepted."
+        },
+        {
+          "name": "config_error_diagnostics",
+          "surface": "BuildError / ErrorKind::ConfigError / cli::atp_config::ConfigError / config::ConfigError",
+          "contract": "Syntax, type, unknown-field, precedence, path, and semantic validation failures stay distinguishable with actionable messages. Diagnostics may improve; they may not get coarser."
+        },
+        {
+          "name": "config_round_trip",
+          "surface": "AtpInstallConfig::write_to_file / AtpConfigManager::save_config",
+          "contract": "Configuration written back must remain loadable and semantically identical. Any comment or ordering loss is operator-visible and belongs in the migration evidence."
+        },
+        {
+          "name": "config_path_security",
+          "surface": "read_from_file_secure / write_to_file_secure",
+          "contract": "The explicit secure variants exist and must keep their stricter path handling; the non-secure variants may not silently become the only option."
+        },
+        {
+          "name": "scenario_include_security",
+          "surface": "IncludeRef validation",
+          "contract": "Include paths require a .yaml or .yml extension, are length-capped, and use a restricted character set. This bound may only tighten in ways that keep the existing corpus valid."
+        },
+        {
+          "name": "scenario_validation",
+          "surface": "Scenario::validate",
+          "contract": "Returns a list of located `ValidationError`s rather than failing on the first problem. Existing rejections (empty id, bad schema version, unordered faults, duplicate participants, missing cancellation count, unknown oracle) must keep failing for the same reason."
+        },
+        {
+          "name": "scenario_determinism",
+          "surface": "ScenarioRunner::run / explore_seeds / validate_replay",
+          "contract": "Same scenario and seed produce the same fingerprint. A format change that perturbs field ordering, numeric parsing, or defaulting can break replay determinism and is therefore in scope for this ADR's evidence."
+        },
+        {
+          "name": "env_prefixes",
+          "surface": "runtime env overrides and config::ConfigLoader",
+          "contract": "The runtime env override set and the RAPTORQ_ prefix are accepted operator inputs and stay accepted."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "CFG-GAP-01",
+          "summary": "The capability registry records `source_owners` for CAP-CONFIG-TOML-JSON as src/config.rs and src/bin/asupersync.rs. Neither makes a single `toml::` call. src/config.rs is a hand-rolled INI-style parser and src/bin/asupersync.rs has no TOML code at all. The real toml-crate owners are src/runtime/env_config.rs, src/runtime/builder.rs, src/cli/atp_config.rs, src/bin/atpd.rs, and src/bin/dependency_marginal_ledger.rs.",
+          "consequence": "Any baseline or cutover work that trusts the registry's source_owners will inventory the wrong files and can miss the entire runtime and CLI TOML surface. The api_surface_map selector `config-reexports` has the same problem: it maps the prefix `config::` to this capability, which is the INI parser rather than the TOML surface.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CFG-GAP-02",
+          "summary": "No integration test exercises `RuntimeBuilder::from_toml`, the file-path variant. Only `from_toml_str` is covered, by in-crate unit tests.",
+          "consequence": "Path handling, IO error mapping, and file-not-found diagnostics for the primary documented entry point are untested.",
+          "owner_bead": "asupersync-5z2scg.4.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CFG-GAP-03",
+          "summary": "No cross-format equivalence test exists. `scenario_yaml_roundtrip` and `scenario_json_roundtrip` are independent single-format round-trips; nothing asserts that YAML and JSON produce the same Scenario.",
+          "consequence": "The central claim of this ADR, that JSON is additive and lossless with respect to YAML, has no executable evidence yet. The registry already names `scenario_cross_format` as a planned scenario ID.",
+          "owner_bead": "asupersync-5z2scg.5.3",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CFG-GAP-04",
+          "summary": "The accepted YAML subset has never been specified. Anchor, alias, merge-key, tag, numeric, Unicode, and duplicate-key behavior are whatever serde_yaml 0.9 does over the corpus.",
+          "consequence": "No owned parser can be shown to preserve the capability until the accepted subset is pinned from evidence.",
+          "owner_bead": "asupersync-5z2scg.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CFG-GAP-05",
+          "summary": "There is no checked-in example TOML configuration file and no doctested TOML journey. The two rustdoc examples on `from_toml` and `from_toml_str` are in ```ignore``` fences, and the documented path `config/runtime.toml` does not exist in the repo.",
+          "consequence": "The operator-facing TOML journey is documented but never executed, so it can rot silently.",
+          "owner_bead": "asupersync-5z2scg.4.5",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CFG-GAP-06",
+          "summary": "`src/fs_config_metamorphic_tests.rs` provides TOML round-trip and canonical-form metamorphic coverage, but it operates on a local mock config struct rather than on `RuntimeTomlConfig`, and the module is gated behind `legacy-internal-test-harnesses`.",
+          "consequence": "That coverage may not be cited as evidence for the real configuration types.",
+          "owner_bead": "asupersync-5z2scg.4.3",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Secrets in configuration are redacted in diagnostics and never echoed into errors or logs.",
+        "Configuration cannot grant ambient file or network authority; unknown security-relevant fields fail closed.",
+        "The explicit secure read and write variants in the ATP config surface keep their stricter path handling.",
+        "Scenario include paths stay bounded by extension, length, and character-set validation, and untrusted scenario documents remain bounded in size, nesting, and collection count.",
+        "No scenario or configuration format may introduce implicit code execution."
+      ],
+      "cancellation_invariants": [
+        "Configuration load is atomic with respect to the builder: a partially parsed document never yields a half-configured runtime.",
+        "A failed or partial migration never replaces the operator's source file.",
+        "Scenario cancellation still runs teardown, and replay stays deterministic across formats."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "Configuration parsing is platform-neutral; the registry scopes CAP-CONFIG-TOML-JSON and CAP-SCENARIO-YAML-JSON to all supported platforms."
+        },
+        {
+          "target_family": "native",
+          "support": "supported",
+          "note": "The CLI and daemon TOML surfaces and the scenario CLI are native-only, because the `cli` feature is native-only."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "asupersync::runtime::RuntimeBuilder::from_toml",
+          "asupersync::runtime::RuntimeBuilder::from_toml_str",
+          "asupersync::lab::scenario::Scenario as a serde-derived type usable with any serde format"
+        ],
+        "accepted_providers": "Any serde-compatible data format can deserialize `Scenario`, because the type carries only serde derives and no format-specific code. That genericity is itself a preserved property.",
+        "pinned_crate_versions": {
+          "toml": "1.0 (optional, enabled by config-file and dependency-ledger)",
+          "serde_yaml": "0.9 (optional, enabled only by cli)",
+          "serde_json": "1.0 (non-optional)"
+        },
+        "no_reexport_note": "Neither `toml` nor `serde_yaml` appears in any library public signature. The only serde-format leakage into public API is `serde_json::Error` on `Scenario::from_json` / `to_json` and `serde_json::Value` in `FaultEvent.args`, `Participant.properties`, and the runner's `to_json` methods.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "`RuntimeConfig` is the typed target and contains no format code, so the parse layer is already separable from the runtime seam.",
+        "removal_precondition": "For TOML: an owned parser must accept the full current grammar with equal-or-better spans and diagnostics, and preserve write round-trips, proved against the real config corpus and both CLI and daemon journeys. For YAML: the accepted subset must first be pinned from the live corpus by asupersync-5z2scg.5.1, then matched exactly. Until both hold: KEEP.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "CLI-users",
+        "atpd-users",
+        "consumer-portfolio",
+        "frankenlab",
+        "scenario-authors"
+      ],
+      "user_journeys": [
+        {
+          "id": "cfg-journey-runtime-toml",
+          "description": "Operator writes a partial `[scheduler]` / `[blocking]` TOML file, loads it with `RuntimeBuilder::from_toml`, layers environment overrides, and finishes with programmatic setters, relying on file < env < programmatic precedence."
+        },
+        {
+          "id": "cfg-journey-atp-layered-config",
+          "description": "ATP operator keeps layered install and daemon configuration across standard paths, inspects where each value came from via source attribution and explain-resolution, and saves changes back to TOML."
+        },
+        {
+          "id": "cfg-journey-raptorq-profile",
+          "description": "Consumer loads a RaptorQ profile through `ConfigLoader` with `RAPTORQ_` environment overrides, using the ungated owned parser and no optional features at all."
+        },
+        {
+          "id": "scn-journey-author-and-validate",
+          "description": "Scenario author writes YAML, runs `lab validate`, then `lab run`, and reads a located list of validation errors when the document is wrong."
+        },
+        {
+          "id": "scn-journey-explore-and-replay",
+          "description": "Author explores seeds and replays a failing scenario deterministically, getting the same fingerprint for the same seed."
+        },
+        {
+          "id": "scn-journey-json-tooling",
+          "description": "Tooling consumes `--json` output and round-trips a `Scenario` through JSON without touching YAML."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. Every frozen symbol lives under `asupersync::runtime`, `asupersync::cli`, `asupersync::config`, or `asupersync::lab`, not at the crate root, and the capability registry pins `api_surface_map_v1.json` by semantic hash. Note that the map's `config-reexports` selector points at the INI-style `config::` module rather than the real TOML surface; that mismatch is recorded as CFG-GAP-01 and belongs to the registry owner, not to this ADR."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 3 item 3.4",
+          "stale_text": "Config formats: TOML to versioned-JSON migration decision; YAML scenario migration rules",
+          "resolution": "Framed as a migration decision. The terminal decision is additive coexistence: TOML and YAML acceptance is retained indefinitely, JSON is added alongside, and no migration away from either is authorized."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "JSON support is added beside TOML and YAML. No accepted document that loads today may stop loading, and no field may become mandatory.",
+        "coexistence": "TOML for configuration and YAML for scenarios remain first-class accepted inputs indefinitely. Canonical JSON may become the preferred machine-generated output without demoting either.",
+        "sequencing": "The accepted YAML subset (asupersync-5z2scg.5.1) and the config baseline corpus (asupersync-5z2scg.4.1) must exist before any parser replacement is even evaluable. Cross-format equivalence evidence gates the additive JSON claim.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_004_config_scenario_formats.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any previously accepted TOML or YAML document that stops loading, any coarsened diagnostic, any precedence reordering, any lost comment or value on config write-back, any change in scenario replay fingerprints, or any narrowing of include-path or size bounds.",
+        "action": "Revert to the frozen surface recorded here. Because the decision is additive coexistence, rollback removes the additive JSON path rather than restoring a deleted format.",
+        "verification": "Re-run the focused ADR contract plus the six scenario IDs owned by the two capabilities, and re-validate the full scenario corpus."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-5z2scg.4.1",
+        "unit_test_owner": "asupersync-5z2scg.4.3",
+        "e2e_owner": "asupersync-5z2scg.4.5",
+        "scenario_ids": [
+          "config_toml_json_roundtrip",
+          "config_precedence",
+          "atpd_config_user",
+          "lab_scenario_yaml",
+          "scenario_cross_format",
+          "scenario_replay"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario config_formats",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "unit: happy path, empty document, partial document, maximum nesting and size, malformed syntax, wrong types, unknown fields, and duplicate keys for both TOML and YAML",
+          "unit: precedence across file, environment, and programmatic layers, including the file-path variant of from_toml that CFG-GAP-02 says is currently untested",
+          "property: TOML and YAML and JSON round-trip idempotence over generated configurations and scenarios",
+          "differential: cross-format equivalence proving YAML and JSON deserialize to the same Scenario, which is the gap CFG-GAP-03 names",
+          "fuzz: untrusted document parsing bounded in size, nesting, and collection count with no panic",
+          "corpus: every file in examples/scenarios, frankenlab/examples/scenarios, and tools/demos still validates, runs, and replays with unchanged fingerprints",
+          "sparse-feature: default, config-file, cli, and deterministic-mode build and test cells",
+          "downstream-consumer: frankenlab and a synthesized config consumer",
+          "real E2E: the CLI lab validate/run/replay/explore journey and the ATP layered-config operator journey, including write-back round-trip fidelity"
+        ],
+        "note": "Naming these owners does not assert they have run. The metamorphic coverage in src/fs_config_metamorphic_tests.rs may not be counted, per CFG-GAP-06, because it tests a mock struct behind a legacy harness feature."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "cutover_state": "KEEP_INCUMBENT",
+        "disposition": "KEEP_UNTIL_PARITY",
+        "primary_authorities": [
+          "asupersync-5z2scg.4",
+          "asupersync-5z2scg.5"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. `toml` and `serde_yaml` remain the incumbent parsers. Two separate implementation campaigns own the two capabilities, so both are named as primary authorities."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that JSON is in fact lossless with respect to the accepted TOML and YAML corpora, that the accepted YAML subset has been characterized, that config write-back preserves comments, that any owned parser could reach parity, that performance is unchanged, or that either parser dependency may be removed. It also does not certify the capability registry's source-owner rows, which CFG-GAP-01 records as incorrect for this capability."
     }
   ],
   "known_loss_fixtures": [
@@ -740,6 +1328,18 @@
       "adr_id": "DEP-ADR-003",
       "prohibited_text": "dependency exit allowed without parity evidence",
       "expected_error": "cutover authorization without evidence"
+    },
+    {
+      "fixture_id": "config-toml-acceptance-loss",
+      "adr_id": "DEP-ADR-004",
+      "prohibited_text": "accept JSON-only config",
+      "expected_error": "accepted format loss: TOML"
+    },
+    {
+      "fixture_id": "scenario-yaml-acceptance-loss",
+      "adr_id": "DEP-ADR-004",
+      "prohibited_text": "stop accepting YAML scenarios",
+      "expected_error": "accepted format loss: YAML scenarios"
     }
   ],
   "validation": {

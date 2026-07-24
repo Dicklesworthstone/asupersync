@@ -197,7 +197,7 @@ fn metadata_and_policy_are_fail_closed() {
         "allowed_decisions",
         "allowed_evidence_states",
         "allowed_cutover_states",
-        "allowed_signal_states",
+        "allowed_surface_states",
         "required_adr_fields",
     ] {
         assert!(
@@ -336,11 +336,18 @@ fn every_referenced_bead_is_live_in_the_tracker() {
             );
         }
         let cutover = adr.get("cutover").expect("cutover must be present");
-        let authority = text(cutover, "primary_authority");
+        let authorities = array(cutover, "primary_authorities");
         assert!(
-            live.contains(authority),
-            "{adr_id} cutover.primary_authority references a dead bead: {authority}"
+            !authorities.is_empty(),
+            "{adr_id} must name at least one primary implementation authority"
         );
+        for authority in authorities {
+            let authority = authority.as_str().expect("authority must be a string");
+            assert!(
+                live.contains(authority),
+                "{adr_id} cutover.primary_authorities references a dead bead: {authority}"
+            );
+        }
         for consumer in array(cutover, "secondary_compatibility_consumers") {
             let consumer = consumer.as_str().expect("consumer must be a string");
             assert!(
@@ -377,7 +384,7 @@ fn every_resolved_adr_row_is_complete() {
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    let allowed_signals: BTreeSet<&str> = array(&registry, "allowed_signal_states")
+    let allowed_surfaces: BTreeSet<&str> = array(&registry, "allowed_surface_states")
         .iter()
         .filter_map(Value::as_str)
         .collect();
@@ -412,10 +419,10 @@ fn every_resolved_adr_row_is_complete() {
             allowed_cutover.contains(text(cutover, "cutover_state")),
             "{adr_id} cutover.cutover_state is outside the allow-list"
         );
-        for signal in array(adr, "preserved_signals") {
+        for surface in array(adr, "preserved_surfaces") {
             assert!(
-                allowed_signals.contains(text(signal, "state")),
-                "{adr_id} signal state is outside the allow-list"
+                allowed_surfaces.contains(text(surface, "state")),
+                "{adr_id} surface state is outside the allow-list"
             );
         }
 
@@ -504,22 +511,32 @@ fn frozen_public_symbols_still_exist_in_source() {
             }
         }
 
-        // Every signal's public entry points must also still exist somewhere in
+        // Every surface's public entry points must also still exist somewhere in
         // the declared implementation file.
-        for signal in array(adr, "preserved_signals") {
-            let implementation = text(signal, "implementation");
+        for surface in array(adr, "preserved_surfaces") {
+            // A surface that does not exist yet cannot name entry points, and
+            // there is no source file to check it against.
+            if text(surface, "state") == "NOT_SHIPPED" {
+                assert!(
+                    array(surface, "public_entry_points").is_empty(),
+                    "{adr_id} surface {} is NOT_SHIPPED but claims public entry points",
+                    text(surface, "surface")
+                );
+                continue;
+            }
+            let implementation = text(surface, "implementation");
             let sources: Vec<String> = implementation
                 .split(" and ")
                 .map(|path| read_repo_file(path.trim()))
                 .collect();
-            for entry in array(signal, "public_entry_points") {
+            for entry in array(surface, "public_entry_points") {
                 let entry = entry.as_str().expect("entry point must be a string");
                 assert!(
                     sources
                         .iter()
                         .any(|source| contains_identifier(source, entry)),
-                    "{adr_id} signal {} froze entry point {entry}, missing from {implementation}",
-                    text(signal, "signal")
+                    "{adr_id} surface {} froze entry point {entry}, missing from {implementation}",
+                    text(surface, "surface")
                 );
             }
         }
