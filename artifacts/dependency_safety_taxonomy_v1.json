@@ -1,0 +1,785 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-safety-taxonomy-v1",
+  "bead_id": "asupersync-dep-p1-foundations-upksjk.1",
+  "program_id": "asupersync-ir2uf0",
+  "generated_from": {
+    "plan_path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+    "plan_revision": "Rev 3",
+    "plan_commit": "bf759eabc"
+  },
+  "policy_scope": {
+    "governs": [
+      "Prospective safety classification and approval evidence for first-party dependency replacements in the Dependency Sovereignty Program.",
+      "The minimum evidence a downstream implementation bead must cite before it can claim that a replacement is safety-eligible.",
+      "The fail-closed exception process for replacements that would introduce algorithmic unsafe."
+    ],
+    "does_not_govern": [
+      "Whether a replacement is worthwhile on marginal dependency cost, interoperability, performance, maintenance, or product grounds.",
+      "Existing unsafe code or existing rows in artifacts/unsafe_boundary_ledger_v1.json.",
+      "Third-party dependency safety in general or the safety of transitive dependency implementations.",
+      "Release readiness, broad workspace health, runtime correctness, or performance parity."
+    ],
+    "no_claim_boundary": "This taxonomy governs prospective dependency-replacement approvals only. It does not retroactively judge, revoke, certify, or reclassify existing ledgered unsafe boundaries. A matching class row is not proof that its evidence requirements or separate program gates have been satisfied."
+  },
+  "eligibility_states": {
+    "eligible": "The safety class permits implementation without an exception when the row and its separate program gates are satisfied.",
+    "eligible_with_required_evidence": "The safety class permits implementation only after every class evidence item is linked from the implementation bead.",
+    "prohibited": "The replacement must not be implemented or approved under the default policy.",
+    "exception_approved": "ALGORITHMIC-UNSAFE is permitted only when the complete exception record is present and explicit owner sign-off is linked."
+  },
+  "class_required_fields": [
+    "class_id",
+    "definition",
+    "default_eligibility",
+    "allowed_row_eligibility",
+    "unsafe_scope",
+    "required_evidence",
+    "review_rules",
+    "explicit_no_claims"
+  ],
+  "classes": [
+    {
+      "class_id": "SAFE-OWN",
+      "definition": "First-party replacement code that is clean under #![forbid(unsafe_code)] and does not rely on first-party unsafe helpers to implement the replacement.",
+      "default_eligibility": "eligible",
+      "allowed_row_eligibility": [
+        "eligible"
+      ],
+      "unsafe_scope": "No first-party unsafe code is permitted in the replacement surface.",
+      "required_evidence": [
+        "A source or crate-level forbid(unsafe_code) gate, or an equivalent contract test proving the complete replacement surface contains no first-party unsafe code.",
+        "Focused unit, differential, and end-to-end evidence required by the owning implementation bead.",
+        "UBS coverage for every owned file before approval.",
+        "A proof note that names the exact replacement surface and its separate program gates."
+      ],
+      "review_rules": [
+        "Do not weaken the class by hiding unsafe behind a new first-party helper or generated file.",
+        "Treat retained third-party dependencies and platform libraries as separate trust relationships rather than calling them first-party safe code.",
+        "Safety eligibility does not waive semantic parity, deterministic testing, marginal-cost, performance, or interoperability gates."
+      ],
+      "explicit_no_claims": [
+        "The absence of first-party unsafe does not prove functional correctness.",
+        "SAFE-OWN does not prove performance parity or justify removing the incumbent.",
+        "SAFE-OWN does not certify transitive dependencies as safe."
+      ]
+    },
+    {
+      "class_id": "BOUNDARY-UNSAFE",
+      "definition": "Narrow, ledgered unsafe at an OS/FFI or CPU-dispatch boundary, including syscall wrappers, target-feature dispatch shims, and process-environment mutation.",
+      "default_eligibility": "eligible_with_required_evidence",
+      "allowed_row_eligibility": [
+        "eligible_with_required_evidence"
+      ],
+      "unsafe_scope": "Only the smallest practical boundary item may contain unsafe code; item- or function-scoped #[allow(unsafe_code)] is required when practical.",
+      "required_evidence": [
+        "A written explanation of why a safe-Rust alternative is insufficient for this boundary.",
+        "The narrowest practical item- or function-scoped #[allow(unsafe_code)] around the unsafe operation.",
+        "A matching row in artifacts/unsafe_boundary_ledger_v1.json with an explicit safety invariant and no-claim boundary.",
+        "Category-specific evidence in docs/unsafe_boundary_ledger.md.",
+        "Miri coverage for executable unsafe behavior, or a documented toolchain or platform limitation plus an alternate focused proof.",
+        "UBS coverage for every owned boundary file.",
+        "A target-gated RCH proof note that states which hosts or architectures were not exercised."
+      ],
+      "review_rules": [
+        "The implementation bead must link every required evidence item; a category label alone is not approval.",
+        "Keep OS handles, raw pointers, target-feature assumptions, and ownership transfer inside the ledgered boundary.",
+        "Apply any separate measured-defect, portability, marginal-cost, security-review, or owner-signoff gate recorded on the classification row."
+      ],
+      "explicit_no_claims": [
+        "Passing the taxonomy contract does not execute or verify platform FFI.",
+        "Evidence from one host or architecture does not prove another host or architecture.",
+        "A ledger row is an inventory and review contract, not proof that unsafe code is correct."
+      ]
+    },
+    {
+      "class_id": "ALGORITHMIC-UNSAFE",
+      "definition": "Unsafe code that encodes an ownership, liveness, initialization, pinning, or weak-memory argument, including lock-free pointer tagging, MaybeUninit inline storage, futex parking protocols, and generated pin projection.",
+      "default_eligibility": "prohibited",
+      "allowed_row_eligibility": [
+        "prohibited",
+        "exception_approved"
+      ],
+      "unsafe_scope": "Prohibited for dependency replacements by default; no implementation work may start from a prohibited row.",
+      "required_evidence": [
+        "A complete algorithmic_unsafe_exception_process record is mandatory before eligibility can change to exception_approved.",
+        "Partial exception evidence fails closed and leaves the row prohibited."
+      ],
+      "review_rules": [
+        "Loom does not prove liveness or linearizability.",
+        "Miri does not model weak memory.",
+        "A 48-hour soak is not a proof.",
+        "Moving algorithmic unsafe from a mature, widely-fuzzed crate into fresh first-party code increases risk.",
+        "Prefer retaining the incumbent or benchmarking a SAFE-OWN alternative."
+      ],
+      "explicit_no_claims": [
+        "Loom, Miri, fuzzing, or soak evidence alone cannot approve an ALGORITHMIC-UNSAFE replacement.",
+        "A performance hypothesis is not a measured incumbent defect.",
+        "Taxonomy contract success does not grant an exception."
+      ]
+    }
+  ],
+  "algorithmic_unsafe_exception_process": {
+    "default_eligibility": "prohibited",
+    "partial_evidence_policy": "fail_closed",
+    "decision_record_required": true,
+    "required_fields": [
+      "measured_incumbent_performance_defect",
+      "safe_alternative_benchmark",
+      "safe_alternative_rejection_rationale",
+      "owner_signoff"
+    ],
+    "requirements": {
+      "measured_incumbent_performance_defect": "A reproducible benchmark or production trace must identify a concrete defect in the incumbent on the real Asupersync workload.",
+      "safe_alternative_benchmark": "At least one SAFE-OWN alternative must be implemented far enough to measure on the same workload and full gate axes.",
+      "safe_alternative_rejection_rationale": "The decision record must explain why the measured SAFE-OWN result is unacceptable and why no narrower safe design satisfies the requirement.",
+      "owner_signoff": "The repository owner must explicitly approve the named algorithmic-unsafe replacement after reviewing the defect and safe-alternative evidence."
+    },
+    "no_implicit_approval": [
+      "An open bead, prototype, benchmark plan, or taxonomy classification is not owner sign-off.",
+      "Evidence for a mature incumbent cannot be reused as evidence for fresh first-party unsafe code.",
+      "No field may be omitted, marked pending, or inferred from another field."
+    ]
+  },
+  "classification_required_fields": [
+    "candidate_id",
+    "incumbents",
+    "replacement_surface",
+    "program_phase",
+    "program_verdict",
+    "class_id",
+    "eligibility",
+    "unsafe_techniques",
+    "program_gates",
+    "exception_record",
+    "notes"
+  ],
+  "classifications": [
+    {
+      "candidate_id": "hex-codec",
+      "incumbents": [
+        "hex"
+      ],
+      "replacement_surface": "Scalar hexadecimal encode and decode helpers.",
+      "program_phase": "2",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Differential vectors against the retained incumbent.",
+        "Marginal-cost ledger baseline and after measurement."
+      ],
+      "exception_record": null,
+      "notes": "Triviality, not graph weight, is the replacement justification."
+    },
+    {
+      "candidate_id": "base64-codec",
+      "incumbents": [
+        "base64"
+      ],
+      "replacement_surface": "Scalar base64 engines for WebSocket, certificate pin, gRPC-Web, and NATS credential surfaces.",
+      "program_phase": "2",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Differential vectors for every accepted alphabet and padding policy.",
+        "Marginal-cost ledger baseline and after measurement."
+      ],
+      "exception_record": null,
+      "notes": "The replacement must not reintroduce an unsafe SIMD backend."
+    },
+    {
+      "candidate_id": "future-utilities",
+      "incumbents": [
+        "futures-lite"
+      ],
+      "replacement_surface": "Owned block_on, poll_fn, zip, race, and yield_now test and utility helpers.",
+      "program_phase": "2",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Differential behavior against futures-lite as a dev-only oracle.",
+        "No second production executor or orphan-task path."
+      ],
+      "exception_record": null,
+      "notes": "The implementation must preserve deterministic test behavior and structured concurrency."
+    },
+    {
+      "candidate_id": "token-slab",
+      "incumbents": [
+        "slab"
+      ],
+      "replacement_surface": "Generation-tagged in-tree TokenSlab family.",
+      "program_phase": "2",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "ABA and stale-token regression coverage.",
+        "Differential allocation and removal behavior."
+      ],
+      "exception_record": null,
+      "notes": "Generation tagging is required; an unsafe MaybeUninit slab would be a different class."
+    },
+    {
+      "candidate_id": "visibility-attribute",
+      "incumbents": [
+        "visibility"
+      ],
+      "replacement_surface": "Owned asupersync-macros visibility attribute.",
+      "program_phase": "2",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Compile-pass and compile-fail macro fixtures.",
+        "Expansion parity for every existing use shape."
+      ],
+      "exception_record": null,
+      "notes": "The attribute expansion may not emit unsafe code."
+    },
+    {
+      "candidate_id": "rfc3339-formatter",
+      "incumbents": [
+        "time"
+      ],
+      "replacement_surface": "Nanosecond timestamp to RFC3339 formatter.",
+      "program_phase": "2",
+      "program_verdict": "REMOVE_WITH_SAFE_OWN_FORMATTER",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Boundary, leap-year, and golden-format vectors.",
+        "Behavioral parity at the sole production call site."
+      ],
+      "exception_record": null,
+      "notes": "This row covers the owned formatter, not a general time library."
+    },
+    {
+      "candidate_id": "typed-symbol-bincode-codec",
+      "incumbents": [
+        "bincode-next"
+      ],
+      "replacement_surface": "Explicit purpose-built snapshot and trace schemas replacing public Bincode format variants.",
+      "program_phase": "3-to-5",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Phase-3 public API ADR approval.",
+        "Versioned golden and differential corpus.",
+        "Migration and compatibility policy for stored artifacts."
+      ],
+      "exception_record": null,
+      "notes": "Eligibility does not pre-approve the public API redesign."
+    },
+    {
+      "candidate_id": "typed-symbol-msgpack-codec",
+      "incumbents": [
+        "rmp-serde"
+      ],
+      "replacement_surface": "Explicit purpose-built typed-symbol, snapshot, and trace serialization replacing public MessagePack format variants.",
+      "program_phase": "3-to-5",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Phase-3 public API ADR approval.",
+        "Versioned golden and differential corpus.",
+        "Shared-file reservation coordination with the bincode surface."
+      ],
+      "exception_record": null,
+      "notes": "Bincode and MessagePack work share typed_symbol.rs and must not be executed as conflicting parallel edits."
+    },
+    {
+      "candidate_id": "config-schema-migration",
+      "incumbents": [
+        "toml",
+        "serde_yaml"
+      ],
+      "replacement_surface": "Owned versioned configuration schemas and migration logic over retained serde_json.",
+      "program_phase": "3-to-5",
+      "program_verdict": "REMOVE_MIGRATE",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Owner-approved TOML and YAML to versioned JSON migration ADR.",
+        "Data-preservation inventory, semantic goldens, and manual corpus review.",
+        "Explicit owner permission before deleting any legacy file."
+      ],
+      "exception_record": null,
+      "notes": "This row does not approve a home-grown TOML or YAML parser."
+    },
+    {
+      "candidate_id": "cli-parser",
+      "incumbents": [
+        "clap"
+      ],
+      "replacement_surface": "Owned parser for the complete documented Asupersync CLI contract.",
+      "program_phase": "3-to-5",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Phase-3 CLI API ADR approval.",
+        "OsString and invalid-UTF-8 coverage, help and error goldens, and exit-code parity.",
+        "Full capability inventory across every clap-consuming file."
+      ],
+      "exception_record": null,
+      "notes": "SAFE-OWN does not reduce the XL implementation scope or permit a partial parser."
+    },
+    {
+      "candidate_id": "regex-scanners",
+      "incumbents": [
+        "regex"
+      ],
+      "replacement_surface": "Fixed PII scanners and an owned subset matcher.",
+      "program_phase": "5",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Unsupported syntax fails closed.",
+        "Differential corpus covers every currently accepted pattern.",
+        "PII redaction must never silently degrade."
+      ],
+      "exception_record": null,
+      "notes": "The production mod-regex mock is not an acceptable replacement."
+    },
+    {
+      "candidate_id": "nkey-codec",
+      "incumbents": [
+        "nkeys"
+      ],
+      "replacement_surface": "NKey base32 no-pad, CRC-16/XMODEM, and prefix codec over retained ed25519-dalek.",
+      "program_phase": "4",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Security review before cutover.",
+        "NATS fixture and differential vectors against nkeys as a dev-only oracle.",
+        "Marginal-cost ledger baseline and after measurement."
+      ],
+      "exception_record": null,
+      "notes": "The codec replacement does not replace or reimplement ed25519-dalek."
+    },
+    {
+      "candidate_id": "proto-codec",
+      "incumbents": [
+        "prost"
+      ],
+      "replacement_surface": "Finite owned ProtoMessage types and protobuf wire codec.",
+      "program_phase": "3-to-5",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Phase-3 ProstCodec public API ADR approval.",
+        "Differential proptest coverage against prost as a dev-only oracle.",
+        "OTLP and gRPC golden vectors for the finite message inventory."
+      ],
+      "exception_record": null,
+      "notes": "The class does not approve retaining an arbitrary prost::Message public surface."
+    },
+    {
+      "candidate_id": "otlp-metrics",
+      "incumbents": [
+        "opentelemetry",
+        "opentelemetry_sdk"
+      ],
+      "replacement_surface": "Owned exporter traits and native OTLP export over the finite owned protobuf surface.",
+      "program_phase": "3-to-5",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Explicit ADR approval to remove external OpenTelemetry Meter and SDK interoperability.",
+        "Owned protobuf prerequisite complete.",
+        "Wire-format and collector interoperability evidence."
+      ],
+      "exception_record": null,
+      "notes": "Safety eligibility does not approve the interoperability reduction."
+    },
+    {
+      "candidate_id": "chrono-time",
+      "incumbents": [
+        "chrono"
+      ],
+      "replacement_surface": "Owned UtcTimestamp, RFC3339, and serde implementations.",
+      "program_phase": "5",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Complete call-site inventory.",
+        "Differential timestamp, range, and serialization vectors."
+      ],
+      "exception_record": null,
+      "notes": "The scope is the finite current timestamp surface, not a general calendar library."
+    },
+    {
+      "candidate_id": "parking-lot-wrapper",
+      "incumbents": [
+        "parking_lot",
+        "parking_lot_core",
+        "lock_api"
+      ],
+      "replacement_surface": "Owned sync/oslock.rs wrapper over std::sync Mutex, RwLock, and Condvar with owned guard types.",
+      "program_phase": "8",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Stable lane remains supported.",
+        "Full-axis performance gate across 1, 8, 32, and 64 cores.",
+        "Optional nightly nonpoison backend must remain SAFE-OWN and feature-gated.",
+        "Owner acceptance for every measured regression."
+      ],
+      "exception_record": null,
+      "notes": "A future raw futex or parking backend is not covered by this SAFE-OWN row and is classified separately as ALGORITHMIC-UNSAFE."
+    },
+    {
+      "candidate_id": "lz4-codec",
+      "incumbents": [
+        "lz4_flex"
+      ],
+      "replacement_surface": "Owned finite LZ4 block codec.",
+      "program_phase": "8",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Differential round-trip and malformed-input corpus.",
+        "Performance and compression-ratio gate."
+      ],
+      "exception_record": null,
+      "notes": "Any later SIMD acceleration must cite the separate simd-dispatch-boundary row."
+    },
+    {
+      "candidate_id": "deflate-codec",
+      "incumbents": [
+        "flate2",
+        "miniz_oxide"
+      ],
+      "replacement_surface": "Owned finite DEFLATE codec for the retained interoperability surface.",
+      "program_phase": "8",
+      "program_verdict": "OWN",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "unsafe_techniques": [],
+      "program_gates": [
+        "Format interoperability and malformed-input corpus.",
+        "Performance, ratio, and memory-use gate.",
+        "Explicit scope decision for compression capabilities."
+      ],
+      "exception_record": null,
+      "notes": "This stretch row remains SAFE-OWN; unsafe acceleration requires a different classification."
+    },
+    {
+      "candidate_id": "polling-reactor",
+      "incumbents": [
+        "polling"
+      ],
+      "replacement_surface": "Cross-platform reactor boundary covering epoll, kqueue, IOCP, wakeups, fd reuse, generation tokens, and registration races.",
+      "program_phase": "8",
+      "program_verdict": "KEEP_UNLESS_GATED",
+      "class_id": "BOUNDARY-UNSAFE",
+      "eligibility": "eligible_with_required_evidence",
+      "unsafe_techniques": [
+        "OS reactor FFI",
+        "raw descriptor and handle ownership"
+      ],
+      "program_gates": [
+        "Measured defect or suite-wide platform-boundary project.",
+        "Cross-platform conformance evidence.",
+        "Explicit owner sign-off."
+      ],
+      "exception_record": null,
+      "notes": "The current marginal cost is about one package; taxonomy eligibility is not a recommendation to replace polling."
+    },
+    {
+      "candidate_id": "socket-platform",
+      "incumbents": [
+        "socket2"
+      ],
+      "replacement_surface": "Cross-platform socket creation, SockAddr conversion, abstract Unix addresses, SockRef, keepalive, and option handling.",
+      "program_phase": "8",
+      "program_verdict": "KEEP_UNLESS_GATED",
+      "class_id": "BOUNDARY-UNSAFE",
+      "eligibility": "eligible_with_required_evidence",
+      "unsafe_techniques": [
+        "socket FFI",
+        "raw address and descriptor conversion"
+      ],
+      "program_gates": [
+        "Measured defect or suite-wide platform-boundary project.",
+        "Cross-platform socket conformance evidence.",
+        "Explicit owner sign-off."
+      ],
+      "exception_record": null,
+      "notes": "The current marginal cost is about one package; taxonomy eligibility is not a recommendation to replace socket2."
+    },
+    {
+      "candidate_id": "signal-platform",
+      "incumbents": [
+        "signal-hook"
+      ],
+      "replacement_surface": "Owned cross-platform signal registration and process-signal boundary.",
+      "program_phase": "8",
+      "program_verdict": "OWN_DEFERRED",
+      "class_id": "BOUNDARY-UNSAFE",
+      "eligibility": "eligible_with_required_evidence",
+      "unsafe_techniques": [
+        "sigaction and self-pipe FFI",
+        "process signal delivery"
+      ],
+      "program_gates": [
+        "Measured performance, maintenance, or idiom-unification justification.",
+        "Cross-platform process lifecycle evidence.",
+        "Explicit owner sign-off."
+      ],
+      "exception_record": null,
+      "notes": "signal-hook compiles no C in the current feature set; native-code removal is not a valid standalone claim."
+    },
+    {
+      "candidate_id": "host-introspection",
+      "incumbents": [
+        "sysinfo"
+      ],
+      "replacement_surface": "Owned host and process resource probes over procfs, sysctl, and Windows APIs.",
+      "program_phase": "8",
+      "program_verdict": "OWN_DEFERRED",
+      "class_id": "BOUNDARY-UNSAFE",
+      "eligibility": "eligible_with_required_evidence",
+      "unsafe_techniques": [
+        "platform resource FFI",
+        "kernel structure and buffer parsing"
+      ],
+      "program_gates": [
+        "Measured generality, performance, or maintenance defect.",
+        "Resource-monitor hot-path performance gate.",
+        "Cross-platform focused evidence and explicit owner sign-off."
+      ],
+      "exception_record": null,
+      "notes": "The signal kill path must be coordinated with signal-platform rather than duplicated."
+    },
+    {
+      "candidate_id": "extended-attributes",
+      "incumbents": [
+        "xattr"
+      ],
+      "replacement_surface": "Owned Unix extended-attribute boundary preserving dereference and no-dereference semantics plus macOS signatures.",
+      "program_phase": "8",
+      "program_verdict": "OWN_DEFERRED",
+      "class_id": "BOUNDARY-UNSAFE",
+      "eligibility": "eligible_with_required_evidence",
+      "unsafe_techniques": [
+        "raw libc xattr FFI",
+        "platform-specific buffer sizing"
+      ],
+      "program_gates": [
+        "Final-rustix-parent trigger or a broader platform-boundary project.",
+        "Per-platform xattr round-trip evidence.",
+        "Explicit owner sign-off."
+      ],
+      "exception_record": null,
+      "notes": "Adding unsafe solely to remove one small pure-Rust crate is not approved by this row."
+    },
+    {
+      "candidate_id": "x509-residual-parser",
+      "incumbents": [
+        "x509-parser"
+      ],
+      "replacement_surface": "Strict DER residue for SPKI extraction and SAN access that cannot be delegated to rustls or webpki.",
+      "program_phase": "8",
+      "program_verdict": "OWN_DEFERRED",
+      "class_id": "BOUNDARY-UNSAFE",
+      "eligibility": "eligible_with_required_evidence",
+      "unsafe_techniques": [
+        "security-sensitive byte parsing boundary"
+      ],
+      "program_gates": [
+        "Delegate-to-webpki inventory complete.",
+        "Differential fuzz corpus and independent security review.",
+        "Full-input consumption, DER canonicality, depth, duplicate-extension, and fail-closed ambiguity proofs.",
+        "Explicit owner sign-off."
+      ],
+      "exception_record": null,
+      "notes": "This row never approves first-party certificate chain validation, name constraints, wildcards, or path building."
+    },
+    {
+      "candidate_id": "simd-dispatch-boundary",
+      "incumbents": [],
+      "replacement_surface": "Target-feature dispatch shims for an otherwise safe owned codec or numerical kernel.",
+      "program_phase": "implementation-specific",
+      "program_verdict": "EVIDENCE_GATED",
+      "class_id": "BOUNDARY-UNSAFE",
+      "eligibility": "eligible_with_required_evidence",
+      "unsafe_techniques": [
+        "target_feature intrinsics",
+        "architecture-specific dispatch"
+      ],
+      "program_gates": [
+        "Safe scalar implementation exists and remains the parity oracle.",
+        "Architecture-specific benchmark demonstrates the need for unsafe acceleration.",
+        "Codegen and target-feature gate review."
+      ],
+      "exception_record": null,
+      "notes": "The boundary class applies only to dispatch and intrinsics, not to unsafe ownership or initialization tricks inside the kernel."
+    },
+    {
+      "candidate_id": "lock-free-queue",
+      "incumbents": [
+        "crossbeam-queue"
+      ],
+      "replacement_surface": "First-party lock-free queue using pointer tagging, epoch ownership, or manual reclamation.",
+      "program_phase": "8",
+      "program_verdict": "KEEP",
+      "class_id": "ALGORITHMIC-UNSAFE",
+      "eligibility": "prohibited",
+      "unsafe_techniques": [
+        "lock-free pointer ownership",
+        "weak-memory linearization",
+        "manual reclamation"
+      ],
+      "program_gates": [
+        "Benchmark a SAFE-OWN mutex-backed alternative first.",
+        "Retain the incumbent unless the complete exception process is approved."
+      ],
+      "exception_record": null,
+      "notes": "The incumbent's mature, widely-fuzzed algorithmic unsafe is part of its value."
+    },
+    {
+      "candidate_id": "inline-storage",
+      "incumbents": [
+        "smallvec"
+      ],
+      "replacement_surface": "First-party inline storage using MaybeUninit or manual drop and initialization tracking.",
+      "program_phase": "8",
+      "program_verdict": "KEEP",
+      "class_id": "ALGORITHMIC-UNSAFE",
+      "eligibility": "prohibited",
+      "unsafe_techniques": [
+        "MaybeUninit initialization tracking",
+        "manual move and drop invariants"
+      ],
+      "program_gates": [
+        "Retain smallvec under the default policy.",
+        "Do not treat a future nonzero marginal as safety approval."
+      ],
+      "exception_record": null,
+      "notes": "Marginal dependency savings cannot change the safety class."
+    },
+    {
+      "candidate_id": "pin-projection",
+      "incumbents": [
+        "pin-project"
+      ],
+      "replacement_surface": "Generated first-party pin-projection machinery.",
+      "program_phase": "deferred",
+      "program_verdict": "KEEP",
+      "class_id": "ALGORITHMIC-UNSAFE",
+      "eligibility": "prohibited",
+      "unsafe_techniques": [
+        "pinning invariants",
+        "conditional Unpin",
+        "PinnedDrop and repr(packed) soundness"
+      ],
+      "program_gates": [
+        "Retain pin-project under the default policy.",
+        "A suite-wide macro consolidation still requires the complete exception process."
+      ],
+      "exception_record": null,
+      "notes": "The small marginal reduction does not justify fresh soundness-critical macro code."
+    },
+    {
+      "candidate_id": "raw-lock-parking-protocol",
+      "incumbents": [
+        "parking_lot"
+      ],
+      "replacement_surface": "First-party futex, WaitOnAddress, or os_unfair_lock parking protocol behind sync/oslock.rs.",
+      "program_phase": "future-follow-up-only",
+      "program_verdict": "PROHIBITED_BY_DEFAULT",
+      "class_id": "ALGORITHMIC-UNSAFE",
+      "eligibility": "prohibited",
+      "unsafe_techniques": [
+        "futex parking protocol",
+        "waiter ownership and wake liveness",
+        "weak-memory synchronization"
+      ],
+      "program_gates": [
+        "The SAFE-OWN std::sync wrapper must be implemented and benchmarked first.",
+        "Retain the safe backend unless the complete exception process is approved."
+      ],
+      "exception_record": null,
+      "notes": "The optional nightly nonpoison backend in parking-lot-wrapper is not this raw-lock fallback and must remain safe."
+    }
+  ],
+  "citation_contract": {
+    "required_fields": [
+      "taxonomy_artifact",
+      "candidate_id",
+      "class_id",
+      "eligibility",
+      "evidence_refs",
+      "explicit_no_claims"
+    ],
+    "artifact_path": "artifacts/dependency_safety_taxonomy_v1.json",
+    "example": {
+      "taxonomy_artifact": "artifacts/dependency_safety_taxonomy_v1.json",
+      "candidate_id": "hex-codec",
+      "class_id": "SAFE-OWN",
+      "eligibility": "eligible",
+      "evidence_refs": [
+        "tests/example_hex_differential.rs",
+        "bead-comment-with-rch-result"
+      ],
+      "explicit_no_claims": [
+        "This citation does not prove marginal dependency savings or broad workspace health."
+      ]
+    }
+  },
+  "validation": {
+    "scenario_id": "dependency_safety_taxonomy_contract_v1",
+    "seed_or_fixture": "artifacts/dependency_safety_taxonomy_v1.json",
+    "contract_test": "tests/dependency_safety_taxonomy_contract.rs",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_safety_taxonomy\" cargo test -p asupersync --test dependency_safety_taxonomy_contract -- --nocapture",
+    "artifact_path": "artifacts/dependency_safety_taxonomy_v1.json",
+    "expected_outcome": "pass"
+  },
+  "summary": {
+    "class_count": 3,
+    "classification_count": 29,
+    "classification_counts_by_class": {
+      "SAFE-OWN": 18,
+      "BOUNDARY-UNSAFE": 7,
+      "ALGORITHMIC-UNSAFE": 4
+    },
+    "classification_counts_by_eligibility": {
+      "eligible": 18,
+      "eligible_with_required_evidence": 7,
+      "prohibited": 4,
+      "exception_approved": 0
+    }
+  }
+}
