@@ -256,7 +256,9 @@ pub use slo_policy::{
     SloRuntimePolicyBridgeRequest, SloRuntimeWorkKind,
 };
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
-pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
+pub use state::{
+    ManualFinalizerReceipt, ManualFinalizerReceiptError, RuntimeSnapshot, RuntimeState, SpawnError,
+};
 pub use state_verifier::{
     ObligationStateTransitions, RegionStateTransitions, StateEntityType, StateTransitionVerifier,
     StateVerifierConfig, StateVerifierStatsSnapshot, StateViolation,

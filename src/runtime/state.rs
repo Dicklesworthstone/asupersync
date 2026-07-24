@@ -294,6 +294,70 @@ pub enum FinalizerHistoryEvent {
     },
 }
 
+/// One-shot accounting token for a finalizer handed to an external driver.
+///
+/// The driver must execute or otherwise retire the associated [`Finalizer`],
+/// then pass this receipt to
+/// [`RuntimeState::complete_manual_finalizer`] or
+/// [`RuntimeState::abandon_manual_finalizer`]. Dropping an unsettled receipt is
+/// fail-closed: the owning region remains in `Finalizing`, and no lower
+/// finalizer can be handed out.
+#[derive(Debug)]
+#[must_use = "an externally driven finalizer must be completed or abandoned"]
+pub struct ManualFinalizerReceipt {
+    runtime_instance_id: u64,
+    region_id: RegionId,
+    finalizer_id: u64,
+    settled: bool,
+}
+
+impl ManualFinalizerReceipt {
+    /// Returns the region that owns the externally driven finalizer.
+    #[must_use]
+    pub const fn region_id(&self) -> RegionId {
+        self.region_id
+    }
+
+    /// Returns the runtime-local identifier of the externally driven finalizer.
+    #[must_use]
+    pub const fn finalizer_id(&self) -> u64 {
+        self.finalizer_id
+    }
+
+    /// Returns whether this receipt has already been completed or abandoned.
+    #[must_use]
+    pub const fn is_settled(&self) -> bool {
+        self.settled
+    }
+}
+
+/// Failure returned while settling a [`ManualFinalizerReceipt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualFinalizerReceiptError {
+    /// The receipt was already completed or abandoned.
+    AlreadySettled,
+    /// The receipt belongs to a different [`RuntimeState`] instance.
+    WrongRuntime,
+    /// The receipt no longer names the region's active manual finalizer.
+    NotActive,
+}
+
+impl fmt::Display for ManualFinalizerReceiptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadySettled => f.write_str("manual finalizer receipt is already settled"),
+            Self::WrongRuntime => {
+                f.write_str("manual finalizer receipt belongs to a different runtime")
+            }
+            Self::NotActive => {
+                f.write_str("manual finalizer receipt is not the active receipt for its region")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManualFinalizerReceiptError {}
+
 /// Auditable events proving that losing race participants are drained.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoserDrainHistoryEvent {
@@ -1414,6 +1478,12 @@ pub struct RuntimeState {
     /// finalizer task may be active for a region at a time, and lower LIFO
     /// finalizers must wait until it completes.
     active_async_finalizers: HashMap<RegionId, TaskId>,
+    /// Regions whose top finalizer is currently owned by an external driver.
+    ///
+    /// The runtime-local finalizer id is the one-shot receipt identity. A
+    /// region remains here until the driver explicitly completes or abandons
+    /// the receipt; dropping the receipt therefore fails closed.
+    active_manual_finalizers: HashMap<RegionId, u64>,
     /// Append-only finalizer lifecycle history for post-run oracle hydration.
     finalizer_history: Vec<FinalizerHistoryEvent>,
     /// Append-only loser-drain evidence for post-run oracle hydration.
@@ -1512,6 +1582,10 @@ impl std::fmt::Debug for RuntimeState {
                 "active_async_finalizers",
                 &self.active_async_finalizers.len(),
             )
+            .field(
+                "active_manual_finalizers",
+                &self.active_manual_finalizers.len(),
+            )
             .field("finalizer_history_len", &self.finalizer_history.len())
             .field(
                 "loser_drain_history_len",
@@ -1586,6 +1660,7 @@ impl RuntimeState {
             pending_finalizer_ids: HashMap::new(),
             async_finalizer_tasks: HashMap::new(),
             active_async_finalizers: HashMap::new(),
+            active_manual_finalizers: HashMap::new(),
             finalizer_history: Vec::new(),
             loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
@@ -5079,7 +5154,9 @@ impl RuntimeState {
         let mut regions_to_process = SmallVec::<[RegionId; 8]>::new();
 
         for &region_id in &self.finalizing_regions {
-            if self.active_async_finalizers.contains_key(&region_id) {
+            if self.active_async_finalizers.contains_key(&region_id)
+                || self.active_manual_finalizers.contains_key(&region_id)
+            {
                 continue;
             }
             if let Some(region) = self.regions.get(region_id.arena_index()) {
@@ -5144,7 +5221,9 @@ impl RuntimeState {
         {
             return false;
         }
-        if self.active_async_finalizers.contains_key(&region_id) {
+        if self.active_async_finalizers.contains_key(&region_id)
+            || self.active_manual_finalizers.contains_key(&region_id)
+        {
             return false;
         }
         let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(region_id) else {
@@ -5317,6 +5396,11 @@ impl RuntimeState {
             "br-asupersync-mg70eb: async finalizer barrier violation - region already has active async finalizer \
              (region={:?})",
             region_id
+        );
+        debug_assert!(
+            !self.active_manual_finalizers.contains_key(&region_id),
+            "async finalizer scheduled while an external driver owns the region barrier \
+             (region={region_id:?})"
         );
 
         let deadline = self
@@ -5543,6 +5627,10 @@ impl RuntimeState {
     }
 
     fn record_finalizer_close(&mut self, region: RegionId) {
+        debug_assert!(
+            !self.active_manual_finalizers.contains_key(&region),
+            "region closed with an unsettled manual finalizer receipt: {region:?}"
+        );
         let now = self.current_runtime_time();
         self.pending_finalizer_ids.remove(&region);
         self.finalizer_history
@@ -5622,10 +5710,19 @@ impl RuntimeState {
     /// handler to run. Finalizers are returned in LIFO order.
     ///
     /// # Returns
-    /// The next finalizer to run, or `None` if all finalizers have been executed.
-    pub fn pop_region_finalizer(&mut self, region_id: RegionId) -> Option<Finalizer> {
-        self.pop_tracked_finalizer(region_id)
-            .map(|(_, finalizer)| finalizer)
+    /// The next finalizer and its one-shot completion receipt, or `None` if the
+    /// stack is empty or another manual finalizer is still active.
+    pub fn pop_region_finalizer(
+        &mut self,
+        region_id: RegionId,
+    ) -> Option<(Finalizer, ManualFinalizerReceipt)> {
+        if self.active_manual_finalizers.contains_key(&region_id)
+            || self.active_async_finalizers.contains_key(&region_id)
+        {
+            return None;
+        }
+        let (finalizer_id, finalizer) = self.pop_tracked_finalizer(region_id)?;
+        Some(self.handoff_manual_finalizer(region_id, finalizer_id, finalizer))
     }
 
     /// Returns the number of pending finalizers for a region.
@@ -5647,15 +5744,102 @@ impl RuntimeState {
     /// Runs synchronous finalizers for a region until an async finalizer is encountered or the stack is empty.
     ///
     /// This method pops and executes sync finalizers in LIFO order.
-    /// If an async finalizer is encountered, it is returned immediately (and not executed).
-    /// The caller must schedule/await the async finalizer before calling this method again
-    /// to process remaining finalizers.
+    /// If an async finalizer is encountered, it and a one-shot receipt are
+    /// returned immediately. The caller must await the finalizer and settle the
+    /// receipt before calling this method again to process lower finalizers.
     ///
     /// # Returns
-    /// An async finalizer that needs to be scheduled, or `None` if the stack is empty.
-    pub fn run_sync_finalizers(&mut self, region_id: RegionId) -> Option<Finalizer> {
-        self.run_sync_finalizers_tracked(region_id)
-            .map(|(_, finalizer)| finalizer)
+    /// An async finalizer and its receipt, or `None` if the stack is empty or a
+    /// previous manual receipt is still active.
+    pub fn run_sync_finalizers(
+        &mut self,
+        region_id: RegionId,
+    ) -> Option<(Finalizer, ManualFinalizerReceipt)> {
+        if self.active_manual_finalizers.contains_key(&region_id)
+            || self.active_async_finalizers.contains_key(&region_id)
+        {
+            return None;
+        }
+        let (finalizer_id, finalizer) = self.run_sync_finalizers_tracked(region_id)?;
+        Some(self.handoff_manual_finalizer(region_id, finalizer_id, finalizer))
+    }
+
+    fn handoff_manual_finalizer(
+        &mut self,
+        region_id: RegionId,
+        finalizer_id: u64,
+        finalizer: Finalizer,
+    ) -> (Finalizer, ManualFinalizerReceipt) {
+        self.validate_live_region_protocol_transition(
+            region_id,
+            RegionEvent::FinalizerStarted,
+            "manual finalizer handoff",
+        );
+        let previous = self
+            .active_manual_finalizers
+            .insert(region_id, finalizer_id);
+        debug_assert!(
+            previous.is_none(),
+            "region {region_id:?} already had an active manual finalizer receipt: {previous:?}"
+        );
+        (
+            finalizer,
+            ManualFinalizerReceipt {
+                runtime_instance_id: self.instance_id,
+                region_id,
+                finalizer_id,
+                settled: false,
+            },
+        )
+    }
+
+    /// Records successful retirement of an externally driven finalizer.
+    ///
+    /// The receipt is one-shot. A second settlement attempt returns
+    /// [`ManualFinalizerReceiptError::AlreadySettled`] without emitting a
+    /// duplicate completion event.
+    pub fn complete_manual_finalizer(
+        &mut self,
+        receipt: &mut ManualFinalizerReceipt,
+    ) -> Result<(), ManualFinalizerReceiptError> {
+        self.settle_manual_finalizer(receipt, false)
+    }
+
+    /// Abandons an externally driven finalizer and releases its close barrier.
+    ///
+    /// Abandonment records a cancelled close outcome before terminal finalizer
+    /// accounting. It does not claim that the callback completed successfully.
+    pub fn abandon_manual_finalizer(
+        &mut self,
+        receipt: &mut ManualFinalizerReceipt,
+    ) -> Result<(), ManualFinalizerReceiptError> {
+        self.settle_manual_finalizer(receipt, true)
+    }
+
+    fn settle_manual_finalizer(
+        &mut self,
+        receipt: &mut ManualFinalizerReceipt,
+        abandoned: bool,
+    ) -> Result<(), ManualFinalizerReceiptError> {
+        if receipt.settled {
+            return Err(ManualFinalizerReceiptError::AlreadySettled);
+        }
+        if receipt.runtime_instance_id != self.instance_id {
+            return Err(ManualFinalizerReceiptError::WrongRuntime);
+        }
+        if self.active_manual_finalizers.get(&receipt.region_id) != Some(&receipt.finalizer_id) {
+            return Err(ManualFinalizerReceiptError::NotActive);
+        }
+
+        if abandoned && let Some(region) = self.regions.get(receipt.region_id.arena_index()) {
+            region.record_close_outcome(Outcome::Cancelled(CancelReason::user(
+                "manual finalizer abandoned",
+            )));
+        }
+        self.record_finalizer_run(receipt.region_id, receipt.finalizer_id);
+        self.active_manual_finalizers.remove(&receipt.region_id);
+        receipt.settled = true;
+        Ok(())
     }
 
     fn take_next_finalizer_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
@@ -5722,11 +5906,11 @@ impl RuntimeState {
                     {
                         // Log but continue — a panicking finalizer must not
                         // block region close or skip sibling finalizers.
+                        let message = payload_to_string(&payload);
+                        std::mem::forget(payload);
                         if let Some(region) = self.regions.get(region_id.arena_index()) {
                             region.record_close_outcome(Outcome::Panicked(
-                                crate::types::outcome::PanicPayload::new(payload_to_string(
-                                    &payload,
-                                )),
+                                crate::types::outcome::PanicPayload::new(message),
                             ));
                         }
                     }
@@ -5843,6 +6027,13 @@ impl RuntimeState {
         // (oracles, debug introspection) see the same readiness
         // verdict the state machine itself does.
         if self.active_async_finalizers.contains_key(&region_id) {
+            return false;
+        }
+
+        // An external driver owns the top LIFO finalizer until it explicitly
+        // completes or abandons the one-shot receipt. A dropped receipt keeps
+        // this barrier active so close cannot silently skip cleanup.
+        if self.active_manual_finalizers.contains_key(&region_id) {
             return false;
         }
 
@@ -5999,7 +6190,9 @@ impl RuntimeState {
                     }
                 }
                 crate::record::region::RegionState::Finalizing => {
-                    if self.active_async_finalizers.contains_key(&region_id) {
+                    if self.active_async_finalizers.contains_key(&region_id)
+                        || self.active_manual_finalizers.contains_key(&region_id)
+                    {
                         break;
                     }
 
@@ -11305,10 +11498,13 @@ mod tests {
         }
 
         // Pop and execute in LIFO order
-        while let Some(finalizer) = state.pop_region_finalizer(region) {
+        while let Some((finalizer, mut receipt)) = state.pop_region_finalizer(region) {
             if let Finalizer::Sync(f) = finalizer {
                 f();
             }
+            state
+                .complete_manual_finalizer(&mut receipt)
+                .expect("manual finalizer receipt should complete");
         }
 
         // Should be 3, 2, 1 (LIFO)
@@ -11348,7 +11544,9 @@ mod tests {
         }
 
         // First pass: runs the top Sync(empty), stops at Async
-        let async_finalizer = state.run_sync_finalizers(region);
+        let (async_finalizer, mut receipt) = state
+            .run_sync_finalizers(region)
+            .expect("async finalizer should be handed off");
 
         // The first sync finalizer (bottom of stack) should NOT have run yet due to async barrier
         let sync_flag = sync_called.load(std::sync::atomic::Ordering::SeqCst);
@@ -11359,15 +11557,24 @@ mod tests {
             sync_flag
         );
 
-        // One async finalizer should be returned
-        crate::assert_with_log!(
-            async_finalizer.is_some(),
-            "async finalizer returned",
-            true,
-            async_finalizer.is_some()
-        );
-        let is_async = matches!(async_finalizer, Some(Finalizer::Async(_)));
+        let is_async = matches!(async_finalizer, Finalizer::Async(_));
         crate::assert_with_log!(is_async, "is async", true, is_async);
+
+        // The active receipt is a barrier: lower LIFO finalizers cannot run.
+        let blocked = state.run_sync_finalizers(region);
+        crate::assert_with_log!(
+            blocked.is_none(),
+            "manual receipt blocks lower finalizers",
+            true,
+            blocked.is_none()
+        );
+
+        if let Finalizer::Async(future) = async_finalizer {
+            futures_lite::future::block_on(future);
+        }
+        state
+            .complete_manual_finalizer(&mut receipt)
+            .expect("async receipt should complete");
 
         // Second pass: runs the remaining Sync(flag=true)
         let remaining = state.run_sync_finalizers(region);
@@ -11386,6 +11593,134 @@ mod tests {
         let empty = state.region_finalizers_empty(region);
         crate::assert_with_log!(empty, "finalizers cleared", true, empty);
         crate::test_complete!("run_sync_finalizers_executes_and_returns_async");
+    }
+
+    #[test]
+    fn manual_finalizer_receipt_rejects_wrong_runtime_and_duplicate_completion() {
+        init_test("manual_finalizer_receipt_rejects_wrong_runtime_and_duplicate_completion");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        state.register_sync_finalizer(region, || {});
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
+        let (finalizer, mut receipt) = state
+            .pop_region_finalizer(region)
+            .expect("manual sync finalizer should be handed off");
+        let Finalizer::Sync(finalizer) = finalizer else {
+            panic!("registered sync finalizer changed kind");
+        };
+        finalizer();
+
+        let mut other_state = RuntimeState::new();
+        assert_eq!(
+            other_state.complete_manual_finalizer(&mut receipt),
+            Err(ManualFinalizerReceiptError::WrongRuntime)
+        );
+        assert!(
+            !state.can_region_complete_close(region),
+            "wrong-runtime settlement must leave the owning close barrier active"
+        );
+
+        state
+            .complete_manual_finalizer(&mut receipt)
+            .expect("owning runtime should accept completion");
+        assert!(receipt.is_settled());
+        assert_eq!(
+            state.complete_manual_finalizer(&mut receipt),
+            Err(ManualFinalizerReceiptError::AlreadySettled)
+        );
+        assert_eq!(
+            state
+                .finalizer_history
+                .iter()
+                .filter(|event| matches!(event, FinalizerHistoryEvent::Ran { .. }))
+                .count(),
+            1,
+            "duplicate settlement must not emit a second completion"
+        );
+        assert!(state.can_region_complete_close(region));
+        crate::test_complete!(
+            "manual_finalizer_receipt_rejects_wrong_runtime_and_duplicate_completion"
+        );
+    }
+
+    #[test]
+    fn manual_finalizer_receipt_drop_fails_closed() {
+        init_test("manual_finalizer_receipt_drop_fails_closed");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        state.register_sync_finalizer(region, || {});
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
+        {
+            let (finalizer, _receipt) = state
+                .pop_region_finalizer(region)
+                .expect("manual finalizer should be handed off");
+            let Finalizer::Sync(finalizer) = finalizer else {
+                panic!("registered sync finalizer changed kind");
+            };
+            finalizer();
+        }
+
+        assert!(
+            !state.can_region_complete_close(region),
+            "dropping an unsettled receipt must block region close"
+        );
+        assert!(
+            state.pop_region_finalizer(region).is_none(),
+            "dropping the receipt must also preserve the LIFO barrier"
+        );
+        assert!(
+            state
+                .finalizer_history
+                .iter()
+                .all(|event| !matches!(event, FinalizerHistoryEvent::Ran { .. })),
+            "an unsettled receipt must not forge completion history"
+        );
+        crate::test_complete!("manual_finalizer_receipt_drop_fails_closed");
+    }
+
+    #[test]
+    fn manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled() {
+        init_test("manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        state.register_sync_finalizer(region, || {});
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
+        let (_finalizer, mut receipt) = state
+            .pop_region_finalizer(region)
+            .expect("manual finalizer should be handed off");
+        state
+            .abandon_manual_finalizer(&mut receipt)
+            .expect("explicit abandonment should settle the receipt");
+
+        assert!(receipt.is_settled());
+        assert!(state.can_region_complete_close(region));
+        assert!(
+            matches!(
+                state.region_close_outcome(region),
+                Some(Outcome::Cancelled(_))
+            ),
+            "abandonment must leave a non-success close outcome"
+        );
+        assert_eq!(
+            state.abandon_manual_finalizer(&mut receipt),
+            Err(ManualFinalizerReceiptError::AlreadySettled)
+        );
+        crate::test_complete!("manual_finalizer_receipt_abandonment_releases_barrier_as_cancelled");
     }
 
     #[test]

@@ -20,7 +20,9 @@ use asupersync::plan::fixtures::all_fixtures;
 use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::record::task::{TaskPhase, TaskState};
 use asupersync::record::{Finalizer, ObligationKind, ObligationState};
-use asupersync::runtime::{JoinError, RuntimeState, TaskHandle, yield_now};
+use asupersync::runtime::{
+    JoinError, ManualFinalizerReceiptError, RuntimeState, TaskHandle, yield_now,
+};
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind, trace_fingerprint};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
@@ -311,12 +313,7 @@ fn e2e_finalizer_lifo_async_masked_execution() {
         region_record.begin_finalize();
     }
 
-    let mut finalizers = Vec::new();
-    while let Some(finalizer) = state.pop_region_finalizer(region) {
-        finalizers.push(finalizer);
-    }
-
-    for finalizer in finalizers {
+    while let Some((finalizer, mut receipt)) = state.pop_region_finalizer(region) {
         match finalizer {
             Finalizer::Sync(f) => f(),
             Finalizer::Async(fut) => {
@@ -324,6 +321,9 @@ fn e2e_finalizer_lifo_async_masked_execution() {
                 cx_mask.masked(|| future::block_on(fut));
             }
         }
+        state
+            .complete_manual_finalizer(&mut receipt)
+            .expect("externally driven finalizer receipt should complete");
     }
 
     let order = order.lock().clone();
@@ -343,6 +343,103 @@ fn e2e_finalizer_lifo_async_masked_execution() {
     );
 
     test_complete!("e2e_finalizer_lifo_async_masked_execution");
+}
+
+#[test]
+fn e2e_manual_finalizer_receipts_are_one_shot_and_fail_closed() {
+    init_test("e2e_manual_finalizer_receipts_are_one_shot_and_fail_closed");
+
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    state.register_sync_finalizer(region, || {});
+    {
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+    }
+
+    let (finalizer, mut receipt) = state
+        .pop_region_finalizer(region)
+        .expect("manual sync finalizer should be handed off");
+    let Finalizer::Sync(finalizer) = finalizer else {
+        panic!("registered sync finalizer changed kind");
+    };
+    finalizer();
+
+    let mut other_state = RuntimeState::new();
+    assert_eq!(
+        other_state.complete_manual_finalizer(&mut receipt),
+        Err(ManualFinalizerReceiptError::WrongRuntime)
+    );
+    assert!(
+        !state.can_region_complete_close(region),
+        "wrong-runtime settlement must preserve the close barrier"
+    );
+    state
+        .complete_manual_finalizer(&mut receipt)
+        .expect("owning runtime should accept completion");
+    assert_eq!(
+        state.complete_manual_finalizer(&mut receipt),
+        Err(ManualFinalizerReceiptError::AlreadySettled)
+    );
+    assert!(state.can_region_complete_close(region));
+
+    let mut dropped_state = RuntimeState::new();
+    let dropped_region = dropped_state.create_root_region(Budget::INFINITE);
+    dropped_state.register_sync_finalizer(dropped_region, || {});
+    {
+        let region_record = dropped_state
+            .regions
+            .get(dropped_region.arena_index())
+            .expect("region");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+    }
+    {
+        let (finalizer, _receipt) = dropped_state
+            .pop_region_finalizer(dropped_region)
+            .expect("manual finalizer should be handed off");
+        let Finalizer::Sync(finalizer) = finalizer else {
+            panic!("registered sync finalizer changed kind");
+        };
+        finalizer();
+    }
+    assert!(
+        !dropped_state.can_region_complete_close(dropped_region),
+        "dropping an unsettled receipt must fail closed"
+    );
+    assert!(
+        dropped_state.pop_region_finalizer(dropped_region).is_none(),
+        "a dropped receipt must preserve the LIFO barrier"
+    );
+
+    let mut abandoned_state = RuntimeState::new();
+    let abandoned_region = abandoned_state.create_root_region(Budget::INFINITE);
+    abandoned_state.register_async_finalizer(abandoned_region, async {});
+    {
+        let region_record = abandoned_state
+            .regions
+            .get(abandoned_region.arena_index())
+            .expect("region");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+    }
+    let (_finalizer, mut abandoned_receipt) = abandoned_state
+        .pop_region_finalizer(abandoned_region)
+        .expect("manual async finalizer should be handed off");
+    abandoned_state
+        .abandon_manual_finalizer(&mut abandoned_receipt)
+        .expect("explicit abandonment should settle the receipt");
+    assert!(abandoned_state.can_region_complete_close(abandoned_region));
+    assert!(
+        matches!(
+            abandoned_state.region_close_outcome(abandoned_region),
+            Some(Outcome::Cancelled(_))
+        ),
+        "abandonment must preserve a non-success close outcome"
+    );
+
+    test_complete!("e2e_manual_finalizer_receipts_are_one_shot_and_fail_closed");
 }
 
 // ============================================================================
