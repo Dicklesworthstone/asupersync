@@ -119,7 +119,7 @@
       "adr_id": "DEP-ADR-006",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.6",
       "title": "Preserve Brotli RFC 7932 capability; KEEP incumbent until a full owned parity campaign passes",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-007",
@@ -131,7 +131,7 @@
       "adr_id": "DEP-ADR-008",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.8",
       "title": "Preserve full futures-lite production semantics, public Stream usability, and test executor workflows",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-009",
@@ -3218,6 +3218,996 @@
       },
       "doc_path": "docs/adr/dep_plan_adr_005_cli_contract.md",
       "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the recorded command vocabulary is exhaustive, that help or error text is stable, that non-UTF-8 argv is handled correctly, that exit codes behave as documented on any binary other than asupersync, that an owned parser could reach parity, or that clap may be removed. It also does not certify the capability registry's CAP-CLI source-owner rows, environment-variable list, hidden-command names or feature claims, which CLI-GAP-01, -02, -04, -05 and -09 record as incorrect or incomplete."
+    },
+    {
+      "adr_id": "DEP-ADR-006",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.6",
+      "title": "Preserve Brotli RFC 7932 capability; KEEP incumbent until a full owned parity campaign passes",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-HTTP-COMPRESSION"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "The focused pure-Rust brotli dependency stays, alongside flate2. The owner directive was already resolved in favour of KEEP before this ADR, and nothing in the source read argues against it. What the read adds is the precise scope a future parity campaign would have to match, and two corrections. First, the real codec lives entirely in src/http/compress.rs, which holds every brotli and flate2 call, the encoding enum, the negotiation algorithm, and the bomb-bound enforcement; the registry names src/web/compress.rs instead, whose only brotli references are inside its test module. Second, src/net/atp/compress/ looks like a second Brotli implementation with adapters and an engine, but it is orphaned: no module declares it, nothing references it, and one of its functions would not even compile on a default build because it imports flate2 without a feature gate. Anyone estimating the replacement from a naive grep would double-count a directory that has never compiled.",
+      "alternatives_considered": [
+        {
+          "option": "Remove Brotli and support only gzip and deflate.",
+          "rejected_because": "Brotli is a live public capability in three places: HTTP Accept-Encoding negotiation, the public BrotliCompressor and BrotliDecompressor types, and the ATP manifest compression algorithm. It is also the default first preference in both compression middlewares. Removal reduces interoperability with every browser that advertises br, and the capability registry's no-claim boundary states outright that DEFLATE parity does not cover Brotli."
+        },
+        {
+          "option": "Write an owned RFC 7932 encoder and decoder now.",
+          "rejected_because": "Only as a separate security-sensitive codec epic. The scope is an encoder and decoder, quality and window settings, streaming flush and finalization, output limits, interoperability with multiple producers and consumers, both HTTP and ATP behavior, a malformed and bomb corpus, and performance and maintenance cost. Compression codecs are a classic source of memory-safety and resource-exhaustion bugs, which is why this cannot ride along with unrelated dependency work."
+        },
+        {
+          "option": "Treat Brotli as cleanup that rides along with the DEFLATE campaign.",
+          "rejected_because": "This is the specific failure mode the bead exists to prevent. The two codecs share a module and a feature flag but not a risk profile or an evidence corpus. Bundling them would let a DEFLATE parity result be read as authorising a Brotli removal."
+        },
+        {
+          "option": "Reuse the CompressionEngine and BrotliAdapter under src/net/atp/compress/ as the basis for an owned implementation.",
+          "rejected_because": "That code is orphaned and has never compiled. No module declares it, nothing outside the directory references its types, and its gzip path imports flate2 with no feature gate, which would be a hard error on a default build. It is not a partial implementation and must not be counted as one."
+        },
+        {
+          "option": "Make the compression feature default-on to simplify the matrix.",
+          "rejected_because": "Out of scope and a graph-size change in the wrong direction. The feature is correctly opt-in, and the identity path plus negotiation work without it."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::http::compress",
+          "feature_gate": null,
+          "source_file": "src/http/compress.rs",
+          "symbols": [
+            "ContentEncoding",
+            "Identity",
+            "Gzip",
+            "Deflate",
+            "Brotli",
+            "from_token",
+            "as_token",
+            "negotiate_encoding",
+            "Compressor",
+            "Decompressor",
+            "IdentityCompressor",
+            "IdentityDecompressor",
+            "make_compressor",
+            "make_compressor_with_output_limit",
+            "content_encoding_from_headers",
+            "accept_encoding_from_headers",
+            "DEFAULT_MAX_COMPRESSED_SIZE"
+          ],
+          "note": "The ungated half: the encoding vocabulary, the negotiation algorithm, the codec traits and the factory all exist without the compression feature. The factory returns None for the three real codings when the feature is off, so a build without it still negotiates and still serves identity."
+        },
+        {
+          "module_path": "asupersync::http::compress",
+          "feature_gate": "compression",
+          "source_file": "src/http/compress.rs",
+          "symbols": [
+            "BrotliCompressor",
+            "BrotliDecompressor",
+            "GzipCompressor",
+            "GzipDecompressor",
+            "DeflateCompressor",
+            "DeflateDecompressor",
+            "with_params",
+            "with_params_and_output_limit",
+            "with_output_limit",
+            "with_level",
+            "with_level_and_output_limit"
+          ],
+          "note": "The real codecs and the only place brotli and flate2 are called. This file is absent from the capability registry's source_owners, which is CMP-GAP-01."
+        },
+        {
+          "module_path": "asupersync::web::compress",
+          "feature_gate": null,
+          "source_file": "src/web/compress.rs",
+          "symbols": [
+            "CompressionPolicy",
+            "CompressionMiddleware",
+            "gzip_only",
+            "with_min_body_size",
+            "with_max_compressed_size",
+            "allow_sensitive_response_compression"
+          ],
+          "note": "The policy-bearing middleware. It owns the BREACH sensitivity guard and the only path that returns 406 when nothing acceptable can be produced. Its production code contains no brotli or flate2 reference; it delegates to http::compress."
+        },
+        {
+          "module_path": "asupersync::web::middleware",
+          "feature_gate": null,
+          "source_file": "src/web/middleware.rs",
+          "symbols": [
+            "CompressionConfig",
+            "CompressionLayer"
+          ],
+          "note": "A second, parallel compression middleware whose type name collides with the one in web::compress. It has no BREACH guard and no 406 path; it falls back to an uncompressed body. Both are public and both are frozen, because a consumer may be using either."
+        },
+        {
+          "module_path": "asupersync::atp::manifest",
+          "feature_gate": null,
+          "source_file": "src/atp/manifest.rs",
+          "symbols": [
+            "CompressionAlgorithm",
+            "compressed_len_for_policy"
+          ],
+          "note": "The ATP manifest capability the plan cites as a reason to keep brotli. Its Brotli branch is feature-gated with an explicit None stub when compression is off."
+        },
+        {
+          "module_path": "asupersync::grpc::codec",
+          "feature_gate": "compression",
+          "source_file": "src/grpc/codec.rs",
+          "symbols": [
+            "gzip_frame_compress",
+            "gzip_frame_decompress",
+            "with_gzip_frame_codec"
+          ],
+          "note": "gRPC frame compression, gzip only. Frozen because it shares the compression feature flag, so a feature change reaches it too."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "compression",
+          "cargo_definition": "compression = [\"dep:flate2\", \"dep:brotli\"]",
+          "effect": "Enables the gzip, deflate and Brotli codecs in http::compress, the Brotli branch of the ATP manifest, and the gRPC gzip frame codec. Opt-in; not in the default feature set.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Both codecs are pure Rust with no tokio edge."
+        },
+        {
+          "name": "brotli",
+          "cargo_definition": "brotli = { version = \"8.0\", optional = true }",
+          "effect": "The RFC 7932 encoder and decoder. Used through CompressorWriter and DecompressorWriter with a fixed internal buffer, default quality 5 and window 22.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Pure Rust, no tokio edge. No brotli type appears in any public signature."
+        },
+        {
+          "name": "flate2",
+          "cargo_definition": "flate2 = { version = \"1.1\", optional = true }",
+          "effect": "gzip and deflate via the pure-Rust miniz_oxide backend. Unlike brotli, flate2::Compression DOES appear in public signatures on the level-setting constructors, so flate2 is a public type dependency and not only an implementation detail.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Pure Rust, no tokio edge."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "content_negotiation",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/http/compress.rs",
+          "wire_encoder": "not applicable",
+          "transport": "Accept-Encoding and Content-Encoding headers",
+          "public_entry_points": [
+            "negotiate_encoding",
+            "ContentEncoding",
+            "from_token",
+            "accept_encoding_from_headers"
+          ],
+          "note": "Entirely owned and dependency-free, so it survives any codec replacement. Implements the RFC 9110 identity rules, accepts the x-gzip alias, and breaks quality ties by server preference order."
+        },
+        {
+          "surface": "brotli_codec",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "compression",
+          "implementation": "src/http/compress.rs",
+          "wire_encoder": "brotli 8.0, RFC 7932",
+          "transport": "HTTP response bodies and ATP manifests",
+          "public_entry_points": [
+            "BrotliCompressor",
+            "BrotliDecompressor",
+            "with_params"
+          ],
+          "note": "The capability this ADR exists to protect. Streaming chunk-at-a-time with explicit finish, poisoning on error, and quality and window exposed as plain integers rather than crate types."
+        },
+        {
+          "surface": "gzip_deflate_codecs",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "compression",
+          "implementation": "src/http/compress.rs",
+          "wire_encoder": "flate2 1.1 over miniz_oxide",
+          "transport": "HTTP response bodies, gRPC frames, ATP storage",
+          "public_entry_points": [
+            "GzipCompressor",
+            "DeflateCompressor",
+            "GzipDecompressor",
+            "DeflateDecompressor"
+          ],
+          "note": "Separate campaign from Brotli. Note the level constructors take flate2::Compression, so a flate2 replacement is a public API change while a brotli replacement is not."
+        },
+        {
+          "surface": "bomb_bounds",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "compression",
+          "implementation": "src/http/compress.rs",
+          "wire_encoder": "not applicable",
+          "transport": "not applicable",
+          "public_entry_points": [
+            "DEFAULT_MAX_COMPRESSED_SIZE",
+            "with_output_limit"
+          ],
+          "note": "Owned and codec-independent. The limiting writer refuses a write that would exceed the budget before extending the buffer, so a decompression bomb never allocates. Every codec wraps it, in both directions."
+        },
+        {
+          "surface": "breach_sensitivity_policy",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/web/compress.rs",
+          "wire_encoder": "not applicable",
+          "transport": "HTTP",
+          "public_entry_points": [
+            "CompressionPolicy",
+            "allow_sensitive_response_compression"
+          ],
+          "note": "Skips compression for responses correlated with secrets, keyed on request cookie or authorization or CSRF headers, a set-cookie response header, or a private or no-store or no-cache cache-control. Present in only one of the two middlewares."
+        },
+        {
+          "surface": "orphaned_atp_compression_engine",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "src/net/atp/compress/ contains an engine, an algorithm registry and a Brotli adapter, but no module declares the directory and nothing references its types, so it never compiles. Its gzip function imports flate2 without a feature gate, which confirms it is not built. Recorded so it is neither counted as an implementation nor as replacement scope."
+        },
+        {
+          "surface": "zstd_support",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "There is no zstd dependency and no zstd encoding. The token is deliberately used in tests as the canonical unknown coding. Recorded so the four supported codings are not mistaken for an open set."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "HTTP content coding, plus ATP manifest compression",
+        "encoding": "identity, gzip including the x-gzip alias, deflate as zlib-wrapped RFC 1951, and Brotli RFC 7932",
+        "content_type": "not applicable",
+        "grpc_supported": true,
+        "signal_paths_note": "Successful compression removes content-length, sets content-encoding, and merges rather than replaces the Vary header. Responses with 204 or 304, or an already-set content-encoding, are skipped, as is output that is not smaller than the input.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "When a header is present and nothing acceptable can be produced, the policy-bearing middleware returns 406 with an explicit body. The parallel middleware instead returns the body uncompressed. Both behaviors are frozen.",
+        "retry_jitter": "not applicable",
+        "collector_interop": "Browsers and intermediaries advertising br must continue to receive Brotli.",
+        "negotiation_rules": "Quality values accept both lower and upper case q, out-of-range or non-finite values drop the entry, a missing q defaults to one, identity defaults to one unless explicitly scored or suppressed by a zero wildcard, and a non-zero wildcard does not lower the identity default. Ties break by server preference order.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "supported_encoding_order",
+          "surface": "CompressionPolicy and CompressionConfig defaults",
+          "contract": "Both default to Brotli, then gzip, then deflate, then identity. Because ties break by server preference, this ordering is the observable default behavior and may not be reordered silently."
+        },
+        {
+          "name": "minimum_body_size",
+          "surface": "CompressionPolicy and CompressionConfig",
+          "contract": "Defaults to 256 bytes; smaller bodies are not compressed."
+        },
+        {
+          "name": "output_size_limit",
+          "surface": "DEFAULT_MAX_COMPRESSED_SIZE and the with_output_limit constructors",
+          "contract": "Defaults to 16 MiB. None means unlimited and must remain expressible. The limit applies to both compression and decompression."
+        },
+        {
+          "name": "brotli_parameters",
+          "surface": "BrotliCompressor::with_params",
+          "contract": "Quality and window are plain integers with documented defaults of quality 5 and window 22. Exposing them as integers rather than crate types is what keeps brotli out of the public API."
+        },
+        {
+          "name": "codec_poisoning",
+          "surface": "the decompressors",
+          "contract": "After any error a decompressor is poisoned: its buffer is cleared and every later call returns the same explicit error. A poisoned codec must never resume and appear to succeed."
+        },
+        {
+          "name": "error_type",
+          "surface": "the Compressor and Decompressor traits",
+          "contract": "All failures are std::io::Error. Limit violations use InvalidData with a distinct message for compressed versus decompressed overflow. No brotli type appears in any public signature."
+        },
+        {
+          "name": "sensitivity_default",
+          "surface": "CompressionPolicy",
+          "contract": "Sensitive responses are not compressed by default; enabling it is an explicit opt-in."
+        },
+        {
+          "name": "feature_off_behavior",
+          "surface": "make_compressor",
+          "contract": "Without the compression feature the factory returns None for the three real codings while negotiation and identity keep working. Building without the feature must never fail to serve."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "CMP-GAP-01",
+          "summary": "The capability registry names src/web/compress.rs and Cargo.toml as source owners. The real codec file, src/http/compress.rs, holds every brotli and flate2 call plus the encoding enum, the negotiation algorithm, the codec traits and the bomb bounds, and is absent. The named file's only brotli references are inside its test module, so its production code contains no dependency-level compression code at all.",
+          "consequence": "A baseline or inventory built from that row would read a middleware that merely delegates, and would miss the entire implementation. src/web/middleware.rs, src/atp/manifest.rs and src/grpc/codec.rs are also unnamed.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CMP-GAP-02",
+          "summary": "src/net/atp/compress/ contains a compression engine, an algorithm registry and a Brotli adapter, but the directory is declared by no module and referenced by nothing. Its gzip function imports flate2 with no feature gate, which would be a hard compile error on a default build if it were live.",
+          "consequence": "It looks like a second Brotli implementation. Anyone scoping a replacement from a grep would double-count roughly four files of code that has never compiled.",
+          "owner_bead": "asupersync-0h6myr.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CMP-GAP-03",
+          "summary": "The registry's baseline command names a web_compression scenario, but no compression scenario is registered in the e2e runner and the fixture is still marked planned.",
+          "consequence": "The named baseline command does not currently exercise compression at all, so citing it as evidence would be citing a command that does nothing for this capability.",
+          "owner_bead": "asupersync-0h6myr.5.7",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CMP-GAP-04",
+          "summary": "Two public types named CompressionMiddleware exist, one in web::compress and one in web::middleware, with different behavior. Only the former has the BREACH sensitivity guard and the 406 path; the latter silently returns an uncompressed body.",
+          "consequence": "A consumer can pick the weaker one by accident, and a security property present in one is absent in the other. Both are frozen here because both are public, but the divergence is a real defect.",
+          "owner_bead": "asupersync-0h6myr.5.6",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CMP-GAP-05",
+          "summary": "flate2::Compression appears in public signatures on the gzip and deflate level constructors, whereas brotli exposes no crate type anywhere.",
+          "consequence": "The two codecs have asymmetric replacement cost. Replacing flate2 is a breaking public API change; replacing brotli is not. Any combined estimate that treats them alike is wrong.",
+          "owner_bead": "asupersync-0h6myr.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CMP-GAP-06",
+          "summary": "There is no Brotli-specific fuzz target. Brotli is fuzzed only inside the shared HTTP decompression target.",
+          "consequence": "For a security-sensitive codec whose replacement would be a new attack surface, dedicated malformed and bomb corpora are a precondition rather than a refinement.",
+          "owner_bead": "asupersync-0h6myr.5.6",
+          "may_widen": false
+        },
+        {
+          "gap_id": "CMP-GAP-07",
+          "summary": "The capability registry records evidence as planned while the capability baseline artifact records the same capability as executable and complete.",
+          "consequence": "Two governance artifacts disagree about whether a baseline exists. The same disagreement affects CAP-FUTURES-STREAMS, so it is a systemic artifact-consistency problem rather than a one-off.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.2",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Compression bombs are bounded by construction: the limiting writer refuses an oversized write before extending its buffer, in both directions.",
+        "The sensitive-body policy is preserved, so responses correlated with secrets are not compressed by default.",
+        "A codec poisoned by an earlier error never resumes and never presents partial output as complete.",
+        "Brotli remains supported, so no peer advertising br is silently downgraded.",
+        "No unsafe algorithmic shortcut is introduced in any codec path."
+      ],
+      "cancellation_invariants": [
+        "A cancelled body releases codec state rather than leaking an encoder.",
+        "A truncated stream is never presented as a complete body; finish is explicit and separate from chunked writes.",
+        "Streaming backpressure is preserved because codecs operate chunk-at-a-time rather than buffering whole bodies."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "Both codecs are pure Rust with no platform-specific paths and no C dependency."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "HTTP clients and browsers advertising br, gzip, deflate or identity",
+          "asupersync::http::compress codec types for direct use",
+          "the two public compression middlewares",
+          "ATP manifests carrying a Brotli compression algorithm"
+        ],
+        "accepted_providers": "Any HTTP peer implementing RFC 7932 Brotli, RFC 1952 gzip or RFC 1951 deflate.",
+        "pinned_crate_versions": {
+          "brotli": "8.0 (optional, enabled by compression)",
+          "flate2": "1.1 (optional, enabled by compression; also an unconditional dev-dependency)"
+        },
+        "no_reexport_note": "Neither codec crate is re-exported. brotli leaks no type into the public API at all. flate2::Compression does appear in the level-setting constructors, which is the one asymmetry between them.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "Negotiation, the codec traits, the size bounds and the sensitivity policy are all owned and codec-independent, so they survive a replacement unchanged.",
+        "removal_precondition": "A separate security-sensitive codec epic must inventory the RFC 7932 encoder and decoder scope, quality and window settings, streaming flush and finalization, output limits, interoperability with multiple independent producers and consumers, both HTTP and ATP behavior, a malformed and bomb corpus, and performance and maintenance cost. Every capability row must be same or better and real interoperability E2E must pass. Until then production continues on the incumbent.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "HTTP-users",
+        "browser-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "cmp-journey-browser-brotli",
+          "description": "A browser sends Accept-Encoding including br and receives a Brotli-encoded response with the correct Content-Encoding and a merged Vary header."
+        },
+        {
+          "id": "cmp-journey-quality-preference",
+          "description": "A client expresses quality preferences and the server honours them, falling back to server preference order only on a tie."
+        },
+        {
+          "id": "cmp-journey-identity-only",
+          "description": "A client that accepts nothing compressible still receives a correct identity response, and a client that explicitly rejects identity receives 406 from the policy-bearing middleware."
+        },
+        {
+          "id": "cmp-journey-bomb-defence",
+          "description": "A malicious peer sends a compression bomb and the decompressor refuses before allocating, returning a distinct size-limit error and poisoning the codec."
+        },
+        {
+          "id": "cmp-journey-sensitive-response",
+          "description": "A response correlated with a session cookie or an authorization header is not compressed by default, mitigating BREACH-style oracles."
+        },
+        {
+          "id": "cmp-journey-atp-manifest",
+          "description": "An ATP manifest records Brotli as its compression algorithm and the compressed length is computed for the policy."
+        },
+        {
+          "id": "cmp-journey-feature-off",
+          "description": "A consumer builds without the compression feature, still negotiates encodings, and still serves identity responses without failure."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The compression surface lives under asupersync::http::compress, asupersync::web and asupersync::atp rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, brotli row",
+          "stale_text": "DECISION REQUIRED ... Owner must either keep the pure-Rust dep or explicitly approve capability removal ... Until then: KEEP",
+          "resolution": "The decision is made: KEEP_UNTIL_PARITY. Capability removal is not an option, and an owned replacement may only proceed as a separate security-sensitive codec epic."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 3 item 3.6",
+          "stale_text": "Brotli: keep vs. approved capability removal (HTTP + ATP manifest impact documented)",
+          "resolution": "Resolved as keep. The HTTP and ATP impact is documented here, and the removal branch is closed."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "New codings may be added. No supported coding, negotiation rule, size bound, sensitivity rule or public codec type may be removed or narrowed.",
+        "coexistence": "brotli and flate2 remain the incumbents. An owned codec, if ever built, must sit behind the existing Compressor and Decompressor traits and be validated against the incumbent before replacing it.",
+        "sequencing": "The Brotli campaign is explicitly separate from the DEFLATE campaign. A DEFLATE parity result confers nothing about Brotli.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_006_brotli_compression.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any dropped coding, any negotiation behavior change, any weakened size bound or sensitivity rule, any lost poisoning behavior, any codec crate type appearing in a public signature, or any peer advertising br that stops receiving Brotli.",
+        "action": "Revert to the incumbent codecs and the frozen surface. Because the decision is KEEP, rollback means abandoning the replacement attempt.",
+        "verification": "Re-run the focused ADR contract, the compression conformance suite, the Brotli round-trip and bomb tests, and the HTTP compression E2E."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-0h6myr.5.1",
+        "unit_test_owner": "asupersync-0h6myr.5.6",
+        "e2e_owner": "asupersync-0h6myr.5.7",
+        "scenario_ids": [
+          "web_compression",
+          "compression_cross_implementation",
+          "compression_cancel_bomb"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario web_compression",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "unit: Accept-Encoding grammar including quality values, wildcards, the identity default rules and the x-gzip alias",
+          "unit: round-trip for every coding, empty input, chunk boundaries, double finish idempotence and poisoning after error",
+          "unit: size-limit enforcement in both directions, verified to refuse before allocation",
+          "differential: encoder output validated against an independent reference implementation for each coding",
+          "interop: real cross-implementation exchange with at least one independent Brotli producer and one consumer",
+          "fuzz: a dedicated Brotli malformed and bomb corpus, which CMP-GAP-06 records as currently absent",
+          "policy: BREACH sensitivity behavior and the 406 path, on both public middlewares",
+          "sparse-feature: builds and tests with and without the compression feature",
+          "E2E: HTTP negotiation end to end plus an ATP manifest carrying Brotli"
+        ],
+        "note": "Naming these owners does not assert they have run. CMP-GAP-03 records that the named baseline command does not currently exercise a compression scenario, and the orphaned ATP compression directory may not be counted as implementation or as coverage."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-HTTP-COMPRESSION",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-0h6myr.5"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. brotli and flate2 remain production dependencies of the compression feature. The Brotli campaign is separate from the DEFLATE campaign and neither result transfers to the other."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_006_brotli_compression.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the codecs are byte-compatible with any reference implementation, that cross-implementation interoperability has been demonstrated, that the bomb bounds have been fuzzed adequately, that an owned RFC 7932 codec is feasible, that performance is unchanged, or that either codec dependency may be removed. It also does not certify the capability registry's source-owner row, which CMP-GAP-01 records as incorrect for this capability."
+    },
+    {
+      "adr_id": "DEP-ADR-008",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.8",
+      "title": "Preserve full futures-lite production semantics, public Stream usability, and test executor workflows",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-FUTURES-STREAMS"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "futures-lite stays. The classification the bead demands turns a scary number into a precise one: of roughly 796 references across 148 files under src, essentially all sit inside test modules. The production set is six sites in five files. But the shape of those six is what decides this. Exactly one is a public trait impl: AtpWriter and AtpReader implement futures_lite::Stream, which is downstream-visible and semver-relevant, and is the only impl of that foreign trait anywhere in the crate. Two are the FutureExt panic-containment boundary in the web layer. Three are the executor itself, block_on, one of them inside the body of the public non-async Router::handle and two driving signal-listener threads. The plan classifies this as a Phase-2 low-risk leaf removal over disjoint files with a util/future.rs shim; that is wrong on every count. The file set is roughly 272 including tests, not disjoint, and the proposed shim covers five helpers while missing poll_once, join_all, pending, FutureExt::catch_unwind and Stream entirely.",
+      "alternatives_considered": [
+        {
+          "option": "Move the helpers to an owned util/future.rs and drop futures-lite, per the plan's Phase-2 entry.",
+          "rejected_because": "The shim list is incomplete and the framing is wrong. It names block_on, poll_fn, zip, race and yield_now, but production and tests also use poll_once, join_all and pending, and neither FutureExt::catch_unwind nor the Stream trait is a free function that a helper module can provide. The work also touches roughly 272 files rather than a disjoint few, which contradicts the phase's own parallelism premise."
+        },
+        {
+          "option": "Port AtpWriter and AtpReader to the crate's own Stream trait, removing the last public futures-lite surface.",
+          "rejected_because": "Attractive and probably correct eventually, but it is a breaking change for any downstream already calling futures_lite::StreamExt methods on those types, and it currently has zero test coverage to protect it. It is recorded as the specific, bounded step that would remove all public leakage, and it belongs to the implementation campaign with downstream-consumer evidence attached."
+        },
+        {
+          "option": "Keep futures-lite only as a dev-dependency for tests.",
+          "rejected_because": "Impossible as things stand. There is no dev-dependency entry today; the single unconditional entry in dependencies is what makes futures-lite visible to both src and tests. Demoting it would break the six production sites, including the public Stream impls and the executor inside Router::handle."
+        },
+        {
+          "option": "Replace the executor uses of block_on with the asupersync runtime.",
+          "rejected_because": "The three production block_on sites are precisely where that is hardest. Router::handle is a public, documented, synchronous entry point whose whole async execution is block_on, and the two signal-listener sites run on dedicated std threads outside any runtime. Changing them alters reentrancy and nested-runtime behavior, which is exactly the contract the bead asks this ADR to define rather than to change."
+        },
+        {
+          "option": "Treat the roughly 149 non-test-file count as the migration scope.",
+          "rejected_because": "It overstates production risk and understates total churn at the same time. Production coupling is six sites; total churn including tests is roughly 272 files. Conflating the two produces both a false sense of danger and a false sense of boundedness."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::stream",
+          "feature_gate": null,
+          "source_file": "src/stream/stream.rs",
+          "symbols": [
+            "Stream",
+            "poll_next",
+            "size_hint"
+          ],
+          "note": "asupersync's own Stream trait, structurally identical to the ecosystem one plus a defaulted size hint, with blanket impls for pinned pointers, boxes and mutable references. Entirely free of futures-lite. This file is where the trait is defined and is absent from the registry's source owners."
+        },
+        {
+          "module_path": "asupersync::stream",
+          "feature_gate": null,
+          "source_file": "src/stream/mod.rs",
+          "symbols": [
+            "Stream",
+            "StreamExt"
+          ],
+          "note": "The extension trait and the combinator surface, blanket-implemented for every local Stream. Roughly thirty owned combinators sit on top of it, none of which touch futures-lite."
+        },
+        {
+          "module_path": "asupersync::io",
+          "feature_gate": null,
+          "source_file": "src/io/stream_adapters.rs",
+          "symbols": [
+            "Stream"
+          ],
+          "note": "Adapters over the local trait. Contains no futures-lite reference of any kind, which is why naming it as a futures-lite source owner is a defect rather than a rounding error."
+        },
+        {
+          "module_path": "asupersync::net::atp::sdk",
+          "feature_gate": null,
+          "source_file": "src/net/atp/sdk/stream.rs",
+          "symbols": [
+            "AtpWriter",
+            "AtpReader",
+            "StreamChunk"
+          ],
+          "note": "The only place in the crate that implements the foreign futures_lite::Stream, and the whole of the public futures-lite surface. Publicly reachable with no feature gate, so the impls are semver-relevant. Notably this file does not import the crate's own Stream trait."
+        },
+        {
+          "module_path": "asupersync::web",
+          "feature_gate": null,
+          "source_file": "src/web/middleware.rs",
+          "symbols": [
+            "CatchPanicMiddleware"
+          ],
+          "note": "Panic containment is two-stage: a synchronous catch at construction, then FutureExt::catch_unwind at poll time. Only the second stage depends on futures-lite."
+        },
+        {
+          "module_path": "asupersync::web",
+          "feature_gate": null,
+          "source_file": "src/web/negotiate.rs",
+          "symbols": [
+            "catch_panics"
+          ],
+          "note": "The error and negotiation handler's panic containment, gated by an explicit configuration flag. Uses the futures-lite stage only."
+        },
+        {
+          "module_path": "asupersync::web",
+          "feature_gate": null,
+          "source_file": "src/web/router.rs",
+          "symbols": [
+            "Router",
+            "handle"
+          ],
+          "note": "The highest-risk site. Router::handle is a public synchronous entry point whose entire async execution is futures-lite's block_on. The dependency does not appear in the signature, so this is a semantic rather than a type leak."
+        },
+        {
+          "module_path": "asupersync::signal",
+          "feature_gate": null,
+          "source_file": "src/signal/shutdown.rs",
+          "symbols": [
+            "spawn_sighup_listener"
+          ],
+          "note": "Two block_on calls driving signal-listener loops on dedicated std threads, outside any runtime. Replacing the executor here changes thread and reentrancy behavior."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "futures-lite",
+          "cargo_definition": "futures-lite = \"2.6\"",
+          "effect": "An unconditional, non-optional dependency with no feature gate and no dev-dependency entry. That single entry is what makes futures-lite visible to src, tests, benches and examples alike. It cannot be made optional or dev-only without breaking the six production sites.",
+          "must_remain": true,
+          "no_tokio_guarantee": "futures-lite introduces no tokio edge."
+        },
+        {
+          "name": "default",
+          "cargo_definition": "default = [\"proc-macros\", \"nightly-outcome-try\"]",
+          "effect": "Recorded because the capability registry claims this capability is gated by default and test-internals. It is not gated at all: futures-lite is unconditional, so a consumer building with default features disabled still gets it and still gets the public Stream impls.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "owned_stream_trait",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/stream/stream.rs and src/stream/mod.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "Stream",
+            "StreamExt",
+            "poll_next",
+            "size_hint"
+          ],
+          "note": "A complete owned Stream implementation across roughly thirty combinators with no futures-lite dependency at the type level. This is the surface most downstream code uses, and it carries no replacement risk at all."
+        },
+        {
+          "surface": "public_futures_lite_stream_impls",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/net/atp/sdk/stream.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "AtpWriter",
+            "AtpReader"
+          ],
+          "note": "The entire public futures-lite surface, and the sole outlier from the crate's own trait. Any downstream can call ecosystem StreamExt methods on these types, so removing futures-lite silently deletes that capability."
+        },
+        {
+          "surface": "panic_containment",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/web/middleware.rs and src/web/negotiate.rs",
+          "wire_encoder": "not applicable",
+          "transport": "HTTP request handling",
+          "public_entry_points": [
+            "CatchPanicMiddleware",
+            "catch_panics"
+          ],
+          "note": "FutureExt::catch_unwind is the poll-phase half of the web panic boundary. It is not a free function, so a helper-module shim cannot replace it; an owned equivalent would need its own future adapter."
+        },
+        {
+          "surface": "production_block_on",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/web/router.rs and src/signal/shutdown.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "Router",
+            "handle",
+            "spawn_sighup_listener"
+          ],
+          "note": "Three sites, and the ones the bead's own description misses. One is inside a public synchronous API; two drive listener threads outside any runtime. These define the reentrancy and nested-runtime contract the ADR is asked to specify."
+        },
+        {
+          "surface": "test_executor",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": null,
+          "implementation": "src/test_utils.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "block_on"
+          ],
+          "note": "block_on accounts for the overwhelming majority of all futures-lite references and is the de facto test executor for the repository, reached directly or through per-module wrappers across roughly 272 files. There is no shared harness to swap in one place."
+        },
+        {
+          "surface": "owned_future_helper_module",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "The util/future.rs module the plan names does not exist. Recorded so the plan entry is not read as describing something already partially built."
+        },
+        {
+          "surface": "stream_trait_interoperability",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "There is no adapter, blanket impl or conversion between the crate's Stream trait and the ecosystem one. The two coexist as disjoint, structurally identical traits. Recorded because the absence is what makes the ATP SDK outlier consequential."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "in-process async execution; not a wire protocol",
+        "encoding": "not applicable",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Router::handle is a synchronous public entry point that internally drives an async pipeline to completion, and the signal listeners drive receive loops on dedicated threads outside any runtime.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "not applicable",
+        "collector_interop": "not applicable",
+        "trait_compatibility": "AtpWriter and AtpReader satisfy the ecosystem Stream trait, so downstream generic code bounded on it accepts them. That is a semver-relevant public property.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "public_stream_impl",
+          "surface": "AtpWriter and AtpReader",
+          "contract": "Both implement the ecosystem Stream trait with a transfer-progress item type. Downstream generic code bounded on that trait must keep compiling, and ecosystem extension methods must keep working on these types."
+        },
+        {
+          "name": "owned_stream_independence",
+          "surface": "the crate's Stream and StreamExt",
+          "contract": "The owned trait and its combinators must remain free of any futures-lite dependency, so the main Stream surface carries no replacement risk."
+        },
+        {
+          "name": "panic_containment_two_stage",
+          "surface": "CatchPanicMiddleware",
+          "contract": "A panic during handler construction and a panic during polling are both contained, and both produce an error response rather than unwinding into the server. Only the poll-phase stage depends on futures-lite."
+        },
+        {
+          "name": "synchronous_public_entry",
+          "surface": "Router::handle",
+          "contract": "A synchronous, non-async public entry point that drives its pipeline to completion. Its blocking behavior, and the fact that it does not require an ambient runtime, are part of the contract."
+        },
+        {
+          "name": "signal_listener_threads",
+          "surface": "spawn_sighup_listener",
+          "contract": "Listener loops run on dedicated std threads and block on receive. They must not require an ambient runtime and must not be starved by one."
+        },
+        {
+          "name": "test_executor_availability",
+          "surface": "block_on across the test suite",
+          "contract": "A blocking executor must remain available to every test target without extra configuration. Any replacement must offer a drop-in equivalent, because there is no central harness to change."
+        },
+        {
+          "name": "helper_surface_completeness",
+          "surface": "the futures-lite API actually consumed",
+          "contract": "The consumed surface is block_on, poll_fn, poll_once, zip, race, join_all, yield_now, pending, FutureExt::catch_unwind and the Stream trait. Any owned replacement must cover all of it, not the five helpers the plan names."
+        },
+        {
+          "name": "no_hidden_executor",
+          "surface": "the capability's security invariant",
+          "contract": "No API may start an executor implicitly. The three production block_on sites are explicit and documented, and that explicitness is the contract."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "FUT-GAP-01",
+          "summary": "The capability registry names src/stream/mod.rs and src/io/stream_adapters.rs as source owners. The first has exactly one futures-lite reference and it is inside a test module; the second has none at all. Every file that actually owns a production futures-lite semantic named in the row's own title, including block_on and the panic boundaries, is absent, as is src/stream/stream.rs where the owned trait is defined.",
+          "consequence": "The two named files cover precisely the part of the capability that has no futures-lite dependency and therefore no replacement risk. A baseline built from that row would inventory the safe half and miss all six production sites.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "FUT-GAP-02",
+          "summary": "The public futures_lite::Stream impls for AtpWriter and AtpReader have no test. The file's test module exercises chunk construction and constructor failure paths, never invokes poll_next, and never imports an extension trait.",
+          "consequence": "The single public futures-lite surface in the crate is the one with zero coverage, so its removal or breakage would be silent.",
+          "owner_bead": "asupersync-d24mms.6.5",
+          "may_widen": false
+        },
+        {
+          "gap_id": "FUT-GAP-03",
+          "summary": "The downstream consumer fixture proves the crate's own Stream trait is usable from an external crate, and does not reference futures-lite at all.",
+          "consequence": "The existing downstream proof would not detect a futures-lite removal breaking the ATP SDK Stream impls. A second fixture bounded on the ecosystem trait is needed before any cutover.",
+          "owner_bead": "asupersync-d24mms.6.10",
+          "may_widen": false
+        },
+        {
+          "gap_id": "FUT-GAP-04",
+          "summary": "The registry records this capability's features as default and test-internals, but futures-lite is unconditional with no feature gate at all.",
+          "consequence": "Any feature matrix derived from that row would test the wrong cells and could conclude the dependency is optional.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "FUT-GAP-05",
+          "summary": "The capability registry records evidence as planned while the capability baseline artifact records the same capability as executable and complete.",
+          "consequence": "Two governance artifacts disagree about whether a baseline exists. The same disagreement affects CAP-HTTP-COMPRESSION, so it is systemic.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.2",
+          "may_widen": false
+        },
+        {
+          "gap_id": "FUT-GAP-06",
+          "summary": "The manifest comment on the dependency describes it as used by web handler adapter shims. That covers two of the six production sites and omits the ATP Stream impls, the router executor and the signal listeners.",
+          "consequence": "A reader trusting the comment would underestimate both the coupling and its risk profile.",
+          "owner_bead": "asupersync-d24mms.6.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "FUT-GAP-07",
+          "summary": "The ATP SDK stream types are the only place in the crate that chose the ecosystem Stream trait; every other stream implementation in net, io and stream uses the crate's own trait. There is no adapter between the two.",
+          "consequence": "The inconsistency is the entire reason futures-lite appears in the public API. Porting those two impls would remove all public leakage, at the cost of a breaking change for downstreams relying on the current impls.",
+          "owner_bead": "asupersync-d24mms.6",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "No API starts an executor implicitly; the three production blocking sites are explicit.",
+        "Pin safety is preserved across every combinator and adapter.",
+        "The owned Stream surface is strictly safe code with no unsafe shortcut.",
+        "Panic containment prevents a panicking handler from unwinding into the server, at both construction and poll time."
+      ],
+      "cancellation_invariants": [
+        "Dropping at any await point is safe.",
+        "Reserved items are either committed or released; no item is silently lost.",
+        "Buffered work either drains or is explicitly discarded rather than abandoned.",
+        "A cancelled stream releases its pending I/O."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "futures-lite is unconditional and platform-neutral. The signal-listener sites are Unix-oriented but the dependency itself is not platform-gated."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "asupersync::net::atp::sdk::AtpWriter and AtpReader as ecosystem Stream implementations",
+          "asupersync::stream::Stream and StreamExt for the owned surface",
+          "a blocking executor available to every test target"
+        ],
+        "accepted_providers": "Downstream generic code bounded on the ecosystem Stream trait, and downstream types implementing the crate's own Stream trait.",
+        "pinned_crate_versions": {
+          "futures-lite": "2.6, unconditional and non-optional, with no dev-dependency entry"
+        },
+        "no_reexport_note": "futures-lite is not re-exported. The coupling is one public trait impl pair plus five internal call sites. No futures-lite type appears in any signature; the router site is a semantic leak rather than a type leak.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "The owned Stream trait, its combinators and the io adapters are entirely independent of futures-lite, so the majority of the stream surface carries no replacement risk.",
+        "removal_precondition": "An owned helper layer must cover the full consumed surface, which is block_on, poll_fn, poll_once, zip, race, join_all, yield_now, pending, a catch-unwind future adapter and a Stream story for the ATP SDK types. It must preserve wake and parking behavior, reentrancy and nested-runtime policy, polling fairness, panic propagation, cancellation and drop behavior, and Send and lifetime expectations, and it must be at least as ergonomic for downstream Stream users and internal tests. A downstream fixture bounded on the ecosystem trait must exist first. Until then: KEEP.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "consumer-portfolio",
+        "arbitrary-stream-implementors"
+      ],
+      "user_journeys": [
+        {
+          "id": "fut-journey-downstream-owned-stream",
+          "description": "A downstream crate implements the crate's own Stream trait and consumes StreamExt combinators. Executed today by the standalone consumer fixture, with no futures-lite involvement."
+        },
+        {
+          "id": "fut-journey-ecosystem-stream-consumer",
+          "description": "A downstream crate treats AtpWriter or AtpReader as an ecosystem Stream and applies ecosystem extension methods. This is the journey that removing futures-lite would break, and it currently has no test."
+        },
+        {
+          "id": "fut-journey-sync-router-entry",
+          "description": "An embedder calls the synchronous Router::handle from non-async code without an ambient runtime and receives a response."
+        },
+        {
+          "id": "fut-journey-panic-containment",
+          "description": "A handler panics during polling and the client receives an error response instead of a dropped connection."
+        },
+        {
+          "id": "fut-journey-signal-reload",
+          "description": "A daemon receives SIGHUP and its listener thread, blocking outside any runtime, drives the reload."
+        },
+        {
+          "id": "fut-journey-test-block-on",
+          "description": "A test drives an async future to completion with a blocking executor, with no runtime setup and no shared harness."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The affected symbols live under asupersync::stream, asupersync::net, asupersync::web, asupersync::io and asupersync::signal rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, futures-lite row",
+          "stale_text": "OWN (SAFE), Phase 2, block_on/poll_fn/zip/race/yield_now in util/future.rs",
+          "resolution": "Disposition is KEEP_UNTIL_PARITY, matching the capability registry. The named helper list is also incomplete: it omits poll_once, join_all, pending, FutureExt::catch_unwind and the Stream trait, and neither of the last two is a free function a helper module can supply."
+        },
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 7, Phase 2 work list",
+          "stale_text": "futures-lite to util/future.rs, listed under low-risk leaf removals over genuinely parallel, disjoint files",
+          "resolution": "Not a low-risk leaf and not disjoint. The capability is public-api exposed through the ATP SDK Stream impls, its cutover state is blocked pending evidence, and the file set is roughly 272 including tests."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "An owned helper layer may be added alongside. No existing helper, combinator, executor behavior, panic boundary or public Stream impl may be removed or narrowed.",
+        "coexistence": "futures-lite remains the incumbent. An owned layer must be validated against it before replacing it, not shipped alongside in production.",
+        "sequencing": "First a downstream fixture bounded on the ecosystem Stream trait and tests for the two public impls, then a complete owned helper surface, then a mechanical migration. Porting the ATP SDK types to the crate's own trait is the specific step that would remove all public leakage and is a breaking change requiring its own review.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_008_futures_streams.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any downstream that can no longer treat AtpWriter or AtpReader as an ecosystem Stream, any lost helper, any change in wake or parking behavior, reentrancy, polling fairness or panic propagation, any Router::handle that begins to require an ambient runtime, or any signal listener that can be starved.",
+        "action": "Revert to futures-lite and the frozen surface. Because the decision is KEEP, rollback means abandoning the replacement attempt.",
+        "verification": "Re-run the focused ADR contract, the stream suites, the web panic-containment tests, and both downstream consumer fixtures."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-d24mms.6.1",
+        "unit_test_owner": "asupersync-d24mms.6.5",
+        "e2e_owner": "asupersync-d24mms.6.10",
+        "scenario_ids": [
+          "public_stream_consumer",
+          "stream_cancel_backpressure",
+          "test_block_on"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario futures_streams",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "inventory: every futures-lite reference classified by Cargo-built feature profile as production, cfg-gated or test-only, rather than by filename",
+          "unit: poll_next behavior for the two public ecosystem Stream impls, which FUT-GAP-02 records as entirely untested",
+          "unit: each consumed helper, covering wake and parking behavior, polling order and fairness, and drop at every await point",
+          "unit: panic propagation and containment at both construction and poll time",
+          "property or lab: cancellation and drop safety, reserved-item commit or release, and buffered-work drain or explicit discard",
+          "downstream-consumer: a fixture bounded on the ecosystem Stream trait, in addition to the existing owned-trait fixture",
+          "cross-subsystem E2E: the synchronous router entry point, the signal-listener reload path, and a representative streaming pipeline",
+          "reentrancy: nested and non-runtime blocking behavior for the three production blocking sites"
+        ],
+        "note": "Naming these owners does not assert they have run. The existing downstream fixture proves only the owned trait and would not detect breakage of the ecosystem impls."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-FUTURES-STREAMS",
+            "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+            "cutover_state": "BLOCKED_PENDING_EVIDENCE"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-d24mms.6"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. futures-lite remains an unconditional production dependency. Phase-5 work is a bounded child epic, not a single large leaf."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_008_futures_streams.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the public ecosystem Stream impls behave correctly, that an owned helper layer could match wake, parking, reentrancy, fairness or panic semantics, that the migration is mechanically safe, that performance is unchanged, or that futures-lite may be removed. It also does not certify the capability registry's source-owner row, feature list or evidence state, which FUT-GAP-01, -04 and -05 record as incorrect."
     }
   ],
   "known_loss_fixtures": [
@@ -3298,6 +4288,18 @@
       "adr_id": "DEP-ADR-005",
       "prohibited_text": "replace clap before help goldens exist",
       "expected_error": "cutover authorization without evidence"
+    },
+    {
+      "fixture_id": "brotli-capability-removal",
+      "adr_id": "DEP-ADR-006",
+      "prohibited_text": "remove Brotli support",
+      "expected_error": "accepted format loss: Brotli"
+    },
+    {
+      "fixture_id": "futures-public-stream-removal",
+      "adr_id": "DEP-ADR-008",
+      "prohibited_text": "drop the public Stream implementation",
+      "expected_error": "third-party ecosystem loss: Stream trait"
     }
   ],
   "validation": {
