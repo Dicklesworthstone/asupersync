@@ -289,9 +289,12 @@ encrypt/decrypt) and `src/atp/mailbox/encryption.rs` (`EncryptedChunk`). Wire
 format unchanged (same AEADs, 12-byte nonces, detached 16-byte tags);
 slice-length conversion now fails closed with explicit errors instead of
 panicking. This harmonizes the graph on the digest-0.11 generation already used
-by sha2/hmac (drops `opaque-debug`, dedups part of the digest/crypto-common
-chains); the remaining `sha2 0.10` duplicate rides `nkeys → ed25519-dalek`
-(replacement plan Phase 5).
+by sha2/hmac (drops `opaque-debug`); note the net graph effect is +1
+crate-version (`cpubits` and `rand_core 0.10` in, `opaque-debug` out) and it
+introduces a new `rand_core` 0.6 + 0.10 duplicate pair. The full old-generation
+dedup (sha2/digest/crypto-common/block-buffer/cpufeatures/getrandom ×2) rides
+`nkeys → ed25519-dalek` and additionally requires an upstream dalek release on
+digest 0.11 (replacement plan §2.3 / Phase 5).
 
 ### Skipped (intentional)
 
