@@ -306,6 +306,11 @@ impl FixedCxProvider {
     }
 
     /// Creates a provider with a test Cx.
+    ///
+    /// This convenience constructor is available only to crate tests and
+    /// consumers that explicitly enable `test-internals`. Production callers
+    /// can provide an explicit context with [`Self::new`].
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_testing() -> Self {
         Self {
