@@ -144,6 +144,9 @@ trace-compression = ["dep:lz4_flex"]
 debug-server = []
 # Enable TOML config file loading for RuntimeBuilder.
 config-file = ["dep:toml"]
+# Enable the Cargo-built dependency marginal-ledger generator. This reuses the
+# already-approved optional TOML parser and does not enter production graphs.
+dependency-ledger = ["dep:toml"]
 # Enable lock contention metrics for ContendedMutex (wait/hold time tracking) and
 # production lock ordering validation. Zero cost when disabled. Enables deadlock
 # prevention checks in production builds for enhanced runtime safety.
@@ -305,6 +308,11 @@ required-features = ["cli"]
 name = "offline_tuner"
 path = "src/bin/offline_tuner.rs"
 required-features = ["cli", "simd-intrinsics"]
+
+[[bin]]
+name = "dependency_marginal_ledger"
+path = "src/bin/dependency_marginal_ledger.rs"
+required-features = ["dependency-ledger"]
 
 [[bin]]
 name = "generate_rfc6330_vectors"
