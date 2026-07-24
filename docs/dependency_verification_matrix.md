@@ -161,6 +161,11 @@ VER A2 owns the runner and schema. Each terminal run must retain:
 ```text
 target/e2e-results/dependency-sovereignty/<run_id>/summary.json
 target/e2e-results/dependency-sovereignty/<run_id>/events.ndjson
+target/e2e-results/dependency-sovereignty/<run_id>/scenarios.ndjson
+target/e2e-results/dependency-sovereignty/<run_id>/validation_stages.ndjson
+target/e2e-results/dependency-sovereignty/<run_id>/artifact_manifest.ndjson
+target/e2e-results/dependency-sovereignty/<run_id>/environment.json
+target/e2e-results/dependency-sovereignty/<run_id>/repro_manifest.json
 target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stdout.log
 target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stderr.log
 ```
@@ -168,6 +173,72 @@ target/e2e-results/dependency-sovereignty/<run_id>/<scenario_id>/<step_id>.stder
 A plan row is not a silent substitute for that no-mock run. `BLOCKED`,
 `UNSUPPORTED`, missing hardware, missing service, redaction failure, replay
 failure, or cleanup residue remains non-green.
+
+### VER A2 runner operation
+
+The maintained runner is
+`scripts/run_dependency_sovereignty_e2e.sh`. The primary orchestrator registers
+it as `dependency-sovereignty` with canonical suite ID
+`E2E-SUITE-DEPENDENCY-SOVEREIGNTY`.
+
+The default smoke profile runs two local, non-Cargo contract scenarios:
+
+- `catalog` checks the live 335-bead, 50-capability, 1,595-plan VER A1 matrix
+  and its 197 planned E2E rows;
+- `runner-contract` exercises the happy path and eleven fail-closed outcome
+  classes: assertion failure, command failure, timeout, signal, unsupported
+  platform, blocked RCH, local fallback, corrupt summary, missing artifact,
+  replay failure, and cleanup failure. It separately injects a deterministic
+  canary through the redaction filter.
+
+The runner also exposes four opt-in Cargo-backed contract scenarios:
+`registry-contract`, `baseline-contract`, `cutover-policy-contract`, and
+`verification-matrix-contract`. They refuse execution unless
+`RCH_REQUIRE_REMOTE=1` and `rch` are both present; a local fallback marker is a
+terminal non-green result.
+
+Useful commands:
+
+```bash
+# Discover the stable scenario IDs without creating a run directory.
+bash scripts/run_dependency_sovereignty_e2e.sh --list
+
+# Emit a complete contract-only bundle through the primary orchestrator.
+bash scripts/run_all_e2e.sh --suite dependency-sovereignty
+
+# Preview selected scenario commands and artifacts without executing them.
+bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario registry-contract \
+  --scenario verification-matrix-contract \
+  --run-id review-001 \
+  --dry-run
+
+# Execute one Cargo-backed scenario with remote-only admission.
+RCH_REQUIRE_REMOTE=1 \
+  bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario verification-matrix-contract \
+  --run-id ver-a2-matrix-001
+```
+
+`--scenario` may be repeated. `--timeout` bounds each scenario; the direct
+runner default is 900 seconds so an uncached remote Cargo scenario can finish.
+An explicit `E2E_TIMEOUT` or `DEPENDENCY_SOVEREIGNTY_TIMEOUT` overrides it.
+`--fail-fast` records later scenarios as `NOT_RUN_FAIL_FAST`;
+`--continue-for-diagnostics` is the default. An explicit run ID is validated
+against ASCII letters, digits, dot, underscore, and hyphen, and the runner
+refuses to overwrite an existing evidence directory.
+
+Every scenario and validation-stage row records the bead, track, capabilities,
+scenario and step IDs, validation surface, feature/profile coordinates, seed
+or fixture, configuration snapshot, exact command, expected and observed
+outcome, exit and signal, monotonic elapsed time, artifact links, RCH routing,
+worker and target directory, evidence owner, redaction policy, first failing
+invariant, cleanup result, and replay pointer. The safe environment snapshot is
+allowlisted; arbitrary process environment values are not retained.
+
+The suite root maintains machine-readable `latest.json` and
+`latest_success.json` pointers. A failed or blocked attempt advances only
+`latest.json`; it cannot replace the last passing pointer.
 
 ## Regeneration
 

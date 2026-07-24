@@ -307,6 +307,44 @@ E2E summary schema extension policy:
 - Any change to required fields (rename/remove/type change/semantics change)
   requires a schema version bump plus validator/test updates in the same change.
 
+### Dependency-Sovereignty E2E Contract
+
+The dependency program's maintained suite is:
+
+```bash
+bash scripts/run_all_e2e.sh --suite dependency-sovereignty
+```
+
+Its runner, `scripts/run_dependency_sovereignty_e2e.sh`, emits
+`summary.json`, `events.ndjson`, `scenarios.ndjson`,
+`validation_stages.ndjson`, `artifact_manifest.ndjson`, `environment.json`,
+`repro_manifest.json`, and per-step stdout/stderr under
+`target/e2e-results/dependency-sovereignty/<run_id>/`. The suite root also
+keeps `latest.json` and `latest_success.json` discovery pointers.
+
+The default smoke profile is contract-only and executes no Cargo. Opt-in
+Cargo-backed scenarios require `RCH_REQUIRE_REMOTE=1`, use isolated
+`CARGO_TARGET_DIR` values, and fail closed on missing RCH or any local fallback
+marker. `BLOCKED_RCH`, `UNSUPPORTED_PLATFORM`, timeout, signal, redaction,
+artifact, replay, and cleanup failures are non-green.
+
+List and select scenarios with:
+
+```bash
+bash scripts/run_dependency_sovereignty_e2e.sh --list
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario verification-matrix-contract \
+  --run-id ver-a2-review-001
+```
+
+`--dry-run` emits the complete inventory and replay bundle without executing a
+scenario. `--timeout` defaults to 900 seconds for direct runs and remains
+overrideable by the orchestrator environment. `--fail-fast` retains explicit
+`NOT_RUN_FAIL_FAST` rows for skipped work; the default continue-for-diagnostics
+mode preserves all attempted results. See
+`docs/dependency_verification_matrix.md` for the field contract, outcome
+taxonomy, and no-claim boundary.
+
 CI evidence:
 - `.github/workflows/ci.yml` check job runs `scripts/check_ci_matrix_policy.py`
   against `.github/ci_matrix_policy.json` and uploads
