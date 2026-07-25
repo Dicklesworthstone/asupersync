@@ -1828,14 +1828,25 @@ impl Parser {
             return Err(self.error(ParseErrorKind::InvalidRepetition, token.span));
         };
         let Some(child) = frame.concatenation.pop() else {
-            return Err(self.error(ParseErrorKind::InvalidRepetition, token.span));
+            return Err(self.error(
+                ParseErrorKind::InvalidRepetition,
+                SourceSpan::empty_at(token.span.byte_start, token.span.scalar_start),
+            ));
         };
-        if self
-            .nodes
-            .get(child.index())
-            .is_some_and(|node| matches!(node.kind, AstNodeKind::Repetition { .. }))
-        {
-            return Err(self.error(ParseErrorKind::InvalidRepetition, token.span));
+        if self.nodes.get(child.index()).is_some_and(|node| {
+            matches!(
+                node.kind,
+                AstNodeKind::Flags {
+                    scoped: false,
+                    child: None,
+                    ..
+                }
+            )
+        }) {
+            return Err(self.error(
+                ParseErrorKind::InvalidRepetition,
+                SourceSpan::empty_at(token.span.byte_start, token.span.scalar_start),
+            ));
         }
         let mut span = self
             .nodes
@@ -2097,11 +2108,15 @@ impl Parser {
         let Some(frame) = frames.last_mut() else {
             return Err(self.error(ParseErrorKind::InvalidClassOperator, span));
         };
-        if frame.pending_range.is_some() || frame.union.is_empty() {
+        if frame.pending_range.is_some() {
             return Err(self.error(ParseErrorKind::InvalidClassOperator, span));
         }
         let union = core::mem::take(&mut frame.union);
-        let right = self.finish_class_union(union)?;
+        let right = if union.is_empty() {
+            self.push_empty_class_union(SourceSpan::empty_at(span.byte_start, span.scalar_start))?
+        } else {
+            self.finish_class_union(union)?
+        };
         let left = if let Some(existing) = frame.left.take() {
             let Some((pending, _)) = frame.pending_operator.take() else {
                 return Err(self.error(ParseErrorKind::InvalidClassOperator, span));
@@ -2124,13 +2139,17 @@ impl Parser {
         if frame.pending_range.is_some() {
             return Err(self.error(ParseErrorKind::InvalidClassRange, close));
         }
-        if frame.union.is_empty() {
-            let span = frame
-                .pending_operator
-                .map_or(close, |(_, operator_span)| operator_span);
-            return Err(self.error(ParseErrorKind::InvalidClassOperator, span));
-        }
-        let right = self.finish_class_union(frame.union)?;
+        let right = if frame.union.is_empty() {
+            if frame.left.is_none() {
+                let span = frame
+                    .pending_operator
+                    .map_or(close, |(_, operator_span)| operator_span);
+                return Err(self.error(ParseErrorKind::InvalidClassOperator, span));
+            }
+            self.push_empty_class_union(SourceSpan::empty_at(close.byte_start, close.scalar_start))?
+        } else {
+            self.finish_class_union(frame.union)?
+        };
         if let Some(left) = frame.left.take() {
             let Some((operator, _)) = frame.pending_operator.take() else {
                 return Err(self.error(ParseErrorKind::InvalidClassOperator, close));
@@ -2157,6 +2176,14 @@ impl Parser {
                 )
             }
         }
+    }
+
+    fn push_empty_class_union(&mut self, span: SourceSpan) -> Result<NodeId, ParseError> {
+        self.push_node(
+            AstNodeKind::ClassUnion(Vec::new()),
+            span,
+            ExpansionEstimate::UNIT,
+        )
     }
 
     fn push_class_set(
@@ -2210,6 +2237,7 @@ pub fn parse(
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use regex::Regex as IncumbentRegex;
 
     fn default_lex(pattern: &str) -> Result<Vec<Token>, LexError> {
         lex(pattern, LexerLimits::default())
@@ -2231,6 +2259,13 @@ mod tests {
         match error {
             SyntaxError::Parse(error) => error.kind,
             SyntaxError::Lex(error) => panic!("expected parser error, got {error}"),
+        }
+    }
+
+    fn diagnostic(error: &SyntaxError) -> (&'static str, SourceSpan) {
+        match error {
+            SyntaxError::Lex(error) => (error.kind.diagnostic_category(), error.span),
+            SyntaxError::Parse(error) => (error.kind.diagnostic_category(), error.span),
         }
     }
 
@@ -2734,14 +2769,12 @@ mod tests {
             ("[", ParseErrorKind::UnclosedClass),
             (")", ParseErrorKind::UnexpectedGroupClose),
             ("*a", ParseErrorKind::InvalidRepetition),
-            ("a**", ParseErrorKind::InvalidRepetition),
-            ("a{1}+", ParseErrorKind::InvalidRepetition),
+            ("(?i)*", ParseErrorKind::InvalidRepetition),
             ("[\\A]", ParseErrorKind::InvalidClassEscape),
             ("[\\b]", ParseErrorKind::InvalidClassEscape),
             ("[a-\\d]", ParseErrorKind::InvalidClassRange),
             ("[\\w-a]", ParseErrorKind::InvalidClassRange),
             ("[z-a]", ParseErrorKind::InvalidClassRange),
-            ("[a&&]", ParseErrorKind::InvalidClassOperator),
         ];
         for (pattern, expected) in cases {
             let error = default_parse(pattern).expect_err("fixture must fail");
@@ -2763,6 +2796,229 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn frozen_invalid_goldens_match_diagnostic_category_and_span() {
+        let cases = [
+            ("(?=secret)", "RGX-DIAG-UNSUPPORTED-LOOKAROUND", (0, 3)),
+            ("(secret)\\1", "RGX-DIAG-UNSUPPORTED-BACKREFERENCE", (8, 10)),
+            ("(", "RGX-DIAG-UNCLOSED-GROUP", (0, 1)),
+            ("[", "RGX-DIAG-UNCLOSED-CLASS", (0, 1)),
+            ("a{3,2}", "RGX-DIAG-INVALID-REPETITION", (1, 6)),
+            ("(?q)secret", "RGX-DIAG-INVALID-FLAG", (2, 3)),
+            ("(?-u:.)", "RGX-DIAG-INVALID-UTF8", (0, 7)),
+            ("\\", "RGX-DIAG-TRAILING-ESCAPE", (0, 1)),
+        ];
+        for (pattern, expected_category, (byte_start, byte_end)) in cases {
+            let error = default_parse(pattern).expect_err("invalid golden must fail");
+            let (category, span) = diagnostic(&error);
+            assert_eq!(category, expected_category, "pattern {pattern:?}");
+            assert_eq!(
+                (span.byte_start, span.byte_end),
+                (byte_start, byte_end),
+                "pattern {pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directly_nested_repetition_matches_incumbent_syntax_and_stays_bounded() {
+        for pattern in ["a**", "a++", "a{1}+", "a+{2}"] {
+            assert!(
+                IncumbentRegex::new(pattern).is_ok(),
+                "incumbent drifted for {pattern:?}"
+            );
+            let ast = default_parse(pattern).expect("direct nested repetition must parse");
+            assert!(ast.invariants_hold(pattern));
+            assert_eq!(ast.resources.repetition_operators, 2);
+            assert_eq!(
+                ast.nodes
+                    .iter()
+                    .filter(|node| matches!(node.kind, AstNodeKind::Repetition { .. }))
+                    .count(),
+                2
+            );
+        }
+
+        let SyntaxError::Parse(error) =
+            default_parse("(?i)*").expect_err("a flag directive is not repeatable")
+        else {
+            panic!("expected parser error");
+        };
+        assert_eq!(error.kind, ParseErrorKind::InvalidRepetition);
+        assert_eq!(
+            error.span,
+            SourceSpan {
+                byte_start: 4,
+                byte_end: 4,
+                scalar_start: 4,
+                scalar_end: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn class_set_operators_preserve_incumbent_empty_operands() {
+        for pattern in ["[a&&]", "[&&a]", "[a--]", "[--a]", "[a~~]", "[~~a]"] {
+            assert!(
+                IncumbentRegex::new(pattern).is_ok(),
+                "incumbent drifted for {pattern:?}"
+            );
+            let ast = default_parse(pattern).expect("empty set operand must parse");
+            assert!(ast.invariants_hold(pattern));
+            assert!(ast.nodes.iter().any(|node| matches!(
+                &node.kind,
+                AstNodeKind::ClassUnion(children) if children.is_empty()
+            )));
+            assert!(
+                ast.nodes
+                    .iter()
+                    .any(|node| matches!(node.kind, AstNodeKind::ClassSet { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn quarantined_incumbent_and_candidate_compile_states_match_adversarial_corpus() {
+        let corpus = [
+            "token-[A-F0-9]{8}",
+            "cat|dog",
+            "(?P<kind>secret)-\\d+",
+            "(?:ab){2,3}",
+            "\\Asecret\\z",
+            "(?m)^secret$",
+            "(?s)BEGIN.*END",
+            "(?mR)^secret$",
+            "(?i)σ",
+            "(?x) secret \\s+ \\d+",
+            "(?U)a+",
+            "\\p{Greek}+",
+            "\\d+",
+            "[[:digit:]]+",
+            "[a-z&&[^aeiou]]+",
+            "[0-9--4]+",
+            "[a-g~~b-h]+",
+            "\\bκόσμος\\b",
+            "(?-u:\\b)secret(?-u:\\b)",
+            "\\x73\\u{65}cret",
+            "",
+            "^",
+            "[a&&b]",
+            "(a+)+$",
+            "(?=secret)",
+            "(secret)\\1",
+            "(",
+            "[",
+            "a{3,2}",
+            "(?q)secret",
+            "(?x:a # comment\n b)",
+            "(?x)[ a-z ]",
+            "(?x)a{ 2 , 3 }",
+            "(?x)\\x { 53 }",
+            "(?x)\\u { 53 }",
+            "(?x)\\p { Greek }",
+            "(?x)( ?P<foo> a )",
+            "(?x)( ?: a )",
+            "(?x:\\ )",
+            "(?P<name>a)|(?P<name>b)",
+            "^*",
+            "\\b+",
+            "(?i)*",
+            "a**",
+            "a{1}+",
+            "[a-\\d]",
+            "[\\w-a]",
+            "[z-a]",
+            "[\\A]",
+            "[\\b]",
+            "[a&&]",
+            "[&&a]",
+            "[a--]",
+            "[--a]",
+            "[a~~]",
+            "[~~a]",
+            "\\p{DefinitelyNotAProperty}",
+            "[[:definitelynot:]]",
+            "(?-u:\\pL)",
+            "(?-u:\\xFF)",
+            "(?>a)",
+            "a++",
+        ];
+        let mismatches = corpus
+            .iter()
+            .filter_map(|pattern| {
+                let incumbent = IncumbentRegex::new(pattern).is_ok();
+                let candidate = default_parse(pattern).is_ok();
+                (incumbent != candidate).then_some((*pattern, incumbent, candidate))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mismatches,
+            vec![
+                ("(?x)a{ 2 , 3 }", true, false),
+                ("(?x)\\x { 53 }", true, false),
+                ("(?x)\\u { 53 }", true, false),
+                ("(?x)\\p { Greek }", true, false),
+                ("(?P<name>a)|(?P<name>b)", false, true),
+                ("\\p{DefinitelyNotAProperty}", false, true),
+                ("(?-u:\\pL)", false, true),
+                ("(?-u:\\xFF)", false, true),
+            ],
+            "quarantined oracle divergence set drifted"
+        );
+    }
+
+    #[test]
+    fn minimized_semantic_divergences_remain_explicit_cutover_blockers() {
+        let incumbent = IncumbentRegex::new("(?x)a b").expect("incumbent x pattern");
+        assert!(incumbent.is_match("ab"));
+        assert!(!incumbent.is_match("a b"));
+        let whitespace = default_parse("(?x)a b").expect("candidate accepts global x");
+        assert!(
+            whitespace
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, AstNodeKind::Literal(' '))),
+            "remove this blocker only with the terminal receipt update"
+        );
+
+        let incumbent = IncumbentRegex::new("(?x)a # comment\n b").expect("incumbent x comment");
+        assert!(incumbent.is_match("ab"));
+        let comment = default_parse("(?x)a # comment\n b").expect("candidate accepts x comment");
+        assert!(
+            comment
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, AstNodeKind::Literal('#'))),
+            "remove this blocker only with the terminal receipt update"
+        );
+
+        let incumbent = IncumbentRegex::new("(?x)[ a-z ]").expect("incumbent x class");
+        assert!(incumbent.is_match("a"));
+        assert!(!incumbent.is_match(" "));
+        let class = default_parse("(?x)[ a-z ]").expect("candidate accepts x class");
+        assert!(
+            class
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, AstNodeKind::ClassLiteral(' '))),
+            "remove this blocker only with the terminal receipt update"
+        );
+
+        let incumbent = IncumbentRegex::new("(?x)( ?P<foo> a )").expect("incumbent spaced capture");
+        assert_eq!(
+            incumbent.capture_names().flatten().collect::<Vec<_>>(),
+            ["foo"]
+        );
+        let capture = default_parse("(?x)( ?P<foo> a )").expect("candidate accepts spaced group");
+        assert!(
+            !capture
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, AstNodeKind::Capture { name: Some(_), .. })),
+            "remove this blocker only with the terminal receipt update"
+        );
     }
 
     #[test]
