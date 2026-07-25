@@ -135,6 +135,12 @@ pub(crate) mod regex_syntax;
 #[cfg(feature = "metrics")]
 #[allow(dead_code)]
 pub(crate) mod regex_semantics;
+// br-asupersync-5z2scg.8.3.2.3: retained-table-backed simple folding and
+// zero-width boundary semantics. This private staging layer deliberately
+// leaves matcher integration and terminal cross-target conformance to R3.2.4.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_boundaries;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
