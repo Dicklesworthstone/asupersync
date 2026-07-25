@@ -390,9 +390,11 @@ impl<T> RwLock<T> {
     fn wake_released_waiters(writer_waker: Option<Waker>, reader_wakers: SmallVec<[Waker; 4]>) {
         let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         let mut isolate = |waker: Waker| {
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                waker.wake();
-            })) && first_panic.is_none()
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    waker.wake();
+                }))
+                && first_panic.is_none()
             {
                 first_panic = Some(payload);
             }
@@ -403,7 +405,9 @@ impl<T> RwLock<T> {
         for waker in reader_wakers {
             isolate(waker);
         }
-        drop(isolate);
+        // `isolate` holds the only mutable borrow of `first_panic`; NLL ends it
+        // at the last call above, so the payload is readable here. A `drop` call
+        // would be a no-op on a closure and trips `drop_non_drop`.
         if let Some(payload) = first_panic {
             if std::thread::panicking() {
                 drop(payload);
@@ -1717,8 +1721,14 @@ mod tests {
         let panic_waker = Waker::from(StdArc::new(PanicWaker));
         let counter = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
         let count_waker = Waker::from(StdArc::new(CountWaker(StdArc::clone(&counter))));
-        assert!(poll_with_waker(&mut r1, &panic_waker).is_pending(), "r1 parks");
-        assert!(poll_with_waker(&mut r2, &count_waker).is_pending(), "r2 parks");
+        assert!(
+            poll_with_waker(&mut r1, &panic_waker).is_pending(),
+            "r1 parks"
+        );
+        assert!(
+            poll_with_waker(&mut r2, &count_waker).is_pending(),
+            "r2 parks"
+        );
 
         // Dropping the writer pregrants both readers and wakes them; r1's Waker
         // panics, but r2 must still be woken, then the panic is resumed out of
@@ -1735,8 +1745,12 @@ mod tests {
 
         // Both readers were pregranted, so they complete on the next poll without
         // re-incrementing the reader count.
-        let g1 = poll_once(&mut r1).expect("r1 ready").expect("r1 read guard");
-        let g2 = poll_once(&mut r2).expect("r2 ready").expect("r2 read guard");
+        let g1 = poll_once(&mut r1)
+            .expect("r1 ready")
+            .expect("r1 read guard");
+        let g2 = poll_once(&mut r2)
+            .expect("r2 ready")
+            .expect("r2 read guard");
         assert_eq!(lock.debug_state().readers, 2, "both readers active");
         drop(g1);
         drop(g2);

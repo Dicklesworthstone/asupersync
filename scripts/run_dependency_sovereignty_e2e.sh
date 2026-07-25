@@ -63,6 +63,8 @@ Cargo-backed scenarios require:
     --scenario aggregate-signoff-contract
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario api-adr-registry-contract
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario api-adr-phase3-signoff
 USAGE
 }
 
@@ -78,12 +80,13 @@ scenario_ids() {
         real-service-fixture-contract \
         feature-platform-consumer-contract \
         aggregate-signoff-contract \
-        api-adr-registry-contract
+        api-adr-registry-contract \
+        api-adr-phase3-signoff
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff)
             return 0
             ;;
         *)
@@ -94,7 +97,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff)
             return 0
             ;;
         *)
@@ -106,7 +109,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract) printf 'contract' ;;
+        runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
 }
@@ -124,6 +127,7 @@ scenario_fixture() {
         feature-platform-consumer-contract) printf 'artifacts/dependency_feature_platform_consumer_matrix_v1.json' ;;
         aggregate-signoff-contract) printf 'artifacts/dependency_verification_final_signoff_v1.json' ;;
         api-adr-registry-contract) printf 'artifacts/dependency_api_adr_registry_v1.json' ;;
+        api-adr-phase3-signoff) printf 'artifacts/dependency_api_adr_phase3_signoff_v1.json' ;;
     esac
 }
 
@@ -156,6 +160,9 @@ scenario_capabilities() {
         api-adr-registry-contract)
             printf '["CAP-OTLP-ECOSYSTEM","CAP-PUBLIC-API-TOPOLOGY"]'
             ;;
+        api-adr-phase3-signoff)
+            printf '["CAP-PUBLIC-API-TOPOLOGY","CAP-DEPENDENCY-LEDGER"]'
+            ;;
     esac
 }
 
@@ -166,6 +173,7 @@ scenario_evidence_owner() {
         feature-platform-consumer-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.5' ;;
         aggregate-signoff-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.6' ;;
         api-adr-registry-contract) printf 'asupersync-dep-p3-api-adrs-h3jspm.3' ;;
+        api-adr-phase3-signoff) printf 'asupersync-dep-p3-api-adrs-h3jspm.13' ;;
         *) printf '%s' "$EVIDENCE_OWNER" ;;
     esac
 }
@@ -177,6 +185,7 @@ scenario_step_id() {
         feature-platform-consumer-contract) printf 'ver-a5-feature-platform-consumer-contract' ;;
         aggregate-signoff-contract) printf 'ver-a6-aggregate-signoff-contract' ;;
         api-adr-registry-contract) printf 'adr-003-api-adr-registry-contract' ;;
+        api-adr-phase3-signoff) printf 'adr-013-api-adr-phase3-signoff' ;;
         *) printf 'ver-a2-%s' "$1" ;;
     esac
 }
@@ -216,6 +225,9 @@ scenario_command_display() {
             ;;
         api-adr-registry-contract)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_api_adr_registry_contract -- --nocapture"
+            ;;
+        api-adr-phase3-signoff)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture"
             ;;
     esac
 }
@@ -681,6 +693,12 @@ execute_scenario() {
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_api_adr_registry_contract -- --nocapture
+            ;;
+        api-adr-phase3-signoff)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture
             ;;
     esac
 }
