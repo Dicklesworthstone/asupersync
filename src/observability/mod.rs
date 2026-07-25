@@ -129,6 +129,12 @@ pub mod pressure_governor;
 #[cfg(feature = "metrics")]
 #[allow(dead_code)]
 pub(crate) mod regex_syntax;
+// br-asupersync-5z2scg.8.3.2.2: retained-table-backed, UTF-8-safe semantic
+// normalization for candidate regex character classes. This remains private
+// staging code and carries no dependency-removal or matcher authority.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_semantics;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;

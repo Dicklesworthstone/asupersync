@@ -1,0 +1,407 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-character-semantics-contract-v1",
+  "program_id": "dependency-sovereignty",
+  "bead_id": "asupersync-5z2scg.8.3.2.2",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "semantics_id": "ASUP-REGEX-CHAR-SEMANTICS-V1",
+  "captured_date_utc": "2026-07-25",
+  "decision": {
+    "disposition": "STAGED_RETAINED_TABLE_BACKEND",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "semantic_kernel_state": "INTERNAL_NOT_WIRED",
+    "r3_2_2_surface_complete": true,
+    "cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "owned_unicode_tables_authorized": false,
+    "reason_codes": [
+      "TEXT_API_HAS_UTF8_INVARIANT",
+      "UNICODE_16_TABLES_RETAINED",
+      "CANONICAL_RANGES_ARE_BOUNDED",
+      "BYTE_MODE_IS_UTF8_SAFE_ONLY",
+      "CASE_FOLD_AND_BOUNDARIES_OWNED_BY_R3_2_3",
+      "TERMINAL_CONFORMANCE_OWNED_BY_R3_2_4",
+      "MATCHER_NOT_IMPLEMENTED"
+    ],
+    "on_unknown_property": "ERROR_KEEP_INCUMBENT",
+    "on_invalid_byte_boundary": "ERROR_KEEP_INCUMBENT",
+    "on_range_budget_exhaustion": "ERROR_KEEP_INCUMBENT"
+  },
+  "authority": {
+    "syntax_contract": "ASUP-REGEX-SYNTAX-V1",
+    "syntax_source": "src/observability/regex_syntax.rs",
+    "syntax_source_sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+    "unicode_contract": "artifacts/regex_unicode_table_contract_v1.json",
+    "unicode_contract_decision": "KEEP_INCUMBENT_DEFER",
+    "unicode_version": "16.0.0",
+    "consumer_input_type": "&str pattern and &str haystack",
+    "bytes_regex_consumer_reachable": false,
+    "ambient_locale_used": false,
+    "platform_tables_used": false
+  },
+  "source": {
+    "path": "src/observability/regex_semantics.rs",
+    "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+    "module_wiring": "src/observability/mod.rs",
+    "visibility": "pub(crate)",
+    "feature": "metrics",
+    "public_api_added": false,
+    "unsafe_code_added": false
+  },
+  "retained_backend": {
+    "dependency_alias": "retained-regex-syntax",
+    "package": "regex-syntax",
+    "version": "0.8.11",
+    "version_requirement": "=0.8.11",
+    "unicode_version": "16.0.0",
+    "cargo_optional": true,
+    "enabled_by_feature": "metrics",
+    "already_in_incumbent_graph": true,
+    "new_unique_packages": 0,
+    "default_table_features": [
+      "unicode-age",
+      "unicode-bool",
+      "unicode-case",
+      "unicode-gencat",
+      "unicode-perl",
+      "unicode-script",
+      "unicode-segment"
+    ],
+    "table_copy_added": false,
+    "build_script_added": false,
+    "proc_macro_added": false,
+    "native_code_added": false
+  },
+  "alphabet_contract": {
+    "default_alphabet": "UNICODE_SCALAR",
+    "unicode_scalar_min": "U+0000",
+    "unicode_scalar_max": "U+10FFFF",
+    "surrogate_policy": "EXCLUDED_NOT_A_SCALAR",
+    "noncharacter_policy": "ACCEPT_AS_SCALAR",
+    "combining_sequence_policy": "MATCH_CODEPOINTS_WITHOUT_NORMALIZATION",
+    "unicode_disabled_alphabet": "UTF8_SAFE_BYTE",
+    "unicode_disabled_byte_max": 127,
+    "raw_non_ascii_literal_policy": "ACCEPT_ONLY_WHEN_WHOLE_SCOPE_PRESERVES_UTF8",
+    "escaped_byte_sequence_policy": "ACCEPT_ONLY_WHEN_WHOLE_SCOPE_PRESERVES_UTF8",
+    "invalid_nonempty_utf8_match_policy": "REJECT",
+    "unicode_property_in_byte_mode_policy": "REJECT"
+  },
+  "canonical_representation": {
+    "unicode_range_bound_type": "char",
+    "byte_range_bound_type": "u8",
+    "range_endpoints": "inclusive",
+    "ordering": "ascending",
+    "overlap": "forbidden",
+    "adjacency": "merged",
+    "set_operations": [
+      "union",
+      "negation",
+      "range",
+      "intersection",
+      "difference",
+      "symmetric_difference"
+    ],
+    "origins": [
+      "bracketed",
+      "dot",
+      "perl",
+      "unicode_property"
+    ],
+    "membership_lookup": "binary_search",
+    "empty_class_allowed": true,
+    "checked_aggregate_accounting": true
+  },
+  "limits": {
+    "max_pattern_bytes": 1048576,
+    "max_syntax_tokens": 1048576,
+    "max_syntax_nodes": 1048576,
+    "max_syntax_nesting": 250,
+    "max_semantic_atoms": 1048576,
+    "max_ranges_per_class": 4096,
+    "max_total_ranges": 1048576,
+    "backend_nesting_limit": 250,
+    "allocation_policy": "grow only after the preceding syntax or semantic budget admits the item",
+    "limit_arithmetic": "checked or saturating before allocation/accounting"
+  },
+  "diagnostics": [
+    {
+      "code": "RGX-SEM-E001",
+      "category": "RGX-DIAG-UNKNOWN-UNICODE-PROPERTY",
+      "trigger": "retained Unicode tables reject a property or alias"
+    },
+    {
+      "code": "RGX-SEM-E002",
+      "category": "RGX-DIAG-UNICODE-PROPERTY-IN-BYTE-MODE",
+      "trigger": "Unicode property occurs while u mode is disabled"
+    },
+    {
+      "code": "RGX-SEM-E003",
+      "category": "RGX-DIAG-INVALID-UTF8",
+      "trigger": "byte-mode expression can produce a non-empty invalid UTF-8 match"
+    },
+    {
+      "code": "RGX-SEM-E004",
+      "category": "RGX-DIAG-RETAINED-TABLE-REJECTED",
+      "trigger": "retained class translator rejects another semantic atom"
+    },
+    {
+      "code": "RGX-SEM-E005",
+      "category": "RGX-DIAG-SEMANTIC-SHAPE",
+      "trigger": "backend output violates the expected canonical atom shape"
+    },
+    {
+      "code": "RGX-SEM-E006",
+      "category": "RGX-DIAG-SEMANTIC-ATOM-LIMIT",
+      "trigger": "semantic atom budget is exhausted"
+    },
+    {
+      "code": "RGX-SEM-E007",
+      "category": "RGX-DIAG-CLASS-RANGE-LIMIT",
+      "trigger": "one canonical class exceeds its range budget"
+    },
+    {
+      "code": "RGX-SEM-E008",
+      "category": "RGX-DIAG-TOTAL-RANGE-LIMIT",
+      "trigger": "aggregate canonical range budget or cardinality accounting overflows"
+    },
+    {
+      "code": "RGX-SEM-E009",
+      "category": "RGX-DIAG-FLAG-CONTEXT",
+      "trigger": "candidate token nesting cannot reconcile Unicode flag ownership"
+    }
+  ],
+  "semantic_cases": [
+    {
+      "case_id": "RGX-R322-C001",
+      "surface": "ASCII inclusive range",
+      "pattern": "[a-z]",
+      "expected": "UNICODE_SCALAR a..z"
+    },
+    {
+      "case_id": "RGX-R322-C002",
+      "surface": "nested set intersection and negation",
+      "pattern": "[a-z&&[^aeiou]]",
+      "expected": "b and z included; a and non-ASCII excluded"
+    },
+    {
+      "case_id": "RGX-R322-C003",
+      "surface": "Unicode Script property",
+      "pattern": "[\\pL&&\\p{Greek}]",
+      "expected": "Greek letters included; Latin letters excluded"
+    },
+    {
+      "case_id": "RGX-R322-C004",
+      "surface": "Unicode decimal Perl class",
+      "pattern": "\\d",
+      "expected": "Arabic-Indic and ASCII digits included"
+    },
+    {
+      "case_id": "RGX-R322-C005",
+      "surface": "ASCII Perl class under scoped u disablement",
+      "pattern": "(?-u:\\d)",
+      "expected": "ASCII digits only"
+    },
+    {
+      "case_id": "RGX-R322-C006",
+      "surface": "ASCII POSIX class",
+      "pattern": "[[:digit:]]",
+      "expected": "ASCII digits only"
+    },
+    {
+      "case_id": "RGX-R322-C007",
+      "surface": "combining mark",
+      "pattern": "\\p{M}",
+      "expected": "U+0301 included without normalization"
+    },
+    {
+      "case_id": "RGX-R322-C008",
+      "surface": "scalar and noncharacter edges",
+      "pattern": "[\\u{0}\\u{FDD0}\\u{10FFFF}]",
+      "expected": "all three scalar values included"
+    },
+    {
+      "case_id": "RGX-R322-C009",
+      "surface": "unknown property",
+      "pattern": "\\p{DefinitelyNotAProperty}",
+      "expected": "RGX-SEM-E001"
+    },
+    {
+      "case_id": "RGX-R322-C010",
+      "surface": "Unicode property in byte mode",
+      "pattern": "(?-u:\\pL)",
+      "expected": "RGX-SEM-E002"
+    },
+    {
+      "case_id": "RGX-R322-C011",
+      "surface": "invalid isolated byte",
+      "pattern": "(?-u:\\xFF)",
+      "expected": "RGX-SEM-E003"
+    },
+    {
+      "case_id": "RGX-R322-C012",
+      "surface": "valid UTF-8 byte sequence",
+      "pattern": "(?-u:\\xC2\\xA0)",
+      "expected": "accepted as one UTF-8-safe byte scope"
+    },
+    {
+      "case_id": "RGX-R322-C013",
+      "surface": "raw multibyte scalar in byte scope",
+      "pattern": "(?-u:é)",
+      "expected": "accepted because the complete literal remains valid UTF-8"
+    },
+    {
+      "case_id": "RGX-R322-C014",
+      "surface": "empty class set",
+      "pattern": "[a&&b]",
+      "expected": "canonical empty range set"
+    },
+    {
+      "case_id": "RGX-R322-C015",
+      "surface": "range budget",
+      "pattern": "\\p{Greek}",
+      "expected": "RGX-SEM-E007 when max_ranges_per_class is one"
+    }
+  ],
+  "r1_rows": [
+    {
+      "case_id": "RGX-SYN-013",
+      "surface": "unicode-script",
+      "coverage": "RGX-R322-C003"
+    },
+    {
+      "case_id": "RGX-SYN-014",
+      "surface": "unicode-digit",
+      "coverage": "RGX-R322-C004"
+    },
+    {
+      "case_id": "RGX-SYN-015",
+      "surface": "ascii-posix-class",
+      "coverage": "RGX-R322-C006"
+    },
+    {
+      "case_id": "RGX-SYN-016",
+      "surface": "class-intersection-subtraction",
+      "coverage": "RGX-R322-C002"
+    },
+    {
+      "case_id": "RGX-SYN-017",
+      "surface": "direct-class-subtraction",
+      "coverage": "canonical set-operation unit coverage"
+    },
+    {
+      "case_id": "RGX-SYN-018",
+      "surface": "class-symmetric-difference",
+      "coverage": "canonical set-operation backend plus contract marker"
+    },
+    {
+      "case_id": "RGX-SYN-021",
+      "surface": "hex-unicode-escapes",
+      "coverage": "RGX-R322-C008 and RGX-R322-C012"
+    },
+    {
+      "case_id": "RGX-SYN-024",
+      "surface": "empty-character-class",
+      "coverage": "RGX-R322-C014"
+    }
+  ],
+  "test_evidence": {
+    "inline_unit_tests": 12,
+    "property_lanes": 2,
+    "property_cases_per_lane": 256,
+    "generated_property_cases": 512,
+    "independent_models": [
+      "closed ASCII interval membership model",
+      "canonical ordering/accounting invariant model"
+    ],
+    "adversarial_classes": [
+      "unknown property",
+      "property under byte mode",
+      "isolated invalid byte",
+      "per-class range exhaustion",
+      "aggregate atom exhaustion",
+      "arbitrary UTF-8 syntax input"
+    ],
+    "resource_effects": "pure synchronous analysis creates no task, obligation, permit, socket, file, lock, or external process",
+    "downstream_no_mock_e2e_owner": "asupersync-5z2scg.8.3.2.4"
+  },
+  "proof": {
+    "warning_denied_lib_check": {
+      "state": "PASSED",
+      "build_id": 29947326818680916,
+      "worker": "hz1",
+      "exit_code": 0,
+      "source_sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock --overlay-path src/observability/mod.rs --overlay-path src/observability/regex_semantics.rs -- env CARGO_INCREMENTAL=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --features metrics --lib",
+      "local_fallback_used": false
+    },
+    "focused_contract_test": {
+      "state": "PASSED",
+      "build_id": 29947326818680917,
+      "worker": "hz2",
+      "exit_code": 0,
+      "tests_passed": 53,
+      "tests_failed": 0,
+      "source_sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock --overlay-path src/observability/mod.rs --overlay-path src/observability/regex_semantics.rs --overlay-path artifacts/regex_character_semantics_contract_v1.json --overlay-path docs/regex_character_semantics_contract.md --overlay-path tests/regex_character_semantics_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_character_semantics_contract -- --nocapture",
+      "local_fallback_used": false
+    },
+    "focused_clippy": {
+      "state": "PASSED",
+      "build_id": 29947326818680914,
+      "worker": "hz1",
+      "exit_code": 0,
+      "source_sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock --overlay-path src/observability/mod.rs --overlay-path src/observability/regex_semantics.rs --overlay-path artifacts/regex_character_semantics_contract_v1.json --overlay-path docs/regex_character_semantics_contract.md --overlay-path tests/regex_character_semantics_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_character_semantics_contract -- -D warnings",
+      "local_fallback_used": false
+    },
+    "broad_all_targets_clippy": {
+      "state": "BLOCKED_STALE_PROGRESS_CANCELLED",
+      "build_id": 29947326818680915,
+      "worker": "hz1",
+      "heartbeat_stale": false,
+      "progress_age_at_cancel_seconds": 259,
+      "graceful_cancel": true,
+      "terminal_success_claimed": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock --overlay-path src/observability/mod.rs --overlay-path src/observability/regex_semantics.rs --overlay-path artifacts/regex_character_semantics_contract_v1.json --overlay-path docs/regex_character_semantics_contract.md --overlay-path tests/regex_character_semantics_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --all-targets --keep-going -- -D warnings",
+      "local_fallback_used": false
+    },
+    "blocked_monolithic_attempts": [
+      {
+        "build_id": 29947326818680902,
+        "worker": "hz2",
+        "terminal_state": "BLOCKED_STALE_PROGRESS_CANCELLED",
+        "test_process_started": false
+      },
+      {
+        "build_id": 29947326818680904,
+        "worker": "vmi1227854",
+        "terminal_state": "BLOCKED_STALE_PROGRESS_CANCELLED",
+        "test_process_started": false
+      },
+      {
+        "build_id": 29947326818680906,
+        "worker": "hz1",
+        "terminal_state": "BLOCKED_STALE_PROGRESS_CANCELLED",
+        "test_process_started": false
+      }
+    ]
+  },
+  "replay": {
+    "focused_source": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_character_semantics_contract semantic_behavior -- --nocapture",
+    "focused_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_character_semantics_contract -- --nocapture",
+    "all_targets_clippy": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --all-targets --keep-going -- -D warnings",
+    "local_cargo_fallback_authorized": false
+  },
+  "no_claims": [
+    "does not authorize removing regex or regex-syntax",
+    "does not claim owned Unicode tables",
+    "does not claim case-insensitive folding parity",
+    "does not claim word, line, or input boundary parity",
+    "does not compile or execute a matcher",
+    "does not prove capture, replace, privacy integration, or cache behavior",
+    "does not prove terminal Unicode or byte conformance owned by R3.2.4",
+    "does not prove performance improvement or no regression",
+    "does not prove broad workspace health or release readiness",
+    "does not approve local Cargo fallback"
+  ]
+}
