@@ -21,13 +21,19 @@ measured in the downstream repository or in a neutral consumer depending on both
 with an independent lockfile. The registry states this as a hard rule, and the
 oracle policy names it `must-not-enter-asupersync-workspace`.
 
-**The bead's own description is wrong on this point.** It says FrankenSQLite
-"already depends **optionally** on asupersync." The downstream manifest carries
-no `optional` marker — the likely misreading is `default-features = false` — and
-the plan states the dependency is **unconditional**. Every downstream crate takes
-it that way. Optionality would have meant some feature configuration could break
-the cycle. It cannot. The constraint is absolute, and this ADR does not carry the
-bead's wording forward.
+**The bead's description is misleading on this point, though not baseless.** It
+says FrankenSQLite "already depends **optionally** on asupersync." Verified
+against the downstream manifests: **11 of 14 crates take it unconditionally**,
+and three genuinely do gate it — the `fsqlite` façade behind `async-api`,
+`fsqlite-types` behind `native`, `fsqlite-vfs` behind `linux-asupersync-uring`.
+
+That partial optionality is not load-bearing. `fsqlite-core` takes asupersync
+unconditionally — under a **non-wasm target cfg**, not a feature gate — and the
+façade depends on `fsqlite-core` unconditionally. Every path runs through core.
+
+So **disabling `async-api` is not a cycle escape**, and must not be attempted as
+one. The constraint is absolute on every non-wasm target. This is recorded
+precisely because the optionality is real enough to look like a way out.
 
 **The plan and the registry also disagree.** §9.1 says the `sqlite` feature is
 "deprecated/removed" and the integration inverted. The registry and the bead both
@@ -98,7 +104,7 @@ The `sqlite` feature stays, with `rusqlite` and its bundled C, at
 
 | ID | Gap | Owner |
 |---|---|---|
-| SQL-GAP-01 | The **bead says "optionally"; the dependency is unconditional.** No feature configuration can break the cycle — the constraint is absolute. | `asupersync-ym2wtv.3.1` |
+| SQL-GAP-01 | The bead says "optionally". Verified: **11 of 14 crates unconditional**, including `fsqlite-core` (non-wasm target cfg) which the façade always depends on; 3 do gate it. No feature configuration breaks the cycle on a non-wasm target — `async-api` is not an escape hatch. | `asupersync-ym2wtv.3.1` |
 | SQL-GAP-02 | Plan §9.1 says deprecate/remove and invert; registry and bead make KEEP the default terminal result absent owner approval. | `asupersync-ym2wtv.4` |
 | SQL-GAP-03 | The one public leak is a **foreign-trait impl**, not a signature. A signature-grep audit would wrongly call the API engine-clean. | `asupersync-ym2wtv.2.9` |
 | SQL-GAP-04 | The registry's baseline command and all four scenario ids are planned; the named e2e scenario appears **nowhere** in the runner script. | `asupersync-ym2wtv.2.1` |

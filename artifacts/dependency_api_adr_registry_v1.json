@@ -5489,8 +5489,8 @@
       "known_gaps": [
         {
           "gap_id": "SQL-GAP-01",
-          "summary": "The bead states that FrankenSQLite depends optionally on asupersync. The downstream manifest carries no optional marker, and the plan states the dependency is unconditional. The likely misreading is the downstream entry disabling default features.",
-          "consequence": "Optionality would have meant a feature-off configuration could break the cycle. It cannot. Every downstream crate in that project takes the dependency unconditionally, so the constraint is absolute and this ADR does not carry the bead's wording forward.",
+          "summary": "The bead states FrankenSQLite depends optionally on asupersync. Verified against the downstream manifests: 11 of 14 crates take it unconditionally, including fsqlite-core (under a non-wasm target cfg), which the facade depends on unconditionally. Three crates do gate it behind a feature.",
+          "consequence": "No feature configuration breaks the cycle on a non-wasm target. Recorded precisely because the partial optionality is real and invites 'just disable async-api' as a false escape hatch; the fsqlite-core edge defeats it.",
           "owner_bead": "asupersync-ym2wtv.3.1",
           "may_widen": false
         },
@@ -5644,7 +5644,7 @@
         {
           "source": "bead asupersync-dep-p3-api-adrs-h3jspm.10 description",
           "stale_text": "FrankenSQLite already depends optionally on asupersync",
-          "resolution": "The downstream dependency is unconditional. Every downstream crate takes it without an optional marker, so no feature configuration can break the cycle. The constraint is absolute rather than conditional."
+          "resolution": "The dependency is unconditional in fsqlite-core, under a non-wasm target cfg rather than a feature gate, and the fsqlite facade depends on fsqlite-core unconditionally. So no feature configuration breaks the cycle on any non-wasm target. Precision correction to this ADR's first statement of the point: three of the fourteen fsqlite crates DO gate asupersync optionally -- the facade behind async-api, fsqlite-types behind native, fsqlite-vfs behind linux-asupersync-uring -- so the bead's word 'optionally' was not baseless. It is simply not load-bearing, because the eleven that take it unconditionally include fsqlite-core, which every path runs through. Disabling async-api is therefore not a cycle escape, and must not be attempted as one."
         }
       ],
       "migration_policy": {
