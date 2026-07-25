@@ -1397,14 +1397,12 @@ mod tests {
             let mut message = ProtobufWireMessage::new(&wire, limits).unwrap();
             let mut decoder = message.decoder();
             let mut steps = 0usize;
-            loop {
-                match decoder.next_field() {
-                    Ok(Some(_)) => {
-                        steps += 1;
-                        prop_assert!(steps <= wire.len());
-                    }
-                    Ok(None) | Err(_) => break,
-                }
+            // `Ok(None)` (clean end) and `Err(_)` (bounded refusal) both mean
+            // "stop"; the property under test is only that the loop terminates
+            // in at most `wire.len()` steps, so both exits are equivalent here.
+            while let Ok(Some(_)) = decoder.next_field() {
+                steps += 1;
+                prop_assert!(steps <= wire.len());
             }
         }
     }

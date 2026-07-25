@@ -109,7 +109,7 @@ impl ProtoMessage for Path {
     ) -> Result<bool, ProtobufWireError> {
         match field.field_number() {
             1 => {
-                self.label = field.as_str()?.to_owned();
+                field.as_str()?.clone_into(&mut self.label);
                 Ok(true)
             }
             2 => {

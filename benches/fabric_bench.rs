@@ -604,7 +604,7 @@ fn bench_steward_selection(c: &mut Criterion) {
         warm_stewards: 3,
         hot_stewards: 5,
         candidate_pool_size: 6,
-        placement_hash_salt: 0x57_4D_F1D_u64,
+        placement_hash_salt: 0x0574_DF1D_u64,
         ..PlacementPolicy::default()
     };
 

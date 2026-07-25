@@ -2969,6 +2969,13 @@ mod tests {
         );
     }
 
+    // The incumbent patterns below are deliberately trivial. This test pins
+    // incumbent `(?x)` whitespace/comment semantics against the candidate
+    // parser, so `clippy::trivial_regex`'s suggestion to use plain string
+    // operations would delete the exact behavior under test. Suppressed rather
+    // than "simplified" (br-asupersync-vdbvkv chain; raised with the R3.1.4
+    // owner in Agent Mail thread asupersync-5z2scg.8.3.1.4 before landing).
+    #[allow(clippy::trivial_regex)]
     #[test]
     fn minimized_semantic_divergences_remain_explicit_cutover_blockers() {
         let incumbent = IncumbentRegex::new("(?x)a b").expect("incumbent x pattern");
