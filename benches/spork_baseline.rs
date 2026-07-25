@@ -96,14 +96,16 @@ fn bench_genserver_call(c: &mut Criterion) {
             let result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
             let result_clone = Arc::clone(&result);
 
-            let (ch, cs) = scope
-                .spawn(&mut runtime.state, &cx, move |cx| async move {
+            // `spawn_registered` stores the task itself, so unlike the
+            // `spawn_gen_server` call above there is no manual
+            // `store_spawned_task` for the client task.
+            let ch = scope
+                .spawn_registered(&mut runtime.state, &cx, move |cx| async move {
                     let r = server_ref.call(&cx, BenchCall::Add(1)).await;
                     *result_clone.lock().unwrap() = Some(r);
                 })
                 .unwrap();
             let client_id = ch.task_id();
-            runtime.state.store_spawned_task(client_id, cs);
 
             {
                 let mut sched = runtime.scheduler.lock();
@@ -118,7 +120,15 @@ fn bench_genserver_call(c: &mut Criterion) {
             }
             runtime.run_until_idle();
 
+            // Assert rather than only black_box the flag: this benchmark is
+            // meaningless if the client task never got scheduled, and a bare
+            // `black_box(guard.is_some())` would time an empty loop just as
+            // happily as a real call roundtrip (br-asupersync-jwr6k0).
             let guard = result.lock().unwrap();
+            assert!(
+                guard.is_some(),
+                "gen_server call did not complete; benchmark would be measuring nothing"
+            );
             std::hint::black_box(guard.is_some())
         })
     });
