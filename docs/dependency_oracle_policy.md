@@ -43,6 +43,81 @@ committed. At that point the owner must:
 If those fields cannot be completed, the production dependency stays in place.
 The program uses KEEP rather than an ungoverned oracle.
 
+## Current manifest reconciliation
+
+Bead `asupersync-mnotoo.4.1` adds the checked
+`dependency-oracle-manifest-reconciliation-v1` block to the same canonical
+artifact. It does not create a second registry and does not activate any of the
+24 planned post-cutover rows.
+
+The reconciliation inventories the reference edges that exist now:
+
+- 10 active reference packages;
+- 15 exact manifest edges;
+- every root workspace member manifest;
+- the excluded fuzz and WASM Cargo projects;
+- five standalone conformance project manifests; and
+- `Cargo.lock` package version, source, and checksum data.
+
+Synthetic Cargo manifests under `tests/fixtures/` are excluded because they are
+positive and negative contract inputs, not installed dependency edges. Every
+other scoped manifest and the lockfile carries a SHA-256 and line-count pin.
+Any drift is an unregistered state until the active registry is reconciled.
+
+The active packages are `httparse`, `tokio-util`, `sqlx`, `redis`, `raptorq`,
+`tokio`, `h2`, `prometheus-client`, `opentelemetry_sdk`, and
+`opentelemetry-proto`. Each row records:
+
+- exact Cargo package ID, requested and resolved version, registry source, and
+  lockfile checksum;
+- every admitted manifest path, dependency section, alias, feature set, and
+  default-feature state;
+- exact source paths and focused `cargo test` lanes;
+- a production-exclusion command and its deliberately narrow no-claim scope;
+- the Git revision and date that introduced the edge;
+- concrete release/date expiry;
+- independent corpus status and provenance;
+- bead-backed owner, renewal authority, and removal bead; and
+- a row-specific no-claim boundary.
+
+The current deterministic class report is:
+
+| Class | Active oracle edges | Interpretation |
+| --- | ---: | --- |
+| Production | 0 | A package may have a distinct production edge, but no oracle edge is production evidence. |
+| Dev / conformance | 15 | Only the exact registered differential and conformance lanes are admitted. |
+| Build | 0 | A build-dependency oracle is unregistered and fails closed. |
+| Native | 0 active, 3 planned | Native incumbents remain planned external or fixture-only oracles. |
+| Reverse-cycle | 0 active, 1 planned | FrankenSQLite remains outside the workspace. |
+
+Some dependency declarations are explicitly non-oracle candidates. For
+example, Tokio drives conformance binaries, prost supports generated messages,
+and the excluded fuzz conformance member declares HTTP/1 packages that its
+current H2-only sources do not import. The H2 edge in that excluded member is
+`declared-reference-not-wired`; it cannot report PASS. The standalone RaptorQ
+differential skeleton similarly has no RaptorQ or asupersync package edge and
+remains blocked.
+
+The active rows expire at release `0.3.11` or `2026-10-24`, whichever governance
+gate is reached first. Renewal belongs to `asupersync-mnotoo.4` and requires a
+new expiry, owner receipt, corpus status, and production-exclusion evidence.
+Removal and the initial retirement sweep belong to
+`asupersync-mnotoo.4.3`. The machine state remains
+`cutover_authorized = false`.
+
+The focused contract fails on:
+
+- manifest or lockfile pin drift;
+- an unregistered or unknown oracle edge;
+- an expired active row;
+- missing owner, exact test scope, independent corpus, or removal bead;
+- package version, source, or checksum mismatch; and
+- deterministic report count drift.
+
+Manifest and lockfile pins prove only that the reviewed graph text has not
+drifted. They do not prove a package safe, a reference correct, a comparison
+complete, or a production graph broadly healthy.
+
 ## Oracle classes
 
 ### `PURE_RUST_IN_WORKSPACE_ORACLE`
@@ -201,6 +276,12 @@ Only `SECURITY_PROTOCOL_ORACLE` may use `permanent_keep`, and only with
 The focused contract contains positive schema/graph checks and negative
 fixtures for:
 
+- manifest or lockfile pin drift;
+- unregistered active oracle edges;
+- expired active manifest-oracle rows;
+- missing active owner, test scope, corpus, or removal fields;
+- lock package identity drift;
+- active report count drift;
 - missing retirement disposition;
 - native oracle in `workspace-dev`;
 - reverse dependency in `workspace-dev`;
@@ -256,6 +337,12 @@ the contract.
 
 Passing this contract proves only that:
 
+- 10 current reference packages across 15 exact manifest edges are registered;
+- all 19 scoped manifests and the lockfile match their reviewed pins;
+- active rows carry package identity, lane, exclusion, expiry, corpus, renewal,
+  removal, and no-claim fields;
+- the report separates Production | 0, Dev / conformance | 15, Build | 0,
+  Native | 0 active, 3 planned, and Reverse-cycle | 0 active, 1 planned;
 - all 24 initial oracle plans have complete governance rows;
 - class placement and forbidden graph lanes are internally consistent;
 - retirement beads and aggregate E2E owners exist;

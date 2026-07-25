@@ -7,17 +7,21 @@
 #![allow(missing_docs)]
 
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 const BEAD_ID: &str = "asupersync-dep-p1-foundations-upksjk.3";
+const RECONCILIATION_BEAD_ID: &str = "asupersync-mnotoo.4.1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const ARTIFACT_PATH: &str = "artifacts/dependency_oracle_policy_v1.json";
 const DOC_PATH: &str = "docs/dependency_oracle_policy.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 const MANIFEST_PATH: &str = "Cargo.toml";
+const LOCK_PATH: &str = "Cargo.lock";
 const TAXONOMY_PATH: &str = "artifacts/dependency_safety_taxonomy_v1.json";
 const SCENARIO_ID: &str = "dependency_oracle_policy_contract_v1";
+const RECONCILIATION_CONTRACT_ID: &str = "dependency-oracle-manifest-reconciliation-v1";
 const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_oracle_policy\" cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture";
 
 const PURE_RUST: &str = "PURE_RUST_IN_WORKSPACE_ORACLE";
@@ -39,7 +43,24 @@ fn policy() -> Value {
         .expect("dependency oracle policy must be valid JSON")
 }
 
+fn reconciliation(policy: &Value) -> &Value {
+    policy
+        .get("manifest_reconciliation")
+        .expect("manifest_reconciliation must exist")
+}
+
+fn active_registry(policy: &Value) -> &[Value] {
+    array(reconciliation(policy), "active_oracle_registry")
+}
+
 fn object<'a>(value: &'a Value, key: &str) -> &'a Map<String, Value> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{key} must be an object"))
+}
+
+fn object_object<'a>(value: &'a Map<String, Value>, key: &str) -> &'a Map<String, Value> {
     value
         .get(key)
         .and_then(Value::as_object)
@@ -60,7 +81,21 @@ fn string<'a>(value: &'a Value, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("{key} must be a string"))
 }
 
+fn object_string<'a>(value: &'a Map<String, Value>, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{key} must be a string"))
+}
+
 fn integer(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{key} must be a nonnegative integer"))
+}
+
+fn object_integer(value: &Map<String, Value>, key: &str) -> u64 {
     value
         .get(key)
         .and_then(Value::as_u64)
@@ -77,6 +112,100 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
                 .to_owned()
         })
         .collect()
+}
+
+fn object_string_set(value: &Map<String, Value>, key: &str) -> BTreeSet<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_owned()
+        })
+        .collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn line_count(bytes: &[u8]) -> usize {
+    std::str::from_utf8(bytes)
+        .expect("pinned manifest source is UTF-8")
+        .lines()
+        .count()
+}
+
+fn active_row_by_id<'a>(policy: &'a Value, oracle_id: &str) -> &'a Value {
+    active_registry(policy)
+        .iter()
+        .find(|row| string(row, "oracle_id") == oracle_id)
+        .unwrap_or_else(|| panic!("missing active oracle row {oracle_id}"))
+}
+
+fn active_row_by_id_mut<'a>(policy: &'a mut Value, oracle_id: &str) -> &'a mut Value {
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("active_oracle_registry"))
+        .and_then(Value::as_array_mut)
+        .expect("active_oracle_registry must be an array")
+        .iter_mut()
+        .find(|row| string(row, "oracle_id") == oracle_id)
+        .unwrap_or_else(|| panic!("missing mutable active oracle row {oracle_id}"))
+}
+
+fn expected_active_oracle_edges() -> BTreeSet<String> {
+    [
+        "Cargo.toml::dev-dependencies::httparse",
+        "Cargo.toml::dev-dependencies::opentelemetry-proto",
+        "Cargo.toml::dev-dependencies::opentelemetry_sdk",
+        "Cargo.toml::dev-dependencies::raptorq",
+        "Cargo.toml::dev-dependencies::redis",
+        "Cargo.toml::dev-dependencies::sqlx",
+        "Cargo.toml::dev-dependencies::tokio",
+        "Cargo.toml::dev-dependencies::tokio-util",
+        "conformance/Cargo.toml::dependencies::h2",
+        "conformance/Cargo.toml::dependencies::opentelemetry-proto",
+        "conformance/Cargo.toml::dependencies::opentelemetry_sdk",
+        "conformance/Cargo.toml::dependencies::prometheus-client",
+        "conformance/Cargo.toml::dev-dependencies::h2",
+        "conformance/Cargo.toml::dev-dependencies::opentelemetry-proto",
+        "fuzz/conformance/Cargo.toml::dependencies::h2",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn expected_manifest_source_pins() -> BTreeSet<String> {
+    [
+        "Cargo.lock",
+        "Cargo.toml",
+        "asupersync-browser-core/Cargo.toml",
+        "asupersync-macros/Cargo.toml",
+        "asupersync-tokio-compat/Cargo.toml",
+        "asupersync-wasm/Cargo.toml",
+        "conformance/Cargo.toml",
+        "drop_unwrap_finder/Cargo.toml",
+        "franken_decision/Cargo.toml",
+        "franken_evidence/Cargo.toml",
+        "franken_kernel/Cargo.toml",
+        "frankenlab/Cargo.toml",
+        "fuzz/Cargo.toml",
+        "fuzz/conformance/Cargo.toml",
+        "tests/conformance/grpc_connect/Cargo.toml",
+        "tests/conformance/raptorq_differential/Cargo.toml",
+        "tests/conformance/raptorq_rfc6330/differential/Cargo.toml",
+        "tests/conformance/raptorq_rfc6330/golden/Cargo.toml",
+        "tests/conformance/raptorq_rfc6330/reporting/Cargo.toml",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn profile_ids(policy: &Value) -> BTreeSet<String> {
@@ -165,6 +294,21 @@ fn set_string_array(row: &mut Value, key: &str, values: &[&str]) {
 }
 
 fn nonempty_string(value: &Value, key: &str, errors: &mut Vec<String>, oracle_id: &str) {
+    if value
+        .get(key)
+        .and_then(Value::as_str)
+        .is_none_or(|text| text.trim().is_empty())
+    {
+        errors.push(format!("{oracle_id}: {key} must be a nonempty string"));
+    }
+}
+
+fn nonempty_object_string(
+    value: &Map<String, Value>,
+    key: &str,
+    errors: &mut Vec<String>,
+    oracle_id: &str,
+) {
     if value
         .get(key)
         .and_then(Value::as_str)
@@ -485,6 +629,419 @@ fn validate_oracle_row(policy: &Value, row: &Value) -> Vec<String> {
     }
 
     validate_extension(row, &mut errors, oracle_id);
+    errors
+}
+
+fn manifest_dependency(manifest_path: &str, section: &str, alias: &str) -> Option<toml::Value> {
+    let manifest: toml::Value = toml::from_str(&read_repo_file(manifest_path))
+        .unwrap_or_else(|error| panic!("{manifest_path} must parse as TOML: {error}"));
+    manifest
+        .get(section)
+        .and_then(toml::Value::as_table)
+        .and_then(|dependencies| dependencies.get(alias))
+        .cloned()
+}
+
+fn dependency_version(value: &toml::Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_table()
+            .and_then(|table| table.get("version"))
+            .and_then(toml::Value::as_str)
+    })
+}
+
+fn dependency_features(value: &toml::Value) -> BTreeSet<String> {
+    value
+        .as_table()
+        .and_then(|table| table.get("features"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|feature| {
+            feature
+                .as_str()
+                .expect("dependency features must be strings")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn dependency_default_features(value: &toml::Value) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("default-features"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+}
+
+fn locked_package(package_name: &str, resolved_version: &str) -> Option<toml::Value> {
+    let lock: toml::Value =
+        toml::from_str(&read_repo_file(LOCK_PATH)).expect("Cargo.lock must parse as TOML");
+    lock.get("package")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|package| {
+            package
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|name| name == package_name)
+                && package
+                    .get("version")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|version| version == resolved_version)
+        })
+        .cloned()
+}
+
+fn validate_active_oracle_row(policy: &Value, row: &Value) -> Vec<String> {
+    let reconciliation = reconciliation(policy);
+    let oracle_id = row
+        .get("oracle_id")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing-active-oracle-id>");
+    let mut errors = Vec::new();
+
+    for field in array(reconciliation, "active_registry_required_fields") {
+        let field = field
+            .as_str()
+            .expect("active registry required fields must be strings");
+        if row.get(field).is_none() {
+            errors.push(format!(
+                "{oracle_id}: missing required active field {field}"
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return errors;
+    }
+
+    for key in [
+        "oracle_id",
+        "package_name",
+        "package_id",
+        "resolved_version",
+        "lock_source",
+        "lock_checksum",
+        "oracle_class",
+        "lifecycle_state",
+        "graph_class",
+        "owner",
+        "removal_bead",
+        "no_claim_boundary",
+    ] {
+        nonempty_string(row, key, &mut errors, oracle_id);
+    }
+
+    if string(row, "lifecycle_state") != "active" {
+        errors.push(format!("{oracle_id}: manifest oracle must be active"));
+    }
+    if string(row, "graph_class") != "dev" {
+        errors.push(format!(
+            "{oracle_id}: active oracle edge must be classed as dev"
+        ));
+    }
+    if !matches!(string(row, "oracle_class"), PURE_RUST | SECURITY) {
+        errors.push(format!(
+            "{oracle_id}: active workspace oracle must be pure-Rust or security protocol"
+        ));
+    }
+    if !string(row, "owner").starts_with("bead:") {
+        errors.push(format!("{oracle_id}: owner must be a bead authority"));
+    }
+    if string_set(row, "requested_versions").is_empty() {
+        errors.push(format!("{oracle_id}: requested_versions must not be empty"));
+    }
+
+    let expected_package_id = format!(
+        "{}#{}@{}",
+        string(row, "lock_source"),
+        string(row, "package_name"),
+        string(row, "resolved_version")
+    );
+    if string(row, "package_id") != expected_package_id {
+        errors.push(format!(
+            "{oracle_id}: package_id does not match lock source, name and version"
+        ));
+    }
+
+    match locked_package(string(row, "package_name"), string(row, "resolved_version")) {
+        Some(package) => {
+            if package
+                .get("source")
+                .and_then(toml::Value::as_str)
+                .is_none_or(|source| source != string(row, "lock_source"))
+            {
+                errors.push(format!("{oracle_id}: lock source mismatch"));
+            }
+            if package
+                .get("checksum")
+                .and_then(toml::Value::as_str)
+                .is_none_or(|checksum| checksum != string(row, "lock_checksum"))
+            {
+                errors.push(format!("{oracle_id}: lock checksum mismatch"));
+            }
+        }
+        None => errors.push(format!(
+            "{oracle_id}: resolved package is absent from Cargo.lock"
+        )),
+    }
+
+    let manifest_edges = array(row, "manifest_edges");
+    if manifest_edges.is_empty() {
+        errors.push(format!("{oracle_id}: manifest_edges must not be empty"));
+    }
+    let mut edge_ids = BTreeSet::new();
+    for edge in manifest_edges {
+        for key in [
+            "edge_id",
+            "manifest_path",
+            "section",
+            "alias",
+            "requested_version",
+            "status",
+        ] {
+            nonempty_string(edge, key, &mut errors, oracle_id);
+        }
+        let edge_id = string(edge, "edge_id");
+        if !edge_ids.insert(edge_id) {
+            errors.push(format!("{oracle_id}: duplicate manifest edge {edge_id}"));
+        }
+        let expected_edge_id = format!(
+            "{}::{}::{}",
+            string(edge, "manifest_path"),
+            string(edge, "section"),
+            string(edge, "alias")
+        );
+        if edge_id != expected_edge_id {
+            errors.push(format!("{oracle_id}: malformed manifest edge ID {edge_id}"));
+        }
+        let Some(dependency) = manifest_dependency(
+            string(edge, "manifest_path"),
+            string(edge, "section"),
+            string(edge, "alias"),
+        ) else {
+            errors.push(format!(
+                "{oracle_id}: registered manifest edge {edge_id} does not exist"
+            ));
+            continue;
+        };
+        if dependency_version(&dependency) != Some(string(edge, "requested_version")) {
+            errors.push(format!("{oracle_id}: requested version drift at {edge_id}"));
+        }
+        if dependency_features(&dependency) != string_set(edge, "features") {
+            errors.push(format!("{oracle_id}: feature drift at {edge_id}"));
+        }
+        if dependency_default_features(&dependency)
+            != edge
+                .get("default_features")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        {
+            errors.push(format!("{oracle_id}: default-feature drift at {edge_id}"));
+        }
+        if !string_set(row, "requested_versions").contains(string(edge, "requested_version")) {
+            errors.push(format!(
+                "{oracle_id}: edge requested version missing from row catalog"
+            ));
+        }
+    }
+
+    let test_scope = object(row, "test_scope");
+    nonempty_object_string(test_scope, "status", &mut errors, oracle_id);
+    let source_paths = object_string_set(test_scope, "source_paths");
+    if source_paths.is_empty() {
+        errors.push(format!(
+            "{oracle_id}: test scope source_paths must not be empty"
+        ));
+    }
+    for path in &source_paths {
+        if path.contains('*') || !repo_root().join(path).is_file() {
+            errors.push(format!(
+                "{oracle_id}: test scope path must be exact and exist: {path}"
+            ));
+        }
+    }
+    let proof_commands = object_string_set(test_scope, "proof_commands");
+    if proof_commands.is_empty()
+        || proof_commands
+            .iter()
+            .any(|command| !command.starts_with("cargo test "))
+    {
+        errors.push(format!(
+            "{oracle_id}: test scope requires exact cargo test proof commands"
+        ));
+    }
+
+    let exclusion = object(row, "production_exclusion_proof");
+    for key in ["status", "expected", "no_claim"] {
+        nonempty_object_string(exclusion, key, &mut errors, oracle_id);
+    }
+    let exclusion_commands = object_string_set(exclusion, "commands");
+    if exclusion_commands.is_empty()
+        || exclusion_commands
+            .iter()
+            .any(|command| !command.starts_with("cargo tree "))
+    {
+        errors.push(format!(
+            "{oracle_id}: production exclusion requires exact cargo tree commands"
+        ));
+    }
+
+    let introduction = object(row, "introduction");
+    for key in ["revision", "date_utc", "evidence"] {
+        nonempty_object_string(introduction, key, &mut errors, oracle_id);
+    }
+    let revision = object_string(introduction, "revision");
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        errors.push(format!(
+            "{oracle_id}: introduction revision must be a full Git object ID"
+        ));
+    }
+    if !is_iso_date(object_string(introduction, "date_utc")) {
+        errors.push(format!("{oracle_id}: introduction date must be ISO-8601"));
+    }
+
+    let expiry = object(row, "expiry");
+    for key in ["release", "date_utc", "status"] {
+        nonempty_object_string(expiry, key, &mut errors, oracle_id);
+    }
+    let expiry_date = object_string(expiry, "date_utc");
+    if !is_iso_date(expiry_date) {
+        errors.push(format!("{oracle_id}: expiry date must be ISO-8601"));
+    } else if expiry_date < string(reconciliation, "as_of_date_utc") {
+        errors.push(format!("{oracle_id}: active manifest oracle is expired"));
+    }
+    if object_integer(expiry, "max_retention_releases") == 0
+        || object_integer(expiry, "max_retention_releases") > 2
+    {
+        errors.push(format!(
+            "{oracle_id}: active retention exceeds two releases"
+        ));
+    }
+
+    let corpus = object(row, "independent_corpus");
+    for key in ["status", "provenance"] {
+        nonempty_object_string(corpus, key, &mut errors, oracle_id);
+    }
+    let corpus_paths = object_string_set(corpus, "paths");
+    if corpus_paths.is_empty() {
+        errors.push(format!(
+            "{oracle_id}: independent corpus paths must not be empty"
+        ));
+    }
+    for path in &corpus_paths {
+        if path.contains('*') || !repo_root().join(path).is_file() {
+            errors.push(format!(
+                "{oracle_id}: independent corpus path must be exact and exist: {path}"
+            ));
+        }
+    }
+
+    let renewal = object(row, "renewal");
+    nonempty_object_string(renewal, "authority", &mut errors, oracle_id);
+    if !object_string(renewal, "authority").starts_with("bead:")
+        || object_string_set(renewal, "required_receipts").is_empty()
+    {
+        errors.push(format!(
+            "{oracle_id}: renewal requires bead authority and receipts"
+        ));
+    }
+
+    errors
+}
+
+fn active_edge_ids(policy: &Value) -> BTreeSet<String> {
+    active_registry(policy)
+        .iter()
+        .flat_map(|row| array(row, "manifest_edges"))
+        .map(|edge| string(edge, "edge_id").to_owned())
+        .collect()
+}
+
+fn validate_manifest_source_pins(policy: &Value) -> Vec<String> {
+    let reconciliation = reconciliation(policy);
+    let mut errors = Vec::new();
+    let pins = array(reconciliation, "source_pins");
+    let actual_paths = pins
+        .iter()
+        .map(|pin| string(pin, "path").to_owned())
+        .collect::<BTreeSet<_>>();
+    let expected_paths = expected_manifest_source_pins();
+    for path in expected_paths.difference(&actual_paths) {
+        errors.push(format!("missing manifest source pin: {path}"));
+    }
+    for path in actual_paths.difference(&expected_paths) {
+        errors.push(format!("unexpected manifest source pin: {path}"));
+    }
+    if actual_paths.len() != pins.len() {
+        errors.push("manifest source pin paths must be unique".to_owned());
+    }
+
+    for pin in pins {
+        let path = string(pin, "path");
+        let bytes = match std::fs::read(repo_root().join(path)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                errors.push(format!("pinned source {path} cannot be read: {error}"));
+                continue;
+            }
+        };
+        if sha256_hex(&bytes) != string(pin, "sha256") {
+            errors.push(format!("manifest source pin hash drift: {path}"));
+        }
+        if line_count(&bytes) != integer(pin, "line_count") as usize {
+            errors.push(format!("manifest source pin line-count drift: {path}"));
+        }
+        if pin
+            .get("scope")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            errors.push(format!("manifest source pin lacks scope: {path}"));
+        }
+    }
+    errors
+}
+
+fn validate_manifest_reconciliation(policy: &Value) -> Vec<String> {
+    let reconciliation = reconciliation(policy);
+    let mut errors = validate_manifest_source_pins(policy);
+    errors.extend(
+        active_registry(policy)
+            .iter()
+            .flat_map(|row| validate_active_oracle_row(policy, row)),
+    );
+
+    let edge_ids = active_edge_ids(policy);
+    let expected_edges = expected_active_oracle_edges();
+    for edge in expected_edges.difference(&edge_ids) {
+        errors.push(format!("unregistered oracle edge: {edge}"));
+    }
+    for edge in edge_ids.difference(&expected_edges) {
+        errors.push(format!("unknown registered oracle edge: {edge}"));
+    }
+
+    let report = object(reconciliation, "report");
+    if object_integer(report, "active_oracle_package_count") as usize
+        != active_registry(policy).len()
+    {
+        errors.push("report active package count drift".to_owned());
+    }
+    if object_integer(report, "active_oracle_manifest_edge_count") as usize != edge_ids.len() {
+        errors.push("report active edge count drift".to_owned());
+    }
+    if object_integer(report, "unregistered_oracle_edge_count") != 0 {
+        errors.push("report must fail closed on unregistered edges".to_owned());
+    }
+    if object_integer(report, "expired_active_oracle_count") != 0 {
+        errors.push("report must fail closed on expired active oracles".to_owned());
+    }
+    if object_integer(report, "missing_required_field_count") != 0 {
+        errors.push("report must fail closed on missing required fields".to_owned());
+    }
+
     errors
 }
 
@@ -1115,6 +1672,339 @@ fn negative_fixture_unknown_profile_fails() {
             .iter()
             .any(|error| error.contains("unknown graph profiles"))
     );
+}
+
+#[test]
+fn manifest_reconciliation_metadata_and_required_fields_are_exact() {
+    let policy = policy();
+    let reconciliation = reconciliation(&policy);
+    assert_eq!(
+        string(reconciliation, "contract_id"),
+        RECONCILIATION_CONTRACT_ID
+    );
+    assert_eq!(string(reconciliation, "bead_id"), RECONCILIATION_BEAD_ID);
+    assert_eq!(
+        string(reconciliation, "capability_id"),
+        "CAP-VERIFICATION-PROFILES"
+    );
+    assert_eq!(string(reconciliation, "as_of_release"), "0.3.9");
+    assert_eq!(string(reconciliation, "as_of_date_utc"), "2026-07-25");
+    assert_eq!(
+        reconciliation
+            .get("cutover_authorized")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        string_set(reconciliation, "active_registry_required_fields"),
+        [
+            "expiry",
+            "graph_class",
+            "independent_corpus",
+            "introduction",
+            "lifecycle_state",
+            "lock_checksum",
+            "lock_source",
+            "manifest_edges",
+            "no_claim_boundary",
+            "oracle_class",
+            "oracle_id",
+            "owner",
+            "package_id",
+            "package_name",
+            "production_exclusion_proof",
+            "removal_bead",
+            "renewal",
+            "requested_versions",
+            "resolved_version",
+            "test_scope",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    assert_eq!(
+        string_set(reconciliation, "required_negative_fixtures"),
+        [
+            "expired-active-oracle",
+            "lock-version-source-checksum-mismatch",
+            "manifest-pin-drift",
+            "missing-independent-corpus",
+            "missing-owner",
+            "missing-removal-bead",
+            "missing-test-scope",
+            "report-count-drift",
+            "unregistered-oracle-edge",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+}
+
+#[test]
+fn every_manifest_and_lockfile_pin_is_current() {
+    let policy = policy();
+    let errors = validate_manifest_source_pins(&policy);
+    assert!(
+        errors.is_empty(),
+        "manifest source pin errors:\n{}",
+        errors.join("\n")
+    );
+}
+
+#[test]
+fn active_manifest_oracle_registry_is_complete_and_valid() {
+    let policy = policy();
+    let actual_packages = active_registry(&policy)
+        .iter()
+        .map(|row| string(row, "package_name"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_packages,
+        [
+            "h2",
+            "httparse",
+            "opentelemetry-proto",
+            "opentelemetry_sdk",
+            "prometheus-client",
+            "raptorq",
+            "redis",
+            "sqlx",
+            "tokio",
+            "tokio-util",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(active_registry(&policy).len(), 10);
+    assert_eq!(active_edge_ids(&policy), expected_active_oracle_edges());
+
+    let errors = validate_manifest_reconciliation(&policy);
+    assert!(
+        errors.is_empty(),
+        "manifest reconciliation errors:\n{}",
+        errors.join("\n")
+    );
+}
+
+#[test]
+fn active_oracle_owners_removal_and_renewal_authorities_exist() {
+    let policy = policy();
+    let tracker_ids = tracker_issue_ids();
+    for row in active_registry(&policy) {
+        let owner = string(row, "owner")
+            .strip_prefix("bead:")
+            .expect("owner must be a bead authority");
+        let renewal = object_string(object(row, "renewal"), "authority")
+            .strip_prefix("bead:")
+            .expect("renewal authority must be a bead");
+        let removal = string(row, "removal_bead");
+        for bead in [owner, renewal, removal] {
+            assert!(
+                tracker_ids.contains(bead),
+                "active oracle authority {bead} is absent from tracker"
+            );
+        }
+    }
+}
+
+#[test]
+fn deterministic_class_report_separates_zero_and_active_classes() {
+    let policy = policy();
+    let report = object(reconciliation(&policy), "report");
+    assert_eq!(object_integer(report, "active_oracle_package_count"), 10);
+    assert_eq!(
+        object_integer(report, "active_oracle_manifest_edge_count"),
+        15
+    );
+    let classes = object_object(report, "classes");
+    assert_eq!(
+        classes.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        ["build", "dev", "native", "production", "reverse_cycle"]
+            .into_iter()
+            .collect()
+    );
+    for class in ["production", "build", "native", "reverse_cycle"] {
+        assert_eq!(
+            object_integer(
+                classes
+                    .get(class)
+                    .and_then(Value::as_object)
+                    .expect("class report row"),
+                "active_oracle_edge_count"
+            ),
+            0,
+            "{class} must remain an explicit zero-active class"
+        );
+    }
+    assert_eq!(
+        object_integer(
+            classes
+                .get("dev")
+                .and_then(Value::as_object)
+                .expect("dev class report"),
+            "active_oracle_edge_count"
+        ),
+        15
+    );
+    assert_eq!(
+        object_string_set(report, "deterministic_markdown_columns"),
+        [
+            "class",
+            "corpus_status",
+            "expiry",
+            "lifecycle",
+            "manifest_edges",
+            "no_claim_boundary",
+            "oracle_id",
+            "owner",
+            "package_id",
+            "removal_bead",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+}
+
+#[test]
+fn negative_fixture_manifest_pin_drift_fails_closed() {
+    let mut policy = policy();
+    let first_pin = policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("source_pins"))
+        .and_then(Value::as_array_mut)
+        .and_then(|pins| pins.first_mut())
+        .expect("source pin fixture");
+    set_string(first_pin, "sha256", &"0".repeat(64));
+    let errors = validate_manifest_source_pins(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("manifest source pin hash drift"))
+    );
+}
+
+#[test]
+fn negative_fixture_unregistered_oracle_edge_fails_closed() {
+    let mut policy = policy();
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("active_oracle_registry"))
+        .and_then(Value::as_array_mut)
+        .expect("active registry fixture")
+        .retain(|row| string(row, "oracle_id") != "active-httparse-http1-reference");
+    let errors = validate_manifest_reconciliation(&policy);
+    assert!(errors.iter().any(|error| {
+        error.contains("unregistered oracle edge: Cargo.toml::dev-dependencies::httparse")
+    }));
+}
+
+#[test]
+fn negative_fixtures_missing_owner_scope_corpus_and_removal_fail_closed() {
+    for (field, expected) in [
+        ("owner", "missing required active field owner"),
+        ("test_scope", "missing required active field test_scope"),
+        (
+            "independent_corpus",
+            "missing required active field independent_corpus",
+        ),
+        ("removal_bead", "missing required active field removal_bead"),
+    ] {
+        let mut policy = policy();
+        active_row_by_id_mut(&mut policy, "active-httparse-http1-reference")
+            .as_object_mut()
+            .expect("active row must be object")
+            .remove(field);
+        let row = active_row_by_id(&policy, "active-httparse-http1-reference");
+        let errors = validate_active_oracle_row(&policy, row);
+        assert!(
+            errors.iter().any(|error| error.contains(expected)),
+            "missing {field} did not fail closed: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn negative_fixture_expired_active_manifest_oracle_fails_closed() {
+    let mut policy = policy();
+    let expiry = active_row_by_id_mut(&mut policy, "active-httparse-http1-reference")
+        .get_mut("expiry")
+        .and_then(Value::as_object_mut)
+        .expect("expiry fixture");
+    expiry.insert(
+        "date_utc".to_owned(),
+        Value::String("2026-07-24".to_owned()),
+    );
+    let row = active_row_by_id(&policy, "active-httparse-http1-reference");
+    let errors = validate_active_oracle_row(&policy, row);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("active manifest oracle is expired"))
+    );
+}
+
+#[test]
+fn negative_fixture_lock_checksum_mismatch_fails_closed() {
+    let mut policy = policy();
+    set_string(
+        active_row_by_id_mut(&mut policy, "active-redis-rs-reference"),
+        "lock_checksum",
+        &"f".repeat(64),
+    );
+    let row = active_row_by_id(&policy, "active-redis-rs-reference");
+    let errors = validate_active_oracle_row(&policy, row);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("lock checksum mismatch"))
+    );
+}
+
+#[test]
+fn negative_fixture_report_count_drift_fails_closed() {
+    let mut policy = policy();
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("report"))
+        .and_then(Value::as_object_mut)
+        .expect("report fixture")
+        .insert(
+            "active_oracle_manifest_edge_count".to_owned(),
+            Value::from(14_u64),
+        );
+    let errors = validate_manifest_reconciliation(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("report active edge count drift"))
+    );
+}
+
+#[test]
+fn reconciliation_docs_preserve_current_and_planned_no_claim_boundaries() {
+    let docs = read_repo_file(DOC_PATH);
+    for marker in [
+        RECONCILIATION_BEAD_ID,
+        RECONCILIATION_CONTRACT_ID,
+        "10 active reference packages",
+        "15 exact manifest edges",
+        "Production | 0",
+        "Dev / conformance | 15",
+        "Build | 0",
+        "Native | 0 active, 3 planned",
+        "Reverse-cycle | 0 active, 1 planned",
+        "declared-reference-not-wired",
+        "cutover_authorized = false",
+        "Manifest and lockfile pins prove only",
+    ] {
+        assert!(
+            docs.contains(marker),
+            "operator docs missing reconciliation marker: {marker}"
+        );
+    }
 }
 
 #[test]
