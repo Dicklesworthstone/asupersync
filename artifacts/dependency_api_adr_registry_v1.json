@@ -137,13 +137,13 @@
       "adr_id": "DEP-ADR-009",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.9",
       "title": "Preserve complete Kafka producer, transaction, consumer-group, security, and interop capability",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-010",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.10",
       "title": "Preserve SQLite feature and one-stop user experience under cycle-safe FrankenSQLite integration",
-      "state": "PENDING"
+      "state": "RESOLVED"
     },
     {
       "adr_id": "DEP-ADR-011",
@@ -155,7 +155,7 @@
       "adr_id": "DEP-ADR-012",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.12",
       "title": "Preserve full user-supplied regex semantics and privacy guarantees; fixed scanners are only a fast path",
-      "state": "PENDING"
+      "state": "RESOLVED"
     }
   ],
   "adrs": [
@@ -4694,6 +4694,1032 @@
       "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the public ecosystem Stream impls behave correctly, that an owned helper layer could match wake, parking, reentrancy, fairness or panic semantics, that the migration is mechanically safe, that performance is unchanged, or that futures-lite may be removed. It also does not certify the capability registry's source-owner row, feature list or evidence state, which FUT-GAP-01, -04 and -05 record as incorrect."
     },
     {
+      "adr_id": "DEP-ADR-009",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.9",
+      "title": "Preserve the complete Kafka client capability behind an already rdkafka-free public facade",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-KAFKA"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "The rdkafka dependency and the kafka feature both stay. The source read turned up one strongly favorable fact and several corrections. The favorable fact is that the public API is already completely free of rdkafka types: every producer, consumer, transaction, config, security and error type is first-party, the error enum is hand-rolled with the upstream error aliased and mapped rather than re-exported, and every rdkafka value lives in a private field or a private function. rdkafka is a swappable backend behind a facade the project already owns, which is the best possible starting position and is worth stating plainly. The corrections cut the other way. The plan says to remove the feature outright once a downstream inventory finds no consumer; the registry says keep until parity and its no-claim boundary is explicit that a wire codec or a simple producer is not a Kafka client. The registry governs. Removal would also delete a capability that is currently gated behind a downstream census nobody has run. Two capability gaps are worth freezing now because they bound what parity even means: there is no way to send consumer offsets inside a transaction, so read-process-write exactly-once is not covered, and there is no admin surface at all. Finally, the compression story is softer than the enum suggests: the codecs are declared in first-party code but their availability depends on what the bundled C library's configure step autodetects on the build host, not on any Cargo feature.",
+      "alternatives_considered": [
+        {
+          "option": "Remove the kafka feature after a downstream inventory confirms no consumer, per the plan.",
+          "rejected_because": "The inventory has not been run, and the registry's terminal posture is keep-until-parity with a no-claim boundary stating librdkafka stays until the complete campaign and a real broker matrix pass. Removing a working, security-hardened client because a census came back empty trades a real capability for a package count."
+        },
+        {
+          "option": "Write a native Kafka client now to evict the bundled C.",
+          "rejected_because": "The plan itself descopes this to an independent protocol campaign, and rightly. The surface to match includes API-version negotiation, flexible and tagged fields, coordinator protocols, idempotence epochs and sequences, transactions, isolation levels, offset management, compression codecs, TLS and SASL, metadata refresh and retry semantics. That is a program, not a dependency swap."
+        },
+        {
+          "option": "Treat the first-party RecordBatch v2 codec in the conformance crate as partial progress toward a native client.",
+          "rejected_because": "It is a genuine, rdkafka-free codec and useful as conformance evidence, but a record-batch encoder is not a client. Counting it as progress is exactly the confusion the registry's no-claim boundary was written to prevent."
+        },
+        {
+          "option": "Feature-gate the module declarations so the types vanish without the feature.",
+          "rejected_because": "The current arrangement is deliberate and better: the types exist on every build and the no-feature lane fails closed with a dedicated feature-disabled error and a diagnostic helper. Callers get a typed, explanatory failure instead of a missing module."
+        },
+        {
+          "option": "Add the missing transactional-offset and admin surfaces as part of this ADR.",
+          "rejected_because": "This is a decision-only ADR and adding public API is out of scope. Both are recorded as frozen gaps so a future replacement cannot quietly define parity as matching today's incomplete surface."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::messaging::kafka",
+          "feature_gate": null,
+          "source_file": "src/messaging/kafka.rs",
+          "symbols": [
+            "KafkaError",
+            "KafkaProducer",
+            "ProducerConfig",
+            "RecordMetadata",
+            "TransactionalConfig",
+            "TransactionalProducer",
+            "Acks",
+            "Compression",
+            "KafkaTlsConfig",
+            "KafkaSaslConfig",
+            "KafkaSaslMechanism",
+            "KafkaSecurityConfig",
+            "KafkaFeatureRequirement",
+            "KafkaClient",
+            "BrokerBackend",
+            "KafkaConsumerTrait",
+            "kafka_feature_diagnostic",
+            "send_with_headers",
+            "allow_insecure_transport_for_testing"
+          ],
+          "note": "The module declaration is NOT feature-gated, so every one of these types exists on a default build; only broker behavior is gated. Without the feature the client fails closed with a dedicated feature-disabled error plus a diagnostic helper. KafkaClient, BrokerBackend and KafkaConsumerTrait have both a real and a deterministic implementation selected by cfg. No rdkafka type appears in any of these signatures."
+        },
+        {
+          "module_path": "asupersync::messaging::kafka_consumer",
+          "feature_gate": null,
+          "source_file": "src/messaging/kafka_consumer.rs",
+          "symbols": [
+            "ConsumerConfig",
+            "KafkaConsumer",
+            "ConsumerRecord",
+            "TopicPartitionOffset",
+            "RebalanceResult",
+            "AutoOffsetReset",
+            "IsolationLevel",
+            "commit_offsets",
+            "rebalance",
+            "seek",
+            "committed_offset",
+            "position",
+            "assigned_partitions",
+            "rebalance_generation"
+          ],
+          "note": "The consumer half, and the second rdkafka source owner the registry omits. RebalanceResult is public and is the return type of the public rebalance method, but is reachable only through this module path because the messaging facade does not re-export it. Rebalancing is a caller-driven assignment API rather than an upstream rebalance callback, which is a deliberate determinism choice."
+        },
+        {
+          "module_path": "asupersync::messaging",
+          "feature_gate": null,
+          "source_file": "src/messaging/mod.rs",
+          "symbols": [
+            "KafkaError",
+            "KafkaProducer",
+            "ProducerConfig",
+            "RecordMetadata",
+            "TransactionalConfig",
+            "TransactionalProducer",
+            "Acks",
+            "Compression",
+            "KafkaConsumer",
+            "AutoOffsetReset",
+            "IsolationLevel",
+            "TopicPartitionOffset"
+          ],
+          "note": "The facade re-export set. Two consumer types are re-exported under renamed identifiers, and the security, client, backend-trait and rebalance-result types are deliberately not re-exported. Both the renames and the omissions are part of the frozen surface."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "kafka",
+          "cargo_definition": "kafka = [\"dep:rdkafka\"]",
+          "effect": "Switches the client from the fail-closed deterministic lane to the real broker backend. It does not gate the module or the types, only the behavior.",
+          "must_remain": true,
+          "no_tokio_guarantee": "rdkafka is taken with default features off, so its tokio default is not enabled and the lockfile shows no tokio edge. Any change to that flag must re-verify the no-tokio production guarantee."
+        },
+        {
+          "name": "rdkafka",
+          "cargo_definition": "rdkafka = { version = \"0.39\", default-features = false, optional = true }",
+          "effect": "The client backend. Default features are off and none are added back, which is what keeps tokio and the compression shim crates out of the graph.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Turning any default feature back on risks reintroducing a tokio edge and must be re-verified against the production graph lane."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "producer_and_delivery",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "kafka",
+          "implementation": "src/messaging/kafka.rs",
+          "wire_encoder": "librdkafka",
+          "transport": "Kafka protocol over TCP",
+          "public_entry_points": [
+            "KafkaProducer",
+            "send_with_headers",
+            "ProducerConfig",
+            "RecordMetadata",
+            "Acks"
+          ],
+          "note": "Async send with and without headers, delivery metadata, acks, batching, linger, retries and message-size limits. Idempotence defaults to on."
+        },
+        {
+          "surface": "transactions",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "kafka",
+          "implementation": "src/messaging/kafka.rs",
+          "wire_encoder": "librdkafka",
+          "transport": "Kafka protocol over TCP",
+          "public_entry_points": [
+            "TransactionalProducer",
+            "TransactionalConfig"
+          ],
+          "note": "A full lifecycle state machine with idle, active, finalizing and needs-abort-recovery phases, a drop guard, and idempotence forced on for transactional producers. Producer-side only: consumer offsets cannot join a transaction."
+        },
+        {
+          "surface": "consumer_groups_and_offsets",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "kafka",
+          "implementation": "src/messaging/kafka_consumer.rs",
+          "wire_encoder": "librdkafka",
+          "transport": "Kafka protocol over TCP",
+          "public_entry_points": [
+            "KafkaConsumer",
+            "ConsumerConfig",
+            "commit_offsets",
+            "seek",
+            "committed_offset",
+            "position",
+            "rebalance",
+            "assigned_partitions",
+            "IsolationLevel"
+          ],
+          "note": "Subscription, caller-driven rebalance with generation and revocation tracking, manual commits, seek, and isolation level. Auto-commit is forced off in the real backend with a written rationale; that default is part of the contract."
+        },
+        {
+          "surface": "transport_security",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "kafka",
+          "implementation": "src/messaging/kafka.rs",
+          "wire_encoder": "librdkafka",
+          "transport": "TLS and SASL_SSL",
+          "public_entry_points": [
+            "KafkaSecurityConfig",
+            "KafkaTlsConfig",
+            "KafkaSaslConfig",
+            "KafkaSaslMechanism",
+            "allow_insecure_transport_for_testing"
+          ],
+          "note": "TLS with CA, certificate, key and key password, plus SCRAM over SSL. SASL over plaintext is deliberately not exposed, non-loopback plaintext is refused with an IPv4-mapped-IPv6 bypass defense, secrets zeroize on drop and redact in debug output, and the insecure opt-out is test-only. This is a hardened posture and every part of it is frozen."
+        },
+        {
+          "surface": "fail_closed_no_feature_lane",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/messaging/kafka.rs",
+          "wire_encoder": "none",
+          "transport": "in-process",
+          "public_entry_points": [
+            "KafkaError",
+            "kafka_feature_diagnostic",
+            "KafkaFeatureRequirement"
+          ],
+          "note": "Owned and rdkafka-free. Without the feature, production paths fail closed with a typed feature-disabled error and an actionable diagnostic, while a cfg-gated deterministic in-process broker covers the state machines for tests only. Deleting the feature would delete this too."
+        },
+        {
+          "surface": "record_batch_v2_codec",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "conformance/src/kafka_record_batch_v2.rs",
+          "wire_encoder": "first-party",
+          "transport": "conformance harness",
+          "public_entry_points": [
+            "RecordBatchV2",
+            "KafkaConformanceHarness"
+          ],
+          "note": "A genuine first-party RecordBatch v2 encoder and decoder with no rdkafka dependency. Useful conformance evidence, but a codec is not a client and it may not be counted as replacement progress."
+        },
+        {
+          "surface": "transactional_consumer_offsets",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No way to send consumer offsets to a transaction, so read-process-write exactly-once is not covered. Recorded so parity is measured against the complete capability rather than against today's surface."
+        },
+        {
+          "surface": "admin_operations",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No topic, partition, ACL, config or group administration surface exists anywhere in the client."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "Apache Kafka binary protocol, spoken by the bundled librdkafka",
+        "encoding": "Kafka RecordBatch v2",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Produce, fetch, and the group-coordinator protocols all traverse the same backend.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "Retries and request timeout are configurable on the producer and consumer.",
+        "collector_interop": "Interoperates with any broker the bundled library supports, across its full accepted API-version range.",
+        "native_build": "The backend links a bundled librdkafka built through its own configure and make, not cmake. This is lockfile-verified: no cmake crate resolves and the only build-time helper that resolves is a pkg-config discovery shim. The plan records this as a corrected earlier error and it must stay lockfile-verified.",
+        "compression_availability": "The codec enum is first-party, but which codecs the bundled library can actually use is decided by what its configure step autodetects on the build host, since default features are off and no compression shim crates resolve. Codec availability is therefore a host property, not a declared Cargo feature.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "types_exist_without_the_feature",
+          "surface": "both kafka modules",
+          "contract": "Module declarations are not feature-gated, so the public types compile on every build and the feature switches behavior only. Callers without the feature get a typed failure, not a missing module."
+        },
+        {
+          "name": "fail_closed_without_the_feature",
+          "surface": "the error taxonomy",
+          "contract": "Production paths without the feature return the dedicated feature-disabled error, and the deterministic in-process broker is reachable only under test configurations. Production must never silently reach a fake broker."
+        },
+        {
+          "name": "idempotence_on_by_default",
+          "surface": "producer configuration",
+          "contract": "Idempotent production defaults to enabled, and is forced on for transactional producers regardless of what the caller set."
+        },
+        {
+          "name": "manual_commit_default",
+          "surface": "the real consumer backend",
+          "contract": "Auto-commit is forced off with a written rationale. Consumers commit explicitly, which is what makes at-least-once and read-committed reasoning tractable."
+        },
+        {
+          "name": "no_sasl_over_plaintext",
+          "surface": "security configuration",
+          "contract": "Only SCRAM over SSL is exposed. SASL over plaintext is deliberately absent and must not be added as a convenience."
+        },
+        {
+          "name": "plaintext_refused_off_loopback",
+          "surface": "configuration validation",
+          "contract": "A plaintext bootstrap server that is not loopback is refused, including via IPv4-mapped-IPv6 forms. The opt-out is a test-only builder method and must stay that way."
+        },
+        {
+          "name": "credential_hygiene",
+          "surface": "security configuration",
+          "contract": "SASL passwords zeroize on drop, and both SASL passwords and TLS key passwords are redacted in debug output."
+        },
+        {
+          "name": "caller_driven_rebalance",
+          "surface": "the consumer",
+          "contract": "Assignment is caller-driven and returns generation, assigned and revoked sets, rather than firing an upstream rebalance callback. This is a determinism choice and callers depend on the returned shape."
+        },
+        {
+          "name": "cancel_correctness",
+          "surface": "every public async entry point",
+          "contract": "Each takes a checkpoint on entry, the producer carries an operation guard, transactions carry a drop guard, and the consumer's broker poll is bounded by a fixed slice so cancellation is observed promptly."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "KFK-GAP-01",
+          "summary": "Registry source_owners lists the producer file and the manifest but omits the consumer file, which carries its own distinct set of rdkafka imports and is a first-class source owner.",
+          "consequence": "A baseline built from this row would inventory the producer half and miss consumer groups, rebalancing, offset commits, seek and isolation level entirely. Unlike the facade-naming failures elsewhere in the registry, both listed entries are genuine, so this is wrong by omission rather than wrong outright.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "KFK-GAP-02",
+          "summary": "There is no way to send consumer offsets to a transaction, so consume-process-produce exactly-once is not achievable through this client.",
+          "consequence": "The registry claims transactional atomicity as an output semantic. That claim holds only for the producer side. Parity must be measured against the complete capability, not against today's surface.",
+          "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+          "may_widen": false
+        },
+        {
+          "gap_id": "KFK-GAP-03",
+          "summary": "No administrative surface exists at all: no topic, partition, ACL, config or group administration.",
+          "consequence": "Operators must administer their cluster by other means. Recorded so it is not discovered late and mistaken for a regression.",
+          "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+          "may_widen": false
+        },
+        {
+          "gap_id": "KFK-GAP-04",
+          "summary": "Compression codec availability depends on what the bundled C library's configure step autodetects on the build host, because default features are off and no compression shim crates resolve. The first-party enum offers five codecs regardless.",
+          "consequence": "A configuration that succeeds on one build host can fail on another with no Cargo-visible difference. Any parity claim about compression must name the build environment.",
+          "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "KFK-GAP-05",
+          "summary": "The plan says remove the feature after a downstream inventory finds no consumer; the registry says keep until parity with a no-claim boundary that a wire codec or a simple producer is not a Kafka client.",
+          "consequence": "The documents disagree about the terminal outcome. The registry is later and stricter and governs. The downstream inventory that would gate any removal has not been run.",
+          "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu",
+          "may_widen": false
+        },
+        {
+          "gap_id": "KFK-GAP-06",
+          "summary": "The registry's four scenario ids and its baseline command are planned, not implemented, and its baseline fixture is a planned placeholder. The real-broker suite runs only when an environment variable opts in and a broker is reachable.",
+          "consequence": "Broker-interoperability evidence is opt-in and currently unexercised by default. Several tests in that file run without a broker and produce proof rows only, which must not be mistaken for interoperability evidence.",
+          "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+          "may_widen": false
+        },
+        {
+          "gap_id": "KFK-GAP-07",
+          "summary": "The public rebalance-result type, the security configuration types, the client type and the two backend traits are public but are not re-exported from the messaging facade, so they are reachable only through the deeper module paths.",
+          "consequence": "Any test or downstream must import them at the module path. Recorded so a future re-export or removal is a reviewed change rather than incidental drift.",
+          "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+          "may_widen": false
+        },
+        {
+          "gap_id": "KFK-GAP-08",
+          "summary": "A consumer doc comment instructs callers to call a singular commit method that does not exist; only the plural form is defined.",
+          "consequence": "A small documentation defect in a security- and correctness-relevant area. Harmless to fix, but recorded because a symbol freeze that trusted the prose would freeze a name that was never there.",
+          "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "SASL is offered only over SSL; SASL over plaintext is not exposed.",
+        "A non-loopback plaintext bootstrap server is refused, including via IPv4-mapped-IPv6 forms, and the opt-out stays test-only.",
+        "SASL passwords zeroize on drop, and SASL and TLS key passwords are redacted in debug output.",
+        "Untrusted broker frames are bounded; the fuzz entry points over response frames, metadata, error responses and delivery results stay wired.",
+        "Transaction fencing stays correct and the abort-recovery phase is not bypassable.",
+        "Without the feature, production fails closed with a typed error and never silently reaches the deterministic in-process broker."
+      ],
+      "cancellation_invariants": [
+        "The capability context owns all broker work; there are no orphan retry loops.",
+        "Delivery and commit ambiguity is surfaced explicitly rather than guessed.",
+        "Group leave and connection shutdown are bounded.",
+        "Every public async entry point takes a checkpoint, and the consumer's broker poll is bounded by a fixed slice."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "linux",
+          "support": "supported",
+          "note": "Requires a build host where the bundled library's configure step can find what it needs."
+        },
+        {
+          "target_family": "macos",
+          "support": "supported",
+          "note": "Same bundled-C build path."
+        },
+        {
+          "target_family": "windows",
+          "support": "supported",
+          "note": "Same bundled-C build path."
+        },
+        {
+          "target_family": "wasm32",
+          "support": "unsupported",
+          "note": "Enabling the feature on a wasm32 browser preview build is a hard compile error by design."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "the producer and transactional producer",
+          "the consumer, its group and offset surface",
+          "the security configuration types"
+        ],
+        "accepted_providers": "Any broker the bundled library supports, across its full accepted API-version range.",
+        "pinned_crate_versions": {
+          "rdkafka": "0.39, default features off, optional",
+          "librdkafka": "2.12.1, bundled C built through configure and make"
+        },
+        "no_reexport_note": "No rdkafka type appears in any public signature. The upstream error type is imported under an alias and mapped into a hand-rolled taxonomy rather than re-exported, and the context type that would leak an associated type is private.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "Exceptionally clean, and the strongest fact in this ADR. The facade, the error taxonomy, the security policy, the fail-closed lane and the record-batch codec are all owned; the dependency supplies protocol and transport only.",
+        "removal_precondition": "A replacement must speak the full accepted API-version range with flexible and tagged fields, implement the coordinator protocols, idempotence epochs and sequences, transactions, isolation levels, offset management, compression, TLS and SASL, and metadata refresh and retry semantics; must pass a real multi-version broker matrix and a security fault matrix; must be fuzzed on every untrusted frame path; and must preserve every frozen public symbol and configuration default above. Removing the feature instead of replacing it additionally requires the downstream inventory the plan names, which has not been run.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "Kafka-users",
+        "consumer-portfolio"
+      ],
+      "user_journeys": [
+        {
+          "id": "kfk-journey-produce",
+          "description": "A service produces records with headers and receives delivery metadata, with idempotence on by default."
+        },
+        {
+          "id": "kfk-journey-transaction",
+          "description": "A service opens a transaction, produces, and commits or aborts, with the lifecycle state machine and drop guard preventing a dangling transaction."
+        },
+        {
+          "id": "kfk-journey-consume-group",
+          "description": "A consumer joins a group, receives an assignment with generation and revocation information, polls records, and commits offsets explicitly."
+        },
+        {
+          "id": "kfk-journey-secure-connect",
+          "description": "An operator connects over TLS or SCRAM-over-SSL, and a plaintext non-loopback configuration is refused rather than silently downgraded."
+        },
+        {
+          "id": "kfk-journey-feature-disabled",
+          "description": "A build without the feature still compiles against the types and receives a typed feature-disabled error with an actionable diagnostic instead of a missing module."
+        },
+        {
+          "id": "kfk-journey-real-broker-proof",
+          "description": "An operator opts in through the environment and runs the real-broker suite against a live cluster, covering round trip, exactly-once, rebalancing and failure recovery."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The affected symbols live under asupersync::messaging rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, rdkafka row, and section 9.3",
+          "stale_text": "REMOVE the kafka feature after a downstream-inventory check confirms no consumer",
+          "resolution": "Disposition is KEEP_UNTIL_PARITY. The registry's no-claim boundary governs: librdkafka stays until the complete campaign and a real broker matrix pass. The downstream inventory that would gate any removal has not been run, and removal would also delete the owned fail-closed lane and its diagnostics."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "Missing capability may be added — transactional consumer offsets and an admin surface are the two named gaps. Nothing in the frozen surface may narrow.",
+        "coexistence": "The dependency remains the only production backend. The deterministic in-process broker stays test-scoped and must never become reachable from production.",
+        "sequencing": "Fix the registry source-owner omission first, since it is cheap and everything downstream reads that row. A native client is an independent campaign with its own epic and is not sequenced here.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_009_kafka_client.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any lost public symbol, error variant or configuration default; any weakening of the security posture including exposing SASL over plaintext or relaxing the plaintext refusal; auto-commit silently becoming the default; idempotence no longer forced on for transactional producers; the deterministic broker becoming reachable from production; a regression against a real broker; or a reintroduced tokio edge from a changed feature flag.",
+        "action": "Revert to the incumbent backend and the frozen surface. Because the decision is KEEP, rollback means abandoning the replacement or removal attempt.",
+        "verification": "Re-run the focused ADR contract, the rebalance lifecycle and compression round-trip tests on both feature lanes, the SASL and idempotence audits, the offset-commit property tests, the record-batch conformance suite, the wired fuzz targets, and the real-broker suite against a live cluster."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-dep-p7-kafka-removal-sarszu.1",
+        "unit_test_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+        "e2e_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+        "scenario_ids": [
+          "kafka_produce_consume",
+          "kafka_transactions",
+          "kafka_group_rebalance",
+          "kafka_security_fault_matrix"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario kafka_multiversion",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "broker matrix: multiple broker versions across the full accepted API-version range, with flexible and tagged fields",
+          "transactions: commit, abort, fencing and abort-recovery against a live broker, plus the recorded absence of transactional consumer offsets",
+          "consumer groups: assignment, revocation, generation advance, seek, and committed-offset readback after restart",
+          "security fault matrix: TLS, SCRAM over SSL, the plaintext refusal including IPv4-mapped-IPv6 forms, and credential redaction and zeroization",
+          "fuzz: response frames, metadata, error responses and delivery results, all already wired",
+          "conformance: first-party RecordBatch v2 encode and decode, recorded as codec evidence only",
+          "feature-lane parity: the fail-closed no-feature lane keeps its typed error and diagnostic",
+          "downstream inventory: the census that would gate any feature removal, which has not been run",
+          "graph: the no-tokio production guarantee re-verified after any rdkafka feature-flag change"
+        ],
+        "note": "Naming these owners does not assert they have run. The real-broker suite is opt-in through an environment variable, and several tests in that file execute without a broker and emit proof rows only; those rows are not interoperability evidence."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-KAFKA",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-dep-p7-kafka-removal-sarszu"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit and no feature removal. rdkafka and its bundled C remain production edges of the kafka feature."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_009_kafka_client.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the client interoperates with any particular broker version or deployment, that transaction fencing or credential zeroization behave as stated, that compression codecs are available on any given build host, that a native client could reach protocol parity, that performance is unchanged, or that rdkafka or the kafka feature may be removed. It also does not certify the capability registry's source-owner row, which KFK-GAP-01 records as omitting the consumer file."
+    },
+    {
+      "adr_id": "DEP-ADR-010",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.10",
+      "title": "Keep the SQLite feature; any FrankenSQLite path must be cycle-safe, official, and equally discoverable",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-SQLITE"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "The sqlite feature stays, with rusqlite and its bundled C. The governing fact is structural rather than a matter of taste: FrankenSQLite depends on asupersync, so asupersync cannot depend back without a Cargo cycle. That means the replacement engine cannot be an in-workspace oracle, cannot be a dev-dependency, and cannot be reached by the root feature. Parity must be measured in the downstream repository or in a neutral consumer depending on both. Two corrections matter. First, the bead's own wording says FrankenSQLite depends optionally on asupersync; the downstream manifest has no optional marker and the plan states the dependency is unconditional. The bead text is wrong and this ADR does not carry it forward. Second, the plan's section 9.1 says the feature is deprecated or removed and the integration inverted, while the registry and the bead both make KEEP the default terminal result unless an owner approves an equally discoverable public move. The registry governs. On the code itself the news is good: the async wrapper is a genuinely well-built seam, with a single blocking-pool funnel, a real interrupt on cancel, and a masked drain that refuses to report cancelled until the blocking job acknowledges. Exactly one rusqlite type reaches the public API, and it does so through a foreign-trait impl rather than a signature, which is easy to miss and hard to remove.",
+      "alternatives_considered": [
+        {
+          "option": "Deprecate or remove the sqlite feature and invert the integration into FrankenSQLite, per plan section 9.1.",
+          "rejected_because": "The bead is explicit that removing the feature after merely proving downstream parity would worsen discoverability and force users to reconstruct the integration themselves. Cargo cannot make the root feature depend on the downstream adapter without a cycle, so the default terminal result is KEEP unless an owner approves an equally discoverable public move after user-journey trials."
+        },
+        {
+          "option": "Add FrankenSQLite as a dev-dependency so parity can be measured in-workspace.",
+          "rejected_because": "Forbidden outright. The registry's no-claim boundary states it may not be added back as an asupersync dependency or used as an in-workspace oracle, and the oracle policy names the cycle rule explicitly. This is not a preference; it is a package-graph impossibility."
+        },
+        {
+          "option": "Swap the engine and keep the current public types unchanged.",
+          "rejected_because": "One rusqlite type is already public through a foreign-trait impl on a public value type. That impl cannot survive an engine swap without an equivalent trait, so the swap is semver-breaking whether or not any signature mentions the engine."
+        },
+        {
+          "option": "Count the existing SQLite end-to-end suite as the parity oracle.",
+          "rejected_because": "It exercises one engine. Parity means the same suite running on both engines during an overlap period, which by the cycle rule cannot happen in this workspace."
+        },
+        {
+          "option": "Treat the smaller marginal package count as sufficient justification.",
+          "rejected_because": "The plan itself calls this capability relocation rather than zero dependency cost, and requires a combined consumer budget measured with the program's own ledger. A count taken on one side of the relocation is not a budget."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::database::sqlite",
+          "feature_gate": "sqlite",
+          "source_file": "src/database/sqlite.rs",
+          "symbols": [
+            "SqliteConnection",
+            "SqliteError",
+            "SqliteRow",
+            "SqliteValue",
+            "SqliteTransaction",
+            "SqliteRowStream",
+            "SqliteRowStreamStats",
+            "query_stream",
+            "query_row_unchecked",
+            "execute_unchecked",
+            "execute_batch_unchecked",
+            "begin_immediate",
+            "begin_exclusive",
+            "set_statement_timeout_override",
+            "set_busy_timeout",
+            "close_async",
+            "is_open",
+            "fuzz_validate_sqlite_open_path"
+          ],
+          "note": "The full surface. The unchecked variants are a deliberate escape hatch beside the SQL-surface-validated defaults and are part of the contract. The row stream and its statistics type are reachable only at this module path. The path-validation helper requires both the sqlite and test-internals features and is doc-hidden. Note that the transaction type's unchecked execute is crate-visible, not public, while the connection's is public; the two must not be conflated."
+        },
+        {
+          "module_path": "asupersync::database",
+          "feature_gate": "sqlite",
+          "source_file": "src/database/mod.rs",
+          "symbols": [
+            "SqliteConnection",
+            "SqliteError",
+            "SqliteRow",
+            "SqliteTransaction",
+            "SqliteValue"
+          ],
+          "note": "The facade re-export set is exactly five names. The row stream, its statistics type and the path-validation helper are deliberately not re-exported. The parent database module is itself gated on any of the three database backends."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "sqlite",
+          "cargo_definition": "sqlite = [\"dep:rusqlite\", \"dep:sqlparser\"]",
+          "effect": "Enables the async SQLite wrapper and the SQL-surface validator together. It is also a member of the aggregate feature list, so broad builds pick it up.",
+          "must_remain": true,
+          "no_tokio_guarantee": "Neither engine crate introduces a tokio edge. Two SQLite test files use tokio test macros, which the root dev-dependency does not enable on its own; see SQL-GAP-05."
+        },
+        {
+          "name": "rusqlite",
+          "cargo_definition": "rusqlite = { version = \"0.40\", features = [\"bundled\", \"hooks\"], optional = true }",
+          "effect": "The engine. The bundled feature compiles the C amalgamation through a native build script; the hooks feature is what makes the progress handler available, and the budget-derived statement timeout is built on it. Neither may be dropped casually.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        },
+        {
+          "name": "sqlparser",
+          "cargo_definition": "sqlparser = { version = \"0.62\", optional = true }",
+          "effect": "Backs the checked SQL surface that separates the validated methods from the unchecked ones. It also drags in a recursion helper that carries C and assembly stack-probing code, so it is a second native edge and not merely a parser.",
+          "must_remain": true,
+          "no_tokio_guarantee": "No tokio edge."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "async_connection_and_query",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "sqlite",
+          "implementation": "src/database/sqlite.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process, over the blocking pool",
+          "public_entry_points": [
+            "SqliteConnection",
+            "SqliteRow",
+            "SqliteValue",
+            "query_stream",
+            "execute_unchecked",
+            "is_open"
+          ],
+          "note": "Open on disk or in memory, execute, batch, query, single-row query and row streaming, all taking the capability context. Parameters cross the boundary as the owned value type, never as an engine type."
+        },
+        {
+          "surface": "transactions_and_savepoints",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "sqlite",
+          "implementation": "src/database/sqlite.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "SqliteTransaction",
+            "begin_immediate",
+            "begin_exclusive"
+          ],
+          "note": "Deferred, immediate and exclusive begins, with three-deep savepoint nesting covered by tests. The drop path discharges the obligation token and poisons for rollback, and a generation counter prevents a stale finish job from touching a newer transaction."
+        },
+        {
+          "surface": "cancellation_and_interrupt",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "sqlite",
+          "implementation": "src/database/sqlite.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "SqliteRowStream",
+            "SqliteRowStreamStats",
+            "close_async"
+          ],
+          "note": "The best-engineered part of this surface and entirely owned. On cancel the pool task is marked, a real interrupt is issued, and the operation then enters a bounded masked drain: it does not report cancelled until the blocking job acknowledges, so the connection lock is released and no statement keeps running unobserved. The row stream carries its own interrupt handle so dropping it aborts a long step rather than waiting for the next row boundary. Three drain outcomes are distinguished and traced."
+        },
+        {
+          "surface": "budget_derived_statement_timeout",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "sqlite",
+          "implementation": "src/database/sqlite.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "set_statement_timeout_override",
+            "set_busy_timeout"
+          ],
+          "note": "The effective limit is the minimum of the remaining context budget and any per-connection override, enforced through the engine's progress handler. Arming failure is fatal to the operation by design, because running unbounded after a bound was requested would void the contract. A documented caveat stands: the handler runs only while the virtual machine executes, so time blocked on a locked database can overshoot by up to the busy timeout."
+        },
+        {
+          "surface": "checked_sql_surface",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "sqlite",
+          "implementation": "src/database/sqlite.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "execute_unchecked",
+            "execute_batch_unchecked",
+            "query_row_unchecked"
+          ],
+          "note": "The default methods validate the SQL surface through the parser and reject unsafe constructs with dedicated error variants; the unchecked variants are the explicit opt-out. The pairing is the security contract and both halves are frozen."
+        },
+        {
+          "surface": "engine_trait_impl_leak",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "sqlite",
+          "implementation": "src/database/sqlite.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process",
+          "public_entry_points": [
+            "SqliteValue"
+          ],
+          "note": "The single public leak, and it is easy to miss: a public implementation of the engine's own parameter-binding trait on the owned value type. No signature names the engine, yet the API is semver-coupled to it. An engine swap cannot preserve this without an equivalent trait."
+        },
+        {
+          "surface": "in_workspace_frankensqlite_oracle",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "Forbidden by the cycle rule, not merely absent. The downstream project depends on asupersync unconditionally, so it may not be added back as a dependency or used as an in-workspace oracle. The corresponding fixture row is marked unsupported for the same reason."
+        },
+        {
+          "surface": "official_cycle_safe_integration",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "The companion workspace or published integration crate that would make a downstream engine equally discoverable does not exist. Until it does, the feature is the only one-stop supported path and removing it would strand users."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "SQLite on-disk file format and its WAL, as produced and consumed by the bundled engine",
+        "encoding": "SQLite storage classes mapped to the five owned value variants",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Not applicable; this is an in-process database rather than a wire protocol.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "Busy and locked conditions are classified by dedicated error predicates so callers can retry on the right ones.",
+        "collector_interop": "not applicable",
+        "data_compatibility": "Database files written by this engine must remain readable by any replacement, including WAL and journal state after an unclean shutdown. Data compatibility is a named gate in the cutover policy and is not satisfied by API parity.",
+        "native_build": "The engine compiles a bundled C amalgamation through a native build script, and the SQL parser adds a second native edge through a recursion helper carrying C and assembly stack-probing code. Both are part of the native attribution for this feature.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "checked_by_default_unchecked_by_choice",
+          "surface": "the connection methods",
+          "contract": "Default methods validate the SQL surface and reject unsafe constructs with dedicated error variants; the unchecked variants are an explicit opt-out. Neither half may be dropped, and the default must not become unchecked."
+        },
+        {
+          "name": "effective_timeout_is_a_minimum",
+          "surface": "statement execution",
+          "contract": "The enforced limit is the minimum of the remaining context budget and any per-connection override. A per-connection override cannot extend a shorter budget."
+        },
+        {
+          "name": "timeout_arming_failure_is_fatal",
+          "surface": "the blocking worker",
+          "contract": "If the progress handler cannot be armed, the operation fails rather than running unbounded. Silently proceeding without the requested bound would void the contract."
+        },
+        {
+          "name": "cancel_drains_before_reporting",
+          "surface": "every public async method",
+          "contract": "On cancellation the operation issues a real interrupt and then waits, under a bounded masked drain, for the blocking job to acknowledge before reporting cancelled. The three drain outcomes — job completed, job never started, and drain budget exhausted — are distinguished and traced."
+        },
+        {
+          "name": "stream_owns_its_interrupt",
+          "surface": "row streaming",
+          "contract": "The row stream carries its own interrupt handle so dropping or cancelling it aborts an in-flight step rather than waiting for the next row boundary."
+        },
+        {
+          "name": "transaction_drop_rolls_back",
+          "surface": "transactions",
+          "contract": "Dropping an unfinished transaction discharges the obligation token and poisons for rollback, and the rollback is generation-guarded so a stale finish job cannot affect a newer transaction."
+        },
+        {
+          "name": "error_predicates_are_the_retry_contract",
+          "surface": "the error type",
+          "contract": "The busy, locked, constraint, unique, connection, transient and retryable predicates and the error-code accessor are how callers classify failures. Their classifications are frozen."
+        },
+        {
+          "name": "engine_errors_do_not_cross_the_boundary",
+          "surface": "the error type",
+          "contract": "Engine errors are stringified into the owned taxonomy rather than wrapped. No engine error type is reachable from the public API."
+        },
+        {
+          "name": "hooks_feature_is_load_bearing",
+          "surface": "the engine dependency",
+          "contract": "The timeout mechanism depends on the engine's hooks feature. Dropping it to trim the graph would silently remove statement timeouts."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "SQL-GAP-01",
+          "summary": "The bead states that FrankenSQLite depends optionally on asupersync. The downstream manifest carries no optional marker, and the plan states the dependency is unconditional. The likely misreading is the downstream entry disabling default features.",
+          "consequence": "Optionality would have meant a feature-off configuration could break the cycle. It cannot. Every downstream crate in that project takes the dependency unconditionally, so the constraint is absolute and this ADR does not carry the bead's wording forward.",
+          "owner_bead": "asupersync-ym2wtv.3.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SQL-GAP-02",
+          "summary": "Plan section 9.1 says the feature is deprecated or removed and the integration inverted; the registry and the bead both make KEEP the default terminal result unless an owner approves an equally discoverable public move after user-journey trials.",
+          "consequence": "The documents disagree on the terminal outcome. The registry and bead are the governing contract and the plan text is the more aggressive position.",
+          "owner_bead": "asupersync-ym2wtv.4",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SQL-GAP-03",
+          "summary": "The one public leak is a foreign-trait implementation rather than a signature: the engine's parameter-binding trait implemented on the owned public value type.",
+          "consequence": "An audit that greps public signatures for the engine name finds nothing and concludes the API is clean. It is not. Any swap is semver-breaking and needs an equivalent trait on the replacement.",
+          "owner_bead": "asupersync-ym2wtv.2.9",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SQL-GAP-04",
+          "summary": "The registry's baseline command and all four of its scenario ids are planned; the named e2e scenario does not appear in the runner script at all.",
+          "consequence": "There is no executable parity baseline today, which is consistent with the recorded evidence state but means the gating measurement has not started.",
+          "owner_bead": "asupersync-ym2wtv.2.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SQL-GAP-05",
+          "summary": "Six SQLite tests across two files use tokio test macros. The root dev-dependency does not enable the macros feature; it arrives only through workspace feature unification from another member.",
+          "consequence": "Those tests compile under a full-workspace run but are at risk under a package-scoped invocation. They are also the only SQLite tests requiring a tokio runtime at all, which is a poor fit for a crate whose defining property is not depending on tokio.",
+          "owner_bead": "asupersync-ym2wtv.2.9",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SQL-GAP-06",
+          "summary": "Two SQLite test files suppress all warnings and all clippy lints at crate scope, and one conformance file contains a test that asserts nothing and merely prints a notice when the feature is off.",
+          "consequence": "Lint regressions in those files are invisible, and a green run includes at least one test that measures nothing. Neither may be counted as parity evidence.",
+          "owner_bead": "asupersync-ym2wtv.2.9",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SQL-GAP-07",
+          "summary": "The SQL parser dependency pulls a recursion helper carrying C and assembly stack-probing code, so the checked SQL surface is a second native edge rather than a pure-Rust one.",
+          "consequence": "The native attribution for this feature is the bundled engine plus the stack-probing helper. A replacement that keeps the checked surface must account for both.",
+          "owner_bead": "asupersync-ym2wtv.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "SQL-GAP-08",
+          "summary": "The documented statement-timeout caveat: the progress handler runs only while the virtual machine executes, so time blocked on a locked database can overshoot the deadline by up to the busy timeout.",
+          "consequence": "A real bound on the guarantee, honestly documented in source. Any replacement must either preserve the caveat or improve on it, and must not silently claim a tighter bound.",
+          "owner_bead": "asupersync-ym2wtv.2.9",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "The checked SQL surface stays the default and the unchecked variants stay an explicit opt-out.",
+        "Open paths remain validated, with a dedicated error variant for an unsafe path.",
+        "The native and C graph stays explicit: the bundled engine and the parser's stack-probing helper are both attributed.",
+        "No reverse Cargo cycle is created; the downstream engine may not become an asupersync dependency or an in-workspace oracle.",
+        "Path and configuration authority stays explicit and flows through the capability context.",
+        "Engine errors are mapped into the owned taxonomy rather than leaking."
+      ],
+      "cancellation_invariants": [
+        "Statement interruption is race-safe: a real interrupt is issued and the operation waits for the blocking job to acknowledge under a bounded masked drain before reporting cancelled.",
+        "Transactions roll back correctly on drop, generation-guarded against stale finish jobs.",
+        "Pool state and region quiescence are restored; no statement keeps running unobserved.",
+        "A dropped row stream aborts its in-flight step rather than waiting for a row boundary."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "linux",
+          "support": "supported",
+          "note": "Bundled C amalgamation compiled by the engine's build script."
+        },
+        {
+          "target_family": "macos",
+          "support": "supported",
+          "note": "Same bundled build path."
+        },
+        {
+          "target_family": "windows",
+          "support": "supported",
+          "note": "Same bundled build path."
+        },
+        {
+          "target_family": "wasm32",
+          "support": "unsupported",
+          "note": "Enabling the feature on a wasm32 browser preview build is a hard compile error by design."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "the async connection, transaction and row-streaming API",
+          "the owned value and error types",
+          "the shipped production-service example, which is gated on this feature"
+        ],
+        "accepted_providers": "The bundled engine only. A downstream engine is reachable solely through a cycle-safe official integration that does not yet exist.",
+        "pinned_crate_versions": {
+          "rusqlite": "0.40 with bundled and hooks, optional",
+          "sqlparser": "0.62, optional",
+          "frankensqlite": "downstream consumer, pins a published asupersync release; must not enter this workspace"
+        },
+        "no_reexport_note": "No engine type appears in any public signature. The single coupling is a public implementation of the engine's parameter-binding trait on the owned value type.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "The seam is well built and largely owned: the blocking-pool funnel, the interrupt-and-drain cancellation protocol, the budget-derived timeout, the error taxonomy and the checked SQL policy are all first-party. The dependency supplies the storage engine and the SQL grammar.",
+        "removal_precondition": "An official cycle-safe integration must exist and be released, be at least as discoverable as the current feature, and demonstrate equal or better API, ergonomics, diagnostics and operational behavior through user-journey trials. A combined consumer budget must be measured with the program's own ledger, a semantic parity matrix must run the existing suite on both engines during an overlap period from outside this workspace, data compatibility must be proved including WAL and unclean-shutdown recovery, an equivalent parameter-binding trait must exist for the leaked impl, rollback must be documented, and the owner must approve. An unofficial workaround or a smaller asupersync-only graph is explicitly not parity.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "consumer-portfolio",
+        "frankensqlite",
+        "SQLite-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "sql-journey-install-query",
+          "description": "A user enables one feature and gets an async SQLite connection integrated with the capability context, deadlines and the blocking pool, with no adapter crate to discover. This one-stop path is what the KEEP decision protects."
+        },
+        {
+          "id": "sql-journey-transaction-savepoint",
+          "description": "A user opens a transaction, nests savepoints, and rolls an inner level back while outer levels survive."
+        },
+        {
+          "id": "sql-journey-cancel-interrupt",
+          "description": "A user cancels a long query and the statement is interrupted, the connection lock is released, and cancellation is not reported until the blocking job acknowledges."
+        },
+        {
+          "id": "sql-journey-restart-rollback",
+          "description": "A user's process is cancelled mid-transaction and the database file is left consistent, with the transaction rolled back on a real disk."
+        },
+        {
+          "id": "sql-journey-stream-large-result",
+          "description": "A user streams a large result set with bounded buffering and observable statistics, and dropping the stream aborts the in-flight step."
+        },
+        {
+          "id": "sql-journey-example-service",
+          "description": "A user runs the shipped production-service example, which is gated on this feature and would stop building if the feature were removed."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The affected symbols live under asupersync::database rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 9.1 and the section 5 rusqlite plus sqlparser row",
+          "stale_text": "asupersync's sqlite feature is deprecated/removed and integration must be inverted",
+          "resolution": "Disposition is KEEP_UNTIL_PARITY. The bead and the registry make KEEP the default terminal result: Cargo cannot make the root feature depend on the downstream adapter without a cycle, and removing the feature after merely proving downstream parity would worsen discoverability. The plan's own gates — combined graph budget, semantic parity matrix, honest maturity framing — remain valid preconditions, and data compatibility and an equivalent parameter-binding trait are added to them."
+        },
+        {
+          "source": "bead asupersync-dep-p3-api-adrs-h3jspm.10 description",
+          "stale_text": "FrankenSQLite already depends optionally on asupersync",
+          "resolution": "The downstream dependency is unconditional. Every downstream crate takes it without an optional marker, so no feature configuration can break the cycle. The constraint is absolute rather than conditional."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "An official integration may be built and published alongside the feature. Nothing in the frozen surface may narrow, and the feature may not be deprecated before the integration is released and demonstrably equal.",
+        "coexistence": "The feature and any official integration must coexist through an overlap period long enough to run the parity matrix on both engines from outside this workspace.",
+        "sequencing": "Correct the bead's optional-dependency wording first, since it misstates the governing constraint. Then the combined graph budget, then the parity matrix from a neutral consumer, then data compatibility, then user-journey trials, then the owner decision.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_010_sqlite_frankensqlite.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any lost public symbol or error predicate; the checked SQL surface ceasing to be the default; a statement timeout that stops being enforced or starts claiming a tighter bound than it delivers; cancellation reporting before the blocking job acknowledges; a transaction that fails to roll back on drop; a database file that stops being readable; the leaked parameter-binding impl disappearing without an equivalent; or any attempt to add the downstream engine to this workspace.",
+        "action": "Revert to the incumbent engine and the frozen surface. Because the decision is KEEP, rollback means abandoning the replacement attempt.",
+        "verification": "Re-run the focused ADR contract, the real-disk cancel-and-rollback test, the three-deep savepoint tests, the WAL conformance and checkpoint audits, the busy-timeout and Unicode-injection audits, the prepared-statement tests, the four wired fuzz targets, and the gated production-service example build."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-ym2wtv.2.1",
+        "unit_test_owner": "asupersync-ym2wtv.2.9",
+        "e2e_owner": "asupersync-ym2wtv.3.5",
+        "scenario_ids": [
+          "sqlite_install_query",
+          "sqlite_transaction_savepoint",
+          "sqlite_cancel_interrupt",
+          "sqlite_restart_rollback"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario sqlite_official_integration",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "combined graph budget: the downstream engine's own async graph plus asupersync, measured with the program ledger — a smaller asupersync-only count is not a budget",
+          "semantic parity matrix run from a neutral consumer or the downstream repository, never in this workspace: transactions, savepoints, prepared statements and caching, interruption, budget-derived timeouts, typed rows, and cancellation behavior",
+          "data compatibility: files written by the incumbent read by the replacement, including WAL state and unclean-shutdown recovery",
+          "trait equivalence: an equivalent parameter-binding trait for the single public leak",
+          "cancellation: real-disk cancel and rollback, stream interrupt on drop, and the three masked-drain outcomes",
+          "security: the checked SQL surface, open-path validation, and the Unicode injection audit",
+          "fuzz: the four wired targets covering SQL, pragma and DDL parsing, pragma serialization and value binding",
+          "user-journey trials proving the official path is at least as discoverable as the current feature",
+          "owner approval, which the bead makes a hard precondition"
+        ],
+        "note": "Naming these owners does not assert they have run. The named e2e scenario does not exist in the runner script, six tests depend on a tokio macros feature the root manifest does not enable directly, two files suppress all lints, and one conformance test asserts nothing when the feature is off."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-SQLITE",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-ym2wtv"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit and no feature deprecation. The oracle gate is structurally constrained: it cannot be satisfied inside this workspace, because the candidate replacement depends on asupersync."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_010_sqlite_frankensqlite.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the downstream engine could reach semantic or data parity, that the masked drain or the generation-guarded rollback behave as stated under load, that the statement timeout holds within its documented caveat, that the combined graph is smaller or larger, that performance is unchanged, or that the sqlite feature or either engine crate may be removed. It makes no claim about the downstream project's maturity, and it does not authorize adding that project to this workspace under any configuration."
+    },
+    {
       "adr_id": "DEP-ADR-011",
       "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
       "title": "Owned UTC timestamp/calendar surface for full chrono/time capability, serialization, and UX",
@@ -5241,6 +6267,420 @@
       },
       "doc_path": "docs/adr/dep_plan_adr_011_time_utc.md",
       "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that the persisted index corpus round-trips, that the owned formatters are correct across the calendar range, that an owned UTC type could reach serde or parsing parity, that performance is unchanged, or that either crate may be removed. It also does not certify the capability registry's source-owner row, which TIM-GAP-01 records as naming a module containing no chrono or time-crate code at all."
+    },
+    {
+      "adr_id": "DEP-ADR-012",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.12",
+      "title": "Preserve full user-supplied regex semantics and privacy guarantees; fixed scanners are only a fast path",
+      "state": "RESOLVED",
+      "owner": "SapphireHill",
+      "resolved_date_utc": "2026-07-24",
+      "capability_ids": [
+        "CAP-REGEX-PRIVACY"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "decision_summary": "The regex crate stays. The source read produced one clarification and one genuine defect. The clarification is that the real regex surface is a single file, the OTLP privacy configuration, where downstream code supplies its own patterns through a public string vector and a public constructor that returns the regex crate's own error type. That error type is a semver-visible leak under the metrics feature. The defect is that the plan's framing of fixed PII scanners as a replacement for the engine does not describe the code: all four built-in detectors are themselves regex-backed today, so there is no non-regex fast path to promote, and the only hand-rolled matching in the privacy path is a Luhn check and a glob matcher. Separately, a module named regex in the ATP chunk artifact is a mock that accepts any pattern and ignores it, compiled unconditionally on non-wasm targets, with a real-looking pattern literal at its call site that has never matched anything. It is not a regex-crate consumer and must not be counted as one; it is a live no-mock-policy violation that the plan already flags for deletion.",
+      "alternatives_considered": [
+        {
+          "option": "Replace the engine with fixed PII scanners plus a subset matcher that fails closed on unsupported syntax, per the plan.",
+          "rejected_because": "The registry's no-claim boundary is explicit that fixed scanners are not a general regex engine and may never justify dropping custom user patterns. Downstream code can supply arbitrary patterns today, and a fail-closed subset matcher would reject patterns that currently work. Fail-closed is the right posture for a redaction engine, but rejecting a previously accepted pattern is capability loss rather than safety."
+        },
+        {
+          "option": "Promote the four built-in detectors as the non-regex fast path.",
+          "rejected_because": "They are not non-regex. Email, SSN and phone are regex literals, and the card detector is a regex candidate scan followed by a hand-rolled Luhn check. Promoting them would mean writing them from scratch, not extracting existing code, and the ordering and exact redaction tokens are pinned by tests."
+        },
+        {
+          "option": "Keep the engine but remove the public constructor that leaks the regex error type.",
+          "rejected_because": "Worth doing eventually, but the leak is how a caller learns that a pattern failed to compile. Removing it without an owned error type would either hide compile failures or force a panic, and the panicking wrapper already exists as the alternative. It belongs with the replacement."
+        },
+        {
+          "option": "Treat the ATP chunk artifact module as a second regex consumer and include it in the replacement scope.",
+          "rejected_because": "It uses no regex crate code at all. Its find implementation ignores the pattern entirely, splitting on whitespace and returning the first token whose dot-separated parts start with a digit. Counting it would inflate the scope and, worse, imply the mock is acceptable."
+        },
+        {
+          "option": "Defer the mock deletion until the engine decision is settled.",
+          "rejected_because": "They are independent. The mock is a production stub that silently ignores a pattern; deleting it and replacing it with an honest bounded version scanner needs no engine decision and is already a separate tracked item."
+        }
+      ],
+      "preserved_public_symbols": [
+        {
+          "module_path": "asupersync::observability::otel",
+          "feature_gate": "metrics",
+          "source_file": "src/observability/otel.rs",
+          "symbols": [
+            "PrivacyConfig",
+            "SpanConfig",
+            "pii_patterns",
+            "try_with_pii_pattern",
+            "with_pii_pattern",
+            "with_auto_pii_detection",
+            "should_drop_field",
+            "redact_pii",
+            "is_luhn_valid_card",
+            "field_pattern_matches"
+          ],
+          "note": "The entire real regex surface. try_with_pii_pattern returns the regex crate's own error type, which is the semver-visible leak. pii_patterns is a public vector that downstream may mutate directly, and the matcher detects a stale compiled cache and recompiles, so direct mutation is a supported path pinned by a dedicated test."
+        },
+        {
+          "module_path": "asupersync::net::atp::chunk::artifact",
+          "feature_gate": null,
+          "source_file": "src/net/atp/chunk/artifact.rs",
+          "symbols": [
+            "extract_version_number"
+          ],
+          "note": "Frozen only so the mock's removal is a visible, reviewed change rather than silent drift. This file contains no regex crate code; the local module of the same name shadows the crate at the call site."
+        }
+      ],
+      "preserved_feature_flags": [
+        {
+          "name": "regex",
+          "cargo_definition": "regex = { version = \"1.12\", optional = true }",
+          "effect": "The pattern engine behind the OTLP privacy configuration. Optional, and enabled only through the metrics feature.",
+          "must_remain": true,
+          "no_tokio_guarantee": "The regex crate introduces no tokio edge."
+        },
+        {
+          "name": "metrics",
+          "cargo_definition": "metrics = [\"dep:opentelemetry\", \"dep:opentelemetry_sdk\", \"dep:regex\"]",
+          "effect": "The only feature that enables the regex crate directly. It therefore also gates the entire privacy redaction surface, which means a build without metrics has no PII redaction engine at all.",
+          "must_remain": true,
+          "no_tokio_guarantee": "The metrics production graph must have no normal-edge dependency on tokio, per the proof lane frozen by DEP-ADR-003."
+        }
+      ],
+      "preserved_surfaces": [
+        {
+          "surface": "user_supplied_patterns",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "metrics",
+          "implementation": "src/observability/otel.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process configuration",
+          "public_entry_points": [
+            "pii_patterns",
+            "try_with_pii_pattern",
+            "with_pii_pattern"
+          ],
+          "note": "The capability this ADR exists to protect. Downstream supplies arbitrary patterns either through the fallible constructor or by mutating the public vector directly; both paths compile through the full engine. A downstream consumer fixture exercises the constructor with its own pattern."
+        },
+        {
+          "surface": "builtin_pii_detectors",
+          "state": "SHIPPED_VIA_DEPENDENCY",
+          "feature_gate": "metrics",
+          "implementation": "src/observability/otel.rs",
+          "wire_encoder": "not applicable",
+          "transport": "redacted telemetry",
+          "public_entry_points": [
+            "with_auto_pii_detection",
+            "redact_pii",
+            "is_luhn_valid_card"
+          ],
+          "note": "Email, SSN, card and phone, applied in that order with distinct redaction tokens. All four are regex-backed, so the bead's fixed-scanner fast path does not exist as non-regex code today. Only the Luhn validity check is hand-rolled."
+        },
+        {
+          "surface": "field_dropping_and_allowlist",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": "metrics",
+          "implementation": "src/observability/otel.rs",
+          "wire_encoder": "not applicable",
+          "transport": "telemetry attribute filtering",
+          "public_entry_points": [
+            "should_drop_field",
+            "field_pattern_matches"
+          ],
+          "note": "Owned and regex-free: a wildcard glob matcher, not a pattern engine. An adjacent audit asserts the attribute denylist stays exact-match rather than becoming fuzzy, so this surface must not drift toward regex."
+        },
+        {
+          "surface": "regex_shaped_mock",
+          "state": "SHIPPED_OWNED",
+          "feature_gate": null,
+          "implementation": "src/net/atp/chunk/artifact.rs",
+          "wire_encoder": "not applicable",
+          "transport": "in-process version extraction",
+          "public_entry_points": [
+            "extract_version_number"
+          ],
+          "note": "A local module named regex that shadows the crate at its call site. Its constructor accepts any pattern and stores it as dead code, and its find ignores the pattern entirely. Compiled unconditionally on non-wasm targets. Recorded as a defect to be replaced with an honest bounded version scanner, not as a regex consumer."
+        },
+        {
+          "surface": "non_regex_fast_path",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "The bead and the plan both speak of fixed scanners as a fast path in front of the engine. No such non-regex path exists; the detectors are regex literals. Recorded so the plan's phrasing is not mistaken for existing work."
+        },
+        {
+          "surface": "regex_adversarial_fuzzing",
+          "state": "NOT_SHIPPED",
+          "feature_gate": null,
+          "implementation": "none",
+          "wire_encoder": "none",
+          "transport": "none",
+          "public_entry_points": [],
+          "note": "No regex or privacy fuzz target exists, although the fuzz build links the engine and the capability declares an adversarial-limits scenario and a catastrophic-backtracking security invariant."
+        }
+      ],
+      "preserved_wire_contract": {
+        "protocol": "in-process pattern matching and telemetry redaction; not a wire protocol",
+        "encoding": "regex crate 1.12 syntax as accepted today",
+        "content_type": "not applicable",
+        "grpc_supported": false,
+        "signal_paths_note": "Redaction applies uniformly across metrics, traces and logs through the shared privacy configuration.",
+        "schema_url": "not applicable",
+        "scope_name": "not applicable",
+        "log_body_value_kinds": [],
+        "temporality": "not applicable",
+        "http_status_semantics": "not applicable",
+        "retry_jitter": "not applicable",
+        "collector_interop": "not applicable",
+        "accepted_language": "The accepted pattern language is whatever the incumbent engine accepts: full Unicode and byte syntax, flags, classes, captures, boundaries, case folding and leftmost-first semantics. Narrowing it is capability loss even if the narrower engine is safer.",
+        "redaction_tokens": "Custom pattern matches yield a generic redaction token; the four built-in detectors yield distinct per-class tokens. Both the tokens and the detector ordering are observable and pinned by tests.",
+        "must_remain": true
+      },
+      "preserved_config_semantics": [
+        {
+          "name": "custom_pattern_precedence",
+          "surface": "redact_pii",
+          "contract": "Custom user patterns are evaluated before the built-in detectors, and a custom match yields the generic redaction token rather than a class-specific one."
+        },
+        {
+          "name": "direct_mutation_support",
+          "surface": "the public pattern vector",
+          "contract": "Mutating the public vector directly, without going through a constructor, still takes effect: the matcher detects a stale compiled cache and recompiles. This is a supported path with its own test and may not regress into silent no-op behavior."
+        },
+        {
+          "name": "compile_error_visibility",
+          "surface": "the fallible and panicking constructors",
+          "contract": "An invalid pattern is reported rather than silently dropped. Both a fallible and a panicking constructor exist and both must remain, because silently ignoring a user's privacy pattern is the worst possible failure for this capability."
+        },
+        {
+          "name": "detector_ordering_and_tokens",
+          "surface": "automatic PII detection",
+          "contract": "Email, then SSN, then card, then phone, each with its own redaction token. A card candidate that fails the Luhn check is left unredacted, which is pinned by a test."
+        },
+        {
+          "name": "glob_not_regex_for_fields",
+          "surface": "field dropping and the allowed-field list",
+          "contract": "Field matching is wildcard globbing, not regex, and the attribute denylist is exact-match. Neither may drift toward fuzzy matching."
+        },
+        {
+          "name": "fail_closed_redaction",
+          "surface": "the privacy configuration",
+          "contract": "Redaction fails closed: when in doubt, redact. A pattern that cannot be evaluated must not result in unredacted output."
+        },
+        {
+          "name": "feature_coupling",
+          "surface": "the metrics feature",
+          "contract": "The redaction engine is available only with metrics enabled. Any change to that coupling changes whether a build has PII redaction at all and is a security-relevant decision."
+        }
+      ],
+      "known_gaps": [
+        {
+          "gap_id": "RGX-GAP-01",
+          "summary": "The capability registry names src/observability/mod.rs as a source owner. That file contains zero occurrences of regex, not even in a comment; it only declares the gated otel module. The real owner, src/observability/otel.rs, is absent.",
+          "consequence": "Same facade failure mode as the time and futures rows. A baseline built from this row would inventory a module declaration and miss the entire engine surface, including the public error-type leak.",
+          "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "RGX-GAP-02",
+          "summary": "A local module named regex in the ATP chunk artifact shadows the crate at its call site. Its constructor accepts any pattern and stores it behind a dead-code allowance, and its find ignores the pattern entirely, splitting on whitespace and returning the first token whose dot-separated parts begin with a digit. The call site passes a real-looking version pattern that has never been used.",
+          "consequence": "Production code that appears to do pattern matching does not. It is compiled unconditionally on non-wasm targets and is a live violation of the repository's no-mock policy. It must not be counted as a regex consumer when scoping a replacement.",
+          "owner_bead": "asupersync-d24mms.11",
+          "may_widen": false
+        },
+        {
+          "gap_id": "RGX-GAP-03",
+          "summary": "All four built-in PII detectors are regex-backed. The only hand-rolled matching in the privacy path is the Luhn check and the field glob matcher.",
+          "consequence": "The fixed-scanner fast path the bead and plan describe does not exist as non-regex code. Building it is new work, not extraction, and it cannot be cited as partial progress toward removing the engine.",
+          "owner_bead": "asupersync-5z2scg.8.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "RGX-GAP-04",
+          "summary": "The public fallible constructor returns the regex crate's own error type, so that type is semver-visible under the metrics feature.",
+          "consequence": "Replacing the engine is a breaking public API change, not only an internal swap, and the replacement must supply an owned error type carrying at least the same location and message quality.",
+          "owner_bead": "asupersync-5z2scg.8.3.7.4",
+          "may_widen": false
+        },
+        {
+          "gap_id": "RGX-GAP-05",
+          "summary": "No regex or privacy fuzz target exists, even though the fuzz build enables metrics and therefore links the engine.",
+          "consequence": "The capability declares an adversarial-limits scenario and a security invariant that adversarial input cannot trigger catastrophic backtracking, and nothing exercises either. For a redaction engine handling untrusted text this is the most consequential missing evidence.",
+          "owner_bead": "asupersync-5z2scg.8.5",
+          "may_widen": false
+        },
+        {
+          "gap_id": "RGX-GAP-06",
+          "summary": "The plan classifies this as owned work in phase five with a subset matcher that fails closed on unsupported syntax, while the registry records keep-until-parity and a no-claim boundary stating that fixed scanners may never justify dropping custom user patterns.",
+          "consequence": "The two documents disagree about whether narrowing the accepted language is permitted. The registry is the later and stricter statement and governs.",
+          "owner_bead": "asupersync-5z2scg.8.1",
+          "may_widen": false
+        },
+        {
+          "gap_id": "RGX-GAP-07",
+          "summary": "The redaction engine is reachable only with the metrics feature enabled, because that is the only feature that pulls the regex crate.",
+          "consequence": "A build without metrics has no PII redaction capability at all. That coupling is load-bearing for the security story and is recorded so it is not changed casually in either direction.",
+          "owner_bead": "asupersync-5z2scg.8.1",
+          "may_widen": false
+        }
+      ],
+      "security_invariants": [
+        "Custom privacy patterns are never silently ignored; an invalid pattern is reported and a directly mutated pattern list still takes effect.",
+        "Redaction is fail-closed: unevaluable input must not produce unredacted output.",
+        "Adversarial input cannot trigger catastrophic backtracking; the incumbent engine's linear-time matching policy is part of the capability.",
+        "Field dropping stays exact-match and glob-based rather than fuzzy, so an attribute denylist cannot be widened by accident.",
+        "A card candidate failing the Luhn check is deliberately left unredacted, so the detector does not over-redact arbitrary digit runs."
+      ],
+      "cancellation_invariants": [
+        "Long scans are bounded or cooperative rather than unbounded.",
+        "Compiled-pattern cache work cannot outlive the owning configuration.",
+        "A cancelled export never emits partially redacted output."
+      ],
+      "platform_cells": [
+        {
+          "target_family": "all-supported",
+          "support": "supported",
+          "note": "The engine is pure Rust and platform-neutral, gated by the metrics feature."
+        },
+        {
+          "target_family": "wasm32",
+          "support": "not-applicable",
+          "note": "The mock module lives under a non-wasm-gated path, and the telemetry surface is scoped to native by its own capability."
+        }
+      ],
+      "external_ecosystem_integration": {
+        "entry_points": [
+          "the public privacy configuration with its user-supplied pattern vector",
+          "the fallible and panicking pattern constructors",
+          "automatic PII detection and field-level redaction"
+        ],
+        "accepted_providers": "Any downstream supplying its own patterns in the incumbent engine's syntax.",
+        "pinned_crate_versions": {
+          "regex": "1.12, optional, enabled only by the metrics feature"
+        },
+        "no_reexport_note": "The engine is not re-exported and its pattern type appears in no public signature. The one leak is the crate's error type on the fallible constructor.",
+        "instrument_surface": "not applicable",
+        "runtime_seam_is_clean": "Field globbing, the Luhn check, the redaction tokens and the ordering are all owned. The dependency supplies pattern compilation and matching only.",
+        "removal_precondition": "An owned engine must accept the full pattern language currently accepted, preserve leftmost-first and case-folding semantics, keep linear-time matching, supply an owned error type with equal location and message quality, and keep both constructor paths and direct mutation working. A full-syntax corpus, an adversarial and resource-limit corpus, fuzzing, and a downstream fixture supplying its own patterns must all pass first. A narrower fail-closed matcher does not qualify, because rejecting a previously accepted pattern is capability loss.",
+        "must_remain": true
+      },
+      "downstream_consumers": [
+        "consumer-portfolio",
+        "privacy-config-users",
+        "OTLP-users"
+      ],
+      "user_journeys": [
+        {
+          "id": "rgx-journey-custom-pattern",
+          "description": "A downstream operator adds their own PII pattern through the fallible constructor and sees matching values replaced with the generic redaction token. Exercised today by the standalone consumer fixture."
+        },
+        {
+          "id": "rgx-journey-direct-mutation",
+          "description": "An operator mutates the public pattern vector directly and redaction still applies, because the matcher recompiles on a stale cache."
+        },
+        {
+          "id": "rgx-journey-invalid-pattern",
+          "description": "An operator supplies an invalid pattern and receives a compile error rather than silently unprotected telemetry."
+        },
+        {
+          "id": "rgx-journey-automatic-detection",
+          "description": "An operator enables automatic detection and email, SSN, valid payment card and phone values are replaced with their class-specific tokens, while a Luhn-invalid digit run is left alone."
+        },
+        {
+          "id": "rgx-journey-field-dropping",
+          "description": "An operator drops attributes by wildcard and the exact-match denylist is applied without fuzzy widening."
+        },
+        {
+          "id": "rgx-journey-multisignal-redaction",
+          "description": "The same privacy policy applies uniformly to metrics, traces and logs, so no signal bypasses redaction."
+        }
+      ],
+      "api_surface_delta": {
+        "root_exports_added": [],
+        "root_exports_removed": [],
+        "api_surface_map_update_required": false,
+        "rationale": "This ADR makes no source change. The affected symbols live under asupersync::observability::otel and asupersync::net rather than at the crate root, and the capability registry pins the api surface map by semantic hash."
+      },
+      "supersedes": [
+        {
+          "source": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md section 5 disposition table, regex row",
+          "stale_text": "OWN (SAFE), phase 5, fixed PII scanners plus a subset matcher that fails closed on unsupported syntax",
+          "resolution": "Disposition is KEEP_UNTIL_PARITY. Fail-closed is the right posture for redaction, but a subset matcher that rejects a previously accepted pattern is capability loss, which the registry's no-claim boundary forbids. Also note the fixed scanners are themselves regex-backed today, so there is nothing to promote."
+        }
+      ],
+      "migration_policy": {
+        "compatibility_shims": "forbidden",
+        "additive_only": "Faster non-regex detectors may be added in front of the engine, provided they are proved equivalent on the patterns they accelerate and fall through to the engine otherwise. The accepted pattern language may not narrow.",
+        "coexistence": "The engine remains the general path. Any accelerated detector is an optimization behind the same public behavior.",
+        "sequencing": "Deleting the ATP chunk mock is independent and may proceed immediately. Building non-regex detectors is new work. Replacing the engine requires the full-syntax and adversarial corpora and an owned error type first.",
+        "docs_obligation": "Any change to the frozen surface updates this artifact, docs/dependency_api_adr_registry.md, and docs/adr/dep_plan_adr_012_regex_privacy.md in the same commit."
+      },
+      "rollback_policy": {
+        "trigger": "Any previously accepted pattern that stops compiling, any custom pattern that stops taking effect, any lost or coarsened compile error, any changed detector ordering or redaction token, any field matcher that becomes fuzzy, any regression in linear-time matching, or any build in which redaction silently disappears.",
+        "action": "Revert to the incumbent engine and the frozen surface. Because the decision is KEEP, rollback means abandoning the replacement attempt.",
+        "verification": "Re-run the focused ADR contract, the privacy configuration unit tests including the directly-mutated-pattern and Luhn-negative cases, the OTLP privacy filtering tests, the attribute denylist audit, and the downstream consumer fixture."
+      },
+      "evidence": {
+        "state": "BASELINE_PLANNED",
+        "baseline_owner": "asupersync-5z2scg.8.1",
+        "unit_test_owner": "asupersync-5z2scg.8.3.7.4",
+        "e2e_owner": "asupersync-5z2scg.8.5",
+        "scenario_ids": [
+          "regex_custom_patterns",
+          "privacy_multisignal_redaction",
+          "regex_adversarial_limits"
+        ],
+        "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario regex_privacy",
+        "adr_contract_scenario_id": "api-adr-registry-contract",
+        "required_evidence_classes": [
+          "corpus: the full accepted pattern syntax including Unicode and byte classes, flags, captures, boundaries, case folding and leftmost-first semantics",
+          "unit: invalid pattern reporting through both constructors, and direct mutation of the public pattern vector still taking effect",
+          "unit: detector ordering, per-class redaction tokens, and the Luhn-negative case that must remain unredacted",
+          "unit: field globbing and the exact-match attribute denylist staying non-fuzzy",
+          "adversarial and fuzz: catastrophic-backtracking resistance and resource limits, which RGX-GAP-05 records as entirely absent today",
+          "differential: an owned candidate compared against the incumbent across the full corpus, with any rejected pattern treated as capability loss",
+          "downstream-consumer: an out-of-workspace crate supplying its own pattern through the public constructor",
+          "multisignal E2E: identical redaction applied across metrics, traces and logs"
+        ],
+        "note": "Naming these owners does not assert they have run. The ATP chunk mock's behavior test pins a stub and may not be counted toward any regex evidence class."
+      },
+      "cutover": {
+        "dependency_exit_allowed": false,
+        "per_capability": [
+          {
+            "capability_id": "CAP-REGEX-PRIVACY",
+            "disposition": "KEEP_UNTIL_PARITY",
+            "cutover_state": "KEEP_INCUMBENT"
+          }
+        ],
+        "primary_authorities": [
+          "asupersync-5z2scg.8"
+        ],
+        "secondary_compatibility_consumers": [
+          "asupersync-dep-p3-api-adrs-h3jspm.13",
+          "asupersync-d24mms.11"
+        ],
+        "gates": [
+          "capability map",
+          "baseline",
+          "safety",
+          "marginal graph",
+          "unit invariants",
+          "downstream",
+          "no-mock E2E",
+          "oracle",
+          "rollback",
+          "UX/docs",
+          "owner",
+          "final no-loss"
+        ],
+        "note": "This ADR authorizes no dependency exit. The regex crate remains a production dependency of the metrics feature. Deleting the ATP chunk mock is tracked separately and is not gated by this decision."
+      },
+      "doc_path": "docs/adr/dep_plan_adr_012_regex_privacy.md",
+      "no_claim_boundary": "This ADR is a frozen decision and public-surface inventory only. It does not prove that the planned evidence has run, that redaction is complete against real PII, that the engine resists adversarial input in this configuration, that an owned engine could match the accepted language, that performance is unchanged, or that the regex crate may be removed. It also does not certify the capability registry's source-owner row, which RGX-GAP-01 records as naming a module with zero regex references."
     }
   ],
   "known_loss_fixtures": [
@@ -5345,6 +6785,24 @@
       "adr_id": "DEP-ADR-011",
       "prohibited_text": "emit a new timestamp format without a reader",
       "expected_error": "persisted artifact loss: timestamp corpus"
+    },
+    {
+      "fixture_id": "regex-language-narrowing",
+      "adr_id": "DEP-ADR-012",
+      "prohibited_text": "support only a subset regex engine",
+      "expected_error": "generic API narrowing: regex"
+    },
+    {
+      "fixture_id": "kafka-feature-removal-on-count",
+      "adr_id": "DEP-ADR-009",
+      "prohibited_text": "remove the kafka feature to reduce the package count",
+      "expected_error": "functionality loss: kafka client"
+    },
+    {
+      "fixture_id": "sqlite-cycle-violation",
+      "adr_id": "DEP-ADR-010",
+      "prohibited_text": "add frankensqlite as a dev-dependency oracle",
+      "expected_error": "cycle violation: sqlite"
     }
   ],
   "validation": {

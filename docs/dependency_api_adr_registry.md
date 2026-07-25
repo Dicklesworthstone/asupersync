@@ -85,8 +85,8 @@ the observability re-exports.
 <!-- BEGIN GENERATED ADR SUMMARY -->
 - Artifact: `dependency-api-adr-registry-v1` (schema 1)
 - Phase: `asupersync-dep-p3-api-adrs-h3jspm`; aggregate terminal `asupersync-dep-p3-api-adrs-h3jspm.13`.
-- Roster: 12 ADRs; RESOLVED=9; PENDING=3.
-- Negative fixtures: 17.
+- Roster: 12 ADRs; RESOLVED=12; PENDING=0.
+- Negative fixtures: 20.
 
 | ADR | Bead | Capabilities | State | Decision | Cutover |
 |---|---|---|---|---|---|
@@ -98,10 +98,10 @@ the observability re-exports.
 | `DEP-ADR-006` | `asupersync-dep-p3-api-adrs-h3jspm.6` | `CAP-HTTP-COMPRESSION` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-007` | `asupersync-dep-p3-api-adrs-h3jspm.7` | `CAP-NKEY-AUTH` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-008` | `asupersync-dep-p3-api-adrs-h3jspm.8` | `CAP-FUTURES-STREAMS` | RESOLVED | KEEP_UNTIL_PARITY | BLOCKED_PENDING_EVIDENCE |
-| `DEP-ADR-009` | `asupersync-dep-p3-api-adrs-h3jspm.9` | `CAP-KAFKA` | PENDING | - | - |
-| `DEP-ADR-010` | `asupersync-dep-p3-api-adrs-h3jspm.10` | `CAP-SQLITE` | PENDING | - | - |
+| `DEP-ADR-009` | `asupersync-dep-p3-api-adrs-h3jspm.9` | `CAP-KAFKA` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
+| `DEP-ADR-010` | `asupersync-dep-p3-api-adrs-h3jspm.10` | `CAP-SQLITE` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 | `DEP-ADR-011` | `asupersync-dep-p3-api-adrs-h3jspm.11` | `CAP-TIME-UTC-RFC3339` | RESOLVED | ADDITIVE_COEXISTENCE | BLOCKED_PENDING_EVIDENCE |
-| `DEP-ADR-012` | `asupersync-dep-p3-api-adrs-h3jspm.12` | `CAP-REGEX-PRIVACY` | PENDING | - | - |
+| `DEP-ADR-012` | `asupersync-dep-p3-api-adrs-h3jspm.12` | `CAP-REGEX-PRIVACY` | RESOLVED | KEEP_UNTIL_PARITY | KEEP_INCUMBENT |
 <!-- END GENERATED ADR SUMMARY -->
 
 ## Authoring the next ADR
