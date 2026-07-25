@@ -186,6 +186,16 @@ fn bench_genserver_call(c: &mut Criterion) {
 // REGISTRY BENCHMARKS
 // =============================================================================
 
+/// Region the registry benchmarks lease names in.
+///
+/// Deliberately NOT `RegionId::new_for_test(0, 0)`: `as_u64()` packs the id as
+/// `(generation << 32) | index`, so index 0 / generation 0 is the *root* region,
+/// and `GradedObligation::reserve` asserts against it —
+/// `[ASUP-E103] Cannot create obligation token in root region`. `NameRegistry::register`
+/// takes a name lease, which is an obligation, so every benchmark in this group
+/// panicked on its first iteration with the root region (br-asupersync-jwr6k0).
+const BENCH_REGION: RegionId = RegionId::new_for_test(1, 0);
+
 fn bench_registry_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("spork/registry");
 
@@ -193,7 +203,7 @@ fn bench_registry_operations(c: &mut Criterion) {
         b.iter(|| {
             let mut registry = NameRegistry::new();
             let task_id = TaskId::new_for_test(1, 0);
-            let region = RegionId::new_for_test(0, 0);
+            let region = BENCH_REGION;
             let now = Time::ZERO;
             let mut lease = registry
                 .register("bench_name", task_id, region, now)
@@ -206,7 +216,7 @@ fn bench_registry_operations(c: &mut Criterion) {
     group.bench_function("register_100_unique", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let mut registry = NameRegistry::new();
-            let region = RegionId::new_for_test(0, 0);
+            let region = BENCH_REGION;
             let now = Time::ZERO;
             let mut leases = Vec::with_capacity(100);
             for i in 0..100u32 {
@@ -224,7 +234,7 @@ fn bench_registry_operations(c: &mut Criterion) {
     group.bench_function("whereis_hit", |b: &mut criterion::Bencher| {
         let mut registry = NameRegistry::new();
         let task_id = TaskId::new_for_test(1, 0);
-        let region = RegionId::new_for_test(0, 0);
+        let region = BENCH_REGION;
         let now = Time::ZERO;
         // Keep the lease alive for the duration of the benchmark.
         let mut lease = registry.register("target", task_id, region, now).unwrap();
@@ -243,7 +253,7 @@ fn bench_registry_operations(c: &mut Criterion) {
         b.iter(|| {
             let mut registry = NameRegistry::new();
             let task_id = TaskId::new_for_test(1, 0);
-            let region = RegionId::new_for_test(0, 0);
+            let region = BENCH_REGION;
             let now = Time::ZERO;
             let mut lease = registry
                 .register("cycle_name", task_id, region, now)
