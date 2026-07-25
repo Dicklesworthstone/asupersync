@@ -1,0 +1,261 @@
+# futures-lite capability inventory
+
+<!-- BEGIN FUTURES LITE CAPABILITY INVENTORY -->
+
+This is the operator-facing view of
+`artifacts/futures_lite_capability_inventory_v1.json`, the FUT A1 baseline for
+`CAP-FUTURES-STREAMS`. The inventory is source-pinned to
+`ed1c0c3ae4ba68947cd2c0212f1aab2242f60724` and follows the accepted
+`DEP-ADR-008` decision: **KEEP_UNTIL_PARITY**. It inventories the current
+dependency; it does not authorize a cutover.
+
+## Result
+
+The root crate has an unconditional normal `futures-lite = "2.6"` dependency,
+resolved to 2.6.1 with its `std` and `race` default features. It remains present
+under default features, `--no-default-features`, every optional root feature,
+native targets, and the excluded wasm and fuzz workspaces that depend on the
+root by path. The Tokio compatibility member separately has a direct
+`futures-lite = "2"` dev dependency. Its normal library build does not have that
+edge; its unit tests do.
+
+The baseline Rust-source census is exact:
+
+| Scope | Files | `futures_lite` tokens | Cargo-built classification |
+|---|---:|---:|---|
+| `src` | 150 | 817 | 6 production, 2 public doctest, 809 test |
+| `tests` | 151 | 534 | integration test |
+| `benches` | 3 | 3 | benchmark |
+| `examples` | 1 | 1 | example |
+| `asupersync-tokio-compat` | 3 | 5 | 3 dev-dependency API tokens, 2 local helper-name tokens |
+| `fuzz` | 2 | 2 | comments only |
+| Total | 310 | 1362 | fully classified; zero unknown |
+
+The contract excludes its own post-baseline source file from those numbers and
+records its single import separately as temporary dev-oracle evidence. It also
+pins a digest of every baseline `path<TAB>count` row, so a new reference, a
+removed reference, or a moved reference fails the focused contract.
+
+The ADR's approximate `796 / 148` `src` count has already drifted to `817 / 150`.
+Migration owners must use the executable census rather than copying the ADR
+headline.
+
+## Production and public surfaces
+
+Six production source tokens in five files preserve seven behaviors:
+
+| ID | Source | Contract |
+|---|---|---|
+| `FUT-PROD-ATP-STREAM` | `src/net/atp/sdk/stream.rs` | One trait import supports public `Stream<Item = TransferProgress>` impls for both `AtpWriter` and `AtpReader`. Empty progress queues self-wake and return `Pending`; disconnected or cancelled queues terminate. Drop best-effort signals cancellation and aborts an outstanding obligation. |
+| `FUT-PROD-MIDDLEWARE-CATCH` | `src/web/middleware.rs` | `CatchPanicMiddleware` separately catches construction panic with `std`, then catches poll panic with `FutureExt`. It emits stable `ASUP-E502` behavior and never intentionally repolls after panic. |
+| `FUT-PROD-NEGOTIATE-CATCH` | `src/web/negotiate.rs` | `ErrorHandlerMiddleware` catches poll panic and converts it through content negotiation. Construction happens before the adapter and is not contained by this site. |
+| `FUT-PROD-ROUTER-BLOCK` | `src/web/router.rs` | Public synchronous `Router::handle` drives `handle_with_cx` on the caller thread without an ambient runtime. |
+| `FUT-PROD-RELOAD-BLOCK` | `src/signal/shutdown.rs` | The SIGHUP receive loop blocks on its dedicated `asupersync-reload-sighup` standard thread. |
+| `FUT-PROD-SHUTDOWN-BLOCK` | `src/signal/shutdown.rs` | Each watched shutdown signal blocks on its own named standard thread. |
+
+Two additional references are compiled public doctests on `Notify`. They are
+not production runtime calls, but removing the test executor without migrating
+them would break the documented public workflow.
+
+The public exposure is a foreign trait implementation, not a root re-export or
+a foreign type in a function signature. That is still downstream-observable:
+generic code bounded on `futures_lite::Stream` accepts the two ATP SDK types
+today. `artifacts/api_surface_map_v1.json` maps root exports and therefore does
+not enumerate this nested trait-implementation property.
+
+The existing standalone downstream fixture proves only
+`asupersync::stream::{Stream, StreamExt}`. It does not depend on futures-lite,
+does not mention the ATP SDK types, and cannot catch a break to the foreign
+impls.
+
+## `block_on` context
+
+The incumbent pins the future on the calling stack, polls it, and parks the
+current thread after `Pending`. Its Waker unparks that Parker. A thread-local
+Parker/Waker pair is reused for ordinary calls; a recursive call on the same
+thread gets a fresh pair because the cache is already borrowed.
+
+`block_on` adds no `Send`, `Unpin`, or `'static` bound. That matters:
+
+- `Router::handle` can borrow `self` and its local `Cx`.
+- unit tests can drive borrowed and non-`Send` futures;
+- recursive calls are supported;
+- signal listeners satisfy thread ownership because their closures move the
+  listener state, not because `block_on` requires it;
+- no ambient executor or orphan task is created.
+
+The production call contexts are the public router caller thread and dedicated
+signal-listener threads. Test call contexts also include ordinary test threads,
+runtime and lab helpers, blocking-pool tests, benchmarks, examples, and the
+Tokio compatibility member. A replacement must explicitly test all of those
+contexts. “Works in a normal unit test” is not parity.
+
+## Consumed helper semantics
+
+The live API set is:
+
+- `block_on`
+- `poll_fn`
+- `poll_once`
+- `yield_now`
+- `zip`
+- `race`
+- `or`
+- `pending`
+- `FutureExt::catch_unwind`
+- `Stream`
+
+`poll_fn` invokes its `FnMut` once per poll and forwards the caller's Context.
+`poll_once` performs exactly one inner poll, turning `Ready(v)` into `Some(v)`
+and `Pending` into `None`; completion drops the inner future. `yield_now`
+self-wakes and returns `Pending` once, then returns `Ready(())`.
+
+`zip` polls left then right, stores completed outputs, and returns an ordered
+pair after both complete. Dropping it drops the remaining child and any stored
+output.
+
+`race` randomizes the first child on each wrapper poll. `or` always polls left
+first. Both return the first ready output and drop the losing future when the
+wrapper is dropped. They do **not** drain the loser or prove region quiescence.
+Any owned replacement must either preserve this incumbent behavior for
+differential compatibility or explicitly upgrade it to the project's stronger
+race contract with obligation-aware drain evidence. Merely dropping the loser
+cannot be reported as “losers are drained.”
+
+`pending` never completes and never schedules a wake. `catch_unwind` wraps each
+inner poll in `std::panic::catch_unwind`, producing
+`Err(Box<dyn Any + Send>)`; the middleware construction-stage catch remains a
+separate requirement. The `Stream` trait is the futures-core trait re-export
+and adds no `Send`, `Sync`, `Unpin`, or `'static` supertrait.
+
+### ADR correction: no `join_all`
+
+`future::join_all` is not consumed. The only repository occurrence is a stale
+comment in `src/sync/notify_metamorphic.rs`, and futures-lite 2.6.1 exports no
+such function. Conversely, `future::or` is used by
+`tests/channel_conformance.rs` and was absent from the ADR list.
+
+FUT A4 must implement the executable inventory, not the stale prose list:
+include `or`; do not invent a futures-lite `join_all` parity target. The
+project's own join-all behavior remains a separate asupersync combinator
+surface.
+
+## Exact migration ownership
+
+Every baseline occurrence is assigned by a deterministic path selector. Each
+group carries the SHA-256 digest of its sorted `path<TAB>count` projection:
+
+| Group | Bead | Files | Tokens | Scope |
+|---|---|---:|---:|---|
+| `FUT-A6-CORE` | `.6.6` | 42 | 258 | actor, cancellation, channels, combinators, Cx, epoch, gen-server, lab, obligations, runtime, service, session, owned stream, sync, test utilities, tracing |
+| `FUT-A7-IO` | `.6.7` | 31 | 145 | filesystem, IO, non-ATP network, process, signal, time, TLS |
+| `FUT-A8-SERVICES` | `.6.8` | 33 | 196 | web, HTTP, gRPC, database, messaging, distributed |
+| `FUT-A9-ATP-DEV` | `.6.9` | 204 | 763 | ATP, transports, root real/conformance test modules, integration tests, benchmarks, examples, compatibility tests, fuzz comments |
+
+Before editing, an owner must materialize the group's digest projection, reserve
+every exact path it intends to change, and fail closed if the projection drifts.
+The groups are ownership partitions, not permission for a bulk rewrite.
+
+Design and kernel ownership remains:
+
+- `.6.2`: owned Stream/public extension contract and ATP downstream ergonomics;
+- `.6.3`: safe blocking kernel, Parker/Waker state, recursion, runtime and
+  blocking-pool policy;
+- `.6.4`: `poll_fn`, `poll_once`, `yield_now`, `zip`, `race`, `or`, and
+  `pending`;
+- `.6.5`: construction- and poll-phase panic containment;
+- `.6.10`: aggregate parity, graph proof, downstream E2E, rollback, and only
+  then a conditional cutover decision.
+
+## Marginal ledger
+
+The existing marginal ledger has 52 root-edge cells: 13 feature profiles over
+four target triples.
+
+| Unique marginal package versions | Cells |
+|---:|---:|
+| 0 | 4 |
+| 3 | 21 |
+| 4 | 13 |
+| 5 | 14 |
+
+The possible unique set is futures-lite 2.6.1, futures-io 0.3.33, parking
+2.2.1, futures-core 0.3.33, and pin-project-lite 0.2.17. No marginal build
+script, proc macro, or native-code package is recorded.
+
+All four zero-marginal cells are `workspace-dev-build-audit` targets. Removing
+the root normal edge would not remove a package there because workspace
+dev/test edges—including the Tokio compatibility member's direct dev
+dependency—retain the incumbent. Therefore:
+
+1. production normal-edge exit is one gate;
+2. temporary differential/dev-oracle retention is a separate, explicit gate;
+3. dev-oracle retirement happens only after standalone owned tests replace the
+   oracle;
+4. a zero workspace marginal is not evidence that production already stopped
+   using futures-lite.
+
+## Required downstream and real E2E evidence
+
+`public_stream_consumer` must compile and run an external crate whose generic
+functions are bounded on the ecosystem Stream trait and consume both ATP SDK
+types. It must cover Pending, wake, progress item, EOF, channel cancellation,
+drop, obligation cleanup, and region-close quiescence.
+
+`stream_cancel_backpressure` must exercise the real bounded progress path and
+prove cancellation signaling, obligation resolution, no task leak, no
+obligation leak, loser cleanup, and quiescence.
+
+`test_block_on` must cover a borrowed non-`Send` future, recursive invocation,
+wake-after-Pending, panic propagation, ordinary test threads, runtime contexts,
+and blocking-pool contexts with no spin, deadlock, or orphan task.
+
+Canonical aggregate execution remains:
+
+```bash
+scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario futures_streams
+```
+
+The scenario must retain the standard provenance, normalized outcomes,
+resource state, timings, redaction scan, and deterministic replay command.
+`BLOCKED` or `UNSUPPORTED` is explicit; silent skip is not green.
+
+## Fail-closed findings
+
+- The capability registry names the wrong source owners.
+- Its feature list implies a gate that does not exist.
+- Registry and baseline evidence states disagree.
+- The manifest comment describes only the two web adapter sites.
+- Public ATP ecosystem Stream behavior and downstream usability are untested.
+- ATP's Empty path self-wakes and has no focused wake-churn test.
+- The ADR count drifted, listed comment-only `join_all`, omitted live `or`, and
+  omitted the compatibility-member direct dev edge.
+- Two fuzz comments imply direct use that does not exist.
+
+All are routed in the machine artifact. None is permission to expand A1 into a
+source migration.
+
+## Focused contract
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
+  --overlay-path artifacts/futures_lite_capability_inventory_v1.json \
+  --overlay-path docs/futures_lite_capability_inventory.md \
+  --overlay-path tests/futures_lite_capability_inventory_contract.rs \
+  -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  RUSTFLAGS='-D warnings -C debuginfo=0' \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_futures_lite_capability_inventory" \
+  cargo test -p asupersync --test futures_lite_capability_inventory_contract -- --nocapture
+```
+
+## No-claim boundary
+
+This inventory proves a source-pinned, zero-unknown classification and focused
+incumbent semantic probes. It does not prove arbitrary downstream Stream
+compatibility, replacement parity, broad workspace health, release readiness,
+performance, no regression, live RCH fleet availability, local Cargo fallback
+approval, or permission to remove futures-lite. Package-count marginals are not
+behavioral evidence. Dropping a race loser is not the project's required loser
+drain.
+
+<!-- END FUTURES LITE CAPABILITY INVENTORY -->
