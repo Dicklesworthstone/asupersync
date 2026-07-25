@@ -45,6 +45,15 @@ use super::codec::Codec;
 // Re-export from parent module (single source of truth).
 pub use super::DEFAULT_MAX_MESSAGE_SIZE;
 
+#[path = "protobuf_wire.rs"]
+mod wire;
+pub use wire::{
+    MAX_PROTOBUF_FIELD_NUMBER, MAX_PROTOBUF_MESSAGE_LEN, ProtobufWireDecoder, ProtobufWireEncoder,
+    ProtobufWireError, ProtobufWireField, ProtobufWireLimits, ProtobufWireMessage,
+    ProtobufWireValue, WireType, decode_varint, encoded_varint_len, zigzag_decode_i32,
+    zigzag_decode_i64, zigzag_encode_i32, zigzag_encode_i64,
+};
+
 /// Error type for protobuf encoding/decoding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtobufError {
