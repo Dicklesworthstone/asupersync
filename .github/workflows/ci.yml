@@ -634,6 +634,50 @@ jobs:
           fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_check" cargo check --all-targets --all-features
 
+  dependency-supply-chain:
+    name: Dependency supply-chain audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache Cargo scanner builds and advisory database
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-dependency-scanners-${{ hashFiles('artifacts/dependency_supply_chain_policy_v1.json') }}
+
+      - name: Install pinned Cargo scanners
+        run: scripts/ci/audit_dependencies.sh install-tools
+
+      - name: Exercise fail-closed dependency policy fixtures
+        env:
+          DEPENDENCY_AUDIT_OUTPUT_DIR: artifacts/dependency-supply-chain
+          ASUPERSYNC_ADVISORY_DB_ROOT: artifacts/dependency-supply-chain/advisory-dbs
+        run: scripts/ci/audit_dependencies.sh self-test
+
+      - name: Run root and excluded-fuzz dependency policy
+        env:
+          DEPENDENCY_AUDIT_OUTPUT_DIR: artifacts/dependency-supply-chain
+          ASUPERSYNC_ADVISORY_DB_ROOT: artifacts/dependency-supply-chain/advisory-dbs
+        run: scripts/ci/audit_dependencies.sh run
+
+      - name: Upload dependency supply-chain receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-supply-chain-receipts
+          path: artifacts/dependency-supply-chain
+          retention-days: 30
+
   differential-fast:
     name: Differential Fast Gate
     runs-on: ubuntu-latest

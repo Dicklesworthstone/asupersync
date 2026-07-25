@@ -266,7 +266,8 @@ scope
 
 ### 2. Cancellation as a First-Class Protocol
 
-Cancellation operates as a multi-phase protocol, not a silent `drop`:
+Cancellation is request, acknowledgement, drain, and finalization—not a silent
+`drop`. It operates as a multi-phase protocol:
 
 ```
 Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelled)
@@ -337,7 +338,7 @@ The runtime design is backed by a small-step operational semantics (`asupersync_
 
 The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
-Some checked artifacts retain the legacy marker `Lean-checked core invariants cover the six non-negotiable runtime invariants`. In this README that phrase means coverage of the six abstract-model rows only; it does not assert a Rust refinement proof.
+Some checked artifacts retain the legacy markers `Lean-checked core invariants cover the six non-negotiable runtime invariants` and `checks the six non-negotiable runtime invariants`. In this README those phrases mean coverage of the six abstract-model rows only; they do not assert a Rust refinement proof.
 
 The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
 
@@ -1411,6 +1412,18 @@ Traces can be exported as TLA+ behaviors with spec skeletons for bounded TLC mod
 Payoff: bridge from deterministic runtime traces to model-checking workflows when you need "prove it", not "it passed tests".
 
 ---
+
+## Dependency supply-chain policy contract
+
+The checked supply-chain gate is
+[`scripts/ci/audit_dependencies.sh`](scripts/ci/audit_dependencies.sh), with
+policy and interpretation in
+[`artifacts/dependency_supply_chain_policy_v1.json`](artifacts/dependency_supply_chain_policy_v1.json)
+and
+[`docs/dependency_supply_chain_policy.md`](docs/dependency_supply_chain_policy.md).
+Its focused proof lane is `dependency-supply-chain-policy-contract`. A root
+scanner pass does not claim that the separately excluded fuzz workspace is
+green; consult the live receipt for its explicit non-green status.
 
 ## Using Asupersync as a Dependency
 

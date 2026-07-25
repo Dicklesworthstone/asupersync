@@ -1,0 +1,25 @@
+# Canonical cargo-audit policy for asupersync.
+#
+# Tool version: cargo-audit 0.22.2. The checked runner supplies the exact
+# advisory database path and disables a second fetch so both tools use the same
+# recorded RustSec revision.
+
+[advisories]
+ignore = ["RUSTSEC-2025-0134"]
+informational_warnings = ["unmaintained", "unsound"]
+severity_threshold = "low"
+
+[database]
+url = "https://github.com/RustSec/advisory-db.git"
+fetch = true
+stale = false
+
+[output]
+deny = ["unmaintained", "unsound", "yanked"]
+format = "json"
+quiet = true
+show_tree = true
+
+[yanked]
+enabled = true
+update_index = true

@@ -514,7 +514,8 @@
     "artifact-governance-validation-harness",
     "artifact-governance-final-signoff",
     "clean-overlay-proof-orchestration-contract",
-    "proof-traffic-final-signoff"
+    "proof-traffic-final-signoff",
+    "dependency-supply-chain-policy-contract"
   ],
   "lanes": [
     {
@@ -2960,6 +2961,63 @@
           "peer-dirt-exclusion-without-supported-admitted-terminal-receipt"
         ]
       }
+    },
+    {
+      "lane_id": "dependency-supply-chain-policy-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "covers": "Dependency supply-chain policy schema, exact Cargo scanner versions, RustSec database freshness contract, root and excluded-fuzz lockfile fingerprints, advisory exception ownership and expiry, license/source policy, duplicate ratchets, safe negative-fixture wiring, CI receipts, runbook boundaries, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Fresh scanner execution until scripts/ci/audit_dependencies.sh run is executed, a green excluded fuzz graph, undisclosed vulnerabilities, legal advice, publisher identity, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability.",
+      "expected_signal": "dependency_supply_chain_policy_contract tests pass",
+      "source_paths": [
+        "deny.toml",
+        ".cargo/audit.toml",
+        "scripts/ci/audit_dependencies.sh",
+        ".github/workflows/ci.yml",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "docs/dependency_supply_chain_policy.md",
+        "tests/dependency_supply_chain_policy_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "pinned Cargo scanner installation unavailable",
+        "RustSec advisory database missing or older than seven days",
+        "root Cargo.lock or policy baseline drift",
+        "excluded fuzz lock remains stale and non-green",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Use this lane only for the checked policy and integration contract. Cite live root scanner health only from a current runner receipt. The excluded fuzz row remains non-green until its separately owned lockfile and advisory findings are resolved.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-supply-chain-policy-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "fresh-scanner-pass",
+          "excluded-fuzz-health",
+          "no-undisclosed-vulnerabilities",
+          "legal-compliance",
+          "publisher-authentication",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -3360,6 +3418,13 @@
       "description": "Proof-traffic A6 final signoff artifact, A1-A5 evidence aggregation, capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, manifest/status rows, README/AGENTS markers, no-local-fallback and no-peer-cancel policies, dependency-cycle receipt/checklist, and scoped no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "proof-traffic-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-supply-chain-policy-contract",
+      "description": "Pinned Cargo scanner policy, RustSec freshness receipts, workspace graph scope, expiring exceptions, license/source rules, duplicate ratchets, negative fixtures, CI/runbook wiring, excluded-fuzz quarantine, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-supply-chain-policy-contract"
       ]
     }
   ],

@@ -94,7 +94,8 @@
     "Rust crate release provenance contract",
     "artifact governance final signoff",
     "clean-overlay proof orchestration contract",
-    "proof traffic final signoff"
+    "proof traffic final signoff",
+    "dependency supply-chain policy contract"
   ],
   "claim_categories": [
     {
@@ -1092,6 +1093,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped proof-traffic A6 operator packet: cite it only for A1-A5 evidence aggregation, capability-drift gate, admission receipts, clean-overlay handshake, proof parking lot, blocked-loop e2e, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds."
+    },
+    {
+      "claim_id": "dependency-supply-chain-policy-contract",
+      "category": "dependency supply-chain policy contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "Dependency supply-chain policy contract",
+          "dependency-supply-chain-policy-contract"
+        ],
+        "AGENTS.md": [
+          "dependency supply-chain policy contract",
+          "dependency-supply-chain-policy-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "manifest_lane_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped dependency supply-chain policy and integration evidence only. A fresh live runner receipt is separately required for scanner health, and the excluded fuzz workspace is explicitly non-green while its lockfile is stale and its known RustSec findings remain. This row does not prove undisclosed-vulnerability absence, legal compliance, publisher identity, excluded fuzz health, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability."
     }
   ],
   "proof_reuse_status_rows": [

@@ -444,7 +444,8 @@
     "artifact-governance-validation-harness",
     "artifact-governance-final-signoff",
     "clean-overlay-proof-orchestration-contract",
-    "proof-traffic-final-signoff"
+    "proof-traffic-final-signoff",
+    "dependency-supply-chain-policy-contract"
   ],
   "lanes": [
     {
@@ -1636,6 +1637,32 @@
         "README.md",
         "AGENTS.md"
       ]
+    },
+    {
+      "lane_id": "dependency-supply-chain-policy-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "dependency_supply_chain_policy_contract tests pass",
+      "source_paths": [
+        "deny.toml",
+        ".cargo/audit.toml",
+        "scripts/ci/audit_dependencies.sh",
+        ".github/workflows/ci.yml",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "docs/dependency_supply_chain_policy.md",
+        "tests/dependency_supply_chain_policy_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ]
     }
   ],
   "guarantees": [
@@ -1979,6 +2006,12 @@
       "guarantee_id": "proof-traffic-final-signoff",
       "lane_ids": [
         "proof-traffic-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-supply-chain-policy-contract",
+      "lane_ids": [
+        "dependency-supply-chain-policy-contract"
       ]
     }
   ]
