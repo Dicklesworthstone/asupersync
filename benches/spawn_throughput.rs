@@ -11,6 +11,12 @@
 //! The join-completion group measures the caller-visible cost of collecting
 //! completed [`TaskHandle`](asupersync::runtime::TaskHandle) values in the same
 //! deterministic batch shape.
+//! The `join_set_fanout` group measures the blessed dynamic fan-out helper
+//! ([`JoinSet`](asupersync::combinator::JoinSet)) on top of that path: spawn-order
+//! `join_all` and completion-order `join_next` at 1k members, plus the 10k-member
+//! stress row for AC5 of `br-asupersync-dx-core-api-v2-u1z5hn.5`. Peak
+//! bookkeeping there is the set's owned-handle vector, bounded by live member
+//! count.
 //! The spawn-throughput groups stop when every task body has executed. Runtime
 //! task-record teardown may trail a body counter: repeated iterations amortize
 //! most cleanup into later samples, while the final cleanup tail can fall
@@ -34,6 +40,7 @@ use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
+use asupersync::combinator::JoinSet;
 use asupersync::runtime::builder::{Runtime, RuntimeBuilder, RuntimeHandle};
 use asupersync::runtime::config::SpawnAdmissionMode;
 use asupersync::runtime::{JoinError, RegionLimits, SpawnError, TaskHandle};
@@ -41,6 +48,9 @@ use asupersync::types::{CancelKind, CancelReason};
 
 const SPAWNS_PER_ITER: usize = 1_000;
 const ADVERSARIAL_REQUESTS: usize = 256;
+/// Member count for the `JoinSet` stress row (AC5 of
+/// `br-asupersync-dx-core-api-v2-u1z5hn.5`).
+const JOIN_SET_STRESS_MEMBERS: usize = 10_000;
 
 struct CompletionLatch {
     completed: AtomicUsize,
@@ -181,6 +191,57 @@ fn join_handle_completion_batch(runtime: &Runtime) {
     });
 }
 
+/// Fan out `members` [`JoinSet`] members and collect every outcome in spawn
+/// order via `join_all`.
+///
+/// This is the AC5 stress shape for `br-asupersync-dx-core-api-v2-u1z5hn.5`:
+/// the set's only queue is its owned-handle vector, so peak bookkeeping is
+/// bounded by the live member count and never by an unbounded completion
+/// buffer.
+fn join_set_join_all_fanout(runtime: &Runtime, members: usize) {
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("spawned root task has Cx");
+        let mut set: JoinSet<'static, usize, &'static str, _> = JoinSet::in_cx(&cx);
+        for value in 0..members {
+            set.spawn(&cx, move |_cx| async move { Ok(value) })
+                .expect("spawn join-set member");
+        }
+        assert_eq!(set.len(), members, "every member is owned before draining");
+
+        let mut checksum = 0usize;
+        for outcome in set.join_all(&cx).await {
+            checksum = checksum.wrapping_add(outcome.expect("member ok"));
+        }
+        black_box(checksum);
+    }));
+}
+
+/// Fan out `members` [`JoinSet`] members and collect them in completion order
+/// via `join_next`.
+///
+/// `join_next` costs more than `join_all` by construction: each parking poll
+/// scans the members it still owns, so this row measures completion-order
+/// collection including that scan, not just task throughput.
+fn join_set_join_next_fanout(runtime: &Runtime, members: usize) {
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("spawned root task has Cx");
+        let mut set: JoinSet<'static, usize, &'static str, _> = JoinSet::in_cx(&cx);
+        for value in 0..members {
+            set.spawn(&cx, move |_cx| async move { Ok(value) })
+                .expect("spawn join-set member");
+        }
+
+        let mut checksum = 0usize;
+        let mut collected = 0usize;
+        while let Some(outcome) = set.join_next(&cx).await {
+            checksum = checksum.wrapping_add(outcome.expect("member ok"));
+            collected += 1;
+        }
+        assert_eq!(collected, members, "every member is collected exactly once");
+        black_box(checksum);
+    }));
+}
+
 fn acquire_root_cx(runtime: &Runtime, keep_task_live: bool) -> Cx {
     let (sender, receiver) = mpsc::sync_channel(1);
     runtime
@@ -227,9 +288,11 @@ fn quota_scenario(mode: SpawnAdmissionMode) -> QuotaScenario {
 }
 
 fn direct_quota_denial(scenario: &QuotaScenario, collect_tails: bool) -> Vec<Duration> {
-    let mut tails = collect_tails
-        .then(|| Vec::with_capacity(ADVERSARIAL_REQUESTS))
-        .unwrap_or_default();
+    let mut tails = if collect_tails {
+        Vec::with_capacity(ADVERSARIAL_REQUESTS)
+    } else {
+        Vec::new()
+    };
     for _ in 0..ADVERSARIAL_REQUESTS {
         let started = collect_tails.then(Instant::now);
         let result = scenario.handle.try_spawn(async {});
@@ -262,9 +325,11 @@ fn deferred_gateway_quota_denial(scenario: &QuotaScenario, collect_tails: bool) 
         pending.push((task, started));
     }
 
-    let mut tails = collect_tails
-        .then(|| Vec::with_capacity(ADVERSARIAL_REQUESTS))
-        .unwrap_or_default();
+    let mut tails = if collect_tails {
+        Vec::with_capacity(ADVERSARIAL_REQUESTS)
+    } else {
+        Vec::new()
+    };
     scenario.runtime.block_on(async {
         for (mut task, started) in pending {
             let result = task.join(&scenario.cx).await;
@@ -344,9 +409,11 @@ fn cancel_storm(scenario: &mut CancelStormScenario, collect_tails: bool) -> Vec<
     for task in &scenario.tasks {
         task.abort_with_reason(CancelReason::user("adversarial cancel storm"));
     }
-    let mut tails = collect_tails
-        .then(|| Vec::with_capacity(ADVERSARIAL_REQUESTS))
-        .unwrap_or_default();
+    let mut tails = if collect_tails {
+        Vec::with_capacity(ADVERSARIAL_REQUESTS)
+    } else {
+        Vec::new()
+    };
     scenario.runtime.block_on(async {
         for task in &mut scenario.tasks {
             match task.join(&scenario.cx).await {
@@ -579,6 +646,31 @@ fn bench_join_handle_completion(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_join_set_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("join_set_fanout");
+    let runtime = build_runtime(SpawnAdmissionMode::Mailbox, 4);
+
+    group.throughput(Throughput::Elements(SPAWNS_PER_ITER as u64));
+    group.sample_size(20);
+    group.bench_function(BenchmarkId::new("join_all", SPAWNS_PER_ITER), |b| {
+        b.iter(|| join_set_join_all_fanout(black_box(&runtime), SPAWNS_PER_ITER));
+    });
+    group.bench_function(BenchmarkId::new("join_next", SPAWNS_PER_ITER), |b| {
+        b.iter(|| join_set_join_next_fanout(black_box(&runtime), SPAWNS_PER_ITER));
+    });
+
+    // AC5 stress row: 10k members in one set. Fewer samples because each
+    // iteration spawns and drains ten thousand real region tasks.
+    group.throughput(Throughput::Elements(JOIN_SET_STRESS_MEMBERS as u64));
+    group.sample_size(10);
+    group.bench_function(BenchmarkId::new("join_all", JOIN_SET_STRESS_MEMBERS), |b| {
+        b.iter(|| join_set_join_all_fanout(black_box(&runtime), JOIN_SET_STRESS_MEMBERS));
+    });
+
+    drop(runtime);
+    group.finish();
+}
+
 fn bench_adversarial_tails(c: &mut Criterion) {
     if adversarial_reports_enabled() {
         {
@@ -665,6 +757,7 @@ criterion_group!(
     benches,
     bench_spawn_throughput,
     bench_join_handle_completion,
+    bench_join_set_fanout,
     bench_adversarial_tails
 );
 criterion_main!(benches);
