@@ -456,9 +456,11 @@ impl Notify {
         // payload propagates.
         let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
         for waker in wakers {
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                waker.wake();
-            })) {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    waker.wake();
+                }))
+            {
                 if first_panic.is_none() {
                     first_panic = Some(payload);
                 }

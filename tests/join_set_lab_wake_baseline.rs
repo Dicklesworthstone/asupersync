@@ -7,6 +7,10 @@
 //! They establish that the lab harness itself drives child tasks correctly and
 //! that `drain_all` keeps its wakers registered, so the `join_next` hang cannot
 //! be dismissed as a harness limitation.
+//!
+//! Keep these green. If one of them ever starts hanging, the conclusion in
+//! `asupersync-tncxj9` no longer holds and the bug needs re-diagnosing rather
+//! than re-confirming.
 
 #![allow(missing_docs)]
 
@@ -32,7 +36,7 @@ fn a_single_spawned_child_completes_under_the_lab_harness() {
 
 #[test]
 fn join_all_is_wake_correct_under_the_lab_scheduler() {
-    let (outcomes, report) = run_async_under_lab(4, |cx| async move {
+    let (collected, report) = run_async_under_lab(4, |cx| async move {
         let mut set: JoinSet<'static, u32, (), _> = JoinSet::in_cx(&cx);
         for member in 0..3u32 {
             set.spawn(&cx, move |_cx| async move { Ok(member) })
@@ -41,7 +45,7 @@ fn join_all_is_wake_correct_under_the_lab_scheduler() {
         set.join_all(&cx).await.len()
     });
 
-    assert_eq!(outcomes, 3, "join_all must collect every member");
+    assert_eq!(collected, 3, "join_all must collect every member");
     assert!(
         report.quiescent,
         "join_all holds its join futures, so wakers stay registered"
