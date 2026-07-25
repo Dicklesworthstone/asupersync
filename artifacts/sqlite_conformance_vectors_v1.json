@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "suite_id": "sqlite-neutral-parity-v1",
+  "capability_id": "CAP-SQLITE",
+  "normalization": {
+    "integer": "signed_i64",
+    "real": "shortest_round_trip_decimal; negative_zero_to_zero",
+    "text": "utf8_exact",
+    "blob": "lowercase_hex",
+    "null": "typed_null",
+    "error": "adapter_maps_engine_error_to_declared_stable_class_without_raw_message",
+    "column_order": "select_list_order",
+    "row_order": "vectors_requiring_order_must_use_explicit_order_by"
+  },
+  "vectors": [
+    {
+      "id": "SQLITE-PARITY-SMOKE-001",
+      "family": "open_execute_query_cleanup",
+      "description": "Create an in-memory table, insert two rows, query one typed row, and close without a live transaction.",
+      "setup": [
+        {
+          "id": "create-table",
+          "kind": "execute_batch",
+          "sql": "CREATE TABLE parity_items (id INTEGER PRIMARY KEY, label TEXT NOT NULL);",
+          "expected_status": "ok"
+        }
+      ],
+      "operations": [
+        {
+          "sequence": 1,
+          "id": "insert-two",
+          "kind": "execute",
+          "sql": "INSERT INTO parity_items (id, label) VALUES (1, 'alpha'), (2, 'beta')",
+          "expected": {
+            "status": "ok",
+            "affected_rows": 2,
+            "values": [],
+            "error_class": null,
+            "transaction_state": "none",
+            "cancellation_state": "not_requested",
+            "resource_state": {
+              "connection": "open",
+              "open_transactions": 0,
+              "background_work": "none_observed"
+            }
+          }
+        },
+        {
+          "sequence": 2,
+          "id": "query-beta",
+          "kind": "query_one",
+          "sql": "SELECT id, label FROM parity_items WHERE id = 2",
+          "expected": {
+            "status": "ok",
+            "affected_rows": null,
+            "values": [
+              {
+                "type": "integer",
+                "value": 2
+              },
+              {
+                "type": "text",
+                "value": "beta"
+              }
+            ],
+            "error_class": null,
+            "transaction_state": "none",
+            "cancellation_state": "not_requested",
+            "resource_state": {
+              "connection": "open",
+              "open_transactions": 0,
+              "background_work": "none_observed"
+            }
+          }
+        }
+      ],
+      "expected_final_state": {
+        "transaction_state": "none",
+        "cancellation_state": "not_requested",
+        "resource_state": {
+          "connection": "closed",
+          "open_transactions": 0,
+          "background_work": "none_observed"
+        }
+      },
+      "unsupported": []
+    }
+  ]
+}
