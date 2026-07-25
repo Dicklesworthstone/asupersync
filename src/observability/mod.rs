@@ -123,6 +123,12 @@ pub mod otlp_unexpected_status_audit_test;
 pub mod otlp_upgrade_required_audit_test;
 pub mod performance_budget_monitor;
 pub mod pressure_governor;
+// br-asupersync-5z2scg.8.3.1.2: this private candidate syntax layer is
+// intentionally staged before its parser consumer. It does not replace the
+// incumbent regex dependency or enlarge the public API.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_syntax;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
