@@ -1,0 +1,1089 @@
+//! Fail-closed typed-format inventory contract.
+//!
+//! Bead: asupersync-5z2scg.3.1
+//! Capabilities: CAP-PERSISTED-TRACE-SNAPSHOT, CAP-SERDE-GENERIC
+//! Fixture: artifacts/typed_format_registry_v1.json
+//!
+//! This lane reconciles the A1 evidence registry with the accepted ADR, Cargo
+//! pins, direct lexical call-site inventory, public/generic source contract,
+//! persisted source owners, corpus aggregates, and human documentation.
+//!
+//! It proves no serialization round trip, historical migration, fuzz result,
+//! broad workspace health, dependency removal, format removal, or cutover.
+
+#![allow(missing_docs)]
+
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+const ARTIFACT_PATH: &str = "artifacts/typed_format_registry_v1.json";
+const DOC_PATH: &str = "docs/typed_format_registry.md";
+const DECISION_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
+const DECISION_DOC_PATH: &str = "docs/adr/dep_plan_adr_001_serde_generic_formats.md";
+const DECISION_ID: &str = "DEP-ADR-001";
+const BEAD_ID: &str = "asupersync-5z2scg.3.1";
+const PROGRAM_ID: &str = "asupersync-ir2uf0";
+const EXPECTED_ROOT_COUNT: usize = 13;
+const EXPECTED_FORMAT_COUNT: usize = 4;
+const EXPECTED_PERSISTED_SURFACE_COUNT: usize = 13;
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read_repo_bytes(path: &str) -> Vec<u8> {
+    std::fs::read(repo_root().join(path))
+        .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+}
+
+fn read_repo_file(path: &str) -> String {
+    String::from_utf8(read_repo_bytes(path))
+        .unwrap_or_else(|error| panic!("{path} must be UTF-8: {error}"))
+}
+
+fn parse_repo_json(path: &str) -> Value {
+    serde_json::from_slice(&read_repo_bytes(path))
+        .unwrap_or_else(|error| panic!("{path} must be valid JSON: {error}"))
+}
+
+fn registry() -> Value {
+    parse_repo_json(ARTIFACT_PATH)
+}
+
+fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+}
+
+fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{key} must be a string"))
+}
+
+fn nonempty_text(value: &Value, key: &str) -> Result<(), String> {
+    let Some(candidate) = value.get(key).and_then(Value::as_str) else {
+        return Err(format!("{key} must be a string"));
+    };
+    if candidate.trim().is_empty() {
+        return Err(format!("{key} must not be empty"));
+    }
+    Ok(())
+}
+
+fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
+    array(value, key)
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_owned()
+        })
+        .collect()
+}
+
+fn find_by_id<'a>(rows: &'a [Value], key: &str, id: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row.get(key).and_then(Value::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("missing {key}={id}"))
+}
+
+fn find_by_id_mut<'a>(rows: &'a mut [Value], key: &str, id: &str) -> &'a mut Value {
+    rows.iter_mut()
+        .find(|row| row.get(key).and_then(Value::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("missing {key}={id}"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn visit_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read directory {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry
+            .unwrap_or_else(|error| panic!("failed to read entry in {}: {error}", dir.display()));
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()));
+        if file_type.is_dir() {
+            visit_files(&path, files);
+        } else if file_type.is_file() {
+            files.push(path);
+        }
+    }
+}
+
+fn repo_relative(path: &Path) -> String {
+    path.strip_prefix(repo_root())
+        .unwrap_or_else(|error| panic!("{} must be below repository root: {error}", path.display()))
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn files_below(root: &str) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    visit_files(&repo_root().join(root), &mut files);
+    files.sort_by_key(|path| repo_relative(path));
+    files
+}
+
+fn scanned_rust_files(root: &str, excluded: &BTreeSet<String>) -> Vec<PathBuf> {
+    files_below(root)
+        .into_iter()
+        .filter(|path| path.extension() == Some(OsStr::new("rs")))
+        .filter(|path| !excluded.contains(&repo_relative(path)))
+        .collect()
+}
+
+fn literal_count(haystack: &str, needle: &str) -> usize {
+    haystack.match_indices(needle).count()
+}
+
+fn scan_root(root: &str, tokens: &[String], excluded: &BTreeSet<String>) -> BTreeMap<String, u64> {
+    let files = scanned_rust_files(root, excluded);
+    let mut counts = BTreeMap::from([(
+        "rust_files".to_owned(),
+        u64::try_from(files.len()).expect("Rust file count fits u64"),
+    )]);
+    for token in tokens {
+        counts.insert(token.clone(), 0);
+    }
+    for path in files {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} must be UTF-8: {error}", path.display()));
+        for token in tokens {
+            *counts.get_mut(token).expect("token was initialized") +=
+                u64::try_from(literal_count(&source, token)).expect("token count fits u64");
+        }
+    }
+    counts
+}
+
+fn source_paths_with_token(root: &str, token: &str) -> BTreeSet<String> {
+    scanned_rust_files(root, &BTreeSet::new())
+        .into_iter()
+        .filter_map(|path| {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{} must be UTF-8: {error}", path.display()));
+            source.contains(token).then(|| repo_relative(&path))
+        })
+        .collect()
+}
+
+fn corpus_receipt(path: &str) -> (u64, u64, String) {
+    let files = files_below(path);
+    let mut byte_count = 0u64;
+    let mut digest_lines = String::new();
+    for file in &files {
+        let bytes = std::fs::read(file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
+        byte_count += u64::try_from(bytes.len()).expect("file length fits u64");
+        writeln!(
+            &mut digest_lines,
+            "{}  {}",
+            sha256_hex(&bytes),
+            repo_relative(file)
+        )
+        .expect("writing to String cannot fail");
+    }
+    (
+        u64::try_from(files.len()).expect("corpus file count fits u64"),
+        byte_count,
+        sha256_hex(digest_lines.as_bytes()),
+    )
+}
+
+fn validate_registry_shape(value: &Value) -> Result<(), String> {
+    for key in [
+        "artifact_id",
+        "program_id",
+        "bead_id",
+        "title",
+        "policy_as_of_date_utc",
+        "policy_as_of_commit",
+    ] {
+        nonempty_text(value, key)?;
+    }
+    if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("schema_version must be 1".to_owned());
+    }
+    let scan = value
+        .get("scan_profile")
+        .ok_or("scan_profile must be an object")?;
+    let roots = scan
+        .get("roots")
+        .and_then(Value::as_array)
+        .ok_or("scan_profile.roots must be an array")?;
+    if roots.len() != EXPECTED_ROOT_COUNT {
+        return Err(format!(
+            "scan_profile.roots must contain {EXPECTED_ROOT_COUNT} rows"
+        ));
+    }
+    let mut scan_paths = BTreeSet::new();
+    for root in roots {
+        nonempty_text(root, "path")?;
+        nonempty_text(root, "classification")?;
+        if !scan_paths.insert(text(root, "path")) {
+            return Err(format!("duplicate scan root {}", text(root, "path")));
+        }
+    }
+
+    let allowed_compatibility: BTreeSet<&str> = value
+        .get("allowed_compatibility_classes")
+        .and_then(Value::as_array)
+        .ok_or("allowed_compatibility_classes must be an array")?
+        .iter()
+        .map(|entry| entry.as_str().ok_or("compatibility class must be a string"))
+        .collect::<Result<_, _>>()?;
+    if allowed_compatibility
+        != BTreeSet::from([
+            "DOWNSTREAM_DEFINED",
+            "EXACT_BYTES",
+            "SEMANTIC",
+            "UNKNOWN_BLOCKING",
+        ])
+    {
+        return Err("compatibility allow-list drifted".to_owned());
+    }
+
+    let profiles = value
+        .get("format_profiles")
+        .and_then(Value::as_array)
+        .ok_or("format_profiles must be an array")?;
+    if profiles.len() != EXPECTED_FORMAT_COUNT {
+        return Err(format!(
+            "format_profiles must contain {EXPECTED_FORMAT_COUNT} rows"
+        ));
+    }
+    let expected_formats = BTreeMap::from([
+        ("Bincode", 2u64),
+        ("Custom", 255u64),
+        ("Json", 3u64),
+        ("MessagePack", 1u64),
+    ]);
+    let observed_formats: BTreeMap<&str, u64> = profiles
+        .iter()
+        .map(|profile| {
+            let format = profile
+                .get("format")
+                .and_then(Value::as_str)
+                .ok_or("format profile format must be a string")?;
+            let discriminant = profile
+                .get("discriminant")
+                .and_then(Value::as_u64)
+                .ok_or("format profile discriminant must be an integer")?;
+            for key in [
+                "backend",
+                "generic_compatibility_class",
+                "persisted_compatibility_class",
+                "canonical_ordering",
+                "resource_bounds",
+                "error_contract",
+                "version_policy",
+                "migration_policy",
+                "state",
+            ] {
+                nonempty_text(profile, key)?;
+            }
+            if !allowed_compatibility.contains(text(profile, "generic_compatibility_class"))
+                || !allowed_compatibility.contains(text(profile, "persisted_compatibility_class"))
+            {
+                return Err(format!("{format} has an unregistered compatibility class"));
+            }
+            if array(profile, "public_generic_bounds").is_empty() {
+                return Err(format!("{format} must state public generic bounds"));
+            }
+            Ok((format, discriminant))
+        })
+        .collect::<Result<_, String>>()?;
+    if observed_formats != expected_formats {
+        return Err("format discriminants drifted".to_owned());
+    }
+    let bincode = find_by_id(profiles, "format", "Bincode");
+    if !text(bincode, "backend").contains("bincode-next 3.1.1")
+        || !text(bincode, "canonical_ordering").contains("config::legacy()")
+    {
+        return Err("Bincode package/configuration baseline drifted".to_owned());
+    }
+    let custom = find_by_id(profiles, "format", "Custom");
+    if text(custom, "state") != "UNKNOWN_BLOCKING"
+        || !text(custom, "migration_policy").contains("No real standalone")
+    {
+        return Err("Custom must stay blocked until a real downstream codec exists".to_owned());
+    }
+
+    let public = value
+        .get("public_generic_surfaces")
+        .and_then(Value::as_array)
+        .ok_or("public_generic_surfaces must be an array")?;
+    let public_ids: BTreeSet<&str> = public
+        .iter()
+        .filter_map(|surface| surface.get("surface_id").and_then(Value::as_str))
+        .collect();
+    if public_ids != BTreeSet::from(["PUB-SERDE-CODEC", "PUB-TYPED-SYMBOL"]) {
+        return Err("public generic surface roster drifted".to_owned());
+    }
+    let serde_surface = find_by_id(public, "surface_id", "PUB-SERDE-CODEC");
+    let generic_contract = text(serde_surface, "generic_contract");
+    if !generic_contract.contains("Arbitrary downstream")
+        || !generic_contract.contains("DeserializeOwned")
+        || !generic_contract.contains("no seal")
+    {
+        return Err("arbitrary downstream Serde must remain first-class".to_owned());
+    }
+    if string_set(serde_surface, "formats")
+        != BTreeSet::from([
+            "Bincode".to_owned(),
+            "Custom".to_owned(),
+            "Json".to_owned(),
+            "MessagePack".to_owned(),
+        ])
+    {
+        return Err("public Serde format roster drifted".to_owned());
+    }
+
+    let persisted = value
+        .get("persisted_surfaces")
+        .and_then(Value::as_array)
+        .ok_or("persisted_surfaces must be an array")?;
+    if persisted.len() != EXPECTED_PERSISTED_SURFACE_COUNT {
+        return Err(format!(
+            "persisted_surfaces must contain {EXPECTED_PERSISTED_SURFACE_COUNT} rows"
+        ));
+    }
+    let expected_persisted = BTreeSet::from([
+        "PERSIST-ATP-CRASHPACK",
+        "PERSIST-BROWSER-TRACE-JSON",
+        "PERSIST-CRASHPACK",
+        "PERSIST-DISTRIBUTED-SNAPSHOT",
+        "PERSIST-GOLDEN-TRACE-JSON",
+        "PERSIST-INCIDENT-JSON",
+        "PERSIST-LAB-SCENARIO-AND-EXPLORER-JSON",
+        "PERSIST-LAB-SNAPSHOT-HASH",
+        "PERSIST-REPLAY-BLOB",
+        "PERSIST-TRACE-FILE",
+        "PERSIST-TRACE-STREAM",
+        "PERSIST-TYPED-SYMBOL",
+        "TOOL-TRACE-CLI-CONSUMER",
+    ]);
+    let observed_persisted: BTreeSet<&str> = persisted
+        .iter()
+        .filter_map(|surface| surface.get("surface_id").and_then(Value::as_str))
+        .collect();
+    if observed_persisted != expected_persisted {
+        return Err("persisted surface roster drifted".to_owned());
+    }
+    let corpus_ids: BTreeSet<&str> = value
+        .get("corpora")
+        .and_then(Value::as_array)
+        .ok_or("corpora must be an array")?
+        .iter()
+        .filter_map(|corpus| corpus.get("corpus_id").and_then(Value::as_str))
+        .collect();
+    for surface in persisted {
+        for key in [
+            "surface_id",
+            "owner",
+            "backend",
+            "compatibility_class",
+            "exactness_detail",
+            "canonical_ordering",
+            "resource_bounds",
+            "version_policy",
+            "error_contract",
+            "migration_policy",
+            "state",
+            "no_claim_boundary",
+        ] {
+            nonempty_text(surface, key)?;
+        }
+        if !allowed_compatibility.contains(text(surface, "compatibility_class")) {
+            return Err(format!(
+                "{} has an unregistered compatibility class",
+                text(surface, "surface_id")
+            ));
+        }
+        for key in ["source_paths", "writers", "readers", "corpus_ids"] {
+            let entries = surface.get(key).and_then(Value::as_array).ok_or_else(|| {
+                format!("{}.{} must be an array", text(surface, "surface_id"), key)
+            })?;
+            if key != "corpus_ids" && entries.is_empty() {
+                return Err(format!(
+                    "{}.{} must not be empty",
+                    text(surface, "surface_id"),
+                    key
+                ));
+            }
+        }
+        for corpus_id in array(surface, "corpus_ids") {
+            let corpus_id = corpus_id
+                .as_str()
+                .ok_or("surface corpus id must be a string")?;
+            if !corpus_ids.contains(corpus_id) {
+                return Err(format!(
+                    "{} references unknown corpus {corpus_id}",
+                    text(surface, "surface_id")
+                ));
+            }
+        }
+        if text(surface, "state") == "UNKNOWN_BLOCKING"
+            && !["not", "no ", "only"].iter().any(|marker| {
+                text(surface, "no_claim_boundary")
+                    .to_ascii_lowercase()
+                    .contains(marker)
+            })
+        {
+            return Err(format!(
+                "{} must state a negative no-claim boundary",
+                text(surface, "surface_id")
+            ));
+        }
+    }
+
+    let blockers = value
+        .get("unknown_blockers")
+        .and_then(Value::as_array)
+        .ok_or("unknown_blockers must be an array")?;
+    let expected_blockers = BTreeSet::from([
+        "BLOCK-ARBITRARY-SERDE-COVERAGE",
+        "BLOCK-CROSS-VERSION-READERS",
+        "BLOCK-HISTORICAL-BYTES",
+        "BLOCK-REAL-CUSTOM-CODEC",
+    ]);
+    let observed_blockers: BTreeSet<&str> = blockers
+        .iter()
+        .filter_map(|blocker| blocker.get("blocker_id").and_then(Value::as_str))
+        .collect();
+    if observed_blockers != expected_blockers {
+        return Err("unknown blocker roster drifted".to_owned());
+    }
+    for blocker in blockers {
+        for key in ["blocker_id", "owner_bead", "missing_evidence", "effect"] {
+            nonempty_text(blocker, key)?;
+        }
+        if array(blocker, "affected_surfaces").is_empty() {
+            return Err(format!(
+                "{} must identify affected surfaces",
+                text(blocker, "blocker_id")
+            ));
+        }
+        if !text(blocker, "effect")
+            .to_ascii_lowercase()
+            .contains("block")
+        {
+            return Err(format!("{} must fail closed", text(blocker, "blocker_id")));
+        }
+    }
+
+    let consumers = value
+        .get("downstream_consumers")
+        .and_then(Value::as_array)
+        .ok_or("downstream_consumers must be an array")?;
+    let custom_consumer = find_by_id(consumers, "consumer_id", "CONSUMER-REAL-CUSTOM-CODEC");
+    if text(custom_consumer, "state") != "UNKNOWN_BLOCKING"
+        || !array(custom_consumer, "paths").is_empty()
+    {
+        return Err("missing real Custom consumer must remain explicit and blocking".to_owned());
+    }
+    let external = find_by_id(
+        consumers,
+        "consumer_id",
+        "CONSUMER-EXTERNAL-HISTORICAL-ARTIFACTS",
+    );
+    if text(external, "state") != "UNKNOWN_BLOCKING" {
+        return Err("external historical artifact consumers must remain blocking".to_owned());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn metadata_and_accepted_adr_authority_are_exact() {
+    let registry = registry();
+    validate_registry_shape(&registry).unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(text(&registry, "artifact_id"), "typed-format-registry-v1");
+    assert_eq!(text(&registry, "program_id"), PROGRAM_ID);
+    assert_eq!(text(&registry, "bead_id"), BEAD_ID);
+    assert_eq!(
+        string_set(&registry, "capability_ids"),
+        BTreeSet::from([
+            "CAP-PERSISTED-TRACE-SNAPSHOT".to_owned(),
+            "CAP-SERDE-GENERIC".to_owned(),
+        ])
+    );
+
+    let authority = registry
+        .get("authority")
+        .and_then(Value::as_object)
+        .expect("authority must be an object");
+    assert_eq!(
+        authority
+            .get("decision_registry_path")
+            .and_then(Value::as_str),
+        Some(DECISION_REGISTRY_PATH)
+    );
+    assert_eq!(
+        authority.get("decision_doc_path").and_then(Value::as_str),
+        Some(DECISION_DOC_PATH)
+    );
+    assert_eq!(
+        authority.get("decision_id").and_then(Value::as_str),
+        Some(DECISION_ID)
+    );
+    assert_eq!(
+        authority.get("decision").and_then(Value::as_str),
+        Some("ADDITIVE_COEXISTENCE")
+    );
+    assert_eq!(
+        authority
+            .get("generic_cutover_state")
+            .and_then(Value::as_str),
+        Some("KEEP_INCUMBENT")
+    );
+    assert_eq!(
+        authority
+            .get("persisted_cutover_state")
+            .and_then(Value::as_str),
+        Some("BLOCKED_PENDING_EVIDENCE")
+    );
+
+    let decision_registry = parse_repo_json(DECISION_REGISTRY_PATH);
+    let adr = find_by_id(array(&decision_registry, "adrs"), "adr_id", DECISION_ID);
+    assert_eq!(text(adr, "decision"), "ADDITIVE_COEXISTENCE");
+    assert_eq!(
+        string_set(adr, "capability_ids"),
+        string_set(&registry, "capability_ids")
+    );
+    let cutover = adr
+        .get("cutover")
+        .and_then(Value::as_object)
+        .expect("accepted ADR cutover must be an object");
+    assert_eq!(
+        cutover
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    let per_capability = cutover
+        .get("per_capability")
+        .and_then(Value::as_array)
+        .expect("accepted ADR per_capability must be an array");
+    assert_eq!(
+        find_by_id(per_capability, "capability_id", "CAP-SERDE-GENERIC")
+            .get("cutover_state")
+            .and_then(Value::as_str),
+        Some("KEEP_INCUMBENT")
+    );
+    assert_eq!(
+        find_by_id(
+            per_capability,
+            "capability_id",
+            "CAP-PERSISTED-TRACE-SNAPSHOT"
+        )
+        .get("cutover_state")
+        .and_then(Value::as_str),
+        Some("BLOCKED_PENDING_EVIDENCE")
+    );
+}
+
+#[test]
+fn dependency_manifest_and_lock_pins_are_live() {
+    let registry = registry();
+    let dependencies = array(&registry, "dependency_pins");
+    assert_eq!(dependencies.len(), 3);
+
+    let manifest = read_repo_file("Cargo.toml");
+    for expected in [
+        "rmp-serde = \"1.3\"",
+        "serde_json = \"1.0\"",
+        "bincode = { package = \"bincode-next\", version = \"3.1.1\", features = [\"serde\"] }",
+    ] {
+        assert!(
+            manifest.contains(expected),
+            "Cargo manifest dependency pin drifted: {expected}"
+        );
+    }
+
+    let lock = read_repo_file("Cargo.lock");
+    for dependency in dependencies {
+        for key in [
+            "logical_name",
+            "manifest_key",
+            "package",
+            "manifest_requirement",
+            "lock_version",
+            "lock_checksum",
+            "configuration",
+            "state",
+        ] {
+            let value = text(dependency, key);
+            assert!(
+                !value.trim().is_empty(),
+                "dependency {key} must not be empty"
+            );
+        }
+        let expected_block = format!(
+            "name = \"{}\"\nversion = \"{}\"",
+            text(dependency, "package"),
+            text(dependency, "lock_version")
+        );
+        assert!(
+            lock.contains(&expected_block),
+            "Cargo.lock package/version drifted: {expected_block}"
+        );
+        let checksum = format!("checksum = \"{}\"", text(dependency, "lock_checksum"));
+        assert!(
+            lock.contains(&checksum),
+            "Cargo.lock checksum drifted for {}",
+            text(dependency, "package")
+        );
+    }
+}
+
+#[test]
+fn lexical_scan_profile_covers_every_registered_root() {
+    let registry = registry();
+    let scan = registry
+        .get("scan_profile")
+        .expect("scan_profile must exist");
+    let roots = array(scan, "roots");
+    assert_eq!(roots.len(), EXPECTED_ROOT_COUNT);
+    let tokens: Vec<String> = array(scan, "tokens")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("scan token must be a string")
+                .to_owned()
+        })
+        .collect();
+    let excluded: BTreeSet<String> = array(scan, "excluded_paths")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("excluded path must be a string")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        excluded,
+        BTreeSet::from(["tests/typed_format_registry_contract.rs".to_owned()])
+    );
+
+    let mut totals = BTreeMap::from([("rust_files".to_owned(), 0u64)]);
+    for token in &tokens {
+        totals.insert(token.clone(), 0);
+    }
+    let mut observed_roots = BTreeSet::new();
+    for root in roots {
+        let path = text(root, "path");
+        assert!(observed_roots.insert(path), "duplicate scan root {path}");
+        assert!(
+            !text(root, "classification").trim().is_empty(),
+            "{path} must have a classification"
+        );
+        let observed = scan_root(path, &tokens, &excluded);
+        for key in std::iter::once("rust_files").chain(tokens.iter().map(String::as_str)) {
+            let expected = root
+                .get(key)
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| panic!("{path}.{key} must be an integer"));
+            assert_eq!(
+                observed.get(key).copied(),
+                Some(expected),
+                "lexical scan drift in {path} for {key}"
+            );
+            *totals.get_mut(key).expect("total key was initialized") += expected;
+        }
+    }
+
+    let expected_totals = scan
+        .get("totals")
+        .and_then(Value::as_object)
+        .expect("scan_profile.totals must be an object");
+    for (key, observed) in totals {
+        assert_eq!(
+            expected_totals.get(&key).and_then(Value::as_u64),
+            Some(observed),
+            "scan total drift for {key}"
+        );
+    }
+}
+
+#[test]
+fn direct_production_backend_file_rosters_are_exact() {
+    let registry = registry();
+    let inventories = array(&registry, "production_backend_files");
+
+    for token in ["rmp_serde::", "bincode::"] {
+        let inventory = find_by_id(inventories, "token", token);
+        let expected: BTreeSet<String> = array(inventory, "paths")
+            .iter()
+            .map(|path| {
+                path.as_str()
+                    .expect("backend path must be a string")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            source_paths_with_token("src", token),
+            expected,
+            "direct production backend file roster drifted for {token}"
+        );
+    }
+
+    let json = find_by_id(inventories, "token", "serde_json::");
+    assert_eq!(
+        json.get("path_count").and_then(Value::as_u64),
+        Some(
+            u64::try_from(source_paths_with_token("src", "serde_json::").len())
+                .expect("path count fits u64")
+        ),
+        "direct serde_json source path count drifted"
+    );
+    assert!(
+        text(json, "classification").contains("Persisted/public exceptions"),
+        "JSON inventory must explain its explicit persisted overrides"
+    );
+}
+
+#[test]
+fn public_generic_and_container_invariants_match_source() {
+    let typed = read_repo_file("src/types/typed_symbol.rs");
+    for expected in [
+        "pub const TYPED_SYMBOL_MAGIC: [u8; 4] = *b\"TSYM\";",
+        "pub const TYPED_SYMBOL_HEADER_LEN: usize = 27;",
+        "Self::MessagePack => 1,",
+        "Self::Bincode => 2,",
+        "Self::Json => 3,",
+        "Self::Custom => 255,",
+        "impl<T: Serialize> Serializer<T> for SerdeCodec",
+        "impl<T: DeserializeOwned> Deserializer<T> for SerdeCodec",
+        "bincode::config::legacy()",
+        "SerializationFormat::Custom => Err",
+        "let max_payload = symbol_size.saturating_sub(TYPED_SYMBOL_HEADER_LEN);",
+    ] {
+        assert!(
+            typed.contains(expected),
+            "typed-symbol public/generic invariant drifted: {expected}"
+        );
+    }
+
+    let trace = read_repo_file("src/trace/file.rs");
+    for expected in [
+        "pub const TRACE_MAGIC: &[u8; 11] = b\"ASUPERTRACE\";",
+        "pub const TRACE_FILE_VERSION: u16 = 2;",
+        "pub const MAX_META_LEN: usize = 1024 * 1024;",
+        "pub const MAX_EVENT_PREALLOC: usize = 10_000_000;",
+        "pub const MAX_EVENT_LEN: usize = 16 * 1024 * 1024;",
+        "pub const MAX_COMPRESSED_CHUNK_LEN: usize = 64 * 1024 * 1024;",
+        "if metadata.version != REPLAY_SCHEMA_VERSION",
+    ] {
+        assert!(
+            trace.contains(expected),
+            "trace-file invariant drifted: {expected}"
+        );
+    }
+
+    let replay = read_repo_file("src/trace/replay.rs");
+    assert!(replay.contains("pub const REPLAY_SCHEMA_VERSION: u32 = 1;"));
+    let compat = read_repo_file("src/trace/compat.rs");
+    assert!(compat.contains("pub const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;"));
+    let crashpack = read_repo_file("src/trace/crashpack.rs");
+    assert!(crashpack.contains("pub const CRASHPACK_SCHEMA_VERSION: u32 = 1;"));
+    assert!(crashpack.contains("pub const MINIMUM_SUPPORTED_SCHEMA_VERSION: u32 = 1;"));
+
+    let snapshot = read_repo_file("src/distributed/snapshot.rs");
+    for expected in [
+        "const SNAP_MAGIC: &[u8; 4] = b\"SNAP\";",
+        "const SNAP_VERSION: u8 = 2;",
+        "bincode::config::legacy()",
+        "const SNAPSHOT_ARENA_ID_MAX_INDEX: u32 = 1_000_000;",
+        "const SNAPSHOT_ARENA_ID_MAX_GENERATION: u32 = 10_000;",
+    ] {
+        assert!(
+            snapshot.contains(expected),
+            "distributed-snapshot invariant drifted: {expected}"
+        );
+    }
+
+    let lab_snapshot = read_repo_file("src/lab/snapshot_restore.rs");
+    for expected in [
+        "pub const SCHEMA_VERSION: u32 = 1;",
+        "if let Ok(encoded) = serde_json::to_vec(snapshot)",
+        "const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;",
+    ] {
+        assert!(
+            lab_snapshot.contains(expected),
+            "lab snapshot hash invariant drifted: {expected}"
+        );
+    }
+}
+
+#[test]
+fn every_registered_source_path_exists_and_source_pins_match() {
+    let registry = registry();
+    for section in ["persisted_surfaces", "downstream_consumers"] {
+        for row in array(&registry, section) {
+            let Some(paths) = row.get("source_paths").or_else(|| row.get("paths")) else {
+                panic!("{section} row must carry source_paths or paths");
+            };
+            for path in paths
+                .as_array()
+                .unwrap_or_else(|| panic!("{section} paths must be an array"))
+            {
+                let path = path.as_str().expect("registered path must be a string");
+                assert!(
+                    repo_root().join(path).exists(),
+                    "registered source/consumer path is missing: {path}"
+                );
+            }
+        }
+    }
+
+    let pins = array(&registry, "source_pins");
+    assert!(
+        pins.len() >= 30,
+        "high-risk source pin roster unexpectedly narrowed"
+    );
+    let mut seen = BTreeSet::new();
+    for pin in pins {
+        let path = text(pin, "path");
+        assert!(seen.insert(path), "duplicate source pin {path}");
+        assert_eq!(
+            sha256_hex(&read_repo_bytes(path)),
+            text(pin, "sha256"),
+            "source pin drifted for {path}; re-audit the affected surface"
+        );
+    }
+}
+
+#[test]
+fn corpus_receipts_and_missing_historical_corpus_are_fail_closed() {
+    let registry = registry();
+    let corpora = array(&registry, "corpora");
+    assert_eq!(corpora.len(), 5);
+
+    for corpus in corpora {
+        let corpus_id = text(corpus, "corpus_id");
+        let state = text(corpus, "state");
+        let path = corpus.get("path");
+        if state == "UNKNOWN_BLOCKING" {
+            assert!(
+                path.is_none_or(Value::is_null),
+                "{corpus_id} missing corpus must not invent a path"
+            );
+            assert_eq!(corpus.get("file_count").and_then(Value::as_u64), Some(0));
+            assert_eq!(corpus.get("byte_count").and_then(Value::as_u64), Some(0));
+            assert!(
+                text(corpus, "provenance").starts_with("No committed"),
+                "{corpus_id} must state the missing evidence"
+            );
+            continue;
+        }
+
+        let path = path
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{corpus_id} must have a path"));
+        let (file_count, byte_count, aggregate) = corpus_receipt(path);
+        assert_eq!(
+            corpus.get("file_count").and_then(Value::as_u64),
+            Some(file_count),
+            "{corpus_id} file count drifted"
+        );
+        assert_eq!(
+            corpus.get("byte_count").and_then(Value::as_u64),
+            Some(byte_count),
+            "{corpus_id} byte count drifted"
+        );
+        assert_eq!(
+            corpus.get("aggregate_sha256").and_then(Value::as_str),
+            Some(aggregate.as_str()),
+            "{corpus_id} aggregate digest drifted"
+        );
+        assert_eq!(
+            corpus.get("aggregate_algorithm").and_then(Value::as_str),
+            Some("SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'")
+        );
+        assert!(
+            text(corpus, "provenance").contains("Current")
+                || text(corpus, "provenance").contains("current"),
+            "{corpus_id} must not imply historical provenance"
+        );
+    }
+
+    let missing = find_by_id(corpora, "corpus_id", "CORPUS-HISTORICAL-TRACE-MISSING");
+    assert_eq!(text(missing, "compatibility_class"), "UNKNOWN_BLOCKING");
+}
+
+#[test]
+fn documentation_and_validation_boundary_are_discoverable() {
+    let registry = registry();
+    let validation = registry
+        .get("validation")
+        .and_then(Value::as_object)
+        .expect("validation must be an object");
+    assert_eq!(
+        validation.get("contract_test").and_then(Value::as_str),
+        Some("tests/typed_format_registry_contract.rs")
+    );
+    assert_eq!(
+        validation.get("doc_path").and_then(Value::as_str),
+        Some(DOC_PATH)
+    );
+    let command = validation
+        .get("proof_command")
+        .and_then(Value::as_str)
+        .expect("proof command must be a string");
+    for expected in [
+        "RCH_REQUIRE_REMOTE=1 rch exec --",
+        "--base HEAD",
+        "--clean-overlay",
+        "--overlay-path artifacts/typed_format_registry_v1.json",
+        "--overlay-path docs/typed_format_registry.md",
+        "--overlay-path tests/typed_format_registry_contract.rs",
+        "--test typed_format_registry_contract",
+    ] {
+        assert!(
+            command.contains(expected),
+            "proof command missing {expected}"
+        );
+    }
+    let no_claim = validation
+        .get("no_claim_boundary")
+        .and_then(Value::as_str)
+        .expect("validation no-claim boundary must be a string");
+    for forbidden_claim in ["does not execute", "dependency removal", "cutover"] {
+        assert!(
+            no_claim.contains(forbidden_claim),
+            "validation boundary missing {forbidden_claim}"
+        );
+    }
+
+    let docs = read_repo_file(DOC_PATH);
+    for marker in [
+        "# Typed format registry",
+        "CAP-SERDE-GENERIC",
+        "CAP-PERSISTED-TRACE-SNAPSHOT",
+        "EXACT_BYTES",
+        "SEMANTIC",
+        "UNKNOWN_BLOCKING",
+        "SerializationFormat::Custom",
+        "bincode::config::legacy()",
+        "ASUPERTRACE",
+        "RestorableSnapshot",
+        "asupersync-5z2scg.3.6",
+        "asupersync-5z2scg.3.7",
+        "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay",
+        "does not execute serialization round trips",
+    ] {
+        assert!(
+            docs.contains(marker),
+            "typed-format documentation missing marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn malformed_registry_fixtures_fail_closed() {
+    let baseline = registry();
+
+    let mut missing_root = baseline.clone();
+    missing_root["scan_profile"]["roots"]
+        .as_array_mut()
+        .expect("roots must be an array")
+        .pop();
+    assert!(
+        validate_registry_shape(&missing_root)
+            .expect_err("missing scan root must fail")
+            .contains("scan_profile.roots")
+    );
+
+    let mut changed_discriminant = baseline.clone();
+    find_by_id_mut(
+        changed_discriminant["format_profiles"]
+            .as_array_mut()
+            .expect("format_profiles must be an array"),
+        "format",
+        "Bincode",
+    )["discriminant"] = Value::from(7);
+    assert!(
+        validate_registry_shape(&changed_discriminant)
+            .expect_err("changed discriminant must fail")
+            .contains("discriminants")
+    );
+
+    let mut changed_config = baseline.clone();
+    find_by_id_mut(
+        changed_config["format_profiles"]
+            .as_array_mut()
+            .expect("format_profiles must be an array"),
+        "format",
+        "Bincode",
+    )["canonical_ordering"] = Value::from("configuration unspecified");
+    assert!(
+        validate_registry_shape(&changed_config)
+            .expect_err("missing legacy config must fail")
+            .contains("Bincode")
+    );
+
+    let mut missing_reader = baseline.clone();
+    find_by_id_mut(
+        missing_reader["persisted_surfaces"]
+            .as_array_mut()
+            .expect("persisted_surfaces must be an array"),
+        "surface_id",
+        "PERSIST-TRACE-FILE",
+    )["readers"] = Value::Array(Vec::new());
+    assert!(
+        validate_registry_shape(&missing_reader)
+            .expect_err("missing downstream reader must fail")
+            .contains("readers")
+    );
+
+    let mut promoted_custom = baseline.clone();
+    find_by_id_mut(
+        promoted_custom["format_profiles"]
+            .as_array_mut()
+            .expect("format_profiles must be an array"),
+        "format",
+        "Custom",
+    )["state"] = Value::from("BASELINE_EXISTING");
+    assert!(
+        validate_registry_shape(&promoted_custom)
+            .expect_err("unproven Custom codec must stay blocking")
+            .contains("Custom")
+    );
+
+    let mut ownerless_blocker = baseline;
+    find_by_id_mut(
+        ownerless_blocker["unknown_blockers"]
+            .as_array_mut()
+            .expect("unknown_blockers must be an array"),
+        "blocker_id",
+        "BLOCK-HISTORICAL-BYTES",
+    )["owner_bead"] = Value::from("");
+    assert!(
+        validate_registry_shape(&ownerless_blocker)
+            .expect_err("ownerless blocker must fail")
+            .contains("owner_bead")
+    );
+}

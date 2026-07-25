@@ -1,0 +1,1104 @@
+{
+  "artifact_id": "typed-format-registry-v1",
+  "schema_version": 1,
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.3.1",
+  "title": "Complete public, generic, persisted, corpus, and consumer inventory for typed formats",
+  "policy_as_of_date_utc": "2026-07-24",
+  "policy_as_of_commit": "e23d56e4192e9093f8faf3133d940fb78c83db23",
+  "capability_ids": [
+    "CAP-PERSISTED-TRACE-SNAPSHOT",
+    "CAP-SERDE-GENERIC"
+  ],
+  "authority": {
+    "decision_registry_path": "artifacts/dependency_api_adr_registry_v1.json",
+    "decision_id": "DEP-ADR-001",
+    "decision_doc_path": "docs/adr/dep_plan_adr_001_serde_generic_formats.md",
+    "decision": "ADDITIVE_COEXISTENCE",
+    "generic_cutover_state": "KEEP_INCUMBENT",
+    "persisted_cutover_state": "BLOCKED_PENDING_EVIDENCE",
+    "inventory_role": "This artifact records the live evidence baseline under the accepted ADR. It is not a new design authority and cannot authorize dependency removal, format removal, migration, or cutover."
+  },
+  "policy": {
+    "coverage_rule": "Every direct serde_json, rmp-serde, and bincode-next token in a scanned Rust root is covered by a pinned lexical count and a root classification. Production persisted or public/generic uses are additionally covered by an explicit surface, format profile, consumer, and corpus row.",
+    "arbitrary_serde_rule": "T: Serialize and T: DeserializeOwned remain first-class downstream inputs. A finite fixture roster cannot narrow the Serde data model or imply a whitelist.",
+    "exact_bytes_rule": "EXACT_BYTES means existing accepted bytes must remain readable and byte-producing behavior may be compatibility-sensitive. SEMANTIC means equivalent values are required but map order, whitespace, or backend byte choices are not claimed stable.",
+    "unknown_rule": "Any missing reader, historical corpus, compatibility classification, resource bound, canonical-order rule, version rule, migration reader, or downstream owner is UNKNOWN_BLOCKING. Unknown evidence cannot be silently converted into a design assumption.",
+    "custom_rule": "SerializationFormat::Custom byte 255 and downstream Serializer and Deserializer injection stay public. SerdeCodec rejecting Custom is intentional and does not prove a real downstream custom codec.",
+    "no_cutover_rule": "This A1 inventory changes no encoder, decoder, schema, dependency, public symbol, discriminant, persisted byte, or error behavior."
+  },
+  "allowed_compatibility_classes": [
+    "EXACT_BYTES",
+    "SEMANTIC",
+    "DOWNSTREAM_DEFINED",
+    "UNKNOWN_BLOCKING"
+  ],
+  "allowed_evidence_states": [
+    "BASELINE_EXISTING",
+    "CURRENT_CORPUS_ONLY",
+    "UNKNOWN_BLOCKING"
+  ],
+  "dependency_pins": [
+    {
+      "logical_name": "Bincode",
+      "manifest_key": "bincode",
+      "package": "bincode-next",
+      "manifest_requirement": "3.1.1",
+      "lock_version": "3.1.1",
+      "lock_checksum": "1d6626829353ae29293be5c86f42de5f0468bc758af074b0c7d08f07e538ccbc",
+      "configuration": "bincode::config::legacy() at every production encode/decode call",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "logical_name": "MessagePack",
+      "manifest_key": "rmp-serde",
+      "package": "rmp-serde",
+      "manifest_requirement": "1.3",
+      "lock_version": "1.3.1",
+      "lock_checksum": "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155",
+      "configuration": "rmp_serde::to_vec/from_slice and named/stream variants at the individual call sites",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "logical_name": "JSON",
+      "manifest_key": "serde_json",
+      "package": "serde_json",
+      "manifest_requirement": "1.0",
+      "lock_version": "1.0.151",
+      "lock_checksum": "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14",
+      "configuration": "Compact or pretty JSON is selected at each call site; no global canonicalizer exists",
+      "state": "BASELINE_EXISTING"
+    }
+  ],
+  "scan_profile": {
+    "algorithm": "For each root, recursively sort every .rs path except excluded_paths and count non-overlapping literal tokens in UTF-8 source. Counts include comments, inline tests, and macros; explicit surface rows separate production compatibility claims from lexical coverage.",
+    "excluded_paths": [
+      "tests/typed_format_registry_contract.rs"
+    ],
+    "tokens": [
+      "serde_json::",
+      "rmp_serde::",
+      "bincode::",
+      "SerializationFormat::",
+      "SerdeCodec",
+      "SerializationFormat::Custom"
+    ],
+    "totals": {
+      "rust_files": 4228,
+      "serde_json::": 5998,
+      "rmp_serde::": 61,
+      "bincode::": 31,
+      "SerializationFormat::": 120,
+      "SerdeCodec": 22,
+      "SerializationFormat::Custom": 9
+    },
+    "roots": [
+      {
+        "path": "src",
+        "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
+        "rust_files": 1431,
+        "serde_json::": 2415,
+        "rmp_serde::": 46,
+        "bincode::": 21,
+        "SerializationFormat::": 56,
+        "SerdeCodec": 9,
+        "SerializationFormat::Custom": 3
+      },
+      {
+        "path": "tests",
+        "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
+        "rust_files": 1841,
+        "serde_json::": 3014,
+        "rmp_serde::": 4,
+        "bincode::": 10,
+        "SerializationFormat::": 9,
+        "SerdeCodec": 3,
+        "SerializationFormat::Custom": 1
+      },
+      {
+        "path": "examples",
+        "classification": "EXAMPLE_EVIDENCE; no production compatibility claim",
+        "rust_files": 20,
+        "serde_json::": 11,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "benches",
+        "classification": "BENCHMARK_EVIDENCE; no production compatibility claim",
+        "rust_files": 45,
+        "serde_json::": 27,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "conformance",
+        "classification": "CONFORMANCE_EVIDENCE; no core-runtime production compatibility claim",
+        "rust_files": 95,
+        "serde_json::": 260,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "asupersync-browser-core",
+        "classification": "SATELLITE_CRATE; semantic JSON unless separately versioned by that crate",
+        "rust_files": 6,
+        "serde_json::": 58,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "asupersync-wasm",
+        "classification": "SATELLITE_CRATE; semantic JSON unless separately versioned by that crate",
+        "rust_files": 4,
+        "serde_json::": 4,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "franken_kernel",
+        "classification": "WORKSPACE_CRATE; semantic JSON unless separately versioned by that crate",
+        "rust_files": 1,
+        "serde_json::": 20,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "franken_evidence",
+        "classification": "WORKSPACE_CRATE; semantic JSON unless separately versioned by that crate",
+        "rust_files": 4,
+        "serde_json::": 12,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "franken_decision",
+        "classification": "WORKSPACE_CRATE; semantic JSON unless separately versioned by that crate",
+        "rust_files": 1,
+        "serde_json::": 15,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "frankenlab",
+        "classification": "WORKSPACE_CRATE; semantic JSON unless separately versioned by that crate",
+        "rust_files": 3,
+        "serde_json::": 28,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "drop_unwrap_finder",
+        "classification": "WORKSPACE_TOOL; no typed-format token at baseline",
+        "rust_files": 1,
+        "serde_json::": 0,
+        "rmp_serde::": 0,
+        "bincode::": 0,
+        "SerializationFormat::": 0,
+        "SerdeCodec": 0,
+        "SerializationFormat::Custom": 0
+      },
+      {
+        "path": "fuzz",
+        "classification": "FUZZ_EVIDENCE; current-corpus robustness only",
+        "rust_files": 776,
+        "serde_json::": 134,
+        "rmp_serde::": 11,
+        "bincode::": 0,
+        "SerializationFormat::": 55,
+        "SerdeCodec": 10,
+        "SerializationFormat::Custom": 5
+      }
+    ]
+  },
+  "production_backend_files": [
+    {
+      "token": "rmp_serde::",
+      "paths": [
+        "src/trace/compat.rs",
+        "src/trace/file.rs",
+        "src/trace/integrity.rs",
+        "src/trace/replay.rs",
+        "src/trace/streaming.rs",
+        "src/types/typed_symbol.rs"
+      ]
+    },
+    {
+      "token": "bincode::",
+      "paths": [
+        "src/distributed/snapshot.rs",
+        "src/real_distributed_snapshot_distributed_bridge_integration_e2e_tests.rs",
+        "src/real_distributed_snapshot_obligation_saga_integration_e2e_tests.rs",
+        "src/real_grpc_codec_grpc_protobuf_integration_e2e_tests.rs",
+        "src/real_types_wasm_abi_io_browser_storage_integration_e2e_tests.rs",
+        "src/types/typed_symbol.rs"
+      ],
+      "note": "Only distributed/snapshot.rs and types/typed_symbol.rs are production implementations; the four real_* files are cfg(test) no-mock evidence stored under src."
+    },
+    {
+      "token": "serde_json::",
+      "path_count": 249,
+      "classification": "All src paths are lexically covered by scan_profile. Persisted/public exceptions are enumerated below; the remainder is semantic JSON or inline-test/tooling use and carries no exact-byte claim."
+    }
+  ],
+  "format_profiles": [
+    {
+      "format": "MessagePack",
+      "discriminant": 1,
+      "backend": "rmp-serde 1.3.1",
+      "public_generic_bounds": [
+        "T: serde::Serialize",
+        "T: serde::de::DeserializeOwned"
+      ],
+      "generic_compatibility_class": "SEMANTIC",
+      "persisted_compatibility_class": "EXACT_BYTES",
+      "canonical_ordering": "Struct field order follows Serde; unordered map iteration is not canonicalized by SerdeCodec. Persisted trace shapes must not infer general map canonicality.",
+      "resource_bounds": "SerdeCodec itself has no input-length cap. TypedSymbol applies its envelope cap. Trace readers apply per-metadata, per-event, compressed-chunk, and preallocation caps.",
+      "error_contract": "Public SerdeCodec owns stringified SerializationError and DeserializationError. ReplayTrace::to_bytes exposes rmp_serde::encode::Error; ReplayTrace::from_bytes owns ReplayDecodeError containing rmp decode failures.",
+      "version_policy": "No generic payload version byte. TypedSymbol, trace-file, replay-metadata, and streaming containers own their versions.",
+      "migration_policy": "Existing trace MessagePack remains readable. No prior-version committed byte corpus or proven migration reader exists.",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "format": "Bincode",
+      "discriminant": 2,
+      "backend": "bincode-next 3.1.1 package aliased as bincode",
+      "public_generic_bounds": [
+        "T: serde::Serialize",
+        "T: serde::de::DeserializeOwned"
+      ],
+      "generic_compatibility_class": "SEMANTIC",
+      "persisted_compatibility_class": "EXACT_BYTES",
+      "canonical_ordering": "Every production call uses bincode::config::legacy(); collection order is inherited from the serialized type and is not globally canonicalized.",
+      "resource_bounds": "SerdeCodec itself has no decode byte limit and ignores trailing decoded bytes. TypedSymbol bounds its payload; distributed snapshot bounds its owned framing before vector-clock decode.",
+      "error_contract": "Public SerdeCodec stringifies bincode EncodeError and DecodeError into owned errors. Distributed snapshot maps codec failures into SnapshotError.",
+      "version_policy": "No generic payload version byte. TypedSymbol owns its header version; distributed snapshot v2 owns the Bincode vector-clock field.",
+      "migration_policy": "The legacy configuration is part of the accepted baseline. There is no committed historical Bincode byte golden or cross-version migration reader.",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "format": "Json",
+      "discriminant": 3,
+      "backend": "serde_json 1.0.151",
+      "public_generic_bounds": [
+        "T: serde::Serialize",
+        "T: serde::de::DeserializeOwned"
+      ],
+      "generic_compatibility_class": "SEMANTIC",
+      "persisted_compatibility_class": "EXACT_BYTES",
+      "canonical_ordering": "Serde struct field order is stable for a fixed type; map order, pretty whitespace, and ad hoc Value construction are not globally canonical. Exact bytes are claimed only where bytes feed a stored hash or a specifically versioned artifact contract.",
+      "resource_bounds": "SerdeCodec has no byte cap. Individual persisted readers own validation and resource policy; the inventory does not infer one global JSON limit.",
+      "error_contract": "SerdeCodec owns stringified errors. Other public JSON helpers may expose serde_json::Error or their module-owned validation errors as recorded per surface.",
+      "version_policy": "No generic JSON envelope. Each persisted JSON family owns its schema field or constant.",
+      "migration_policy": "Semantic additive evolution is the default. Existing versioned artifact readers remain required; no global JSON migration exists.",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "format": "Custom",
+      "discriminant": 255,
+      "backend": "downstream Serializer<T> and Deserializer<T> implementations injected into TypedEncoder and TypedDecoder",
+      "public_generic_bounds": [
+        "implementation-defined T",
+        "Serializer<T>: Send + Sync",
+        "Deserializer<T>: Send + Sync"
+      ],
+      "generic_compatibility_class": "DOWNSTREAM_DEFINED",
+      "persisted_compatibility_class": "DOWNSTREAM_DEFINED",
+      "canonical_ordering": "Entirely downstream-defined.",
+      "resource_bounds": "Downstream codec plus TypedSymbol envelope; SerdeCodec intentionally rejects Custom.",
+      "error_contract": "Downstream codec returns Asupersync-owned SerializationError or DeserializationError.",
+      "version_policy": "TypedSymbol header carries version, type id, format byte, schema hash, and payload length; payload versioning remains downstream-defined.",
+      "migration_policy": "No real standalone downstream custom-codec fixture exists. Byte 255 parsing and SerdeCodec rejection do not prove custom codec interoperability.",
+      "state": "UNKNOWN_BLOCKING"
+    }
+  ],
+  "public_generic_surfaces": [
+    {
+      "surface_id": "PUB-SERDE-CODEC",
+      "source_path": "src/types/typed_symbol.rs",
+      "exports_path": "src/types/mod.rs",
+      "symbols": [
+        "SerializationFormat",
+        "SerdeCodec",
+        "Serializer",
+        "Deserializer",
+        "SerializationError",
+        "DeserializationError"
+      ],
+      "generic_contract": "Arbitrary downstream T: Serialize and T: DeserializeOwned; no seal, registry allow-list, derive requirement, or finite schema roster.",
+      "formats": [
+        "MessagePack",
+        "Bincode",
+        "Json",
+        "Custom"
+      ],
+      "owner": "CAP-SERDE-GENERIC",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "surface_id": "PUB-TYPED-SYMBOL",
+      "source_path": "src/types/typed_symbol.rs",
+      "exports_path": "src/types/mod.rs",
+      "symbols": [
+        "TYPED_SYMBOL_MAGIC",
+        "TYPED_SYMBOL_HEADER_LEN",
+        "TypeRegistry",
+        "TypeDescriptor",
+        "TypedSymbol",
+        "TypedEncoder",
+        "TypedDecoder"
+      ],
+      "generic_contract": "TypeRegistry derives a deterministic u64 schema hash from Rust type_name<T> and u32 version. TypedEncoder defaults to version 1 and permits downstream codec injection.",
+      "formats": [
+        "MessagePack",
+        "Bincode",
+        "Json",
+        "Custom"
+      ],
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "state": "BASELINE_EXISTING"
+    }
+  ],
+  "persisted_surfaces": [
+    {
+      "surface_id": "PERSIST-TYPED-SYMBOL",
+      "owner": "CAP-SERDE-GENERIC",
+      "source_paths": [
+        "src/types/typed_symbol.rs",
+        "src/types/mod.rs"
+      ],
+      "writers": [
+        "TypedEncoder<T>::encode"
+      ],
+      "readers": [
+        "TypedDecoder<T>::decode",
+        "TypedSymbol::from_bytes",
+        "fuzz/fuzz_targets/typed_symbol_parser.rs",
+        "fuzz/fuzz_targets/symbol_id_deserialization.rs",
+        "standalone dependency-capability baseline consumer"
+      ],
+      "backend": "Selected SerializationFormat backend or downstream Custom codec",
+      "compatibility_class": "EXACT_BYTES",
+      "exactness_detail": "27-byte TSYM header: magic[4], u16 LE version, u64 LE type id, u8 format, u64 LE schema hash, u32 LE payload length. Discriminants are 1, 2, 3, and 255. Payload compatibility then follows the selected backend.",
+      "canonical_ordering": "Header canonical; payload not globally canonical for arbitrary Serde maps.",
+      "resource_bounds": "Payload <= DEFAULT_SYMBOL_SIZE - 27 and representable as u32.",
+      "version_policy": "Header version defaults to 1; type id and schema hash are derived from type_name<T> and version.",
+      "error_contract": "Owned SerializationError, DeserializationError, and TypeMismatchError.",
+      "migration_policy": "No type rename map, schema-hash alias, or historical generic payload migration reader.",
+      "corpus_ids": [
+        "CORPUS-TYPED-SYMBOL-FUZZ"
+      ],
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "Current fuzz seeds prove parser coverage inputs, not cross-release byte stability for arbitrary downstream types."
+    },
+    {
+      "surface_id": "PERSIST-TRACE-FILE",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/trace/file.rs",
+        "src/trace/replay.rs",
+        "src/trace/compat.rs"
+      ],
+      "writers": [
+        "TraceWriter",
+        "StreamingTraceWriter"
+      ],
+      "readers": [
+        "TraceReader",
+        "CompatTraceReader",
+        "StreamingTraceReader",
+        "TraceIntegrityChecker",
+        "src/bin/asupersync.rs trace commands"
+      ],
+      "backend": "Owned ASUPERTRACE container with MessagePack metadata/events and optional LZ4 chunks",
+      "compatibility_class": "EXACT_BYTES",
+      "exactness_detail": "Magic ASUPERTRACE, u16 LE file version 2, flags/compression framing, length-delimited MessagePack records.",
+      "canonical_ordering": "Container order is append order; event/metadata struct field encoding follows rmp-serde. General map canonicality is not claimed.",
+      "resource_bounds": "metadata <= 1 MiB; event <= 16 MiB; compressed or uncompressed chunk <= 64 MiB; event preallocation <= 10,000,000.",
+      "version_policy": "File reader rejects versions above 2 and admits older container versions; embedded replay metadata must equal schema version 1.",
+      "error_contract": "TraceFileError owns I/O, magic, version, length, compression, MessagePack, and schema failures.",
+      "migration_policy": "Compatibility scaffolding exists, but MIN_SUPPORTED_SCHEMA_VERSION equals current schema 1 and no committed prior-version trace byte corpus proves a migration.",
+      "corpus_ids": [
+        "CORPUS-HISTORICAL-TRACE-MISSING"
+      ],
+      "state": "UNKNOWN_BLOCKING",
+      "no_claim_boundary": "Unit tests and fuzzing do not prove that any artifact emitted by an earlier release remains readable."
+    },
+    {
+      "surface_id": "PERSIST-REPLAY-BLOB",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/trace/replay.rs",
+        "src/trace/integrity.rs"
+      ],
+      "writers": [
+        "ReplayTrace::to_bytes"
+      ],
+      "readers": [
+        "ReplayTrace::from_bytes",
+        "validate_trace_bytes",
+        "tests/raptorq_journal_kill_recover_replay_e2e.rs",
+        "tests/distributed_trace_remote_invariants.rs",
+        "fuzz/fuzz_targets/replay_event_deserialization.rs",
+        "fuzz/fuzz_targets/trace_integrity.rs"
+      ],
+      "backend": "MessagePack ReplayTrace",
+      "compatibility_class": "EXACT_BYTES",
+      "exactness_detail": "Raw MessagePack blob whose TraceMetadata.version must exactly equal REPLAY_SCHEMA_VERSION 1.",
+      "canonical_ordering": "Replay event vector order is significant; general map canonicality is not claimed.",
+      "resource_bounds": "Raw ReplayTrace::from_bytes has no module-level byte cap; file/streaming envelopes own their bounds.",
+      "version_policy": "Exact schema version 1.",
+      "error_contract": "Public encode returns rmp_serde::encode::Error; decode returns owned ReplayDecodeError with MessagePack and version cases.",
+      "migration_policy": "No prior-version committed blob or active lower-version migration reader.",
+      "corpus_ids": [
+        "CORPUS-HISTORICAL-TRACE-MISSING"
+      ],
+      "state": "UNKNOWN_BLOCKING",
+      "no_claim_boundary": "Current round trips do not prove historical replay compatibility."
+    },
+    {
+      "surface_id": "PERSIST-TRACE-STREAM",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/trace/streaming.rs"
+      ],
+      "writers": [
+        "StreamingTraceWriter"
+      ],
+      "readers": [
+        "StreamingTraceReader",
+        "fuzz/fuzz_targets/trace_streaming.rs"
+      ],
+      "backend": "MessagePack length-delimited stream/checkpoint records",
+      "compatibility_class": "EXACT_BYTES",
+      "exactness_detail": "Ordered framed records and checkpoint data are persisted and consumed incrementally.",
+      "canonical_ordering": "Record order and sequence numbers are significant.",
+      "resource_bounds": "Streaming reader owns framed-length validation; trace-file global bounds are not automatically inferred for every standalone stream.",
+      "version_policy": "Replay schema metadata is the semantic version owner; no independent historical stream-version corpus exists.",
+      "error_contract": "Module-owned StreamingError wraps I/O and MessagePack failures.",
+      "migration_policy": "No committed historical streaming trace corpus.",
+      "corpus_ids": [
+        "CORPUS-HISTORICAL-TRACE-MISSING"
+      ],
+      "state": "UNKNOWN_BLOCKING",
+      "no_claim_boundary": "Fuzz target presence is robustness evidence only."
+    },
+    {
+      "surface_id": "PERSIST-CRASHPACK",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/trace/crashpack.rs",
+        "src/lab/runtime.rs"
+      ],
+      "writers": [
+        "CrashPack::write_to"
+      ],
+      "readers": [
+        "CrashPack::read_from",
+        "lab runtime/operator tooling"
+      ],
+      "backend": "Pretty JSON manifest and component files written via temporary files and rename",
+      "compatibility_class": "SEMANTIC",
+      "exactness_detail": "JSON meaning and schema range are compatibility-owned; pretty whitespace is not an exact-byte contract.",
+      "canonical_ordering": "Struct fields are stable for fixed types; filesystem component ordering and arbitrary maps are not globally canonical.",
+      "resource_bounds": "Filesystem and individual component validation; no one global pack-byte ceiling is claimed.",
+      "version_policy": "CRASHPACK_SCHEMA_VERSION 1 with closed supported range [1,1].",
+      "error_contract": "Owned CrashPackError covers I/O, JSON, version, and validation failures.",
+      "migration_policy": "Reader validates the supported range; no lower supported schema or historical pack corpus is committed.",
+      "corpus_ids": [],
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "Generated current-schema round trips are not cross-release migration proof."
+    },
+    {
+      "surface_id": "PERSIST-ATP-CRASHPACK",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/lab/crashpack/mod.rs",
+        "src/lab/crashpack/replay.rs",
+        "src/lab/crashpack/agent_proof.rs",
+        "src/lab/crashpack/evidence_ledger.rs"
+      ],
+      "writers": [
+        "AtpCrashpack artifact writer",
+        "AgentProofBundle writer",
+        "EvidenceLedger::to_json"
+      ],
+      "readers": [
+        "ATP crashpack replay",
+        "AgentProofBundle reader",
+        "EvidenceLedger::from_json",
+        "crashpack-to-repro fixture tests"
+      ],
+      "backend": "Pretty JSON trace, proof bundle, and evidence ledger plus text manifest",
+      "compatibility_class": "SEMANTIC",
+      "exactness_detail": "Schema-tagged JSON values and journal digests are semantic contracts; pretty JSON bytes are not globally frozen.",
+      "canonical_ordering": "Trace vector order and ledger record order are meaningful; general JSON map order is not claimed canonical.",
+      "resource_bounds": "Module-specific validation; no global artifact byte ceiling is claimed.",
+      "version_policy": "ATP_CRASHPACK_SCHEMA_VERSION 1; AGENT_PROOF_BUNDLE_SCHEMA_VERSION 1; EvidenceLedger schema version 1.",
+      "error_contract": "Module-owned errors wrap JSON, I/O, schema, digest, and replay failures.",
+      "migration_policy": "Only current-schema fixtures are present.",
+      "corpus_ids": [
+        "CORPUS-CRASHPACK-TO-REPRO"
+      ],
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "The fixture proves current repro behavior, not historical schema migration."
+    },
+    {
+      "surface_id": "PERSIST-BROWSER-TRACE-JSON",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/trace/event.rs"
+      ],
+      "writers": [
+        "browser trace JSON encoders"
+      ],
+      "readers": [
+        "browser trace JSON decoders",
+        "v0 alias decoder"
+      ],
+      "backend": "JSON",
+      "compatibility_class": "SEMANTIC",
+      "exactness_detail": "Schema name browser-trace-schema-v1 and event meaning are owned; JSON whitespace and map order are not.",
+      "canonical_ordering": "Event order is significant; object member order is not a general contract.",
+      "resource_bounds": "No format-wide JSON byte cap in this module.",
+      "version_policy": "TRACE_EVENT_SCHEMA_VERSION 1 and BROWSER_TRACE_SCHEMA_VERSION browser-trace-schema-v1; an explicit v0 alias path exists.",
+      "error_contract": "Owned browser trace validation errors plus serde_json failures.",
+      "migration_policy": "v0 alias decode is an active compatibility path; no committed external v0 corpus is registered here.",
+      "corpus_ids": [],
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "Alias unit tests do not establish a broad historical corpus."
+    },
+    {
+      "surface_id": "PERSIST-GOLDEN-TRACE-JSON",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/trace/format.rs"
+      ],
+      "writers": [
+        "GoldenTrace JSON report writer"
+      ],
+      "readers": [
+        "GoldenTrace JSON report reader",
+        "golden comparison tooling"
+      ],
+      "backend": "JSON",
+      "compatibility_class": "SEMANTIC",
+      "exactness_detail": "GoldenTrace schema and ordered event semantics are owned; formatting bytes are not.",
+      "canonical_ordering": "Event order is significant.",
+      "resource_bounds": "No format-wide JSON byte cap.",
+      "version_policy": "GOLDEN_TRACE_SCHEMA_VERSION 1.",
+      "error_contract": "serde_json errors at the helper boundary.",
+      "migration_policy": "No prior schema reader or historical corpus is registered.",
+      "corpus_ids": [],
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "Current golden comparisons are not migration evidence."
+    },
+    {
+      "surface_id": "PERSIST-INCIDENT-JSON",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/trace/incident.rs",
+        "src/trace/divergence.rs",
+        "src/trace/replayer.rs"
+      ],
+      "writers": [
+        "incident bundle to_json helpers",
+        "divergence and replay report JSON helpers"
+      ],
+      "readers": [
+        "incident bundle from_json helpers",
+        "operator and CLI report consumers"
+      ],
+      "backend": "JSON",
+      "compatibility_class": "SEMANTIC",
+      "exactness_detail": "Versioned report meaning is owned; compact/pretty bytes and arbitrary map order are not.",
+      "canonical_ordering": "Record vectors preserve order; general map order is not claimed canonical.",
+      "resource_bounds": "Per-type validation; no common JSON byte ceiling.",
+      "version_policy": "Each incident/report family owns its schema constant; registry source pins force explicit review when those constants or helpers change.",
+      "error_contract": "Module-owned validation errors and serde_json errors.",
+      "migration_policy": "No single cross-family migration reader or historical corpus.",
+      "corpus_ids": [],
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "This row groups related operator artifacts but does not claim one interchangeable schema."
+    },
+    {
+      "surface_id": "PERSIST-LAB-SNAPSHOT-HASH",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/lab/snapshot_restore.rs"
+      ],
+      "writers": [
+        "RestorableSnapshot::new content_hash computation"
+      ],
+      "readers": [
+        "RestorableSnapshot::validate"
+      ],
+      "backend": "serde_json::to_vec used as FNV-1a hash input; no standalone JSON file API",
+      "compatibility_class": "EXACT_BYTES",
+      "exactness_detail": "JSON bytes are compatibility-sensitive because every byte feeds the stored u64 content hash.",
+      "canonical_ordering": "Claim relies on fixed struct/vector field order; introducing unordered maps without canonicalization changes hashes.",
+      "resource_bounds": "In-memory runtime snapshot size; no explicit byte cap.",
+      "version_policy": "RestorableSnapshot::SCHEMA_VERSION 1 is included in hash input.",
+      "error_contract": "Serialization failure deterministically hashes a fixed fallback marker.",
+      "migration_policy": "No cross-version hash migration; schema or serialization changes require explicit compatibility handling.",
+      "corpus_ids": [],
+      "state": "BASELINE_EXISTING",
+      "no_claim_boundary": "Determinism for future unordered containers is not implied."
+    },
+    {
+      "surface_id": "PERSIST-LAB-SCENARIO-AND-EXPLORER-JSON",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/lab/scenario.rs",
+        "src/lab/explorer.rs"
+      ],
+      "writers": [
+        "Scenario JSON encoder",
+        "Explorer JSON summary writer"
+      ],
+      "readers": [
+        "Scenario JSON decoder",
+        "lab and operator tooling"
+      ],
+      "backend": "JSON",
+      "compatibility_class": "SEMANTIC",
+      "exactness_detail": "Scenario/report meaning is owned; formatting and map order are not.",
+      "canonical_ordering": "Scenario action order is significant; general map order is not canonicalized.",
+      "resource_bounds": "Scenario validators own semantic bounds; no global JSON byte ceiling.",
+      "version_policy": "Per-type schema fields and validators; YAML remains an adjacent accepted scenario surface outside this typed-format backend inventory.",
+      "error_contract": "Scenario/explorer owned errors plus serde_json failures.",
+      "migration_policy": "No global JSON migration reader.",
+      "corpus_ids": [],
+      "state": "BASELINE_EXISTING",
+      "no_claim_boundary": "This row does not authorize narrowing the accepted YAML scenario surface."
+    },
+    {
+      "surface_id": "PERSIST-DISTRIBUTED-SNAPSHOT",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/distributed/snapshot.rs"
+      ],
+      "writers": [
+        "RegionSnapshot::serialize",
+        "owned vector-clock encoder"
+      ],
+      "readers": [
+        "RegionSnapshot::deserialize",
+        "distributed snapshot bridge tests",
+        "obligation saga tests"
+      ],
+      "backend": "Owned SNAP v2 framing with bincode-next legacy vector clock, SHA-256 content hash, and authenticated domain separator",
+      "compatibility_class": "EXACT_BYTES",
+      "exactness_detail": "Magic SNAP, u8 version 2, owned deterministic field framing, and legacy-config Bincode vector clock are accepted persisted bytes.",
+      "canonical_ordering": "Owned maps use deterministic ordering where serialized; vector-clock representation and legacy Bincode configuration are compatibility-sensitive.",
+      "resource_bounds": "Owned metadata/vector-clock lengths and arena index <= 1,000,000 and generation <= 10,000 are fail-closed before handle reconstruction.",
+      "version_policy": "Exact SNAP_VERSION 2 and v2 HMAC domain.",
+      "error_contract": "Owned SnapshotError covers magic, version, bounds, authentication, hashing, and Bincode codec failures.",
+      "migration_policy": "No prior-version reader or committed historical byte golden.",
+      "corpus_ids": [
+        "CORPUS-DISTRIBUTED-SNAPSHOT-SEEDS",
+        "CORPUS-DISTRIBUTED-SNAPSHOT-INSTA"
+      ],
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "Current fuzz seeds and textual snapshots do not prove cross-release byte compatibility."
+    },
+    {
+      "surface_id": "TOOL-TRACE-CLI-CONSUMER",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "source_paths": [
+        "src/bin/asupersync.rs"
+      ],
+      "writers": [
+        "trace conversion and report subcommands"
+      ],
+      "readers": [
+        "trace inspect/replay/validate/diff CLI paths"
+      ],
+      "backend": "Consumers of trace file, replay, and JSON report surfaces",
+      "compatibility_class": "SEMANTIC",
+      "exactness_detail": "CLI behavior depends on the registered readers but does not define a second wire format.",
+      "canonical_ordering": "Inherited from the underlying reader/report.",
+      "resource_bounds": "Inherited from underlying reader plus CLI I/O policy.",
+      "version_policy": "Inherited from trace/replay/report schemas.",
+      "error_contract": "CLI diagnostics wrap underlying format errors.",
+      "migration_policy": "CLI cannot be cited as migration proof without a historical input corpus.",
+      "corpus_ids": [
+        "CORPUS-HISTORICAL-TRACE-MISSING"
+      ],
+      "state": "UNKNOWN_BLOCKING",
+      "no_claim_boundary": "A reachable CLI reader is not evidence that old bytes were exercised."
+    }
+  ],
+  "corpora": [
+    {
+      "corpus_id": "CORPUS-TYPED-SYMBOL-FUZZ",
+      "path": "fuzz/corpus/fuzz_typed_symbol_parser",
+      "file_count": 28,
+      "byte_count": 667,
+      "aggregate_sha256": "9d44637292a2a5de141a17eecb403be701475685698f8eff1d38e8bac2c13371",
+      "aggregate_algorithm": "SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'",
+      "compatibility_class": "UNKNOWN_BLOCKING",
+      "state": "CURRENT_CORPUS_ONLY",
+      "provenance": "Current parser seeds include valid MessagePack, Bincode, JSON, Custom, limits, and malformed headers; no emitting release or backend-version provenance."
+    },
+    {
+      "corpus_id": "CORPUS-DISTRIBUTED-SNAPSHOT-SEEDS",
+      "path": "fuzz/seeds/distributed_snapshot",
+      "file_count": 5,
+      "byte_count": 278,
+      "aggregate_sha256": "a2b63e3b2e201f985da38a80a0636194e29470dcbb5ebe5ccf4668270ffc6e07",
+      "aggregate_algorithm": "SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'",
+      "compatibility_class": "UNKNOWN_BLOCKING",
+      "state": "CURRENT_CORPUS_ONLY",
+      "provenance": "Current malformed/boundary fuzz seeds; not an earlier-release byte corpus."
+    },
+    {
+      "corpus_id": "CORPUS-DISTRIBUTED-SNAPSHOT-INSTA",
+      "path": "tests/snapshots/distributed_snapshot",
+      "file_count": 8,
+      "byte_count": 32955,
+      "aggregate_sha256": "27b8e383520a07ac0ec2ca4aa1b2a432589cb99a71b06b446f8e27fb730d00c1",
+      "aggregate_algorithm": "SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'",
+      "compatibility_class": "SEMANTIC",
+      "state": "CURRENT_CORPUS_ONLY",
+      "provenance": "Current textual Insta snapshots and PROVENANCE metadata; not raw Bincode or full SNAP historical bytes."
+    },
+    {
+      "corpus_id": "CORPUS-CRASHPACK-TO-REPRO",
+      "path": "tests/fixtures/crashpack_to_repro",
+      "file_count": 10,
+      "byte_count": 21599,
+      "aggregate_sha256": "6b61870ce2753ee27f94218e6cc5df3133dc253be576e7f611df67c9a71586e4",
+      "aggregate_algorithm": "SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'",
+      "compatibility_class": "SEMANTIC",
+      "state": "CURRENT_CORPUS_ONLY",
+      "provenance": "Current ATP crashpack-to-repro fixtures; no earlier-release schema provenance."
+    },
+    {
+      "corpus_id": "CORPUS-HISTORICAL-TRACE-MISSING",
+      "path": null,
+      "file_count": 0,
+      "byte_count": 0,
+      "aggregate_sha256": null,
+      "aggregate_algorithm": null,
+      "compatibility_class": "UNKNOWN_BLOCKING",
+      "state": "UNKNOWN_BLOCKING",
+      "provenance": "No committed prior-release ASUPERTRACE, ReplayTrace MessagePack, or streaming trace byte corpus was found."
+    }
+  ],
+  "downstream_consumers": [
+    {
+      "consumer_id": "CONSUMER-PUBLIC-ARBITRARY-SERDE",
+      "owner": "CAP-SERDE-GENERIC",
+      "paths": [
+        "src/types/typed_symbol.rs"
+      ],
+      "formats": [
+        "MessagePack",
+        "Bincode",
+        "Json",
+        "Custom"
+      ],
+      "evidence": "Public generic bounds and injection traits",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "consumer_id": "CONSUMER-STANDALONE-BASELINE",
+      "owner": "CAP-SERDE-GENERIC",
+      "paths": [
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ],
+      "formats": [
+        "MessagePack",
+        "Bincode",
+        "Json",
+        "Custom"
+      ],
+      "evidence": "Isolated workspace exercises empty, boundary, extreme, Unicode, and byte-containing arbitrary ConsumerRecord values; malformed JSON; codec recovery; typed-symbol observables; and intentional SerdeCodec Custom rejection.",
+      "state": "CURRENT_CORPUS_ONLY"
+    },
+    {
+      "consumer_id": "CONSUMER-REAL-CUSTOM-CODEC",
+      "owner": "asupersync-5z2scg.3.3",
+      "paths": [],
+      "formats": [
+        "Custom"
+      ],
+      "evidence": "No isolated downstream implementation of Serializer<T> and Deserializer<T> was found.",
+      "state": "UNKNOWN_BLOCKING"
+    },
+    {
+      "consumer_id": "CONSUMER-TRACE-STACK",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "paths": [
+        "src/trace/file.rs",
+        "src/trace/replay.rs",
+        "src/trace/compat.rs",
+        "src/trace/integrity.rs",
+        "src/trace/streaming.rs",
+        "src/bin/asupersync.rs"
+      ],
+      "formats": [
+        "MessagePack",
+        "Json"
+      ],
+      "evidence": "Production writers/readers, compatibility parser, integrity checker, streaming path, and CLI consumers.",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "consumer_id": "CONSUMER-DISTRIBUTED-SNAPSHOT",
+      "owner": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "paths": [
+        "src/distributed/snapshot.rs",
+        "src/real_distributed_snapshot_distributed_bridge_integration_e2e_tests.rs",
+        "src/real_distributed_snapshot_obligation_saga_integration_e2e_tests.rs"
+      ],
+      "formats": [
+        "Bincode"
+      ],
+      "evidence": "Production SNAP v2 writer/reader plus no-mock bridge and obligation-saga test surfaces.",
+      "state": "BASELINE_EXISTING"
+    },
+    {
+      "consumer_id": "CONSUMER-EXTERNAL-HISTORICAL-ARTIFACTS",
+      "owner": "asupersync-5z2scg.3.7",
+      "paths": [],
+      "formats": [
+        "MessagePack",
+        "Bincode",
+        "Json",
+        "Custom"
+      ],
+      "evidence": "No external artifact inventory, release provenance, or downstream owner receipt was found.",
+      "state": "UNKNOWN_BLOCKING"
+    }
+  ],
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461"
+    },
+    {
+      "path": "src/types/mod.rs",
+      "sha256": "d2e3f37ccd567b36dbfee1721ca97d8cfdfc1cddfdabb00f222a2510e27949ee"
+    },
+    {
+      "path": "src/types/typed_symbol.rs",
+      "sha256": "6d2224c1b1b362c59e7c99d91322b0baf2d2c18491f5327b48c3a44eaccfd37b"
+    },
+    {
+      "path": "src/trace/file.rs",
+      "sha256": "d1f78de95ac3372bdea62a9197ae321414699859648dd977f167721ae3bd061a"
+    },
+    {
+      "path": "src/trace/replay.rs",
+      "sha256": "a5dd73ff157b0526d37b21a21de80cd67a6599da2c1e76c581bf0d0930380145"
+    },
+    {
+      "path": "src/trace/compat.rs",
+      "sha256": "467fa13cd3dbfa776fab88edd33996a601030ed2a106717a71c8e8f46cea3f7a"
+    },
+    {
+      "path": "src/trace/integrity.rs",
+      "sha256": "ea93a98e639448f33a116f4313bd4b51ac6dcec3ee75c9d2b971f1cfd5c4ec48"
+    },
+    {
+      "path": "src/trace/streaming.rs",
+      "sha256": "65e979cc57702716eddb1d0e2d96ee0907951cb25a306df7e418fbde2d8ea891"
+    },
+    {
+      "path": "src/trace/crashpack.rs",
+      "sha256": "76082b54047d2f5a95d1a01a51da2ea462d0545f2e69583350b8c4ef98a8354d"
+    },
+    {
+      "path": "src/trace/event.rs",
+      "sha256": "c773c8902b36735cc6c99b2bd77e9fd4f8709af83a93b03eb441cf4deb1664d6"
+    },
+    {
+      "path": "src/trace/format.rs",
+      "sha256": "d6c374976a8938bb392ffad8c9b6154cc6d3301e25651a28d2ff09dfd48fbf31"
+    },
+    {
+      "path": "src/trace/incident.rs",
+      "sha256": "565ce0278ac0d4bb6d26768a9274b16d0c272934bafb7ee90e753ee981490a41"
+    },
+    {
+      "path": "src/trace/divergence.rs",
+      "sha256": "ff32423f6d484f0ea904cb4d51f922110f2e5aeedf2e8a115c7110e144b76b69"
+    },
+    {
+      "path": "src/trace/replayer.rs",
+      "sha256": "ae86e8467fbc87a0453e2065db04d427c8b8cb725309defcb7c18b3a92b938c5"
+    },
+    {
+      "path": "src/lab/snapshot_restore.rs",
+      "sha256": "7e229bf5e757a0fab5da341fcb9fec6bf55bc985a23064e4afd57ca8cf399324"
+    },
+    {
+      "path": "src/lab/scenario.rs",
+      "sha256": "ce653696f29f9478d1ed3fb1b39a69df5205f0ce6f45de11e7a03bcb0448a180"
+    },
+    {
+      "path": "src/lab/explorer.rs",
+      "sha256": "ea0a821e7a002a1d8410fc73bd98045c98aa130e21f69a725f0d2d185a1d99a9"
+    },
+    {
+      "path": "src/lab/crashpack/mod.rs",
+      "sha256": "ab683dd67fc81373d9545270b0995d7bb89297d83669541ad19cbeac317b66da"
+    },
+    {
+      "path": "src/lab/crashpack/replay.rs",
+      "sha256": "fd23aae8304366ea323c077e8cef1f5583e224bbcc68b1e8377d7853373b6acc"
+    },
+    {
+      "path": "src/lab/crashpack/agent_proof.rs",
+      "sha256": "db81bd7b1acce3f665de2d71a8927e6808a773bc10fdcdaed66315bf09fc58e7"
+    },
+    {
+      "path": "src/lab/crashpack/evidence_ledger.rs",
+      "sha256": "a579beb31e585f815a73ef5c46d4193bacdb64540dd4f2126456e5fb960796da"
+    },
+    {
+      "path": "src/distributed/snapshot.rs",
+      "sha256": "d6e7dc3c5cf90d44435984e5134ac0ff3bb12b47d65d6fd1ecd64e18813f120d"
+    },
+    {
+      "path": "src/bin/asupersync.rs",
+      "sha256": "cbf0c69b27ac98921afebed685dc5d0a8855a05c87cf7eb8e28134256a1062f7"
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+      "sha256": "51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a"
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6"
+    },
+    {
+      "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",
+      "sha256": "eb00f80d9a4670357c871202d8a2a7649eb27a91ea05f5fbb5003aa62e97e698"
+    },
+    {
+      "path": "tests/distributed_trace_remote_invariants.rs",
+      "sha256": "6ce7041a5232cfa022f2d5552c730545f5492a25c8438bbdabd1dd05c9a0c2b1"
+    },
+    {
+      "path": "fuzz/fuzz_targets/typed_symbol_parser.rs",
+      "sha256": "684798664229438319393b7e5a5c6451e7f4966edf8591cd25e9fffdc0870250"
+    },
+    {
+      "path": "fuzz/fuzz_targets/symbol_id_deserialization.rs",
+      "sha256": "3e105d0c0c5d6c564390b2cd83f8ae55b40bcb92c9517c41df8c1696b14ad67b"
+    },
+    {
+      "path": "fuzz/fuzz_targets/replay_event_deserialization.rs",
+      "sha256": "0d2530a010468e73be8c338e9e6bc24f64eb6e0d8e426543162e9e71d86e44de"
+    },
+    {
+      "path": "fuzz/fuzz_targets/trace_file_parsing.rs",
+      "sha256": "f252d911623debf5af038bc8b4bc46cde2c9156c6f8b3c5678c3d18be9099209"
+    },
+    {
+      "path": "fuzz/fuzz_targets/trace_integrity.rs",
+      "sha256": "220aefbe0190d0a5cb9c6cc86df04c3cc35b9ae9b339667873bf9a4c4084b104"
+    },
+    {
+      "path": "fuzz/fuzz_targets/trace_streaming.rs",
+      "sha256": "ae3901f0b5e6224fa38c0bf498db0c633815272898a51e37319bea76a8c17779"
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_001_serde_generic_formats.md",
+      "sha256": "27506abf3ba0e99114f33b944edd1d100b4d953f1de7acd104c781d9104dc4f8"
+    },
+    {
+      "path": "artifacts/dependency_api_adr_registry_v1.json",
+      "sha256": "ca0b3f80af74b296e6beae0f7bf76aef0f8e73b161efa177de3239742c324786"
+    }
+  ],
+  "unknown_blockers": [
+    {
+      "blocker_id": "BLOCK-HISTORICAL-BYTES",
+      "owner_bead": "asupersync-5z2scg.3.6",
+      "affected_surfaces": [
+        "PERSIST-TYPED-SYMBOL",
+        "PERSIST-TRACE-FILE",
+        "PERSIST-REPLAY-BLOB",
+        "PERSIST-TRACE-STREAM",
+        "PERSIST-DISTRIBUTED-SNAPSHOT"
+      ],
+      "missing_evidence": "Version-provenanced byte goldens for Bincode legacy, MessagePack traces/replay, typed symbols, and full SNAP artifacts.",
+      "effect": "Blocks any byte-compatibility, backend replacement, or persisted cutover claim."
+    },
+    {
+      "blocker_id": "BLOCK-CROSS-VERSION-READERS",
+      "owner_bead": "asupersync-5z2scg.3.7",
+      "affected_surfaces": [
+        "PERSIST-TRACE-FILE",
+        "PERSIST-REPLAY-BLOB",
+        "PERSIST-TRACE-STREAM",
+        "PERSIST-DISTRIBUTED-SNAPSHOT",
+        "TOOL-TRACE-CLI-CONSUMER"
+      ],
+      "missing_evidence": "No-mock E2E using committed earlier-version artifacts through every downstream reader and CLI path.",
+      "effect": "Blocks migration and historical-readability claims."
+    },
+    {
+      "blocker_id": "BLOCK-REAL-CUSTOM-CODEC",
+      "owner_bead": "asupersync-5z2scg.3.3",
+      "affected_surfaces": [
+        "PUB-SERDE-CODEC",
+        "PERSIST-TYPED-SYMBOL"
+      ],
+      "missing_evidence": "Standalone downstream Serializer<T>/Deserializer<T> implementation for format byte 255, including errors, resource limits, versioning, and recovery.",
+      "effect": "Blocks Custom interoperability and replacement-parity claims."
+    },
+    {
+      "blocker_id": "BLOCK-ARBITRARY-SERDE-COVERAGE",
+      "owner_bead": "asupersync-5z2scg.3.3",
+      "affected_surfaces": [
+        "PUB-SERDE-CODEC"
+      ],
+      "missing_evidence": "Synthesized broad Serde data-model matrix, malformed inputs, depth/size adversaries, and resource envelopes across all three incumbent backends.",
+      "effect": "Blocks generic serializer replacement parity; the public generic bounds remain authoritative."
+    }
+  ],
+  "validation": {
+    "contract_test": "tests/typed_format_registry_contract.rs",
+    "doc_path": "docs/typed_format_registry.md",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/typed_format_registry_v1.json --overlay-path docs/typed_format_registry.md --overlay-path tests/typed_format_registry_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a1 cargo test -p asupersync --test typed_format_registry_contract -- --nocapture",
+    "proof_scope": "Registry schema, accepted ADR mapping, dependency pins, lexical root counts, direct backend source paths, source pins, corpus aggregates, public/generic invariants, persisted-row completeness, downstream ownership, fail-closed unknowns, and documentation markers.",
+    "no_claim_boundary": "This focused contract does not execute serialization round trips, fuzzing, migration, historical readers, CLI E2E, broad workspace tests, performance, release readiness, dependency removal, format removal, or cutover."
+  }
+}
