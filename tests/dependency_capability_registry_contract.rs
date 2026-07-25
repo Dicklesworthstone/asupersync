@@ -181,7 +181,7 @@ fn references_crate(source: &str, krate: &str) -> bool {
             let after = source[end..].trim_start();
             let preceded_by_use = source[..start]
                 .trim_end()
-                .rsplit(|c: char| c == '\n' || c == ';')
+                .rsplit(['\n', ';'])
                 .next()
                 .is_some_and(|segment| segment.trim() == "use");
             if after.starts_with("::") || preceded_by_use {
@@ -238,7 +238,11 @@ fn source_owner_attribution_fails(
         .collect();
     let sources: Vec<String> = strings(row, "source_owners")
         .into_iter()
-        .filter(|source| source.ends_with(".rs"))
+        .filter(|source| {
+            Path::new(source)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+        })
         .collect();
     if crates.is_empty() || sources.is_empty() {
         return false;
@@ -1911,7 +1915,7 @@ fn downstream_consumers_are_real_cycle_aware_manifests() {
         "asupersync-dep-p1-foundations-upksjk.5.2"
     );
     assert!(string(probe_policy, "remote_absence_rule").contains("may not claim downstream"));
-    let authoritative_portfolio_host = repo_root() == PathBuf::from("/data/projects/asupersync");
+    let authoritative_portfolio_host = repo_root() == Path::new("/data/projects/asupersync");
     let mut unavailable_manifests = Vec::new();
     let mut consumer_ids = BTreeSet::new();
     for row in array(&registry, "downstream_consumers") {
