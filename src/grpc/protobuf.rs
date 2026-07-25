@@ -1,15 +1,42 @@
-//! Protobuf codec implementation using prost.
+//! Protobuf codecs for gRPC: the owned surface and the prost-backed adapter.
 //!
-//! This module provides a [`ProstCodec`] that implements the gRPC [`Codec`] trait
-//! for encoding and decoding Protocol Buffer messages using the prost library.
+//! This module hosts two implementations of the gRPC [`Codec`] trait:
 //!
-//! # Features
+//! - [`ProtoCodec`], generic over the owned [`ProtoMessage`] trait. This is the
+//!   dependency-free surface and the migration target
+//!   (`br-asupersync-5z2scg.1.2`).
+//! - [`ProstCodec`], backed by the `prost` library. This remains fully
+//!   supported as the coexistence adapter; it is not deprecated and not
+//!   removed.
 //!
-//! - Zero-copy decoding where possible
-//! - Configurable message size limits
-//! - Deterministic encoding for consistent wire format
-//! - Unknown field preservation (via prost's default behavior)
-//! - Cancel-safe: all operations are synchronous and complete immediately
+//! Both are cancel-safe in the same sense: every operation is synchronous and
+//! completes immediately, so there is no partially-encoded or partially-decoded
+//! state to strand on cancellation.
+//!
+//! # Choosing between them
+//!
+//! | | [`ProtoCodec`] | [`ProstCodec`] |
+//! |---|---|---|
+//! | Message trait | [`ProtoMessage`] (owned, open to downstream crates) | `prost::Message` |
+//! | Unknown fields | Preserved **opt-in** via [`UnknownFields`] | **Dropped** |
+//! | `Codec::set_max_*_message_size` | Honored | **Ignored** |
+//! | Encode allocation | Charged against the budget while writing | `encoded_len()` then allocate |
+//!
+//! Two of those rows are corrections to long-standing beliefs about this
+//! module, and both matter in production:
+//!
+//! - **Unknown fields are not preserved by prost.** `prost` discards fields it
+//!   does not recognize unless the message type explicitly carries them, so a
+//!   [`ProstCodec`] decode/re-encode round trip is lossy against a newer peer.
+//!   An earlier version of this documentation claimed the opposite. If you rely
+//!   on forwarding a newer peer's fields untouched, use [`ProtoCodec`] with an
+//!   [`UnknownFields`] member; that path is pinned by a byte-for-byte
+//!   round-trip test.
+//! - **[`ProstCodec`] ignores the per-channel size hooks.** It tracks only the
+//!   single limit given at construction, so a limit configured above it through
+//!   [`Codec::set_max_encode_message_size`] or
+//!   [`Codec::set_max_decode_message_size`] silently does not apply.
+//!   [`ProtoCodec`] implements both.
 //!
 //! # Example
 //!
