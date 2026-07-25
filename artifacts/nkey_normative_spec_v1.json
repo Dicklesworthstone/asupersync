@@ -1,0 +1,1266 @@
+{
+  "schema_version": 1,
+  "artifact_id": "nkey-normative-spec-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-dep-p4-nkeys-poc60v.1.1",
+  "capability_id": "CAP-NKEY-AUTH",
+  "baseline_revision": "d14477867f3b8d3472443b87ba0851a440af61a6",
+  "captured_date_utc": "2026-07-25",
+  "authority": {
+    "decision": "FULL_NOMINAL_FORMAT_WITH_FAIL_CLOSED_ROLE_POLICY",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "registry_evidence_state": "BASELINE_PLANNED",
+    "registry_cutover_state": "KEEP_INCUMBENT",
+    "normative_core_children_authorized": true,
+    "production_integration_authorized": false,
+    "dependency_exit_allowed": false,
+    "unknown_rows": 0,
+    "ambiguous_rows": 0,
+    "scope": "All public N/C/O/A/U/M/V/X encodings, both P private payload forms, every typed seed form, Ed25519 versus X25519 operation separation, and the complete Operator/Account/User/delegated signer policy are normative. Current User-only production checks remain fail-closed. Rust-only M/V forms are preserved as non-NATS Ed25519 extensions. Observed incumbent type-confusion, signer-policy, secret-disposition, and resource-limit defects are explicitly non-normative.",
+    "implementation_gate": "N2-N6 may implement only the rows in this artifact. Any newly discovered UNKNOWN or ambiguity returns the affected child to BLOCKED and requires this artifact, its companion document, and its contract to change together.",
+    "cutover_gate": "No production cutover or dependency removal is authorized until every row has SAME_OR_BETTER evidence, the real-service scenarios pass, and the independent security review closes."
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "accepted_states": [
+      "NORMATIVE",
+      "PRESERVED_EXTENSION",
+      "OBSERVED_NON_NORMATIVE",
+      "UNAVAILABLE_CURRENT_BUILD",
+      "PLANNED",
+      "BLOCKED",
+      "ROUTED",
+      "OUT_OF_SCOPE"
+    ],
+    "missing_evidence_is_parity": false,
+    "current_defects_are_compatibility_requirements": false,
+    "cryptographic_validity_implies_authorization": false,
+    "crc_is_authentication": false
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+      "line_count": 991
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+      "line_count": 4664
+    },
+    {
+      "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
+      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
+      "line_count": 332
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "82a73ec1c14fbe317611f6d592af480d75d002cbe9333045ab74840bcaf1c081",
+      "line_count": 6907
+    },
+    {
+      "path": "artifacts/dependency_api_adr_registry_v1.json",
+      "sha256": "ca0b3f80af74b296e6beae0f7bf76aef0f8e73b161efa177de3239742c324786",
+      "line_count": 6831
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+      "line_count": 4650
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_007_nkey_auth.md",
+      "sha256": "e4fa5414e836d812e5f2d5d386ed0cbabed7ee398712efdbb1cb368406bc57df",
+      "line_count": 149
+    },
+    {
+      "path": "src/messaging/nats.rs",
+      "sha256": "be280b4bdbcf3e557e96e4989cc7c05c8b920f7cb89e5fee58d1fdfd6a5915fd",
+      "line_count": 5539
+    },
+    {
+      "path": "src/security/keys/mod.rs",
+      "sha256": "51d2b9a90729311d426a75a991706eea9aa9edbeff4ac3233269331c5e105c26",
+      "line_count": 777
+    },
+    {
+      "path": "src/runtime/config.rs",
+      "sha256": "4058034fd1a594171e3ad3220cf3d0628c0c43959ff21185ebc2a9287e8bcf84",
+      "line_count": 10763
+    },
+    {
+      "path": "src/atp/identity/mod.rs",
+      "sha256": "4f634ef675fc103ef4ba349d1402655d8f2b55f947e7362dfddf6ba283020579",
+      "line_count": 354
+    },
+    {
+      "path": "src/atp/policy/verification.rs",
+      "sha256": "ec2a1b53cbb382a1506f8c8faed38964dfc24026238c787069ce8ba8cecfc613",
+      "line_count": 568
+    },
+    {
+      "path": "src/agent_swarm/control_plane.rs",
+      "sha256": "f0dcad5544b29eed1c34f864452d06810dd2068931814dd054294d894ab51620",
+      "line_count": 1328
+    },
+    {
+      "path": "tests/signed_profile_bundle_contract.rs",
+      "sha256": "12bf5e998e6118d51d412309a2b9174a4480b31821ae38cf70183670f3fe9494",
+      "line_count": 1496
+    },
+    {
+      "path": "tests/nats_jwt_empty_issuer_rejected.rs",
+      "sha256": "4b49b951fdb6af1aac18b9a66ff329c064ddeb21b23f26082779c84de8bdf381",
+      "line_count": 37
+    },
+    {
+      "path": "fuzz/fuzz_targets/nats_creds_jwt.rs",
+      "sha256": "e34d434909a63d93f6b131ffcc74e493898f54e6be81c6fc85c635fccc535786",
+      "line_count": 567
+    },
+    {
+      "path": "scripts/run_dependency_sovereignty_e2e.sh",
+      "sha256": "59ccb2212cb55b9fae8c28ec880fff532ab762a69669277f26940008ebd01af2",
+      "line_count": 1077
+    }
+  ],
+  "upstream_baselines": {
+    "rust_incumbent": {
+      "package": "nkeys",
+      "version": "0.4.5",
+      "cargo_requirement": "0.4.5",
+      "crates_io_checksum": "879011babc47a1c7fdf5a935ae3cfe94f34645ca0cac1c7f6424b36fc743d1bf",
+      "repository": "https://github.com/wasmcloud/nkeys",
+      "default_features": [],
+      "enabled_features": [],
+      "xkeys_feature_enabled": false,
+      "normal_dependency": true,
+      "observed_public_types": [
+        "KeyPair",
+        "KeyPairType",
+        "error::Error",
+        "error::ErrorKind"
+      ],
+      "observed_public_functions": [
+        "KeyPair::new",
+        "KeyPair::new_from_raw",
+        "KeyPair::new_server",
+        "KeyPair::new_cluster",
+        "KeyPair::new_operator",
+        "KeyPair::new_account",
+        "KeyPair::new_user",
+        "KeyPair::new_module",
+        "KeyPair::new_service",
+        "KeyPair::from_public_key",
+        "KeyPair::from_seed",
+        "KeyPair::public_key",
+        "KeyPair::seed",
+        "KeyPair::sign",
+        "KeyPair::verify",
+        "KeyPair::key_pair_type",
+        "from_public_key",
+        "decode_seed"
+      ],
+      "feature_gated_public_functions": [
+        "XKey::new",
+        "XKey::new_from_raw",
+        "XKey::from_public_key",
+        "XKey::from_seed",
+        "XKey::public_key",
+        "XKey::private_key",
+        "XKey::seed",
+        "XKey::seal",
+        "XKey::seal_with_rand",
+        "XKey::seal_with_nonce",
+        "XKey::open"
+      ]
+    },
+    "official_go_reference": {
+      "package": "github.com/nats-io/nkeys",
+      "version": "0.4.16",
+      "commit": "c1eebf38bd8b1b1021b45b5f8f403052ac042dc5",
+      "commit_date_utc": "2026-06-02",
+      "repository": "https://github.com/nats-io/nkeys",
+      "source_urls": [
+        "https://github.com/nats-io/nkeys/blob/c1eebf38bd8b1b1021b45b5f8f403052ac042dc5/strkey.go",
+        "https://github.com/nats-io/nkeys/blob/c1eebf38bd8b1b1021b45b5f8f403052ac042dc5/nkeys.go",
+        "https://github.com/nats-io/nkeys/blob/c1eebf38bd8b1b1021b45b5f8f403052ac042dc5/keypair.go",
+        "https://github.com/nats-io/nkeys/blob/c1eebf38bd8b1b1021b45b5f8f403052ac042dc5/xkeys.go",
+        "https://github.com/nats-io/nkeys/blob/c1eebf38bd8b1b1021b45b5f8f403052ac042dc5/nkeys_test.go",
+        "https://github.com/nats-io/nkeys/blob/c1eebf38bd8b1b1021b45b5f8f403052ac042dc5/strkey_test.go"
+      ],
+      "role_prefixes": [
+        "N",
+        "C",
+        "O",
+        "A",
+        "U",
+        "X"
+      ],
+      "does_not_define_rust_extensions": [
+        "M",
+        "V"
+      ],
+      "keypair_operations": [
+        "Seed",
+        "PublicKey",
+        "PrivateKey",
+        "Sign",
+        "Verify",
+        "Wipe",
+        "Seal",
+        "SealWithRand",
+        "Open"
+      ]
+    },
+    "official_nats_policy_docs": [
+      {
+        "topic": "JWT role hierarchy and authentication",
+        "url": "https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/jwt"
+      },
+      {
+        "topic": "Operator, Account and User chain of trust",
+        "url": "https://docs.nats.io/running-a-nats-service/nats_admin/security/jwt"
+      },
+      {
+        "topic": "same-kind delegated signing keys",
+        "url": "https://docs.nats.io/using-nats/nats-tools/nsc/signing_keys"
+      }
+    ]
+  },
+  "format_contract": {
+    "base32": {
+      "alphabet": "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
+      "case": "UPPERCASE_ONLY",
+      "padding": "FORBIDDEN",
+      "canonical_rule": "Decode must consume the complete input, reject non-alphabet bytes and non-zero trailing bits, then re-encode byte-for-byte identically. Lowercase, whitespace, separators and '=' padding are noncanonical and rejected.",
+      "public_length_chars": 56,
+      "seed_length_chars": 58,
+      "private_x25519_length_chars": 56,
+      "private_ed25519_length_chars": 108
+    },
+    "crc16_xmodem": {
+      "polynomial_hex": "0x1021",
+      "initial_value_hex": "0x0000",
+      "input_reflected": false,
+      "output_reflected": false,
+      "xor_out_hex": "0x0000",
+      "serialized_byte_order": "little-endian",
+      "scope": "Every prefix byte followed by the complete payload, excluding the two checksum bytes.",
+      "security_claim": "Corruption detection only; never authentication, authorization, collision resistance or a MAC."
+    },
+    "public_encoding": {
+      "raw_layout": "[public_prefix:1][public_key:32][crc16_xmodem_le:2]",
+      "decoded_length_bytes": 35,
+      "key_material_length_bytes": 32
+    },
+    "seed_encoding": {
+      "raw_layout": "[packed_seed_prefix:2][raw_secret_seed:32][crc16_xmodem_le:2]",
+      "decoded_length_bytes": 36,
+      "secret_length_bytes": 32,
+      "packing": {
+        "seed_prefix_byte": 144,
+        "public_prefix_mask": 248,
+        "first_byte_formula": "0x90 | (public_prefix >> 5)",
+        "second_byte_formula": "(public_prefix & 0x1f) << 3",
+        "decoded_outer_formula": "raw[0] & 0xf8",
+        "decoded_inner_formula": "((raw[0] & 0x07) << 5) | ((raw[1] & 0xf8) >> 3)",
+        "unused_low_bits_rule": "The low three bits of raw[1] are zero in canonical encodings and any non-zero value is rejected as noncanonical."
+      }
+    },
+    "private_encoding": {
+      "raw_layout": "[private_prefix:1][private_material:32_or_64][crc16_xmodem_le:2]",
+      "private_prefix_byte": 120,
+      "type_recovery": "P is not self-describing by role. The surrounding owned type and the exact payload length select X25519 secret material (32 bytes) or expanded Ed25519 private material (64 bytes). An untyped P string grants no operation.",
+      "seed_preference": "Seed forms are the canonical persistent secret for reconstructing key pairs. P is preserved for interop but must be opt-in and secret-safe."
+    }
+  },
+  "prefix_matrix": [
+    {
+      "prefix_id": "NKEY-PREFIX-A",
+      "symbol": "A",
+      "byte": 0,
+      "meaning": "Account Ed25519 public identity",
+      "seed_symbol": "SA",
+      "algorithm": "Ed25519",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "NORMATIVE",
+      "current_production_acceptance": "rejected by User-only key-store/NATS/ATP boundaries; accepted by generic verification paths",
+      "signer_role": "Account identity or authorized Account signing key"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-C",
+      "symbol": "C",
+      "byte": 16,
+      "meaning": "Cluster Ed25519 public identity",
+      "seed_symbol": "SC",
+      "algorithm": "Ed25519",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "NORMATIVE",
+      "current_production_acceptance": "generic verification paths only",
+      "signer_role": "no NATS JWT hierarchy authority"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-M",
+      "symbol": "M",
+      "byte": 96,
+      "meaning": "Module Ed25519 public identity",
+      "seed_symbol": "SM",
+      "algorithm": "Ed25519",
+      "official_go": "ABSENT",
+      "rust_incumbent": "PRESERVED_EXTENSION",
+      "current_production_acceptance": "generic verification paths only",
+      "signer_role": "no NATS JWT hierarchy authority"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-N",
+      "symbol": "N",
+      "byte": 104,
+      "meaning": "Server Ed25519 public identity",
+      "seed_symbol": "SN",
+      "algorithm": "Ed25519",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "NORMATIVE",
+      "current_production_acceptance": "generic verification paths only",
+      "signer_role": "no Operator/Account/User JWT hierarchy authority"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-O",
+      "symbol": "O",
+      "byte": 112,
+      "meaning": "Operator Ed25519 public identity",
+      "seed_symbol": "SO",
+      "algorithm": "Ed25519",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "NORMATIVE",
+      "current_production_acceptance": "generic verification paths and NATS JWT issuer parsing",
+      "signer_role": "Operator identity or authorized Operator signing key"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-P-ED25519",
+      "symbol": "P",
+      "byte": 120,
+      "meaning": "Expanded Ed25519 private key",
+      "payload_length_bytes": 64,
+      "encoded_length_chars": 108,
+      "algorithm": "Ed25519",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "UNAVAILABLE_CURRENT_BUILD",
+      "current_production_acceptance": "none",
+      "signer_role": "none until imported into an explicitly typed secret key"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-P-X25519",
+      "symbol": "P",
+      "byte": 120,
+      "meaning": "X25519 private scalar material",
+      "payload_length_bytes": 32,
+      "encoded_length_chars": 56,
+      "algorithm": "X25519",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "UNAVAILABLE_CURRENT_BUILD",
+      "rust_feature": "xkeys",
+      "current_production_acceptance": "none",
+      "signer_role": "never"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-S",
+      "symbol": "S",
+      "byte": 144,
+      "meaning": "typed 32-byte secret-seed container",
+      "algorithm": "selected by the packed inner public prefix",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "NORMATIVE",
+      "current_production_acceptance": "User seeds only at key-store/NATS boundaries; all eight inner kinds accepted by raw incumbent decode",
+      "signer_role": "none until decoded into an explicitly typed owned secret"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-U",
+      "symbol": "U",
+      "byte": 160,
+      "meaning": "User Ed25519 public identity",
+      "seed_symbol": "SU",
+      "algorithm": "Ed25519",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "NORMATIVE",
+      "current_production_acceptance": "required by key store, NATS nonce authentication and ATP durable identity",
+      "signer_role": "server-nonce proof only; never a JWT issuer"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-V",
+      "symbol": "V",
+      "byte": 168,
+      "meaning": "Service Ed25519 public identity",
+      "seed_symbol": "SV",
+      "algorithm": "Ed25519",
+      "official_go": "ABSENT",
+      "rust_incumbent": "PRESERVED_EXTENSION",
+      "current_production_acceptance": "generic verification paths only",
+      "signer_role": "no NATS JWT hierarchy authority"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-X",
+      "symbol": "X",
+      "byte": 184,
+      "meaning": "Curve X25519 public key",
+      "seed_symbol": "SX",
+      "algorithm": "X25519 plus NaCl box compatible encryption",
+      "official_go": "NORMATIVE",
+      "rust_incumbent": "UNAVAILABLE_CURRENT_BUILD",
+      "rust_feature": "xkeys",
+      "current_production_acceptance": "none",
+      "signer_role": "never; Curve keys cannot sign or verify Ed25519 signatures"
+    },
+    {
+      "prefix_id": "NKEY-PREFIX-Z",
+      "symbol": "Z",
+      "byte": 200,
+      "meaning": "unknown sentinel",
+      "algorithm": "none",
+      "official_go": "REJECT",
+      "rust_incumbent": "REJECT_PUBLIC",
+      "current_production_acceptance": "none",
+      "signer_role": "never"
+    }
+  ],
+  "operation_matrix": [
+    {
+      "operation_id": "NKEY-OP-ED-SEED",
+      "key_form": "typed N/C/O/A/U/M/V Ed25519 seed",
+      "construct": true,
+      "public_key": true,
+      "sign": true,
+      "verify": true,
+      "seal": false,
+      "open": false,
+      "normative_state": "NORMATIVE"
+    },
+    {
+      "operation_id": "NKEY-OP-ED-PUBLIC",
+      "key_form": "typed N/C/O/A/U/M/V Ed25519 public key",
+      "construct": true,
+      "public_key": true,
+      "sign": false,
+      "verify": true,
+      "seal": false,
+      "open": false,
+      "normative_state": "NORMATIVE"
+    },
+    {
+      "operation_id": "NKEY-OP-X-SEED",
+      "key_form": "typed SX X25519 seed/private key",
+      "construct": true,
+      "public_key": true,
+      "sign": false,
+      "verify": false,
+      "seal": true,
+      "open": true,
+      "normative_state": "NORMATIVE"
+    },
+    {
+      "operation_id": "NKEY-OP-X-PUBLIC",
+      "key_form": "typed X X25519 public key",
+      "construct": true,
+      "public_key": true,
+      "sign": false,
+      "verify": false,
+      "seal": true,
+      "open": false,
+      "normative_state": "NORMATIVE"
+    },
+    {
+      "operation_id": "NKEY-OP-UNTYPED-P",
+      "key_form": "untyped P private material",
+      "construct": false,
+      "public_key": false,
+      "sign": false,
+      "verify": false,
+      "seal": false,
+      "open": false,
+      "normative_state": "NORMATIVE"
+    },
+    {
+      "operation_id": "NKEY-OP-RUST-CURVE-AS-ED",
+      "key_form": "nkeys::KeyPairType::Curve through base KeyPair",
+      "construct": true,
+      "public_key": true,
+      "sign": true,
+      "verify": true,
+      "seal": false,
+      "open": false,
+      "normative_state": "OBSERVED_NON_NORMATIVE",
+      "reason": "The base Rust KeyPair labels an Ed25519 key X and permits signatures. This is type confusion, not X25519 behavior, and must not be preserved."
+    }
+  ],
+  "signer_policy_matrix": [
+    {
+      "policy_id": "NKEY-POL-O-SELF",
+      "claim": "Operator JWT",
+      "subject_kind": "O",
+      "issuer_kind": "O",
+      "relationship": "issuer equals subject identity",
+      "decision": "ALLOW",
+      "conditions": "signature valid, ed25519-nkey algorithm, configured trust anchor"
+    },
+    {
+      "policy_id": "NKEY-POL-O-DELEGATED",
+      "claim": "Account JWT",
+      "subject_kind": "A",
+      "issuer_kind": "O",
+      "relationship": "issuer is a same-kind Operator signing key",
+      "decision": "ALLOW",
+      "conditions": "issuer is listed in the trusted Operator JWT signing keys and is not revoked"
+    },
+    {
+      "policy_id": "NKEY-POL-O-IDENTITY-ACCOUNT",
+      "claim": "Account JWT",
+      "subject_kind": "A",
+      "issuer_kind": "O",
+      "relationship": "issuer is the trusted Operator identity",
+      "decision": "ALLOW",
+      "conditions": "signature valid and trusted Operator chain current"
+    },
+    {
+      "policy_id": "NKEY-POL-A-IDENTITY-USER",
+      "claim": "User JWT",
+      "subject_kind": "U",
+      "issuer_kind": "A",
+      "relationship": "issuer is the resolved Account identity",
+      "decision": "ALLOW",
+      "conditions": "signature valid, Account JWT valid, subject not revoked"
+    },
+    {
+      "policy_id": "NKEY-POL-A-DELEGATED-USER",
+      "claim": "User JWT",
+      "subject_kind": "U",
+      "issuer_kind": "A",
+      "relationship": "issuer is a same-kind Account signing key",
+      "decision": "ALLOW",
+      "conditions": "issuer is listed in the resolved Account JWT, issuer_account equals that Account subject, scoped signing-key permissions allow the claim, key not revoked"
+    },
+    {
+      "policy_id": "NKEY-POL-U-NONCE",
+      "claim": "NATS server challenge",
+      "subject_kind": "U",
+      "issuer_kind": "U",
+      "relationship": "seed public key equals JWT subject",
+      "decision": "ALLOW",
+      "conditions": "nonce signature valid, JWT chain authorized, subject comparison constant-time"
+    },
+    {
+      "policy_id": "NKEY-POL-UNLISTED-DELEGATE",
+      "claim": "any JWT",
+      "subject_kind": "O/A/U",
+      "issuer_kind": "O/A",
+      "relationship": "same-kind issuer is not listed by its identity JWT",
+      "decision": "DENY",
+      "conditions": "cryptographic validity does not grant authorization"
+    },
+    {
+      "policy_id": "NKEY-POL-CROSS-O-U",
+      "claim": "User JWT",
+      "subject_kind": "U",
+      "issuer_kind": "O",
+      "relationship": "Operator skips Account level",
+      "decision": "DENY",
+      "conditions": "role hierarchy is mandatory"
+    },
+    {
+      "policy_id": "NKEY-POL-CROSS-A-A",
+      "claim": "Account JWT",
+      "subject_kind": "A",
+      "issuer_kind": "A",
+      "relationship": "Account attempts production self-authorization",
+      "decision": "DENY",
+      "conditions": "self-signed exchange artifacts are not a trusted server-chain Account JWT"
+    },
+    {
+      "policy_id": "NKEY-POL-U-ISSUER",
+      "claim": "any JWT",
+      "subject_kind": "any",
+      "issuer_kind": "U",
+      "relationship": "User attempts to issue a JWT",
+      "decision": "DENY",
+      "conditions": "Users have no signing-key authority"
+    },
+    {
+      "policy_id": "NKEY-POL-NCMV-ISSUER",
+      "claim": "Operator/Account/User JWT",
+      "subject_kind": "O/A/U",
+      "issuer_kind": "N/C/M/V",
+      "relationship": "non-hierarchy Ed25519 key",
+      "decision": "DENY",
+      "conditions": "valid prefix and signature are insufficient"
+    },
+    {
+      "policy_id": "NKEY-POL-X-ISSUER",
+      "claim": "any signed claim",
+      "subject_kind": "any",
+      "issuer_kind": "X",
+      "relationship": "Curve key used as signer",
+      "decision": "DENY",
+      "conditions": "Curve types expose no Ed25519 sign or verify operation"
+    },
+    {
+      "policy_id": "NKEY-POL-ISSUER-MISSING",
+      "claim": "any JWT requiring verification",
+      "subject_kind": "any",
+      "issuer_kind": "missing/empty/invalid",
+      "relationship": "no verifiable issuer",
+      "decision": "DENY",
+      "conditions": "fail closed before authorization"
+    },
+    {
+      "policy_id": "NKEY-POL-CHAIN-UNTRUSTED",
+      "claim": "Account or User JWT",
+      "subject_kind": "A/U",
+      "issuer_kind": "O/A",
+      "relationship": "signature valid but parent identity/signing-key chain is absent, stale or revoked",
+      "decision": "DENY",
+      "conditions": "authorization chain must terminate at a configured Operator trust anchor"
+    },
+    {
+      "policy_id": "NKEY-POL-ALGORITHM",
+      "claim": "any NATS JWT",
+      "subject_kind": "any",
+      "issuer_kind": "any",
+      "relationship": "JWT alg is absent or not ed25519-nkey",
+      "decision": "DENY",
+      "conditions": "algorithm pinning is fail-closed"
+    }
+  ],
+  "error_contract": {
+    "incumbent_error_kinds": [
+      "InvalidPrefix",
+      "InvalidKeyLength",
+      "VerifyError",
+      "SignatureError",
+      "ChecksumFailure",
+      "CodecFailure",
+      "IncorrectKeyType",
+      "InvalidPayload",
+      "InvalidSignatureLength"
+    ],
+    "normative_error_ids": [
+      {
+        "error_id": "NKEY-E001",
+        "class": "LENGTH",
+        "boundary": "encoded key, seed, private key, signature or bounded protocol field has the wrong length"
+      },
+      {
+        "error_id": "NKEY-E002",
+        "class": "ALPHABET",
+        "boundary": "non-Base32 byte"
+      },
+      {
+        "error_id": "NKEY-E003",
+        "class": "NONCANONICAL",
+        "boundary": "lowercase, padding, whitespace, separator, trailing-bit or re-encode mismatch"
+      },
+      {
+        "error_id": "NKEY-E004",
+        "class": "CHECKSUM",
+        "boundary": "CRC16-XMODEM mismatch"
+      },
+      {
+        "error_id": "NKEY-E005",
+        "class": "OUTER_PREFIX",
+        "boundary": "unknown or wrong outer public/private/seed prefix"
+      },
+      {
+        "error_id": "NKEY-E006",
+        "class": "SEED_INNER_PREFIX",
+        "boundary": "packed seed inner prefix is unknown, forbidden or noncanonical"
+      },
+      {
+        "error_id": "NKEY-E007",
+        "class": "KEY_MATERIAL",
+        "boundary": "key bytes cannot construct the selected algorithm/type"
+      },
+      {
+        "error_id": "NKEY-E008",
+        "class": "WRONG_KIND",
+        "boundary": "valid key form is not the type required by the caller"
+      },
+      {
+        "error_id": "NKEY-E009",
+        "class": "MISSING_SECRET",
+        "boundary": "secret operation requested from a public-only value"
+      },
+      {
+        "error_id": "NKEY-E010",
+        "class": "SIGNATURE_LENGTH",
+        "boundary": "Ed25519 signature is not exactly 64 bytes"
+      },
+      {
+        "error_id": "NKEY-E011",
+        "class": "SIGNATURE_MISMATCH",
+        "boundary": "well-formed signature does not verify"
+      },
+      {
+        "error_id": "NKEY-E012",
+        "class": "UNAUTHORIZED_SIGNER",
+        "boundary": "signature verifies but signer relationship or scope is not authorized"
+      },
+      {
+        "error_id": "NKEY-E013",
+        "class": "ALGORITHM",
+        "boundary": "algorithm missing, unexpected or incompatible with the key kind"
+      },
+      {
+        "error_id": "NKEY-E014",
+        "class": "TEMPORAL_POLICY",
+        "boundary": "claim not-yet-valid, expired, revoked or stale"
+      },
+      {
+        "error_id": "NKEY-E015",
+        "class": "RESOURCE_LIMIT",
+        "boundary": "configured input, allocation or work ceiling exceeded before unbounded work"
+      },
+      {
+        "error_id": "NKEY-E016",
+        "class": "CURVE_OPERATION",
+        "boundary": "sign/verify requested from X25519 or seal/open requested from Ed25519"
+      },
+      {
+        "error_id": "NKEY-E017",
+        "class": "SECRET_DISPOSITION",
+        "boundary": "secret export, clone, serialization or persistence violates explicit policy"
+      }
+    ],
+    "diagnostic_policy": "Errors name class, field and safe size/type metadata. They never include seed/private bytes, full credential blocks, JWTs, signatures or decrypted payloads. Parser distinctions are stable for callers but must not expose secret-dependent timing or data."
+  },
+  "public_and_downstream_api": [
+    {
+      "api_id": "NKEY-API-UPSTREAM-KEYPAIR",
+      "path": "nkeys::KeyPair",
+      "state": "SHIPPED_VIA_DEPENDENCY",
+      "surface": "construction, public/seed encoding, Ed25519 sign/verify, parsing and type inspection",
+      "replacement_obligation": "Owned types replace the API directly; no permanent compatibility shim."
+    },
+    {
+      "api_id": "NKEY-API-UPSTREAM-XKEY",
+      "path": "nkeys::XKey",
+      "state": "UNAVAILABLE_CURRENT_BUILD",
+      "surface": "typed X25519 public/seed/private and seal/open",
+      "replacement_obligation": "Implement full nominal Curve capability despite the disabled incumbent feature, because the capability registry and this bead require it."
+    },
+    {
+      "api_id": "NKEY-API-KEYSTORE-LEAK",
+      "path": "asupersync::security::keys::IdentityKeyStore::active_key_pair",
+      "source_path": "src/security/keys/mod.rs",
+      "source_fragment": "pub fn active_key_pair(&self) -> Result<KeyPair, KeyStoreError>",
+      "state": "SHIPPED_PUBLIC_DEPENDENCY_TYPE",
+      "surface": "only public asupersync signature that exposes nkeys::KeyPair",
+      "replacement_obligation": "Breaking direct migration to an owned signer; preserve usable sign/verify capability without a shim."
+    },
+    {
+      "api_id": "NKEY-API-NATS",
+      "path": "asupersync::messaging::nats::NatsConfig",
+      "source_path": "src/messaging/nats.rs",
+      "source_fragment": "fn load_user_nkey(seed: &str) -> Result<KeyPair, NatsError>",
+      "state": "SHIPPED_OWNED_WRAPPER",
+      "surface": "creds parsing, User seed loading, nonce signing, JWT parsing, subject binding and CONNECT emission",
+      "replacement_obligation": "Preserve accepted .creds markers, exact User-only enforcement, redacted Debug, constant-time subject binding and base64url nonce signature."
+    },
+    {
+      "api_id": "NKEY-API-ATP-IDENTITY",
+      "path": "asupersync::atp::identity::DurablePeerIdentity",
+      "source_path": "src/atp/identity/mod.rs",
+      "source_fragment": "fn validate_nkey_public_key(public_key: &str, generation: u64)",
+      "state": "SHIPPED_OWNED_WRAPPER",
+      "surface": "User-only durable public identity, peer ID, fingerprint and proof metadata",
+      "replacement_obligation": "Preserve User-only fail-closed validation and nkey-ed25519 proof method."
+    },
+    {
+      "api_id": "NKEY-API-ATP-CAPABILITY",
+      "path": "asupersync::atp::policy::verification",
+      "source_path": "src/atp/policy/verification.rs",
+      "source_fragment": "pub fn verify_capability(&self, capability: &Capability)",
+      "state": "SHIPPED_OWNED_WRAPPER",
+      "surface": "deterministic capability signing and trusted-peer public verification",
+      "replacement_obligation": "Preserve canonical payload and Outcome/error behavior while using owned User key types."
+    },
+    {
+      "api_id": "NKEY-API-SWARM",
+      "path": "asupersync::agent_swarm::control_plane",
+      "source_path": "src/agent_swarm/control_plane.rs",
+      "source_fragment": "async fn validate_agent_credentials(",
+      "state": "SHIPPED_OWNED_WRAPPER",
+      "surface": "agent credential signature plus optional issuer allow-list",
+      "replacement_obligation": "Preserve scheme, canonical payload, freshness and issuer checks; add explicit accepted key-kind policy."
+    },
+    {
+      "api_id": "NKEY-API-SIGNED-PROFILE",
+      "path": "asupersync::runtime::config::SignedProfileBundleIntegrityMode::NkeyEd25519",
+      "source_path": "src/runtime/config.rs",
+      "source_fragment": "fn verify_nkey_signature(&self) -> Vec<String>",
+      "state": "SHIPPED_OWNED_WRAPPER",
+      "surface": "domain-separated signed profile bundle with explicit trusted key store, epochs, expiry and revocation",
+      "replacement_obligation": "Preserve deterministic payload and all refusal reasons; add explicit accepted key-kind policy and secret-safe signing."
+    }
+  ],
+  "downstream_workflows": [
+    {
+      "journey_id": "NKEY-JOURNEY-NATS-NKEY",
+      "capability_ids": [
+        "CAP-NKEY-AUTH",
+        "CAP-NATS-MESSAGING"
+      ],
+      "source_path": "src/messaging/nats.rs",
+      "behavior": "User seed signs an 8..256-character validated server nonce and CONNECT sends nkey plus base64url-no-pad signature.",
+      "e2e_scenario": "nkey_nats_auth",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "journey_id": "NKEY-JOURNEY-NATS-JWT",
+      "capability_ids": [
+        "CAP-NKEY-AUTH",
+        "CAP-NATS-MESSAGING"
+      ],
+      "source_path": "src/messaging/nats.rs",
+      "behavior": "creds JWT and User seed bind by constant-time subject comparison; issuer signature, algorithm and expiration are checked before CONNECT.",
+      "e2e_scenario": "nkey_jwt_authorization",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "journey_id": "NKEY-JOURNEY-KEYSTORE",
+      "capability_ids": [
+        "CAP-NKEY-AUTH"
+      ],
+      "source_path": "src/security/keys/mod.rs",
+      "behavior": "caller-provided entropy creates User seeds, JSON persistence preserves generation/history/revocation, Unix files are 0600, fingerprints are domain-separated and Debug redacts seeds.",
+      "e2e_scenario": "nkey_secret_redaction",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "journey_id": "NKEY-JOURNEY-ATP-IDENTITY",
+      "capability_ids": [
+        "CAP-NKEY-AUTH"
+      ],
+      "source_path": "src/atp/identity/mod.rs",
+      "behavior": "User public key becomes a durable peer identity, PeerId, fingerprint and proof identity.",
+      "e2e_scenario": "nkey_all_forms",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "journey_id": "NKEY-JOURNEY-ATP-CAPABILITY",
+      "capability_ids": [
+        "CAP-NKEY-AUTH"
+      ],
+      "source_path": "src/atp/policy/verification.rs",
+      "behavior": "active User seed signs canonical capability JSON and trusted DurablePeerIdentity verifies it.",
+      "e2e_scenario": "nkey_all_forms",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "journey_id": "NKEY-JOURNEY-SWARM",
+      "capability_ids": [
+        "CAP-NKEY-AUTH"
+      ],
+      "source_path": "src/agent_swarm/control_plane.rs",
+      "behavior": "agent credential signs a domain-separated payload with freshness and optional issuer allow-list checks.",
+      "e2e_scenario": "nkey_all_forms",
+      "evidence_state": "PLANNED"
+    },
+    {
+      "journey_id": "NKEY-JOURNEY-SIGNED-PROFILE",
+      "capability_ids": [
+        "CAP-NKEY-AUTH"
+      ],
+      "source_path": "src/runtime/config.rs",
+      "behavior": "profile manifest signature is domain separated, algorithm pinned, time/epoch bounded, trusted-key matched and revocation checked.",
+      "e2e_scenario": "nkey_all_forms",
+      "evidence_state": "PLANNED"
+    }
+  ],
+  "secret_concurrency_resource_contract": {
+    "secrets": {
+      "normative": [
+        "Seed/private owned types are not Copy or ordinarily Clone.",
+        "Debug and Display redact secret material.",
+        "Serialization and plaintext export are explicit opt-in operations.",
+        "Drop zeroizes the narrowest owned buffers and documents allocator/copy no-claim boundaries.",
+        "Transient decoded buffers and authentication cancellation paths are wiped.",
+        "No error, panic, trace, log, E2E artifact or report contains seed/private bytes."
+      ],
+      "observed_incumbent": [
+        "nkeys::KeyPair derives Clone and duplicates raw SecretKey and SigningKey state.",
+        "nkeys::KeyPair has no Drop zeroization or Wipe method.",
+        "seed() returns an ordinary String.",
+        "IdentityKeyStore derives Clone and persists seed Strings in plaintext JSON.",
+        "PersistedIdentityKey and NatsConfig custom Debug implementations redact configured secrets.",
+        "Unix persistence is hardened to 0600; Windows ACL enforcement is external and other platforms are best-effort."
+      ]
+    },
+    "concurrency": {
+      "observed_incumbent": "KeyPair is Send + Sync, and public_key/seed/sign/verify use shared references without mutable internal state. Clone creates independent secret copies.",
+      "normative": "Public verification keys are Send + Sync and cheaply shareable. Secret signers may be Send + Sync only when the underlying audited primitive is; shared signing is race-free and deterministic. No mutable global state, ambient RNG or process-global authorization cache is introduced."
+    },
+    "resource_limits": [
+      {
+        "boundary_id": "NKEY-LIMIT-PUBLIC",
+        "normative_limit": "exactly 56 ASCII characters before decode",
+        "current_state": "PRESENT"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-SEED",
+        "normative_limit": "exactly 58 ASCII characters before decode",
+        "current_state": "PRESENT"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-P-X",
+        "normative_limit": "exactly 56 ASCII characters before decode",
+        "current_state": "UNAVAILABLE_CURRENT_BUILD"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-P-ED",
+        "normative_limit": "exactly 108 ASCII characters before decode",
+        "current_state": "UNAVAILABLE_CURRENT_BUILD"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-SIGNATURE",
+        "normative_limit": "exactly 64 bytes before Ed25519 verification",
+        "current_state": "PRESENT"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-NONCE",
+        "normative_limit": "8..=256 ASCII base64/base64url characters plus current repeated/sequential rejection",
+        "current_state": "PRESENT"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-SIGN-MESSAGE",
+        "normative_limit": "caller-declared bounded slice; integrations set protocol-specific maxima before hashing",
+        "current_state": "ABSENT"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-JWT",
+        "normative_limit": "configured maximum compact JWT bytes and decoded JSON bytes before allocation",
+        "current_state": "ABSENT"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-CREDS",
+        "normative_limit": "configured maximum creds file, line count and block bytes before concatenation",
+        "current_state": "ABSENT"
+      },
+      {
+        "boundary_id": "NKEY-LIMIT-X-PAYLOAD",
+        "normative_limit": "configured plaintext/ciphertext maximum; checked-add before allocation",
+        "current_state": "UNAVAILABLE_CURRENT_BUILD"
+      }
+    ]
+  },
+  "vector_corpus": {
+    "raw_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ed25519_public_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "message_utf8": "asupersync-nkey-n1-vector-v1",
+    "ed25519_signature_hex": "75bddd6aba3ec37c3ba2170b938b477673dbbd30b29f1288bc5f5a897f6adc240adc349a37ac89bbcfc24f4fb9654ba5be87561da51ab6ba68672e5d9b996b09",
+    "independent_generator": {
+      "base32": "Python 3 standard-library base64.b32encode without padding",
+      "crc": "Python 3 binascii.crc_hqx(data, 0), emitted little-endian",
+      "ed25519": "Python cryptography 43.0.0 Ed25519PrivateKey",
+      "independence_note": "The generator did not import or execute Rust nkeys. The focused Rust contract recomputes codec values with a small independent implementation and compares the incumbent separately."
+    },
+    "independent_ed25519_vectors": [
+      {
+        "vector_id": "NKEY-VEC-INDEP-A",
+        "kind": "Account",
+        "seed": "SAAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4HYMHI",
+        "public": "AAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3QPZV"
+      },
+      {
+        "vector_id": "NKEY-VEC-INDEP-C",
+        "kind": "Cluster",
+        "seed": "SCAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4HYO7Q",
+        "public": "CAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3R53J"
+      },
+      {
+        "vector_id": "NKEY-VEC-INDEP-O",
+        "kind": "Operator",
+        "seed": "SOAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4H2AJA",
+        "public": "OAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3QZVT"
+      },
+      {
+        "vector_id": "NKEY-VEC-INDEP-N",
+        "kind": "Server",
+        "seed": "SNAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4H2D5U",
+        "public": "NAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3RSWB"
+      },
+      {
+        "vector_id": "NKEY-VEC-INDEP-U",
+        "kind": "User",
+        "seed": "SUAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4H776Y",
+        "public": "UAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3RLKK"
+      },
+      {
+        "vector_id": "NKEY-VEC-INDEP-M",
+        "kind": "Module",
+        "seed": "SMAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4H2CRY",
+        "public": "MAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3RLXP"
+      },
+      {
+        "vector_id": "NKEY-VEC-INDEP-V",
+        "kind": "Service",
+        "seed": "SVAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4H76SU",
+        "public": "VAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3RSLE"
+      },
+      {
+        "vector_id": "NKEY-VEC-OBSERVED-RUST-X-AS-ED",
+        "kind": "Curve",
+        "seed": "SXAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4H74KM",
+        "public": "XAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3QAJY",
+        "state": "OBSERVED_NON_NORMATIVE",
+        "reason": "This pair is Ed25519 material mislabeled with X by base KeyPair, not an X25519 vector."
+      }
+    ],
+    "private_vectors": [
+      {
+        "vector_id": "NKEY-VEC-INDEP-P-ED",
+        "algorithm": "Ed25519",
+        "payload_length_bytes": 64,
+        "encoded": "PAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB6A5BA677HTQQXYOXBXIY45F4BGLH4TLDBG5FBVPR3XEGMQJFKMNYJGWQ"
+      },
+      {
+        "vector_id": "NKEY-VEC-INDEP-P-X",
+        "algorithm": "X25519",
+        "payload_length_bytes": 32,
+        "encoded": "PAAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB7QT2"
+      }
+    ],
+    "official_historical_vectors": [
+      {
+        "vector_id": "NKEY-VEC-RUST-GO-ACCOUNT",
+        "provenance": "nkeys 0.4.5 src/lib.rs roundtrip_encoding_go_compat; generated by Go nkeys",
+        "seed": "SAAPN4W3EG6KCJGUQTKTJ5GSB5NHK5CHAJL4DBGFUM3HHROI4XUEP4OBK4",
+        "public": "ACODERUVFFAWZQDSS6SBIACUA5O6SXF7HJ3YTYXBALHZP3P7R4BUO4J2"
+      },
+      {
+        "vector_id": "NKEY-VEC-RUST-GO-X25519",
+        "provenance": "nkeys 0.4.5 src/xkeys.rs roundtrip_encoding_go_compat; generated by Go nkeys",
+        "seed": "SXAKIYZX2POLIHZ5W5YZEWVTH24NLEUETBW3TKIVYRSS3GNHFXO5D4JJZM",
+        "public": "XBUJMZHVOPQ2SK5VD3TY4VNBPVU2YFGRLK6EFPEPSMVDUYEBSROWZCEA",
+        "current_build_state": "codec-decodable but XKey unavailable; base KeyPair derives a different Ed25519-labeled X public key"
+      },
+      {
+        "vector_id": "NKEY-VEC-GO-BENCH-U",
+        "provenance": "official nats-io/nkeys commit c1eebf38 strkey_test.go BenchmarkDecode",
+        "seed": "SUAMAR5BIQ2AZCPYRTLLK7UGWMGSG2GWD2VPIXBNO7ZIB6TZAU4QAEJS2Q"
+      }
+    ],
+    "malformed_vectors": [
+      {
+        "vector_id": "NKEY-VEC-BAD-SEED-OUTER",
+        "input": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "operation": "from_seed",
+        "incumbent_error_kind": "InvalidPrefix",
+        "normative_error_id": "NKEY-E005"
+      },
+      {
+        "vector_id": "NKEY-VEC-BAD-SEED-CRC",
+        "input": "FAAPN4W3EG6KCJGUQTKTJ5GSB5NHK5CHAJL4DBGFUM3HHROI4XUEP4OBK4",
+        "operation": "from_seed",
+        "incumbent_error_kind": "ChecksumFailure",
+        "normative_error_id": "NKEY-E004"
+      },
+      {
+        "vector_id": "NKEY-VEC-BAD-SEED-LENGTH",
+        "input": "SAAPN4W3EG6KCJGUQTKTJ5GSB5NHK5",
+        "operation": "from_seed",
+        "incumbent_error_kind": "InvalidKeyLength",
+        "normative_error_id": "NKEY-E001"
+      },
+      {
+        "vector_id": "NKEY-VEC-BAD-SEED-ALPHABET",
+        "input": "SAAPN4W3EG6KCJGUQTKTJ5!#B5NHK5CHAJL4DBGFUM3HHROI4XUEP4OBK4",
+        "operation": "from_seed",
+        "incumbent_error_kind": "CodecFailure",
+        "normative_error_id": "NKEY-E002"
+      },
+      {
+        "vector_id": "NKEY-VEC-BAD-PUBLIC-PREFIX",
+        "input": "ZCO4XYNKEN7ZFQ42BHYCBYI3K7USOGG43C2DIJZYWSQ2YEMBOZWN6PYH",
+        "operation": "from_public_key",
+        "incumbent_error_kind": "InvalidPrefix",
+        "normative_error_id": "NKEY-E005"
+      },
+      {
+        "vector_id": "NKEY-VEC-BAD-SIGNATURE-LENGTH",
+        "input": "",
+        "operation": "verify_empty_signature",
+        "incumbent_error_kind": "InvalidSignatureLength",
+        "normative_error_id": "NKEY-E010"
+      },
+      {
+        "vector_id": "NKEY-VEC-NONCANONICAL-LOWERCASE",
+        "input": "suaaaaicamcakbqhbaequcymbuha6earcijrifiwc4mbsgq3dqor4h776y",
+        "operation": "from_seed",
+        "incumbent_error_kind": "CodecFailure",
+        "normative_error_id": "NKEY-E003"
+      }
+    ],
+    "cross_prefix_vectors": [
+      {
+        "vector_id": "NKEY-VEC-CROSS-UNKNOWN-SEED-24",
+        "input": "SDAAAAICAMCAKBQHBAEQUCYMBUHA6EARCIJRIFIWC4MBSGQ3DQOR4HYPT4",
+        "decoded_inner_prefix": 24,
+        "official_go": "REJECT invalid seed inner prefix",
+        "rust_incumbent": "decode_seed returns 24; KeyPair::from_seed silently maps it to Operator",
+        "normative": "REJECT NKEY-E006 before key construction"
+      },
+      {
+        "vector_id": "NKEY-VEC-CROSS-Z-PUBLIC",
+        "input": "ZAB2CB576PHBBPQ5ODORRZ2LYCMWPZGWGCN2KDK7DXOIMZASKUY3QWF6",
+        "decoded_outer_prefix": 200,
+        "official_go": "REJECT unknown public prefix",
+        "rust_incumbent": "REJECT InvalidPrefix",
+        "normative": "REJECT NKEY-E005"
+      },
+      {
+        "vector_id": "NKEY-VEC-CROSS-X-AS-ED",
+        "input": "SXAKIYZX2POLIHZ5W5YZEWVTH24NLEUETBW3TKIVYRSS3GNHFXO5D4JJZM",
+        "official_go": "construct X25519 and derive XBUJMZ...",
+        "rust_incumbent": "base KeyPair constructs Ed25519, permits signing and derives a different X public key",
+        "normative": "construct typed X25519 only; Ed25519 sign/verify unavailable"
+      }
+    ]
+  },
+  "observed_gaps": [
+    {
+      "gap_id": "NKEY-N1-GAP-01",
+      "severity": "CRITICAL",
+      "finding": "A valid-checksum seed with unknown inner prefix 24 is accepted by Rust KeyPair::from_seed and silently becomes Operator.",
+      "normative_resolution": "Reject NKEY-E006 before type construction.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-02",
+      "severity": "CRITICAL",
+      "finding": "Rust base KeyPairType::Curve is Ed25519 material labeled X and can sign/verify; real X25519 XKey is feature-gated off.",
+      "normative_resolution": "Separate owned Ed25519 and X25519 types; Curve has seal/open only.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.3",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-03",
+      "severity": "HIGH",
+      "finding": "KeyPairType::from_str maps every unknown name to Module rather than rejecting it.",
+      "normative_resolution": "Unknown names return a typed error.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.3",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-04",
+      "severity": "HIGH",
+      "finding": "The current Rust build exposes neither official 64-byte Ed25519 P form nor the feature-gated 32-byte X25519 P form.",
+      "normative_resolution": "N3/N4 preserve both forms through explicit typed import/export.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.4",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-05",
+      "severity": "HIGH",
+      "finding": "nkeys::KeyPair and IdentityKeyStore are Clone, seed export returns String, persisted seeds are plaintext JSON, and the incumbent has no zeroization or Wipe API.",
+      "normative_resolution": "Owned secret types restrict cloning/export, redact, zeroize narrow buffers and document persistence/allocator boundaries.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.3",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-06",
+      "severity": "HIGH",
+      "finding": "NATS JWT parsing verifies a signature directly against iss but does not authorize the Operator/Account/delegated signer chain or issuer_account scope.",
+      "normative_resolution": "N5 implements the exhaustive signer-policy matrix; cryptographic verification alone never authorizes.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.5.3",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-07",
+      "severity": "HIGH",
+      "finding": "Generic swarm and signed-profile verification accept any parseable public prefix without an explicit key-kind policy.",
+      "normative_resolution": "Each integration declares and tests allowed key kinds and signer scopes.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.5.2",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-08",
+      "severity": "HIGH",
+      "finding": "JWT, creds, arbitrary signing messages and Curve payloads have absent or unproven allocation/work ceilings; cancellation wipe is unproven.",
+      "normative_resolution": "N2-N6 enforce explicit ceilings and retain resource/cancellation evidence.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.6",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-09",
+      "severity": "MEDIUM",
+      "finding": "Rust M/V extensions are absent from official Go nkeys and must not gain NATS JWT role authority.",
+      "normative_resolution": "Preserve encoding and Ed25519 operations as explicit extensions; signer policy denies hierarchy authority.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.5.2",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-10",
+      "severity": "MEDIUM",
+      "finding": "IdentityKeyStore::active_key_pair is the sole public nkeys type leak.",
+      "normative_resolution": "N3 replaces it directly with an owned signer type and downstream compile evidence, without a permanent shim.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.3",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-11",
+      "severity": "MEDIUM",
+      "finding": "The official differential oracle harness is absent and current tests primarily prove self-consistency.",
+      "normative_resolution": "N6 pins a dev-only incumbent oracle and compares every vector/policy row.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.1.6",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-12",
+      "severity": "MEDIUM",
+      "finding": "The four canonical dependency-sovereignty NKey scenarios are declared but absent from the runner.",
+      "normative_resolution": "The NKey E2E aggregate implements and retains all four real scenario receipts.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.5",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-13",
+      "severity": "MEDIUM",
+      "finding": "Windows key-file ACL enforcement is external and non-Unix persistence is best-effort.",
+      "normative_resolution": "Secret-safety evidence distinguishes platform cells and fails closed where permission hardening cannot be established.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.5",
+      "state": "ROUTED"
+    },
+    {
+      "gap_id": "NKEY-N1-GAP-14",
+      "severity": "BLOCKING_GATE",
+      "finding": "The independent security review required by CAP-NKEY-AUTH has not happened.",
+      "normative_resolution": "No cutover until the dedicated security-review bead closes without unresolved high findings.",
+      "owner": "asupersync-dep-p4-nkeys-poc60v.2",
+      "state": "ROUTED"
+    }
+  ],
+  "evidence_plan": {
+    "unit_owner": "asupersync-dep-p4-nkeys-poc60v.1.6",
+    "e2e_owner": "asupersync-dep-p4-nkeys-poc60v.5",
+    "security_review_owner": "asupersync-dep-p4-nkeys-poc60v.2",
+    "scenario_ids": [
+      "nkey_all_forms",
+      "nkey_nats_auth",
+      "nkey_jwt_authorization",
+      "nkey_secret_redaction"
+    ],
+    "current_runner_state": "PLANNED_MISSING",
+    "focused_contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/nkey_normative_spec_v1.json --overlay-path docs/nkey_normative_spec.md --overlay-path tests/nkey_normative_spec_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_nkey_normative_spec\" cargo test -p asupersync --test nkey_normative_spec_contract -- --nocapture",
+    "canonical_e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario nkey_nats_auth",
+    "required_terminal_evidence": [
+      "independent and official vectors for every public, seed and both private forms",
+      "differential oracle across every accepted and rejected row",
+      "property and bounded fuzz evidence for codec, key types and signer policy",
+      "compile-fail type-separation and downstream public API fixtures",
+      "secret canary/redaction/zeroization/cancellation receipts",
+      "real NATS nkey and JWT authentication with complete trust-chain authorization",
+      "named Apple Silicon and x86 throughput/allocation measurements",
+      "independent security review"
+    ]
+  },
+  "no_claim_boundary": "This specification and focused contract freeze format, policy, API, vector, error, secret, concurrency, resource and downstream obligations. They do not implement the owned codec or key types, enable the incumbent xkeys feature, prove zeroization, constant-time behavior beyond already delegated primitives, real NATS interoperability, signer-chain correctness, cancellation cleanup, bounded production resource use, performance, broad workspace health, release readiness, or dependency-removal parity. No file deletion, production cutover or nkeys removal is authorized."
+}
