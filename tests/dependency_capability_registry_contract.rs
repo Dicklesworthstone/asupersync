@@ -148,6 +148,110 @@ fn path_exists(path: &str) -> bool {
     }
 }
 
+/// Package names resolved by `Cargo.lock`. A `dependency_owners` entry that is
+/// neither one of these nor a declared non-crate owner does not exist.
+fn locked_package_names() -> BTreeSet<String> {
+    read_repo_file("Cargo.lock")
+        .lines()
+        .filter_map(|line| line.strip_prefix("name = \""))
+        .filter_map(|rest| rest.strip_suffix('"'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Cargo package names differ from crate paths by `-` vs `_`; accept either.
+fn resolves_to_package(owner: &str, packages: &BTreeSet<String>) -> bool {
+    packages.contains(owner)
+        || packages.contains(&owner.replace('_', "-"))
+        || packages.contains(&owner.replace('-', "_"))
+}
+
+/// Whole-token search for a crate's use sites: `foo::` or `use foo`. Matching
+/// the bare word would let a comment or an unrelated identifier satisfy the
+/// attribution check, which is the failure mode this exists to catch.
+fn references_crate(source: &str, krate: &str) -> bool {
+    let token = krate.replace('-', "_");
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0usize;
+    while let Some(offset) = source[from..].find(&token) {
+        let start = from + offset;
+        let end = start + token.len();
+        let before_ok = start == 0 || !source[..start].chars().next_back().is_some_and(is_ident);
+        if before_ok {
+            let after = source[end..].trim_start();
+            let preceded_by_use = source[..start]
+                .trim_end()
+                .rsplit(|c: char| c == '\n' || c == ';')
+                .next()
+                .is_some_and(|segment| segment.trim() == "use");
+            if after.starts_with("::") || preceded_by_use {
+                return true;
+            }
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// Capability ids exempted from the source-owner attribution check, with the
+/// reason. An exemption is only legitimate for a genuinely cross-cutting
+/// dependency where no short file list would be true.
+fn attribution_exemptions(registry: &Value) -> BTreeMap<String, String> {
+    array(registry, "source_owner_attribution_exemptions")
+        .iter()
+        .map(|row| {
+            (
+                string(row, "capability_id").to_owned(),
+                string(row, "reason").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Declared non-crate `dependency_owners` — sentinels, external tools, bundled
+/// native libraries and std. Declaring them keeps the resolution check
+/// fail-closed for everything else.
+fn declared_non_crate_owners(registry: &Value) -> BTreeMap<String, String> {
+    array(registry, "allowed_non_crate_dependency_owners")
+        .iter()
+        .map(|row| {
+            (
+                string(row, "owner").to_owned(),
+                string(row, "reason").to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// True when the row names at least one real crate and at least one `.rs`
+/// source owner, but no named source file actually references any of those
+/// crates. This is the check that catches a row naming a `mod.rs` facade, or
+/// the wrong one of two same-named files.
+fn source_owner_attribution_fails(
+    row: &Value,
+    packages: &BTreeSet<String>,
+    non_crate: &BTreeMap<String, String>,
+) -> bool {
+    let crates: Vec<String> = strings(row, "dependency_owners")
+        .into_iter()
+        .filter(|owner| !non_crate.contains_key(owner) && resolves_to_package(owner, packages))
+        .collect();
+    let sources: Vec<String> = strings(row, "source_owners")
+        .into_iter()
+        .filter(|source| source.ends_with(".rs"))
+        .collect();
+    if crates.is_empty() || sources.is_empty() {
+        return false;
+    }
+    !sources.iter().any(|source| {
+        std::fs::read_to_string(repo_root().join(source)).is_ok_and(|text| {
+            crates
+                .iter()
+                .any(|krate| references_crate(&text, krate.as_str()))
+        })
+    })
+}
+
 fn validate_capability_row(
     registry: &Value,
     row: &Value,
@@ -1894,4 +1998,116 @@ fn human_summary_is_deterministic_and_current() {
     assert!(doc.contains("No feature loss"));
     assert!(doc.contains("scripts/run_all_e2e.sh --suite dependency-sovereignty"));
     assert!(doc.contains("FrankenSQLite"));
+}
+
+/// Every `dependency_owners` entry must name something real: a package that
+/// `Cargo.lock` resolves, or an explicitly declared non-crate owner.
+///
+/// This is what catches invented crates. `CAP-NKEY-AUTH` listed `base32` and
+/// `crc16` as if they were dependencies; neither exists anywhere in the graph
+/// (base32 is `data-encoding`, and CRC-16/XMODEM lives inside `nkeys`). An SBOM
+/// or marginal-cost calculation built from that field would have referenced
+/// packages that are not in the build.
+#[test]
+fn every_dependency_owner_resolves_to_a_package_or_a_declared_non_crate_owner() {
+    let registry = registry();
+    let packages = locked_package_names();
+    let non_crate = declared_non_crate_owners(&registry);
+    assert!(
+        !non_crate.is_empty(),
+        "allowed_non_crate_dependency_owners must declare the sentinel vocabulary"
+    );
+    for (owner, reason) in &non_crate {
+        assert!(
+            !reason.trim().is_empty(),
+            "non-crate dependency owner {owner} must carry a reason"
+        );
+    }
+
+    let mut unresolved = Vec::new();
+    for row in array(&registry, "capabilities") {
+        let capability_id = string(row, "capability_id");
+        for owner in strings(row, "dependency_owners") {
+            if non_crate.contains_key(&owner) || resolves_to_package(&owner, &packages) {
+                continue;
+            }
+            unresolved.push(format!("{capability_id}: {owner}"));
+        }
+    }
+    assert!(
+        unresolved.is_empty(),
+        "these dependency_owners resolve to no Cargo.lock package and are not declared \
+         non-crate owners: {unresolved:#?}"
+    );
+}
+
+/// A `source_owners` file must actually reference one of the row's crate
+/// dependencies. Asserting only that the path exists is far too weak.
+///
+/// The registry named `src/web/compress.rs` for `CAP-HTTP-COMPRESSION`. That
+/// file exists — so the path check passed — but it contains no compression
+/// crate at all; the real owner is `src/http/compress.rs`. Two files share a
+/// name and the registry named the wrong one. The same class of error credited
+/// the RaptorQ pipeline with two serialization capabilities and pointed the
+/// regex capability at a module with zero regex references.
+#[test]
+fn every_source_owner_row_attributes_to_its_dependency() {
+    let registry = registry();
+    let packages = locked_package_names();
+    let non_crate = declared_non_crate_owners(&registry);
+    let exemptions = attribution_exemptions(&registry);
+
+    let mut unattributed = Vec::new();
+    for row in array(&registry, "capabilities") {
+        let capability_id = string(row, "capability_id");
+        if exemptions.contains_key(capability_id) {
+            continue;
+        }
+        if source_owner_attribution_fails(row, &packages, &non_crate) {
+            unattributed.push(format!(
+                "{capability_id}: source_owners {:?} reference none of {:?}",
+                strings(row, "source_owners"),
+                strings(row, "dependency_owners")
+            ));
+        }
+    }
+    assert!(
+        unattributed.is_empty(),
+        "these capability rows name source owners that do not implement the capability: {unattributed:#?}"
+    );
+}
+
+/// An exemption must still be earned. If a row is corrected so that it now
+/// attributes cleanly, its exemption has to go — otherwise the exemption list
+/// becomes a place where defects hide after they stop being defects.
+#[test]
+fn no_attribution_exemption_is_stale() {
+    let registry = registry();
+    let packages = locked_package_names();
+    let non_crate = declared_non_crate_owners(&registry);
+    let exemptions = attribution_exemptions(&registry);
+    let known = capability_ids(&registry);
+
+    let mut stale = Vec::new();
+    for (capability_id, reason) in &exemptions {
+        assert!(
+            known.contains(capability_id),
+            "attribution exemption names unknown capability {capability_id}"
+        );
+        assert!(
+            !reason.trim().is_empty(),
+            "attribution exemption for {capability_id} must carry a reason"
+        );
+        let row = array(&registry, "capabilities")
+            .iter()
+            .find(|row| string(row, "capability_id") == capability_id)
+            .expect("capability row must exist");
+        if !source_owner_attribution_fails(row, &packages, &non_crate) {
+            stale.push(capability_id.clone());
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "these rows now attribute cleanly and must drop their exemption: {stale:?}"
+    );
 }
