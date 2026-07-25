@@ -90,7 +90,10 @@ pub use interceptor::{
     TracingInterceptor, auth_bearer_interceptor, auth_validator, fn_interceptor,
     logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
 };
-pub use protobuf::{ProstCodec, ProtobufError};
+pub use protobuf::{
+    ProstCodec, ProtoCodec, ProtoCodecError, ProtoMessage, ProtobufError, SymmetricProstCodec,
+    SymmetricProtoCodec, UnknownFields,
+};
 pub use reflection::{
     ReflectedMethod, ReflectedService, ReflectionDescribeServiceRequest,
     ReflectionDescribeServiceResponse, ReflectionListServicesRequest,

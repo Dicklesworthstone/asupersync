@@ -191,6 +191,585 @@ where
 /// and receive the same message type.
 pub type SymmetricProstCodec<T> = ProstCodec<T, T>;
 
+// ---------------------------------------------------------------------------
+// Owned generic message + codec surface (br-asupersync-5z2scg.1.2)
+// ---------------------------------------------------------------------------
+
+/// A Protocol Buffers message that owns its serialization.
+///
+/// This is the dependency-free authoring boundary that [`ProtoCodec`] is
+/// generic over. It is deliberately open: any downstream crate can implement
+/// it for its own types, so the owned path never narrows to a finite in-tree
+/// registry the way a closed enum or a fixed schema table would.
+///
+/// # Relationship to `prost::Message`
+///
+/// [`ProstCodec`] stays available and unchanged; it is the prost-backed
+/// adapter for the coexistence window. `ProtoMessage` is the migration
+/// target, not a wrapper around prost, and carries no prost types in its
+/// signatures. See [the migration notes](#migrating-from-prostcodec).
+///
+/// # Merge and default semantics
+///
+/// Decoding follows the Protocol Buffers merge model rather than a
+/// construct-from-scratch model:
+///
+/// - Decoding starts from [`Default::default`], which is why `Default` is a
+///   supertrait. Every field absent from the wire keeps its default value, so
+///   a zero-length message decodes to the default instance rather than an
+///   error.
+/// - Each field record on the wire is merged into the in-progress value by
+///   [`merge_field`](Self::merge_field), in wire order. For a repeated field
+///   that means append; for a scalar, last-one-wins; for a nested message,
+///   recursive merge (see [`merge_nested_message`]).
+/// - Because merging is incremental, [`merge_from_bytes`](Self::merge_from_bytes)
+///   over concatenated buffers is equivalent to decoding their concatenation,
+///   which is the property that makes protobuf streaming chunks composable.
+///
+/// # Unknown fields
+///
+/// [`merge_field`](Self::merge_field) returns `false` for a field number the
+/// implementing schema does not recognize. That is a routing answer, not an
+/// error: unknown fields are legal and must not fail a decode. What happens
+/// to them is the message type's choice. Embed an [`UnknownFields`] and
+/// record them to preserve round-trip fidelity; ignore them to drop them.
+///
+/// Note that `prost` drops unknown fields by default, so preserving them is
+/// one place the owned path is strictly *more* capable than the adapter it
+/// replaces.
+///
+/// # Buffer ownership
+///
+/// Decoding borrows. A [`ProtobufWireField`] points into the caller's input
+/// buffer and never copies it, so an implementation only pays for the bytes it
+/// actually keeps. Encoding owns: [`encode_to_bytes`](Self::encode_to_bytes)
+/// returns [`Bytes`], and the writer's growth is charged against the encoder's
+/// limits as it goes rather than pre-allocated from a wire-declared length.
+///
+/// # Resource bounds
+///
+/// Every provided method threads a [`ProtobufWireLimits`] budget, and nested
+/// descent through [`merge_nested_message`] *shares* the parent's budget
+/// instead of starting a fresh one. That is what keeps a deeply nested or
+/// field-dense hostile message bounded in aggregate rather than per level.
+///
+/// # Examples
+///
+/// A hand-written implementation — this is exactly what the derive in
+/// `asupersync-5z2scg.1.6` will generate:
+///
+/// ```
+/// use asupersync::grpc::protobuf::{
+///     ProtoMessage, ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError,
+///     ProtobufWireField, ProtobufWireLimits,
+/// };
+///
+/// #[derive(Debug, Default, PartialEq)]
+/// struct Greeting {
+///     name: String,
+///     times: u32,
+/// }
+///
+/// impl ProtoMessage for Greeting {
+///     fn encode_fields(
+///         &self,
+///         encoder: &mut ProtobufWireEncoder,
+///     ) -> Result<(), ProtobufWireError> {
+///         if !self.name.is_empty() {
+///             encoder.write_string(1, &self.name)?;
+///         }
+///         if self.times != 0 {
+///             encoder.write_varint(2, u64::from(self.times))?;
+///         }
+///         Ok(())
+///     }
+///
+///     fn merge_field<'wire>(
+///         &mut self,
+///         field: &ProtobufWireField<'wire>,
+///         _decoder: &mut ProtobufWireDecoder<'wire, '_>,
+///     ) -> Result<bool, ProtobufWireError> {
+///         match field.field_number() {
+///             1 => {
+///                 self.name = field.as_str()?.to_owned();
+///                 Ok(true)
+///             }
+///             2 => {
+///                 self.times = field.as_varint()? as u32;
+///                 Ok(true)
+///             }
+///             _ => Ok(false),
+///         }
+///     }
+/// }
+///
+/// let limits = ProtobufWireLimits::default();
+/// let encoded = Greeting { name: "ada".into(), times: 3 }
+///     .encode_to_bytes(limits)
+///     .expect("encode");
+/// let decoded = Greeting::decode_from_bytes(&encoded, limits).expect("decode");
+/// assert_eq!(decoded, Greeting { name: "ada".into(), times: 3 });
+/// ```
+pub trait ProtoMessage: Default + Send + Sized + 'static {
+    /// Writes every populated field of `self` into `encoder`.
+    ///
+    /// Implementations should skip default-valued fields to match proto3
+    /// wire economy, and must emit fields in ascending field-number order for
+    /// byte-for-byte deterministic output.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's [`ProtobufWireError`] when a field exceeds the
+    /// configured size, field-count, depth, or work budget.
+    fn encode_fields(&self, encoder: &mut ProtobufWireEncoder) -> Result<(), ProtobufWireError>;
+
+    /// Merges one decoded field record into `self`.
+    ///
+    /// Returns `Ok(true)` when the field number belongs to this schema and was
+    /// consumed, and `Ok(false)` when it is unknown. Returning `false` is not a
+    /// failure: the caller skips the record (consuming a whole group when the
+    /// unknown field is a group delimiter), which is what keeps forward
+    /// compatibility working.
+    ///
+    /// `decoder` is supplied so an implementation can descend into a nested
+    /// message with [`merge_nested_message`] while sharing this decode's
+    /// aggregate resource budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError`] when a recognized field carries the wrong
+    /// wire type, invalid UTF-8, or a nested payload that breaches the budget.
+    fn merge_field<'wire>(
+        &mut self,
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+    ) -> Result<bool, ProtobufWireError>;
+
+    /// Serializes `self` into a fresh buffer under `limits`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`ProtobufWireError`] from
+    /// [`encode_fields`](Self::encode_fields), including an unclosed group.
+    fn encode_to_bytes(&self, limits: ProtobufWireLimits) -> Result<Bytes, ProtobufWireError> {
+        let mut encoder = ProtobufWireEncoder::new(limits);
+        self.encode_fields(&mut encoder)?;
+        encoder.finish()
+    }
+
+    /// Merges every field of `input` into `self` under a shared `limits`
+    /// budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError`] for malformed input or a breached budget.
+    fn merge_from_bytes(
+        &mut self,
+        input: &[u8],
+        limits: ProtobufWireLimits,
+    ) -> Result<(), ProtobufWireError> {
+        let mut message = ProtobufWireMessage::new(input, limits)?;
+        let mut decoder = message.decoder();
+        merge_fields(self, &mut decoder)
+    }
+
+    /// Decodes a complete message from `input`, starting at the default value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError`] for malformed input or a breached budget.
+    fn decode_from_bytes(
+        input: &[u8],
+        limits: ProtobufWireLimits,
+    ) -> Result<Self, ProtobufWireError> {
+        let mut message = Self::default();
+        message.merge_from_bytes(input, limits)?;
+        Ok(message)
+    }
+}
+
+/// Drives `decoder` to exhaustion, merging every field into `target`.
+///
+/// Fields the schema does not recognize are skipped rather than rejected. When
+/// an unknown field is a group delimiter the whole group is consumed, so a
+/// group's interior is never mistaken for further top-level fields.
+///
+/// # Errors
+///
+/// Returns [`ProtobufWireError`] for malformed input, a breached budget, or a
+/// failure reported by [`ProtoMessage::merge_field`].
+pub fn merge_fields<M>(
+    target: &mut M,
+    decoder: &mut ProtobufWireDecoder<'_, '_>,
+) -> Result<(), ProtobufWireError>
+where
+    M: ProtoMessage,
+{
+    while let Some(field) = decoder.next_field()? {
+        if target.merge_field(&field, decoder)? {
+            continue;
+        }
+        if field.wire_type() == WireType::StartGroup {
+            decoder.skip_group(&field)?;
+        }
+    }
+    Ok(())
+}
+
+/// Merges a nested-message field into `target`, sharing the parent's budget.
+///
+/// This is the descent helper for [`ProtoMessage::merge_field`]. Sharing the
+/// budget is the point: a fresh top-level decode per nesting level would reset
+/// the field, depth, and work accounting and reopen the amplification hole the
+/// bounded kernel exists to close.
+///
+/// Merging (rather than replacing) `target` is the Protocol Buffers rule for a
+/// message field that appears more than once in the same buffer.
+///
+/// # Errors
+///
+/// Returns [`ProtobufWireError`] when `field` is not length-delimited, when the
+/// nested payload is malformed, or when descent breaches the shared budget.
+pub fn merge_nested_message<'wire, M>(
+    target: &mut M,
+    field: &ProtobufWireField<'wire>,
+    decoder: &mut ProtobufWireDecoder<'wire, '_>,
+) -> Result<(), ProtobufWireError>
+where
+    M: ProtoMessage,
+{
+    let mut nested = decoder.nested_message(field)?;
+    merge_fields(target, &mut nested)
+}
+
+/// Verbatim storage for field records a schema does not recognize.
+///
+/// Embed this in a message and record into it from
+/// [`ProtoMessage::merge_field`]'s unknown branch to keep decode/re-encode
+/// round-trips lossless, which is what lets an old binary forward a new
+/// binary's fields untouched.
+///
+/// Records are held as the exact bytes that appeared on the wire, including
+/// each field key and length prefix, and are re-emitted unchanged.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnknownFields {
+    raw: Vec<u8>,
+}
+
+impl UnknownFields {
+    /// Creates an empty set.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { raw: Vec::new() }
+    }
+
+    /// Returns `true` when nothing has been recorded.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// Total preserved byte length.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    /// Borrows the preserved bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.raw
+    }
+
+    /// Discards everything recorded so far.
+    pub fn clear(&mut self) {
+        self.raw.clear();
+    }
+
+    /// Records one unrecognized field verbatim.
+    ///
+    /// For a group, record the complete group with
+    /// [`record_group`](Self::record_group) instead: a
+    /// [`ProtobufWireField::raw`] for a group delimiter is only the delimiter
+    /// key, and a lone delimiter is a partial group fragment that
+    /// [`encode`](Self::encode) will reject fail-closed.
+    pub fn record(&mut self, field: &ProtobufWireField<'_>) {
+        self.raw.extend_from_slice(field.raw());
+    }
+
+    /// Records a complete group, consuming it from `decoder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError`] when `start` is not the most recently
+    /// returned start-group field or the group is unterminated.
+    pub fn record_group<'wire>(
+        &mut self,
+        start: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+    ) -> Result<(), ProtobufWireError> {
+        let group = decoder.skip_group(start)?;
+        self.raw.extend_from_slice(group);
+        Ok(())
+    }
+
+    /// Appends already validated raw field bytes.
+    pub fn record_raw(&mut self, raw: &[u8]) {
+        self.raw.extend_from_slice(raw);
+    }
+
+    /// Re-emits every preserved field into `encoder`.
+    ///
+    /// Call this last in [`ProtoMessage::encode_fields`] so known fields keep
+    /// ascending field-number order among themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError`] when the preserved bytes fail
+    /// revalidation (for example a partial group fragment) or exceed the
+    /// encoder's remaining budget.
+    pub fn encode(&self, encoder: &mut ProtobufWireEncoder) -> Result<(), ProtobufWireError> {
+        if self.raw.is_empty() {
+            return Ok(());
+        }
+        encoder.write_raw_fields(&self.raw)
+    }
+}
+
+/// Failures surfaced by [`ProtoCodec`].
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ProtoCodecError {
+    /// The bounded wire kernel rejected the message.
+    #[error("protobuf wire error: {0}")]
+    Wire(#[from] ProtobufWireError),
+
+    /// An inbound buffer exceeded the configured decode ceiling.
+    ///
+    /// This is checked before any parsing work, so an oversized frame costs a
+    /// length comparison rather than a traversal.
+    #[error("inbound message size {size} exceeds decode limit {limit}")]
+    DecodeMessageTooLarge {
+        /// Observed buffer length in bytes.
+        size: usize,
+        /// Configured inbound ceiling in bytes.
+        limit: usize,
+    },
+}
+
+/// Generic gRPC [`Codec`] over the owned [`ProtoMessage`] trait.
+///
+/// This is the dependency-free counterpart to [`ProstCodec`], with the same
+/// shape so a migration is a type substitution rather than a redesign:
+/// independent encode and decode type parameters, a symmetric alias
+/// ([`SymmetricProtoCodec`]), configurable size limits, and `Send + 'static`
+/// throughout so it drops into unary and streaming call sites unchanged.
+///
+/// # Type parameters
+///
+/// - `T`: the outbound type, implementing [`ProtoMessage`].
+/// - `U`: the inbound type, implementing [`ProtoMessage`].
+///
+/// Keeping these separate is what lets one codec serve a method whose request
+/// and response types differ, which is the common case.
+///
+/// # Limits
+///
+/// Inbound and outbound ceilings are tracked independently and both default to
+/// [`DEFAULT_MAX_MESSAGE_SIZE`]. The gRPC layer's
+/// [`Codec::set_max_encode_message_size`] and
+/// [`Codec::set_max_decode_message_size`] hooks are implemented, so a
+/// per-channel limit configured above this codec is actually honored.
+///
+/// Beyond the byte ceiling, decoding is bounded structurally — field count,
+/// nesting depth, and total work — through [`ProtobufWireLimits`]. Use
+/// [`with_wire_limits`](Self::with_wire_limits) to tighten those for untrusted
+/// peers.
+///
+/// # Determinism
+///
+/// Encoding is deterministic for a given value: the encoder emits exactly the
+/// ordered calls [`ProtoMessage::encode_fields`] makes, with no map iteration
+/// or hash ordering anywhere in the path. Byte-identical output across runs is
+/// what the lab runtime's replay requires.
+///
+/// # Migrating from `ProstCodec`
+///
+/// `ProstCodec` remains fully supported during coexistence, so migration is
+/// per-call-site and reversible rather than a flag day:
+///
+/// | `ProstCodec` | `ProtoCodec` |
+/// |---|---|
+/// | `T: prost::Message` | `T: ProtoMessage` |
+/// | `ProstCodec::<T, U>::new()` | `ProtoCodec::<T, U>::new()` |
+/// | `ProstCodec::with_max_size(n)` | `ProtoCodec::with_max_size(n)` |
+/// | `SymmetricProstCodec<T>` | [`SymmetricProtoCodec<T>`] |
+/// | [`ProtobufError`] | [`ProtoCodecError`] |
+///
+/// Two behavior differences are deliberate improvements rather than parity
+/// gaps, and both are fail-closed:
+///
+/// - `ProstCodec` ignores the `set_max_*_message_size` hooks, so a limit set on
+///   the channel silently does not apply to it. `ProtoCodec` honors both.
+/// - `ProstCodec` checks `encoded_len()` and then allocates that much;
+///   `ProtoCodec` charges the budget as it writes, so an oversized message is
+///   refused without first reserving room for it.
+///
+/// # Examples
+///
+/// ```
+/// use asupersync::grpc::codec::Codec;
+/// use asupersync::grpc::protobuf::{ProtoCodec, ProtoMessage};
+/// # use asupersync::grpc::protobuf::{
+/// #     ProtobufWireDecoder, ProtobufWireEncoder, ProtobufWireError, ProtobufWireField,
+/// # };
+/// # #[derive(Debug, Default, PartialEq)]
+/// # struct Ping { seq: u64 }
+/// # impl ProtoMessage for Ping {
+/// #     fn encode_fields(&self, e: &mut ProtobufWireEncoder) -> Result<(), ProtobufWireError> {
+/// #         if self.seq != 0 { e.write_varint(1, self.seq)?; }
+/// #         Ok(())
+/// #     }
+/// #     fn merge_field<'w>(
+/// #         &mut self,
+/// #         f: &ProtobufWireField<'w>,
+/// #         _d: &mut ProtobufWireDecoder<'w, '_>,
+/// #     ) -> Result<bool, ProtobufWireError> {
+/// #         if f.field_number() == 1 { self.seq = f.as_varint()?; Ok(true) } else { Ok(false) }
+/// #     }
+/// # }
+/// let mut codec: ProtoCodec<Ping, Ping> = ProtoCodec::new();
+/// let bytes = codec.encode(&Ping { seq: 42 }).expect("encode");
+/// assert_eq!(codec.decode(&bytes).expect("decode"), Ping { seq: 42 });
+/// ```
+#[derive(Debug)]
+pub struct ProtoCodec<T, U> {
+    /// Outbound ceiling in bytes.
+    max_encode_message_size: usize,
+    /// Inbound ceiling in bytes.
+    max_decode_message_size: usize,
+    /// Structural decode budget (fields, depth, work).
+    decode_limits: ProtobufWireLimits,
+    /// `fn(T) -> U` rather than `(T, U)`: the codec owns no value of either
+    /// type, so it must not inherit their auto traits or drop behavior.
+    _marker: PhantomData<fn(T) -> U>,
+}
+
+impl<T, U> ProtoCodec<T, U> {
+    /// Creates a codec with [`DEFAULT_MAX_MESSAGE_SIZE`] in both directions.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_max_size(DEFAULT_MAX_MESSAGE_SIZE)
+    }
+
+    /// Creates a codec with `max_size` as both the inbound and outbound
+    /// ceiling, and structural decode limits balanced around it.
+    #[must_use]
+    pub const fn with_max_size(max_size: usize) -> Self {
+        Self {
+            max_encode_message_size: max_size,
+            max_decode_message_size: max_size,
+            decode_limits: ProtobufWireLimits::for_message_size(max_size),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Replaces the structural decode budget.
+    ///
+    /// The inbound byte ceiling is tightened to the budget's
+    /// `max_message_len` when that is smaller, so the two can never disagree
+    /// in the permissive direction.
+    #[must_use]
+    pub const fn with_wire_limits(mut self, limits: ProtobufWireLimits) -> Self {
+        self.decode_limits = limits;
+        if limits.max_message_len < self.max_decode_message_size {
+            self.max_decode_message_size = limits.max_message_len;
+        }
+        self
+    }
+
+    /// Outbound ceiling in bytes.
+    #[must_use]
+    pub const fn max_encode_message_size(&self) -> usize {
+        self.max_encode_message_size
+    }
+
+    /// Inbound ceiling in bytes.
+    #[must_use]
+    pub const fn max_decode_message_size(&self) -> usize {
+        self.max_decode_message_size
+    }
+
+    /// Structural decode budget.
+    #[must_use]
+    pub const fn wire_limits(&self) -> ProtobufWireLimits {
+        self.decode_limits
+    }
+}
+
+impl<T, U> Default for ProtoCodec<T, U> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, U> Clone for ProtoCodec<T, U> {
+    fn clone(&self) -> Self {
+        Self {
+            max_encode_message_size: self.max_encode_message_size,
+            max_decode_message_size: self.max_decode_message_size,
+            decode_limits: self.decode_limits,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T, U> Codec for ProtoCodec<T, U>
+where
+    T: ProtoMessage,
+    U: ProtoMessage,
+{
+    type Encode = T;
+    type Decode = U;
+    type Error = ProtoCodecError;
+
+    fn encode(&mut self, item: &Self::Encode) -> Result<Bytes, Self::Error> {
+        // The encoder enforces the ceiling as it writes, so an oversized
+        // message never reserves the memory it was refused for.
+        let limits = ProtobufWireLimits::for_message_size(self.max_encode_message_size);
+        Ok(item.encode_to_bytes(limits)?)
+    }
+
+    fn decode(&mut self, buf: &Bytes) -> Result<Self::Decode, Self::Error> {
+        if buf.len() > self.max_decode_message_size {
+            return Err(ProtoCodecError::DecodeMessageTooLarge {
+                size: buf.len(),
+                limit: self.max_decode_message_size,
+            });
+        }
+        Ok(U::decode_from_bytes(buf.as_ref(), self.decode_limits)?)
+    }
+
+    fn set_max_encode_message_size(&mut self, max_size: usize) {
+        self.max_encode_message_size = max_size;
+    }
+
+    fn set_max_decode_message_size(&mut self, max_size: usize) {
+        self.max_decode_message_size = max_size;
+        // Keep the structural budget from silently out-ranking the byte
+        // ceiling the channel just asked for.
+        if self.decode_limits.max_message_len > max_size {
+            self.decode_limits.max_message_len = max_size;
+        }
+    }
+}
+
+/// A symmetric owned codec whose encode and decode types are the same.
+///
+/// The counterpart to [`SymmetricProstCodec`], for bidirectional streaming
+/// where both directions carry one message type.
+pub type SymmetricProtoCodec<T> = ProtoCodec<T, T>;
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1332,5 +1911,565 @@ mod tests {
             decoded == message
         );
         crate::test_complete!("test_symmetric_codec_alias");
+    }
+
+    /// Owned `ProtoMessage` / [`ProtoCodec`] surface (br-asupersync-5z2scg.1.2).
+    ///
+    /// The messages here are written by hand on purpose. They are the standing
+    /// proof that the authoring boundary is open to downstream crates — nothing
+    /// in the owned path depends on a derive macro (that is
+    /// `asupersync-5z2scg.1.6`) or on an in-tree schema registry.
+    mod owned_codec {
+        use super::*;
+
+        /// Field-for-field mirror of the prost `TestMessage` above, so the two
+        /// encoders can be compared byte-for-byte.
+        #[derive(Clone, Debug, Default, Eq, PartialEq)]
+        struct OwnedTestMessage {
+            name: String,
+            value: i32,
+        }
+
+        impl ProtoMessage for OwnedTestMessage {
+            fn encode_fields(
+                &self,
+                encoder: &mut ProtobufWireEncoder,
+            ) -> Result<(), ProtobufWireError> {
+                // proto3 wire economy: default-valued fields are not emitted,
+                // which is also what makes byte parity with prost possible.
+                if !self.name.is_empty() {
+                    encoder.write_string(1, &self.name)?;
+                }
+                if self.value != 0 {
+                    encoder.write_int32(2, self.value)?;
+                }
+                Ok(())
+            }
+
+            fn merge_field<'wire>(
+                &mut self,
+                field: &ProtobufWireField<'wire>,
+                _decoder: &mut ProtobufWireDecoder<'wire, '_>,
+            ) -> Result<bool, ProtobufWireError> {
+                match field.field_number() {
+                    1 => {
+                        self.name = field.as_str()?.to_owned();
+                        Ok(true)
+                    }
+                    2 => {
+                        // int32 rides a 64-bit varint; truncation to the low 32
+                        // bits is the specified narrowing.
+                        self.value = field.as_varint()? as i32;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            }
+        }
+
+        /// Exercises nested descent, a repeated field, and opt-in unknown-field
+        /// preservation in one type.
+        #[derive(Clone, Debug, Default, Eq, PartialEq)]
+        struct OwnedOuter {
+            inner: Option<OwnedTestMessage>,
+            items: Vec<String>,
+            unknown: UnknownFields,
+        }
+
+        impl ProtoMessage for OwnedOuter {
+            fn encode_fields(
+                &self,
+                encoder: &mut ProtobufWireEncoder,
+            ) -> Result<(), ProtobufWireError> {
+                if let Some(inner) = &self.inner {
+                    let nested = inner.encode_to_bytes(ProtobufWireLimits::default())?;
+                    encoder.write_message(1, nested.as_ref())?;
+                }
+                for item in &self.items {
+                    encoder.write_string(2, item)?;
+                }
+                // Preserved fields go last so known fields keep ascending order.
+                self.unknown.encode(encoder)?;
+                Ok(())
+            }
+
+            fn merge_field<'wire>(
+                &mut self,
+                field: &ProtobufWireField<'wire>,
+                decoder: &mut ProtobufWireDecoder<'wire, '_>,
+            ) -> Result<bool, ProtobufWireError> {
+                match field.field_number() {
+                    1 => {
+                        let target = self.inner.get_or_insert_with(OwnedTestMessage::default);
+                        merge_nested_message(target, field, decoder)?;
+                        Ok(true)
+                    }
+                    2 => {
+                        self.items.push(field.as_str()?.to_owned());
+                        Ok(true)
+                    }
+                    _ => {
+                        if field.wire_type() == WireType::StartGroup {
+                            self.unknown.record_group(field, decoder)?;
+                        } else {
+                            self.unknown.record(field);
+                        }
+                        Ok(true)
+                    }
+                }
+            }
+        }
+
+        /// Same schema as [`OwnedOuter`] but without preservation, to prove
+        /// that dropping unknown fields is a per-message choice.
+        #[derive(Clone, Debug, Default, Eq, PartialEq)]
+        struct OwnedOuterDropping {
+            items: Vec<String>,
+        }
+
+        impl ProtoMessage for OwnedOuterDropping {
+            fn encode_fields(
+                &self,
+                encoder: &mut ProtobufWireEncoder,
+            ) -> Result<(), ProtobufWireError> {
+                for item in &self.items {
+                    encoder.write_string(2, item)?;
+                }
+                Ok(())
+            }
+
+            fn merge_field<'wire>(
+                &mut self,
+                field: &ProtobufWireField<'wire>,
+                _decoder: &mut ProtobufWireDecoder<'wire, '_>,
+            ) -> Result<bool, ProtobufWireError> {
+                if field.field_number() == 2 {
+                    self.items.push(field.as_str()?.to_owned());
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+        }
+
+        fn sample() -> OwnedTestMessage {
+            OwnedTestMessage {
+                name: "owned".to_string(),
+                value: 4242,
+            }
+        }
+
+        #[test]
+        fn owned_codec_roundtrips_through_the_codec_trait() {
+            init_test("owned_codec_roundtrips_through_the_codec_trait");
+
+            let mut codec: ProtoCodec<OwnedTestMessage, OwnedTestMessage> = ProtoCodec::new();
+            let encoded = codec.encode(&sample()).expect("encode");
+            let decoded = codec.decode(&encoded).expect("decode");
+
+            assert_eq!(decoded, sample(), "owned codec must round-trip its value");
+            crate::test_complete!("owned_codec_roundtrips_through_the_codec_trait");
+        }
+
+        #[test]
+        fn owned_encoding_is_byte_identical_to_prost_for_the_same_schema() {
+            init_test("owned_encoding_is_byte_identical_to_prost_for_the_same_schema");
+
+            // Interop, not just self-consistency: the owned encoder has to
+            // agree with an independent implementation on the exact bytes, or
+            // a migrated service would silently stop being wire-compatible
+            // with peers that have not migrated.
+            for (name, value) in [
+                ("", 0_i32),
+                ("owned", 4242),
+                ("negative", -1),
+                ("min", i32::MIN),
+                ("max", i32::MAX),
+                ("unicode \u{1f600}", 7),
+            ] {
+                let owned = OwnedTestMessage {
+                    name: name.to_string(),
+                    value,
+                };
+                let prost_message = TestMessage {
+                    name: name.to_string(),
+                    value,
+                };
+
+                let mut owned_codec: ProtoCodec<OwnedTestMessage, OwnedTestMessage> =
+                    ProtoCodec::new();
+                let mut prost_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+
+                let owned_bytes = owned_codec.encode(&owned).expect("owned encode");
+                let prost_bytes = prost_codec.encode(&prost_message).expect("prost encode");
+                assert_eq!(
+                    owned_bytes.as_ref(),
+                    prost_bytes.as_ref(),
+                    "owned and prost encodings must match for name={name:?} value={value}"
+                );
+
+                // And each side must accept the other's bytes.
+                let owned_from_prost = owned_codec.decode(&prost_bytes).expect("owned decode");
+                assert_eq!(owned_from_prost, owned);
+                let prost_from_owned = prost_codec.decode(&owned_bytes).expect("prost decode");
+                assert_eq!(prost_from_owned, prost_message);
+            }
+            crate::test_complete!("owned_encoding_is_byte_identical_to_prost_for_the_same_schema");
+        }
+
+        #[test]
+        fn empty_buffer_decodes_to_the_default_value() {
+            init_test("empty_buffer_decodes_to_the_default_value");
+
+            let mut codec: ProtoCodec<OwnedTestMessage, OwnedTestMessage> = ProtoCodec::new();
+            let decoded = codec.decode(&Bytes::from(Vec::new())).expect("decode");
+
+            assert_eq!(
+                decoded,
+                OwnedTestMessage::default(),
+                "a zero-length message is the default value, not an error"
+            );
+            crate::test_complete!("empty_buffer_decodes_to_the_default_value");
+        }
+
+        #[test]
+        fn oversized_inbound_buffer_is_refused_before_parsing() {
+            init_test("oversized_inbound_buffer_is_refused_before_parsing");
+
+            let mut codec: ProtoCodec<OwnedTestMessage, OwnedTestMessage> =
+                ProtoCodec::with_max_size(8);
+            let big = Bytes::from(vec![0_u8; 64]);
+
+            match codec.decode(&big) {
+                Err(ProtoCodecError::DecodeMessageTooLarge { size, limit }) => {
+                    assert_eq!(size, 64);
+                    assert_eq!(limit, 8);
+                }
+                other => panic!("expected DecodeMessageTooLarge, got {other:?}"),
+            }
+            crate::test_complete!("oversized_inbound_buffer_is_refused_before_parsing");
+        }
+
+        #[test]
+        fn oversized_outbound_message_is_refused_by_the_encoder_budget() {
+            init_test("oversized_outbound_message_is_refused_by_the_encoder_budget");
+
+            let mut codec: ProtoCodec<OwnedTestMessage, OwnedTestMessage> =
+                ProtoCodec::with_max_size(8);
+            let message = OwnedTestMessage {
+                name: "x".repeat(4096),
+                value: 1,
+            };
+
+            // The refusal comes from the wire budget while writing, so the
+            // encoder never reserves the space it is about to reject.
+            assert!(
+                matches!(codec.encode(&message), Err(ProtoCodecError::Wire(_))),
+                "an over-budget message must fail closed through the wire kernel"
+            );
+            crate::test_complete!("oversized_outbound_message_is_refused_by_the_encoder_budget");
+        }
+
+        #[test]
+        fn channel_configured_limits_are_honored_unlike_the_prost_adapter() {
+            init_test("channel_configured_limits_are_honored_unlike_the_prost_adapter");
+
+            let mut owned: ProtoCodec<OwnedTestMessage, OwnedTestMessage> = ProtoCodec::new();
+            owned.set_max_decode_message_size(4);
+            owned.set_max_encode_message_size(4);
+
+            assert_eq!(owned.max_decode_message_size(), 4);
+            assert_eq!(owned.max_encode_message_size(), 4);
+            assert!(
+                owned.wire_limits().max_message_len <= 4,
+                "the structural budget must not out-rank the byte ceiling the channel set"
+            );
+            assert!(
+                matches!(
+                    owned.decode(&Bytes::from(vec![0_u8; 16])),
+                    Err(ProtoCodecError::DecodeMessageTooLarge { .. })
+                ),
+                "a limit set through the Codec hook must actually apply"
+            );
+
+            // Contrast, pinned deliberately: the prost adapter ignores these
+            // hooks. This is the documented behavior difference in the
+            // migration table, and it is why the owned codec is not merely a
+            // like-for-like swap.
+            let mut prost_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+            prost_codec.set_max_decode_message_size(4);
+            assert_eq!(
+                prost_codec.max_message_size(),
+                DEFAULT_MAX_MESSAGE_SIZE,
+                "ProstCodec still ignores the channel hook; the owned codec is the fix"
+            );
+            crate::test_complete!("channel_configured_limits_are_honored_unlike_the_prost_adapter");
+        }
+
+        #[test]
+        fn malformed_input_fails_closed_with_a_wire_error() {
+            init_test("malformed_input_fails_closed_with_a_wire_error");
+
+            let mut codec: ProtoCodec<OwnedTestMessage, OwnedTestMessage> = ProtoCodec::new();
+
+            // Field 1, length-delimited, declaring 200 bytes of payload that
+            // are not present.
+            let truncated = Bytes::from(vec![0x0a, 200, 0x01]);
+            assert!(
+                matches!(codec.decode(&truncated), Err(ProtoCodecError::Wire(_))),
+                "a truncated length-delimited field must be rejected"
+            );
+
+            // Field 1 declared as a string but carrying invalid UTF-8.
+            let bad_utf8 = Bytes::from(vec![0x0a, 0x01, 0xff]);
+            assert!(
+                matches!(codec.decode(&bad_utf8), Err(ProtoCodecError::Wire(_))),
+                "invalid UTF-8 in a string field must be rejected"
+            );
+            crate::test_complete!("malformed_input_fails_closed_with_a_wire_error");
+        }
+
+        #[test]
+        fn unknown_fields_survive_a_decode_reencode_roundtrip_when_preserved() {
+            init_test("unknown_fields_survive_a_decode_reencode_roundtrip_when_preserved");
+
+            // A "newer peer" buffer: known field 2, plus fields 7 and 9 that
+            // this schema has never heard of.
+            let mut writer = ProtobufWireEncoder::new(ProtobufWireLimits::default());
+            writer.write_string(2, "known").expect("write known");
+            writer.write_varint(7, 1234).expect("write unknown varint");
+            writer
+                .write_string(9, "future-field")
+                .expect("write unknown string");
+            let wire = writer.finish().expect("finish");
+
+            let mut codec: ProtoCodec<OwnedOuter, OwnedOuter> = ProtoCodec::new();
+            let decoded = codec.decode(&wire).expect("decode");
+
+            assert_eq!(decoded.items, vec!["known".to_string()]);
+            assert!(
+                !decoded.unknown.is_empty(),
+                "unknown fields must have been preserved"
+            );
+
+            // Re-encoding must reproduce the original buffer exactly, which is
+            // the property that lets an old binary forward a new binary's
+            // fields without corrupting them.
+            let reencoded = codec.encode(&decoded).expect("re-encode");
+            assert_eq!(
+                reencoded.as_ref(),
+                wire.as_ref(),
+                "decode/re-encode must be lossless when unknown fields are preserved"
+            );
+            crate::test_complete!(
+                "unknown_fields_survive_a_decode_reencode_roundtrip_when_preserved"
+            );
+        }
+
+        #[test]
+        fn unknown_fields_are_skipped_without_error_when_not_preserved() {
+            init_test("unknown_fields_are_skipped_without_error_when_not_preserved");
+
+            let mut writer = ProtobufWireEncoder::new(ProtobufWireLimits::default());
+            writer.write_string(2, "known").expect("write known");
+            writer.write_varint(7, 1234).expect("write unknown");
+            let wire = writer.finish().expect("finish");
+
+            let mut codec: ProtoCodec<OwnedOuterDropping, OwnedOuterDropping> = ProtoCodec::new();
+            let decoded = codec
+                .decode(&wire)
+                .expect("unknown fields must not fail a decode");
+
+            assert_eq!(decoded.items, vec!["known".to_string()]);
+            let reencoded = codec.encode(&decoded).expect("re-encode");
+            assert!(
+                reencoded.len() < wire.len(),
+                "a message that drops unknown fields must re-encode smaller"
+            );
+            crate::test_complete!("unknown_fields_are_skipped_without_error_when_not_preserved");
+        }
+
+        #[test]
+        fn merging_concatenated_buffers_equals_decoding_the_concatenation() {
+            init_test("merging_concatenated_buffers_equals_decoding_the_concatenation");
+
+            let limits = ProtobufWireLimits::default();
+            let first = OwnedOuterDropping {
+                items: vec!["a".to_string()],
+            }
+            .encode_to_bytes(limits)
+            .expect("encode first");
+            let second = OwnedOuterDropping {
+                items: vec!["b".to_string()],
+            }
+            .encode_to_bytes(limits)
+            .expect("encode second");
+
+            let mut concatenated = Vec::new();
+            concatenated.extend_from_slice(first.as_ref());
+            concatenated.extend_from_slice(second.as_ref());
+
+            let from_concatenation =
+                OwnedOuterDropping::decode_from_bytes(&concatenated, limits).expect("decode");
+
+            let mut incremental = OwnedOuterDropping::default();
+            incremental
+                .merge_from_bytes(first.as_ref(), limits)
+                .expect("merge first");
+            incremental
+                .merge_from_bytes(second.as_ref(), limits)
+                .expect("merge second");
+
+            assert_eq!(
+                incremental, from_concatenation,
+                "incremental merge must equal decoding the concatenation"
+            );
+            assert_eq!(
+                incremental.items,
+                vec!["a".to_string(), "b".to_string()],
+                "a repeated field merges by appending, in wire order"
+            );
+            crate::test_complete!("merging_concatenated_buffers_equals_decoding_the_concatenation");
+        }
+
+        #[test]
+        fn scalar_merge_is_last_one_wins_and_nested_message_merge_is_recursive() {
+            init_test("scalar_merge_is_last_one_wins_and_nested_message_merge_is_recursive");
+
+            let limits = ProtobufWireLimits::default();
+
+            // Two records for the same scalar field: the later one wins.
+            let mut writer = ProtobufWireEncoder::new(limits);
+            writer.write_string(1, "first").expect("write");
+            writer.write_string(1, "second").expect("write");
+            let wire = writer.finish().expect("finish");
+            let decoded =
+                OwnedTestMessage::decode_from_bytes(wire.as_ref(), limits).expect("decode");
+            assert_eq!(decoded.name, "second", "scalar merge is last-one-wins");
+
+            // Two records for the same nested-message field: they merge field
+            // by field rather than the second replacing the first wholesale.
+            let part_one = OwnedTestMessage {
+                name: "only-name".to_string(),
+                value: 0,
+            }
+            .encode_to_bytes(limits)
+            .expect("encode part one");
+            let part_two = OwnedTestMessage {
+                name: String::new(),
+                value: 99,
+            }
+            .encode_to_bytes(limits)
+            .expect("encode part two");
+
+            let mut writer = ProtobufWireEncoder::new(limits);
+            writer.write_message(1, part_one.as_ref()).expect("write");
+            writer.write_message(1, part_two.as_ref()).expect("write");
+            let wire = writer.finish().expect("finish");
+
+            let outer = OwnedOuter::decode_from_bytes(wire.as_ref(), limits).expect("decode");
+            assert_eq!(
+                outer.inner,
+                Some(OwnedTestMessage {
+                    name: "only-name".to_string(),
+                    value: 99,
+                }),
+                "a repeated nested message merges recursively"
+            );
+            crate::test_complete!(
+                "scalar_merge_is_last_one_wins_and_nested_message_merge_is_recursive"
+            );
+        }
+
+        #[test]
+        fn nested_descent_is_charged_against_the_shared_budget() {
+            init_test("nested_descent_is_charged_against_the_shared_budget");
+
+            let outer = OwnedOuter {
+                inner: Some(sample()),
+                items: vec!["a".to_string(), "b".to_string()],
+                unknown: UnknownFields::new(),
+            };
+            let wire = outer
+                .encode_to_bytes(ProtobufWireLimits::default())
+                .expect("encode");
+
+            // Three top-level records (one nested message + two strings) plus
+            // two records inside the nested message: five in aggregate.
+            let generous = ProtobufWireLimits::default().with_max_fields(5);
+            assert!(
+                OwnedOuter::decode_from_bytes(wire.as_ref(), generous).is_ok(),
+                "five records must fit a five-record budget"
+            );
+
+            // If nested descent started a fresh budget instead of sharing the
+            // parent's, this would also succeed — and a hostile peer could
+            // amplify work per nesting level for free.
+            let tight = ProtobufWireLimits::default().with_max_fields(3);
+            assert!(
+                OwnedOuter::decode_from_bytes(wire.as_ref(), tight).is_err(),
+                "nested fields must count against the parent's aggregate budget"
+            );
+            crate::test_complete!("nested_descent_is_charged_against_the_shared_budget");
+        }
+
+        #[test]
+        fn nested_descent_respects_the_depth_ceiling() {
+            init_test("nested_descent_respects_the_depth_ceiling");
+
+            let outer = OwnedOuter {
+                inner: Some(sample()),
+                items: Vec::new(),
+                unknown: UnknownFields::new(),
+            };
+            let wire = outer
+                .encode_to_bytes(ProtobufWireLimits::default())
+                .expect("encode");
+
+            let no_descent = ProtobufWireLimits::default().with_max_depth(0);
+            assert!(
+                matches!(
+                    OwnedOuter::decode_from_bytes(wire.as_ref(), no_descent),
+                    Err(ProtobufWireError::RecursionLimitExceeded { .. })
+                ),
+                "descending past the depth ceiling must fail closed"
+            );
+            crate::test_complete!("nested_descent_respects_the_depth_ceiling");
+        }
+
+        #[test]
+        fn symmetric_alias_default_and_clone_preserve_configuration() {
+            init_test("symmetric_alias_default_and_clone_preserve_configuration");
+
+            let configured: SymmetricProtoCodec<OwnedTestMessage> =
+                SymmetricProtoCodec::with_max_size(1024);
+            let cloned = configured.clone();
+            assert_eq!(cloned.max_encode_message_size(), 1024);
+            assert_eq!(cloned.max_decode_message_size(), 1024);
+            assert_eq!(cloned.wire_limits().max_message_len, 1024);
+
+            let defaulted: SymmetricProtoCodec<OwnedTestMessage> = SymmetricProtoCodec::default();
+            assert_eq!(
+                defaulted.max_encode_message_size(),
+                DEFAULT_MAX_MESSAGE_SIZE
+            );
+
+            let mut symmetric: SymmetricProtoCodec<OwnedTestMessage> = SymmetricProtoCodec::new();
+            let encoded = symmetric.encode(&sample()).expect("encode");
+            assert_eq!(symmetric.decode(&encoded).expect("decode"), sample());
+            crate::test_complete!("symmetric_alias_default_and_clone_preserve_configuration");
+        }
+
+        #[test]
+        fn codec_is_send_and_static_for_streaming_call_sites() {
+            init_test("codec_is_send_and_static_for_streaming_call_sites");
+
+            // The gRPC streaming paths require `Codec: Send + 'static`. Pin it
+            // here so a future field cannot quietly regress the bound and only
+            // fail at a distant call site.
+            fn assert_codec<C: Codec + Send + 'static>() {}
+            assert_codec::<ProtoCodec<OwnedTestMessage, OwnedOuterDropping>>();
+            assert_codec::<SymmetricProtoCodec<OwnedTestMessage>>();
+            crate::test_complete!("codec_is_send_and_static_for_streaming_call_sites");
+        }
     }
 }
