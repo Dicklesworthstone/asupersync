@@ -372,7 +372,10 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         Sender {
             inner: Arc::clone(&inner),
         },
-        Receiver { inner },
+        Receiver {
+            inner,
+            poll_waiter_id: None,
+        },
     )
 }
 
@@ -700,6 +703,88 @@ impl<T> Drop for SendPermit<T> {
     }
 }
 
+/// Polls an uninterruptible receive, registering `waiter_id` in the channel's
+/// single receive-waiter slot.
+///
+/// The waiter identity is owned by the caller so both registration lifetimes
+/// are expressible over one implementation:
+///
+/// - [`RecvUninterruptibleFuture`] keeps it in the future, so the future's
+///   `Drop` retires the registration when the caller stops waiting.
+/// - [`Receiver::poll_recv_uninterruptible`] keeps it on the long-lived
+///   receiver, so a `Pending` registration *survives* the poll. A poll-based
+///   join API needs that: it may scan several receivers in one poll and keep
+///   none of the futures alive (br-asupersync-tncxj9).
+fn poll_recv_uninterruptible_with_waiter<T>(
+    channel: &Mutex<OneShotInner<T>>,
+    waiter_id: &mut Option<u64>,
+    ctx: &mut Context<'_>,
+) -> Poll<Result<T, RecvError>> {
+    {
+        let mut inner = channel.lock();
+
+        if let Some(value) = inner.value.take() {
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
+            inner.closed_reason = Some("committed");
+            *waiter_id = None;
+            drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            wake_waker_after_unlock(retired_closed_waker);
+            return Poll::Ready(Ok(value));
+        }
+
+        if inner.is_closed() {
+            let retired_waker = inner.take_waker();
+            let retired_closed_waker = inner.receiver_closed_waker.take();
+            *waiter_id = None;
+            drop(inner);
+            retire_waker_after_unlock(retired_waker);
+            wake_waker_after_unlock(retired_closed_waker);
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        if receive_waker_is_current(&inner, *waiter_id, ctx.waker()) {
+            return Poll::Pending;
+        }
+    }
+
+    // RawWaker cloning may re-enter or panic. Prepare it without the
+    // channel mutex, then recheck terminal state and ownership.
+    let mut incoming_waker = Some(ctx.waker().clone());
+    let mut inner = channel.lock();
+
+    if let Some(value) = inner.value.take() {
+        let retired_waker = inner.take_waker();
+        let retired_closed_waker = inner.receiver_closed_waker.take();
+        inner.closed_reason = Some("committed");
+        *waiter_id = None;
+        drop(inner);
+        retire_waker_after_unlock(retired_waker);
+        wake_waker_after_unlock(retired_closed_waker);
+        retire_waker_after_unlock(incoming_waker);
+        return Poll::Ready(Ok(value));
+    }
+
+    if inner.is_closed() {
+        let retired_waker = inner.take_waker();
+        let retired_closed_waker = inner.receiver_closed_waker.take();
+        *waiter_id = None;
+        drop(inner);
+        retire_waker_after_unlock(retired_waker);
+        wake_waker_after_unlock(retired_closed_waker);
+        retire_waker_after_unlock(incoming_waker);
+        return Poll::Ready(Err(RecvError::Closed));
+    }
+
+    let retired_waker =
+        install_receive_waker(&mut inner, waiter_id, ctx.waker(), &mut incoming_waker);
+    drop(inner);
+    retire_waker_after_unlock(retired_waker);
+    retire_waker_after_unlock(incoming_waker);
+    Poll::Pending
+}
+
 /// Future returned by `recv_uninterruptible`.
 pub(crate) struct RecvUninterruptibleFuture<'a, T> {
     receiver: &'a mut Receiver<T>,
@@ -726,77 +811,12 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             return Poll::Ready(Err(RecvError::PolledAfterCompletion));
         }
 
-        {
-            let mut inner = this.receiver.inner.lock();
-
-            if let Some(value) = inner.value.take() {
-                let retired_waker = inner.take_waker();
-                let retired_closed_waker = inner.receiver_closed_waker.take();
-                inner.closed_reason = Some("committed");
-                this.waiter_id = None;
-                this.completed = true;
-                drop(inner);
-                retire_waker_after_unlock(retired_waker);
-                wake_waker_after_unlock(retired_closed_waker);
-                return Poll::Ready(Ok(value));
-            }
-
-            if inner.is_closed() {
-                let retired_waker = inner.take_waker();
-                let retired_closed_waker = inner.receiver_closed_waker.take();
-                this.waiter_id = None;
-                this.completed = true;
-                drop(inner);
-                retire_waker_after_unlock(retired_waker);
-                wake_waker_after_unlock(retired_closed_waker);
-                return Poll::Ready(Err(RecvError::Closed));
-            }
-
-            if receive_waker_is_current(&inner, this.waiter_id, ctx.waker()) {
-                return Poll::Pending;
-            }
-        }
-
-        // RawWaker cloning may re-enter or panic. Prepare it without the
-        // channel mutex, then recheck terminal state and ownership.
-        let mut incoming_waker = Some(ctx.waker().clone());
-        let mut inner = this.receiver.inner.lock();
-
-        if let Some(value) = inner.value.take() {
-            let retired_waker = inner.take_waker();
-            let retired_closed_waker = inner.receiver_closed_waker.take();
-            inner.closed_reason = Some("committed");
-            this.waiter_id = None;
+        let polled =
+            poll_recv_uninterruptible_with_waiter(&this.receiver.inner, &mut this.waiter_id, ctx);
+        if polled.is_ready() {
             this.completed = true;
-            drop(inner);
-            retire_waker_after_unlock(retired_waker);
-            wake_waker_after_unlock(retired_closed_waker);
-            retire_waker_after_unlock(incoming_waker);
-            return Poll::Ready(Ok(value));
         }
-
-        if inner.is_closed() {
-            let retired_waker = inner.take_waker();
-            let retired_closed_waker = inner.receiver_closed_waker.take();
-            this.waiter_id = None;
-            this.completed = true;
-            drop(inner);
-            retire_waker_after_unlock(retired_waker);
-            wake_waker_after_unlock(retired_closed_waker);
-            retire_waker_after_unlock(incoming_waker);
-            return Poll::Ready(Err(RecvError::Closed));
-        }
-
-        let retired_waker = install_receive_waker(
-            &mut inner,
-            &mut this.waiter_id,
-            ctx.waker(),
-            &mut incoming_waker,
-        );
-        drop(inner);
-        retire_waker_after_unlock(retired_waker);
-        retire_waker_after_unlock(incoming_waker);
-        Poll::Pending
+        polled
     }
 }
 
@@ -1078,6 +1098,13 @@ impl<T, Caps> Drop for RecvFuture<'_, T, Caps> {
 #[derive(Debug)]
 pub struct Receiver<T> {
     inner: Arc<Mutex<OneShotInner<T>>>,
+    /// Waiter identity for [`Receiver::poll_recv_uninterruptible`].
+    ///
+    /// Living on the receiver rather than in a per-poll future is what keeps a
+    /// `Pending` registration alive across polls (br-asupersync-tncxj9).
+    /// `Receiver::drop` retires the registration, so no executor state is
+    /// retained past the receiver's own lifetime.
+    poll_waiter_id: Option<u64>,
 }
 
 impl<T> Receiver<T> {
@@ -1118,6 +1145,33 @@ impl<T> Receiver<T> {
             waiter_id: None,
             completed: false,
         }
+    }
+
+    /// Polls for a value, ignoring cancellation, keeping the wake registration
+    /// on the receiver itself.
+    ///
+    /// This is the poll-based form of
+    /// [`recv_uninterruptible`](Self::recv_uninterruptible) for callers that
+    /// cannot hold a future across polls. The difference that matters is the
+    /// registration lifetime: a `Pending` result leaves this receiver's waiter
+    /// installed, whereas dropping a `RecvUninterruptibleFuture` retires it. A
+    /// caller that builds a fresh future per poll therefore ends its scan with
+    /// no waker registered anywhere and never wakes (br-asupersync-tncxj9).
+    ///
+    /// A terminal result drains the channel, so a later call observes
+    /// [`RecvError::Closed`] rather than a distinct already-completed signal.
+    /// Callers that need to tell those apart track terminality themselves; see
+    /// [`TaskHandle::poll_join`](crate::runtime::TaskHandle::poll_join).
+    #[inline]
+    pub(crate) fn poll_recv_uninterruptible(
+        &mut self,
+        ctx: &mut Context<'_>,
+    ) -> Poll<Result<T, RecvError>> {
+        let Self {
+            inner,
+            poll_waiter_id,
+        } = self;
+        poll_recv_uninterruptible_with_waiter(inner, poll_waiter_id, ctx)
     }
 
     /// Attempts to receive a value without blocking.

@@ -1,7 +1,8 @@
 //! Cancel-correctness, loser-drain equivalence, determinism and stress proof
 //! for `JoinSet`.
 //!
-//! Bead: asupersync-dx-core-api-v2-u1z5hn.5 (AC2, AC3, AC4, AC5)
+//! Bead: asupersync-dx-core-api-v2-u1z5hn.5 (AC1 abort-on-drop, AC2, AC3, AC4,
+//! AC5)
 //!
 //! The API surface and its unit tests already live inline in
 //! `src/combinator/join_set.rs`. What was missing is the *proof* surface the
@@ -10,6 +11,9 @@
 //! (`tests/cx_race_combinator_loser_drain_audit.rs`) greps source text, which
 //! proves the code is shaped a certain way but not that it behaves that way.
 //!
+//! - AC1 dropping a non-empty set requests cancellation of every member it
+//!   still owns, observed while the root task is still running so the request
+//!   is attributable to `Drop` rather than to region close.
 //! - AC2 `cancel_all` drives cancellation on every member, the caller observes
 //!   a terminal `Cancelled` for each, and the run stays quiescent with the
 //!   oracle suite green and no invariant violations.
@@ -27,6 +31,8 @@ use asupersync::cx::Cx;
 use asupersync::lab::run_async_under_lab;
 use asupersync::runtime::{RuntimeBuilder, yield_now};
 use asupersync::types::{CancelKind, CancelReason, Outcome};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Mirrors the inline helper: a loser may be attributed `RaceLost` or anything
 /// strictly stronger (a parent teardown can outrank it), but never weaker.
@@ -106,7 +112,7 @@ fn cancel_all_drives_cancellation_on_every_member_and_leaves_no_leaks() {
 
 #[test]
 fn join_next_after_cancel_all_reports_no_further_members() {
-    let (remaining, report) = run_async_under_lab(0xA2_2, |cx| async move {
+    let (remaining, report) = run_async_under_lab(0xA22, |cx| async move {
         let mut set: JoinSet<'static, u32, &'static str, _> = JoinSet::in_cx(&cx);
         for _ in 0..4 {
             set.spawn(&cx, parks_forever).expect("spawn member");
@@ -129,6 +135,80 @@ fn join_next_after_cancel_all_reports_no_further_members() {
         "join_next on a drained set must report no further members"
     );
     assert!(report.quiescent && report.invariant_violations.is_empty());
+}
+
+// ------------------------------------------------- AC1 (abort-on-drop)
+
+/// Dropping a non-empty set is a cancellation *request* to every member it
+/// still owns. This is the behavioral half of AC1's abort-on-drop clause; the
+/// documentation half is pinned by
+/// `tests/cx_join_all_independence_vs_region_audit.rs`, which only reads source
+/// text.
+///
+/// The proof is attributive, not just "everything eventually stopped": members
+/// are counted the moment they observe cancellation, and the count is asserted
+/// to be zero before the drop and complete *while the root task is still
+/// running*. Region close has not happened yet at that point, so the drop is
+/// the only thing that could have requested cancellation. Without that
+/// distinction the test would pass on region teardown alone and prove nothing
+/// about `Drop`.
+#[test]
+fn dropping_a_non_empty_set_requests_cancellation_of_every_member() {
+    const MEMBERS: usize = 4;
+
+    let (observed, report) = run_async_under_lab(0xA1D, |cx| async move {
+        let cancelled_seen = Arc::new(AtomicUsize::new(0));
+        let mut set: JoinSet<'static, u32, &'static str, _> = JoinSet::in_cx(&cx);
+        for _ in 0..MEMBERS {
+            let seen = Arc::clone(&cancelled_seen);
+            set.spawn(&cx, move |member_cx| async move {
+                loop {
+                    if member_cx.checkpoint().is_err() {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        return Err("observed cancellation");
+                    }
+                    yield_now().await;
+                }
+            })
+            .expect("spawn member");
+        }
+
+        // Let every member reach its first checkpoint before the drop, so the
+        // pre-drop reading below is a real observation rather than a race.
+        for _ in 0..32 {
+            yield_now().await;
+        }
+        let before_drop = cancelled_seen.load(Ordering::SeqCst);
+
+        drop(set);
+
+        for _ in 0..128 {
+            yield_now().await;
+        }
+        let after_drop = cancelled_seen.load(Ordering::SeqCst);
+        (before_drop, after_drop)
+    });
+
+    assert_eq!(
+        observed.0, 0,
+        "no member may observe cancellation before the set is dropped, or the \
+         post-drop count proves nothing"
+    );
+    assert_eq!(
+        observed.1, MEMBERS,
+        "every member must observe the drop's cancellation request while the \
+         root task is still running, before any region close"
+    );
+    assert!(
+        report.quiescent,
+        "dropping the set must still reach quiescence: region close is the \
+         no-orphan backstop behind drop's best-effort request"
+    );
+    assert!(
+        report.invariant_violations.is_empty(),
+        "abort-on-drop must leak no tasks or obligations: {:?}",
+        report.invariant_violations
+    );
 }
 
 // ---------------------------------------------------------------- AC3
@@ -174,7 +254,7 @@ fn default_cancel_all_attribution_is_weaker_than_race_loss() {
     // Guards the AC3 claim from becoming vacuous: if plain cancel_all also
     // reported RaceLost, the equivalence test above would prove nothing about
     // the explicit-reason path.
-    let (outcomes, _report) = run_async_under_lab(0xA3_2, |cx| async move {
+    let (outcomes, _report) = run_async_under_lab(0xA32, |cx| async move {
         let mut set: JoinSet<'static, u32, &'static str, _> = JoinSet::in_cx(&cx);
         set.spawn(&cx, parks_forever).expect("spawn member");
         set.cancel_all(&cx).await
@@ -224,10 +304,12 @@ fn completion_order_under_seed(seed: u64) -> (Vec<u32>, u64) {
     (order, report.trace_fingerprint)
 }
 
+/// This is also the acceptance test for `br-asupersync-tncxj9`: it only
+/// terminates because `join_next` polls members through
+/// `TaskHandle::poll_join`, whose wake registration survives a `Pending` poll.
+/// A per-poll join future retires the waiter it installs, so the set would park
+/// here until the lab's 100k step limit.
 #[test]
-#[ignore = "blocked by br-asupersync-tncxj9: JoinSet::join_next drops its per-poll \
-            join future, deregistering the waker, so it never wakes under the \
-            deterministic lab scheduler. join_all/cancel_all are unaffected."]
 fn same_seed_runs_produce_identical_completion_order_and_trace_fingerprint() {
     let (first_order, first_fingerprint) = completion_order_under_seed(0xA4);
     let (second_order, second_fingerprint) = completion_order_under_seed(0xA4);
