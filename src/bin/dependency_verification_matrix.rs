@@ -521,7 +521,9 @@ fn local_test_file(
     for capability_id in capability_ids {
         if let Some(row) = capabilities.get(capability_id) {
             for owner in strings(row, "source_owners") {
-                if owner.ends_with(".rs")
+                if std::path::Path::new(&owner)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
                     && (owner.starts_with("src/")
                         || owner.starts_with("asupersync-")
                         || owner.starts_with("franken"))
