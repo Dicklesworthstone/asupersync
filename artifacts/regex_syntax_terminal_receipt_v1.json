@@ -1,0 +1,391 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-syntax-terminal-receipt-v1",
+  "program_id": "dependency-sovereignty",
+  "bead_id": "asupersync-5z2scg.8.3.1.4",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "grammar_id": "ASUP-REGEX-SYNTAX-V1",
+  "language_version": 1,
+  "captured_date_utc": "2026-07-25",
+  "source_revisions": {
+    "r1_inventory": "8b399fa72",
+    "grammar_contract": "4074a2746",
+    "lexer": "582da577c",
+    "parser": "9056ef793",
+    "terminal_repairs": "69e796eeb727f9772bdadfe6869d9c3d14a10db3"
+  },
+  "source_digests": [
+    {
+      "path": "src/observability/regex_syntax.rs",
+      "sha256": "91dcafd95ed26dca1d0f21e9e3ad79cb15f69b73e868661f0ce6fd9280b399b3"
+    },
+    {
+      "path": "artifacts/regex_syntax_grammar_contract_v1.json",
+      "sha256": "06fbee0863829c1186d6ef7eb4ba12b758a939f5db3d677d3ecd926b80380c9b"
+    },
+    {
+      "path": "artifacts/regex_privacy_capability_inventory_v1.json",
+      "sha256": "eb4058b888b33a152975d7be576d117663f8560ed55a634369991d091f76d6ea"
+    }
+  ],
+  "oracle": {
+    "incumbent_package": "regex@1.13.1",
+    "structural_reference_package": "regex-syntax@0.8.11",
+    "quarantined": true,
+    "wording_is_not_compared": true,
+    "oracle_expiry_utc": "2026-10-23T00:00:00Z",
+    "invalidate_earlier_on": [
+      "Cargo.lock changes the resolved regex or regex-syntax version",
+      "ASUP-REGEX-SYNTAX-V1 language_version changes",
+      "the R1 inventory or grammar artifact digest changes",
+      "the candidate syntax source digest changes"
+    ]
+  },
+  "decision": {
+    "terminal_receipt_complete": true,
+    "syntax_disposition": "KEEP_INCUMBENT_DEFER",
+    "incumbent_state": "KEEP_INCUMBENT",
+    "candidate_state": "BOUNDED_PARSER_WITH_EXPLICIT_GAPS",
+    "cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "same_rows": 30,
+    "better_rows": 0,
+    "defer_rows": 1,
+    "unknown_rows": 0,
+    "unresolved_high_findings": 0,
+    "resolved_by_fail_closed_disposition": 3,
+    "on_missing_row_or_new_divergence": "KEEP_INCUMBENT_DEFER"
+  },
+  "limits": [
+    {
+      "limit_id": "RGX-LIMIT-PATTERN-BYTES",
+      "candidate_value": 1048576,
+      "unit": "UTF-8 bytes",
+      "outcome": "RGX-DIAG-PATTERN-TOO-LARGE",
+      "parity": "DEFER_CANDIDATE_ONLY_POLICY"
+    },
+    {
+      "limit_id": "RGX-LIMIT-TOKENS",
+      "candidate_value": 1048576,
+      "unit": "tokens including end",
+      "outcome": "RGX-DIAG-TOKEN-LIMIT",
+      "parity": "DEFER_CANDIDATE_ONLY_POLICY"
+    },
+    {
+      "limit_id": "RGX-LIMIT-AST-NODES",
+      "candidate_value": 1048576,
+      "unit": "arena nodes",
+      "outcome": "RGX-DIAG-AST-LIMIT",
+      "parity": "DEFER_CANDIDATE_ONLY_POLICY"
+    },
+    {
+      "limit_id": "RGX-LIMIT-NESTING",
+      "candidate_value": 250,
+      "unit": "group and class nesting",
+      "outcome": "RGX-DIAG-NEST-LIMIT",
+      "parity": "SAME"
+    },
+    {
+      "limit_id": "RGX-LIMIT-REPETITION-COUNT",
+      "candidate_value": 4294967295,
+      "unit": "count",
+      "outcome": "RGX-DIAG-INVALID-REPETITION",
+      "parity": "SAME"
+    }
+  ],
+  "evidence_summary": {
+    "inventory_rows": 31,
+    "golden_cases": 20,
+    "accepted_goldens": 12,
+    "diagnostic_goldens": 8,
+    "adversarial_compile_cases": 62,
+    "retained_lexer_regressions": 16,
+    "retained_parser_regressions": 23,
+    "property_cases_per_lane": 256,
+    "property_lanes": 4,
+    "generated_property_cases": 1024,
+    "focused_tests": 35,
+    "panic_observed": false,
+    "unbounded_ast_expansion_observed": false,
+    "source_text_in_diagnostics_observed": false
+  },
+  "row_results": [
+    {
+      "case_id": "RGX-SYN-001",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-002",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-003",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-004",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-005",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-006",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-007",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-008",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-009",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-010",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-011",
+      "parity": "DEFER",
+      "blocker_id": "RGX-GAP-X-WHITESPACE"
+    },
+    {
+      "case_id": "RGX-SYN-012",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-013",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-014",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-015",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-016",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-017",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-018",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-019",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-020",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-021",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-022",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-023",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-024",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-025",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-026",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-027",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-028",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-029",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-030",
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-SYN-031",
+      "parity": "SAME"
+    }
+  ],
+  "diagnostic_results": [
+    {
+      "case_id": "RGX-GOLDEN-013",
+      "category": "RGX-DIAG-UNSUPPORTED-LOOKAROUND",
+      "byte_span": [0, 3],
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-GOLDEN-014",
+      "category": "RGX-DIAG-UNSUPPORTED-BACKREFERENCE",
+      "byte_span": [8, 10],
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-GOLDEN-015",
+      "category": "RGX-DIAG-UNCLOSED-GROUP",
+      "byte_span": [0, 1],
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-GOLDEN-016",
+      "category": "RGX-DIAG-UNCLOSED-CLASS",
+      "byte_span": [0, 1],
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-GOLDEN-017",
+      "category": "RGX-DIAG-INVALID-REPETITION",
+      "byte_span": [1, 6],
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-GOLDEN-018",
+      "category": "RGX-DIAG-INVALID-FLAG",
+      "byte_span": [2, 3],
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-GOLDEN-019",
+      "category": "RGX-DIAG-INVALID-UTF8",
+      "byte_span": [0, 7],
+      "parity": "SAME"
+    },
+    {
+      "case_id": "RGX-GOLDEN-020",
+      "category": "RGX-DIAG-TRAILING-ESCAPE",
+      "byte_span": [0, 1],
+      "parity": "SAME"
+    }
+  ],
+  "repair_receipts": [
+    {
+      "repair_id": "RGX-REPAIR-DIRECT-NESTED-REPETITION",
+      "minimized_inputs": ["a**", "a++", "a{1}+", "a+{2}"],
+      "result": "SAME",
+      "evidence_test": "directly_nested_repetition_matches_incumbent_syntax_and_stays_bounded"
+    },
+    {
+      "repair_id": "RGX-REPAIR-MISSING-REPETITION-SPAN",
+      "minimized_inputs": ["*a", "(?i)*"],
+      "result": "SAME",
+      "evidence_test": "directly_nested_repetition_matches_incumbent_syntax_and_stays_bounded"
+    },
+    {
+      "repair_id": "RGX-REPAIR-EMPTY-CLASS-SET-OPERANDS",
+      "minimized_inputs": ["[a&&]", "[&&a]", "[a--]", "[--a]", "[a~~]", "[~~a]"],
+      "result": "SAME",
+      "evidence_test": "class_set_operators_preserve_incumbent_empty_operands"
+    }
+  ],
+  "divergence_register": [
+    {
+      "blocker_id": "RGX-GAP-X-WHITESPACE",
+      "classification": "R3_1_SYNTAX_AND_AST_SEMANTICS",
+      "severity": "HIGH_CUTOVER_BLOCKER",
+      "disposition": "DEFER_KEEP_INCUMBENT",
+      "mapped_rows": ["RGX-SYN-011"],
+      "minimized_inputs": [
+        "(?x)a b",
+        "(?x)a # comment\n b",
+        "(?x)[ a-z ]",
+        "(?x)a{ 2 , 3 }",
+        "(?x)\\x { 53 }",
+        "(?x)\\u { 53 }",
+        "(?x)\\p { Greek }",
+        "(?x)( ?P<foo> a )"
+      ],
+      "candidate_observation": "ordinary whitespace and comments remain AST atoms in accepted forms, and whitespace inside counted repetition and escape/group syntax is rejected",
+      "incumbent_observation": "x mode erases unescaped Unicode whitespace/comments and admits whitespace at grammar-specific boundaries",
+      "owner_bead": "asupersync-5z2scg.8.3.5"
+    },
+    {
+      "blocker_id": "RGX-GAP-DUPLICATE-CAPTURE-NAME",
+      "classification": "R3_1_TYPED_DIAGNOSTICS",
+      "severity": "HIGH_CUTOVER_BLOCKER",
+      "disposition": "DEFER_KEEP_INCUMBENT",
+      "mapped_rows": [],
+      "minimized_inputs": ["(?P<name>a)|(?P<name>b)"],
+      "candidate_observation": "accepted with duplicate named captures",
+      "incumbent_observation": "rejected as a duplicate capture name",
+      "owner_bead": "asupersync-5z2scg.8.3.5"
+    },
+    {
+      "blocker_id": "RGX-GAP-UNICODE-PROPERTY-VALIDATION",
+      "classification": "R3_2_UNICODE_AND_BYTE_SEMANTICS",
+      "severity": "HIGH_CUTOVER_BLOCKER",
+      "disposition": "DEFER_KEEP_INCUMBENT",
+      "mapped_rows": [],
+      "minimized_inputs": [
+        "\\p{DefinitelyNotAProperty}",
+        "(?-u:\\pL)",
+        "(?-u:\\xFF)"
+      ],
+      "candidate_observation": "syntax nodes are accepted before Unicode-table/property and UTF-8 byte-mode validation exists",
+      "incumbent_observation": "unknown properties and invalid string-mode byte constructs are rejected",
+      "owner_bead": "asupersync-5z2scg.8.3.2.2"
+    }
+  ],
+  "seeds_and_replay": {
+    "lexer_seed": "0x5A2C0312",
+    "parser_seed": "0x5A2C0313",
+    "proptest_cases_per_lane": 256,
+    "focused_source_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics regex_syntax::tests --lib -- --nocapture",
+    "terminal_contract_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_syntax_terminal_receipt_contract -- --nocapture"
+  },
+  "redaction": {
+    "source_text_rendered_by_candidate_errors": false,
+    "canary": "private-source-canary",
+    "canary_observed_in_rendered_error": false,
+    "stable_display_fields": [
+      "error code",
+      "diagnostic category",
+      "byte span",
+      "scalar span"
+    ]
+  },
+  "lifecycle_scope": {
+    "tasks": 0,
+    "obligations": 0,
+    "io_effects": 0,
+    "cancellation_applicable": false,
+    "reason": "the candidate syntax layer is pure synchronous parsing with bounded in-memory vectors and no runtime integration"
+  },
+  "no_claim_boundaries": [
+    "does not authorize removing regex or regex-syntax",
+    "does not prove Unicode/property/byte-mode parity",
+    "does not prove compiler, matcher, capture, replacement, cache, or privacy behavior",
+    "does not prove performance improvement or no regression",
+    "does not prove broad workspace health or release readiness",
+    "does not claim the canonical dependency-sovereignty E2E has run",
+    "does not authorize local Cargo fallback"
+  ]
+}
