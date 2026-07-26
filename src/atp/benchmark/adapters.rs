@@ -87,7 +87,7 @@ impl ToolVersion {
 #[async_trait::async_trait]
 pub trait BaselineAdapter: Send + Sync + std::fmt::Debug {
     /// Get the tool name.
-    fn tool_name(&self) -> &str;
+    fn tool_name(&self) -> &'static str;
 
     /// Check if the tool is available and get version info.
     async fn check_availability(&self) -> ToolAvailability;
@@ -179,7 +179,7 @@ impl ScpAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for ScpAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         "scp"
     }
 
@@ -227,7 +227,7 @@ impl BaselineAdapter for ScpAdapter {
         let mut total_metrics = Vec::new();
 
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
 
             // Build and execute scp command
             let mut cmd = self.build_scp_command(source_path, &iteration_dest);
@@ -412,7 +412,7 @@ impl RsyncAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for RsyncAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         "rsync"
     }
 
@@ -459,7 +459,7 @@ impl BaselineAdapter for RsyncAdapter {
         let mut total_metrics = Vec::new();
 
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
 
             // Build and execute rsync command
             let mut cmd = self.build_rsync_command(source_path, &iteration_dest);
@@ -605,7 +605,7 @@ impl RcloneAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for RcloneAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         "rclone"
     }
 
@@ -647,7 +647,7 @@ impl BaselineAdapter for RcloneAdapter {
 
         let mut total_metrics = Vec::new();
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
             let mut cmd = self.build_rclone_command(source_path, &iteration_dest);
 
             let start_time = Instant::now();
@@ -827,7 +827,7 @@ impl CurlAdapter {
 
 #[async_trait::async_trait]
 impl BaselineAdapter for CurlAdapter {
-    fn tool_name(&self) -> &str {
+    fn tool_name(&self) -> &'static str {
         if self.enable_http3 {
             "curl-http3"
         } else {
@@ -901,7 +901,7 @@ impl BaselineAdapter for CurlAdapter {
         let mut total_metrics = Vec::new();
 
         for iteration in 0..config.iterations {
-            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let iteration_dest = dest_path.with_extension(format!("iter{iteration}"));
 
             let test_url = format!("file://{}", source_path.to_string_lossy());
 

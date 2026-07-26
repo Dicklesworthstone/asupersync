@@ -8,7 +8,6 @@ use crate::trace::event::TraceEvent;
 use crate::types::{ObligationId, RegionId, TaskId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -215,7 +214,7 @@ impl TraceMinimizer {
         // Find events that are transitively required
         for (i, event) in events.iter().enumerate() {
             if self.is_target_event(event) {
-                self.mark_dependencies_recursive(&dependencies, i, &mut essential);
+                Self::mark_dependencies_recursive(&dependencies, i, &mut essential);
             }
         }
 
@@ -392,7 +391,6 @@ impl TraceMinimizer {
 
     /// Mark dependencies recursively
     fn mark_dependencies_recursive(
-        &self,
         dependencies: &HashMap<usize, Vec<usize>>,
         event_idx: usize,
         essential: &mut HashSet<usize>,
@@ -403,7 +401,7 @@ impl TraceMinimizer {
 
         if let Some(deps) = dependencies.get(&event_idx) {
             for &dep in deps {
-                self.mark_dependencies_recursive(dependencies, dep, essential);
+                Self::mark_dependencies_recursive(dependencies, dep, essential);
             }
         }
     }
@@ -426,60 +424,64 @@ impl TraceMinimizer {
 
     /// Check if event is a target for minimization
     fn is_target_event(&self, event: &TraceEvent) -> bool {
-        use crate::trace::event::TraceEventKind::*;
+        use crate::trace::event::TraceEventKind as Kind;
 
+        // Deliberately exhaustive with no `_` arm: adding a TraceEventKind must be
+        // an explicit target/non-target decision, not a silent default to false.
         match event.kind {
             // Critical events that usually indicate problems
-            ObligationLeak | ObligationAbort | FuturelockDetected => true,
+            Kind::ObligationLeak | Kind::ObligationAbort | Kind::FuturelockDetected => true,
 
             // Cancellation events - important for understanding failures
-            CancelRequest | CancelAck => true,
+            Kind::CancelRequest | Kind::CancelAck => true,
 
             // Region lifecycle events that might indicate hangs or deadlocks
-            RegionCloseBegin | RegionCloseComplete | RegionCancelled => true,
+            Kind::RegionCloseBegin | Kind::RegionCloseComplete | Kind::RegionCancelled => true,
 
             // Worker events that might indicate cross-boundary issues
-            WorkerCancelRequested | WorkerDrainCompleted | WorkerFinalizeCompleted => true,
+            Kind::WorkerCancelRequested
+            | Kind::WorkerDrainCompleted
+            | Kind::WorkerFinalizeCompleted => true,
 
             // Monitor/supervision events that indicate failures
-            DownDelivered | ExitDelivered => true,
+            Kind::DownDelivered | Kind::ExitDelivered => true,
 
             // I/O errors are often important
-            IoError => true,
+            Kind::IoError => true,
 
             // User traces and checkpoints might mark important points
-            UserTrace | Checkpoint => true,
+            Kind::UserTrace | Kind::Checkpoint => true,
 
             // Regular operational events are not targets by default
-            Spawn
-            | Schedule
-            | Yield
-            | Wake
-            | Poll
-            | Complete
-            | RegionCreated
-            | ObligationReserve
-            | ObligationCommit
-            | TimeAdvance
-            | TimerScheduled
-            | TimerFired
-            | TimerCancelled
-            | IoRequested
-            | IoReady
-            | IoResult
-            | RngSeed
-            | RngValue
-            | ChaosInjection
-            | MonitorCreated
-            | MonitorDropped
-            | LinkCreated
-            | LinkDropped
-            | TaskSpawnEnqueued
-            | TaskAdmitted
-            | BudgetInstalled
-            | BudgetConsumed
-            | WorkerCancelAcknowledged
-            | WorkerDrainStarted => false,
+            Kind::Spawn
+            | Kind::Schedule
+            | Kind::Yield
+            | Kind::Wake
+            | Kind::Poll
+            | Kind::Complete
+            | Kind::RegionCreated
+            | Kind::ObligationReserve
+            | Kind::ObligationCommit
+            | Kind::TimeAdvance
+            | Kind::TimerScheduled
+            | Kind::TimerFired
+            | Kind::TimerCancelled
+            | Kind::IoRequested
+            | Kind::IoReady
+            | Kind::IoResult
+            | Kind::RngSeed
+            | Kind::RngValue
+            | Kind::ChaosInjection
+            | Kind::MonitorCreated
+            | Kind::MonitorDropped
+            | Kind::LinkCreated
+            | Kind::LinkDropped
+            | Kind::TaskSpawnEnqueued
+            | Kind::TaskAdmitted
+            | Kind::BudgetInstalled
+            | Kind::BudgetConsumed
+            | Kind::WorkerCancelAcknowledged
+            | Kind::WorkerDrainStarted => false,
         }
     }
 
@@ -539,14 +541,14 @@ impl TraceMinimizer {
         events: &[TraceEvent],
         dependencies: &mut HashMap<usize, Vec<usize>>,
     ) {
-        use crate::trace::event::TraceEventKind::*;
+        use crate::trace::event::TraceEventKind as Kind;
 
         // Find parent-child region relationships
         for (child_idx, child_event) in events.iter().enumerate() {
             if self.extract_region_id(child_event).is_some() {
                 // Look for the parent region creation that this child depends on
                 for (parent_idx, parent_event) in events.iter().enumerate().take(child_idx) {
-                    if parent_event.kind == RegionCreated {
+                    if parent_event.kind == Kind::RegionCreated {
                         if let Some(parent_region) = self.extract_region_id(parent_event) {
                             // If child event references parent as its parent, add dependency
                             if let crate::trace::event::TraceData::Region {
@@ -567,8 +569,8 @@ impl TraceMinimizer {
         let mut timer_scheduled_indices = Vec::new();
         for (i, event) in events.iter().enumerate() {
             match event.kind {
-                TimerScheduled => timer_scheduled_indices.push(i),
-                TimerFired | TimerCancelled => {
+                Kind::TimerScheduled => timer_scheduled_indices.push(i),
+                Kind::TimerFired | Kind::TimerCancelled => {
                     // Timer fire/cancel events depend on the most recent timer scheduled
                     if let Some(&last_scheduled) = timer_scheduled_indices.last() {
                         dependencies.entry(i).or_default().push(last_scheduled);
@@ -583,9 +585,9 @@ impl TraceMinimizer {
         let mut link_created_indices = Vec::new();
         for (i, event) in events.iter().enumerate() {
             match event.kind {
-                MonitorCreated => monitor_created_indices.push(i),
-                LinkCreated => link_created_indices.push(i),
-                DownDelivered => {
+                Kind::MonitorCreated => monitor_created_indices.push(i),
+                Kind::LinkCreated => link_created_indices.push(i),
+                Kind::DownDelivered => {
                     // Down events depend on monitor creation
                     for &monitor_idx in &monitor_created_indices {
                         if monitor_idx < i {
@@ -593,7 +595,7 @@ impl TraceMinimizer {
                         }
                     }
                 }
-                ExitDelivered => {
+                Kind::ExitDelivered => {
                     // Exit events depend on link creation
                     for &link_idx in &link_created_indices {
                         if link_idx < i {
@@ -608,7 +610,7 @@ impl TraceMinimizer {
 
     /// Check if two events have causal relationship
     fn has_causal_relationship(&self, first: &TraceEvent, second: &TraceEvent) -> bool {
-        use crate::trace::event::{TraceData, TraceEventKind::*};
+        use crate::trace::event::{TraceData, TraceEventKind as Kind};
 
         // Logical time ordering indicates causal dependency
         if let (Some(first_time), Some(second_time)) = (&first.logical_time, &second.logical_time) {
@@ -621,44 +623,44 @@ impl TraceMinimizer {
         match (&first.kind, &second.kind, &first.data, &second.data) {
             // Task lifecycle: spawn -> schedule -> poll -> complete
             (
-                Spawn,
-                Schedule,
+                Kind::Spawn,
+                Kind::Schedule,
                 TraceData::Task { task: task1, .. },
                 TraceData::Task { task: task2, .. },
             )
             | (
-                Schedule,
-                Poll,
+                Kind::Schedule,
+                Kind::Poll,
                 TraceData::Task { task: task1, .. },
                 TraceData::Task { task: task2, .. },
             )
             | (
-                Poll,
-                Complete,
+                Kind::Poll,
+                Kind::Complete,
                 TraceData::Task { task: task1, .. },
                 TraceData::Task { task: task2, .. },
             ) if task1 == task2 => true,
 
             // Wake -> Schedule relationship
             (
-                Wake,
-                Schedule,
+                Kind::Wake,
+                Kind::Schedule,
                 TraceData::Task { task: task1, .. },
                 TraceData::Task { task: task2, .. },
             ) if task1 == task2 => true,
 
             // Cancellation protocol: request -> ack
             (
-                CancelRequest,
-                CancelAck,
+                Kind::CancelRequest,
+                Kind::CancelAck,
                 TraceData::Cancel { task: task1, .. },
                 TraceData::Cancel { task: task2, .. },
             ) if task1 == task2 => true,
 
             // Region lifecycle: create -> close
             (
-                RegionCreated,
-                RegionCloseBegin,
+                Kind::RegionCreated,
+                Kind::RegionCloseBegin,
                 TraceData::Region {
                     region: region1, ..
                 },
@@ -667,8 +669,8 @@ impl TraceMinimizer {
                 },
             )
             | (
-                RegionCloseBegin,
-                RegionCloseComplete,
+                Kind::RegionCloseBegin,
+                Kind::RegionCloseComplete,
                 TraceData::Region {
                     region: region1, ..
                 },
@@ -679,7 +681,7 @@ impl TraceMinimizer {
 
             // Parent-child region relationships
             (
-                RegionCreated,
+                Kind::RegionCreated,
                 _,
                 TraceData::Region { region: parent, .. },
                 TraceData::Region {
@@ -690,8 +692,8 @@ impl TraceMinimizer {
 
             // Obligation lifecycle: reserve -> commit/abort
             (
-                ObligationReserve,
-                ObligationCommit,
+                Kind::ObligationReserve,
+                Kind::ObligationCommit,
                 TraceData::Obligation {
                     obligation: obl1, ..
                 },
@@ -700,8 +702,8 @@ impl TraceMinimizer {
                 },
             )
             | (
-                ObligationReserve,
-                ObligationAbort,
+                Kind::ObligationReserve,
+                Kind::ObligationAbort,
                 TraceData::Obligation {
                     obligation: obl1, ..
                 },
@@ -711,21 +713,21 @@ impl TraceMinimizer {
             ) if obl1 == obl2 => true,
 
             // Timer lifecycle: schedule -> fire/cancel
-            (TimerScheduled, TimerFired, _, _) | (TimerScheduled, TimerCancelled, _, _) => true,
+            (Kind::TimerScheduled, Kind::TimerFired | Kind::TimerCancelled, _, _) => true,
 
             // I/O lifecycle: request -> ready -> result/error
-            (IoRequested, IoReady, _, _) | (IoReady, IoResult, _, _) | (IoReady, IoError, _, _) => {
-                true
-            }
+            (Kind::IoRequested, Kind::IoReady, _, _)
+            | (Kind::IoReady, Kind::IoResult | Kind::IoError, _, _) => true,
 
             // Worker offload protocol
-            (WorkerCancelRequested, WorkerCancelAcknowledged, _, _)
-            | (WorkerCancelAcknowledged, WorkerDrainStarted, _, _)
-            | (WorkerDrainStarted, WorkerDrainCompleted, _, _)
-            | (WorkerDrainCompleted, WorkerFinalizeCompleted, _, _) => true,
+            (Kind::WorkerCancelRequested, Kind::WorkerCancelAcknowledged, _, _)
+            | (Kind::WorkerCancelAcknowledged, Kind::WorkerDrainStarted, _, _)
+            | (Kind::WorkerDrainStarted, Kind::WorkerDrainCompleted, _, _)
+            | (Kind::WorkerDrainCompleted, Kind::WorkerFinalizeCompleted, _, _) => true,
 
             // Monitor/link relationships
-            (MonitorCreated, DownDelivered, _, _) | (LinkCreated, ExitDelivered, _, _) => true,
+            (Kind::MonitorCreated, Kind::DownDelivered, _, _)
+            | (Kind::LinkCreated, Kind::ExitDelivered, _, _) => true,
 
             _ => false,
         }
@@ -914,7 +916,10 @@ impl MinimizerFactory {
 
 /// Utility functions for trace processing
 pub mod utils {
-    use super::*;
+    use crate::error::{Error, Result};
+    use crate::trace::event::TraceEvent;
+    use std::collections::HashMap;
+    use std::path::Path;
 
     /// Load trace from file
     pub async fn load_trace(path: &Path) -> Result<Vec<TraceEvent>> {

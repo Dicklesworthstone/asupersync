@@ -516,7 +516,7 @@ impl BenchmarkCartel {
     /// Get current git commit hash for baseline validation
     fn get_current_commit_hash() -> Result<String> {
         let output = std::process::Command::new("git")
-            .args(&["rev-parse", "HEAD"])
+            .args(["rev-parse", "HEAD"])
             .output()
             .map_err(|e| Error::internal(format!("failed to get current commit hash: {e}")))?;
 
@@ -693,7 +693,8 @@ impl BenchmarkCartel {
 
 /// Utility functions for benchmark analysis
 pub mod analysis {
-    use super::*;
+    use super::BenchmarkResult;
+    use std::collections::HashMap;
 
     /// Compare two sets of benchmark results
     pub fn compare_result_sets(
