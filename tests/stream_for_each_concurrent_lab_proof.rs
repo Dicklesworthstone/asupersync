@@ -18,10 +18,12 @@
 
 #![allow(missing_docs)]
 
+use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::lab::run_async_under_lab;
 use asupersync::runtime::yield_now;
 use asupersync::stream::{for_each_concurrent, iter, try_for_each_concurrent};
+use asupersync::sync::{OwnedSemaphorePermit, Semaphore};
 use asupersync::types::Outcome;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,7 +51,7 @@ fn for_each_concurrent_visits_every_item_exactly_once() {
     let (outcome, report) = run_async_under_lab(0xB01, {
         let seen = Arc::clone(&seen);
         move |cx| async move {
-            let source = iter((0..ITEMS).collect::<Vec<usize>>());
+            let source = iter(0..ITEMS);
             for_each_concurrent(&cx, source, 4, move |_item_cx, _item| {
                 let seen = Arc::clone(&seen);
                 async move {
@@ -89,7 +91,7 @@ fn for_each_concurrent_never_exceeds_the_limit() {
         let in_flight = Arc::clone(&in_flight);
         let max_seen = Arc::clone(&max_seen);
         move |cx| async move {
-            let source = iter((0..ITEMS).collect::<Vec<usize>>());
+            let source = iter(0..ITEMS);
             for_each_concurrent(&cx, source, LIMIT, move |_item_cx, _item| {
                 let in_flight = Arc::clone(&in_flight);
                 let max_seen = Arc::clone(&max_seen);
@@ -141,7 +143,7 @@ fn try_for_each_concurrent_drains_in_flight_items_before_returning() {
     let (outcome, report) = run_async_under_lab(0xB03, {
         let observed = Arc::clone(&observed_cancellation);
         move |cx| async move {
-            let source = iter((0..=PARKED).collect::<Vec<usize>>());
+            let source = iter(0..=PARKED);
             try_for_each_concurrent(&cx, source, LIMIT, move |item_cx, item| {
                 let observed = Arc::clone(&observed);
                 async move {
@@ -177,6 +179,142 @@ fn try_for_each_concurrent_drains_in_flight_items_before_returning() {
     );
 }
 
+/// AC2's obligation clause: an in-flight item that *holds live obligations* is
+/// drained, and draining it resolves those obligations.
+///
+/// Each parked item holds two different obligations while it waits:
+///
+/// - an [`OwnedSemaphorePermit`] — backed by a runtime-tracked
+///   `ObligationToken`, so a leak would surface as a lab invariant violation,
+///   not merely as a wrong counter in this test;
+/// - a reserved-but-uncommitted mpsc [`mpsc::SendPermit`] — the two-phase send
+///   obligation the project's cancel-correctness story is built on.
+///
+/// The failing item waits until every holder genuinely holds both obligations,
+/// so the short-circuit is guaranteed to land on obligation-holding in-flight
+/// work. After the call returns, the assertions distinguish *resolved* from
+/// *leaked*: no message was delivered (the send permits aborted rather than
+/// committed), every reserved channel slot is reservable again, the semaphore
+/// is back to its full permit count, and the oracle reports quiescence with
+/// zero invariant violations — meaning no runtime-tracked obligation outlived
+/// its task.
+#[test]
+fn try_for_each_concurrent_drains_items_holding_live_obligations() {
+    const LIMIT: usize = 4;
+    const HOLDERS: usize = 3;
+
+    let observed = Arc::new(AtomicUsize::new(0));
+    let holding = Arc::new(AtomicUsize::new(0));
+
+    let ((outcome, undelivered, reservable, sem_available), report) = run_async_under_lab(0xB08, {
+        let observed = Arc::clone(&observed);
+        let holding = Arc::clone(&holding);
+        move |cx| async move {
+            let (tx, mut rx) = mpsc::channel::<usize>(HOLDERS);
+            let sem = Arc::new(Semaphore::new(HOLDERS));
+            let outer_tx = tx.clone();
+            let outer_sem = Arc::clone(&sem);
+
+            let source = iter(0..=HOLDERS);
+            let outcome = try_for_each_concurrent(&cx, source, LIMIT, move |item_cx, item| {
+                let tx = tx.clone();
+                let sem = Arc::clone(&sem);
+                let observed = Arc::clone(&observed);
+                let holding = Arc::clone(&holding);
+                async move {
+                    if item == 0 {
+                        // Fail only once every holder holds both obligations,
+                        // so the failure cannot land before the claim under
+                        // test exists.
+                        while holding.load(Ordering::SeqCst) < HOLDERS {
+                            if item_cx.checkpoint().is_err() {
+                                return Err("failer cancelled before holders were ready");
+                            }
+                            yield_now().await;
+                        }
+                        return Err("first item fails");
+                    }
+                    let sem_permit = OwnedSemaphorePermit::acquire(sem, &item_cx, 1)
+                        .await
+                        .expect("semaphore holds one permit per holder");
+                    let send_slot = tx
+                        .reserve(&item_cx)
+                        .await
+                        .expect("channel holds one slot per holder");
+                    holding.fetch_add(1, Ordering::SeqCst);
+                    // `send_slot` keeps `item_cx` borrowed (reserve unifies the
+                    // sender and Cx lifetimes), so the parker gets a clone of
+                    // the same capability context.
+                    let result = parks_until_cancelled(item_cx.clone(), observed).await;
+                    // Dropping the permits on this return path IS the
+                    // resolution under test: the send slot aborts without
+                    // committing, and the semaphore obligation is released.
+                    drop(send_slot);
+                    drop(sem_permit);
+                    result
+                }
+            })
+            .await;
+
+            // Gather the after-the-call facts inside the same runtime; the
+            // assertions on them run back on the test thread.
+            let undelivered = rx.try_recv().is_err();
+            let mut reclaimed = Vec::new();
+            while reclaimed.len() < HOLDERS {
+                match outer_tx.try_reserve() {
+                    Ok(slot) => reclaimed.push(slot),
+                    Err(_) => break,
+                }
+            }
+            let reservable = reclaimed.len();
+            for slot in reclaimed {
+                slot.abort();
+            }
+            (
+                outcome,
+                undelivered,
+                reservable,
+                outer_sem.available_permits(),
+            )
+        }
+    });
+
+    assert!(
+        matches!(outcome, Outcome::Err("first item fails")),
+        "the deliberate failure is the reported cause: {outcome:?}"
+    );
+    assert_eq!(
+        holding.load(Ordering::SeqCst),
+        HOLDERS,
+        "every holder must have held its obligations when the failure landed"
+    );
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        HOLDERS,
+        "every obligation-holding item must observe cancellation before the \
+         call returns - if this is short, holders were abandoned in flight"
+    );
+    assert!(
+        undelivered,
+        "an aborted send permit must not deliver a message"
+    );
+    assert_eq!(
+        reservable, HOLDERS,
+        "every reserved channel slot must be released by the drain"
+    );
+    assert_eq!(
+        sem_available, HOLDERS,
+        "every semaphore permit must be returned by the drain"
+    );
+    assert!(
+        report.quiescent && report.invariant_violations.is_empty(),
+        "run must reach quiescence with no invariant violations (a leaked \
+         obligation would appear here): quiescent={} violations={:?}",
+        report.quiescent,
+        report.invariant_violations
+    );
+}
+
 #[test]
 fn try_for_each_concurrent_reports_ok_when_no_item_fails() {
     const ITEMS: usize = 16;
@@ -185,7 +323,7 @@ fn try_for_each_concurrent_reports_ok_when_no_item_fails() {
     let (outcome, report) = run_async_under_lab(0xB04, {
         let seen = Arc::clone(&seen);
         move |cx| async move {
-            let source = iter((0..ITEMS).collect::<Vec<usize>>());
+            let source = iter(0..ITEMS);
             try_for_each_concurrent(&cx, source, 5, move |_item_cx, _item| {
                 let seen = Arc::clone(&seen);
                 async move {
@@ -213,7 +351,7 @@ fn concurrent_terminals_are_deterministic_under_the_same_seed() {
         let (outcome, _report) = run_async_under_lab(seed, {
             let seen = Arc::clone(&seen);
             move |cx| async move {
-                let source = iter((0..20usize).collect::<Vec<usize>>());
+                let source = iter(0..20usize);
                 try_for_each_concurrent(&cx, source, 4, move |_item_cx, item| {
                     let seen = Arc::clone(&seen);
                     async move {
@@ -280,7 +418,7 @@ fn concurrent_terminal_drains_in_flight_items_when_the_caller_is_cancelled() {
 
             let mut handle = cx
                 .spawn(move |task_cx| async move {
-                    let source = iter((0..MEMBERS).collect::<Vec<usize>>());
+                    let source = iter(0..MEMBERS);
                     try_for_each_concurrent(&task_cx, source, MEMBERS, move |item_cx, _item| {
                         let started = Arc::clone(&driver_started);
                         let observed = Arc::clone(&driver_observed);

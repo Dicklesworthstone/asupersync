@@ -3,7 +3,7 @@
 //! `Buffered` preserves output order, while `BufferUnordered` yields results
 //! as soon as futures complete.
 
-use super::Stream;
+use super::{Stream, StreamTelemetrySnapshot};
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
@@ -123,6 +123,30 @@ where
     #[inline]
     pub fn into_inner(self) -> S {
         self.stream
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this combinator.
+    ///
+    /// The caller supplies `combinator_id` so the runtime needs no ambient
+    /// registration. See [`StreamTelemetrySnapshot`] for field semantics and
+    /// the determinism contract.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, combinator_id: u64) -> StreamTelemetrySnapshot {
+        StreamTelemetrySnapshot {
+            combinator_id,
+            combinator_kind: "buffered",
+            limit: self.limit,
+            in_flight: self.in_flight.len(),
+            available: self.limit.saturating_sub(self.in_flight.len()),
+            ready_results: self
+                .in_flight
+                .iter()
+                .filter(|entry| entry.output.is_some())
+                .count(),
+            waker_epoch: self.poll_epoch,
+            closed: self.done,
+        }
     }
 }
 
@@ -351,6 +375,28 @@ where
     #[inline]
     pub fn into_inner(self) -> S {
         self.stream
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this combinator.
+    ///
+    /// The caller supplies `combinator_id` so the runtime needs no ambient
+    /// registration. See [`StreamTelemetrySnapshot`] for field semantics and
+    /// the determinism contract. `ready_results` is structurally zero here:
+    /// completions are yielded in the poll that observes them, never parked
+    /// behind head-of-line ordering.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, combinator_id: u64) -> StreamTelemetrySnapshot {
+        StreamTelemetrySnapshot {
+            combinator_id,
+            combinator_kind: "buffer_unordered",
+            limit: self.limit,
+            in_flight: self.in_flight.len(),
+            available: self.limit.saturating_sub(self.in_flight.len()),
+            ready_results: 0,
+            waker_epoch: self.poll_epoch,
+            closed: self.done,
+        }
     }
 }
 
@@ -1056,5 +1102,241 @@ mod tests {
             let got = drain_ready(buf);
             assert_eq!(got.len(), n, "large-limit buffered must drain all inputs");
         }
+    }
+
+    /// Follows one `Buffered` through its lifecycle and checks the snapshot at
+    /// every deterministic observation point, including the head-of-line
+    /// `ready_results` signal that only the ordered combinator can produce.
+    #[test]
+    fn telemetry_snapshot_tracks_buffered_lifecycle() {
+        init_test("telemetry_snapshot_tracks_buffered_lifecycle");
+        let poll_counter = Arc::new(AtomicUsize::new(0));
+        let mut stream = Buffered::new(AlwaysReadyPendingFutureStream::new(3, poll_counter), 2);
+
+        let fresh = stream.telemetry_snapshot(7);
+        let expected_fresh = StreamTelemetrySnapshot {
+            combinator_id: 7,
+            combinator_kind: "buffered",
+            limit: 2,
+            in_flight: 0,
+            available: 2,
+            ready_results: 0,
+            waker_epoch: 0,
+            closed: false,
+        };
+        crate::assert_with_log!(
+            fresh == expected_fresh,
+            "fresh combinator reports empty pressure",
+            expected_fresh,
+            fresh
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll admits up to the limit; both futures are pending-once, so
+        // nothing completes yet and the poll registers the first waker epoch.
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll is pending",
+            "Poll::Pending",
+            first
+        );
+        let admitted = stream.telemetry_snapshot(7);
+        crate::assert_with_log!(
+            admitted.in_flight == 2 && admitted.available == 0,
+            "admission fills the buffer to its limit",
+            (2usize, 0usize),
+            (admitted.in_flight, admitted.available)
+        );
+        crate::assert_with_log!(
+            admitted.waker_epoch == 1 && !admitted.closed,
+            "one waker epoch, source not exhausted",
+            (1u64, false),
+            (admitted.waker_epoch, admitted.closed)
+        );
+
+        // Second poll completes both futures and yields the front; the second
+        // completion is parked behind head-of-line order and must show up as a
+        // ready result.
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(Some(0)),
+            "second poll yields the front output",
+            Poll::Ready(Some(0)),
+            second
+        );
+        let parked = stream.telemetry_snapshot(7);
+        crate::assert_with_log!(
+            parked.in_flight == 1 && parked.ready_results == 1,
+            "the second completion is parked behind head-of-line order",
+            (1usize, 1usize),
+            (parked.in_flight, parked.ready_results)
+        );
+
+        // A different task waker must register as churn.
+        let churn_flag = Arc::new(AtomicBool::new(false));
+        let other_waker = Waker::from(Arc::new(TrackWaker(churn_flag)));
+        let mut other_cx = Context::from_waker(&other_waker);
+        let _ = Pin::new(&mut stream).poll_next(&mut other_cx);
+        let churned = stream.telemetry_snapshot(7);
+        crate::assert_with_log!(
+            churned.waker_epoch == 2,
+            "a distinct polling waker increments the epoch",
+            2u64,
+            churned.waker_epoch
+        );
+
+        // Drain to the end: the terminal snapshot reports a closed, empty
+        // combinator with its full capacity available again.
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut other_cx) {
+                Poll::Ready(None) => break,
+                Poll::Ready(Some(_)) | Poll::Pending => {}
+            }
+        }
+        let terminal = stream.telemetry_snapshot(7);
+        crate::assert_with_log!(
+            terminal.closed && terminal.in_flight == 0 && terminal.available == 2,
+            "terminal snapshot is closed and empty",
+            (true, 0usize, 2usize),
+            (terminal.closed, terminal.in_flight, terminal.available)
+        );
+        crate::test_complete!("telemetry_snapshot_tracks_buffered_lifecycle");
+    }
+
+    /// Same-seed determinism for AC5: two identical runs observe identical
+    /// snapshot sequences at identical observation points.
+    #[test]
+    fn telemetry_snapshots_are_deterministic_across_identical_runs() {
+        init_test("telemetry_snapshots_are_deterministic_across_identical_runs");
+        fn observe() -> Vec<StreamTelemetrySnapshot> {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let mut stream = Buffered::new(AlwaysReadyPendingFutureStream::new(4, counter), 3);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut snapshots = vec![stream.telemetry_snapshot(1)];
+            loop {
+                let done = matches!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+                snapshots.push(stream.telemetry_snapshot(1));
+                if done {
+                    break;
+                }
+            }
+            snapshots
+        }
+
+        let first = observe();
+        let second = observe();
+        crate::assert_with_log!(
+            first == second,
+            "identical runs must observe identical snapshot sequences",
+            first.len(),
+            second.len()
+        );
+        // Without these, the equality above is vacuous: two empty or two
+        // all-identical sequences would compare equal and prove nothing. The
+        // observed run must actually traverse the lifecycle.
+        crate::assert_with_log!(
+            first.len() >= 3,
+            "the observed sequence must be long enough to show a lifecycle",
+            "len >= 3",
+            first.len()
+        );
+        crate::assert_with_log!(
+            first.iter().any(|s| s.in_flight > 1),
+            "some snapshot must show genuine concurrency, or the sequence is trivial",
+            "any(in_flight > 1)",
+            first.iter().map(|s| s.in_flight).collect::<Vec<_>>()
+        );
+        crate::assert_with_log!(
+            first.first().is_some_and(|s| !s.closed)
+                && first.last().is_some_and(|s| s.closed && s.in_flight == 0),
+            "the sequence must start open and end closed and empty",
+            "(open .. closed+empty)",
+            first
+                .iter()
+                .map(|s| (s.in_flight, s.closed))
+                .collect::<Vec<_>>()
+        );
+        crate::test_complete!("telemetry_snapshots_are_deterministic_across_identical_runs");
+    }
+
+    /// `BufferUnordered` reports the same pressure fields, never parks a ready
+    /// result, and closes when the source is exhausted.
+    #[test]
+    fn telemetry_snapshot_tracks_buffer_unordered_lifecycle() {
+        init_test("telemetry_snapshot_tracks_buffer_unordered_lifecycle");
+        let poll_counter = Arc::new(AtomicUsize::new(0));
+        let mut stream =
+            BufferUnordered::new(AlwaysReadyPendingFutureStream::new(3, poll_counter), 2);
+
+        let fresh = stream.telemetry_snapshot(9);
+        crate::assert_with_log!(
+            fresh.combinator_kind == "buffer_unordered"
+                && fresh.in_flight == 0
+                && fresh.available == 2
+                && fresh.waker_epoch == 0
+                && !fresh.closed,
+            "fresh combinator reports empty pressure",
+            ("buffer_unordered", 0usize, 2usize, 0u64, false),
+            (
+                fresh.combinator_kind,
+                fresh.in_flight,
+                fresh.available,
+                fresh.waker_epoch,
+                fresh.closed
+            )
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll is pending",
+            "Poll::Pending",
+            first
+        );
+        let admitted = stream.telemetry_snapshot(9);
+        crate::assert_with_log!(
+            admitted.in_flight == 2 && admitted.available == 0 && admitted.ready_results == 0,
+            "admission fills the buffer; unordered never parks ready results",
+            (2usize, 0usize, 0usize),
+            (
+                admitted.in_flight,
+                admitted.available,
+                admitted.ready_results
+            )
+        );
+
+        let mut yielded = 0usize;
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(_)) => {
+                    yielded += 1;
+                    let mid = stream.telemetry_snapshot(9);
+                    crate::assert_with_log!(
+                        mid.ready_results == 0,
+                        "unordered yields completions instead of parking them",
+                        0usize,
+                        mid.ready_results
+                    );
+                }
+                Poll::Ready(None) => break,
+                Poll::Pending => {}
+            }
+        }
+        crate::assert_with_log!(yielded == 3, "all items yielded", 3usize, yielded);
+
+        let terminal = stream.telemetry_snapshot(9);
+        crate::assert_with_log!(
+            terminal.closed && terminal.in_flight == 0 && terminal.available == 2,
+            "terminal snapshot is closed and empty",
+            (true, 0usize, 2usize),
+            (terminal.closed, terminal.in_flight, terminal.available)
+        );
+        crate::test_complete!("telemetry_snapshot_tracks_buffer_unordered_lifecycle");
     }
 }
