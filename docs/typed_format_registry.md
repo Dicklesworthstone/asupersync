@@ -86,10 +86,14 @@ cutover must stop until the named owner produces the missing evidence.
 | MessagePack | `1` | Semantic arbitrary-Serde round trip through `rmp-serde` | Trace and replay bytes are accepted persisted artifacts |
 | Bincode | `2` | Semantic arbitrary-Serde round trip through the `bincode-next` package | Typed payloads and distributed vector clocks use `config::legacy()` |
 | JSON | `3` | Semantic arbitrary-Serde round trip through `serde_json` | Versioned JSON families and lab snapshot hash input need surface-specific review |
-| Custom | `255` | Downstream `Serializer<T>` / `Deserializer<T>` | Payload compatibility is downstream-defined; no real standalone codec fixture exists |
+| Custom | `255` | Downstream `Serializer<T>` / `Deserializer<T>` | Payload compatibility is downstream-defined; the current standalone non-Serde fixture is not broad replacement parity |
 
-`SerdeCodec` intentionally rejects `Custom`. That establishes the division of
-responsibility but does not prove custom-codec interoperability.
+`SerdeCodec` intentionally rejects `Custom`. The isolated baseline consumer
+implements `Serializer<ConsumerOpaque>` and `Deserializer<ConsumerOpaque>`,
+round-trips format byte `255`, rejects malformed input, and fences an explicit
+typed-symbol version. That proves the public injection path for one current
+non-Serde downstream type. It does not generalize the downstream payload's
+ordering, resource, or migration policy.
 
 The generic JSON, MessagePack, and Bincode helpers do not impose a global input
 byte limit. A typed-symbol envelope applies its own payload limit, and trace or
@@ -193,12 +197,19 @@ these families:
 - lab scenario and explorer output;
 - `RestorableSnapshot` content-hash input.
 
-Most are semantic JSON contracts. `RestorableSnapshot` is different:
-`serde_json::to_vec` output is fed byte-by-byte into its FNV-1a content hash.
-That makes field order and JSON byte production compatibility-sensitive even
-though no standalone JSON snapshot file is exposed. Adding an unordered
-container there requires explicit canonicalization or a version/migration
-decision.
+Most are semantic JSON contracts. `RestorableSnapshot` is different. It now has
+an owned `ASUPSNAP` envelope at version `1`, an inner state schema at version
+`2`, deterministic full and incremental payloads, SHA-256 payload integrity,
+explicit count/depth/byte limits, and leading `[ASUP-E404]` diagnostics.
+
+The schema-1 legacy JSON reader preserves the original caller-order FNV-1a hash
+rule. Schema 2 canonicalizes regions, tasks, task obligation IDs, obligations,
+and recent events before hashing and encoding; lifecycle histories retain
+recorded order. Migration is explicit and reversible: the original source stays
+as the rollback anchor and the migrated target is installed separately through
+the cancel-safe atomic write boundary. The byte golden and migration E2E are
+current-corpus evidence, not an external historical corpus. See
+[`runtime_snapshot_codec.md`](./runtime_snapshot_codec.md).
 
 YAML remains an adjacent accepted lab-scenario surface. This registry does not
 authorize narrowing scenarios to JSON.
@@ -226,17 +237,20 @@ compatibility corpus.
 
 ## Blocking evidence owners
 
-The registry intentionally keeps four blockers open:
+The registry intentionally keeps three blockers open:
 
 1. `asupersync-5z2scg.3.6` owns version-provenanced byte goldens for typed
    symbols, MessagePack trace/replay, Bincode legacy payloads, and full
    distributed snapshots.
 2. `asupersync-5z2scg.3.7` owns no-mock cross-version readers and CLI E2E over
    committed historical artifacts.
-3. `asupersync-5z2scg.3.3` owns a real standalone downstream custom codec and
-   broad arbitrary-Serde data-model/resource evidence.
-4. External historical artifact consumers have no current receipt or owner;
-   `.3.7` must close that gap before historical-readability claims.
+3. `asupersync-5z2scg.3.3` still owns broad arbitrary-Serde
+   data-model/resource evidence. Its standalone Custom injection fixture is now
+   current-corpus evidence, but does not prove generic replacement parity.
+
+The external historical-artifact consumer row also remains
+`UNKNOWN_BLOCKING`; `.3.7` must close that consumer evidence gap before
+historical-readability claims.
 
 These are evidence gaps, not permission to delete the affected surface.
 
@@ -248,7 +262,11 @@ Run it through the remote clean-overlay lane:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
+  --overlay-path src/lab/snapshot_restore.rs \
+  --overlay-path src/lab/mod.rs \
+  --overlay-path tests/runtime_snapshot_codec_e2e.rs \
   --overlay-path artifacts/typed_format_registry_v1.json \
+  --overlay-path docs/runtime_snapshot_codec.md \
   --overlay-path docs/typed_format_registry.md \
   --overlay-path tests/typed_format_registry_contract.rs \
   -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \

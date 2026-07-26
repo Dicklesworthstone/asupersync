@@ -4,7 +4,7 @@
   "program_id": "asupersync-ir2uf0",
   "bead_id": "asupersync-5z2scg.3.1",
   "title": "Complete public, generic, persisted, corpus, and consumer inventory for typed formats",
-  "policy_as_of_date_utc": "2026-07-24",
+  "policy_as_of_date_utc": "2026-07-26",
   "policy_as_of_commit": "e23d56e4192e9093f8faf3133d940fb78c83db23",
   "capability_ids": [
     "CAP-PERSISTED-TRACE-SNAPSHOT",
@@ -24,7 +24,7 @@
     "arbitrary_serde_rule": "T: Serialize and T: DeserializeOwned remain first-class downstream inputs. A finite fixture roster cannot narrow the Serde data model or imply a whitelist.",
     "exact_bytes_rule": "EXACT_BYTES means existing accepted bytes must remain readable and byte-producing behavior may be compatibility-sensitive. SEMANTIC means equivalent values are required but map order, whitespace, or backend byte choices are not claimed stable.",
     "unknown_rule": "Any missing reader, historical corpus, compatibility classification, resource bound, canonical-order rule, version rule, migration reader, or downstream owner is UNKNOWN_BLOCKING. Unknown evidence cannot be silently converted into a design assumption.",
-    "custom_rule": "SerializationFormat::Custom byte 255 and downstream Serializer and Deserializer injection stay public. SerdeCodec rejecting Custom is intentional and does not prove a real downstream custom codec.",
+    "custom_rule": "SerializationFormat::Custom byte 255 and downstream Serializer and Deserializer injection stay public. The current standalone non-Serde codec fixture proves that injection path, while SerdeCodec rejecting Custom remains intentional and no finite fixture proves arbitrary downstream replacement parity.",
     "no_cutover_rule": "This A1 inventory changes no encoder, decoder, schema, dependency, public symbol, discriminant, persisted byte, or error behavior."
   },
   "allowed_compatibility_classes": [
@@ -84,8 +84,8 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4263,
-      "serde_json::": 6056,
+      "rust_files": 4267,
+      "serde_json::": 6070,
       "rmp_serde::": 61,
       "bincode::": 31,
       "SerializationFormat::": 149,
@@ -97,7 +97,7 @@
         "path": "src",
         "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
         "rust_files": 1441,
-        "serde_json::": 2419,
+        "serde_json::": 2427,
         "rmp_serde::": 46,
         "bincode::": 21,
         "SerializationFormat::": 81,
@@ -107,8 +107,8 @@
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1866,
-        "serde_json::": 3068,
+        "rust_files": 1870,
+        "serde_json::": 3074,
         "rmp_serde::": 4,
         "bincode::": 10,
         "SerializationFormat::": 13,
@@ -335,8 +335,8 @@
       "resource_bounds": "Downstream codec plus TypedSymbol envelope; SerdeCodec intentionally rejects Custom.",
       "error_contract": "Downstream codec returns Asupersync-owned SerializationError or DeserializationError.",
       "version_policy": "TypedSymbol header carries version, type id, format byte, schema hash, and payload length; payload versioning remains downstream-defined.",
-      "migration_policy": "No real standalone downstream custom-codec fixture exists. Byte 255 parsing and SerdeCodec rejection do not prove custom codec interoperability.",
-      "state": "UNKNOWN_BLOCKING"
+      "migration_policy": "The standalone baseline consumer implements a non-Serde codec, exercises Custom byte 255 through the single-symbol path, and fences explicit typed-symbol versions. Its finite current fixture does not prove arbitrary downstream payload migration, ordering, or resource parity.",
+      "state": "CURRENT_CORPUS_ONLY"
     }
   ],
   "public_generic_surfaces": [
@@ -655,22 +655,25 @@
         "src/lab/snapshot_restore.rs"
       ],
       "writers": [
-        "RestorableSnapshot::new content_hash computation"
+        "RestorableSnapshot::new content_hash computation",
+        "SnapshotArtifact::to_bytes and SnapshotArtifact::incremental"
       ],
       "readers": [
-        "RestorableSnapshot::validate"
+        "SnapshotArtifact::from_bytes and SnapshotArtifact::materialize",
+        "RestorableSnapshot::validate and RestorableSnapshot::migrate_to_current",
+        "tests/runtime_snapshot_codec_e2e.rs"
       ],
-      "backend": "serde_json::to_vec used as FNV-1a hash input; no standalone JSON file API",
+      "backend": "Owned ASUPSNAP envelope version 1 with compact JSON full/incremental payloads, SHA-256 payload integrity, and schema-versioned FNV-1a state identity",
       "compatibility_class": "EXACT_BYTES",
-      "exactness_detail": "JSON bytes are compatibility-sensitive because every byte feeds the stored u64 content hash.",
-      "canonical_ordering": "Claim relies on fixed struct/vector field order; introducing unordered maps without canonicalization changes hashes.",
-      "resource_bounds": "In-memory runtime snapshot size; no explicit byte cap.",
-      "version_policy": "RestorableSnapshot::SCHEMA_VERSION 1 is included in hash input.",
-      "error_contract": "Serialization failure deterministically hashes a fixed fallback marker.",
-      "migration_policy": "No cross-version hash migration; schema or serialization changes require explicit compatibility handling.",
+      "exactness_detail": "The 52-byte ASUPSNAP header, schema-2 compact JSON payload, SHA-256 checksum, and canonical entity ordering are frozen by a byte golden. Schema-1 content hashes retain their original caller-order rule.",
+      "canonical_ordering": "Schema 2 sorts regions, tasks, task obligation IDs, and obligations by full ID and recent events by sequence/time/version. Finalizer and loser-drain histories preserve recorded order.",
+      "resource_bounds": "Default admission is 64 MiB, 1,000,000 regions/tasks/obligations, 10,000,000 recent events, 1,000,000 records per oracle history, and region depth 4,096; callers may narrow limits.",
+      "version_policy": "ASUPSNAP envelope version 1 is independent from state schema version 2; the state reader admits the closed range [1,2], and incremental targets must use current schema 2.",
+      "error_contract": "SnapshotCodecError emits leading ASUP-E404 diagnostics for envelope, JSON, limit, validation, delta, and base/target hash failures.",
+      "migration_policy": "Legacy raw schema-1 JSON is detected, validated under its original hash rule, and promoted only through explicit migrate_to_current. The no-mock E2E retains the source rollback bytes and installs a distinct target through cancel-safe atomic write.",
       "corpus_ids": [],
-      "state": "BASELINE_EXISTING",
-      "no_claim_boundary": "Determinism for future unordered containers is not implied."
+      "state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "The current byte golden and generated legacy fixture do not prove an external historical corpus, trace/replay or distributed SNAP migration, performance, dependency removal, or production cutover."
     },
     {
       "surface_id": "PERSIST-LAB-SCENARIO-AND-EXPLORER-JSON",
@@ -848,12 +851,14 @@
     {
       "consumer_id": "CONSUMER-REAL-CUSTOM-CODEC",
       "owner": "asupersync-5z2scg.3.3",
-      "paths": [],
+      "paths": [
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ],
       "formats": [
         "Custom"
       ],
-      "evidence": "No isolated downstream implementation of Serializer<T> and Deserializer<T> was found.",
-      "state": "UNKNOWN_BLOCKING"
+      "evidence": "The isolated downstream crate implements Serializer<ConsumerOpaque> and Deserializer<ConsumerOpaque> without Serde, exercises Custom byte 255, typed-symbol round trip, malformed input, and explicit version fencing.",
+      "state": "CURRENT_CORPUS_ONLY"
     },
     {
       "consumer_id": "CONSUMER-TRACE-STACK",
@@ -964,7 +969,7 @@
     },
     {
       "path": "src/lab/snapshot_restore.rs",
-      "sha256": "7e229bf5e757a0fab5da341fcb9fec6bf55bc985a23064e4afd57ca8cf399324"
+      "sha256": "f778ae73629550c16b789cad5674cdd93a4ca45bc3377fc0ae0881b542dc3d6a"
     },
     {
       "path": "src/lab/scenario.rs",
@@ -1075,16 +1080,6 @@
       "effect": "Blocks migration and historical-readability claims."
     },
     {
-      "blocker_id": "BLOCK-REAL-CUSTOM-CODEC",
-      "owner_bead": "asupersync-5z2scg.3.3",
-      "affected_surfaces": [
-        "PUB-SERDE-CODEC",
-        "PERSIST-TYPED-SYMBOL"
-      ],
-      "missing_evidence": "Standalone downstream Serializer<T>/Deserializer<T> implementation for format byte 255, including errors, resource limits, versioning, and recovery.",
-      "effect": "Blocks Custom interoperability and replacement-parity claims."
-    },
-    {
       "blocker_id": "BLOCK-ARBITRARY-SERDE-COVERAGE",
       "owner_bead": "asupersync-5z2scg.3.3",
       "affected_surfaces": [
@@ -1097,7 +1092,7 @@
   "validation": {
     "contract_test": "tests/typed_format_registry_contract.rs",
     "doc_path": "docs/typed_format_registry.md",
-    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/typed_format_registry_v1.json --overlay-path docs/typed_format_registry.md --overlay-path tests/typed_format_registry_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a1 cargo test -p asupersync --test typed_format_registry_contract -- --nocapture",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/lab/snapshot_restore.rs --overlay-path src/lab/mod.rs --overlay-path tests/runtime_snapshot_codec_e2e.rs --overlay-path artifacts/typed_format_registry_v1.json --overlay-path docs/runtime_snapshot_codec.md --overlay-path docs/typed_format_registry.md --overlay-path tests/typed_format_registry_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a1 cargo test -p asupersync --test typed_format_registry_contract -- --nocapture",
     "proof_scope": "Registry schema, accepted ADR mapping, dependency pins, lexical root counts, direct backend source paths, source pins, corpus aggregates, public/generic invariants, persisted-row completeness, downstream ownership, fail-closed unknowns, and documentation markers.",
     "no_claim_boundary": "This focused contract does not execute serialization round trips, fuzzing, migration, historical readers, CLI E2E, broad workspace tests, performance, release readiness, dependency removal, format removal, or cutover."
   }

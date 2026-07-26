@@ -220,7 +220,9 @@ pub use scenario_runner::{
     ScenarioRunner, ScenarioRunnerError as FrankenLabRunnerError, TraceCertificateSnapshot,
 };
 pub use snapshot_restore::{
-    RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,
+    IncrementalSnapshot, RestorableSnapshot, RestoreError, SNAPSHOT_ARTIFACT_MAGIC,
+    SNAPSHOT_ARTIFACT_VERSION, SnapshotArtifact, SnapshotArtifactKind, SnapshotCodecError,
+    SnapshotLimits, SnapshotRestore, SnapshotStats, ValidationResult,
 };
 pub use spork_harness::{
     HarnessError, ScenarioRunnerError, SporkAppHarness, SporkScenarioConfig, SporkScenarioResult,

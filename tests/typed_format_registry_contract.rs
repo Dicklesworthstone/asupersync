@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/typed_format_registry_v1.json";
 const DOC_PATH: &str = "docs/typed_format_registry.md";
+const SNAPSHOT_DOC_PATH: &str = "docs/runtime_snapshot_codec.md";
 const DECISION_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
 const DECISION_DOC_PATH: &str = "docs/adr/dep_plan_adr_001_serde_generic_formats.md";
 const DECISION_ID: &str = "DEP-ADR-001";
@@ -322,10 +323,13 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         return Err("Bincode package/configuration baseline drifted".to_owned());
     }
     let custom = find_by_id(profiles, "format", "Custom");
-    if text(custom, "state") != "UNKNOWN_BLOCKING"
-        || !text(custom, "migration_policy").contains("No real standalone")
+    if text(custom, "state") != "CURRENT_CORPUS_ONLY"
+        || !text(custom, "migration_policy").contains("standalone baseline consumer")
+        || !text(custom, "migration_policy").contains("does not prove")
     {
-        return Err("Custom must stay blocked until a real downstream codec exists".to_owned());
+        return Err(
+            "Custom must record its finite fixture without claiming replacement parity".to_owned(),
+        );
     }
 
     let public = value
@@ -464,7 +468,6 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         "BLOCK-ARBITRARY-SERDE-COVERAGE",
         "BLOCK-CROSS-VERSION-READERS",
         "BLOCK-HISTORICAL-BYTES",
-        "BLOCK-REAL-CUSTOM-CODEC",
     ]);
     let observed_blockers: BTreeSet<&str> = blockers
         .iter()
@@ -496,10 +499,13 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         .and_then(Value::as_array)
         .ok_or("downstream_consumers must be an array")?;
     let custom_consumer = find_by_id(consumers, "consumer_id", "CONSUMER-REAL-CUSTOM-CODEC");
-    if text(custom_consumer, "state") != "UNKNOWN_BLOCKING"
-        || !array(custom_consumer, "paths").is_empty()
+    if text(custom_consumer, "state") != "CURRENT_CORPUS_ONLY"
+        || string_set(custom_consumer, "paths")
+            != BTreeSet::from([
+                "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs".to_owned(),
+            ])
     {
-        return Err("missing real Custom consumer must remain explicit and blocking".to_owned());
+        return Err("the real Custom consumer receipt must stay exact".to_owned());
     }
     let external = find_by_id(
         consumers,
@@ -827,9 +833,14 @@ fn public_generic_and_container_invariants_match_source() {
 
     let lab_snapshot = read_repo_file("src/lab/snapshot_restore.rs");
     for expected in [
-        "pub const SCHEMA_VERSION: u32 = 1;",
-        "if let Ok(encoded) = serde_json::to_vec(snapshot)",
+        "pub const SNAPSHOT_ARTIFACT_MAGIC: [u8; 8] = *b\"ASUPSNAP\";",
+        "pub const SNAPSHOT_ARTIFACT_VERSION: u16 = 1;",
+        "pub const SCHEMA_VERSION: u32 = 2;",
+        "pub const MINIMUM_SUPPORTED_SCHEMA_VERSION: u32 = 1;",
+        "serde_json::to_vec(hash_input)",
         "const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;",
+        "Sha256::digest(&payload)",
+        "[ASUP-E404] snapshot artifact",
     ] {
         assert!(
             lab_snapshot.contains(expected),
@@ -957,7 +968,10 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "RCH_REQUIRE_REMOTE=1 rch exec --",
         "--base HEAD",
         "--clean-overlay",
+        "--overlay-path src/lab/snapshot_restore.rs",
+        "--overlay-path tests/runtime_snapshot_codec_e2e.rs",
         "--overlay-path artifacts/typed_format_registry_v1.json",
+        "--overlay-path docs/runtime_snapshot_codec.md",
         "--overlay-path docs/typed_format_registry.md",
         "--overlay-path tests/typed_format_registry_contract.rs",
         "--test typed_format_registry_contract",
@@ -990,6 +1004,9 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "bincode::config::legacy()",
         "ASUPERTRACE",
         "RestorableSnapshot",
+        "ASUPSNAP",
+        "ASUP-E404",
+        "runtime_snapshot_codec.md",
         "asupersync-5z2scg.3.6",
         "asupersync-5z2scg.3.7",
         "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay",
@@ -998,6 +1015,25 @@ fn documentation_and_validation_boundary_are_discoverable() {
         assert!(
             docs.contains(marker),
             "typed-format documentation missing marker: {marker}"
+        );
+    }
+
+    let snapshot_docs = read_repo_file(SNAPSHOT_DOC_PATH);
+    for marker in [
+        "# Runtime snapshot codec",
+        "52-byte header",
+        "`ASUPSNAP`",
+        "Schema version 2",
+        "## Full and incremental artifacts",
+        "`SnapshotLimits::DEFAULT`",
+        "Reversible migration",
+        "`asupersync::fs::write_atomic`",
+        "[ASUP-E404]",
+        "does not prove an external historical corpus",
+    ] {
+        assert!(
+            snapshot_docs.contains(marker),
+            "runtime-snapshot documentation missing marker: {marker}"
         );
     }
 }
@@ -1069,7 +1105,7 @@ fn malformed_registry_fixtures_fail_closed() {
     )["state"] = Value::from("BASELINE_EXISTING");
     assert!(
         validate_registry_shape(&promoted_custom)
-            .expect_err("unproven Custom codec must stay blocking")
+            .expect_err("finite Custom evidence must not be promoted to a general baseline")
             .contains("Custom")
     );
 

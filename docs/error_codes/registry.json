@@ -1,7 +1,7 @@
 {
   "schema_version": "asupersync-error-code-registry-v1",
   "namespace": "ASUP-Exxx",
-  "updated": "2026-06-19",
+  "updated": "2026-07-26",
   "ranges": [
     {
       "range": "ASUP-E0xx",
@@ -547,6 +547,28 @@
       "since": "0.3.4",
       "source_refs": [
         "src/lab/oracle/determinism.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E404",
+      "name": "snapshot-artifact-invalid",
+      "area": "lab-replay",
+      "status": "live",
+      "summary": "An owned runtime snapshot artifact failed version, integrity, resource, structural, or incremental-base validation.",
+      "probable_causes": [
+        "The artifact is partial, corrupt, oversized, or from an unsupported future version.",
+        "An incremental artifact was applied without the exact validated base snapshot.",
+        "Decoded runtime state violates referential, quiescence, timestamp, count, or depth invariants."
+      ],
+      "remediation": [
+        "Preserve the rejected bytes and use the specific diagnostic suffix to identify the failed admission check.",
+        "Validate legacy schema-1 JSON before explicit reversible migration and retain the source as the rollback anchor.",
+        "Install migrated bytes through the cancel-safe atomic write boundary only after successful decode and validation."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E404.md",
+      "since": "0.3.9",
+      "source_refs": [
+        "src/lab/snapshot_restore.rs"
       ]
     },
     {
