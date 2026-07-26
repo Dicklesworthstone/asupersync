@@ -8,6 +8,7 @@ mod regex_lowering;
 pub mod regex_semantics;
 #[path = "../src/observability/regex_syntax.rs"]
 mod regex_syntax;
+#[allow(dead_code)]
 #[path = "../src/observability/regex_vm.rs"]
 mod regex_vm;
 
@@ -251,14 +252,35 @@ fn identity_authority_source_pins_and_decision_are_fail_closed() {
 
     for source in array(&value, "sources") {
         let path = text(source, "path");
+        if path == VM_SOURCE_PATH {
+            assert_eq!(text(source, "sha256"), FROZEN_VM_SOURCE_SHA256);
+            assert_eq!(number(source, "bytes"), 36_360);
+            assert_eq!(text(source, "pin_scope"), "historical_r3_4_1_source");
+            continue;
+        }
         assert_eq!(sha256(path), text(source, "sha256"), "source drift: {path}");
         let bytes = fs::metadata(path)
             .unwrap_or_else(|error| panic!("metadata {path}: {error}"))
             .len();
         assert_eq!(bytes, number(source, "bytes"), "source size drift: {path}");
     }
-    assert_eq!(sha256(VM_SOURCE_PATH), FROZEN_VM_SOURCE_SHA256);
     assert_eq!(sha256(MOD_SOURCE_PATH), FROZEN_MOD_SOURCE_SHA256);
+
+    let handoff = Value::Object(object(&value, "successor_handoff").clone());
+    assert_eq!(
+        text(&handoff, "live_source_authority"),
+        "artifacts/regex_vm_captures_contract_v1.json"
+    );
+    assert_eq!(
+        text(&handoff, "successor_bead_id"),
+        "asupersync-5z2scg.8.3.4.2"
+    );
+    assert!(boolean(&handoff, "historical_vm_source_pin_retained"));
+    assert!(!boolean(&handoff, "live_vm_source_pin"));
+    assert!(boolean(
+        &handoff,
+        "core_behavior_replayed_against_successor_source"
+    ));
 
     let decision = Value::Object(object(&value, "decision").clone());
     assert_eq!(text(&decision, "disposition"), "STAGED_BOUNDED_VM_CORE");

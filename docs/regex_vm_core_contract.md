@@ -79,6 +79,20 @@ lowers to the validated bytes `C3 A9`. The spelling
 for that non-folded spelling. This is a compiler boundary, not an executor
 claim.
 
+## Successor handoff
+
+R3.4.2 extends the same private source file with one-shot priority selection
+and bounded capture histories. This R3.4.1 packet therefore retains the
+original `src/observability/regex_vm.rs` digest as a historical pin rather than
+pretending it is still the live source authority. The live source pin and the
+new behavior belong to
+`artifacts/regex_vm_captures_contract_v1.json`.
+
+The R3.4.1 contract test continues to execute every core recognizer fixture,
+model comparison, property case, malformed-IR case, resource ceiling, and
+long-input replay against the successor source. Its behavioral evidence remains
+live even though its original source digest is historical.
+
 ## Replay
 
 Run the VM unit tests remotely:

@@ -1,21 +1,25 @@
 //! Strictly safe, resource-bounded Thompson-IR execution.
 //!
-//! This private R3.4.1 surface executes only programs that pass the R3.3
-//! validator. It implements whole-haystack language recognition with ordered
-//! epsilon closure. Leftmost search, capture propagation, iteration APIs,
-//! cancellation, production privacy wiring, and dependency replacement remain
-//! downstream work.
+//! This private R3.4 surface executes only programs that pass the R3.3
+//! validator. The R3.4.1 entry point implements whole-haystack language
+//! recognition. The R3.4.2 entry points add one-shot leftmost-first selection,
+//! ordered greedy/lazy execution, and bounded capture histories. Iteration
+//! APIs, cancellation, production privacy wiring, and dependency replacement
+//! remain downstream work.
 
 use core::fmt;
 
 use super::regex_boundaries::BoundaryEvalErrorKind;
 use super::regex_ir::{
-    ClassId, CompileError, CompileErrorKind, CompileLimits, Instruction, Program, StateId,
+    CaptureSlot, ClassId, CompileError, CompileErrorKind, CompileLimits, Instruction, Program,
+    StateId,
 };
 use super::regex_semantics::{ByteRange, CanonicalRanges, ScalarRange};
 
 pub const VM_ID: &str = "ASUP-REGEX-THREAD-SET-VM-V1";
 pub const VM_SCHEMA_VERSION: u16 = 1;
+pub const CAPTURE_VM_ID: &str = "ASUP-REGEX-PRIORITY-CAPTURE-VM-V1";
+pub const CAPTURE_VM_SCHEMA_VERSION: u16 = 1;
 
 pub const DEFAULT_MAX_INPUT_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_THREADS_PER_OFFSET: usize = 262_144;
@@ -29,6 +33,15 @@ pub const ACCOUNTED_VM_BASE_BYTES: u64 = 1_024;
 pub const ACCOUNTED_THREAD_BYTES: u64 = 8;
 pub const ACCOUNTED_SEEN_BYTE: u64 = 1;
 pub const ACCOUNTED_TRACE_EVENT_BYTES: u64 = 32;
+
+pub const DEFAULT_MAX_CAPTURE_HISTORY_NODES: usize = 262_144;
+pub const CAPTURE_SEEN_KEYS_PER_STATE: usize = MAX_UTF8_SCALAR_BYTES;
+pub const CAPTURE_OFFSET_BUCKET_COUNT: usize = 2;
+pub const ACCOUNTED_CAPTURE_THREAD_BYTES: u64 = 64;
+pub const ACCOUNTED_CAPTURE_TOUCHED_KEY_BYTES: u64 = 8;
+pub const ACCOUNTED_CAPTURE_HISTORY_NODE_BYTES: u64 = 64;
+pub const ACCOUNTED_CAPTURE_HISTORY_ALLOCATION_FLOOR_BYTES: u64 = 256;
+pub const ACCOUNTED_CAPTURE_RESULT_SLOT_BYTES: u64 = 32;
 
 const FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -64,6 +77,34 @@ impl VmLimits {
     }
 }
 
+/// Additional limits for prioritized capture execution.
+///
+/// Capture histories are persistent linked records. A `Save` appends one
+/// bounded node and threads share the prior prefix instead of copying every
+/// slot. `vm.max_memory_bytes` covers the complete capture executor, including
+/// its thread frontiers, seen keys, retained trace, result slots, and history
+/// nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureVmLimits {
+    pub vm: VmLimits,
+    pub max_capture_history_nodes: usize,
+}
+
+impl Default for CaptureVmLimits {
+    fn default() -> Self {
+        Self {
+            vm: VmLimits::default(),
+            max_capture_history_nodes: DEFAULT_MAX_CAPTURE_HISTORY_NODES,
+        }
+    }
+}
+
+impl CaptureVmLimits {
+    const fn invariants_hold(self) -> bool {
+        self.vm.invariants_hold() && self.max_capture_history_nodes > 0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmErrorKind {
     Compile(CompileErrorKind),
@@ -77,6 +118,9 @@ pub enum VmErrorKind {
     InvalidState,
     InvalidClass,
     BucketCollision,
+    CaptureHistoryLimit,
+    InvalidCaptureHistory,
+    InvalidCaptureBoundary,
 }
 
 impl VmErrorKind {
@@ -93,6 +137,9 @@ impl VmErrorKind {
             Self::InvalidState => "RGX-VM-E007",
             Self::InvalidClass => "RGX-VM-E008",
             Self::BucketCollision => "RGX-VM-E009",
+            Self::CaptureHistoryLimit => "RGX-VM-E010",
+            Self::InvalidCaptureHistory => "RGX-VM-E011",
+            Self::InvalidCaptureBoundary => "RGX-VM-E012",
         }
     }
 }
@@ -199,6 +246,10 @@ pub enum VmTraceAction {
     AssertionPass,
     AssertionFail,
     Clear,
+    SearchStart,
+    CaptureSave,
+    ConsumeContinue,
+    Candidate,
 }
 
 impl VmTraceAction {
@@ -214,6 +265,10 @@ impl VmTraceAction {
             Self::AssertionPass => 8,
             Self::AssertionFail => 9,
             Self::Clear => 10,
+            Self::SearchStart => 11,
+            Self::CaptureSave => 12,
+            Self::ConsumeContinue => 13,
+            Self::Candidate => 14,
         }
     }
 }
@@ -263,6 +318,50 @@ impl VmResources {
 pub struct VmOutcome {
     pub is_full_match: bool,
     pub resources: VmResources,
+    pub execution_fingerprint: u64,
+    pub trace: Vec<VmTraceEvent>,
+    pub trace_truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmMatch {
+    pub span: CaptureSpan,
+    /// Explicit capture groups in opening-parenthesis order.
+    ///
+    /// `None` means the group did not participate. An empty participating
+    /// group is `Some` with equal start and end offsets.
+    pub captures: Vec<Option<CaptureSpan>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureVmResources {
+    pub core: VmResources,
+    pub capture_saves: u64,
+    pub capture_history_nodes: usize,
+    pub peak_capture_history_nodes: usize,
+}
+
+impl CaptureVmResources {
+    const fn new(input_bytes: usize, accounted_memory_bytes: u64) -> Self {
+        Self {
+            core: VmResources::new(input_bytes, accounted_memory_bytes),
+            capture_saves: 0,
+            capture_history_nodes: 0,
+            peak_capture_history_nodes: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureVmOutcome {
+    pub matched: Option<VmMatch>,
+    pub resources: CaptureVmResources,
     pub execution_fingerprint: u64,
     pub trace: Vec<VmTraceEvent>,
     pub trace_truncated: bool,
@@ -731,6 +830,847 @@ impl<'program, 'haystack> Executor<'program, 'haystack> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureMode {
+    AnchoredPrefix,
+    AnchoredFull,
+    Search,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturePc {
+    State(StateId),
+    /// One-byte continuation for a Unicode scalar already validated by a
+    /// `Consume` state. `remaining` is in `1..=3`.
+    Delay {
+        target: StateId,
+        remaining: u8,
+    },
+}
+
+impl CapturePc {
+    const fn state(self) -> StateId {
+        match self {
+            Self::State(state) => state,
+            Self::Delay { target, .. } => target,
+        }
+    }
+
+    fn seen_key(self) -> Result<usize, VmError> {
+        let state = self.state();
+        let base = state
+            .index()
+            .checked_mul(CAPTURE_SEEN_KEYS_PER_STATE)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        let suffix = match self {
+            Self::State(_) => 0,
+            Self::Delay { remaining, .. } => usize::from(remaining),
+        };
+        if suffix >= CAPTURE_SEEN_KEYS_PER_STATE {
+            return Err(VmError::new(VmErrorKind::InvalidState).with_state(state));
+        }
+        base.checked_add(suffix)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureThread {
+    pc: CapturePc,
+    capture_head: Option<usize>,
+    start: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureHistoryNode {
+    previous: Option<usize>,
+    slot: CaptureSlot,
+    offset: usize,
+}
+
+struct CaptureOffsetBucket {
+    offset: Option<usize>,
+    threads: Vec<CaptureThread>,
+}
+
+impl CaptureOffsetBucket {
+    fn new(thread_capacity: usize) -> Self {
+        Self {
+            offset: None,
+            threads: Vec::with_capacity(thread_capacity),
+        }
+    }
+}
+
+struct CaptureExecutor<'program, 'haystack> {
+    program: &'program Program,
+    haystack: &'haystack str,
+    limits: CaptureVmLimits,
+    buckets: Vec<CaptureOffsetBucket>,
+    active_threads: usize,
+    seen: Vec<u8>,
+    touched_seen: Vec<usize>,
+    history: Vec<CaptureHistoryNode>,
+    base_memory_bytes: u64,
+    resources: CaptureVmResources,
+    fingerprint: u64,
+    trace: Vec<VmTraceEvent>,
+    trace_truncated: bool,
+    trace_sequence: u64,
+}
+
+/// Execute an anchored one-shot match and retain the prioritized capture set.
+///
+/// Unlike [`execute_full`], this accepts a prefix. Ordered alternation and
+/// greedy/lazy repetition are selected exactly through the IR's
+/// `Split(preferred, fallback)` order. The result is the first accepted path
+/// after all still-live higher-priority paths have either accepted or failed.
+pub fn execute_anchored(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+) -> Result<CaptureVmOutcome, VmError> {
+    execute_capture_mode(
+        program,
+        haystack,
+        compile_limits,
+        limits,
+        CaptureMode::AnchoredPrefix,
+    )
+}
+
+/// Execute an anchored whole-haystack match and retain captures.
+pub fn execute_captures_full(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+) -> Result<CaptureVmOutcome, VmError> {
+    execute_capture_mode(
+        program,
+        haystack,
+        compile_limits,
+        limits,
+        CaptureMode::AnchoredFull,
+    )
+}
+
+/// Find one leftmost-first match and retain its prioritized capture set.
+///
+/// This is a one-shot primitive. Iterator construction, zero-width progress,
+/// replacement expansion, and cancellation checkpoints are owned by R3.4.3.
+pub fn execute_search(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+) -> Result<CaptureVmOutcome, VmError> {
+    execute_capture_mode(
+        program,
+        haystack,
+        compile_limits,
+        limits,
+        CaptureMode::Search,
+    )
+}
+
+fn execute_capture_mode(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+    mode: CaptureMode,
+) -> Result<CaptureVmOutcome, VmError> {
+    if !limits.invariants_hold() {
+        return Err(VmError::new(VmErrorKind::InvalidLimits));
+    }
+    program.validate(compile_limits).map_err(VmError::compile)?;
+    if haystack.len() > limits.vm.max_input_bytes {
+        return Err(VmError::new(VmErrorKind::InputLimit)
+            .with_actual_limit(haystack.len(), limits.vm.max_input_bytes));
+    }
+
+    let seen_keys = program
+        .states
+        .len()
+        .checked_mul(CAPTURE_SEEN_KEYS_PER_STATE)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let thread_capacity = seen_keys.min(limits.vm.max_threads_per_offset);
+    let base_memory_bytes = capture_base_memory_bytes(
+        seen_keys,
+        thread_capacity,
+        program.capture_slots,
+        limits.vm.max_trace_events,
+    )?;
+    if base_memory_bytes > limits.vm.max_memory_bytes {
+        return Err(VmError::new(VmErrorKind::MemoryLimit)
+            .with_actual_limit(base_memory_bytes, limits.vm.max_memory_bytes));
+    }
+
+    CaptureExecutor::new(
+        program,
+        haystack,
+        limits,
+        seen_keys,
+        thread_capacity,
+        base_memory_bytes,
+    )
+    .run(mode)
+}
+
+fn capture_base_memory_bytes(
+    seen_keys: usize,
+    thread_capacity: usize,
+    capture_slots: usize,
+    trace_capacity: usize,
+) -> Result<u64, VmError> {
+    let seen =
+        u64::try_from(seen_keys).map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let threads = u64::try_from(thread_capacity)
+        .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let slots =
+        u64::try_from(capture_slots).map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let traces =
+        u64::try_from(trace_capacity).map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let bucket_count = u64::try_from(CAPTURE_OFFSET_BUCKET_COUNT)
+        .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+
+    let bucket_threads = threads
+        .checked_mul(ACCOUNTED_CAPTURE_THREAD_BYTES)
+        .and_then(|bytes| bytes.checked_mul(bucket_count))
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let pending_threads = threads
+        .checked_mul(ACCOUNTED_CAPTURE_THREAD_BYTES)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let touched_seen = threads
+        .checked_mul(ACCOUNTED_CAPTURE_TOUCHED_KEY_BYTES)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let result_slots = slots
+        .checked_mul(ACCOUNTED_CAPTURE_RESULT_SLOT_BYTES)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let trace_bytes = traces
+        .checked_mul(ACCOUNTED_TRACE_EVENT_BYTES)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+
+    ACCOUNTED_VM_BASE_BYTES
+        .checked_add(bucket_threads)
+        .and_then(|bytes| bytes.checked_add(pending_threads))
+        .and_then(|bytes| bytes.checked_add(touched_seen))
+        .and_then(|bytes| bytes.checked_add(seen))
+        .and_then(|bytes| bytes.checked_add(result_slots))
+        .and_then(|bytes| bytes.checked_add(trace_bytes))
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))
+}
+
+impl<'program, 'haystack> CaptureExecutor<'program, 'haystack> {
+    fn new(
+        program: &'program Program,
+        haystack: &'haystack str,
+        limits: CaptureVmLimits,
+        seen_keys: usize,
+        thread_capacity: usize,
+        base_memory_bytes: u64,
+    ) -> Self {
+        Self {
+            program,
+            haystack,
+            limits,
+            buckets: (0..CAPTURE_OFFSET_BUCKET_COUNT)
+                .map(|_| CaptureOffsetBucket::new(thread_capacity))
+                .collect(),
+            active_threads: 0,
+            seen: vec![0; seen_keys],
+            touched_seen: Vec::with_capacity(thread_capacity),
+            history: Vec::new(),
+            base_memory_bytes,
+            resources: CaptureVmResources::new(haystack.len(), base_memory_bytes),
+            fingerprint: FINGERPRINT_OFFSET_BASIS,
+            trace: Vec::with_capacity(limits.vm.max_trace_events),
+            trace_truncated: false,
+            trace_sequence: 0,
+        }
+    }
+
+    fn run(mut self, mode: CaptureMode) -> Result<CaptureVmOutcome, VmError> {
+        let mut selected = None;
+        for offset in 0..=self.haystack.len() {
+            if selected.is_some() && self.active_threads == 0 {
+                break;
+            }
+
+            let mut ordered = self.take_bucket(offset)?;
+            let seed = match mode {
+                CaptureMode::AnchoredPrefix | CaptureMode::AnchoredFull => offset == 0,
+                CaptureMode::Search => selected.is_none() && self.haystack.is_char_boundary(offset),
+            };
+            if seed {
+                let thread = CaptureThread {
+                    pc: CapturePc::State(self.program.entry),
+                    capture_head: None,
+                    start: offset,
+                };
+                self.charge(1, offset, Some(self.program.entry))?;
+                self.resources.core.thread_enqueues =
+                    checked_increment(self.resources.core.thread_enqueues)?;
+                self.record(offset, self.program.entry, VmTraceAction::SearchStart)?;
+                ordered.push(thread);
+            }
+            if ordered.is_empty() {
+                continue;
+            }
+            if ordered.len() > self.limits.vm.max_threads_per_offset {
+                return Err(VmError::new(VmErrorKind::ThreadLimit)
+                    .with_offset(offset)
+                    .with_actual_limit(ordered.len(), self.limits.vm.max_threads_per_offset));
+            }
+
+            self.charge(1, offset, None)?;
+            self.resources.core.offsets_examined =
+                checked_increment(self.resources.core.offsets_examined)?;
+            self.resources.core.peak_threads_per_offset = self
+                .resources
+                .core
+                .peak_threads_per_offset
+                .max(ordered.len());
+            let mut pending = ordered.into_iter().rev().collect::<Vec<_>>();
+            let mut accepted = false;
+
+            while let Some(thread) = pending.pop() {
+                let state_id = thread.pc.state();
+                let key = thread.pc.seen_key()?;
+                self.charge(1, offset, Some(state_id))?;
+                let seen = self.seen.get_mut(key).ok_or_else(|| {
+                    VmError::new(VmErrorKind::InvalidState)
+                        .with_offset(offset)
+                        .with_state(state_id)
+                })?;
+                if *seen == 1 {
+                    self.resources.core.deduplicated_threads =
+                        checked_increment(self.resources.core.deduplicated_threads)?;
+                    self.record(offset, state_id, VmTraceAction::Deduplicate)?;
+                    continue;
+                }
+                *seen = 1;
+                self.touched_seen.push(key);
+                self.resources.core.state_visits =
+                    checked_increment(self.resources.core.state_visits)?;
+                self.record(offset, state_id, VmTraceAction::Visit)?;
+
+                match thread.pc {
+                    CapturePc::Delay { target, remaining } => {
+                        if offset >= self.haystack.len() {
+                            continue;
+                        }
+                        self.record(offset, target, VmTraceAction::ConsumeContinue)?;
+                        let next_pc = if remaining == 1 {
+                            CapturePc::State(target)
+                        } else {
+                            CapturePc::Delay {
+                                target,
+                                remaining: remaining - 1,
+                            }
+                        };
+                        self.enqueue_next(
+                            offset,
+                            CaptureThread {
+                                pc: next_pc,
+                                ..thread
+                            },
+                        )?;
+                    }
+                    CapturePc::State(state_id) => {
+                        let state = self.program.states.get(state_id.index()).ok_or_else(|| {
+                            VmError::new(VmErrorKind::InvalidState)
+                                .with_offset(offset)
+                                .with_state(state_id)
+                        })?;
+                        match &state.instruction {
+                            Instruction::Accept => {
+                                self.record(offset, state_id, VmTraceAction::Accept)?;
+                                if mode == CaptureMode::AnchoredFull
+                                    && offset != self.haystack.len()
+                                {
+                                    continue;
+                                }
+                                selected = Some(self.materialize_match(thread, offset)?);
+                                self.record(offset, state_id, VmTraceAction::Candidate)?;
+                                pending.clear();
+                                accepted = true;
+                                break;
+                            }
+                            Instruction::Jump { target } => {
+                                self.record(offset, state_id, VmTraceAction::Epsilon)?;
+                                self.push_pending(
+                                    &mut pending,
+                                    CaptureThread {
+                                        pc: CapturePc::State(*target),
+                                        ..thread
+                                    },
+                                    offset,
+                                )?;
+                            }
+                            Instruction::Split {
+                                preferred,
+                                fallback,
+                            } => {
+                                self.record(offset, state_id, VmTraceAction::Epsilon)?;
+                                self.push_pending(
+                                    &mut pending,
+                                    CaptureThread {
+                                        pc: CapturePc::State(*fallback),
+                                        ..thread
+                                    },
+                                    offset,
+                                )?;
+                                self.push_pending(
+                                    &mut pending,
+                                    CaptureThread {
+                                        pc: CapturePc::State(*preferred),
+                                        ..thread
+                                    },
+                                    offset,
+                                )?;
+                            }
+                            Instruction::Consume { class, target } => {
+                                if let Some(width) =
+                                    self.capture_class_width(*class, offset, state_id)?
+                                {
+                                    self.record(offset, state_id, VmTraceAction::ConsumeMatch)?;
+                                    let pc = if width == 1 {
+                                        CapturePc::State(*target)
+                                    } else {
+                                        let remaining = u8::try_from(width - 1).map_err(|_| {
+                                            VmError::new(VmErrorKind::ArithmeticOverflow)
+                                        })?;
+                                        CapturePc::Delay {
+                                            target: *target,
+                                            remaining,
+                                        }
+                                    };
+                                    self.enqueue_next(offset, CaptureThread { pc, ..thread })?;
+                                } else {
+                                    self.record(offset, state_id, VmTraceAction::ConsumeMiss)?;
+                                }
+                            }
+                            Instruction::Assert { kind, target } => {
+                                self.charge(1, offset, Some(state_id))?;
+                                self.resources.core.assertion_evaluations =
+                                    checked_increment(self.resources.core.assertion_evaluations)?;
+                                let passes =
+                                    kind.is_match(self.haystack, offset).map_err(|error| {
+                                        VmError::boundary(error.kind, offset, state_id)
+                                    })?;
+                                self.record(
+                                    offset,
+                                    state_id,
+                                    if passes {
+                                        VmTraceAction::AssertionPass
+                                    } else {
+                                        VmTraceAction::AssertionFail
+                                    },
+                                )?;
+                                if passes {
+                                    self.push_pending(
+                                        &mut pending,
+                                        CaptureThread {
+                                            pc: CapturePc::State(*target),
+                                            ..thread
+                                        },
+                                        offset,
+                                    )?;
+                                }
+                            }
+                            Instruction::Save { slot, target } => {
+                                let capture_head = self.save_capture(
+                                    thread.capture_head,
+                                    *slot,
+                                    offset,
+                                    state_id,
+                                )?;
+                                self.record(offset, state_id, VmTraceAction::CaptureSave)?;
+                                self.push_pending(
+                                    &mut pending,
+                                    CaptureThread {
+                                        pc: CapturePc::State(*target),
+                                        capture_head: Some(capture_head),
+                                        ..thread
+                                    },
+                                    offset,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let cleanup = self.touched_seen.len().saturating_add(pending.len());
+            self.reset_seen(offset)?;
+            self.resources.core.cleanup_operations = self
+                .resources
+                .core
+                .cleanup_operations
+                .checked_add(
+                    u64::try_from(cleanup)
+                        .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+                )
+                .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+            if accepted && self.active_threads == 0 {
+                break;
+            }
+        }
+        Ok(self.outcome(selected))
+    }
+
+    fn take_bucket(&mut self, offset: usize) -> Result<Vec<CaptureThread>, VmError> {
+        let bucket_index = offset % CAPTURE_OFFSET_BUCKET_COUNT;
+        let bucket = self
+            .buckets
+            .get_mut(bucket_index)
+            .ok_or_else(|| VmError::new(VmErrorKind::BucketCollision))?;
+        if bucket.offset.is_some_and(|assigned| assigned != offset) && !bucket.threads.is_empty() {
+            return Err(VmError::new(VmErrorKind::BucketCollision).with_offset(offset));
+        }
+        if bucket.offset != Some(offset) {
+            return Ok(Vec::new());
+        }
+        let count = bucket.threads.len();
+        let ordered = bucket.threads.drain(..).collect::<Vec<_>>();
+        bucket.offset = None;
+        self.active_threads = self
+            .active_threads
+            .checked_sub(count)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        Ok(ordered)
+    }
+
+    fn push_pending(
+        &mut self,
+        pending: &mut Vec<CaptureThread>,
+        thread: CaptureThread,
+        offset: usize,
+    ) -> Result<(), VmError> {
+        if pending.len() >= self.limits.vm.max_threads_per_offset {
+            return Err(VmError::new(VmErrorKind::ThreadLimit)
+                .with_offset(offset)
+                .with_state(thread.pc.state())
+                .with_actual_limit(
+                    pending.len().saturating_add(1),
+                    self.limits.vm.max_threads_per_offset,
+                ));
+        }
+        self.charge(1, offset, Some(thread.pc.state()))?;
+        pending.push(thread);
+        self.resources.core.thread_enqueues =
+            checked_increment(self.resources.core.thread_enqueues)?;
+        self.resources.core.peak_threads_per_offset = self
+            .resources
+            .core
+            .peak_threads_per_offset
+            .max(pending.len());
+        self.record(offset, thread.pc.state(), VmTraceAction::Enqueue)
+    }
+
+    fn enqueue_next(&mut self, offset: usize, thread: CaptureThread) -> Result<(), VmError> {
+        let next_offset = offset
+            .checked_add(1)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        if next_offset > self.haystack.len() {
+            return Ok(());
+        }
+        let bucket_index = next_offset % CAPTURE_OFFSET_BUCKET_COUNT;
+        let thread_count = {
+            let bucket = self
+                .buckets
+                .get(bucket_index)
+                .ok_or_else(|| VmError::new(VmErrorKind::BucketCollision))?;
+            if bucket
+                .offset
+                .is_some_and(|assigned| assigned != next_offset)
+                && !bucket.threads.is_empty()
+            {
+                return Err(VmError::new(VmErrorKind::BucketCollision)
+                    .with_offset(next_offset)
+                    .with_state(thread.pc.state()));
+            }
+            bucket.threads.len()
+        };
+        if thread_count >= self.limits.vm.max_threads_per_offset {
+            return Err(VmError::new(VmErrorKind::ThreadLimit)
+                .with_offset(next_offset)
+                .with_state(thread.pc.state())
+                .with_actual_limit(
+                    thread_count.saturating_add(1),
+                    self.limits.vm.max_threads_per_offset,
+                ));
+        }
+
+        self.charge(1, next_offset, Some(thread.pc.state()))?;
+        let bucket = self
+            .buckets
+            .get_mut(bucket_index)
+            .ok_or_else(|| VmError::new(VmErrorKind::BucketCollision))?;
+        bucket.offset = Some(next_offset);
+        bucket.threads.push(thread);
+        self.active_threads = self
+            .active_threads
+            .checked_add(1)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        self.resources.core.thread_enqueues =
+            checked_increment(self.resources.core.thread_enqueues)?;
+        self.resources.core.peak_threads_per_offset = self
+            .resources
+            .core
+            .peak_threads_per_offset
+            .max(bucket.threads.len());
+        self.record(next_offset, thread.pc.state(), VmTraceAction::Enqueue)
+    }
+
+    fn capture_class_width(
+        &mut self,
+        class: ClassId,
+        offset: usize,
+        state: StateId,
+    ) -> Result<Option<usize>, VmError> {
+        let ranges = &self
+            .program
+            .classes
+            .get(class.index())
+            .ok_or_else(|| {
+                VmError::new(VmErrorKind::InvalidClass)
+                    .with_offset(offset)
+                    .with_state(state)
+                    .with_class(class)
+            })?
+            .ranges;
+        let (width, comparisons) = match ranges {
+            CanonicalRanges::Unicode(ranges) => {
+                let Some(scalar) = self
+                    .haystack
+                    .get(offset..)
+                    .and_then(|remaining| remaining.chars().next())
+                else {
+                    return Ok(None);
+                };
+                let (matches, comparisons) = scalar_in_ranges(ranges, scalar, offset, state)?;
+                (matches.then_some(scalar.len_utf8()), comparisons)
+            }
+            CanonicalRanges::Bytes(ranges) => {
+                let Some(byte) = self.haystack.as_bytes().get(offset).copied() else {
+                    return Ok(None);
+                };
+                let (matches, comparisons) = byte_in_ranges(ranges, byte, offset, state)?;
+                (matches.then_some(1), comparisons)
+            }
+        };
+        self.charge(comparisons, offset, Some(state))?;
+        self.resources.core.class_range_comparisons = self
+            .resources
+            .core
+            .class_range_comparisons
+            .checked_add(comparisons)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        Ok(width)
+    }
+
+    fn save_capture(
+        &mut self,
+        previous: Option<usize>,
+        slot: CaptureSlot,
+        offset: usize,
+        state: StateId,
+    ) -> Result<usize, VmError> {
+        let next_len = self
+            .history
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        if next_len > self.limits.max_capture_history_nodes {
+            return Err(VmError::new(VmErrorKind::CaptureHistoryLimit)
+                .with_offset(offset)
+                .with_state(state)
+                .with_actual_limit(next_len, self.limits.max_capture_history_nodes));
+        }
+        let history_bytes = u64::try_from(next_len)
+            .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?
+            .checked_mul(ACCOUNTED_CAPTURE_HISTORY_NODE_BYTES)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?
+            .max(ACCOUNTED_CAPTURE_HISTORY_ALLOCATION_FLOOR_BYTES);
+        let accounted = self
+            .base_memory_bytes
+            .checked_add(history_bytes)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        if accounted > self.limits.vm.max_memory_bytes {
+            return Err(VmError::new(VmErrorKind::MemoryLimit)
+                .with_offset(offset)
+                .with_state(state)
+                .with_actual_limit(accounted, self.limits.vm.max_memory_bytes));
+        }
+        self.charge(1, offset, Some(state))?;
+        let index = self.history.len();
+        self.history.push(CaptureHistoryNode {
+            previous,
+            slot,
+            offset,
+        });
+        self.resources.capture_saves = checked_increment(self.resources.capture_saves)?;
+        self.resources.capture_history_nodes = self.history.len();
+        self.resources.peak_capture_history_nodes = self
+            .resources
+            .peak_capture_history_nodes
+            .max(self.history.len());
+        self.resources.core.accounted_memory_bytes = accounted;
+        Ok(index)
+    }
+
+    fn materialize_match(&mut self, thread: CaptureThread, end: usize) -> Result<VmMatch, VmError> {
+        if thread.start > end
+            || !self.haystack.is_char_boundary(thread.start)
+            || !self.haystack.is_char_boundary(end)
+        {
+            return Err(VmError::new(VmErrorKind::InvalidCaptureBoundary)
+                .with_offset(end)
+                .with_state(thread.pc.state()));
+        }
+        let mut slots = vec![None; self.program.capture_slots];
+        let mut cursor = thread.capture_head;
+        while let Some(index) = cursor {
+            self.charge(1, end, Some(thread.pc.state()))?;
+            let node = self.history.get(index).copied().ok_or_else(|| {
+                VmError::new(VmErrorKind::InvalidCaptureHistory)
+                    .with_offset(end)
+                    .with_state(thread.pc.state())
+            })?;
+            let slot = slots.get_mut(node.slot.index()).ok_or_else(|| {
+                VmError::new(VmErrorKind::InvalidCaptureHistory)
+                    .with_offset(end)
+                    .with_state(thread.pc.state())
+            })?;
+            if slot.is_none() {
+                *slot = Some(node.offset);
+            }
+            cursor = node.previous;
+        }
+
+        self.charge(
+            u64::try_from(slots.len())
+                .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+            end,
+            Some(thread.pc.state()),
+        )?;
+        let mut captures = Vec::with_capacity(slots.len() / 2);
+        for pair in slots.chunks_exact(2) {
+            let capture = match (pair[0], pair[1]) {
+                (None, None) => None,
+                (Some(start), Some(capture_end))
+                    if start <= capture_end
+                        && self.haystack.is_char_boundary(start)
+                        && self.haystack.is_char_boundary(capture_end) =>
+                {
+                    Some(CaptureSpan {
+                        start,
+                        end: capture_end,
+                    })
+                }
+                (Some(_), Some(_)) => {
+                    return Err(VmError::new(VmErrorKind::InvalidCaptureBoundary)
+                        .with_offset(end)
+                        .with_state(thread.pc.state()));
+                }
+                (None, Some(_)) | (Some(_), None) => {
+                    return Err(VmError::new(VmErrorKind::InvalidCaptureHistory)
+                        .with_offset(end)
+                        .with_state(thread.pc.state()));
+                }
+            };
+            captures.push(capture);
+        }
+        Ok(VmMatch {
+            span: CaptureSpan {
+                start: thread.start,
+                end,
+            },
+            captures,
+        })
+    }
+
+    fn reset_seen(&mut self, offset: usize) -> Result<(), VmError> {
+        for key in self.touched_seen.drain(..) {
+            let seen = self
+                .seen
+                .get_mut(key)
+                .ok_or_else(|| VmError::new(VmErrorKind::InvalidState).with_offset(offset))?;
+            *seen = 0;
+        }
+        Ok(())
+    }
+
+    fn charge(&mut self, units: u64, offset: usize, state: Option<StateId>) -> Result<(), VmError> {
+        let next = self
+            .resources
+            .core
+            .work_units
+            .checked_add(units)
+            .ok_or_else(|| {
+                let mut error = VmError::new(VmErrorKind::ArithmeticOverflow).with_offset(offset);
+                error.state = state;
+                error
+            })?;
+        if next > self.limits.vm.max_work_units {
+            let mut error = VmError::new(VmErrorKind::WorkLimit)
+                .with_offset(offset)
+                .with_actual_limit(next, self.limits.vm.max_work_units);
+            error.state = state;
+            return Err(error);
+        }
+        self.resources.core.work_units = next;
+        Ok(())
+    }
+
+    fn record(
+        &mut self,
+        offset: usize,
+        state: StateId,
+        action: VmTraceAction,
+    ) -> Result<(), VmError> {
+        self.trace_sequence = self
+            .trace_sequence
+            .checked_add(1)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        self.fingerprint = fingerprint_mix(self.fingerprint, action.tag());
+        self.fingerprint = fingerprint_mix(
+            self.fingerprint,
+            u64::try_from(offset).map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+        );
+        self.fingerprint = fingerprint_mix(
+            self.fingerprint,
+            u64::try_from(state.index())
+                .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+        );
+        if self.trace.len() < self.limits.vm.max_trace_events {
+            self.trace.push(VmTraceEvent {
+                sequence: self.trace_sequence,
+                offset,
+                state,
+                action,
+            });
+        } else {
+            self.trace_truncated = true;
+        }
+        Ok(())
+    }
+
+    fn outcome(self, matched: Option<VmMatch>) -> CaptureVmOutcome {
+        CaptureVmOutcome {
+            matched,
+            resources: self.resources,
+            execution_fingerprint: self.fingerprint,
+            trace: self.trace,
+            trace_truncated: self.trace_truncated,
+        }
+    }
+}
+
 fn checked_increment(value: u64) -> Result<u64, VmError> {
     value
         .checked_add(1)
@@ -828,6 +1768,18 @@ mod tests {
         .unwrap_or_else(|error| panic!("{pattern:?} on {haystack:?}: {error}"))
     }
 
+    fn search(pattern: &str, haystack: &str) -> VmMatch {
+        execute_search(
+            &lower_default(pattern),
+            haystack,
+            CompileLimits::default(),
+            CaptureVmLimits::default(),
+        )
+        .unwrap_or_else(|error| panic!("{pattern:?} on {haystack:?}: {error}"))
+        .matched
+        .unwrap_or_else(|| panic!("{pattern:?} must match {haystack:?}"))
+    }
+
     fn span() -> SourceSpan {
         SourceSpan {
             byte_start: 0,
@@ -835,6 +1787,133 @@ mod tests {
             scalar_start: 0,
             scalar_end: 0,
         }
+    }
+
+    #[test]
+    fn leftmost_alternation_and_greedy_lazy_priority_are_exact() {
+        let first = search("(a|ab)", "zab");
+        assert_eq!(first.span, CaptureSpan { start: 1, end: 2 });
+        assert_eq!(first.captures, vec![Some(CaptureSpan { start: 1, end: 2 })]);
+
+        let longest_first = search("(ab|a)", "zab");
+        assert_eq!(longest_first.span, CaptureSpan { start: 1, end: 3 });
+        assert_eq!(
+            longest_first.captures,
+            vec![Some(CaptureSpan { start: 1, end: 3 })]
+        );
+
+        let greedy = search("(a+)", "zaaab");
+        assert_eq!(greedy.span, CaptureSpan { start: 1, end: 4 });
+        assert_eq!(
+            greedy.captures,
+            vec![Some(CaptureSpan { start: 1, end: 4 })]
+        );
+
+        let lazy = search("(a+?)", "zaaab");
+        assert_eq!(lazy.span, CaptureSpan { start: 1, end: 2 });
+        assert_eq!(lazy.captures, vec![Some(CaptureSpan { start: 1, end: 2 })]);
+    }
+
+    #[test]
+    fn capture_participation_empty_repeated_and_unicode_spans_are_exact() {
+        let unmatched = search("(a)?b", "b");
+        assert_eq!(unmatched.span, CaptureSpan { start: 0, end: 1 });
+        assert_eq!(unmatched.captures, vec![None]);
+
+        let empty = search("(a*)", "");
+        assert_eq!(empty.span, CaptureSpan { start: 0, end: 0 });
+        assert_eq!(empty.captures, vec![Some(CaptureSpan { start: 0, end: 0 })]);
+
+        let repeated = search("(a)+", "aaa");
+        assert_eq!(repeated.span, CaptureSpan { start: 0, end: 3 });
+        assert_eq!(
+            repeated.captures,
+            vec![Some(CaptureSpan { start: 2, end: 3 })]
+        );
+
+        let unicode = search("(é+)", "xééy");
+        assert_eq!(unicode.span, CaptureSpan { start: 1, end: 5 });
+        assert_eq!(
+            unicode.captures,
+            vec![Some(CaptureSpan { start: 1, end: 5 })]
+        );
+    }
+
+    #[test]
+    fn full_capture_mode_rejects_a_preferred_prefix_before_a_complete_fallback() {
+        let program = lower_default("(a|ab)");
+        let outcome = execute_captures_full(
+            &program,
+            "ab",
+            CompileLimits::default(),
+            CaptureVmLimits::default(),
+        )
+        .expect("full capture execution");
+        let matched = outcome.matched.expect("fallback reaches the full end");
+        assert_eq!(matched.span, CaptureSpan { start: 0, end: 2 });
+        assert_eq!(
+            matched.captures,
+            vec![Some(CaptureSpan { start: 0, end: 2 })]
+        );
+    }
+
+    #[test]
+    fn capture_history_and_memory_limits_fail_closed_without_input_disclosure() {
+        assert!(
+            u64::try_from(core::mem::size_of::<CaptureThread>()).expect("thread size fits u64")
+                <= ACCOUNTED_CAPTURE_THREAD_BYTES
+        );
+        assert!(
+            u64::try_from(core::mem::size_of::<CaptureHistoryNode>())
+                .expect("history-node size fits u64")
+                <= ACCOUNTED_CAPTURE_HISTORY_NODE_BYTES
+        );
+        assert!(
+            u64::try_from(core::mem::size_of::<usize>()).expect("key size fits u64")
+                <= ACCOUNTED_CAPTURE_TOUCHED_KEY_BYTES
+        );
+        assert!(
+            u64::try_from(core::mem::size_of::<Option<CaptureSpan>>())
+                .expect("capture result size fits u64")
+                <= ACCOUNTED_CAPTURE_RESULT_SLOT_BYTES * 2
+        );
+
+        let program = lower_default("(a)+");
+        let history = execute_search(
+            &program,
+            "private-capture-canary-aaa",
+            CompileLimits::default(),
+            CaptureVmLimits {
+                max_capture_history_nodes: 1,
+                ..CaptureVmLimits::default()
+            },
+        )
+        .expect_err("history ceiling");
+        assert_eq!(history.kind, VmErrorKind::CaptureHistoryLimit);
+        assert!(!history.to_string().contains("private-capture-canary"));
+
+        let base_memory = capture_base_memory_bytes(
+            program.states.len() * CAPTURE_SEEN_KEYS_PER_STATE,
+            (program.states.len() * CAPTURE_SEEN_KEYS_PER_STATE)
+                .min(DEFAULT_MAX_THREADS_PER_OFFSET),
+            program.capture_slots,
+            DEFAULT_MAX_TRACE_EVENTS,
+        )
+        .expect("bounded base memory");
+        let memory = execute_search(
+            &program,
+            "a",
+            CompileLimits::default(),
+            CaptureVmLimits {
+                vm: VmLimits {
+                    max_memory_bytes: base_memory,
+                    ..VmLimits::default()
+                },
+                ..CaptureVmLimits::default()
+            },
+        )
+        .expect_err("first Save exceeds base-only memory");
+        assert_eq!(memory.kind, VmErrorKind::MemoryLimit);
     }
 
     #[test]

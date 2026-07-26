@@ -15,6 +15,13 @@
     "vm_experimentation_authorized": true,
     "production_cutover_eligible": false
   },
+  "successor_handoff": {
+    "live_source_authority": "artifacts/regex_vm_captures_contract_v1.json",
+    "successor_bead_id": "asupersync-5z2scg.8.3.4.2",
+    "historical_vm_source_pin_retained": true,
+    "live_vm_source_pin": false,
+    "core_behavior_replayed_against_successor_source": true
+  },
   "decision": {
     "disposition": "STAGED_BOUNDED_VM_CORE",
     "r3_4_1_vm_core_complete": true,
@@ -106,7 +113,8 @@
       "path": "src/observability/regex_vm.rs",
       "sha256": "8952e787fe20b6bd0b4896b90e00fe25ed93d44154279c4c4c4deab1565d0e30",
       "bytes": 36360,
-      "revision": "asupersync-5z2scg.8.3.4.1"
+      "revision": "asupersync-5z2scg.8.3.4.1",
+      "pin_scope": "historical_r3_4_1_source"
     },
     {
       "path": "src/observability/mod.rs",
