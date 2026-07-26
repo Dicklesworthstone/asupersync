@@ -65,6 +65,8 @@ Cargo-backed scenarios require:
     --scenario api-adr-registry-contract
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario api-adr-phase3-signoff
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e
 USAGE
 }
 
@@ -82,12 +84,13 @@ scenario_ids() {
         aggregate-signoff-contract \
         api-adr-registry-contract \
         api-adr-phase3-signoff \
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e \
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             return 0
             ;;
         *)
@@ -98,7 +101,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             return 0
             ;;
         *)
@@ -110,7 +113,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'e2e' ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'e2e' ;;
         runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
@@ -130,6 +133,7 @@ scenario_fixture() {
         aggregate-signoff-contract) printf 'artifacts/dependency_verification_final_signoff_v1.json' ;;
         api-adr-registry-contract) printf 'artifacts/dependency_api_adr_registry_v1.json' ;;
         api-adr-phase3-signoff) printf 'artifacts/dependency_api_adr_phase3_signoff_v1.json' ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'artifacts/typed_format_final_signoff_v1.json' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'tests/fixtures/typed-format-historical-corpus/v0.3.9.json' ;;
     esac
 }
@@ -139,6 +143,7 @@ scenario_profile() {
         catalog | runner-contract) printf 'contract-only' ;;
         feature-platform-consumer-contract) printf 'sparse-feature-platform-consumer' ;;
         aggregate-signoff-contract) printf 'aggregate-signoff' ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'typed-format-terminal-keep' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'published-v0.3.9-current-cli' ;;
         *) printf 'nightly-default' ;;
     esac
@@ -167,7 +172,7 @@ scenario_capabilities() {
         api-adr-phase3-signoff)
             printf '["CAP-PUBLIC-API-TOPOLOGY","CAP-DEPENDENCY-LEDGER"]'
             ;;
-        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '["CAP-PERSISTED-TRACE-SNAPSHOT","CAP-SERDE-GENERIC"]'
             ;;
     esac
@@ -175,7 +180,7 @@ scenario_capabilities() {
 
 scenario_features() {
     case "$1" in
-        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '["cli","default","test-internals","trace-compression"]'
             ;;
         *)
@@ -192,6 +197,7 @@ scenario_evidence_owner() {
         aggregate-signoff-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.6' ;;
         api-adr-registry-contract) printf 'asupersync-dep-p3-api-adrs-h3jspm.3' ;;
         api-adr-phase3-signoff) printf 'asupersync-dep-p3-api-adrs-h3jspm.13' ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'asupersync-5z2scg.3.5' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'asupersync-5z2scg.3.7' ;;
         *) printf '%s' "$EVIDENCE_OWNER" ;;
     esac
@@ -205,6 +211,7 @@ scenario_step_id() {
         aggregate-signoff-contract) printf 'ver-a6-aggregate-signoff-contract' ;;
         api-adr-registry-contract) printf 'adr-003-api-adr-registry-contract' ;;
         api-adr-phase3-signoff) printf 'adr-013-api-adr-phase3-signoff' ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'typed-formats-a5-terminal-keep-signoff' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'typed-formats-a7-cross-version-e2e' ;;
         *) printf 'ver-a2-%s' "$1" ;;
     esac
@@ -248,6 +255,9 @@ scenario_command_display() {
             ;;
         api-adr-phase3-signoff)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture"
+            ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_generic cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_historical cargo test --manifest-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml --locked -- --nocapture && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --features cli,test-internals,trace-compression --test typed_format_registry_contract --test runtime_snapshot_codec_e2e --test replay_e2e_suite --test typed_format_cross_version_e2e --test typed_format_final_signoff_contract -- --nocapture --test-threads=1"
             ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_consumer cargo test --manifest-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml --locked -- --nocapture && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --features cli,test-internals,trace-compression --test typed_format_cross_version_e2e -- --nocapture --test-threads=1"
@@ -722,6 +732,28 @@ execute_scenario() {
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture
+            ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="${target_dir}_generic" \
+                cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml \
+                --locked -- --nocapture &&
+                env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                    env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                    RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="${target_dir}_historical" \
+                    cargo test --manifest-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml \
+                    --locked -- --nocapture &&
+                env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                    env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                    RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                    cargo test -p asupersync --features cli,test-internals,trace-compression \
+                    --test typed_format_registry_contract \
+                    --test runtime_snapshot_codec_e2e \
+                    --test replay_e2e_suite \
+                    --test typed_format_cross_version_e2e \
+                    --test typed_format_final_signoff_contract \
+                    -- --nocapture --test-threads=1
             ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \

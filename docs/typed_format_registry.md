@@ -345,6 +345,25 @@ exact pinned release, artifacts, boundary payloads, semantics, and tool paths.
 
 These scoped evidence receipts are not permission to delete an affected surface.
 
+## A5 terminal decision
+
+`asupersync-5z2scg.3.5` joins the A1-A4/A6/A7 receipts in the checked
+[`typed-format terminal signoff`](./typed_format_final_signoff.md). Its verdict
+is `KEEP_INCUMBENTS_WITH_SCOPED_PERSISTED_PARITY`.
+
+Both generic binary backends remain independent `KEEP` decisions:
+`rmp-serde 1.3.1` continues to own MessagePack, and `bincode-next 3.1.1` with
+`bincode::config::legacy()` continues to own Bincode. The owned typed-symbol,
+snapshot, trace, replay, migration, and CLI work is additive. It does not
+replace unrestricted downstream Serde or authorize removing either incumbent.
+
+The exact published-v0.3.9 corpus and current-schema tests satisfy the scoped
+persisted compatibility decision. Current-only JSON families, arbitrary old
+releases, third-party payloads, unordered-map bytes, and the absence of one
+replacement-grade differential/fuzz packet across every decoder remain
+explicit no-claim boundaries. Those gaps require `KEEP`; they are not silently
+counted as green.
+
 ## Validation
 
 The focused contract is
