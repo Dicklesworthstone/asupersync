@@ -115,6 +115,20 @@ permit, socket, file, lock, timer, or background work. Cancellation, timeout,
 shutdown, cleanup, and region-quiescence scenarios do not apply to this
 one-shot pure computation.
 
+## R3.4.3 successor handoff
+
+R3.4.3 extends the same private source with bounded iteration, explicit overlap
+policy, Unicode-safe zero-width progress, and ordered replacement spans. The
+live source digest therefore moves to
+`artifacts/regex_vm_iteration_contract_v1.json`. This artifact retains the
+original R3.4.2 `src/observability/regex_vm.rs` digest as a historical pin.
+
+`tests/regex_vm_captures_contract.rs` still imports and executes the current
+source. Its 20 exact fixtures, 5,115 incumbent comparisons, 512 generated
+cases, adversarial enumeration, resource failures, and privacy canaries remain
+live behavioral evidence even though its original source digest is historical.
+The R3.4.3 contract runs the core, capture, and iteration contracts together.
+
 ## Remote proof
 
 Run the focused inline unit tests:

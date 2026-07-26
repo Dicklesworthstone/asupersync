@@ -3,9 +3,11 @@
 //! This private R3.4 surface executes only programs that pass the R3.3
 //! validator. The R3.4.1 entry point implements whole-haystack language
 //! recognition. The R3.4.2 entry points add one-shot leftmost-first selection,
-//! ordered greedy/lazy execution, and bounded capture histories. Iteration
-//! APIs, cancellation, production privacy wiring, and dependency replacement
-//! remain downstream work.
+//! ordered greedy/lazy execution, and bounded capture histories. R3.4.3 adds
+//! deterministic match/capture iteration, explicit overlap policy, Unicode-safe
+//! zero-width progress, and ordered replacement spans. Cancellation,
+//! production privacy wiring, replacement-template syntax, and dependency
+//! replacement remain downstream work.
 
 use core::fmt;
 
@@ -20,6 +22,8 @@ pub const VM_ID: &str = "ASUP-REGEX-THREAD-SET-VM-V1";
 pub const VM_SCHEMA_VERSION: u16 = 1;
 pub const CAPTURE_VM_ID: &str = "ASUP-REGEX-PRIORITY-CAPTURE-VM-V1";
 pub const CAPTURE_VM_SCHEMA_VERSION: u16 = 1;
+pub const ITERATION_VM_ID: &str = "ASUP-REGEX-ITERATION-VM-V1";
+pub const ITERATION_VM_SCHEMA_VERSION: u16 = 1;
 
 pub const DEFAULT_MAX_INPUT_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_THREADS_PER_OFFSET: usize = 262_144;
@@ -42,6 +46,10 @@ pub const ACCOUNTED_CAPTURE_TOUCHED_KEY_BYTES: u64 = 8;
 pub const ACCOUNTED_CAPTURE_HISTORY_NODE_BYTES: u64 = 64;
 pub const ACCOUNTED_CAPTURE_HISTORY_ALLOCATION_FLOOR_BYTES: u64 = 256;
 pub const ACCOUNTED_CAPTURE_RESULT_SLOT_BYTES: u64 = 32;
+pub const DEFAULT_MAX_ITERATED_MATCHES: usize = 262_144;
+pub const DEFAULT_MAX_ITERATION_TRACE_EVENTS: usize = 256;
+pub const ACCOUNTED_ITERATION_MATCH_BYTES: u64 = 128;
+pub const ACCOUNTED_ITERATION_TRACE_EVENT_BYTES: u64 = 80;
 
 const FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -105,6 +113,33 @@ impl CaptureVmLimits {
     }
 }
 
+/// Aggregate limits for repeated search.
+///
+/// `capture.vm.max_work_units` and `capture.vm.max_memory_bytes` are whole
+/// iteration ceilings, not fresh budgets for every search attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IterationVmLimits {
+    pub capture: CaptureVmLimits,
+    pub max_matches: usize,
+    pub max_trace_events: usize,
+}
+
+impl Default for IterationVmLimits {
+    fn default() -> Self {
+        Self {
+            capture: CaptureVmLimits::default(),
+            max_matches: DEFAULT_MAX_ITERATED_MATCHES,
+            max_trace_events: DEFAULT_MAX_ITERATION_TRACE_EVENTS,
+        }
+    }
+}
+
+impl IterationVmLimits {
+    const fn invariants_hold(self) -> bool {
+        self.capture.invariants_hold() && self.max_matches > 0 && self.max_trace_events > 0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmErrorKind {
     Compile(CompileErrorKind),
@@ -121,6 +156,8 @@ pub enum VmErrorKind {
     CaptureHistoryLimit,
     InvalidCaptureHistory,
     InvalidCaptureBoundary,
+    MatchLimit,
+    InvalidIterationBoundary,
 }
 
 impl VmErrorKind {
@@ -140,6 +177,8 @@ impl VmErrorKind {
             Self::CaptureHistoryLimit => "RGX-VM-E010",
             Self::InvalidCaptureHistory => "RGX-VM-E011",
             Self::InvalidCaptureBoundary => "RGX-VM-E012",
+            Self::MatchLimit => "RGX-VM-E013",
+            Self::InvalidIterationBoundary => "RGX-VM-E014",
         }
     }
 }
@@ -365,6 +404,77 @@ pub struct CaptureVmOutcome {
     pub execution_fingerprint: u64,
     pub trace: Vec<VmTraceEvent>,
     pub trace_truncated: bool,
+}
+
+impl CaptureVmOutcome {
+    /// Return whether the one-shot search selected a match.
+    pub const fn is_match(&self) -> bool {
+        self.matched.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterationPolicy {
+    /// Resume at the previous non-empty match end. Empty matches advance by
+    /// one complete Unicode scalar.
+    NonOverlapping,
+    /// Resume one complete Unicode scalar after the previous match start.
+    /// This admits matches beginning inside a previous non-empty match without
+    /// returning the same start twice.
+    Overlapping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IterationTraceEvent {
+    pub sequence: u64,
+    pub search_start: usize,
+    pub matched: Option<CaptureSpan>,
+    pub next_search_start: Option<usize>,
+    pub search_fingerprint: u64,
+    pub discarded_adjacent_empty: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IterationVmResources {
+    pub search_attempts: u64,
+    pub matches: usize,
+    pub zero_width_advances: u64,
+    pub overlap_advances: u64,
+    pub total_work_units: u64,
+    pub peak_accounted_memory_bytes: u64,
+}
+
+impl IterationVmResources {
+    const fn new(accounted_memory_bytes: u64) -> Self {
+        Self {
+            search_attempts: 0,
+            matches: 0,
+            zero_width_advances: 0,
+            overlap_advances: 0,
+            total_work_units: 0,
+            peak_accounted_memory_bytes: accounted_memory_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmIterationOutcome {
+    /// Matches remain in deterministic search order and retain capture spans.
+    pub matches: Vec<VmMatch>,
+    pub resources: IterationVmResources,
+    pub execution_fingerprint: u64,
+    pub trace: Vec<IterationTraceEvent>,
+    pub trace_truncated: bool,
+}
+
+impl VmIterationOutcome {
+    /// Ordered, non-copying replacement targets.
+    ///
+    /// Capture-reference expansion belongs to R3.5; callers can pair each
+    /// yielded whole-match span with the corresponding `matches` entry.
+    pub fn replacement_spans(&self) -> impl ExactSizeIterator<Item = CaptureSpan> + '_ {
+        self.matches.iter().map(|matched| matched.span)
+    }
 }
 
 struct OffsetBucket {
@@ -834,7 +944,7 @@ impl<'program, 'haystack> Executor<'program, 'haystack> {
 enum CaptureMode {
     AnchoredPrefix,
     AnchoredFull,
-    Search,
+    Search { start_offset: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -958,21 +1068,229 @@ pub fn execute_captures_full(
 
 /// Find one leftmost-first match and retain its prioritized capture set.
 ///
-/// This is a one-shot primitive. Iterator construction, zero-width progress,
-/// replacement expansion, and cancellation checkpoints are owned by R3.4.3.
+/// This is the one-shot primitive used by R3.4.3 iteration.
 pub fn execute_search(
     program: &Program,
     haystack: &str,
     compile_limits: CompileLimits,
     limits: CaptureVmLimits,
 ) -> Result<CaptureVmOutcome, VmError> {
+    execute_search_from(program, haystack, compile_limits, limits, 0)
+}
+
+fn execute_search_from(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+    start_offset: usize,
+) -> Result<CaptureVmOutcome, VmError> {
     execute_capture_mode(
         program,
         haystack,
         compile_limits,
         limits,
-        CaptureMode::Search,
+        CaptureMode::Search { start_offset },
     )
+}
+
+/// Repeatedly select matches under an explicit overlap policy.
+///
+/// The result retains captures for every match. `replacement_spans()` exposes
+/// those same whole-match spans in application order without parsing or
+/// expanding replacement templates.
+pub fn execute_find_iter(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    policy: IterationPolicy,
+    limits: IterationVmLimits,
+) -> Result<VmIterationOutcome, VmError> {
+    if !limits.invariants_hold() {
+        return Err(VmError::new(VmErrorKind::InvalidLimits));
+    }
+    program.validate(compile_limits).map_err(VmError::compile)?;
+    if haystack.len() > limits.capture.vm.max_input_bytes {
+        return Err(VmError::new(VmErrorKind::InputLimit)
+            .with_actual_limit(haystack.len(), limits.capture.vm.max_input_bytes));
+    }
+
+    let retained_base =
+        iteration_retained_memory_bytes(0, program.capture_slots, limits.max_trace_events)?;
+    if retained_base > limits.capture.vm.max_memory_bytes {
+        return Err(VmError::new(VmErrorKind::MemoryLimit)
+            .with_actual_limit(retained_base, limits.capture.vm.max_memory_bytes));
+    }
+
+    let mut matches = Vec::new();
+    let mut resources = IterationVmResources::new(retained_base);
+    let mut fingerprint = FINGERPRINT_OFFSET_BASIS;
+    let mut trace = Vec::with_capacity(limits.max_trace_events);
+    let mut trace_truncated = false;
+    let mut trace_sequence = 0_u64;
+    let mut next_search_start = Some(0_usize);
+    let mut last_match_end = None;
+
+    while let Some(search_start) = next_search_start {
+        iteration_charge(
+            &mut resources,
+            1,
+            limits.capture.vm.max_work_units,
+            search_start,
+        )?;
+        let retained_before = iteration_retained_memory_bytes(
+            matches.len(),
+            program.capture_slots,
+            limits.max_trace_events,
+        )?;
+        let remaining_memory = limits
+            .capture
+            .vm
+            .max_memory_bytes
+            .checked_sub(retained_before)
+            .ok_or_else(|| {
+                VmError::new(VmErrorKind::MemoryLimit)
+                    .with_offset(search_start)
+                    .with_actual_limit(retained_before, limits.capture.vm.max_memory_bytes)
+            })?;
+        if remaining_memory < ACCOUNTED_VM_BASE_BYTES {
+            return Err(VmError::new(VmErrorKind::MemoryLimit)
+                .with_offset(search_start)
+                .with_actual_limit(retained_before, limits.capture.vm.max_memory_bytes));
+        }
+        let remaining_work = limits
+            .capture
+            .vm
+            .max_work_units
+            .checked_sub(resources.total_work_units)
+            .ok_or_else(|| {
+                VmError::new(VmErrorKind::WorkLimit)
+                    .with_offset(search_start)
+                    .with_actual_limit(resources.total_work_units, limits.capture.vm.max_work_units)
+            })?;
+        if remaining_work == 0 {
+            return Err(VmError::new(VmErrorKind::WorkLimit)
+                .with_offset(search_start)
+                .with_actual_limit(
+                    resources.total_work_units.saturating_add(1),
+                    limits.capture.vm.max_work_units,
+                ));
+        }
+
+        let mut search_limits = limits.capture;
+        search_limits.vm.max_memory_bytes = remaining_memory;
+        search_limits.vm.max_work_units = remaining_work;
+        let search = execute_search_from(
+            program,
+            haystack,
+            compile_limits,
+            search_limits,
+            search_start,
+        )?;
+        resources.search_attempts = checked_increment(resources.search_attempts)?;
+        resources.total_work_units = resources
+            .total_work_units
+            .checked_add(search.resources.core.work_units)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        let peak = retained_before
+            .checked_add(search.resources.core.accounted_memory_bytes)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+        resources.peak_accounted_memory_bytes = resources.peak_accounted_memory_bytes.max(peak);
+
+        fingerprint = fingerprint_mix(fingerprint, search.execution_fingerprint);
+        fingerprint = fingerprint_mix(
+            fingerprint,
+            u64::try_from(search_start)
+                .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+        );
+
+        let Some(matched) = search.matched else {
+            record_iteration_trace(
+                &mut trace,
+                &mut trace_truncated,
+                &mut trace_sequence,
+                limits.max_trace_events,
+                search_start,
+                None,
+                None,
+                search.execution_fingerprint,
+                false,
+            )?;
+            break;
+        };
+        let resume = next_iteration_start(haystack, matched.span, policy)?;
+        if policy == IterationPolicy::NonOverlapping
+            && matched.span.start == matched.span.end
+            && last_match_end == Some(matched.span.end)
+        {
+            if resume.is_some() {
+                resources.zero_width_advances = checked_increment(resources.zero_width_advances)?;
+            }
+            record_iteration_trace(
+                &mut trace,
+                &mut trace_truncated,
+                &mut trace_sequence,
+                limits.max_trace_events,
+                search_start,
+                Some(matched.span),
+                resume,
+                search.execution_fingerprint,
+                true,
+            )?;
+            next_search_start = resume;
+            continue;
+        }
+        fingerprint = mix_match_fingerprint(fingerprint, &matched)?;
+        record_iteration_trace(
+            &mut trace,
+            &mut trace_truncated,
+            &mut trace_sequence,
+            limits.max_trace_events,
+            search_start,
+            Some(matched.span),
+            resume,
+            search.execution_fingerprint,
+            false,
+        )?;
+
+        if matches.len() >= limits.max_matches {
+            return Err(VmError::new(VmErrorKind::MatchLimit)
+                .with_offset(matched.span.start)
+                .with_actual_limit(matches.len().saturating_add(1), limits.max_matches));
+        }
+        if matched.span.start == matched.span.end && resume.is_some() {
+            resources.zero_width_advances = checked_increment(resources.zero_width_advances)?;
+        }
+        if policy == IterationPolicy::Overlapping && resume.is_some() {
+            resources.overlap_advances = checked_increment(resources.overlap_advances)?;
+        }
+        let matched_end = matched.span.end;
+        matches.push(matched);
+        resources.matches = matches.len();
+        last_match_end = Some(matched_end);
+
+        let retained_after = iteration_retained_memory_bytes(
+            matches.len(),
+            program.capture_slots,
+            limits.max_trace_events,
+        )?;
+        if retained_after > limits.capture.vm.max_memory_bytes {
+            return Err(VmError::new(VmErrorKind::MemoryLimit)
+                .with_offset(search_start)
+                .with_actual_limit(retained_after, limits.capture.vm.max_memory_bytes));
+        }
+        resources.peak_accounted_memory_bytes =
+            resources.peak_accounted_memory_bytes.max(retained_after);
+        next_search_start = resume;
+    }
+
+    Ok(VmIterationOutcome {
+        matches,
+        resources,
+        execution_fingerprint: fingerprint,
+        trace,
+        trace_truncated,
+    })
 }
 
 fn execute_capture_mode(
@@ -989,6 +1307,11 @@ fn execute_capture_mode(
     if haystack.len() > limits.vm.max_input_bytes {
         return Err(VmError::new(VmErrorKind::InputLimit)
             .with_actual_limit(haystack.len(), limits.vm.max_input_bytes));
+    }
+    if let CaptureMode::Search { start_offset } = mode
+        && (start_offset > haystack.len() || !haystack.is_char_boundary(start_offset))
+    {
+        return Err(VmError::new(VmErrorKind::InvalidIterationBoundary).with_offset(start_offset));
     }
 
     let seen_keys = program
@@ -1063,6 +1386,157 @@ fn capture_base_memory_bytes(
         .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))
 }
 
+fn iteration_retained_memory_bytes(
+    match_count: usize,
+    capture_slots: usize,
+    trace_capacity: usize,
+) -> Result<u64, VmError> {
+    let matches =
+        u64::try_from(match_count).map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let slots =
+        u64::try_from(capture_slots).map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let traces =
+        u64::try_from(trace_capacity).map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let captures_per_match = slots
+        .checked_mul(ACCOUNTED_CAPTURE_RESULT_SLOT_BYTES)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let bytes_per_match = ACCOUNTED_ITERATION_MATCH_BYTES
+        .checked_add(captures_per_match)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let match_bytes = matches
+        .checked_mul(bytes_per_match)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    let trace_bytes = traces
+        .checked_mul(ACCOUNTED_ITERATION_TRACE_EVENT_BYTES)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))?;
+    ACCOUNTED_VM_BASE_BYTES
+        .checked_add(match_bytes)
+        .and_then(|bytes| bytes.checked_add(trace_bytes))
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))
+}
+
+fn iteration_charge(
+    resources: &mut IterationVmResources,
+    units: u64,
+    limit: u64,
+    offset: usize,
+) -> Result<(), VmError> {
+    let next = resources
+        .total_work_units
+        .checked_add(units)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow).with_offset(offset))?;
+    if next > limit {
+        return Err(VmError::new(VmErrorKind::WorkLimit)
+            .with_offset(offset)
+            .with_actual_limit(next, limit));
+    }
+    resources.total_work_units = next;
+    Ok(())
+}
+
+fn next_iteration_start(
+    haystack: &str,
+    span: CaptureSpan,
+    policy: IterationPolicy,
+) -> Result<Option<usize>, VmError> {
+    if span.start > span.end
+        || span.end > haystack.len()
+        || !haystack.is_char_boundary(span.start)
+        || !haystack.is_char_boundary(span.end)
+    {
+        return Err(VmError::new(VmErrorKind::InvalidIterationBoundary).with_offset(span.start));
+    }
+    match policy {
+        IterationPolicy::NonOverlapping if span.start != span.end => Ok(Some(span.end)),
+        IterationPolicy::NonOverlapping | IterationPolicy::Overlapping => {
+            next_scalar_boundary(haystack, span.start)
+        }
+    }
+}
+
+fn next_scalar_boundary(haystack: &str, offset: usize) -> Result<Option<usize>, VmError> {
+    if offset > haystack.len() || !haystack.is_char_boundary(offset) {
+        return Err(VmError::new(VmErrorKind::InvalidIterationBoundary).with_offset(offset));
+    }
+    let Some(scalar) = haystack
+        .get(offset..)
+        .and_then(|remaining| remaining.chars().next())
+    else {
+        return Ok(None);
+    };
+    offset
+        .checked_add(scalar.len_utf8())
+        .map(Some)
+        .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow).with_offset(offset))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_iteration_trace(
+    trace: &mut Vec<IterationTraceEvent>,
+    trace_truncated: &mut bool,
+    sequence: &mut u64,
+    limit: usize,
+    search_start: usize,
+    matched: Option<CaptureSpan>,
+    next_search_start: Option<usize>,
+    search_fingerprint: u64,
+    discarded_adjacent_empty: bool,
+) -> Result<(), VmError> {
+    *sequence = checked_increment(*sequence)?;
+    if trace.len() < limit {
+        trace.push(IterationTraceEvent {
+            sequence: *sequence,
+            search_start,
+            matched,
+            next_search_start,
+            search_fingerprint,
+            discarded_adjacent_empty,
+        });
+    } else {
+        *trace_truncated = true;
+    }
+    Ok(())
+}
+
+fn mix_match_fingerprint(mut fingerprint: u64, matched: &VmMatch) -> Result<u64, VmError> {
+    fingerprint = fingerprint_mix(
+        fingerprint,
+        u64::try_from(matched.span.start)
+            .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+    );
+    fingerprint = fingerprint_mix(
+        fingerprint,
+        u64::try_from(matched.span.end)
+            .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+    );
+    fingerprint = fingerprint_mix(
+        fingerprint,
+        u64::try_from(matched.captures.len())
+            .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+    );
+    for capture in &matched.captures {
+        match capture {
+            Some(span) => {
+                fingerprint = fingerprint_mix(fingerprint, 1);
+                fingerprint = fingerprint_mix(
+                    fingerprint,
+                    u64::try_from(span.start)
+                        .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+                );
+                fingerprint = fingerprint_mix(
+                    fingerprint,
+                    u64::try_from(span.end)
+                        .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+                );
+            }
+            None => {
+                fingerprint = fingerprint_mix(fingerprint, 0);
+            }
+        }
+    }
+    Ok(fingerprint)
+}
+
 impl<'program, 'haystack> CaptureExecutor<'program, 'haystack> {
     fn new(
         program: &'program Program,
@@ -1094,7 +1568,11 @@ impl<'program, 'haystack> CaptureExecutor<'program, 'haystack> {
 
     fn run(mut self, mode: CaptureMode) -> Result<CaptureVmOutcome, VmError> {
         let mut selected = None;
-        for offset in 0..=self.haystack.len() {
+        let first_offset = match mode {
+            CaptureMode::AnchoredPrefix | CaptureMode::AnchoredFull => 0,
+            CaptureMode::Search { start_offset } => start_offset,
+        };
+        for offset in first_offset..=self.haystack.len() {
             if selected.is_some() && self.active_threads == 0 {
                 break;
             }
@@ -1102,7 +1580,11 @@ impl<'program, 'haystack> CaptureExecutor<'program, 'haystack> {
             let mut ordered = self.take_bucket(offset)?;
             let seed = match mode {
                 CaptureMode::AnchoredPrefix | CaptureMode::AnchoredFull => offset == 0,
-                CaptureMode::Search => selected.is_none() && self.haystack.is_char_boundary(offset),
+                CaptureMode::Search { start_offset } => {
+                    selected.is_none()
+                        && offset >= start_offset
+                        && self.haystack.is_char_boundary(offset)
+                }
             };
             if seed {
                 let thread = CaptureThread {
@@ -1780,6 +2262,17 @@ mod tests {
         .unwrap_or_else(|| panic!("{pattern:?} must match {haystack:?}"))
     }
 
+    fn iterate(pattern: &str, haystack: &str, policy: IterationPolicy) -> VmIterationOutcome {
+        execute_find_iter(
+            &lower_default(pattern),
+            haystack,
+            CompileLimits::default(),
+            policy,
+            IterationVmLimits::default(),
+        )
+        .unwrap_or_else(|error| panic!("{pattern:?} on {haystack:?}: {error}"))
+    }
+
     fn span() -> SourceSpan {
         SourceSpan {
             byte_start: 0,
@@ -1914,6 +2407,183 @@ mod tests {
         )
         .expect_err("first Save exceeds base-only memory");
         assert_eq!(memory.kind, VmErrorKind::MemoryLimit);
+    }
+
+    #[test]
+    fn one_shot_is_match_and_iteration_adapters_preserve_captures() {
+        let program = lower_default("(a)?b");
+        let present = execute_search(
+            &program,
+            "b",
+            CompileLimits::default(),
+            CaptureVmLimits::default(),
+        )
+        .expect("one-shot match");
+        assert!(present.is_match());
+        assert_eq!(
+            present.matched.expect("selected match").captures,
+            vec![None]
+        );
+
+        let absent = execute_search(
+            &program,
+            "zzz",
+            CompileLimits::default(),
+            CaptureVmLimits::default(),
+        )
+        .expect("one-shot miss");
+        assert!(!absent.is_match());
+
+        let iterated = iterate("(a)?b", "b ab", IterationPolicy::NonOverlapping);
+        assert_eq!(
+            iterated.replacement_spans().collect::<Vec<_>>(),
+            vec![
+                CaptureSpan { start: 0, end: 1 },
+                CaptureSpan { start: 2, end: 4 },
+            ]
+        );
+        assert_eq!(iterated.matches[0].captures, vec![None]);
+        assert_eq!(
+            iterated.matches[1].captures,
+            vec![Some(CaptureSpan { start: 2, end: 3 })]
+        );
+    }
+
+    #[test]
+    fn overlap_policy_resumes_after_start_without_duplicate_matches() {
+        let non_overlapping = iterate("aba", "ababa", IterationPolicy::NonOverlapping);
+        assert_eq!(
+            non_overlapping.replacement_spans().collect::<Vec<_>>(),
+            vec![CaptureSpan { start: 0, end: 3 }]
+        );
+
+        let overlapping = iterate("aba", "ababa", IterationPolicy::Overlapping);
+        assert_eq!(
+            overlapping.replacement_spans().collect::<Vec<_>>(),
+            vec![
+                CaptureSpan { start: 0, end: 3 },
+                CaptureSpan { start: 2, end: 5 },
+            ]
+        );
+        assert_eq!(overlapping.resources.overlap_advances, 2);
+        assert_eq!(
+            overlapping.trace.last().expect("terminal miss").matched,
+            None
+        );
+    }
+
+    #[test]
+    fn zero_width_iteration_advances_by_complete_unicode_scalars_and_stops_at_end() {
+        let first = iterate("", "éa", IterationPolicy::NonOverlapping);
+        let second = iterate("", "éa", IterationPolicy::NonOverlapping);
+        assert_eq!(
+            first.replacement_spans().collect::<Vec<_>>(),
+            vec![
+                CaptureSpan { start: 0, end: 0 },
+                CaptureSpan { start: 2, end: 2 },
+                CaptureSpan { start: 3, end: 3 },
+            ]
+        );
+        assert_eq!(first.resources.zero_width_advances, 2);
+        assert_eq!(first.resources.search_attempts, 3);
+        assert_eq!(first.execution_fingerprint, second.execution_fingerprint);
+        assert_eq!(first.resources, second.resources);
+        assert_eq!(first.trace, second.trace);
+        assert_eq!(
+            first
+                .trace
+                .iter()
+                .map(|event| event.search_start)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+
+        let adjacent = iterate("a*", "baa", IterationPolicy::NonOverlapping);
+        assert_eq!(
+            adjacent.replacement_spans().collect::<Vec<_>>(),
+            vec![
+                CaptureSpan { start: 0, end: 0 },
+                CaptureSpan { start: 1, end: 3 },
+            ]
+        );
+        let discarded = adjacent.trace.last().expect("discarded terminal empty");
+        assert_eq!(discarded.matched, Some(CaptureSpan { start: 3, end: 3 }));
+        assert!(discarded.discarded_adjacent_empty);
+        assert_eq!(discarded.next_search_start, None);
+    }
+
+    #[test]
+    fn iteration_match_work_memory_and_trace_limits_fail_closed() {
+        assert!(
+            u64::try_from(core::mem::size_of::<VmMatch>()).expect("match size fits")
+                <= ACCOUNTED_ITERATION_MATCH_BYTES
+        );
+        assert!(
+            u64::try_from(core::mem::size_of::<IterationTraceEvent>())
+                .expect("iteration event size fits")
+                <= ACCOUNTED_ITERATION_TRACE_EVENT_BYTES
+        );
+
+        let empty = lower_default("");
+        let limit = execute_find_iter(
+            &empty,
+            "a",
+            CompileLimits::default(),
+            IterationPolicy::NonOverlapping,
+            IterationVmLimits {
+                max_matches: 1,
+                ..IterationVmLimits::default()
+            },
+        )
+        .expect_err("second empty match exceeds limit");
+        assert_eq!(limit.kind, VmErrorKind::MatchLimit);
+        assert_eq!(limit.actual, Some(2));
+        assert_eq!(limit.limit, Some(1));
+
+        let exact = execute_find_iter(
+            &lower_default("a"),
+            "a",
+            CompileLimits::default(),
+            IterationPolicy::NonOverlapping,
+            IterationVmLimits {
+                max_matches: 1,
+                ..IterationVmLimits::default()
+            },
+        )
+        .expect("one match at the exact ceiling");
+        assert_eq!(exact.matches.len(), 1);
+
+        let invalid = execute_find_iter(
+            &empty,
+            "",
+            CompileLimits::default(),
+            IterationPolicy::NonOverlapping,
+            IterationVmLimits {
+                max_matches: 0,
+                ..IterationVmLimits::default()
+            },
+        )
+        .expect_err("zero match ceiling is invalid");
+        assert_eq!(invalid.kind, VmErrorKind::InvalidLimits);
+
+        let work = execute_find_iter(
+            &lower_default("a"),
+            "a",
+            CompileLimits::default(),
+            IterationPolicy::NonOverlapping,
+            IterationVmLimits {
+                capture: CaptureVmLimits {
+                    vm: VmLimits {
+                        max_work_units: 1,
+                        ..VmLimits::default()
+                    },
+                    ..CaptureVmLimits::default()
+                },
+                ..IterationVmLimits::default()
+            },
+        )
+        .expect_err("aggregate work limit");
+        assert_eq!(work.kind, VmErrorKind::WorkLimit);
     }
 
     #[test]

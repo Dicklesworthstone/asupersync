@@ -44,8 +44,11 @@ const DOC_PATH: &str = "docs/regex_vm_captures_contract.md";
 const PREDECESSOR_PATH: &str = "artifacts/regex_vm_core_contract_v1.json";
 const TERMINAL_PATH: &str = "artifacts/regex_compiler_terminal_receipt_v1.json";
 const LOWERING_PATH: &str = "artifacts/regex_priority_capture_lowering_contract_v1.json";
+const VM_SOURCE_PATH: &str = "src/observability/regex_vm.rs";
 const TERMINAL_SHA256: &str = "caf2507d626b25c55b4371c84bd2c946f2b5a7d60f7578582b86994d97f59668";
 const LOWERING_SHA256: &str = "094517b1e5d35d862ac69e8bd30c7d153c85e78435bdd1d2844a98bd9ce49de5";
+const FROZEN_R3_4_2_VM_SHA256: &str =
+    "5b27779e8384d5746b471064820f87410b3ccc5dea06ac637890eefc460ef0ee";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedMatch {
@@ -192,12 +195,34 @@ fn identity_sources_authority_and_decision_are_fail_closed() {
 
     for source in array(&value, "sources") {
         let path = text(source, "path");
+        if path == VM_SOURCE_PATH {
+            assert_eq!(text(source, "sha256"), FROZEN_R3_4_2_VM_SHA256);
+            assert_eq!(number(source, "bytes"), 77_571);
+            assert_eq!(text(source, "pin_scope"), "historical_r3_4_2_source");
+            continue;
+        }
         assert_eq!(sha256(path), text(source, "sha256"), "source drift: {path}");
         let bytes = fs::metadata(path)
             .unwrap_or_else(|error| panic!("metadata {path}: {error}"))
             .len();
         assert_eq!(bytes, number(source, "bytes"), "source size drift: {path}");
     }
+
+    let handoff = Value::Object(object(&value, "successor_handoff").clone());
+    assert_eq!(
+        text(&handoff, "live_source_authority"),
+        "artifacts/regex_vm_iteration_contract_v1.json"
+    );
+    assert_eq!(
+        text(&handoff, "successor_bead_id"),
+        "asupersync-5z2scg.8.3.4.3"
+    );
+    assert!(boolean(&handoff, "historical_vm_source_pin_retained"));
+    assert!(!boolean(&handoff, "live_vm_source_pin"));
+    assert!(boolean(
+        &handoff,
+        "capture_behavior_replayed_against_successor_source"
+    ));
 
     let decision = Value::Object(object(&value, "decision").clone());
     for key in [

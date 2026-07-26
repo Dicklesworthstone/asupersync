@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-vm-iteration-contract-v1",
+  "bead_id": "asupersync-5z2scg.8.3.4.3",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "iteration_vm_id": "ASUP-REGEX-ITERATION-VM-V1",
+  "iteration_vm_schema_version": 1,
+  "generated_at_utc": "2026-07-26T06:02:00Z",
+  "authority": {
+    "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
+    "compiler_terminal_sha256": "caf2507d626b25c55b4371c84bd2c946f2b5a7d60f7578582b86994d97f59668",
+    "compiler_disposition": "KEEP_INCUMBENT_DEFER",
+    "priority_capture_predecessor_path": "artifacts/regex_vm_captures_contract_v1.json",
+    "production_cutover_eligible": false
+  },
+  "sources": [
+    {
+      "path": "src/observability/regex_ir.rs",
+      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+      "bytes": 45049,
+      "revision": "asupersync-5z2scg.8.3.3.1"
+    },
+    {
+      "path": "src/observability/regex_lowering.rs",
+      "sha256": "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54",
+      "bytes": 56882,
+      "revision": "asupersync-5z2scg.8.3.3.4"
+    },
+    {
+      "path": "src/observability/regex_vm.rs",
+      "sha256": "d0d2b841cb3533bc0dbfdcbd6c237e594391015e649477b408ff047ea75ffe2c",
+      "bytes": 101389,
+      "revision": "asupersync-5z2scg.8.3.4.3"
+    },
+    {
+      "path": "src/observability/mod.rs",
+      "sha256": "9008a30ec981e63ef07f2351b5ad80bfcd89dea8d191869fd027d2dd76fd7a80",
+      "bytes": 43361,
+      "revision": "asupersync-5z2scg.8.3.4.1"
+    }
+  ],
+  "decision": {
+    "disposition": "STAGED_BOUNDED_ITERATION_VM",
+    "r3_4_3_iteration_complete": true,
+    "validated_ir_required": true,
+    "single_match_authorized": true,
+    "is_match_authorized": true,
+    "capture_iteration_authorized": true,
+    "non_overlapping_iteration_authorized": true,
+    "overlapping_iteration_authorized": true,
+    "replacement_span_production_authorized": true,
+    "unicode_zero_width_progress": true,
+    "strictly_safe": true,
+    "deterministic": true,
+    "panic_free_under_contract_limits": true,
+    "replacement_template_expansion_authorized": false,
+    "capture_reference_syntax_authorized": false,
+    "cancellation_authorized": false,
+    "production_wiring_authorized": false,
+    "dependency_removal_authorized": false
+  },
+  "iteration_contract": {
+    "offset_unit": "UTF-8 byte",
+    "non_overlapping_nonempty_resume": "previous match end",
+    "non_overlapping_empty_resume": "one complete Unicode scalar after previous match start",
+    "overlapping_resume": "one complete Unicode scalar after previous match start",
+    "terminal_empty_match": "yield once unless it begins exactly at the previous non-empty match end; that adjacent empty is discarded",
+    "same_start_duplicate": "forbidden",
+    "replacement_order": "ascending selected match order",
+    "replacement_payload": "whole-match spans with retained capture spans; template parsing and capture-reference expansion are deferred to R3.5",
+    "trace_privacy": "search offsets, spans, next offsets, resources, and fingerprints only; no matched text"
+  },
+  "limits": {
+    "max_matches": 262144,
+    "max_iteration_trace_events": 256,
+    "accounted_iteration_match_bytes": 128,
+    "accounted_iteration_trace_event_bytes": 80,
+    "memory_formula": "1024 + max_iteration_trace_events * 80 + retained_matches * (128 + capture_slots * 32), combined with the current one-shot executor peak",
+    "work_formula": "one iteration unit per search attempt plus the sum of every one-shot search work count",
+    "match_overflow": "RGX-VM-E013",
+    "invalid_boundary": "RGX-VM-E014",
+    "memory_overflow": "RGX-VM-E004",
+    "work_overflow": "RGX-VM-E005",
+    "trace_overflow": "TRUNCATE_WITH_FINGERPRINT_CONTINUATION"
+  },
+  "iteration_error_rows": [
+    {
+      "code": "RGX-VM-E013",
+      "kind": "MatchLimit",
+      "meaning": "an additional selected match exceeds the configured retained-match ceiling"
+    },
+    {
+      "code": "RGX-VM-E014",
+      "kind": "InvalidIterationBoundary",
+      "meaning": "a search or resume offset is not a valid UTF-8 boundary"
+    }
+  ],
+  "fixtures": [
+    {"case_id":"RGX-ITER-001","policy":"non_overlapping","pattern":"a","haystack":"zzz","spans":[]},
+    {"case_id":"RGX-ITER-002","policy":"non_overlapping","pattern":"a","haystack":"aba","spans":[[0,1],[2,3]]},
+    {"case_id":"RGX-ITER-003","policy":"non_overlapping","pattern":"aa","haystack":"aaa","spans":[[0,2]]},
+    {"case_id":"RGX-ITER-004","policy":"overlapping","pattern":"aa","haystack":"aaa","spans":[[0,2],[1,3]]},
+    {"case_id":"RGX-ITER-005","policy":"overlapping","pattern":"aba","haystack":"ababa","spans":[[0,3],[2,5]]},
+    {"case_id":"RGX-ITER-006","policy":"non_overlapping","pattern":"","haystack":"","spans":[[0,0]]},
+    {"case_id":"RGX-ITER-007","policy":"non_overlapping","pattern":"","haystack":"éa","spans":[[0,0],[2,2],[3,3]]},
+    {"case_id":"RGX-ITER-008","policy":"non_overlapping","pattern":"a*","haystack":"baa","spans":[[0,0],[1,3]]},
+    {"case_id":"RGX-ITER-009","policy":"non_overlapping","pattern":"^|$","haystack":"a","spans":[[0,0],[1,1]]},
+    {"case_id":"RGX-ITER-010","policy":"non_overlapping","pattern":"\\b","haystack":"é a","spans":[[0,0],[2,2],[3,3],[4,4]]},
+    {"case_id":"RGX-ITER-011","policy":"non_overlapping","pattern":"(a)?b","haystack":"b ab","spans":[[0,1],[2,4]]},
+    {"case_id":"RGX-ITER-012","policy":"non_overlapping","pattern":"([a-z]+)=([0-9]+)","haystack":"a=1 bb=22","spans":[[0,3],[4,9]]},
+    {"case_id":"RGX-ITER-013","policy":"non_overlapping","pattern":"(é+)","haystack":"xéé yé","spans":[[1,5],[7,9]]},
+    {"case_id":"RGX-ITER-014","policy":"non_overlapping","pattern":"(a+?)","haystack":"aaa","spans":[[0,1],[1,2],[2,3]]},
+    {"case_id":"RGX-ITER-015","policy":"non_overlapping","pattern":"(a+)","haystack":"aaa","spans":[[0,3]]},
+    {"case_id":"RGX-ITER-016","policy":"overlapping","pattern":"(a|aa)","haystack":"aaa","spans":[[0,1],[1,2],[2,3]]},
+    {"case_id":"RGX-ITER-017","policy":"overlapping","pattern":"(aa|a)","haystack":"aaa","spans":[[0,2],[1,3],[2,3]]},
+    {"case_id":"RGX-ITER-018","policy":"non_overlapping","pattern":"(?:ab)?","haystack":"ab","spans":[[0,2]]},
+    {"case_id":"RGX-ITER-019","policy":"overlapping","pattern":"(?:ab)?","haystack":"ab","spans":[[0,2],[1,1],[2,2]]},
+    {"case_id":"RGX-ITER-020","policy":"overlapping","pattern":"z","haystack":"","spans":[]}
+  ],
+  "privacy_probes": [
+    {
+      "probe_id": "RGX-PRIV-CUSTOM-TOKEN",
+      "pattern": "token-[A-F0-9]{8}",
+      "input_sha256": "947251b8b6d6451e24d17d60f2d73afaf27ca7e9a4925d4b86d534534476305d"
+    },
+    {
+      "probe_id": "RGX-PRIV-CUSTOM-SECRET",
+      "pattern": "secret-\\d{4}",
+      "input_sha256": "724b4fab7cf8233f9718bd03d01a21a05f5e3b0846ceb77e6133d116d7c995e5"
+    },
+    {
+      "probe_id": "RGX-PRIV-SSN",
+      "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+      "input_sha256": "539fff6ed79eaad4ba8a5c427519f820dbb2ef7a62b7b03fc04620f62a754e94"
+    },
+    {
+      "probe_id": "RGX-PRIV-CARD",
+      "pattern": "\\b(?:\\d[ -]?){13,19}\\b",
+      "input_sha256": "7febb5a11f86529f6e157c732392f76fb9cda06f36771da833aee00d1bf2c055"
+    }
+  ],
+  "evidence": {
+    "inline_unit_tests": 15,
+    "exact_golden_fixtures": 20,
+    "bounded_non_overlapping_incumbent_comparisons": 1210,
+    "bounded_overlapping_model_comparisons": 726,
+    "property_cases": 512,
+    "privacy_pattern_probes": 4,
+    "long_input_bytes_at_least": 20000,
+    "deterministic_replay": true,
+    "panic_containment": true,
+    "secret_canary": true,
+    "independent_reference": "regex@1.13.1"
+  },
+  "retained_minimized_cases": [
+    {
+      "case_id": "RGX-ITER-MIN-001",
+      "pattern": "",
+      "haystack": "é",
+      "reason": "empty iteration advances from byte 0 to byte 2 and never splits UTF-8"
+    },
+    {
+      "case_id": "RGX-ITER-MIN-002",
+      "pattern": "a*",
+      "haystack": "baa",
+      "reason": "an initial empty and consuming match remain ordered while the adjacent terminal empty is discarded"
+    },
+    {
+      "case_id": "RGX-ITER-MIN-003",
+      "pattern": "aa",
+      "haystack": "aaa",
+      "reason": "accepted overlap policy resumes after the prior start, not the prior end"
+    },
+    {
+      "case_id": "RGX-ITER-MIN-004",
+      "pattern": "(a)?b",
+      "haystack": "b ab",
+      "reason": "replacement targets retain unmatched and participating capture distinctions"
+    }
+  ],
+  "proof": {
+    "unit_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --lib observability::regex_vm::tests -- --nocapture",
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs --overlay-path artifacts/regex_vm_captures_contract_v1.json --overlay-path docs/regex_vm_captures_contract.md --overlay-path tests/regex_vm_captures_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_vm_core_contract --test regex_vm_captures_contract --test regex_vm_iteration_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs --overlay-path artifacts/regex_vm_captures_contract_v1.json --overlay-path docs/regex_vm_captures_contract.md --overlay-path tests/regex_vm_captures_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_vm_core_contract --test regex_vm_captures_contract --test regex_vm_iteration_contract -- -D warnings",
+    "format_command": "rustfmt --edition 2024 --check src/observability/regex_vm.rs tests/regex_vm_core_contract.rs tests/regex_vm_captures_contract.rs tests/regex_vm_iteration_contract.rs",
+    "local_cargo_fallback": false
+  },
+  "no_claims": [
+    "no replacement-template parser or capture-reference expansion",
+    "no cancellation or cooperative-yield integration",
+    "no production privacy wiring or dependency removal",
+    "no accepted regex syntax expansion",
+    "no persisted or deserializable VM, capture, iterator, or replacement state",
+    "no isolated binary-size or cross-target result",
+    "no performance improvement or no-regression claim",
+    "no broad workspace health or release-readiness claim",
+    "no live RCH fleet availability claim",
+    "no local Cargo fallback approval"
+  ]
+}
