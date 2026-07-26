@@ -3375,6 +3375,64 @@ mod tests {
         });
     }
 
+    /// Re-homes the duplicate-offset property deleted in 17e1226da
+    /// (br-asupersync-d8aiqa).
+    ///
+    /// `enable_idempotence(true)` configures the *client*. It does not make the
+    /// crate-local deterministic broker validate producer-id + sequence-number
+    /// pairs, because that harness is not a Kafka broker. Sending a byte-identical
+    /// key+payload twice therefore appends twice and yields two distinct offsets.
+    ///
+    /// This is a boundary test, not an aspiration: it pins the harness's actual
+    /// semantics so `enable_idempotence(true)` can never be mistaken for
+    /// exactly-once delivery against it. If real dedup is ever implemented here,
+    /// this test must fail and be rewritten deliberately rather than silently
+    /// drifting.
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn deterministic_broker_does_not_deduplicate_idempotent_retries() {
+        let _broker = deterministic_broker_guard();
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let topic = "idempotence-retry-dedup-boundary";
+            // The deterministic broker is process-global; anchor on the current
+            // end offset rather than assuming an empty partition.
+            let before = deterministic_broker_end_offset(topic, 0);
+
+            let producer = KafkaProducer::new(
+                ProducerConfig::default()
+                    .enable_idempotence(true)
+                    .retries(3),
+            )
+            .unwrap();
+            assert!(
+                producer.config.enable_idempotence,
+                "precondition: the producer must actually claim idempotence"
+            );
+
+            let first = producer
+                .send(&cx, topic, Some(b"key1"), b"message1", None)
+                .await
+                .unwrap();
+            let second = producer
+                .send(&cx, topic, Some(b"key1"), b"message1", None)
+                .await
+                .unwrap();
+
+            assert_eq!(first.offset, before, "first send appends at the end offset");
+            assert_eq!(
+                second.offset,
+                before + 1,
+                "a byte-identical retry must NOT collapse onto the first offset: \
+                 the deterministic harness does not implement idempotent dedup"
+            );
+            assert_eq!(
+                deterministic_broker_end_offset(topic, 0),
+                before + 2,
+                "both records are durable in the partition log"
+            );
+        });
+    }
+
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_abort_discards_staged_offsets() {
