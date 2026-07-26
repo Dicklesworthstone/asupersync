@@ -375,6 +375,23 @@ fn no_mock_policy_evidence_runner_emits_valid_jsonl_and_logs() {
         assert_eq!(str_field(&record, "verdict"), "pass");
         assert_eq!(str_field(&record, "evidence_quality"), "live");
         assert_eq!(str_field(&record, "blocker_bead_id"), "");
+        // Provenance must be stated, never fabricated. RCH's synced worker tree
+        // is not a git repository, so the runner degrades to an explicit marker
+        // instead of aborting (br-asupersync-bq3c9g). Either form is acceptable;
+        // an empty or absent stamp is not.
+        let git_state = str_field(&record, "git_sha_or_tree_state");
+        assert!(
+            !git_state.is_empty(),
+            "record must state its provenance: {record:?}"
+        );
+        assert!(
+            git_state == "unavailable-not-a-git-repository"
+                || git_state
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_hexdigit()),
+            "provenance should be a git sha or the explicit unavailable marker, got {git_state:?}"
+        );
         assert!(scenario_ids.insert(str_field(&record, "scenario_id").to_string()));
         let output_artifact = str_field(&record, "output_artifact");
         assert!(
