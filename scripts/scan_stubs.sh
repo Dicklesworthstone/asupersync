@@ -313,6 +313,31 @@ def is_src_rust_test_module(rel_path: str) -> bool:
     return name.endswith("_test.rs") or name.startswith("test_")
 
 
+# The filename heuristic above only catches whole test FILES. It says nothing
+# about a `#[cfg(test)] mod tests` living inside an ordinary module, which is the
+# layout AGENTS.md mandates, so every marker in such a module was being scanned
+# as production code (br-asupersync-afrve1). Reuse the lexer-backed extent finder
+# from the no-mock policy scanner rather than growing a second, divergent
+# approximation here: it masks comments and string literals before matching
+# braces, and fails closed to "no test regions" on anything it cannot resolve, so
+# the error direction stays over-reporting rather than hiding a real marker.
+sys.path.insert(0, str(project_root / "scripts"))
+try:
+    from check_no_mock_policy import cfg_test_regions
+except ImportError:  # pragma: no cover - keep the scan diagnostic, never silent.
+    cfg_test_regions = None
+
+_test_region_cache: dict[str, list[tuple[int, int]]] = {}
+
+
+def test_gated_lines(rel_path: str, text: str) -> list[tuple[int, int]]:
+    if cfg_test_regions is None or not rel_path.endswith(".rs"):
+        return []
+    if rel_path not in _test_region_cache:
+        _test_region_cache[rel_path] = cfg_test_regions(text) or []
+    return _test_region_cache[rel_path]
+
+
 def selector_matches(selector: dict, rel_path: str, text: str, term: str) -> bool:
     exact_paths = selector.get("paths", []) or []
     prefixes = selector.get("path_prefixes", []) or []
@@ -345,10 +370,14 @@ for root_name in inventory.get("scanned_paths", []):
         if is_src_rust_test_module(rel_path):
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            source = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        lines = source.splitlines()
+        regions = test_gated_lines(rel_path, source)
         for line_no, line in enumerate(lines, start=1):
+            if any(start <= line_no <= end for start, end in regions):
+                continue
             line_lower = line.lower()
             for term in terms:
                 if term.lower() in line_lower:
@@ -661,6 +690,11 @@ check_production_deferred_comments_are_tracked() {
         [[ -z "$line" ]] && continue
         if [[ "$line" == src/messaging/nats.rs:*"TO""DO: Re-establish subscriptions that existed before disconnect"* ]]; then
             tracked+="${line} -> asupersync-jh9g1j"$'\n'
+        elif [[ "$line" == src/bin/atp.rs:*"TO""DO(z01bbr.8.3 H3): open the live"* ]]; then
+            # bond-pull's ssh -L tunnel leg is unimplemented and disclosed; it
+            # also holds a no-mock waiver expiring 2026-10-31 under the same
+            # bead, so both gates name the same owner (br-asupersync-afrve1).
+            tracked+="${line} -> asupersync-atp-channel-bonding-z01bbr.8.3"$'\n'
         else
             unexpected+="${line}"$'\n'
         fi
