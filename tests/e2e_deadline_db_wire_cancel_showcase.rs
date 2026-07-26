@@ -69,7 +69,11 @@ const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(12);
 fn backend_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + 4 + body.len());
     out.push(msg_type);
-    out.extend_from_slice(&((body.len() as i32) + 4).to_be_bytes());
+    // The PostgreSQL wire length prefix is a big-endian i32 covering the body
+    // plus the 4 length bytes themselves. Fail loudly on an oversized body
+    // rather than silently wrapping on a 32-bit-pointer target.
+    let body_len = i32::try_from(body.len()).expect("test backend body fits i32");
+    out.extend_from_slice(&(body_len + 4).to_be_bytes());
     out.extend_from_slice(body);
     out
 }
@@ -160,17 +164,13 @@ fn fake_pg_server(listener: &TcpListener, evidence: &mpsc::Sender<u64>) {
 
     // Leave the connection idle. The request budget deadline cancels the
     // handler and tears the connection down; the server observes EOF (or a
-    // reset) rather than further protocol traffic.
+    // reset) rather than further protocol traffic. One read is all that takes:
+    // `Ok(0)` is the clean EOF we expect, `Err` is a reset, and any bytes at
+    // all would be a protocol surprise for an idle backend. (The original
+    // `loop` broke on every arm, so it never iterated -- same single read,
+    // spelled without the dead loop.)
     let mut probe = [0u8; 64];
-    loop {
-        match conn.read(&mut probe) {
-            Ok(0) => break,
-            // Any further bytes would be a protocol surprise for an idle
-            // backend; only the teardown is expected.
-            Ok(_) => break,
-            Err(_) => break,
-        }
-    }
+    let _ = conn.read(&mut probe);
 }
 
 #[test]
