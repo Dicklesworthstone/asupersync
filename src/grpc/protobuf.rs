@@ -282,8 +282,29 @@ pub type SymmetricProstCodec<T> = ProstCodec<T, T>;
 ///
 /// # Examples
 ///
-/// A hand-written implementation — this is exactly what the derive in
-/// `asupersync-5z2scg.1.6` will generate:
+/// The preferred Cargo-only authoring path uses the root derive:
+///
+/// ```
+/// use asupersync::grpc::protobuf::{ProtoMessage as _, ProtobufWireLimits};
+///
+/// #[derive(Debug, Default, PartialEq, asupersync::ProtoMessage)]
+/// struct Greeting {
+///     #[proto(string, tag = 1)]
+///     name: String,
+///     #[proto(uint32, tag = 2)]
+///     times: u32,
+/// }
+///
+/// let limits = ProtobufWireLimits::default();
+/// let encoded = Greeting { name: "ada".into(), times: 3 }
+///     .encode_to_bytes(limits)
+///     .expect("encode");
+/// let decoded = Greeting::decode_from_bytes(&encoded, limits).expect("decode");
+/// assert_eq!(decoded, Greeting { name: "ada".into(), times: 3 });
+/// ```
+///
+/// Hand-written implementations remain supported for schemas that need
+/// specialized merge behavior:
 ///
 /// ```
 /// use asupersync::grpc::protobuf::{
@@ -413,6 +434,61 @@ pub trait ProtoMessage: Default + Send + Sized + 'static {
         message.merge_from_bytes(input, limits)?;
         Ok(message)
     }
+}
+
+/// A generated Protocol Buffers `oneof` value.
+///
+/// Implement this trait with [`asupersync::ProtoOneof`] rather than by hand.
+/// The derive validates every variant tag at compile time and generates the
+/// field dispatch used by a containing [`ProtoMessage`] derive.
+///
+/// A containing field uses the frozen authoring grammar:
+///
+/// ```ignore
+/// #[derive(asupersync::ProtoOneof)]
+/// enum Payload {
+///     #[proto(string, tag = 4)]
+///     Text(String),
+///     #[proto(message, tag = 5)]
+///     Point(Point),
+/// }
+///
+/// #[derive(Default, asupersync::ProtoMessage)]
+/// struct Envelope {
+///     #[proto(oneof, tags = "4, 5")]
+///     payload: Option<Payload>,
+/// }
+/// ```
+///
+/// The containing `tags` list is intentionally explicit. It lets the message
+/// derive reject collisions between ordinary fields and oneof variants without
+/// executing code generation or consulting an ambient schema registry.
+pub trait ProtoOneof: Send + Sized + 'static {
+    /// Returns the complete, sorted field-number set owned by this oneof.
+    const FIELD_NUMBERS: &'static [u32];
+
+    /// Encodes the active variant, including its field key.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's [`ProtobufWireError`] when the value breaches a
+    /// configured message, field, depth, or work bound.
+    fn encode_oneof(&self, encoder: &mut ProtobufWireEncoder) -> Result<(), ProtobufWireError>;
+
+    /// Decodes `field` when it belongs to this oneof.
+    ///
+    /// `Ok(None)` means the field number belongs to another schema component.
+    /// A containing derive treats that as an unknown field rather than a
+    /// malformed one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtobufWireError`] for a wire-type mismatch, malformed
+    /// nested message, invalid UTF-8, or exhausted resource budget.
+    fn decode_oneof<'wire>(
+        field: &ProtobufWireField<'wire>,
+        decoder: &mut ProtobufWireDecoder<'wire, '_>,
+    ) -> Result<Option<Self>, ProtobufWireError>;
 }
 
 /// Drives `decoder` to exhaustion, merging every field into `target`.
@@ -1944,8 +2020,8 @@ mod tests {
     ///
     /// The messages here are written by hand on purpose. They are the standing
     /// proof that the authoring boundary is open to downstream crates — nothing
-    /// in the owned path depends on a derive macro (that is
-    /// `asupersync-5z2scg.1.6`) or on an in-tree schema registry.
+    /// in the owned path requires the additive derive macro or an in-tree
+    /// schema registry.
     mod owned_codec {
         use super::*;
 

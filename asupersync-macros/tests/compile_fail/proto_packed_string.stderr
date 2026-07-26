@@ -1,0 +1,6 @@
+error: `packed` is valid only on a repeated numeric, bool, or enumeration field
+ --> tests/compile_fail/proto_packed_string.rs:5:5
+  |
+5 | /     #[proto(string, repeated, packed, tag = 1)]
+6 | |     values: Vec<String>,
+  | |_______________________^

@@ -444,7 +444,9 @@ pub use types::{
 // while `scope!`, `spawn!`, and `join_all!` are unavailable until `proc-macros`
 // is re-enabled.
 #[cfg(feature = "proc-macros")]
-pub use asupersync_macros::{join, join_all, lab_test, main, race, scope, select, spawn, test};
+pub use asupersync_macros::{
+    ProtoMessage, ProtoOneof, join, join_all, lab_test, main, race, scope, select, spawn, test,
+};
 
 // Proc macro versions available with explicit path when needed
 #[cfg(feature = "proc-macros")]
@@ -454,8 +456,10 @@ pub mod proc_macros {
     //! This module mirrors the supported root re-exports (`scope!`, `spawn!`,
     //! `join!`, `join_all!`, `race!`, `select!`, entry attributes) and also
     //! exposes advanced macros that intentionally remain explicit-path-only,
-    //! such as `session_protocol!`.
+    //! such as `session_protocol!`. The owned protobuf authoring derives are
+    //! also available here and at the crate root.
     pub use asupersync_macros::{
-        join, join_all, lab_test, main, race, scope, select, session_protocol, spawn, test,
+        ProtoMessage, ProtoOneof, join, join_all, lab_test, main, race, scope, select,
+        session_protocol, spawn, test,
     };
 }

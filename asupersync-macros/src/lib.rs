@@ -16,6 +16,7 @@
 //! - [`session_protocol!`] - Generate typestate session protocols
 //! - [`conformance`] - Annotate conformance tests
 //! - [`lab_test`] / [`explore_seeds`] - Run deterministic lab-runtime tests
+//! - [`ProtoMessage`] / [`ProtoOneof`] - Derive the owned protobuf authoring contract
 //!
 //! # Contract With `asupersync`
 //!
@@ -47,6 +48,7 @@ mod entry;
 mod instrument;
 mod join;
 mod lab_test;
+mod proto;
 mod race;
 mod scope;
 mod select;
@@ -55,6 +57,36 @@ mod spawn;
 mod util;
 
 use proc_macro::TokenStream;
+use syn::parse_macro_input;
+
+/// Derives the owned `asupersync::grpc::protobuf::ProtoMessage` contract.
+///
+/// Fields use `#[proto(kind, tag = N)]`, with explicit `optional`,
+/// `repeated`, and `packed` modifiers. Maps use
+/// `#[proto(map, key = "string", value = "uint64", tag = N)]`; oneofs use an
+/// `Option<T>` field annotated with `#[proto(oneof, tags = "N, M")]`.
+///
+/// Expansion is deterministic and Cargo-only: it invokes no schema compiler
+/// and reads no ambient files.
+#[proc_macro_derive(ProtoMessage, attributes(proto))]
+pub fn derive_proto_message(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    proto::derive_proto_message(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derives the owned `asupersync::grpc::protobuf::ProtoOneof` contract.
+///
+/// Every enum variant must be a one-value tuple variant with its own
+/// `#[proto(kind, tag = N)]` attribute.
+#[proc_macro_derive(ProtoOneof, attributes(proto))]
+pub fn derive_proto_oneof(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    proto::derive_proto_oneof(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
 
 /// Runs an async `main` function on an asupersync production runtime.
 ///
