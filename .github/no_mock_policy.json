@@ -62,6 +62,10 @@
       "category": "canonical_grpc_status_code"
     },
     {
+      "pattern": "src/grpc/server.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
       "pattern": "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap",
       "category": "canonical_grpc_status_code"
     },
@@ -181,6 +185,46 @@
     "tests/recovery_security.rs"
   ],
   "allowlist_entries": [
+    {
+      "pattern": "src/bin/dependency_verification_matrix.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The only lexical hit is the literal rule text 'no-mock dependency-sovereignty scenario' inside the JSON contract this binary emits, so the scan is matching the implementation-completeness policy's own vocabulary rather than an incomplete code path.",
+      "revisit_condition": "Revisit if this binary gains a lexical hit outside the emitted policy rule text.",
+      "replacement_issue": "asupersync-pzfwf5"
+    },
+    {
+      "pattern": "src/net/atp/sdk/bonded.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The module doc contrasts BondedTransfer against the single-source ActiveTransfer handle, whose in-process driver it documents as a fail-closed stub. The term describes a different type in a different module; BondedTransfer itself drives the landed bonded RaptorQ data path.",
+      "revisit_condition": "Revisit when the ActiveTransfer in-process driver stops being a fail-closed stub and the contrasting sentence is removed.",
+      "replacement_issue": "asupersync-pzfwf5"
+    },
+    {
+      "pattern": "src/net/atp/transport_quic/native_link.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The hit is the word 'fake-expires' in a comment explaining why an all-dropped packet batch must keep waiting out the caller's remaining idle allowance instead of short-circuiting a zero back (br-asupersync-u6m3dy). It documents a landed fix, not a fake implementation.",
+      "revisit_condition": "Revisit if this file gains a lexical hit outside explanatory comments.",
+      "replacement_issue": "asupersync-pzfwf5"
+    },
+    {
+      "pattern": "src/net/atp/transport_rq/mod.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The hit is a call to sha256_hex_placeholder() inside this file's #[cfg(test)] module. The scan classifies by path, so test-only helpers living under src/ are still categorised production_stub even though they never compile into a production build.",
+      "revisit_condition": "Revisit if a lexical hit appears outside a #[cfg(test)] module in this file, or if the scanner gains cfg(test)-aware classification.",
+      "replacement_issue": "asupersync-pzfwf5"
+    },
+    {
+      "pattern": "src/net/udp.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The hit is the comment on the non-Windows suppress_windows_udp_connection_reset no-op, which accurately describes a deliberate platform-conditional shim rather than unfinished work.",
+      "revisit_condition": "Revisit if the non-Windows shim gains real behavior or the descriptive comment is removed.",
+      "replacement_issue": "asupersync-pzfwf5"
+    },
     {
       "pattern": "src/channel/session.rs",
       "category": "production_stub",
@@ -415,6 +459,7 @@
         "src/grpc/status.rs",
         "src/grpc/streaming.rs",
         "src/grpc/web.rs",
+        "src/grpc/server.rs",
         "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap",
         "tests/conformance/grpc_connect/src/connect_compat.rs",
         "tests/conformance/grpc_connect/src/lib.rs",
@@ -614,6 +659,16 @@
     }
   ],
   "waivers": [
+    {
+      "waiver_id": "waiver.atp.bond-pull-ssh-tunnel.2026-07-25",
+      "path": "src/bin/atp.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "status": "active",
+      "reason": "TODO(z01bbr.8.3 H3): for SSH-selected donors, bond-pull computes and reports the `ssh -L` tunnel plan but the leg still falls back to a direct dial of the selected endpoint; opening the live forward and proving UDP-in-TCP against real NAT'd hosts is unimplemented. This is genuinely unfinished work, so it takes a waiver with an expiry rather than an allowlist entry: it must resurface if the tunnel leg stalls instead of being silently reclassified as approved.",
+      "expires_at_utc": "2026-10-31T00:00:00Z",
+      "replacement_issue": "asupersync-atp-channel-bonding-z01bbr.8.3"
+    },
     {
       "waiver_id": "waiver.messaging.kafka.phase0-stub.2026-02-18",
       "path": "src/messaging/kafka.rs",
