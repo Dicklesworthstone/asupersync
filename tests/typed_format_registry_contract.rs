@@ -796,12 +796,16 @@ fn public_generic_and_container_invariants_match_source() {
     let trace = read_repo_file("src/trace/file.rs");
     for expected in [
         "pub const TRACE_MAGIC: &[u8; 11] = b\"ASUPERTRACE\";",
-        "pub const TRACE_FILE_VERSION: u16 = 2;",
+        "pub const TRACE_FILE_VERSION: u16 = 3;",
+        "pub const FLAG_CHECKSUMMED: u16 = 0x0002;",
+        "pub const TRACE_CHECKSUM_LEN: usize = 32;",
         "pub const MAX_META_LEN: usize = 1024 * 1024;",
         "pub const MAX_EVENT_PREALLOC: usize = 10_000_000;",
         "pub const MAX_EVENT_LEN: usize = 16 * 1024 * 1024;",
         "pub const MAX_COMPRESSED_CHUNK_LEN: usize = 64 * 1024 * 1024;",
         "if metadata.version != REPLAY_SCHEMA_VERSION",
+        "pub fn recover_trace_prefix(",
+        "pub fn migrate_trace_file(",
     ] {
         assert!(
             trace.contains(expected),
@@ -813,6 +817,8 @@ fn public_generic_and_container_invariants_match_source() {
     assert!(replay.contains("pub const REPLAY_SCHEMA_VERSION: u32 = 1;"));
     let compat = read_repo_file("src/trace/compat.rs");
     assert!(compat.contains("pub const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;"));
+    assert!(compat.contains("pub fn read_event_compat("));
+    assert!(compat.contains("without silently skipping"));
     let crashpack = read_repo_file("src/trace/crashpack.rs");
     assert!(crashpack.contains("pub const CRASHPACK_SCHEMA_VERSION: u32 = 1;"));
     assert!(crashpack.contains("pub const MINIMUM_SUPPORTED_SCHEMA_VERSION: u32 = 1;"));
@@ -968,10 +974,14 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "RCH_REQUIRE_REMOTE=1 rch exec --",
         "--base HEAD",
         "--clean-overlay",
-        "--overlay-path src/lab/snapshot_restore.rs",
-        "--overlay-path tests/runtime_snapshot_codec_e2e.rs",
+        "--overlay-path src/trace/file.rs",
+        "--overlay-path src/trace/compat.rs",
+        "--overlay-path src/trace/integrity.rs",
+        "--overlay-path src/bin/asupersync.rs",
+        "--overlay-path tests/replay_e2e_suite.rs",
+        "--overlay-path tests/trace_file_parsing_property_fuzz.rs",
+        "--overlay-path fuzz/fuzz_targets/trace_streaming.rs",
         "--overlay-path artifacts/typed_format_registry_v1.json",
-        "--overlay-path docs/runtime_snapshot_codec.md",
         "--overlay-path docs/typed_format_registry.md",
         "--overlay-path tests/typed_format_registry_contract.rs",
         "--test typed_format_registry_contract",
@@ -1003,6 +1013,9 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "SerializationFormat::Custom",
         "bincode::config::legacy()",
         "ASUPERTRACE",
+        "SHA-256",
+        "trace migrate",
+        "recover_trace_prefix",
         "RestorableSnapshot",
         "ASUPSNAP",
         "ASUP-E404",

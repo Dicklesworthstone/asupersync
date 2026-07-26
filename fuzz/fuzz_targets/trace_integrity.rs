@@ -13,6 +13,7 @@
 //! - **Boundary conditions**: Empty files, minimal files, large files
 
 use arbitrary::{Arbitrary, Result, Unstructured};
+use asupersync::trace::TRACE_MAGIC;
 use asupersync::trace::integrity::{VerificationOptions, VerificationResult, verify_trace};
 use asupersync::trace::replay::{CompactTaskId, ReplayEvent, TraceMetadata};
 use libfuzzer_sys::fuzz_target;
@@ -22,9 +23,11 @@ use std::fs;
 // Constants from trace/file.rs
 // =============================================================================
 
-const TRACE_MAGIC: &[u8; 11] = b"ASUP_TRACE\0";
-const TRACE_FILE_VERSION: u16 = 2;
-const HEADER_SIZE: usize = 16; // magic(11) + version(2) + flags(2) + compression(1)
+// This structured malformed-input generator deliberately exercises the exact
+// legacy v2 framing. `trace_streaming` generates checksum-bearing current-v3
+// containers, while arbitrary bytes continue to reach all accepted versions.
+const LEGACY_TRACE_FILE_VERSION: u16 = 2;
+const LEGACY_HEADER_PREFIX_SIZE: usize = 16; // magic + version + flags + compression
 
 // Fuzzing limits to prevent timeouts
 const MAX_EVENTS: usize = 100;
@@ -219,7 +222,7 @@ fn generate_trace_blob(
             }
 
             // Version (tampered or valid)
-            let version = tamper_version.unwrap_or(TRACE_FILE_VERSION);
+            let version = tamper_version.unwrap_or(LEGACY_TRACE_FILE_VERSION);
             blob.extend_from_slice(&version.to_le_bytes());
 
             // Flags (tampered or valid)
@@ -449,12 +452,12 @@ fn generate_trace_blob(
 
             // Determine truncation point
             let truncate_pos = match truncate_at {
-                TruncationPoint::Header => (*offset).min(HEADER_SIZE - 1),
-                TruncationPoint::MetadataLength => HEADER_SIZE + (*offset).min(3),
-                TruncationPoint::Metadata => HEADER_SIZE + 4 + offset,
+                TruncationPoint::Header => (*offset).min(LEGACY_HEADER_PREFIX_SIZE - 1),
+                TruncationPoint::MetadataLength => LEGACY_HEADER_PREFIX_SIZE + (*offset).min(3),
+                TruncationPoint::Metadata => LEGACY_HEADER_PREFIX_SIZE + 4 + offset,
                 TruncationPoint::EventCount => {
                     let meta_len = get_metadata_length();
-                    HEADER_SIZE + 4 + meta_len + (*offset).min(7)
+                    LEGACY_HEADER_PREFIX_SIZE + 4 + meta_len + (*offset).min(7)
                 }
                 TruncationPoint::EventLength => blob.len().saturating_sub(100) + (*offset).min(50),
                 TruncationPoint::EventData => blob.len().saturating_sub(50) + (*offset).min(30),
@@ -474,7 +477,7 @@ fn generate_trace_blob(
 
 fn write_valid_header(blob: &mut Vec<u8>) {
     blob.extend_from_slice(TRACE_MAGIC);
-    blob.extend_from_slice(&TRACE_FILE_VERSION.to_le_bytes());
+    blob.extend_from_slice(&LEGACY_TRACE_FILE_VERSION.to_le_bytes());
     blob.extend_from_slice(&0u16.to_le_bytes()); // No flags
     blob.push(0); // No compression
 }

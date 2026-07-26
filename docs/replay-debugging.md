@@ -1092,20 +1092,45 @@ pub enum Breakpoint {
 ```rust
 // Writing
 let mut writer = TraceWriter::create("trace.bin")?;
-writer.write_trace(&trace)?;
+writer.write_metadata(&trace.metadata)?;
+for event in &trace.events {
+    writer.write_event(event)?;
+}
 writer.finish()?;
 
-// Reading
+// Reading all events
 let reader = TraceReader::open("trace.bin")?;
-let metadata = reader.metadata();
-let trace = reader.read_all()?;
+let file_version = reader.file_version();
+let metadata = reader.metadata().clone();
+let events = reader.load_all()?;
 
 // Streaming read (large traces)
+let reader = TraceReader::open("trace.bin")?;
 for event in reader.events() {
     let event = event?;
     // process event
 }
 ```
+
+Current writers emit checksummed container version 3. Readers accept supported
+legacy v1/v2 containers, but embedded replay metadata must still use the exact
+supported replay schema. Unknown versions, records, checksum mismatches, and
+truncation fail closed.
+
+Use a distinct destination to migrate a legacy container while retaining the
+source as a rollback anchor:
+
+```text
+asupersync trace migrate legacy-v2.trace current-v3.trace
+```
+
+The destination must not exist and the source must be v1 or v2. For damaged
+input, `recover_trace_prefix(path, max_events)` returns only the contiguous
+decoded prefix plus an explicit `Complete`, `Partial`, or `LimitReached`
+status. Recovery never skips a corrupt event and does not convert a partial
+trace into deterministic replay proof. For v3, only `Complete` authenticates
+the whole event stream; partial and limit-reached receipts are decoded prefixes,
+not checksum admission.
 
 ### ReplayEvent Variants
 

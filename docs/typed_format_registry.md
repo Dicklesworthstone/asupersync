@@ -149,26 +149,50 @@ multi-symbol pipelines.
 
 ### Trace and replay
 
-The trace stack uses an owned `ASUPERTRACE` container at file version `2` with
-MessagePack metadata/events and optional LZ4 chunks. The current bounds are:
+The trace stack uses an owned `ASUPERTRACE` container at file version `3` with
+MessagePack metadata/events, optional LZ4 chunks, and two SHA-256 integrity
+fields. The metadata digest covers its exact MessagePack bytes. The event
+digest covers the canonical uncompressed sequence of each little-endian length
+prefix followed by its MessagePack event bytes, so ordinary and compressed
+readers validate the same logical stream. The current bounds are:
 
 - metadata: 1 MiB;
 - event: 16 MiB;
 - compressed or declared uncompressed chunk: 64 MiB;
 - event preallocation: 10,000,000.
 
-The container reader rejects future file versions but admits older container
-versions. Embedded replay metadata must exactly match replay schema version
-`1`. The compatibility module has migration architecture, but its minimum
-supported replay schema currently equals the current schema. There is no
-committed prior-release trace, raw replay blob, or streaming trace byte corpus.
-Accordingly, historical readability and migration remain
-`UNKNOWN_BLOCKING`.
+Writers emit only v3. The ordinary, streaming, and integrity readers reject
+future or malformed versions and admit the supported v1/v2 container layouts.
+The raw-record compatibility inspector admits uncompressed v1/v2/v3 framing
+and deliberately rejects compressed input; ordinary `TraceReader` remains the
+compression-capable admission path. Embedded replay metadata must exactly match
+replay schema version `1`; ordinary reads reject unknown events without
+skipping. Diagnostic code can explicitly inspect a rejected raw record through
+`CompatReader::read_event_compat`, but that path is not replay admission.
+
+`migrate_trace_file` and `asupersync trace migrate INPUT OUTPUT` stream a
+legacy v1/v2 trace into a distinct, non-existing v3 destination. They preserve
+event order and count, keep the source untouched as the rollback anchor, reject
+an already-current source, and fail if any event lacks a lossless mapping.
+`recover_trace_prefix` has an explicit caller event bound and returns
+`Complete`, `Partial`, or `LimitReached`; corruption is a terminal receipt and
+is never skipped. A partial/limited v3 receipt contains only a structurally
+decoded prefix: because v3 authenticates the complete canonical event stream,
+only `Complete` is checksum admission.
+
+The maintained no-mock A4 E2E synthesizes exact v2 container framing over the
+current replay schema, exercises ordinary and streaming legacy readers,
+migrates to v3, preserves the source digest, completes deterministic replay,
+and proves a bounded truncated-prefix receipt. This is current migration
+evidence, not a committed artifact emitted by an earlier release. There is no
+committed prior-release trace, raw replay blob, or streaming trace byte corpus,
+so broad historical release readability remains `UNKNOWN_BLOCKING`.
 
 Trace consumers include the ordinary, compatibility, streaming, and integrity
-readers; replay/integrity E2E tests; fuzz targets; and trace CLI commands in
-`src/bin/asupersync.rs`. A reachable reader is not proof that historical bytes
-were exercised.
+readers; replay/integrity E2E tests; checksum-bearing current-v3 and structured
+legacy-v2 fuzz inputs; and trace CLI commands in `src/bin/asupersync.rs`. A
+reachable reader or synthesized legacy container is not proof that external
+historical bytes were exercised.
 
 ### Distributed snapshots
 
@@ -244,9 +268,10 @@ The registry intentionally keeps three blockers open:
    distributed snapshots.
 2. `asupersync-5z2scg.3.7` owns no-mock cross-version readers and CLI E2E over
    committed historical artifacts.
-3. `asupersync-5z2scg.3.3` still owns broad arbitrary-Serde
-   data-model/resource evidence. Its standalone Custom injection fixture is now
-   current-corpus evidence, but does not prove generic replacement parity.
+3. `asupersync-5z2scg.3.6` owns broad arbitrary-Serde MessagePack/Bincode
+   data-model, resource, and downstream-consumer evidence. The current
+   standalone Custom injection fixture does not prove generic replacement
+   parity.
 
 The external historical-artifact consumer row also remains
 `UNKNOWN_BLOCKING`; `.3.7` must close that consumer evidence gap before
@@ -262,16 +287,24 @@ Run it through the remote clean-overlay lane:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
-  --overlay-path src/lab/snapshot_restore.rs \
-  --overlay-path src/lab/mod.rs \
-  --overlay-path tests/runtime_snapshot_codec_e2e.rs \
+  --overlay-path src/trace/file.rs \
+  --overlay-path src/trace/compat.rs \
+  --overlay-path src/trace/integrity.rs \
+  --overlay-path src/trace/mod.rs \
+  --overlay-path src/bin/asupersync.rs \
+  --overlay-path tests/property_trace_schema.rs \
+  --overlay-path tests/replay_e2e_suite.rs \
+  --overlay-path tests/trace_file_parsing_property_fuzz.rs \
+  --overlay-path fuzz/fuzz_targets/trace_file_parsing.rs \
+  --overlay-path fuzz/fuzz_targets/trace_integrity.rs \
+  --overlay-path fuzz/fuzz_targets/trace_streaming.rs \
   --overlay-path artifacts/typed_format_registry_v1.json \
-  --overlay-path docs/runtime_snapshot_codec.md \
   --overlay-path docs/typed_format_registry.md \
+  --overlay-path docs/replay-debugging.md \
   --overlay-path tests/typed_format_registry_contract.rs \
   -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
   RUSTFLAGS='-D warnings -C debuginfo=0' \
-  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a1" \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a4" \
   cargo test -p asupersync --test typed_format_registry_contract -- --nocapture
 ```
 
