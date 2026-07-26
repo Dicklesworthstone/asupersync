@@ -106,15 +106,45 @@ fn is_matrix_bead(issue: &Value) -> bool {
         && !is_superseded_duplicate(issue)
 }
 
+/// Disposition tokens that mark a closed tracker issue as superseded by a
+/// canonical successor, matching the documented `coverage_scope`.
+///
+/// These are matched as whole ASCII words, never as substrings. A naked
+/// `contains` match fails open: it silently drops a bead from required
+/// verification coverage whenever an unrelated longer word happens to embed
+/// one of these tokens. `asupersync-ym2wtv.1` is the live example -- it closed
+/// as a DEFER decision whose reason reads "GB-03 duplicated-runtime finding is
+/// decisive", and `contains("duplicate")` matched inside "duplicated".
+const SUPERSEDED_DUPLICATE_TOKENS: [&str; 2] = ["superseded", "duplicate"];
+
 fn is_superseded_duplicate(issue: &Value) -> bool {
     issue.get("status").and_then(Value::as_str) == Some("closed")
         && issue
             .get("close_reason")
             .and_then(Value::as_str)
-            .is_some_and(|reason| {
-                let reason = reason.to_ascii_lowercase();
-                reason.contains("superseded") || reason.contains("duplicate")
-            })
+            .is_some_and(contains_superseded_duplicate_token)
+}
+
+/// Returns true when `reason` contains a disposition token as a whole word.
+///
+/// Word boundaries are any non-alphanumeric ASCII character, so
+/// "plan superseded", "closed: duplicate of x" and "(duplicate)" all match,
+/// while "duplicated", "deduplicate" and "superseded_by_nothing" do not.
+fn contains_superseded_duplicate_token(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    SUPERSEDED_DUPLICATE_TOKENS.iter().any(|token| {
+        reason.match_indices(token).any(|(start, matched)| {
+            let before_ok = reason[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_ascii_alphanumeric());
+            let after_ok = reason[start + matched.len()..]
+                .chars()
+                .next()
+                .is_none_or(|character| !character.is_ascii_alphanumeric());
+            before_ok && after_ok
+        })
+    })
 }
 
 fn slug(text: &str) -> String {

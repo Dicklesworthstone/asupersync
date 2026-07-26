@@ -104,6 +104,62 @@ fn nonempty_strings(value: &Value, key: &str, context: &str, errors: &mut Vec<St
     }
 }
 
+/// Disposition tokens marking a closed tracker issue as superseded by a
+/// canonical successor. Must stay in sync with `SUPERSEDED_DUPLICATE_TOKENS`
+/// in `src/bin/dependency_verification_matrix.rs`, which is the generator side
+/// of this same rule.
+const SUPERSEDED_DUPLICATE_TOKENS: [&str; 2] = ["superseded", "duplicate"];
+
+/// Returns true when `reason` contains a disposition token as a whole ASCII
+/// word.
+///
+/// Deliberately not a naked `contains`: substring matching fails open, silently
+/// dropping a bead from required verification coverage whenever a longer word
+/// embeds one of these tokens. `asupersync-ym2wtv.1` closed as a DEFER decision
+/// reading "GB-03 duplicated-runtime finding is decisive", and
+/// `contains("duplicate")` matched inside "duplicated" (br-asupersync-290bci).
+fn contains_superseded_duplicate_token(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    SUPERSEDED_DUPLICATE_TOKENS.iter().any(|token| {
+        reason.match_indices(token).any(|(start, matched)| {
+            let before_ok = reason[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_ascii_alphanumeric());
+            let after_ok = reason[start + matched.len()..]
+                .chars()
+                .next()
+                .is_none_or(|character| !character.is_ascii_alphanumeric());
+            before_ok && after_ok
+        })
+    })
+}
+
+#[test]
+fn superseded_duplicate_tokens_match_whole_words_only() {
+    // Genuine dispositions still exclude the bead from required coverage.
+    assert!(contains_superseded_duplicate_token(
+        "DEP-ADR-009/010/012 resolved and frozen; plan superseded"
+    ));
+    assert!(contains_superseded_duplicate_token(
+        "closed: duplicate of x"
+    ));
+    assert!(contains_superseded_duplicate_token("Superseded."));
+    assert!(contains_superseded_duplicate_token("(duplicate)"));
+
+    // Prose that merely embeds a token must NOT drop coverage. The first case
+    // is the live regression: asupersync-ym2wtv.1 is a DEFER decision.
+    assert!(!contains_superseded_duplicate_token(
+        "GB-03 duplicated-runtime finding is decisive; terminal outcome DEFER, incumbent stands"
+    ));
+    assert!(!contains_superseded_duplicate_token(
+        "deduplicate the evidence rows"
+    ));
+    assert!(!contains_superseded_duplicate_token("duplicates"));
+    assert!(!contains_superseded_duplicate_token("superseding"));
+    assert!(!contains_superseded_duplicate_token(""));
+}
+
 fn tracker_matrix_ids() -> BTreeSet<String> {
     read_repo_file(TRACKER_PATH)
         .lines()
@@ -123,10 +179,7 @@ fn tracker_matrix_ids() -> BTreeSet<String> {
                     && issue
                         .get("close_reason")
                         .and_then(Value::as_str)
-                        .is_some_and(|reason| {
-                            let reason = reason.to_ascii_lowercase();
-                            reason.contains("superseded") || reason.contains("duplicate")
-                        }))
+                        .is_some_and(contains_superseded_duplicate_token))
         })
         .filter_map(|issue| {
             issue
