@@ -90,7 +90,7 @@
     ],
     "totals": {
       "rust_files": 4273,
-      "serde_json::": 6128,
+      "serde_json::": 6099,
       "rmp_serde::": 67,
       "bincode::": 31,
       "SerializationFormat::": 156,
@@ -102,7 +102,7 @@
         "path": "src",
         "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
         "rust_files": 1441,
-        "serde_json::": 2457,
+        "serde_json::": 2428,
         "rmp_serde::": 48,
         "bincode::": 21,
         "SerializationFormat::": 82,
