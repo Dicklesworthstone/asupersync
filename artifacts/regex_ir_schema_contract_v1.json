@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-ir-schema-contract-v1",
+  "bead_id": "asupersync-5z2scg.8.3.3.1",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "captured_at_utc": "2026-07-26T00:04:00Z",
+  "ir_id": "ASUP-REGEX-THOMPSON-IR-V1",
+  "ir_schema_version": 1,
+  "diagnostic_schema_id": "asupersync-regex-thompson-ir-diagnostic-v1",
+  "decision": {
+    "disposition": "STAGED_BOUNDED_THOMPSON_IR_SCHEMA",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "compiler_experimentation_authorized": true,
+    "compiler_must_retain_pinned_semantics": true,
+    "r3_3_1_schema_complete": true,
+    "lowering_authorized_for_r3_3_2": true,
+    "matcher_execution_authorized": false,
+    "production_wiring_authorized": false,
+    "persistence_authorized": false,
+    "cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "unknown_representation_needs": []
+  },
+  "authority": {
+    "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
+    "semantic_terminal_sha256": "887dd0b97c6794ef7481090a8c1677830093cfdce440ebdb720c3c337b260d23",
+    "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
+    "retained_backend": "regex-syntax@0.8.11",
+    "unicode_version": "16.0.0",
+    "source_revision_before_work": "a36968fc7603ae813ef7a21cfc1266781e731af5",
+    "capability_registry_persistence_contract": false,
+    "on_authority_drift": "KEEP_INCUMBENT_DEFER"
+  },
+  "sources": [
+    {
+      "path": "src/observability/regex_ir.rs",
+      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+      "bytes": 45049,
+      "role": "private versioned IR schema, accounting, diagnostics and validator"
+    },
+    {
+      "path": "src/observability/regex_syntax.rs",
+      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+      "bytes": 112380,
+      "role": "accepted AST and source-span authority"
+    },
+    {
+      "path": "src/observability/regex_semantics.rs",
+      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "bytes": 41269,
+      "role": "canonical Unicode and byte class authority"
+    },
+    {
+      "path": "src/observability/regex_boundaries.rs",
+      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "bytes": 49494,
+      "role": "fold and zero-width assertion authority"
+    }
+  ],
+  "program_fields": [
+    {
+      "field": "schema_version",
+      "invariant": "equals 1"
+    },
+    {
+      "field": "ir_id",
+      "invariant": "equals ASUP-REGEX-THOMPSON-IR-V1"
+    },
+    {
+      "field": "entry",
+      "invariant": "references a reachable in-range state"
+    },
+    {
+      "field": "accept",
+      "invariant": "references the sole reachable Accept state"
+    },
+    {
+      "field": "states",
+      "invariant": "nonempty; every source span and target is valid; every state is entry-reachable"
+    },
+    {
+      "field": "classes",
+      "invariant": "canonical Unicode or UTF-8-safe byte ranges; every class is referenced"
+    },
+    {
+      "field": "capture_slots",
+      "invariant": "even paired boundary count; every slot is referenced"
+    },
+    {
+      "field": "repetition_expansion",
+      "invariant": "checked compiler-emitted copy count within the repetition ceiling"
+    },
+    {
+      "field": "resources",
+      "invariant": "exact deterministic recomputation matches every count, memory byte and work unit"
+    }
+  ],
+  "instruction_schema": [
+    {
+      "op": "Accept",
+      "transitions": 0,
+      "semantics": "sole terminal state"
+    },
+    {
+      "op": "Jump",
+      "transitions": 1,
+      "semantics": "unconditional epsilon transition"
+    },
+    {
+      "op": "Split",
+      "transitions": 2,
+      "semantics": "ordered epsilon fork; preferred is scheduled before fallback"
+    },
+    {
+      "op": "Consume",
+      "transitions": 1,
+      "semantics": "consume one referenced canonical class element"
+    },
+    {
+      "op": "Assert",
+      "transitions": 1,
+      "semantics": "test one zero-width boundary and continue"
+    },
+    {
+      "op": "Save",
+      "transitions": 1,
+      "semantics": "save the current offset to one paired capture boundary slot"
+    }
+  ],
+  "accepted_syntax_mapping": [
+    {
+      "ast": "Empty",
+      "ir": "Jump or entry-equals-Accept"
+    },
+    {
+      "ast": "Literal",
+      "ir": "Consume canonical singleton Unicode class"
+    },
+    {
+      "ast": "Dot",
+      "ir": "Consume canonical semantic dot class"
+    },
+    {
+      "ast": "Escape",
+      "ir": "Consume canonical class or Assert"
+    },
+    {
+      "ast": "Assertion",
+      "ir": "Assert"
+    },
+    {
+      "ast": "LineStart",
+      "ir": "Assert line-start variant"
+    },
+    {
+      "ast": "LineEnd",
+      "ir": "Assert line-end variant"
+    },
+    {
+      "ast": "Concat",
+      "ir": "ordered fragment target patching"
+    },
+    {
+      "ast": "Alternation",
+      "ir": "Split preferred/fallback preserving source order"
+    },
+    {
+      "ast": "Capture",
+      "ir": "paired Save states around the child"
+    },
+    {
+      "ast": "NonCapturing",
+      "ir": "child fragment without Save states"
+    },
+    {
+      "ast": "Flags",
+      "ir": "compile-time semantic context; no runtime instruction"
+    },
+    {
+      "ast": "Repetition",
+      "ir": "finite Jump/Split graph plus checked repetition_expansion"
+    },
+    {
+      "ast": "Class",
+      "ir": "Consume referenced canonical class"
+    },
+    {
+      "ast": "ClassLiteral",
+      "ir": "canonical singleton class contribution"
+    },
+    {
+      "ast": "ClassEscape",
+      "ir": "canonical class contribution"
+    },
+    {
+      "ast": "PosixClass",
+      "ir": "canonical class contribution"
+    },
+    {
+      "ast": "ClassRange",
+      "ir": "canonical range contribution"
+    },
+    {
+      "ast": "ClassUnion",
+      "ir": "merged canonical range contribution"
+    },
+    {
+      "ast": "ClassSet",
+      "ir": "canonical set-operation result"
+    },
+    {
+      "semantic": "R3.2.3 ExactBytes",
+      "ir": "chain of singleton UTF-8 byte Consume states after R3.2.2 validation"
+    }
+  ],
+  "resource_contract": {
+    "accounting_model": "TARGET_INDEPENDENT_FIXED_SCHEMA_COSTS",
+    "uses_rust_size_of": false,
+    "accounted_bytes": {
+      "program": 64,
+      "state": 48,
+      "class": 32,
+      "class_range": 8,
+      "capture_slot": 8
+    },
+    "default_limits": {
+      "states": 262144,
+      "transitions": 524288,
+      "classes": 65536,
+      "ranges_per_class": 4096,
+      "total_class_ranges": 1048576,
+      "capture_slots": 4096,
+      "repetition_expansion": 1048576,
+      "memory_bytes": 10485760,
+      "work_units": 8388608
+    },
+    "memory_formula": "64 + states*48 + classes*32 + class_ranges*8 + capture_slots*8",
+    "work_formula": "1 + states + transitions + classes + class_ranges + capture_slots + repetition_expansion",
+    "arithmetic": "checked u64/usize only",
+    "limit_failure_policy": "typed error; no Program escapes"
+  },
+  "compile_failures": [
+    {
+      "code": "RGX-IR-E001",
+      "kind": "InvalidLimits"
+    },
+    {
+      "code": "RGX-IR-E002",
+      "kind": "InvalidSchema"
+    },
+    {
+      "code": "RGX-IR-E003",
+      "kind": "ArithmeticOverflow"
+    },
+    {
+      "code": "RGX-IR-E004",
+      "kind": "EmptyProgram"
+    },
+    {
+      "code": "RGX-IR-E005",
+      "kind": "StateLimit"
+    },
+    {
+      "code": "RGX-IR-E006",
+      "kind": "TransitionLimit"
+    },
+    {
+      "code": "RGX-IR-E007",
+      "kind": "ClassLimit"
+    },
+    {
+      "code": "RGX-IR-E008",
+      "kind": "ClassRangeLimit"
+    },
+    {
+      "code": "RGX-IR-E009",
+      "kind": "TotalClassRangeLimit"
+    },
+    {
+      "code": "RGX-IR-E010",
+      "kind": "CaptureSlotLimit"
+    },
+    {
+      "code": "RGX-IR-E011",
+      "kind": "OddCaptureSlots"
+    },
+    {
+      "code": "RGX-IR-E012",
+      "kind": "RepetitionLimit"
+    },
+    {
+      "code": "RGX-IR-E013",
+      "kind": "MemoryLimit"
+    },
+    {
+      "code": "RGX-IR-E014",
+      "kind": "WorkLimit"
+    },
+    {
+      "code": "RGX-IR-E015",
+      "kind": "ResourceAccountingMismatch"
+    },
+    {
+      "code": "RGX-IR-E016",
+      "kind": "InvalidEntry"
+    },
+    {
+      "code": "RGX-IR-E017",
+      "kind": "InvalidAccept"
+    },
+    {
+      "code": "RGX-IR-E018",
+      "kind": "AcceptNotTerminal"
+    },
+    {
+      "code": "RGX-IR-E019",
+      "kind": "ExtraAcceptState"
+    },
+    {
+      "code": "RGX-IR-E020",
+      "kind": "InvalidTarget"
+    },
+    {
+      "code": "RGX-IR-E021",
+      "kind": "InvalidClassReference"
+    },
+    {
+      "code": "RGX-IR-E022",
+      "kind": "InvalidCaptureSlot"
+    },
+    {
+      "code": "RGX-IR-E023",
+      "kind": "InvalidSpan"
+    },
+    {
+      "code": "RGX-IR-E024",
+      "kind": "NonCanonicalClass"
+    },
+    {
+      "code": "RGX-IR-E025",
+      "kind": "UnreferencedClass"
+    },
+    {
+      "code": "RGX-IR-E026",
+      "kind": "UnreferencedCaptureSlot"
+    },
+    {
+      "code": "RGX-IR-E027",
+      "kind": "AcceptUnreachable"
+    },
+    {
+      "code": "RGX-IR-E028",
+      "kind": "UnreachableState"
+    }
+  ],
+  "diagnostic_contract": {
+    "persistence_policy": "diagnostic-only-no-deserialization-contract",
+    "decoder_exists": false,
+    "raw_pattern_included": false,
+    "source_spans_included": true,
+    "all_program_fields_included": true,
+    "cross_version_compatibility_promised": false
+  },
+  "test_contract": {
+    "inline_test_count": 8,
+    "covers": [
+      "empty and literal happy paths",
+      "every instruction variant",
+      "canonical diagnostic golden",
+      "deterministic memory and work accounting",
+      "invalid target, class, slot and accept",
+      "invalid span and noncanonical class",
+      "unreachable state and unreferenced resources",
+      "state, transition, capture, repetition, memory and work ceilings",
+      "panic containment",
+      "unique typed diagnostic codes"
+    ],
+    "cancellation_timeout_shutdown_scope": "not applicable: schema validation is synchronous, finite, allocation-bounded and owns no tasks, obligations, permits, sockets, files or locks",
+    "r3_3_4_retained_scope": "independent model/property/fuzz validation and compiler terminal receipt"
+  },
+  "proof": {
+    "unit_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --lib observability::regex_ir::tests -- --nocapture",
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_ir_schema_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_ir_schema_contract -- -D warnings",
+    "no_local_fallback": true,
+    "corrected_attempts": [
+      {
+        "job_id": 29947326818680940,
+        "result": "TEST_FIXTURE_RESOURCE_ACCOUNTING_ORDER_EXPOSED"
+      }
+    ],
+    "sealed_jobs": [
+      {
+        "job_id": 29947326818680941,
+        "worker": "hz1",
+        "command_kind": "focused_unit",
+        "passed": 8,
+        "failed": 0
+      }
+    ]
+  },
+  "no_claims": [
+    "no AST lowering implementation",
+    "no matcher or VM execution",
+    "no persisted or deserializable IR format",
+    "no public API or production wiring",
+    "no regex or regex-syntax removal authorization",
+    "no owned Unicode table authorization",
+    "no performance improvement or no-regression claim",
+    "no broad workspace health or release-readiness claim",
+    "no local Cargo fallback approval"
+  ]
+}

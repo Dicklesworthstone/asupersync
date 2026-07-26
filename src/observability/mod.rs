@@ -141,6 +141,12 @@ pub(crate) mod regex_semantics;
 #[cfg(feature = "metrics")]
 #[allow(dead_code)]
 pub(crate) mod regex_boundaries;
+// br-asupersync-5z2scg.8.3.3.1: versioned, deterministic Thompson IR schema,
+// checked resource accounting, and structural validation. Diagnostic JSON has
+// no persistence contract; lowering, execution, and cutover remain downstream.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_ir;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
