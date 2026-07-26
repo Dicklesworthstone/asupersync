@@ -30,6 +30,10 @@
 //! - [`Zip`]: Pairs items from two streams
 //! - [`Merge`]: Interleaves items from multiple streams
 //!
+//! ## Splitting
+//! - [`Partition`]: Splits one stream into two by a predicate, with a bounded
+//!   per-lane buffer and an explicit head-of-line backpressure contract
+//!
 //! ## Stateful
 //! - [`Scan`]: Yields intermediate accumulator values (like `Iterator::scan`)
 //! - [`Peekable`]: Look at the next item without consuming it
@@ -41,16 +45,28 @@
 //! ## Buffering
 //! - [`Buffered`]: Runs multiple futures while preserving order
 //! - [`BufferUnordered`]: Runs multiple futures without ordering guarantees
+//! - [`TryBuffered`]: Ordered buffering of fallible futures, stopping at the first `Err`
 //! - [`Chunks`]: Groups items into fixed-size batches
 //! - [`ReadyChunks`]: Returns immediately available items
 //!
 //! ## Terminal Operations
 //! - [`Collect`]: Collects all items into a collection
+//! - [`StreamExt::collect_into`]: Collects into a caller-supplied collection, reusing its allocation
 //! - [`Fold`]: Reduces items into a single value
 //! - [`ForEach`]: Executes a closure for each item
 //! - [`Count`]: Counts the number of items
 //! - [`Any`]: Checks if any item matches a predicate
 //! - [`All`]: Checks if all items match a predicate
+//!
+//! ## Bounded Concurrency
+//!
+//! These take a [`Cx`](crate::Cx) and run each item as a **region task**, so
+//! in-flight work is drained rather than dropped on cancellation or error.
+//! Prefer [`BufferUnordered`] when the per-item work is pure and holds no
+//! obligation — it is lighter and needs no `Send + 'static` bounds.
+//!
+//! - [`for_each_concurrent`]: Applies an async function with at most `limit` items in flight
+//! - [`try_for_each_concurrent`]: Same, stopping at the first failure and draining the rest
 //!
 //! ## Error Handling
 //! - [`TryCollect`]: Collects items from a stream of Results
@@ -84,6 +100,7 @@ mod enumerate;
 mod filter;
 mod fold;
 mod for_each;
+mod for_each_concurrent;
 mod forward;
 mod fuse;
 mod inspect;
@@ -91,6 +108,7 @@ mod iter;
 mod map;
 mod merge;
 mod next;
+mod partition;
 mod peekable;
 mod receiver_stream;
 mod scan;
@@ -99,6 +117,7 @@ mod stream;
 mod take;
 mod then;
 mod throttle;
+mod try_buffered;
 mod try_stream;
 mod watch_stream;
 mod zip;
@@ -115,6 +134,7 @@ pub use enumerate::Enumerate;
 pub use filter::{Filter, FilterMap};
 pub use fold::Fold;
 pub use for_each::{ForEach, ForEachAsync};
+pub use for_each_concurrent::{for_each_concurrent, try_for_each_concurrent};
 pub use forward::{SinkStream, forward, into_sink};
 pub use fuse::Fuse;
 pub use inspect::Inspect;
@@ -122,6 +142,7 @@ pub use iter::{Iter, iter};
 pub use map::Map;
 pub use merge::{Merge, merge};
 pub use next::Next;
+pub use partition::{Partition, partition};
 pub use peekable::Peekable;
 pub use receiver_stream::ReceiverStream;
 pub use scan::Scan;
@@ -130,6 +151,7 @@ pub use stream::Stream;
 pub use take::{Take, TakeWhile};
 pub use then::Then;
 pub use throttle::Throttle;
+pub use try_buffered::TryBuffered;
 pub use try_stream::{TryCollect, TryFold, TryForEach, TryStreamError};
 pub use watch_stream::WatchStream;
 pub use zip::Zip;
@@ -215,6 +237,33 @@ pub trait StreamExt: Stream {
         FilterMap::new(self, f)
     }
 
+    /// Splits this stream into two by `predicate`.
+    ///
+    /// The first returned stream yields items for which `predicate` returned
+    /// `true`, the second yields the rest. Each item is delivered to exactly
+    /// one half; the predicate runs once per item.
+    ///
+    /// `lane_capacity` bounds how many items may be buffered for the half that
+    /// is not currently being polled. Once that buffer is full, the polling
+    /// half stalls until its peer drains — so **both halves must be consumed**,
+    /// or the unwanted one dropped. See [`partition`] for the full backpressure
+    /// and wakeup contract.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lane_capacity` is zero.
+    fn partition<P>(
+        self,
+        predicate: P,
+        lane_capacity: usize,
+    ) -> (Partition<Self, P>, Partition<Self, P>)
+    where
+        Self: Sized + Unpin,
+        P: FnMut(&Self::Item) -> bool,
+    {
+        partition(self, predicate, lane_capacity)
+    }
+
     /// Takes the first `n` items.
     fn take(self, n: usize) -> Take<Self>
     where
@@ -292,6 +341,38 @@ pub trait StreamExt: Stream {
         BufferUnordered::new(self, n)
     }
 
+    /// Buffers up to `n` fallible futures in order, stopping at the first `Err`.
+    ///
+    /// Outputs are yielded in **source order**, so the terminating error is the
+    /// first `Err` in the source sequence rather than the first to complete.
+    /// That makes the outcome independent of completion timing.
+    ///
+    /// In-flight futures are dropped when the stream short-circuits; they are
+    /// plain futures, not region tasks. Use
+    /// [`try_for_each_concurrent`] when the per-item work
+    /// holds obligations and must be drained instead of dropped.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::stream::{iter, StreamExt};
+    ///
+    /// async fn first_four(jobs: Vec<Job>) -> Result<Vec<Out>, Error> {
+    ///     // 4 jobs run at once; results arrive in job order, and the first
+    ///     // failing job in that order ends the stream.
+    ///     iter(jobs).map(run).try_buffered(4).try_collect().await
+    /// }
+    /// # struct Job; struct Out; struct Error;
+    /// # async fn run(_j: Job) -> Result<Out, Error> { unimplemented!() }
+    /// ```
+    fn try_buffered(self, n: usize) -> TryBuffered<Self>
+    where
+        Self: Sized,
+        Self::Item: std::future::Future,
+    {
+        TryBuffered::new(self, n)
+    }
+
     /// Collects all items into a collection.
     fn collect<C>(self) -> Collect<Self, C>
     where
@@ -299,6 +380,35 @@ pub trait StreamExt: Stream {
         C: Default + Extend<Self::Item>,
     {
         Collect::new(self, C::default())
+    }
+
+    /// Collects all items into `collection`, reusing its existing allocation.
+    ///
+    /// This is [`collect`](Self::collect) with a caller-supplied starting
+    /// collection instead of `C::default()`. Use it to append to an existing
+    /// buffer, or to recycle one allocation across repeated drains rather than
+    /// allocating a fresh collection each time.
+    ///
+    /// Items already present in `collection` are preserved; stream items are
+    /// appended via [`Extend`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::stream::{iter, StreamExt};
+    ///
+    /// async fn drain_into(buf: Vec<i32>) -> Vec<i32> {
+    ///     // Reuses `buf`'s allocation instead of allocating a fresh Vec, and
+    ///     // appends after whatever it already held.
+    ///     iter(vec![4, 5, 6]).collect_into(buf).await
+    /// }
+    /// ```
+    fn collect_into<C>(self, collection: C) -> Collect<Self, C>
+    where
+        Self: Sized,
+        C: Default + Extend<Self::Item>,
+    {
+        Collect::new(self, collection)
     }
 
     /// Collects items into fixed-size chunks.
