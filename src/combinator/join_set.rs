@@ -39,6 +39,38 @@
 //! [`JoinSet::new`] and [`JoinSet::in_cx`] intentionally reuse an existing
 //! region instead of allocating a hidden quiescence boundary.
 //!
+//! # There is no separate `TaskGroup`
+//!
+//! `JoinSet` **is** this runtime's task-group primitive, and no `TaskGroup`
+//! type is planned (`br-asupersync-ufdab2`). If you came here looking for one,
+//! stop looking: everything a task group is normally wanted for is already on
+//! this type — region-owned members, completion-order [`JoinSet::join_next`],
+//! spawn-order [`JoinSet::join_all`], drained [`JoinSet::cancel_all`],
+//! [`JoinSet::summary`] severity aggregation, and abort-on-drop.
+//!
+//! A `TaskGroup` that merely renamed or aliased `JoinSet` would be a
+//! compatibility shim, which this project does not add, and it would leave
+//! agents choosing between two names for one concept.
+//!
+//! The one genuinely different design — a group that *owns* a child region by
+//! construction, so that cancelling the group is a region cancel and leaving it
+//! is a quiescence boundary — is deliberately **not** what `JoinSet` does.
+//! `JoinSet` shares the caller's region. When you want the group itself to be a
+//! structure boundary, compose it explicitly rather than reaching for a
+//! different type:
+//!
+//! ```ignore
+//! // The group IS the quiescence boundary: the child region cannot close
+//! // until every member is done, and cancelling the region cancels them all.
+//! scope
+//!     .region(&mut state, &cx, FailFast, |child, state| async move {
+//!         let mut set = JoinSet::new(&child);
+//!         // ... set.spawn(...) ...
+//!         set.join_all(&cx).await
+//!     })
+//!     .await
+//! ```
+//!
 //! [`join_next`]: JoinSet
 
 use std::future::Future;
