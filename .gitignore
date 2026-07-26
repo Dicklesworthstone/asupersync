@@ -540,3 +540,10 @@ opencode.json
 /bug_report_*.md
 
 .sbh-protect
+
+# CI step output. ci.yml's `check` job does `mkdir -p ci-summaries` and writes
+# reports there for upload-artifact. Any agent reproducing that step locally
+# (e.g. scripts/ci_summary_report.py no-mock-snapshot --output
+# ci-summaries/no_mock_policy_report.json) leaves the directory behind, and it
+# was not ignored, so a `git add .` would commit generated CI output.
+/ci-summaries/
