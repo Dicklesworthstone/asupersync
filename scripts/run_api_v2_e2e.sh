@@ -29,7 +29,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_ROOT="${API_V2_E2E_OUTPUT_ROOT:-${REPO_ROOT}/target/e2e-results/api_v2}"
 RUN_ID="${API_V2_E2E_RUN_ID:-$(date -u +%Y%m%d_%H%M%S)}"
 TIMEOUT_SEC="${API_V2_E2E_TIMEOUT_SEC:-900}"
-TARGET_DIR="${API_V2_E2E_TARGET_DIR:-${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_api_v2_e2e}"
+# Empty by default, and that is deliberate. Pinning a custom CARGO_TARGET_DIR
+# forces a cold full-library rebuild AND a large artifact retrieval back to this
+# host; measured here, that retrieval is what timed out (RCH-E309: the remote
+# compile succeeded but the artifacts never arrived). Leaving it unset lets rch
+# use its warm shared worker target, which is the same reason
+# scripts/run_appspec_reference_journey_e2e.sh leaves it empty. Override with
+# --target-dir when you deliberately want an isolated build.
+TARGET_DIR="${API_V2_E2E_TARGET_DIR:-}"
 RCH_BIN="${RCH_BIN:-rch}"
 REHEARSE_FAILURE=0
 SKIP_CARGO=0
@@ -222,6 +229,13 @@ rch_cargo() {
     local out_file="${RUN_DIR}/${1}"; shift
     local rch_log="${RUN_DIR}/rch_${stage//[:\/]/_}.log"
     local start end
+    # An explicit array, not an unquoted ${VAR:+...} expansion: word-splitting
+    # rules differ between shells, and an empty TARGET_DIR must contribute zero
+    # arguments rather than an empty one.
+    local -a env_prefix=()
+    if [[ -n "${TARGET_DIR}" ]]; then
+        env_prefix=(env "CARGO_TARGET_DIR=${TARGET_DIR}")
+    fi
 
     start="$(now_ms)"
     set +e
@@ -241,7 +255,7 @@ rch_cargo() {
         --base HEAD --clean-overlay \
         -o examples/hello.rs -o examples/spawn_fanout.rs \
         -o examples/deterministic_test.rs -o tests/api_v2_integration.rs -- \
-        env "CARGO_TARGET_DIR=${TARGET_DIR}" "$@" > "${out_file}" 2> "${rch_log}"
+        "${env_prefix[@]}" "$@" > "${out_file}" 2> "${rch_log}"
     RCH_STATUS=$?
     set -e
     end="$(now_ms)"
@@ -287,7 +301,7 @@ offload_ok() {
 
 run_example() {
     local name="$1"
-    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o examples/${name}.rs -o tests/api_v2_integration.rs -- env CARGO_TARGET_DIR=${TARGET_DIR} cargo run --quiet --example ${name}"
+    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o examples/${name}.rs -o tests/api_v2_integration.rs -- cargo run --quiet --example ${name}"
     rch_cargo "run_example:${name}" "${name}.stdout" cargo run --quiet --example "${name}"
     offload_ok "run_example:${name}" "${repro}" || return 1
 
@@ -308,7 +322,7 @@ run_example() {
 }
 
 run_integration_lane() {
-    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o tests/api_v2_integration.rs -- env CARGO_TARGET_DIR=${TARGET_DIR} cargo test -p asupersync --test api_v2_integration --features test-internals"
+    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o tests/api_v2_integration.rs -- cargo test -p asupersync --test api_v2_integration --features test-internals"
     rch_cargo "integration_lane" "integration_lane.log" \
         cargo test -p asupersync --test api_v2_integration --features test-internals
     offload_ok "integration_lane" "${repro}" || return 1
