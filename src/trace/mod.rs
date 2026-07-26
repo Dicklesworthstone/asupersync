@@ -64,6 +64,11 @@ pub mod gf2;
 pub mod incident;
 pub mod independence;
 pub mod integrity;
+#[allow(
+    dead_code,
+    reason = "A2 keeps the owned LZ4 codec private and inactive until A4 integration"
+)]
+mod lz4_block;
 pub mod minimizer;
 pub mod raptorq_journal;
 pub mod raptorq_journal_writer;
