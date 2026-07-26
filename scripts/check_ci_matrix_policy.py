@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fnmatch
 import hashlib
 import json
 from dataclasses import dataclass
@@ -323,6 +324,116 @@ def cargo_routing_violations(text: str) -> list[str]:
     if has_local_cargo_command(text):
         violations.append("local_cargo")
     return sorted(set(violations))
+
+
+SCRIPT_ROUTING_EXCEPTION_CATEGORIES = {
+    # A `printf`/heredoc that CONSTRUCTS a command string for display or repro
+    # while the real execution is routed. Telling a command that is built from
+    # one that is run needs shell dataflow this scan does not do.
+    "command_builder_string",
+    # A bare invocation reachable only behind an explicit, default-off opt-in
+    # (ALLOW_LOCAL_CARGO=1, --local, ...). AGENTS.md permits a local run when the
+    # operator explicitly authorizes one; the flag IS that authorization.
+    "gated_local_opt_in",
+    # Code that only executes ON the worker, inside an already-routed context --
+    # e.g. a script that dispatches itself via `rch exec -- bash <self> __remote`.
+    # Routing it again would be rch-inside-rch.
+    "remote_reentrant_block",
+}
+
+
+def validate_script_routing_exceptions(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = policy.get("script_routing_exceptions", [])
+    if not isinstance(raw, list):
+        raise PolicyError("script_routing_exceptions must be a list")
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        label = f"script_routing_exceptions[{index}]"
+        if not isinstance(entry, dict):
+            raise PolicyError(f"{label} must be an object")
+        pattern = require_str(entry.get("pattern"), f"{label}.pattern")
+        if pattern in seen:
+            raise PolicyError(f"duplicate script_routing_exceptions pattern {pattern}")
+        seen.add(pattern)
+        category = require_str(entry.get("category"), f"{label}.category")
+        if category not in SCRIPT_ROUTING_EXCEPTION_CATEGORIES:
+            raise PolicyError(
+                f"{label}.category {category!r} is not one of "
+                f"{sorted(SCRIPT_ROUTING_EXCEPTION_CATEGORIES)}"
+            )
+        require_str(entry.get("owner"), f"{label}.owner")
+        require_str(entry.get("reason"), f"{label}.reason")
+        # Every entry must carry the exact violation kinds it excuses, so an
+        # exception written for a display string cannot silently also excuse a
+        # genuinely unrouted command that appears in the same file later.
+        violations = entry.get("violations")
+        if not isinstance(violations, list) or not violations:
+            raise PolicyError(f"{label}.violations must be a non-empty list")
+        for violation in violations:
+            require_str(violation, f"{label}.violations[]")
+        if not (
+            isinstance(entry.get("expires_at_utc"), str)
+            or isinstance(entry.get("revisit_condition"), str)
+        ):
+            raise PolicyError(
+                f"{label} must include expires_at_utc or revisit_condition"
+            )
+    return raw
+
+
+def script_routing_exception_expired(entry: dict[str, Any], now_utc: dt.datetime) -> bool:
+    expiry = entry.get("expires_at_utc")
+    if not isinstance(expiry, str):
+        return False
+    raw = expiry[:-1] + "+00:00" if expiry.endswith("Z") else expiry
+    parsed = dt.datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        raise PolicyError(f"expires_at_utc must include a timezone: {expiry}")
+    return parsed.astimezone(dt.timezone.utc) <= now_utc
+
+
+def apply_script_routing_exceptions(
+    reports: list[dict[str, Any]],
+    exceptions: list[dict[str, Any]],
+    now_utc: dt.datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split reports into still-violating and excused.
+
+    An exception removes only the violation kinds it names, and only while it is
+    unexpired. Anything it does not name stays a violation, so a file with a
+    documented builder string still fails on a newly added unrouted command.
+    """
+    remaining: list[dict[str, Any]] = []
+    excused: list[dict[str, Any]] = []
+    for report in reports:
+        path = report["path"]
+        kinds = list(report["violations"])
+        applied: list[dict[str, Any]] = []
+        for entry in exceptions:
+            if not fnmatch.fnmatch(path, entry["pattern"]):
+                continue
+            if script_routing_exception_expired(entry, now_utc):
+                continue
+            excused_kinds = [kind for kind in kinds if kind in entry["violations"]]
+            if not excused_kinds:
+                continue
+            kinds = [kind for kind in kinds if kind not in entry["violations"]]
+            applied.append(
+                {
+                    "pattern": entry["pattern"],
+                    "category": entry["category"],
+                    "owner": entry["owner"],
+                    "reason": entry["reason"],
+                    "expires_at_utc": entry.get("expires_at_utc", ""),
+                    "revisit_condition": entry.get("revisit_condition", ""),
+                    "violations": excused_kinds,
+                }
+            )
+        if applied:
+            excused.append({"path": path, "exceptions": applied})
+        if kinds:
+            remaining.append({"path": path, "violations": kinds})
+    return remaining, excused
 
 
 def collect_script_routing_violations(script_root: Path, script_glob: str) -> list[dict[str, Any]]:
@@ -916,6 +1027,70 @@ jobs:
                 f"routing scan false positive: expected clean, got {found} for {source!r}"
             )
 
+    # Script-routing exception fixtures (br-asupersync-gjn12m). An exception
+    # mechanism is only worth having if it cannot quietly grow into a blanket
+    # waiver, so pin the ways it must REFUSE to excuse.
+    now = dt.datetime.now(dt.timezone.utc)
+    base_exception = {
+        "pattern": "*scripts/route_bad.sh",
+        "category": "command_builder_string",
+        "owner": "runtime-core",
+        "reason": "fixture",
+        "revisit_condition": "fixture",
+        "violations": ["local_cargo"],
+    }
+    reports = [{"path": "scripts/route_bad.sh", "violations": ["local_cargo"]}]
+
+    remaining, excused = apply_script_routing_exceptions(reports, [base_exception], now)
+    if remaining or len(excused) != 1:
+        raise AssertionError("expected the matching exception to excuse the violation")
+
+    # Only the NAMED violation kinds are excused; anything else still fails.
+    mixed = [{"path": "scripts/route_bad.sh", "violations": ["local_cargo", "rch_cargo_missing_env"]}]
+    remaining, _ = apply_script_routing_exceptions(mixed, [base_exception], now)
+    if remaining != [{"path": "scripts/route_bad.sh", "violations": ["rch_cargo_missing_env"]}]:
+        raise AssertionError("exception must not excuse violation kinds it does not name")
+
+    # An expired exception excuses nothing.
+    expired = dict(base_exception, expires_at_utc="2000-01-01T00:00:00Z")
+    remaining, excused = apply_script_routing_exceptions(reports, [expired], now)
+    if not remaining or excused:
+        raise AssertionError("expired exception must not excuse")
+
+    # A non-matching pattern excuses nothing.
+    other = dict(base_exception, pattern="*scripts/route_other.sh")
+    remaining, _ = apply_script_routing_exceptions(reports, [other], now)
+    if not remaining:
+        raise AssertionError("non-matching exception must not excuse")
+
+    # Malformed entries fail closed at load time rather than silently excusing.
+    for broken, label in [
+        ({**base_exception, "violations": []}, "empty violations"),
+        ({k: v for k, v in base_exception.items() if k != "reason"}, "missing reason"),
+        ({k: v for k, v in base_exception.items() if k != "owner"}, "missing owner"),
+        ({**base_exception, "category": "not_a_category"}, "unknown category"),
+        (
+            {k: v for k, v in base_exception.items() if k != "revisit_condition"},
+            "no expiry and no revisit condition",
+        ),
+    ]:
+        try:
+            validate_script_routing_exceptions({"script_routing_exceptions": [broken]})
+        except PolicyError:
+            pass
+        else:
+            raise AssertionError(f"malformed exception accepted: {label}")
+
+    # Duplicate patterns are rejected so two entries cannot disagree silently.
+    try:
+        validate_script_routing_exceptions(
+            {"script_routing_exceptions": [base_exception, dict(base_exception)]}
+        )
+    except PolicyError:
+        pass
+    else:
+        raise AssertionError("duplicate exception patterns accepted")
+
     print("CI matrix policy self-test passed")
     return 0
 
@@ -928,11 +1103,19 @@ def main() -> int:
     policy_path = args.policy
     policy, lanes, default_summary_path, default_events_path = load_policy(policy_path)
     script_scan_root = args.script_scan_root if args.script_scan_root is not None else policy_path.parent.parent / "scripts"
+    script_routing_exceptions = validate_script_routing_exceptions(policy)
+    script_routing_excused: list[dict[str, Any]] = []
     script_routing_violations = (
         []
         if args.skip_script_scan
         else collect_script_routing_violations(script_scan_root, args.script_scan_glob)
     )
+    if script_routing_violations:
+        script_routing_violations, script_routing_excused = apply_script_routing_exceptions(
+            script_routing_violations,
+            script_routing_exceptions,
+            dt.datetime.now(dt.timezone.utc),
+        )
 
     workflow_path = args.workflow or Path(require_str(policy.get("workflow_path"), "workflow_path"))
     workflow_text = workflow_path.read_text(encoding="utf-8")
@@ -990,6 +1173,10 @@ def main() -> int:
             "glob": args.script_scan_glob,
             "violating_path_count": len(script_routing_violations),
             "violations": script_routing_violations,
+            # Excused paths are reported, never hidden: an exception that stops
+            # being visible is an exception nobody revisits.
+            "excused_path_count": len(script_routing_excused),
+            "excused": script_routing_excused,
         },
         "lanes": lane_reports,
     }
