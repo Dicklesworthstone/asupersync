@@ -644,7 +644,7 @@ coverage is missing or relies on mocks.
 
 | Subsystem | Invariants (examples) | Unit tests (src/) | Integration tests (tests/) | E2E tests (tests/e2e/) | Logging/trace expectations | Gaps / notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Runtime + scheduler | Lane priority, fairness, no orphan tasks, region close = quiescence | `src/runtime/scheduler/three_lane.rs::test_cancel_priority_over_ready`, `src/runtime/scheduler/three_lane.rs::test_stealing_only_from_ready_lane`, `src/runtime/scheduler/mod.rs::test_worker_shutdown` | `tests/scheduler_lane_fairness.rs::test_ready_not_starved_by_cancel_flood`, `tests/scheduler_backoff.rs::test_scheduler_shutdown_with_backoff`, `tests/scheduler_regression.rs::regression_throughput_10k_schedule_pop`, `tests/phase0_verification.rs::e2e_nested_region_quiescence_oracles` | `tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence` | `init_test_logging`, `test_phase!` in scheduler and runtime tests | Unit gap task tracked in `bd-2tlx` |
+| Runtime + scheduler | Lane priority, fairness, no orphan tasks, region close = quiescence | `src/runtime/scheduler/three_lane.rs::test_cancel_priority_over_ready`, `src/runtime/scheduler/three_lane.rs::test_stealing_only_from_ready_lane`, `src/runtime/scheduler/mod.rs::test_worker_shutdown` | `tests/scheduler_lane_fairness.rs::test_ready_not_starved_by_cancel_flood`, `tests/scheduler_backoff.rs::test_scheduler_shutdown_with_backoff`, `tests/scheduler_regression.rs::regression_throughput_10k_schedule_pop`, `tests/phase0_verification.rs::e2e_nested_region_quiescence_oracles` | `tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence` | Scoped logging from `run_test` / `run_test_with_cx`, plus `test_phase!` in scheduler and runtime tests | Unit gap task tracked in `bd-2tlx` |
 | Cancellation + obligations | Request -> drain -> finalize, no obligation leaks, losers drained | `src/cancel/symbol_cancel.rs::test_token_cancel_once`, `src/cancel/symbol_cancel.rs::test_token_child_inherits_cancellation`, `src/obligation/leak_check.rs::clean_reserve_commit`, `src/obligation/graded.rs::obligation_commit_clean` | `tests/cancellation_conformance.rs::cancel_request_on_running_task`, `tests/cancellation_conformance.rs::cancel_finalize_phase_entered`, `tests/cancel_attribution.rs::cancel_reason_basic_construction`, `tests/io_cancellation.rs::io_cancel_001_cancel_during_read` | `tests/e2e/combinator/cancel_correctness/obligation_cleanup.rs::test_loser_permit_resolved` | Cancellation tests should emit phase markers for checkpoints and drain | Unit gap task tracked in `bd-38kk` |
 | Channels + sync primitives | No permit/ack leaks, bounded drain, correct wakeups | `src/channel/mpsc.rs::basic_send_recv`, `src/channel/mpsc.rs::fifo_ordering_single_sender`, `src/sync/semaphore.rs::new_semaphore_has_correct_permits` | `tests/channel_conformance.rs::run_conformance_tests`, `tests/sync_conformance.rs::sync_001_mutex_basic_lock_unlock`, `tests/stream_e2e.rs::test_basic_stream_iteration` | `tests/e2e_messaging.rs::e2e_mpsc_queue_delivery` | Trace markers around reserve/commit and drain | Unit gap task tracked in `bd-139b` |
 | IO + reactor + time | Readiness registration, cancellation behavior, deadline/timeout correctness | `src/time/sleep.rs::new_creates_sleep_with_deadline`, `src/time/sleep.rs::after_computes_deadline`, `src/runtime/reactor/registration.rs::drop_deregisters` | `tests/io_cancellation.rs::io_cancel_001_cancel_during_read`, `tests/io_uring_reactor.rs::reactor_creates_successfully`, `tests/time_e2e.rs::test_sleep_new_creates_with_deadline` | `tests/e2e_fs.rs::e2e_file_create_write_read_roundtrip` | Must log timer wheel steps and cancellation injection points | Unit gap task tracked in `bd-rpsc` |
@@ -872,19 +872,64 @@ let trace = runtime.finish_replay_trace().expect("replay trace");
 
 ## Logging Standards
 
-### Initialization (required)
+### Scoped initialization (required)
 
-Every test must initialize logging once at the top of the test body:
+`run_test`, `run_test_with_cx`, and `lab_with_config` manage logging for their
+complete execution scope, including runtime construction and future polling.
+Do not call `init_test_logging` before these helpers. They preserve an existing
+scoped or process-global tracing dispatcher unchanged. If no dispatcher exists,
+they install a thread-scoped subscriber for the duration of the helper:
+
+- a wholly valid `RUST_LOG` is honored;
+- unset `RUST_LOG` uses `warn,asupersync=debug`;
+- empty, non-Unicode, or malformed `RUST_LOG` fails closed to that same safe
+  default and emits a warning;
+- the prior dispatcher is restored during normal return and panic unwinding;
+- no process-global tracing subscriber or `log` logger is installed.
 
 ```rust
-use asupersync::test_utils::init_test_logging;
+use asupersync::test_utils::run_test;
 
 #[test]
-fn my_test() {
-    init_test_logging();
-    // ...
+fn my_async_test() {
+    run_test(|| async {
+        tracing::debug!("polled inside the scoped subscriber");
+    });
 }
 ```
+
+Synchronous tests that need tracing can use the explicit scoped API:
+
+```rust
+use asupersync::test_utils::{TestLogConfig, with_test_logging};
+
+#[test]
+fn my_sync_test() {
+    let config = TestLogConfig::try_new("warn,my_crate=debug")
+        .expect("static filter must be valid");
+    with_test_logging(&config, || {
+        tracing::debug!(target: "my_crate", "captured in this scope");
+    });
+}
+```
+
+All-target TRACE is available only as a deliberate local choice:
+
+```rust
+use asupersync::test_utils::{TestLogConfig, with_test_logging};
+
+with_test_logging(&TestLogConfig::trace(), || {
+    // Narrow diagnostic scope; TRACE can be extremely high volume.
+});
+```
+
+`log` records from third-party dependencies are not bridged into tracing by
+default. `install_global_test_log_bridge()` is an explicit, irreversible
+process-wide opt-in and must be isolated in a fresh test process. Likewise,
+`install_global_test_subscriber()` is only for legacy harnesses that cannot
+accept a closure. The transitional `init_test_logging*` functions use this
+global path with a safe filter and no implicit `LogTracer`; new tests must use
+the scoped APIs.
 
 ### Phase Markers
 
@@ -922,7 +967,7 @@ asupersync::test_complete!("my_test");
 
 Every test should log:
 
-1. Test start (call `init_test_logging()` and a `test_phase!` marker)
+1. Test start (enter a scoped runtime/logging helper and emit a `test_phase!` marker)
 2. Each major phase or step (`test_phase!`, `test_section!`)
 3. Values before key assertions (`assert_with_log!`)
 4. Final outcome (`test_complete!`)

@@ -106,7 +106,12 @@ wasm-browser-deterministic = ["wasm-runtime", "deterministic-mode", "browser-tra
 wasm-browser-minimal = ["wasm-runtime"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
-test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
+test-internals = [
+    "dep:tracing",
+    "dep:tracing-log",
+    "dep:tracing-subscriber",
+    "dep:visibility",
+]
 # Opt-in for legacy crate-root metamorphic/conformance harness modules that are
 # retained for audit history but not part of the default release compile gate.
 legacy-internal-test-harnesses = []
@@ -359,8 +364,12 @@ unicode-normalization = "0.1.25"
 bincode = { package = "bincode-next", version = "3.1.1", features = ["serde"] }
 # Optional tracing integration - only compiled when tracing-integration feature is enabled
 tracing = { version = "0.1", optional = true }
-# Optional tracing subscriber for test-internals feature
-tracing-subscriber = { version = "0.3", optional = true }
+# Optional tracing subscriber for test-internals feature. EnvFilter is scoped
+# to this test-only surface so production consumers do not pay for it.
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+# Explicit opt-in bridge for dependencies that still emit through `log`.
+# Test helpers never install this bridge implicitly.
+tracing-log = { version = "0.2", optional = true }
 # Optional OpenTelemetry metrics provider
 opentelemetry = { version = "0.32", default-features = false, features = ["metrics", "trace"], optional = true }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "trace"], optional = true }
@@ -544,6 +553,7 @@ trybuild = "1.0"
 conformance = { package = "asupersync-conformance", path = "conformance", default-features = false }
 tempfile = "3.25"
 tracing = "0.1"
+tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "testing"] }
 # Dev-only OTLP wire fixtures use tonic-generated protobuf messages; this edge

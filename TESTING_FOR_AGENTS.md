@@ -135,6 +135,13 @@ Use this for cancellation, virtual-time, region, and obligation behavior. Prefer
 `run_test_with_cx` when the tested API expects a `Cx`; use direct `LabRuntime`
 only when you need scheduler or trace control.
 
+The runtime helpers preserve any dispatcher supplied by the caller. Otherwise
+they use a thread-scoped subscriber for runtime construction and future polling,
+honoring a wholly valid `RUST_LOG` and falling back to
+`warn,asupersync=debug`. They do not mutate the process-global tracing
+subscriber or install a `log` bridge. Do not precede them with
+`init_test_logging`.
+
 ```rust
 #[test]
 fn scenario_id_cancel_path_is_clean() {
@@ -158,9 +165,15 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target
 ## Recipe 3: Lab Test Matrix
 
 Use `#[asupersync::lab_test]` for deterministic lab tests that fit one of the
-two blessed signatures. The macro initializes logging, creates the lab runtime
-for each seed, drives the lab to quiescence, and reports the failing seed plus a
-rerun command.
+two blessed signatures. The macro creates the lab runtime for each seed, drives
+the lab to quiescence, and reports the failing seed plus a rerun command.
+
+The macro still enters the transitional legacy global logging initializer. That
+initializer now honors a valid `RUST_LOG`, otherwise uses
+`warn,asupersync=debug`, and never installs `LogTracer`; however, global
+installation remains process-wide and first-wins. Use the direct runtime
+helpers when a test needs per-thread filter or subscriber isolation until the
+macro migration is complete.
 
 ```rust
 use asupersync::{lab::LabRuntime, lab_test};

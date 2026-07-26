@@ -2,7 +2,7 @@
 //! Test utilities for Asupersync.
 //!
 //! This module provides shared helpers for unit tests:
-//! - Consistent tracing-based logging initialization
+//! - Scoped tracing-based logging
 //! - Phase/section macros for readable test output
 //! - Lab runtime constructors
 //! - Async test runners
@@ -11,10 +11,9 @@
 //!
 //! # Example
 //! ```
-//! use asupersync::test_utils::{init_test_logging, run_test};
+//! use asupersync::test_utils::run_test;
 //!
 //! fn my_async_test() {
-//!     init_test_logging();
 //!     run_test(|| async {
 //!         // async test code
 //!     });
@@ -42,6 +41,8 @@ use std::future::Future;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 use tracing::Dispatch;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 static GLOBAL_INIT_LOGGING: Once = Once::new();
@@ -50,6 +51,175 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Default seed used by test lab helpers.
 pub const DEFAULT_TEST_SEED: u64 = 0xDEAD_BEEF;
+/// Deterministic fallback used when `RUST_LOG` is unset or malformed.
+pub const DEFAULT_TEST_LOG_FILTER: &str = "warn,asupersync=debug";
+
+/// Parsed logging policy for scoped test subscribers.
+///
+/// `from_env` accepts a wholly valid `RUST_LOG`. Invalid directives fail
+/// closed to [`DEFAULT_TEST_LOG_FILTER`] rather than being partially accepted.
+/// Regex field matching is disabled so an ambient filter cannot introduce
+/// regex compilation or surprising partial matches into a deterministic test.
+#[derive(Clone, Debug)]
+pub struct TestLogConfig {
+    filter: EnvFilter,
+    effective_filter: String,
+    rust_log_error: Option<String>,
+}
+
+impl TestLogConfig {
+    /// Build the deterministic safe default.
+    #[must_use]
+    pub fn safe_default() -> Self {
+        Self::try_new(DEFAULT_TEST_LOG_FILTER)
+            .expect("DEFAULT_TEST_LOG_FILTER must remain a valid EnvFilter")
+    }
+
+    /// Build an explicit filter, rejecting the entire value on any bad directive.
+    pub fn try_new(
+        filter: impl AsRef<str>,
+    ) -> Result<Self, tracing_subscriber::filter::ParseError> {
+        let filter = filter.as_ref().trim();
+        let parsed = Self::filter_builder().parse(filter)?;
+        Ok(Self {
+            filter: parsed,
+            effective_filter: filter.to_string(),
+            rust_log_error: None,
+        })
+    }
+
+    /// Read `RUST_LOG`, using the safe default when it is absent or malformed.
+    #[must_use]
+    pub fn from_env() -> Self {
+        match std::env::var("RUST_LOG") {
+            Ok(value) if !value.trim().is_empty() => match Self::try_new(&value) {
+                Ok(config) => config,
+                Err(error) => Self::fallback_after_rust_log_error(error.to_string()),
+            },
+            Ok(_) => Self::fallback_after_rust_log_error("RUST_LOG is empty".to_string()),
+            Err(std::env::VarError::NotPresent) => Self::safe_default(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Self::fallback_after_rust_log_error("RUST_LOG is not valid Unicode".to_string())
+            }
+        }
+    }
+
+    /// Explicit all-target TRACE policy.
+    ///
+    /// This is deliberately opt-in. Runtime helpers never select it by default.
+    #[must_use]
+    pub fn trace() -> Self {
+        Self::try_new("trace").expect("the TRACE directive must remain valid")
+    }
+
+    /// The filter that will actually be applied.
+    #[must_use]
+    pub fn effective_filter(&self) -> &str {
+        &self.effective_filter
+    }
+
+    /// Whether a malformed `RUST_LOG` forced the deterministic fallback.
+    #[must_use]
+    pub const fn used_rust_log_fallback(&self) -> bool {
+        self.rust_log_error.is_some()
+    }
+
+    fn filter_builder() -> tracing_subscriber::filter::Builder {
+        EnvFilter::builder().with_regex(false)
+    }
+
+    fn fallback_after_rust_log_error(error: String) -> Self {
+        let mut config = Self::safe_default();
+        config.rust_log_error = Some(error);
+        config
+    }
+
+    fn report_fallback(&self) {
+        if let Some(error) = &self.rust_log_error {
+            tracing::warn!(
+                target: "asupersync::test_utils",
+                error = %error,
+                fallback = DEFAULT_TEST_LOG_FILTER,
+                "invalid RUST_LOG; using deterministic test logging fallback"
+            );
+        }
+    }
+}
+
+impl Default for TestLogConfig {
+    fn default() -> Self {
+        Self::safe_default()
+    }
+}
+
+fn test_dispatch<W>(config: &TestLogConfig, writer: W) -> Dispatch
+where
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(config.filter.clone())
+        .with_writer(writer)
+        .with_file(true)
+        .with_line_number(true)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_span_events(FmtSpan::CLOSE)
+        .with_ansi(false)
+        .finish();
+    Dispatch::new(subscriber)
+}
+
+/// Execute a closure under an explicitly configured scoped subscriber.
+///
+/// The prior dispatcher is restored even when `f` panics. This function never
+/// modifies the process-global tracing subscriber or the global `log` logger.
+pub fn with_test_logging<F, R>(config: &TestLogConfig, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let dispatch = test_dispatch(config, tracing_subscriber::fmt::writer::TestWriter::new());
+    tracing::dispatcher::with_default(&dispatch, || {
+        config.report_fallback();
+        f()
+    })
+}
+
+fn with_default_test_logging<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let current_dispatch_is_noop = tracing::dispatcher::get_default(|dispatch| {
+        dispatch.is::<tracing::subscriber::NoSubscriber>()
+    });
+    if current_dispatch_is_noop {
+        with_test_logging(&TestLogConfig::from_env(), f)
+    } else {
+        f()
+    }
+}
+
+/// Install a process-global test subscriber.
+///
+/// This is an irreversible, explicitly global opt-in for legacy tests that
+/// cannot yet use [`with_test_logging`]. It never installs a `log` bridge.
+/// Prefer scoped logging for all new tests.
+pub fn install_global_test_subscriber(
+    config: &TestLogConfig,
+) -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
+    let dispatch = test_dispatch(config, tracing_subscriber::fmt::writer::TestWriter::new());
+    tracing::dispatcher::set_global_default(dispatch)?;
+    config.report_fallback();
+    Ok(())
+}
+
+/// Irreversibly bridge global `log` records into the active tracing dispatcher.
+///
+/// Runtime helpers intentionally do not call this. Consumers must opt in when
+/// diagnosing a dependency that emits through `log`, and should do so only in
+/// a fresh test process because the global logger cannot be uninstalled.
+pub fn install_global_test_log_bridge() -> Result<(), tracing_log::log::SetLoggerError> {
+    tracing_log::LogTracer::init()
+}
 
 /// Runtime-isolated subscriber handle for per-runtime tracing.
 ///
@@ -101,35 +271,29 @@ impl RuntimeSubscriberHandle {
     }
 }
 
-/// Initialize test logging with trace-level output.
+/// Initialize legacy process-global test logging with a safe filter.
 ///
-/// **DEPRECATED**: Use `init_runtime_logging()` for new code to get proper
-/// per-runtime isolation. This function maintains global semantics for
-/// backwards compatibility with existing tests.
+/// This explicit legacy opt-in is retained while older test modules migrate to
+/// [`with_test_logging`]. It does not install `LogTracer`, and it honors a
+/// wholly valid `RUST_LOG`; otherwise it uses [`DEFAULT_TEST_LOG_FILTER`].
 ///
 /// Safe to call multiple times; only initializes once per process.
 pub fn init_test_logging() {
-    init_test_logging_with_level(tracing::Level::TRACE);
+    GLOBAL_INIT_LOGGING.call_once(|| {
+        let _existing_global_is_preserved =
+            install_global_test_subscriber(&TestLogConfig::from_env());
+    });
 }
 
-/// Initialize test logging with a custom level.
+/// Initialize legacy process-global test logging with an explicit level.
 ///
-/// **DEPRECATED**: Use `init_runtime_logging_with_level()` for new code.
-///
-/// The first call wins; later calls are no-ops. This maintains the old
-/// behavior for compatibility but is vulnerable to multi-runtime conflicts.
+/// This is an explicit global opt-in. Prefer [`with_test_logging`] with an
+/// explicit [`TestLogConfig`] for deterministic scoped behavior.
 pub fn init_test_logging_with_level(level: tracing::Level) {
     GLOBAL_INIT_LOGGING.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(level)
-            .with_test_writer()
-            .with_file(true)
-            .with_line_number(true)
-            .with_target(true)
-            .with_thread_ids(true)
-            .with_span_events(FmtSpan::CLOSE)
-            .with_ansi(false)
-            .try_init();
+        let config = TestLogConfig::try_new(level.as_str())
+            .expect("tracing::Level must map to a valid EnvFilter directive");
+        let _existing_global_is_preserved = install_global_test_subscriber(&config);
     });
 }
 
@@ -196,9 +360,10 @@ pub fn lab_with_config<F, R>(f: F) -> R
 where
     F: FnOnce(&mut LabRuntime) -> R,
 {
-    init_test_logging();
-    let mut lab = test_lab();
-    f(&mut lab)
+    with_default_test_logging(|| {
+        let mut lab = test_lab();
+        f(&mut lab)
+    })
 }
 
 /// Create a [`TestContext`] for a unit test with the default seed.
@@ -219,11 +384,12 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
-    init_test_logging();
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("failed to build test runtime");
-    runtime.block_on(f());
+    with_default_test_logging(|| {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("failed to build test runtime");
+        runtime.block_on(f());
+    });
 }
 
 /// Run async test code with a test `Cx`.
@@ -232,12 +398,13 @@ where
     F: FnOnce(Cx) -> Fut,
     Fut: Future<Output = ()>,
 {
-    init_test_logging();
-    let cx: Cx = Cx::for_testing();
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("failed to build test runtime");
-    runtime.block_on(f(cx));
+    with_default_test_logging(|| {
+        let cx: Cx = Cx::for_testing();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("failed to build test runtime");
+        runtime.block_on(f(cx));
+    });
 }
 
 /// Assert that an async operation completes within a timeout.
@@ -281,6 +448,430 @@ mod tests {
     use super::*;
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget};
     use futures_lite::future;
+    use std::io::{self, Write};
+    use std::process::{Command, Output};
+    use std::sync::Barrier;
+
+    const LOGGING_CHILD_CASE_ENV: &str = "ASUPERSYNC_LOGGING_CHILD_CASE";
+    const LOGGING_CHILD_TEST: &str = "test_utils::tests::logging_fresh_process_child";
+    const ASUPERSYNC_DEBUG_MARKER: &str = "ASUPERSYNC_DEBUG_MARKER_7MF9BT";
+    const TOKENIZERS_TRACE_MARKER: &str = "TOKENIZERS_TRACE_MARKER_7MF9BT";
+    const TOKENIZERS_LOG_MARKER: &str = "TOKENIZERS_LOG_MARKER_7MF9BT";
+    const FALLBACK_MARKER: &str = "invalid RUST_LOG; using deterministic test logging fallback";
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    struct CaptureGuard {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl CaptureWriter {
+        fn text(&self) -> String {
+            let bytes = self.bytes.lock().expect("capture mutex was poisoned");
+            String::from_utf8(bytes.clone()).expect("tracing output must be UTF-8")
+        }
+    }
+
+    impl Write for CaptureGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .expect("capture mutex was poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CaptureWriter {
+        type Writer = CaptureGuard;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CaptureGuard {
+                bytes: Arc::clone(&self.bytes),
+            }
+        }
+    }
+
+    fn capture_dispatch(filter: &str) -> (Dispatch, CaptureWriter) {
+        let writer = CaptureWriter::default();
+        let config = TestLogConfig::try_new(filter).expect("test filter must be valid");
+        (test_dispatch(&config, writer.clone()), writer)
+    }
+
+    fn emit_filter_probe_events() {
+        tracing::debug!(
+            target: "asupersync::logging_contract",
+            "{ASUPERSYNC_DEBUG_MARKER}"
+        );
+        tracing::trace!(
+            target: "tokenizers::normalizer",
+            "{TOKENIZERS_TRACE_MARKER}"
+        );
+        tracing_log::log::trace!(
+            target: "tokenizers::normalizer",
+            "{TOKENIZERS_LOG_MARKER}"
+        );
+    }
+
+    fn combined_output(output: &Output) -> String {
+        let mut bytes = output.stdout.clone();
+        bytes.extend_from_slice(&output.stderr);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn run_logging_child(case: &str, rust_log: Option<&str>) -> Output {
+        let mut command = Command::new(
+            std::env::current_exe().expect("current test executable must be available"),
+        );
+        command
+            .arg(LOGGING_CHILD_TEST)
+            .arg("--exact")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(LOGGING_CHILD_CASE_ENV, case)
+            .env_remove("RUST_LOG");
+        if let Some(rust_log) = rust_log {
+            command.env("RUST_LOG", rust_log);
+        }
+        command
+            .output()
+            .expect("fresh-process logging test failed to launch")
+    }
+
+    fn assert_child_passed(case: &str, output: &Output) -> String {
+        let text = combined_output(output);
+        assert!(
+            output.status.success(),
+            "fresh-process logging case {case:?} failed with {:?}:\n{text}",
+            output.status.code()
+        );
+        text
+    }
+
+    // Bead: asupersync-7mf9bt
+    // Scenario: an ambient scoped dispatcher must remain authoritative before,
+    // during future polling, during LabRuntime construction, and afterward.
+    // Seed: DEFAULT_TEST_SEED.
+    // Artifact: the in-memory capture is asserted for every lifecycle marker.
+    #[test]
+    fn logging_helpers_preserve_existing_scoped_dispatcher() {
+        let (dispatch, writer) = capture_dispatch("trace");
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::info!(target: "asupersync::logging_contract", "scoped-before");
+            run_test(|| async {
+                tracing::info!(
+                    target: "asupersync::logging_contract",
+                    "scoped-run-test-polled"
+                );
+            });
+            run_test_with_cx(|_cx| async {
+                tracing::info!(
+                    target: "asupersync::logging_contract",
+                    "scoped-run-test-with-cx-polled"
+                );
+            });
+            lab_with_config(|_lab| {
+                tracing::info!(target: "asupersync::logging_contract", "scoped-lab");
+            });
+            tracing::info!(target: "asupersync::logging_contract", "scoped-after");
+        });
+
+        let text = writer.text();
+        for marker in [
+            "scoped-before",
+            "scoped-run-test-polled",
+            "scoped-run-test-with-cx-polled",
+            "scoped-lab",
+            "scoped-after",
+        ] {
+            assert!(text.contains(marker), "missing {marker:?} in:\n{text}");
+        }
+    }
+
+    // Bead: asupersync-7mf9bt
+    // Scenario: two concurrent current-thread runtimes inherit only their
+    // caller's thread-scoped dispatcher.
+    // Seed: no scheduler randomness; a Barrier forces overlapping execution.
+    // Artifact: two independent in-memory sinks with cross-contamination checks.
+    #[test]
+    fn logging_concurrent_runtimes_keep_distinct_sinks() {
+        let barrier = Arc::new(Barrier::new(2));
+        let (dispatch_a, writer_a) = capture_dispatch("trace");
+        let (dispatch_b, writer_b) = capture_dispatch("trace");
+
+        let barrier_a = Arc::clone(&barrier);
+        let thread_a = std::thread::spawn(move || {
+            tracing::dispatcher::with_default(&dispatch_a, || {
+                run_test(|| async move {
+                    barrier_a.wait();
+                    tracing::info!(target: "asupersync::logging_contract", "runtime-a-only");
+                });
+            });
+        });
+
+        let barrier_b = Arc::clone(&barrier);
+        let thread_b = std::thread::spawn(move || {
+            tracing::dispatcher::with_default(&dispatch_b, || {
+                run_test(|| async move {
+                    barrier_b.wait();
+                    tracing::info!(target: "asupersync::logging_contract", "runtime-b-only");
+                });
+            });
+        });
+
+        thread_a.join().expect("runtime A thread panicked");
+        thread_b.join().expect("runtime B thread panicked");
+
+        let text_a = writer_a.text();
+        let text_b = writer_b.text();
+        assert!(
+            text_a.contains("runtime-a-only"),
+            "runtime A output:\n{text_a}"
+        );
+        assert!(
+            !text_a.contains("runtime-b-only"),
+            "runtime B leaked into runtime A output:\n{text_a}"
+        );
+        assert!(
+            text_b.contains("runtime-b-only"),
+            "runtime B output:\n{text_b}"
+        );
+        assert!(
+            !text_b.contains("runtime-a-only"),
+            "runtime A leaked into runtime B output:\n{text_b}"
+        );
+    }
+
+    // Bead: asupersync-7mf9bt
+    // Scenario: TRACE remains available only through an explicit filter.
+    // Seed: not applicable.
+    // Artifact: captured third-party-target tracing event.
+    #[test]
+    fn logging_explicit_trace_filter_is_opt_in() {
+        let writer = CaptureWriter::default();
+        let config = TestLogConfig::trace();
+        let dispatch = test_dispatch(&config, writer.clone());
+
+        tracing::dispatcher::with_default(&dispatch, emit_filter_probe_events);
+
+        let text = writer.text();
+        assert!(
+            text.contains(TOKENIZERS_TRACE_MARKER),
+            "explicit TRACE did not capture tracing event:\n{text}"
+        );
+        assert!(
+            !text.contains(TOKENIZERS_LOG_MARKER),
+            "a log record crossed into tracing without the explicit bridge:\n{text}"
+        );
+    }
+
+    // Bead: asupersync-7mf9bt
+    // Scenario: process-global subscriber/logger state must be tested in fresh
+    // processes because successful installation is irreversible.
+    // Seed: DEFAULT_TEST_SEED for the LabRuntime case.
+    // Command: current test binary, exact child test, nocapture, one test thread.
+    // Artifact: captured child stdout/stderr.
+    #[test]
+    fn logging_fresh_process_contract_matrix() {
+        let unset = run_logging_child("unset-rust-log", None);
+        let unset_text = assert_child_passed("unset-rust-log", &unset);
+        assert!(
+            unset_text.contains(ASUPERSYNC_DEBUG_MARKER),
+            "safe default suppressed Asupersync DEBUG:\n{unset_text}"
+        );
+        assert!(
+            !unset_text.contains(TOKENIZERS_TRACE_MARKER),
+            "safe default admitted third-party tracing TRACE:\n{unset_text}"
+        );
+        assert!(
+            !unset_text.contains(TOKENIZERS_LOG_MARKER),
+            "runtime helper implicitly installed LogTracer:\n{unset_text}"
+        );
+
+        let valid = run_logging_child("valid-rust-log", Some("warn,tokenizers::normalizer=trace"));
+        let valid_text = assert_child_passed("valid-rust-log", &valid);
+        assert!(
+            valid_text.contains(TOKENIZERS_TRACE_MARKER),
+            "valid RUST_LOG was not honored:\n{valid_text}"
+        );
+        assert!(
+            !valid_text.contains(ASUPERSYNC_DEBUG_MARKER),
+            "valid RUST_LOG was replaced by the safe fallback:\n{valid_text}"
+        );
+        assert!(
+            !valid_text.contains(TOKENIZERS_LOG_MARKER),
+            "valid RUST_LOG implicitly enabled the global log bridge:\n{valid_text}"
+        );
+
+        let malformed = run_logging_child(
+            "malformed-rust-log",
+            Some("asupersync=definitely-not-a-level"),
+        );
+        let malformed_text = assert_child_passed("malformed-rust-log", &malformed);
+        assert!(
+            malformed_text.contains(ASUPERSYNC_DEBUG_MARKER),
+            "malformed RUST_LOG did not fail closed to the safe default:\n{malformed_text}"
+        );
+        assert!(
+            !malformed_text.contains(TOKENIZERS_TRACE_MARKER),
+            "malformed RUST_LOG partially admitted third-party TRACE:\n{malformed_text}"
+        );
+        assert!(
+            malformed_text.contains(FALLBACK_MARKER),
+            "malformed RUST_LOG fallback was not diagnosed:\n{malformed_text}"
+        );
+
+        for case in [
+            "globals-untouched",
+            "preexisting-global",
+            "panic-restoration",
+            "explicit-log-bridge",
+        ] {
+            let output = run_logging_child(case, None);
+            let _text = assert_child_passed(case, &output);
+        }
+    }
+
+    // This test is invoked directly by `logging_fresh_process_contract_matrix`.
+    // Its cases intentionally make irreversible process-global changes.
+    #[test]
+    fn logging_fresh_process_child() {
+        let Ok(case) = std::env::var(LOGGING_CHILD_CASE_ENV) else {
+            return;
+        };
+
+        match case.as_str() {
+            "unset-rust-log" | "valid-rust-log" | "malformed-rust-log" => {
+                run_test(|| async {
+                    emit_filter_probe_events();
+                });
+            }
+            "globals-untouched" => {
+                run_test(|| async {});
+                run_test_with_cx(|_cx| async {});
+                lab_with_config(|_lab| {});
+
+                tracing::dispatcher::set_global_default(Dispatch::new(
+                    tracing::subscriber::NoSubscriber::default(),
+                ))
+                .expect("runtime helpers mutated the global tracing subscriber");
+
+                struct NoopLogger;
+                impl tracing_log::log::Log for NoopLogger {
+                    fn enabled(&self, _metadata: &tracing_log::log::Metadata<'_>) -> bool {
+                        false
+                    }
+
+                    fn log(&self, _record: &tracing_log::log::Record<'_>) {}
+
+                    fn flush(&self) {}
+                }
+                static NOOP_LOGGER: NoopLogger = NoopLogger;
+                tracing_log::log::set_logger(&NOOP_LOGGER)
+                    .expect("runtime helpers mutated the global log logger");
+            }
+            "preexisting-global" => {
+                let (dispatch, writer) = capture_dispatch("trace");
+                tracing::dispatcher::set_global_default(dispatch)
+                    .expect("fresh process must accept the test global subscriber");
+
+                tracing::info!(
+                    target: "asupersync::logging_contract",
+                    "preexisting-global-before"
+                );
+                run_test(|| async {
+                    tracing::info!(
+                        target: "asupersync::logging_contract",
+                        "preexisting-global-run-test"
+                    );
+                });
+                run_test_with_cx(|_cx| async {
+                    tracing::info!(
+                        target: "asupersync::logging_contract",
+                        "preexisting-global-run-test-with-cx"
+                    );
+                });
+                lab_with_config(|_lab| {
+                    tracing::info!(
+                        target: "asupersync::logging_contract",
+                        "preexisting-global-lab"
+                    );
+                });
+                tracing::info!(
+                    target: "asupersync::logging_contract",
+                    "preexisting-global-after"
+                );
+
+                let text = writer.text();
+                for marker in [
+                    "preexisting-global-before",
+                    "preexisting-global-run-test",
+                    "preexisting-global-run-test-with-cx",
+                    "preexisting-global-lab",
+                    "preexisting-global-after",
+                ] {
+                    assert!(
+                        text.contains(marker),
+                        "global subscriber missed {marker:?}:\n{text}"
+                    );
+                }
+            }
+            "panic-restoration" => {
+                let cases: [Box<dyn FnOnce() + std::panic::UnwindSafe>; 3] = [
+                    Box::new(|| run_test(|| async { panic!("run_test panic probe") })),
+                    Box::new(|| {
+                        run_test_with_cx(|_cx| async { panic!("run_test_with_cx panic probe") });
+                    }),
+                    Box::new(|| {
+                        lab_with_config(|_lab| panic!("lab_with_config panic probe"));
+                    }),
+                ];
+
+                for panic_case in cases {
+                    let result = std::panic::catch_unwind(panic_case);
+                    assert!(result.is_err(), "panic probe unexpectedly returned");
+                    let restored = tracing::dispatcher::get_default(|dispatch| {
+                        dispatch.is::<tracing::subscriber::NoSubscriber>()
+                    });
+                    assert!(restored, "scoped dispatcher leaked after panic");
+                }
+            }
+            "explicit-log-bridge" => {
+                let (dispatch, writer) = capture_dispatch("trace");
+                install_global_test_log_bridge()
+                    .expect("fresh process must accept explicit LogTracer installation");
+                tracing::dispatcher::with_default(&dispatch, || {
+                    tracing::trace!(
+                        target: "tokenizers::normalizer",
+                        "{TOKENIZERS_TRACE_MARKER}"
+                    );
+                    tracing_log::log::trace!(
+                        target: "tokenizers::normalizer",
+                        "{TOKENIZERS_LOG_MARKER}"
+                    );
+                });
+
+                let text = writer.text();
+                assert!(
+                    text.contains(TOKENIZERS_TRACE_MARKER),
+                    "explicit bridge case lost tracing record:\n{text}"
+                );
+                assert!(
+                    text.contains(TOKENIZERS_LOG_MARKER),
+                    "explicit LogTracer bridge lost log record:\n{text}"
+                );
+            }
+            other => panic!("unknown fresh-process logging case {other:?}"),
+        }
+    }
 
     #[test]
     fn assert_completes_within_uses_wall_time_when_no_runtime_is_active() {
