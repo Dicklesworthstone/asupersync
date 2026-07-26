@@ -38,6 +38,7 @@
 use super::{Stream, StreamExt};
 use crate::combinator::JoinSet;
 use crate::cx::Cx;
+use crate::runtime::yield_now;
 use crate::types::policy::FailFast;
 use crate::types::{CancelReason, Outcome, PanicPayload};
 use std::convert::Infallible;
@@ -215,15 +216,52 @@ where
         }
 
         // Either at the concurrency ceiling, or the source is exhausted with
-        // members still running. Wait for the next completion.
-        match set.join_next(cx).await {
+        // members still running. Wait for the next completion — but stay
+        // responsive to cancellation while doing so.
+        //
+        // This deliberately does NOT use `JoinSet::join_next`, which is
+        // documented as uninterruptible: it waits for a member's terminal
+        // outcome so that no-orphan accounting always holds. That is the right
+        // default for a caller who will eventually be satisfied, and it
+        // DEADLOCKS here. An item that only terminates *because* it was
+        // cancelled can never terminate while this loop is parked waiting for
+        // it, because the parked loop never reaches the cancellation check and
+        // therefore never reaches the drain that would cancel it. Measured, not
+        // theorised: parking here burned the lab's entire 100_000-step budget
+        // and came back non-quiescent
+        // (tests/stream_for_each_concurrent_lab_proof.rs).
+        //
+        // TRADEOFF: polling cooperatively costs one wakeup per scheduler turn
+        // while waiting, where parking would cost none. That is the price of
+        // being cancellable, and it is the correct trade for a combinator whose
+        // entire reason to exist is drain-on-cancel.
+        let mut completed = None;
+        loop {
+            if let Some(outcome) = set.try_join_next() {
+                completed = Some(outcome);
+                break;
+            }
+            if cx.is_cancel_requested() || set.is_empty() {
+                break;
+            }
+            yield_now().await;
+        }
+
+        match completed {
             Some(outcome) => {
                 if let Some(failure) = failure_of(outcome) {
                     terminal = Some(failure);
                     break 'drive;
                 }
             }
-            None => break 'drive,
+            None => {
+                if cx.is_cancel_requested() {
+                    terminal = Some(Outcome::cancelled(CancelReason::user(
+                        "try_for_each_concurrent: caller cancelled",
+                    )));
+                }
+                break 'drive;
+            }
         }
     }
 

@@ -254,3 +254,74 @@ fn try_for_each_concurrent_rejects_zero_limit() {
         .await
     });
 }
+
+/// AC1's cancellation clause: when the *caller* is cancelled, the items still
+/// in flight must be drained rather than abandoned.
+///
+/// This is the hardest case in the combinator and the one most likely to hide a
+/// hang, so the test is deliberately adversarial: every item parks forever and
+/// can only terminate through cancellation, and the driver is cancelled while
+/// all of them are running. If cancellation could not reach the items, the run
+/// would burn its step budget and come back non-quiescent instead of passing.
+#[test]
+fn concurrent_terminal_drains_in_flight_items_when_the_caller_is_cancelled() {
+    const MEMBERS: usize = 4;
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(AtomicUsize::new(0));
+
+    let (_joined, report) = run_async_under_lab(0xB07, {
+        let started = Arc::clone(&started);
+        let observed = Arc::clone(&observed);
+        move |cx| async move {
+            let driver_started = Arc::clone(&started);
+            let driver_observed = Arc::clone(&observed);
+            let outer_started = Arc::clone(&started);
+
+            let mut handle = cx
+                .spawn(move |task_cx| async move {
+                    let source = iter((0..MEMBERS).collect::<Vec<usize>>());
+                    try_for_each_concurrent(&task_cx, source, MEMBERS, move |item_cx, _item| {
+                        let started = Arc::clone(&driver_started);
+                        let observed = Arc::clone(&driver_observed);
+                        async move {
+                            started.fetch_add(1, Ordering::SeqCst);
+                            parks_until_cancelled(item_cx, observed).await
+                        }
+                    })
+                    .await
+                })
+                .expect("spawn driver task");
+
+            // Cancel only once every item is genuinely in flight, so the
+            // cancellation lands on running work rather than racing the spawn.
+            let mut guard = 0usize;
+            while outer_started.load(Ordering::SeqCst) < MEMBERS {
+                yield_now().await;
+                guard += 1;
+                assert!(guard < 10_000, "items never reached the in-flight state");
+            }
+
+            handle.abort();
+            handle.join(&cx).await
+        }
+    });
+
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        MEMBERS,
+        "every item must have been in flight when the cancellation landed"
+    );
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        MEMBERS,
+        "every in-flight item must observe cancellation - if this is short, the \
+         items were abandoned rather than drained"
+    );
+    assert!(
+        report.quiescent && report.invariant_violations.is_empty(),
+        "run must reach quiescence with no invariant violations: quiescent={} violations={:?}",
+        report.quiescent,
+        report.invariant_violations
+    );
+}
