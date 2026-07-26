@@ -27,7 +27,16 @@ const DECISION_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.j
 const DECISION_DOC_PATH: &str = "docs/adr/dep_plan_adr_001_serde_generic_formats.md";
 const DECISION_ID: &str = "DEP-ADR-001";
 const BEAD_ID: &str = "asupersync-5z2scg.3.1";
+const A6_BEAD_ID: &str = "asupersync-5z2scg.3.6";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
+const CONSUMER_MANIFEST_PATH: &str =
+    "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml";
+const CONSUMER_LOCK_PATH: &str =
+    "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock";
+const CONSUMER_SOURCE_PATH: &str =
+    "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs";
+const MESSAGEPACK_GOLDEN: &str = "95cfffffffffffffffff81a7426f756e646564cfffffffffffffffff82a0a0a7756e69636f6465ac4772c3bcc39f6520f09fa6809600017fcc80ccfeccffd38000000000000000";
+const BINCODE_GOLDEN: &str = "ffffffffffffffff02000000ffffffffffffffff0200000000000000000000000000000000000000000000000700000000000000756e69636f64650c000000000000004772c3bcc39f6520f09fa680060000000000000000017f80feff010000000000000080";
 const EXPECTED_ROOT_COUNT: usize = 13;
 const EXPECTED_FORMAT_COUNT: usize = 4;
 const EXPECTED_PERSISTED_SURFACE_COUNT: usize = 13;
@@ -263,6 +272,21 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         return Err("compatibility allow-list drifted".to_owned());
     }
 
+    let allowed_dispositions: BTreeSet<&str> = value
+        .get("allowed_dependency_dispositions")
+        .and_then(Value::as_array)
+        .ok_or("allowed_dependency_dispositions must be an array")?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .ok_or("dependency disposition must be a string")
+        })
+        .collect::<Result<_, _>>()?;
+    if allowed_dispositions != BTreeSet::from(["KEEP", "REPLACE"]) {
+        return Err("dependency disposition allow-list drifted".to_owned());
+    }
+
     let profiles = value
         .get("format_profiles")
         .and_then(Value::as_array)
@@ -330,6 +354,150 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         return Err(
             "Custom must record its finite fixture without claiming replacement parity".to_owned(),
         );
+    }
+
+    let decisions = value
+        .get("generic_dependency_decisions")
+        .and_then(Value::as_array)
+        .ok_or("generic_dependency_decisions must be an array")?;
+    if decisions.len() != 2 {
+        return Err("generic_dependency_decisions must contain two rows".to_owned());
+    }
+    let observed_decisions: BTreeSet<&str> = decisions
+        .iter()
+        .filter_map(|decision| decision.get("format").and_then(Value::as_str))
+        .collect();
+    if observed_decisions != BTreeSet::from(["Bincode", "MessagePack"]) {
+        return Err("generic dependency decision roster drifted".to_owned());
+    }
+    for decision in decisions {
+        let format = text(decision, "format");
+        for key in [
+            "bead_id",
+            "capability_id",
+            "disposition",
+            "incumbent_package",
+            "incumbent_version",
+            "incumbent_checksum",
+            "public_surface",
+            "configuration",
+            "rationale",
+            "replacement_gate",
+            "evidence_state",
+            "no_claim_boundary",
+            "proof_command",
+        ] {
+            nonempty_text(decision, key)?;
+        }
+        if text(decision, "bead_id") != A6_BEAD_ID
+            || text(decision, "capability_id") != "CAP-SERDE-GENERIC"
+        {
+            return Err(format!("{format} decision authority drifted"));
+        }
+        let disposition = text(decision, "disposition");
+        if !allowed_dispositions.contains(disposition) {
+            return Err(format!(
+                "{format} has an unregistered dependency disposition"
+            ));
+        }
+        if disposition == "KEEP" && !text(decision, "replacement_gate").contains("REPLACE") {
+            return Err(format!(
+                "{format} KEEP decision must retain the REPLACE gate"
+            ));
+        }
+        if disposition == "REPLACE"
+            && decision
+                .get("replacement_parity")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+        {
+            return Err(format!(
+                "{format} REPLACE decision requires replacement_parity evidence"
+            ));
+        }
+        for key in [
+            "fixture_paths",
+            "fixture_tests",
+            "accepted_data_model",
+            "accepted_exclusions",
+            "errors_and_limits",
+            "dependency_closure",
+        ] {
+            if decision
+                .get(key)
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+            {
+                return Err(format!("{format}.{key} must be a nonempty array"));
+            }
+        }
+        if array(decision, "accepted_data_model").len() < 7 {
+            return Err(format!("{format} accepted data model was narrowed"));
+        }
+        if text(decision, "evidence_state") != "CURRENT_CORPUS_ONLY" {
+            return Err(format!(
+                "{format} generic evidence must remain current-corpus only"
+            ));
+        }
+        let golden = decision
+            .get("exact_payload_golden")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{format}.exact_payload_golden must be an object"))?;
+        let fixture = golden
+            .get("fixture")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{format} golden fixture must be a string"))?;
+        let hex = golden
+            .get("hex")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{format} golden hex must be a string"))?;
+        let byte_count = golden
+            .get("byte_count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{format} golden byte_count must be an integer"))?;
+        if fixture != "ConsumerRecord::boundary_fixture()"
+            || hex.is_empty()
+            || hex.len() != usize::try_from(byte_count).expect("golden byte count fits usize") * 2
+            || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!("{format} exact payload golden is malformed"));
+        }
+        let measurement = decision
+            .get("source_measurement")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{format}.source_measurement must be an object"))?;
+        if measurement
+            .get("method")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            || measurement
+                .get("crate_src_rust_lines")
+                .and_then(Value::as_u64)
+                .is_none_or(|lines| lines == 0)
+        {
+            return Err(format!("{format} source measurement is incomplete"));
+        }
+        let proof_command = text(decision, "proof_command");
+        for marker in [
+            "RCH_REQUIRE_REMOTE=1 rch exec",
+            "--base HEAD",
+            "--clean-overlay",
+            CONSUMER_SOURCE_PATH,
+            CONSUMER_LOCK_PATH,
+            "--locked",
+        ] {
+            if !proof_command.contains(marker) {
+                return Err(format!("{format} proof command missing {marker}"));
+            }
+        }
+        if !text(decision, "no_claim_boundary")
+            .to_ascii_lowercase()
+            .contains("does not prove")
+        {
+            return Err(format!(
+                "{format} decision must state a negative no-claim boundary"
+            ));
+        }
     }
 
     let public = value
@@ -464,11 +632,8 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         .get("unknown_blockers")
         .and_then(Value::as_array)
         .ok_or("unknown_blockers must be an array")?;
-    let expected_blockers = BTreeSet::from([
-        "BLOCK-ARBITRARY-SERDE-COVERAGE",
-        "BLOCK-CROSS-VERSION-READERS",
-        "BLOCK-HISTORICAL-BYTES",
-    ]);
+    let expected_blockers =
+        BTreeSet::from(["BLOCK-CROSS-VERSION-READERS", "BLOCK-HISTORICAL-BYTES"]);
     let observed_blockers: BTreeSet<&str> = blockers
         .iter()
         .filter_map(|blocker| blocker.get("blocker_id").and_then(Value::as_str))
@@ -498,12 +663,23 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         .get("downstream_consumers")
         .and_then(Value::as_array)
         .ok_or("downstream_consumers must be an array")?;
+    let standalone = find_by_id(consumers, "consumer_id", "CONSUMER-STANDALONE-BASELINE");
+    if text(standalone, "state") != "CURRENT_CORPUS_ONLY"
+        || string_set(standalone, "paths")
+            != BTreeSet::from([
+                CONSUMER_MANIFEST_PATH.to_owned(),
+                CONSUMER_LOCK_PATH.to_owned(),
+                CONSUMER_SOURCE_PATH.to_owned(),
+            ])
+        || !text(standalone, "evidence").contains("complete accepted owned Serde model")
+        || !text(standalone, "evidence").contains("1 MiB")
+        || !text(standalone, "evidence").contains("128 recursive levels")
+    {
+        return Err("the locked A6 downstream consumer receipt must stay exact".to_owned());
+    }
     let custom_consumer = find_by_id(consumers, "consumer_id", "CONSUMER-REAL-CUSTOM-CODEC");
     if text(custom_consumer, "state") != "CURRENT_CORPUS_ONLY"
-        || string_set(custom_consumer, "paths")
-            != BTreeSet::from([
-                "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs".to_owned(),
-            ])
+        || string_set(custom_consumer, "paths") != BTreeSet::from([CONSUMER_SOURCE_PATH.to_owned()])
     {
         return Err("the real Custom consumer receipt must stay exact".to_owned());
     }
@@ -659,6 +835,143 @@ fn dependency_manifest_and_lock_pins_are_live() {
             lock.contains(&checksum),
             "Cargo.lock checksum drifted for {}",
             text(dependency, "package")
+        );
+    }
+}
+
+#[test]
+fn binary_generic_keep_receipts_and_downstream_fixture_are_exact() {
+    let registry = registry();
+    let decisions = array(&registry, "generic_dependency_decisions");
+    assert_eq!(decisions.len(), 2);
+
+    let expected_paths = BTreeSet::from([
+        CONSUMER_MANIFEST_PATH.to_owned(),
+        CONSUMER_LOCK_PATH.to_owned(),
+        CONSUMER_SOURCE_PATH.to_owned(),
+    ]);
+    let expected_tests = BTreeSet::from([
+        "binary_format_bytes_are_explicit_downstream_goldens".to_owned(),
+        "binary_formats_cover_the_complete_owned_serde_model".to_owned(),
+        "binary_formats_preserve_errors_trailing_bytes_recovery_and_large_owned_values".to_owned(),
+    ]);
+
+    for decision in decisions {
+        assert_eq!(text(decision, "bead_id"), A6_BEAD_ID);
+        assert_eq!(text(decision, "capability_id"), "CAP-SERDE-GENERIC");
+        assert_eq!(text(decision, "disposition"), "KEEP");
+        assert_eq!(text(decision, "evidence_state"), "CURRENT_CORPUS_ONLY");
+        assert_eq!(string_set(decision, "fixture_paths"), expected_paths);
+        assert_eq!(string_set(decision, "fixture_tests"), expected_tests);
+        assert!(
+            text(decision, "replacement_gate").contains("differential")
+                && text(decision, "replacement_gate").contains("property")
+                && text(decision, "replacement_gate").contains("fuzz")
+                && text(decision, "replacement_gate").contains("ergonomic"),
+            "{} replacement gate was weakened",
+            text(decision, "format")
+        );
+
+        let golden = decision
+            .get("exact_payload_golden")
+            .and_then(Value::as_object)
+            .expect("exact_payload_golden must be an object");
+        let measurement = decision
+            .get("source_measurement")
+            .and_then(Value::as_object)
+            .expect("source_measurement must be an object");
+        match text(decision, "format") {
+            "MessagePack" => {
+                assert_eq!(text(decision, "incumbent_package"), "rmp-serde");
+                assert_eq!(text(decision, "incumbent_version"), "1.3.1");
+                assert_eq!(
+                    text(decision, "incumbent_checksum"),
+                    "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+                );
+                assert_eq!(golden.get("byte_count").and_then(Value::as_u64), Some(71));
+                assert_eq!(
+                    golden.get("hex").and_then(Value::as_str),
+                    Some(MESSAGEPACK_GOLDEN)
+                );
+                assert_eq!(
+                    measurement
+                        .get("crate_src_rust_lines")
+                        .and_then(Value::as_u64),
+                    Some(3_207)
+                );
+                assert_eq!(
+                    string_set(decision, "dependency_closure"),
+                    BTreeSet::from(["rmp".to_owned(), "serde".to_owned()])
+                );
+            }
+            "Bincode" => {
+                assert_eq!(text(decision, "incumbent_package"), "bincode-next");
+                assert_eq!(text(decision, "incumbent_version"), "3.1.1");
+                assert_eq!(
+                    text(decision, "incumbent_checksum"),
+                    "1d6626829353ae29293be5c86f42de5f0468bc758af074b0c7d08f07e538ccbc"
+                );
+                assert!(text(decision, "configuration").contains("config::legacy()"));
+                assert_eq!(golden.get("byte_count").and_then(Value::as_u64), Some(102));
+                assert_eq!(
+                    golden.get("hex").and_then(Value::as_str),
+                    Some(BINCODE_GOLDEN)
+                );
+                assert_eq!(
+                    measurement
+                        .get("crate_src_rust_lines")
+                        .and_then(Value::as_u64),
+                    Some(18_992)
+                );
+                assert_eq!(
+                    measurement
+                        .get("serde_bridge_rust_lines")
+                        .and_then(Value::as_u64),
+                    Some(1_564)
+                );
+                assert!(
+                    array(decision, "accepted_exclusions").iter().any(|entry| {
+                        entry
+                            .as_str()
+                            .is_some_and(|value| value.contains("deserialize_any"))
+                    }),
+                    "Bincode decision must fence deserialize_any"
+                );
+            }
+            format => panic!("unexpected generic dependency decision {format}"),
+        }
+
+        let errors_and_limits = array(decision, "errors_and_limits")
+            .iter()
+            .map(|entry| entry.as_str().expect("error/limit entry must be a string"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for marker in ["truncation", "Trailing bytes", "1 MiB", "128", "no global"] {
+            assert!(
+                errors_and_limits.contains(marker),
+                "{} decision missing error/limit marker {marker}",
+                text(decision, "format")
+            );
+        }
+    }
+
+    let source = read_repo_file(CONSUMER_SOURCE_PATH);
+    for marker in [
+        "struct ConsumerSerdeModel",
+        "serializer.serialize_bytes(&self.0)",
+        "deserializer.deserialize_byte_buf(ConsumerBytesVisitor)",
+        "fn binary_formats_cover_the_complete_owned_serde_model()",
+        "fn binary_format_bytes_are_explicit_downstream_goldens()",
+        "fn binary_formats_preserve_errors_trailing_bytes_recovery_and_large_owned_values()",
+        "consumer-forced encode failure",
+        "1024 * 1024",
+        "ConsumerNested::with_depth(128)",
+        MESSAGEPACK_GOLDEN,
+        BINCODE_GOLDEN,
+    ] {
+        assert!(
+            source.contains(marker),
+            "A6 downstream fixture missing marker: {marker}"
         );
     }
 }
@@ -974,13 +1287,8 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "RCH_REQUIRE_REMOTE=1 rch exec --",
         "--base HEAD",
         "--clean-overlay",
-        "--overlay-path src/trace/file.rs",
-        "--overlay-path src/trace/compat.rs",
-        "--overlay-path src/trace/integrity.rs",
-        "--overlay-path src/bin/asupersync.rs",
-        "--overlay-path tests/replay_e2e_suite.rs",
-        "--overlay-path tests/trace_file_parsing_property_fuzz.rs",
-        "--overlay-path fuzz/fuzz_targets/trace_streaming.rs",
+        "--overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+        "--overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
         "--overlay-path artifacts/typed_format_registry_v1.json",
         "--overlay-path docs/typed_format_registry.md",
         "--overlay-path tests/typed_format_registry_contract.rs",
@@ -1022,6 +1330,15 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "runtime_snapshot_codec.md",
         "asupersync-5z2scg.3.6",
         "asupersync-5z2scg.3.7",
+        "## A6 generic MessagePack/Bincode decision",
+        "3,207",
+        "18,992",
+        "1,564",
+        "DeserializeOwned",
+        "deserialize_any",
+        "trailing bytes",
+        "1 MiB",
+        "128 recursive levels",
         "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay",
         "does not execute serialization round trips",
     ] {
@@ -1120,6 +1437,48 @@ fn malformed_registry_fixtures_fail_closed() {
         validate_registry_shape(&promoted_custom)
             .expect_err("finite Custom evidence must not be promoted to a general baseline")
             .contains("Custom")
+    );
+
+    let mut invalid_disposition = baseline.clone();
+    find_by_id_mut(
+        invalid_disposition["generic_dependency_decisions"]
+            .as_array_mut()
+            .expect("generic_dependency_decisions must be an array"),
+        "format",
+        "MessagePack",
+    )["disposition"] = Value::from("DISCARD");
+    assert!(
+        validate_registry_shape(&invalid_disposition)
+            .expect_err("unregistered dependency disposition must fail")
+            .contains("disposition")
+    );
+
+    let mut missing_golden = baseline.clone();
+    find_by_id_mut(
+        missing_golden["generic_dependency_decisions"]
+            .as_array_mut()
+            .expect("generic_dependency_decisions must be an array"),
+        "format",
+        "Bincode",
+    )["exact_payload_golden"] = Value::Null;
+    assert!(
+        validate_registry_shape(&missing_golden)
+            .expect_err("missing binary golden must fail")
+            .contains("exact_payload_golden")
+    );
+
+    let mut unjustified_replacement = baseline.clone();
+    find_by_id_mut(
+        unjustified_replacement["generic_dependency_decisions"]
+            .as_array_mut()
+            .expect("generic_dependency_decisions must be an array"),
+        "format",
+        "MessagePack",
+    )["disposition"] = Value::from("REPLACE");
+    assert!(
+        validate_registry_shape(&unjustified_replacement)
+            .expect_err("REPLACE without parity evidence must fail")
+            .contains("replacement_parity")
     );
 
     let mut ownerless_blocker = baseline;

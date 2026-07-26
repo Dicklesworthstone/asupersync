@@ -101,6 +101,50 @@ snapshot readers apply their own framing and allocation limits. A proposed
 replacement must not infer one format-wide resource contract from a bounded
 container.
 
+## A6 generic MessagePack/Bincode decision
+
+`asupersync-5z2scg.3.6` evaluates the two binary generic dependencies
+independently. Both receive a measured `KEEP` decision:
+
+| Format | Exact incumbent | Decision | Measured ownership surface | Current exact golden |
+|---|---|---|---:|---:|
+| MessagePack | `rmp-serde 1.3.1` | `KEEP` | 3,207 Rust lines under the crate's `src` tree; direct closure `rmp` and `serde` | 71 bytes |
+| Bincode | `bincode-next 3.1.1` with `bincode::config::legacy()` | `KEEP` | 18,992 Rust lines under `src`, including a 1,564-line owned Serde bridge; derive/encoding closure `bincode_derive-next`, `pastey`, `rapidhash`, `serde`, `unty-next`, and `virtue-next` | 102 bytes |
+
+The standalone locked downstream fixture exercises the complete accepted owned
+Serde model for both formats: unit and unit structs; newtype, tuple, tuple
+struct, and ordinary structs; every enum variant shape; booleans; every signed
+and unsigned integer width including 128-bit values; exact-bit `f32` and `f64`
+boundaries including negative zero, infinity, and NaN; chars, Unicode strings,
+Serde byte buffers, options, sequences, string-key and numeric-key maps, nested
+containers, and owned recursion. It also preserves a forced custom-serializer
+reason, rejects one-byte truncation, proves recovery on the next decode, records
+the incumbent behavior of accepting trailing bytes, and round-trips a 1 MiB
+owned byte buffer plus 128 recursive levels.
+
+The current `ConsumerRecord::boundary_fixture()` bytes are pinned as:
+
+- MessagePack:
+  `95cfffffffffffffffff81a7426f756e646564cfffffffffffffffff82a0a0a7756e69636f6465ac4772c3bcc39f6520f09fa6809600017fcc80ccfeccffd38000000000000000`
+- Bincode legacy:
+  `ffffffffffffffff02000000ffffffffffffffff0200000000000000000000000000000000000000000000000700000000000000756e69636f64650c000000000000004772c3bcc39f6520f09fa680060000000000000000017f80feff010000000000000080`
+
+These goldens freeze the current downstream payload under the exact lockfile;
+they are not prior-release trace, replay, typed-symbol, or distributed-snapshot
+artifacts. `SerdeCodec` requires `DeserializeOwned`, so borrowed output is
+outside the public contract. Bincode is not self-describing, so
+`deserialize_any` is outside its accepted model. Neither backend canonicalizes
+unordered-map iteration, and raw `SerdeCodec` has no global byte or depth cap;
+the enclosing persisted containers continue to own those limits.
+
+Full replacement would require differential, property, fuzz, diagnostic,
+resource, and downstream ergonomic parity across this entire general-purpose
+surface. A finite project-schema codec cannot satisfy that gate. The measured
+ownership cost is disproportionate, so the pure-Rust incumbents and their public
+`SerializationFormat::{MessagePack,Bincode}` variants remain. A6 changes no
+production source, dependency, public variant, discriminant, persisted format,
+or migration policy.
+
 ## Typed-symbol envelope
 
 The exact typed-symbol header is 27 bytes:
@@ -261,17 +305,15 @@ compatibility corpus.
 
 ## Blocking evidence owners
 
-The registry intentionally keeps three blockers open:
+A6 closes the arbitrary-Serde MessagePack/Bincode evidence gap with independent
+`KEEP` receipts, current payload goldens, and the locked downstream fixture.
+The registry still keeps two historical-evidence blockers open under
+`asupersync-5z2scg.3.7`:
 
-1. `asupersync-5z2scg.3.6` owns version-provenanced byte goldens for typed
-   symbols, MessagePack trace/replay, Bincode legacy payloads, and full
-   distributed snapshots.
-2. `asupersync-5z2scg.3.7` owns no-mock cross-version readers and CLI E2E over
-   committed historical artifacts.
-3. `asupersync-5z2scg.3.6` owns broad arbitrary-Serde MessagePack/Bincode
-   data-model, resource, and downstream-consumer evidence. The current
-   standalone Custom injection fixture does not prove generic replacement
-   parity.
+1. prior-release, version-provenanced byte corpora for Bincode legacy fields,
+   MessagePack traces/replay, typed symbols, and full distributed snapshots;
+2. no-mock cross-version readers and CLI E2E over those committed historical
+   artifacts.
 
 The external historical-artifact consumer row also remains
 `UNKNOWN_BLOCKING`; `.3.7` must close that consumer evidence gap before
@@ -287,31 +329,22 @@ Run it through the remote clean-overlay lane:
 
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
-  --overlay-path src/trace/file.rs \
-  --overlay-path src/trace/compat.rs \
-  --overlay-path src/trace/integrity.rs \
-  --overlay-path src/trace/mod.rs \
-  --overlay-path src/bin/asupersync.rs \
-  --overlay-path tests/property_trace_schema.rs \
-  --overlay-path tests/replay_e2e_suite.rs \
-  --overlay-path tests/trace_file_parsing_property_fuzz.rs \
-  --overlay-path fuzz/fuzz_targets/trace_file_parsing.rs \
-  --overlay-path fuzz/fuzz_targets/trace_integrity.rs \
-  --overlay-path fuzz/fuzz_targets/trace_streaming.rs \
+  --overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs \
+  --overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock \
   --overlay-path artifacts/typed_format_registry_v1.json \
   --overlay-path docs/typed_format_registry.md \
-  --overlay-path docs/replay-debugging.md \
   --overlay-path tests/typed_format_registry_contract.rs \
   -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
   RUSTFLAGS='-D warnings -C debuginfo=0' \
-  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a4" \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a6" \
   cargo test -p asupersync --test typed_format_registry_contract -- --nocapture
 ```
 
 This proves registry structure, accepted-ADR mapping, live dependency pins,
 scan counts, direct backend paths, source pins, corpus aggregates, public
-generic invariants, persisted-row completeness, downstream ownership,
-fail-closed unknowns, and documentation markers.
+generic invariants, independent binary-format `KEEP` receipts, exact current
+payload goldens and fixture markers, persisted-row completeness, downstream
+ownership, fail-closed historical unknowns, and documentation markers.
 
 It does not execute serialization round trips, fuzzing, migration, historical
 readers, CLI E2E, broad workspace tests, benchmarks, release checks, dependency

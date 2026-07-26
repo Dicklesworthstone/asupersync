@@ -5,7 +5,7 @@
   "bead_id": "asupersync-5z2scg.3.1",
   "title": "Complete public, generic, persisted, corpus, and consumer inventory for typed formats",
   "policy_as_of_date_utc": "2026-07-26",
-  "policy_as_of_commit": "84b33a4d4e052c520ad162b0d0b60e334fcdef24",
+  "policy_as_of_commit": "9992352969dfc9fa0be3f1c2c515189609f8ee05",
   "capability_ids": [
     "CAP-PERSISTED-TRACE-SNAPSHOT",
     "CAP-SERDE-GENERIC"
@@ -37,6 +37,10 @@
     "BASELINE_EXISTING",
     "CURRENT_CORPUS_ONLY",
     "UNKNOWN_BLOCKING"
+  ],
+  "allowed_dependency_dispositions": [
+    "KEEP",
+    "REPLACE"
   ],
   "dependency_pins": [
     {
@@ -88,8 +92,8 @@
       "serde_json::": 6072,
       "rmp_serde::": 67,
       "bincode::": 31,
-      "SerializationFormat::": 149,
-      "SerdeCodec": 22,
+      "SerializationFormat::": 153,
+      "SerdeCodec": 25,
       "SerializationFormat::Custom": 27
     },
     "roots": [
@@ -111,8 +115,8 @@
         "serde_json::": 3075,
         "rmp_serde::": 6,
         "bincode::": 10,
-        "SerializationFormat::": 13,
-        "SerdeCodec": 3,
+        "SerializationFormat::": 17,
+        "SerdeCodec": 6,
         "SerializationFormat::Custom": 5
       },
       {
@@ -282,8 +286,8 @@
       "resource_bounds": "SerdeCodec itself has no input-length cap. TypedSymbol applies its envelope cap. Trace readers apply per-metadata, per-event, compressed-chunk, and preallocation caps.",
       "error_contract": "Public SerdeCodec owns stringified SerializationError and DeserializationError. ReplayTrace::to_bytes exposes rmp_serde::encode::Error; ReplayTrace::from_bytes owns ReplayDecodeError containing rmp decode failures.",
       "version_policy": "No generic payload version byte. TypedSymbol, trace-file, replay-metadata, and streaming containers own their versions.",
-      "migration_policy": "Existing trace MessagePack remains readable. No prior-version committed byte corpus or proven migration reader exists.",
-      "state": "BASELINE_EXISTING"
+      "migration_policy": "The standalone downstream fixture pins one current rmp-serde 1.3.1 payload golden. Existing trace MessagePack remains readable, but no prior-release committed byte corpus or proven historical migration reader exists.",
+      "state": "CURRENT_CORPUS_ONLY"
     },
     {
       "format": "Bincode",
@@ -299,8 +303,8 @@
       "resource_bounds": "SerdeCodec itself has no decode byte limit and ignores trailing decoded bytes. TypedSymbol bounds its payload; distributed snapshot bounds its owned framing before vector-clock decode.",
       "error_contract": "Public SerdeCodec stringifies bincode EncodeError and DecodeError into owned errors. Distributed snapshot maps codec failures into SnapshotError.",
       "version_policy": "No generic payload version byte. TypedSymbol owns its header version; distributed snapshot v2 owns the Bincode vector-clock field.",
-      "migration_policy": "The legacy configuration is part of the accepted baseline. There is no committed historical Bincode byte golden or cross-version migration reader.",
-      "state": "BASELINE_EXISTING"
+      "migration_policy": "The legacy configuration is part of the accepted baseline, and the standalone downstream fixture pins one current bincode-next 3.1.1 legacy-config payload golden. There is no prior-release committed Bincode corpus or cross-version migration reader.",
+      "state": "CURRENT_CORPUS_ONLY"
     },
     {
       "format": "Json",
@@ -336,6 +340,134 @@
       "version_policy": "TypedSymbol header carries version, type id, format byte, schema hash, and payload length; payload versioning remains downstream-defined.",
       "migration_policy": "The standalone baseline consumer implements a non-Serde codec, exercises Custom byte 255 through the single-symbol path, and fences explicit typed-symbol versions. Its finite current fixture does not prove arbitrary downstream payload migration, ordering, or resource parity.",
       "state": "CURRENT_CORPUS_ONLY"
+    }
+  ],
+  "generic_dependency_decisions": [
+    {
+      "format": "MessagePack",
+      "bead_id": "asupersync-5z2scg.3.6",
+      "capability_id": "CAP-SERDE-GENERIC",
+      "disposition": "KEEP",
+      "incumbent_package": "rmp-serde",
+      "incumbent_version": "1.3.1",
+      "incumbent_checksum": "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155",
+      "public_surface": "SerdeCodec with SerializationFormat::MessagePack",
+      "configuration": "rmp_serde::to_vec and rmp_serde::from_slice",
+      "fixture_paths": [
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ],
+      "fixture_tests": [
+        "binary_formats_cover_the_complete_owned_serde_model",
+        "binary_format_bytes_are_explicit_downstream_goldens",
+        "binary_formats_preserve_errors_trailing_bytes_recovery_and_large_owned_values"
+      ],
+      "accepted_data_model": [
+        "unit and unit struct",
+        "newtype struct, tuple, tuple struct, and struct",
+        "unit, newtype, tuple, and struct enum variants",
+        "bool, every signed and unsigned integer width including i128 and u128",
+        "f32 and f64 including positive zero, negative zero, infinity, and NaN with exact bit comparison",
+        "char, UTF-8 string, and Serde byte-buffer representation",
+        "None, Some, sequence, string-key map, numeric-key map, nested containers, and owned recursive values"
+      ],
+      "accepted_exclusions": [
+        "Borrowed output is outside the public contract because SerdeCodec requires DeserializeOwned.",
+        "Exact bytes for unordered maps are not claimed because SerdeCodec does not canonicalize iteration order.",
+        "This current generic payload is not a prior-release trace, replay blob, typed symbol, or distributed snapshot."
+      ],
+      "exact_payload_golden": {
+        "fixture": "ConsumerRecord::boundary_fixture()",
+        "byte_count": 71,
+        "hex": "95cfffffffffffffffff81a7426f756e646564cfffffffffffffffff82a0a0a7756e69636f6465ac4772c3bcc39f6520f09fa6809600017fcc80ccfeccffd38000000000000000"
+      },
+      "errors_and_limits": [
+        "A downstream custom serializer reason remains present in SerializationError.",
+        "A one-byte truncation fails decoding, and the same codec recovers for the next valid decode.",
+        "Trailing bytes are accepted and ignored by the current SerdeCodec backend contract.",
+        "A 1 MiB owned byte buffer and 128 recursive owned levels round-trip.",
+        "Raw SerdeCodec imposes no global byte or depth cap; enclosing persisted containers own their limits."
+      ],
+      "source_measurement": {
+        "method": "Counted all .rs lines in the exact Cargo registry rmp-serde-1.3.1/src tree.",
+        "crate_src_rust_lines": 3207
+      },
+      "dependency_closure": [
+        "rmp",
+        "serde"
+      ],
+      "rationale": "Owning a general-purpose Serde MessagePack implementation would require preserving the complete downstream data model, diagnostics, resource behavior, and ergonomics represented by 3,207 incumbent Rust source lines. No in-repository finite codec can establish that parity, while the pure-Rust incumbent already satisfies the public capability.",
+      "replacement_gate": "REPLACE remains unavailable without full differential, property, fuzz, diagnostic, resource, and downstream ergonomic parity; the A6 evidence therefore requires KEEP.",
+      "evidence_state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "KEEP changes no production source, dependency, public variant, discriminant, persisted format, or migration policy and does not prove historical artifact readability or unordered-map byte canonicality.",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs --overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_a6_consumer cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture"
+    },
+    {
+      "format": "Bincode",
+      "bead_id": "asupersync-5z2scg.3.6",
+      "capability_id": "CAP-SERDE-GENERIC",
+      "disposition": "KEEP",
+      "incumbent_package": "bincode-next",
+      "incumbent_version": "3.1.1",
+      "incumbent_checksum": "1d6626829353ae29293be5c86f42de5f0468bc758af074b0c7d08f07e538ccbc",
+      "public_surface": "SerdeCodec with SerializationFormat::Bincode",
+      "configuration": "bincode::serde::encode_to_vec and bincode::serde::decode_from_slice with bincode::config::legacy()",
+      "fixture_paths": [
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+        "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+      ],
+      "fixture_tests": [
+        "binary_formats_cover_the_complete_owned_serde_model",
+        "binary_format_bytes_are_explicit_downstream_goldens",
+        "binary_formats_preserve_errors_trailing_bytes_recovery_and_large_owned_values"
+      ],
+      "accepted_data_model": [
+        "unit and unit struct",
+        "newtype struct, tuple, tuple struct, and struct",
+        "unit, newtype, tuple, and struct enum variants",
+        "bool, every signed and unsigned integer width including i128 and u128",
+        "f32 and f64 including positive zero, negative zero, infinity, and NaN with exact bit comparison",
+        "char, UTF-8 string, and Serde byte-buffer representation",
+        "None, Some, sequence, string-key map, numeric-key map, nested containers, and owned recursive values"
+      ],
+      "accepted_exclusions": [
+        "Borrowed output is outside the public contract because SerdeCodec requires DeserializeOwned.",
+        "deserialize_any is outside the accepted Bincode model because Bincode is not self-describing.",
+        "Exact bytes for unordered maps are not claimed because SerdeCodec does not canonicalize iteration order.",
+        "This current generic payload is not a prior-release distributed snapshot, typed symbol, trace, or replay artifact."
+      ],
+      "exact_payload_golden": {
+        "fixture": "ConsumerRecord::boundary_fixture()",
+        "byte_count": 102,
+        "hex": "ffffffffffffffff02000000ffffffffffffffff0200000000000000000000000000000000000000000000000700000000000000756e69636f64650c000000000000004772c3bcc39f6520f09fa680060000000000000000017f80feff010000000000000080"
+      },
+      "errors_and_limits": [
+        "A downstream custom serializer reason remains present in SerializationError.",
+        "A one-byte truncation fails decoding, and the same codec recovers for the next valid decode.",
+        "Trailing bytes are accepted and ignored by the current SerdeCodec backend contract.",
+        "A 1 MiB owned byte buffer and 128 recursive owned levels round-trip.",
+        "Raw SerdeCodec imposes no global byte or depth cap; enclosing persisted containers own their limits."
+      ],
+      "source_measurement": {
+        "method": "Counted all .rs lines in the exact Cargo registry bincode-next-3.1.1/src tree and its owned Serde bridge files.",
+        "crate_src_rust_lines": 18992,
+        "serde_bridge_rust_lines": 1564
+      },
+      "dependency_closure": [
+        "bincode_derive-next",
+        "pastey",
+        "rapidhash",
+        "serde",
+        "unty-next",
+        "virtue-next"
+      ],
+      "rationale": "Owning the accepted legacy-config Bincode capability would require preserving a non-self-describing general-purpose format across 18,992 incumbent Rust source lines, including 1,564 Serde-bridge lines, plus its derive and encoding support closure. No in-repository finite codec can establish complete parity, while the pure-Rust incumbent already satisfies the public capability.",
+      "replacement_gate": "REPLACE remains unavailable without full differential, property, fuzz, diagnostic, resource, and downstream ergonomic parity; the A6 evidence therefore requires KEEP.",
+      "evidence_state": "CURRENT_CORPUS_ONLY",
+      "no_claim_boundary": "KEEP changes no production source, dependency, public variant, legacy configuration, discriminant, persisted format, or migration policy and does not prove historical artifact readability, deserialize_any support, or unordered-map byte canonicality.",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs --overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_a6_consumer cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture"
     }
   ],
   "public_generic_surfaces": [
@@ -836,6 +968,7 @@
       "owner": "CAP-SERDE-GENERIC",
       "paths": [
         "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+        "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
         "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
       ],
       "formats": [
@@ -844,7 +977,7 @@
         "Json",
         "Custom"
       ],
-      "evidence": "Isolated workspace exercises empty, boundary, extreme, Unicode, and byte-containing arbitrary ConsumerRecord values; malformed JSON; codec recovery; typed-symbol observables; intentional SerdeCodec Custom rejection; and a non-Serde downstream Custom codec with explicit typed-symbol version handling.",
+      "evidence": "Isolated locked workspace exercises the complete accepted owned Serde model for MessagePack and Bincode, exact current payload goldens, forced encode reasons, truncation failure, trailing-byte behavior, post-error recovery, 1 MiB owned bytes, 128 recursive levels, earlier ConsumerRecord boundaries, malformed JSON, typed-symbol observables, intentional SerdeCodec Custom rejection, and a non-Serde downstream Custom codec with explicit typed-symbol version handling.",
       "state": "CURRENT_CORPUS_ONLY"
     },
     {
@@ -908,11 +1041,11 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d"
+      "sha256": "e2d9dc52c79eb4c7e24645d7394438b54bfb654d555aae6864f8c10173d94a31"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d"
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd"
     },
     {
       "path": "src/types/mod.rs",
@@ -1028,7 +1161,11 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "e141b1bc99013596cf3fbb6e6e72d6adde41b8672c9e692d8c25635804bcee88"
+      "sha256": "2b7b408f39508d2604d3d384a5184eb66b24d59b3945f39e0231492a5b6cc2bc"
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+      "sha256": "6d442849149134f242eb99aad3a795c850cb05e9c0f549f29f72a02493734d47"
     },
     {
       "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",
@@ -1074,7 +1211,7 @@
   "unknown_blockers": [
     {
       "blocker_id": "BLOCK-HISTORICAL-BYTES",
-      "owner_bead": "asupersync-5z2scg.3.6",
+      "owner_bead": "asupersync-5z2scg.3.7",
       "affected_surfaces": [
         "PERSIST-TYPED-SYMBOL",
         "PERSIST-TRACE-FILE",
@@ -1082,7 +1219,7 @@
         "PERSIST-TRACE-STREAM",
         "PERSIST-DISTRIBUTED-SNAPSHOT"
       ],
-      "missing_evidence": "Version-provenanced byte goldens for Bincode legacy, MessagePack traces/replay, typed symbols, and full SNAP artifacts.",
+      "missing_evidence": "Prior-release version-provenanced byte corpora for Bincode legacy fields, MessagePack traces/replay, typed symbols, and full SNAP artifacts.",
       "effect": "Blocks any byte-compatibility, backend replacement, or persisted cutover claim."
     },
     {
@@ -1097,22 +1234,13 @@
       ],
       "missing_evidence": "No-mock E2E using committed earlier-version artifacts through every downstream reader and CLI path.",
       "effect": "Blocks migration and historical-readability claims."
-    },
-    {
-      "blocker_id": "BLOCK-ARBITRARY-SERDE-COVERAGE",
-      "owner_bead": "asupersync-5z2scg.3.6",
-      "affected_surfaces": [
-        "PUB-SERDE-CODEC"
-      ],
-      "missing_evidence": "Synthesized broad Serde data-model matrix, malformed inputs, depth/size adversaries, and resource envelopes across all three incumbent backends.",
-      "effect": "Blocks generic serializer replacement parity; the public generic bounds remain authoritative."
     }
   ],
   "validation": {
     "contract_test": "tests/typed_format_registry_contract.rs",
     "doc_path": "docs/typed_format_registry.md",
-    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/trace/file.rs --overlay-path src/trace/compat.rs --overlay-path src/trace/integrity.rs --overlay-path src/trace/mod.rs --overlay-path src/bin/asupersync.rs --overlay-path tests/property_trace_schema.rs --overlay-path tests/replay_e2e_suite.rs --overlay-path tests/trace_file_parsing_property_fuzz.rs --overlay-path fuzz/fuzz_targets/trace_file_parsing.rs --overlay-path fuzz/fuzz_targets/trace_integrity.rs --overlay-path fuzz/fuzz_targets/trace_streaming.rs --overlay-path artifacts/typed_format_registry_v1.json --overlay-path docs/typed_format_registry.md --overlay-path docs/replay-debugging.md --overlay-path tests/typed_format_registry_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a4 cargo test -p asupersync --test typed_format_registry_contract -- --nocapture",
-    "proof_scope": "Registry schema, accepted ADR mapping, dependency pins, lexical root counts, direct backend source paths, source pins, corpus aggregates, public/generic invariants, v3 checksum/migration/recovery markers, persisted-row completeness, downstream ownership, fail-closed historical unknowns, and documentation markers.",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs --overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock --overlay-path artifacts/typed_format_registry_v1.json --overlay-path docs/typed_format_registry.md --overlay-path tests/typed_format_registry_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a6 cargo test -p asupersync --test typed_format_registry_contract -- --nocapture",
+    "proof_scope": "Registry schema, accepted ADR mapping, dependency pins, lexical root counts, direct backend source paths, source pins, corpus aggregates, public/generic invariants, independent MessagePack and Bincode KEEP rows, exact current downstream payload goldens, complete accepted owned-Serde fixture markers, persisted-row completeness, downstream ownership, fail-closed historical unknowns, and documentation markers.",
     "no_claim_boundary": "This focused contract does not execute serialization round trips, fuzzing, migration, historical readers, CLI E2E, broad workspace tests, performance, release readiness, dependency removal, format removal, or cutover."
   }
 }
