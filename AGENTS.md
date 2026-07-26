@@ -374,6 +374,34 @@ rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 
+### Feature-gated targets: the three commands above are not enough
+
+The commands above use the **default** feature set, which reaches only the
+ungated targets. Every `[[bench]]` / `[[test]]` with `required-features`, and
+every module behind `postgres`, `mysql`, `sqlite`, `tls`, `kafka`, `quic`,
+`messaging-fabric`, `cli`, `io-uring`, or `simd-intrinsics`, is **silently
+skipped** — it is not compiled, so it cannot fail, so it looks fine.
+
+That is not hypothetical. Two call sites of a removed `Scope::spawn` API sat
+broken on `main` for ~3 months (`br-asupersync-jwr6k0`), and
+`src/database/postgres.rs` has not compiled since 2026-07-15
+(`br-asupersync-evb4i9`), because nothing anyone routinely ran compiled them.
+
+Before landing anything that touches a feature-gated surface, run:
+
+```bash
+# Reaches every required-features target. --keep-going is mandatory:
+# without it the build stops at the FIRST bad target and every target behind
+# it stays invisible, so you fix one thing and the failure merely moves.
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_check_all_features" cargo check --all-targets --all-features --keep-going
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_clippy_all_features" cargo clippy --all-targets --all-features --keep-going -- -D warnings
+```
+
+**A red gate and a skipped gate are indistinguishable from the outside.** CI's
+`lint-build` job runs exactly these two commands, but do not rely on it to cover
+for you: grepping a workflow proves a step *exists*, never that it *ran*
+(`br-asupersync-c6ppu4`). Check that the job actually reached the step.
+
 ---
 
 ## Testing
