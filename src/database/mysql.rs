@@ -1862,6 +1862,66 @@ fn outcome_from_error<T>(err: MySqlError) -> Outcome<T, MySqlError> {
     }
 }
 
+/// Ambient cancellation reason, or `None` when no cancel is pending.
+///
+/// The low-level `write_all` / `read_exact` stream helpers have no explicit
+/// `&Cx` parameter, so they consult the ambient task context exactly the way
+/// their in-poll cancel guards already do.
+fn ambient_cancel_reason() -> Option<CancelReason> {
+    Cx::with_current(|c| {
+        if c.checkpoint().is_err() {
+            Some(
+                c.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            )
+        } else {
+            None
+        }
+    })
+    .flatten()
+}
+
+/// Map a stream I/O error onto `MySqlError`, downgrading `Interrupted` to
+/// `Cancelled` only when a cancel is actually pending.
+///
+/// The in-poll cancel guards in `write_all` / `read_exact` signal cancellation
+/// as `ErrorKind::Interrupted`, but `outcome_from_error` keys solely off
+/// `MySqlError::Cancelled`, so without this mapping a cancelled read/write
+/// surfaces as `Outcome::Err` (br-asupersync-xwanb4).
+///
+/// The downgrade is gated on live cancellation, mirroring the established
+/// idiom in `src/transport/router.rs`: an `Interrupted` that arrives with no
+/// cancel pending stays an I/O error.
+fn stream_io_error(err: io::Error) -> MySqlError {
+    if err.kind() != io::ErrorKind::Interrupted {
+        return MySqlError::Io(err);
+    }
+    match ambient_cancel_reason() {
+        Some(reason) => MySqlError::Cancelled(reason),
+        None => MySqlError::Io(err),
+    }
+}
+
+/// Classify a zero-byte read from the peer.
+///
+/// `read_exact`'s in-poll cancel guard runs at the top of each poll, but the
+/// `n == 0` check happens after the poll returns, so a cancel set from another
+/// thread can land in that window and be reported as `Err` instead of
+/// `Cancelled` (br-asupersync-xwanb4). Per the severity lattice
+/// (`Ok < Err < Cancelled < Panicked`), `Cancelled` dominates.
+///
+/// Gated on cancellation actually being pending: a peer that genuinely hung up
+/// early with no cancel outstanding still reports `UnexpectedEof`.
+fn eof_or_cancelled() -> MySqlError {
+    match ambient_cancel_reason() {
+        Some(reason) => MySqlError::Cancelled(reason),
+        None => MySqlError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected end of stream",
+        )),
+    }
+}
+
 impl MySqlConnection {
     /// Connect to a MySQL database.
     ///
@@ -4724,7 +4784,7 @@ impl MySqlConnection {
                 Pin::new(&mut self.inner.stream).poll_write(cx, &data[pos..])
             })
             .await
-            .map_err(MySqlError::Io)?;
+            .map_err(stream_io_error)?;
 
             if written == 0 {
                 return Err(MySqlError::Io(io::Error::new(
@@ -4752,14 +4812,11 @@ impl MySqlConnection {
                 Pin::new(&mut self.inner.stream).poll_read(cx, &mut read_buf)
             })
             .await
-            .map_err(MySqlError::Io)?;
+            .map_err(stream_io_error)?;
 
             let n = read_buf.filled().len();
             if n == 0 {
-                return Err(MySqlError::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "unexpected end of stream",
-                )));
+                return Err(eof_or_cancelled());
             }
             pos += n;
         }
@@ -6163,6 +6220,127 @@ mod tests {
     use std::sync::mpsc;
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
+
+    // ================================================================
+    // br-asupersync-xwanb4: cancellation must dominate Err on the
+    // read/write stream paths.
+    //
+    // These are the deterministic half of that bead. `read_exact`'s
+    // `n == 0` branch is only reachable when a cancel lands inside a
+    // single poll (after the guard, before the length check), which is
+    // a genuine race; extracting `eof_or_cancelled` / `stream_io_error`
+    // makes the *decision* testable without needing that interleaving.
+    // ================================================================
+
+    fn cancelled_test_cx(kind: CancelKind) -> Cx {
+        let cx = Cx::for_testing();
+        cx.cancel_fast(kind);
+        cx
+    }
+
+    /// A cancel that races the peer's hangup reports `Cancelled`, not the
+    /// `UnexpectedEof` I/O error. Without this, a client-deadline cancel
+    /// surfaces as a server error (5xx instead of 499).
+    #[test]
+    fn mysql_eof_during_pending_cancel_reports_cancelled() {
+        let cx = cancelled_test_cx(CancelKind::User);
+        let _guard = Cx::set_current(Some(cx));
+
+        match eof_or_cancelled() {
+            MySqlError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected Cancelled, got: {other:?}"),
+        }
+    }
+
+    /// The paired NEGATIVE test. A peer that genuinely hung up with no cancel
+    /// outstanding must still report `UnexpectedEof`. The severity lattice does
+    /// not license suppressing an error that happened before any cancel, so
+    /// this asymmetry is the whole point of gating the downgrade.
+    #[test]
+    fn mysql_eof_without_cancel_stays_unexpected_eof() {
+        match eof_or_cancelled() {
+            MySqlError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof),
+            other => panic!("expected Io(UnexpectedEof), got: {other:?}"),
+        }
+    }
+
+    /// The in-poll cancel guards signal cancellation as `Interrupted`, but
+    /// `outcome_from_error` keys solely off `MySqlError::Cancelled`. Before
+    /// this mapping, a cancelled read/write became `Outcome::Err` on the
+    /// *guarded* path, so cancellation was mis-reported even without a race.
+    #[test]
+    fn mysql_interrupted_during_pending_cancel_maps_to_cancelled() {
+        let cx = cancelled_test_cx(CancelKind::Timeout);
+        let _guard = Cx::set_current(Some(cx));
+
+        let err = stream_io_error(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        match err {
+            MySqlError::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::Timeout),
+            other => panic!("expected Cancelled, got: {other:?}"),
+        }
+    }
+
+    /// Negative counterpart: a real `Interrupted` from the OS with no cancel
+    /// pending stays an I/O error.
+    #[test]
+    fn mysql_interrupted_without_cancel_stays_io_error() {
+        let err = stream_io_error(io::Error::new(io::ErrorKind::Interrupted, "eintr"));
+        match err {
+            MySqlError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::Interrupted),
+            other => panic!("expected Io(Interrupted), got: {other:?}"),
+        }
+    }
+
+    /// Only `Interrupted` is eligible for the downgrade. An unrelated I/O
+    /// failure that happens to occur while a cancel is pending stays `Err`.
+    #[test]
+    fn mysql_non_interrupted_io_error_is_never_downgraded() {
+        let cx = cancelled_test_cx(CancelKind::User);
+        let _guard = Cx::set_current(Some(cx));
+
+        let err = stream_io_error(io::Error::new(io::ErrorKind::ConnectionReset, "reset"));
+        match err {
+            MySqlError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset),
+            other => panic!("expected Io(ConnectionReset), got: {other:?}"),
+        }
+    }
+
+    /// End-to-end: the classification actually reaches `Outcome::Cancelled`.
+    /// This is the assertion that fails if `outcome_from_error` ever stops
+    /// recognising the variant.
+    #[test]
+    fn mysql_cancelled_stream_error_becomes_outcome_cancelled() {
+        let cx = cancelled_test_cx(CancelKind::User);
+        let _guard = Cx::set_current(Some(cx));
+
+        let outcome: Outcome<(), MySqlError> = outcome_from_error(eof_or_cancelled());
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "cancelled EOF must aggregate as Cancelled, got: {outcome:?}"
+        );
+
+        let outcome: Outcome<(), MySqlError> = outcome_from_error(stream_io_error(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "cancelled",
+        )));
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "cancelled read/write must aggregate as Cancelled, got: {outcome:?}"
+        );
+    }
+
+    /// `ambient_cancel_reason` must report `None` when no cancel is pending,
+    /// including when there is no ambient `Cx` at all.
+    #[test]
+    fn mysql_ambient_cancel_reason_is_none_without_pending_cancel() {
+        assert!(ambient_cancel_reason().is_none(), "no ambient cx");
+
+        let _guard = Cx::set_current(Some(Cx::for_testing()));
+        assert!(
+            ambient_cancel_reason().is_none(),
+            "live ambient cx with no cancel requested"
+        );
+    }
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
         futures_lite::future::block_on(future)
