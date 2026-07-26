@@ -17,19 +17,6 @@ use asupersync::cx::Cx;
 use asupersync::database::{SqliteConnection, SqliteRow, SqliteValue};
 #[cfg(feature = "sqlite")]
 use asupersync::test_utils::init_test_logging;
-#[cfg(feature = "sqlite")]
-use asupersync::types::{Budget, RegionId, TaskId};
-#[cfg(feature = "sqlite")]
-use asupersync::util::ArenaIndex;
-
-#[cfg(feature = "sqlite")]
-fn create_test_cx() -> Cx {
-    Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 1)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
-}
 
 #[cfg(feature = "sqlite")]
 #[test]
@@ -348,7 +335,6 @@ fn unicode_sql_construction_vulnerability_demo() {
 fn verify_text_storage_preserves_bytes() {
     // Verify that SQLite TEXT storage preserves exact Unicode byte sequences
     init_test_logging();
-    let cx = create_test_cx();
 
     let config = TestConfig::new().with_seed(42);
     let mut runtime = LabRuntimeTarget::create_runtime(config);
@@ -383,7 +369,7 @@ fn verify_text_storage_preserves_bytes() {
                     &cx,
                     "INSERT INTO unicode_test (rowid, data) VALUES (?, ?)",
                     &[
-                        SqliteValue::Integer(i as i64),
+                        SqliteValue::Integer(i64::try_from(i).expect("test row index fits i64")),
                         SqliteValue::Text(s.to_string()),
                     ],
                 )
@@ -400,7 +386,9 @@ fn verify_text_storage_preserves_bytes() {
                 .query(
                     &cx,
                     "SELECT data FROM unicode_test WHERE rowid = ?",
-                    &[SqliteValue::Integer(i as i64)],
+                    &[SqliteValue::Integer(
+                        i64::try_from(i).expect("test row index fits i64"),
+                    )],
                 )
                 .await
             {
@@ -429,7 +417,7 @@ fn verify_text_storage_preserves_bytes() {
                 "✓ String {}: '{}' preserved exactly ({} bytes)",
                 i,
                 original,
-                original.as_bytes().len()
+                original.len()
             );
         }
 

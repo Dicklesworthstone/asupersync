@@ -8,9 +8,19 @@
 //! Kafka broker and does not validate producer sequence numbers. Production
 //! operations must fail closed unless the real Kafka backend feature is enabled.
 
+// Every consumer of these three names lives in a `#[cfg(not(feature =
+// "kafka"))]` test below, so the imports are gated to match their users rather
+// than deleted. That is deliberate: the gate is what records the fact that with
+// `--features kafka` this target has NO producer coverage at all. The only
+// tests that survive the feature are the two `println!`-only audit fns, which
+// assert nothing. The duplicate-offset property this file is named for was
+// removed in 17e1226da and never re-homed -- tracked separately; see
+// br-asupersync-u05hk9.
 #[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::KafkaError;
+#[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::{KafkaProducer, ProducerConfig};
+#[cfg(not(feature = "kafka"))]
 use asupersync::test_utils::run_test_with_cx;
 
 #[cfg(not(feature = "kafka"))]

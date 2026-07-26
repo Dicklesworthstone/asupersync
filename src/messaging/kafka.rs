@@ -3962,9 +3962,71 @@ mod tests {
 
             let client_config = build_client_config(&test_config, None);
 
-            // Note: We can't directly inspect ClientConfig values, but we verify
-            // the configuration is passed correctly by checking the build process
-            // doesn't panic and the producer can be created
+            // Assert on the rdkafka key mapping directly. A previous comment
+            // here claimed "we can't directly inspect ClientConfig values" and
+            // then asserted on `producer.config()` instead -- which only proves
+            // the `ProducerConfig` struct field round-trips and never touches
+            // `build_client_config` at all. That claim is false for the pinned
+            // dependency: `rdkafka::ClientConfig::get(&str) -> Option<&str>`
+            // (rdkafka-0.39.0/src/config.rs:265) reads back exactly what `set`
+            // stored, so the binding is now used for the thing it was created
+            // for. Without this, a typo in any key string ("batch_size" for
+            // "batch.size") would ship silently, because librdkafka ignores
+            // unknown keys and the crate does not validate them at build time.
+            assert_eq!(
+                client_config.get("batch.size"),
+                Some("8192"),
+                "batch_size must reach rdkafka under the exact `batch.size` key"
+            );
+            assert_eq!(
+                client_config.get("linger.ms"),
+                Some("15"),
+                "linger_ms must reach rdkafka under the exact `linger.ms` key"
+            );
+
+            // Exactly-once plumbing. This is the only place in the tree where
+            // the idempotence mapping is reachable without a live broker: the
+            // real-broker assertions in tests/integration/kafka_real_broker.rs
+            // are env-gated behind REAL_KAFKA_TESTS.
+            let idem = build_client_config(
+                &ProducerConfig::new(vec!["localhost:9092".into()]).enable_idempotence(true),
+                None,
+            );
+            assert_eq!(
+                idem.get("enable.idempotence"),
+                Some("true"),
+                "enable_idempotence(true) must map to `enable.idempotence=true`"
+            );
+            let non_idem = build_client_config(
+                &ProducerConfig::new(vec!["localhost:9092".into()]).enable_idempotence(false),
+                None,
+            );
+            assert_eq!(
+                non_idem.get("enable.idempotence"),
+                Some("false"),
+                "enable_idempotence(false) must map to `enable.idempotence=false`"
+            );
+
+            // A transactional producer must force idempotence on regardless of
+            // what the caller asked for -- transactions are undefined without
+            // it. Nothing else in the tree covers this override.
+            let txn_cfg = TransactionalConfig::new(
+                ProducerConfig::new(vec!["localhost:9092".into()]).enable_idempotence(false),
+                "audit-txn-1".to_string(),
+            );
+            let txn = build_client_config(&txn_cfg.producer, Some(&txn_cfg));
+            assert_eq!(
+                txn.get("enable.idempotence"),
+                Some("true"),
+                "transactional producers must force idempotence on even when the \
+                 caller configured it off"
+            );
+            assert_eq!(
+                txn.get("transactional.id"),
+                Some("audit-txn-1"),
+                "transaction_id must reach rdkafka under the exact `transactional.id` key"
+            );
+
             let producer_result = KafkaProducer::new(test_config.clone());
 
             // Should succeed if configuration is valid
