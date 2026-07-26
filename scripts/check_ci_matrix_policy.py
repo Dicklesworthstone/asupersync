@@ -54,8 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", default=".github/ci_matrix_policy.json", type=Path)
     parser.add_argument("--workflow", type=Path, default=None)
-    parser.add_argument("--summary-output", default="", type=Path)
-    parser.add_argument("--events-output", default="", type=Path)
+    # Default must be None, not "": Path("") normalizes to Path("."), whose str()
+    # is "." and therefore truthy, so an empty-string default silently wins over
+    # the policy's output paths and the run dies writing a file onto the cwd.
+    parser.add_argument("--summary-output", default=None, type=Path)
+    parser.add_argument("--events-output", default=None, type=Path)
     parser.add_argument("--script-scan-root", default=None, type=Path)
     parser.add_argument("--script-scan-glob", default="*.sh")
     parser.add_argument("--skip-script-scan", action="store_true")
@@ -739,8 +742,8 @@ def main() -> int:
         for step_name in lane.get("rch_local_fallback_step_names", [])
     )
 
-    summary_path = args.summary_output if str(args.summary_output) else default_summary_path
-    events_path = args.events_output if str(args.events_output) else default_events_path
+    summary_path = args.summary_output if args.summary_output is not None else default_summary_path
+    events_path = args.events_output if args.events_output is not None else default_events_path
 
     summary = {
         "schema_version": "ci-matrix-policy-report-v1",

@@ -614,6 +614,26 @@ jobs:
             artifacts/wasm_launch_rollout_support_stabilization_test.log
           retention-days: 30
 
+  # The --all-features clippy/check pair lives in its own job on purpose
+  # (br-asupersync-c6ppu4). It used to be the last two steps of `check`, behind
+  # ~50 cheap policy/WASM/perf gates. GitHub Actions stops a job at the first
+  # failing step, so any one of those unrelated gates silently turned the repo's
+  # only comprehensive compile gate into a no-op that still looked present when
+  # you grepped the workflow. That is how two removed-API call sites
+  # (benches/spork_baseline.rs, benches/fabric_bench.rs) bit-rotted for ~3 months
+  # behind a red no-mock policy step. A cheap gate must never be able to disable
+  # an expensive one; keep these steps in a job with no policy steps ahead of them.
+  lint-build:
+    name: Lint and compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
       - name: Clippy lints
         run: |
           set -euo pipefail
@@ -622,7 +642,7 @@ jobs:
             echo "rch is required for Clippy lints" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_clippy" cargo clippy --all-targets --all-features -- -D warnings
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_clippy" cargo clippy --all-targets --all-features --keep-going -- -D warnings
 
       - name: Check compilation
         run: |
@@ -632,7 +652,7 @@ jobs:
             echo "rch is required for Check compilation" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_check" cargo check --all-targets --all-features
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_check" cargo check --all-targets --all-features --keep-going
 
   dependency-supply-chain:
     name: Dependency supply-chain audit
