@@ -147,6 +147,12 @@ pub(crate) mod regex_boundaries;
 #[cfg(feature = "metrics")]
 #[allow(dead_code)]
 pub(crate) mod regex_ir;
+// br-asupersync-5z2scg.8.3.3.2: checked iterative lowering for atoms,
+// concatenation, and ordered alternation. Capture/repetition remain fail-closed
+// for R3.3.3; matcher execution, production wiring, and cutover remain absent.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_lowering;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
