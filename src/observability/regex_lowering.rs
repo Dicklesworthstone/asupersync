@@ -1,9 +1,10 @@
 //! Checked AST-to-Thompson-IR lowering for the candidate regex compiler.
 //!
-//! This private R3.3.2 surface consumes the pinned R3.2 character, fold, and
-//! boundary analysis. It lowers only structural atoms, concatenation, and
-//! ordered alternation. Capture and repetition nodes fail closed for R3.3.3.
-//! No incomplete state graph can escape as an executable [`Program`].
+//! This private R3.3 compiler surface consumes the pinned R3.2 character, fold,
+//! and boundary analysis. It lowers structural atoms, ordered alternation,
+//! capture boundaries, and bounded or consuming repetition. Nullable
+//! unbounded loops and capture-erasing zero repeats fail closed. No incomplete
+//! state graph can escape as an executable [`Program`].
 
 use core::fmt;
 
@@ -12,14 +13,17 @@ use super::regex_boundaries::{
     FoldBoundaryLimits, FoldOutput,
 };
 use super::regex_ir::{
-    ACCOUNTED_PROGRAM_BYTES, ClassId, CompileError, CompileErrorKind, CompileLimits, Instruction,
-    IrClass, Program, State, StateId,
+    ACCOUNTED_PROGRAM_BYTES, CaptureSlot, ClassId, CompileError, CompileErrorKind, CompileLimits,
+    Instruction, IrClass, Program, State, StateId,
 };
 use super::regex_semantics::{CanonicalClass, CanonicalRanges, ScalarRange, SemanticLimits};
-use super::regex_syntax::{AstNodeKind, Escape, LexerLimits, NodeId, ParserLimits, SourceSpan};
+use super::regex_syntax::{
+    AstNodeKind, Escape, ExpansionBound, Greediness, LexerLimits, NodeId, ParserLimits, Quantifier,
+    RepetitionRange, SourceSpan,
+};
 
 pub const LOWERING_ID: &str = "ASUP-REGEX-THOMPSON-LOWERING-V1";
-pub const LOWERING_SCHEMA_VERSION: u16 = 1;
+pub const LOWERING_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LowerErrorKind {
@@ -31,8 +35,9 @@ pub enum LowerErrorKind {
     MissingFragment,
     DuplicatePatch,
     UnresolvedPatch,
-    UnsupportedCapture,
-    UnsupportedRepetition,
+    NullableUnboundedRepetition,
+    CaptureErasedByZeroRepetition,
+    InvalidCaptureIndex,
 }
 
 impl LowerErrorKind {
@@ -46,8 +51,9 @@ impl LowerErrorKind {
             Self::MissingFragment => "RGX-LOWER-E004",
             Self::DuplicatePatch => "RGX-LOWER-E005",
             Self::UnresolvedPatch => "RGX-LOWER-E006",
-            Self::UnsupportedCapture => "RGX-LOWER-E007",
-            Self::UnsupportedRepetition => "RGX-LOWER-E008",
+            Self::NullableUnboundedRepetition => "RGX-LOWER-E009",
+            Self::CaptureErasedByZeroRepetition => "RGX-LOWER-E010",
+            Self::InvalidCaptureIndex => "RGX-LOWER-E011",
         }
     }
 }
@@ -125,8 +131,8 @@ impl std::error::Error for LowerError {}
 /// Parse, semantically normalize, and lower one pattern into a complete IR.
 ///
 /// The returned value has passed both the R3.2 analysis invariants and
-/// [`Program::checked`]. Capture and repetition syntax is deliberately rejected
-/// until R3.3.3 supplies its lowering rules.
+/// [`Program::checked`]. Repetition expansion is bounded before state cloning,
+/// and partial graphs never escape when a capture or repetition is rejected.
 pub fn lower(
     pattern: &str,
     lexer_limits: LexerLimits,
@@ -180,7 +186,7 @@ fn pattern_span(pattern: &str) -> SourceSpan {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PendingInstruction {
     Accept,
     Jump {
@@ -196,6 +202,10 @@ enum PendingInstruction {
     },
     Assert {
         kind: regex_boundaries::BoundaryKind,
+        target: Option<StateId>,
+    },
+    Save {
+        slot: CaptureSlot,
         target: Option<StateId>,
     },
 }
@@ -227,6 +237,8 @@ struct LoweringBuilder<'analysis> {
     folds_used: Vec<bool>,
     boundaries_used: Vec<bool>,
     total_class_ranges: usize,
+    capture_slots: usize,
+    repetition_expansion: u64,
 }
 
 impl<'analysis> LoweringBuilder<'analysis> {
@@ -241,6 +253,8 @@ impl<'analysis> LoweringBuilder<'analysis> {
             folds_used: vec![false; analysis.folds.len()],
             boundaries_used: vec![false; analysis.boundaries.len()],
             total_class_ranges: 0,
+            capture_slots: 0,
+            repetition_expansion: 0,
         }
     }
 
@@ -269,9 +283,18 @@ impl<'analysis> LoweringBuilder<'analysis> {
         };
         let accept = self.push_state(PendingInstruction::Accept, accept_span)?;
         self.patch(&root.outs, accept, root_span)?;
+        let (entry, accept) = self.prune_pending_unreachable(root.start, accept, root_span)?;
         let states = self.finish_states()?;
-        Program::checked(root.start, accept, states, self.classes, 0, 0, self.limits)
-            .map_err(|error| LowerError::compile(error, root_span))
+        Program::checked(
+            entry,
+            accept,
+            states,
+            self.classes,
+            self.capture_slots,
+            self.repetition_expansion,
+            self.limits,
+        )
+        .map_err(|error| LowerError::compile(error, root_span))
     }
 
     fn lower_node(
@@ -296,12 +319,16 @@ impl<'analysis> LoweringBuilder<'analysis> {
                 child: Some(child), ..
             } => self.take_fragment(child, span).map(Some),
             AstNodeKind::Flags { child: None, .. } => self.empty_fragment(span).map(Some),
-            AstNodeKind::Capture { .. } => {
-                Err(LowerError::new(LowerErrorKind::UnsupportedCapture, span))
+            AstNodeKind::Capture { index, child, .. } => {
+                self.capture_fragment(index, child, span).map(Some)
             }
-            AstNodeKind::Repetition { .. } => {
-                Err(LowerError::new(LowerErrorKind::UnsupportedRepetition, span))
-            }
+            AstNodeKind::Repetition {
+                child,
+                quantifier,
+                greediness,
+            } => self
+                .repetition_fragment(child, quantifier, greediness, span)
+                .map(Some),
             AstNodeKind::Class { .. } => self.semantic_class_fragment(span).map(Some),
             AstNodeKind::ClassLiteral(_)
             | AstNodeKind::ClassEscape(_)
@@ -413,6 +440,318 @@ impl<'analysis> LoweringBuilder<'analysis> {
         })
     }
 
+    fn capture_fragment(
+        &mut self,
+        index: usize,
+        child: NodeId,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        let Some(slot_start) = index.checked_sub(1).and_then(|value| value.checked_mul(2)) else {
+            return Err(LowerError::new(LowerErrorKind::InvalidCaptureIndex, span));
+        };
+        let Some(slot_end) = slot_start.checked_add(1) else {
+            return Err(LowerError::new(LowerErrorKind::InvalidCaptureIndex, span));
+        };
+        let Some(required_slots) = slot_end.checked_add(1) else {
+            return Err(LowerError::new(LowerErrorKind::InvalidCaptureIndex, span));
+        };
+        if required_slots > self.limits.max_capture_slots {
+            return Err(LowerError::compile_limit(
+                CompileErrorKind::CaptureSlotLimit,
+                span,
+                required_slots,
+                self.limits.max_capture_slots,
+            ));
+        }
+
+        let child = self.take_fragment(child, span)?;
+        let end_span = zero_width_span(span.byte_end, span.scalar_end);
+        let end = self.push_state(
+            PendingInstruction::Save {
+                slot: CaptureSlot::new(slot_end),
+                target: None,
+            },
+            end_span,
+        )?;
+        self.patch(&child.outs, end, span)?;
+        let start_span = zero_width_span(span.byte_start, span.scalar_start);
+        let start = self.push_state(
+            PendingInstruction::Save {
+                slot: CaptureSlot::new(slot_start),
+                target: Some(child.start),
+            },
+            start_span,
+        )?;
+        self.capture_slots = self.capture_slots.max(required_slots);
+        Ok(Fragment {
+            start,
+            outs: vec![Patch { state: end }],
+        })
+    }
+
+    fn repetition_fragment(
+        &mut self,
+        child: NodeId,
+        quantifier: Quantifier,
+        greediness: Greediness,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        let child_is_nullable = self
+            .analysis
+            .character_semantics
+            .ast
+            .node(child)
+            .is_some_and(|node| matches!(node.expansion.minimum, ExpansionBound::Finite(0)));
+        let child = self.take_fragment(child, span)?;
+
+        match quantifier {
+            Quantifier::ZeroOrOne => self.optional_fragment(child, greediness, span),
+            Quantifier::ZeroOrMore => {
+                if child_is_nullable {
+                    return Err(LowerError::new(
+                        LowerErrorKind::NullableUnboundedRepetition,
+                        span,
+                    ));
+                }
+                self.zero_or_more_fragment(child, greediness, span)
+            }
+            Quantifier::OneOrMore => {
+                if child_is_nullable {
+                    return Err(LowerError::new(
+                        LowerErrorKind::NullableUnboundedRepetition,
+                        span,
+                    ));
+                }
+                self.one_or_more_fragment(child, greediness, span)
+            }
+            Quantifier::Counted(RepetitionRange::Exact(count)) => {
+                self.exact_repetition_fragment(child, count, span)
+            }
+            Quantifier::Counted(RepetitionRange::AtLeast(minimum)) => {
+                if child_is_nullable {
+                    return Err(LowerError::new(
+                        LowerErrorKind::NullableUnboundedRepetition,
+                        span,
+                    ));
+                }
+                self.at_least_fragment(child, minimum, greediness, span)
+            }
+            Quantifier::Counted(RepetitionRange::Bounded { min, max }) => {
+                self.bounded_repetition_fragment(child, min, max, greediness, span)
+            }
+        }
+    }
+
+    fn optional_fragment(
+        &mut self,
+        child: Fragment,
+        greediness: Greediness,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        let empty = self.empty_fragment(span)?;
+        self.ordered_choice(child, empty, greediness, span)
+    }
+
+    fn zero_or_more_fragment(
+        &mut self,
+        child: Fragment,
+        greediness: Greediness,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        let exit = self.empty_fragment(span)?;
+        let (preferred, fallback) = match greediness {
+            Greediness::Greedy => (child.start, exit.start),
+            Greediness::Lazy => (exit.start, child.start),
+        };
+        let split = self.push_state(
+            PendingInstruction::Split {
+                preferred,
+                fallback,
+            },
+            span,
+        )?;
+        self.patch(&child.outs, split, span)?;
+        Ok(Fragment {
+            start: split,
+            outs: exit.outs,
+        })
+    }
+
+    fn one_or_more_fragment(
+        &mut self,
+        child: Fragment,
+        greediness: Greediness,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        let exit = self.empty_fragment(span)?;
+        let (preferred, fallback) = match greediness {
+            Greediness::Greedy => (child.start, exit.start),
+            Greediness::Lazy => (exit.start, child.start),
+        };
+        let split = self.push_state(
+            PendingInstruction::Split {
+                preferred,
+                fallback,
+            },
+            span,
+        )?;
+        self.patch(&child.outs, split, span)?;
+        Ok(Fragment {
+            start: child.start,
+            outs: exit.outs,
+        })
+    }
+
+    fn exact_repetition_fragment(
+        &mut self,
+        child: Fragment,
+        count: u32,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        if count == 0 {
+            if self.fragment_contains_save(&child)? {
+                return Err(LowerError::new(
+                    LowerErrorKind::CaptureErasedByZeroRepetition,
+                    span,
+                ));
+            }
+            return self.empty_fragment(span);
+        }
+
+        let additional = usize::try_from(count - 1).map_err(|_| {
+            LowerError::compile_limit(
+                CompileErrorKind::RepetitionLimit,
+                span,
+                u64::MAX,
+                self.limits.max_repetition_expansion,
+            )
+        })?;
+        let copies = self.clone_copies(&child, additional, span)?;
+        let mut fragments = Vec::with_capacity(copies.len().saturating_add(1));
+        fragments.push(Fragment {
+            start: child.start,
+            outs: child.outs.clone(),
+        });
+        fragments.extend(copies);
+        self.concat_fragments(fragments, span)
+    }
+
+    fn at_least_fragment(
+        &mut self,
+        child: Fragment,
+        minimum: u32,
+        greediness: Greediness,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        if minimum == 0 {
+            return self.zero_or_more_fragment(child, greediness, span);
+        }
+
+        let additional = usize::try_from(minimum - 1).map_err(|_| {
+            LowerError::compile_limit(
+                CompileErrorKind::RepetitionLimit,
+                span,
+                u64::MAX,
+                self.limits.max_repetition_expansion,
+            )
+        })?;
+        let copies = self.clone_copies(&child, additional, span)?;
+        let mut fragments = Vec::with_capacity(copies.len().saturating_add(1));
+        fragments.push(Fragment {
+            start: child.start,
+            outs: child.outs.clone(),
+        });
+        fragments.extend(copies);
+        let last = fragments
+            .pop()
+            .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+        let tail = self.one_or_more_fragment(last, greediness, span)?;
+        fragments.push(tail);
+        self.concat_fragments(fragments, span)
+    }
+
+    fn bounded_repetition_fragment(
+        &mut self,
+        child: Fragment,
+        min: u32,
+        max: u32,
+        greediness: Greediness,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        if max == 0 {
+            if self.fragment_contains_save(&child)? {
+                return Err(LowerError::new(
+                    LowerErrorKind::CaptureErasedByZeroRepetition,
+                    span,
+                ));
+            }
+            return self.empty_fragment(span);
+        }
+
+        let additional = usize::try_from(max - 1).map_err(|_| {
+            LowerError::compile_limit(
+                CompileErrorKind::RepetitionLimit,
+                span,
+                u64::MAX,
+                self.limits.max_repetition_expansion,
+            )
+        })?;
+        let cloned = self.clone_copies(&child, additional, span)?;
+        let mut copies = Vec::with_capacity(cloned.len().saturating_add(1));
+        copies.push(Fragment {
+            start: child.start,
+            outs: child.outs.clone(),
+        });
+        copies.extend(cloned);
+
+        let minimum = usize::try_from(min)
+            .map_err(|_| LowerError::new(LowerErrorKind::InvalidAnalysis, span))?;
+        let mut optional_tail = self.empty_fragment(span)?;
+        while copies.len() > minimum {
+            let copy = copies
+                .pop()
+                .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+            self.patch(&copy.outs, optional_tail.start, span)?;
+            let (preferred, fallback) = match greediness {
+                Greediness::Greedy => (copy.start, optional_tail.start),
+                Greediness::Lazy => (optional_tail.start, copy.start),
+            };
+            let split = self.push_state(
+                PendingInstruction::Split {
+                    preferred,
+                    fallback,
+                },
+                span,
+            )?;
+            optional_tail.start = split;
+        }
+        copies.push(optional_tail);
+        self.concat_fragments(copies, span)
+    }
+
+    fn ordered_choice(
+        &mut self,
+        child: Fragment,
+        empty: Fragment,
+        greediness: Greediness,
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        let (preferred, fallback) = match greediness {
+            Greediness::Greedy => (child.start, empty.start),
+            Greediness::Lazy => (empty.start, child.start),
+        };
+        let split = self.push_state(
+            PendingInstruction::Split {
+                preferred,
+                fallback,
+            },
+            span,
+        )?;
+        let mut outs = child.outs;
+        outs.extend(empty.outs);
+        Ok(Fragment { start: split, outs })
+    }
+
     fn concat_children(
         &mut self,
         children: &[NodeId],
@@ -466,6 +805,166 @@ impl<'analysis> LoweringBuilder<'analysis> {
             combined = Fragment { start: split, outs };
         }
         Ok(combined)
+    }
+
+    fn clone_copies(
+        &mut self,
+        fragment: &Fragment,
+        count: usize,
+        span: SourceSpan,
+    ) -> Result<Vec<Fragment>, LowerError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let state_ids = self.fragment_state_ids(fragment, span)?;
+        let added = state_ids.len().checked_mul(count).ok_or_else(|| {
+            LowerError::compile_limit(
+                CompileErrorKind::RepetitionLimit,
+                span,
+                u64::MAX,
+                self.limits.max_repetition_expansion,
+            )
+        })?;
+        let added_u64 = u64::try_from(added).map_err(|_| {
+            LowerError::compile_limit(
+                CompileErrorKind::RepetitionLimit,
+                span,
+                u64::MAX,
+                self.limits.max_repetition_expansion,
+            )
+        })?;
+        let next_expansion = self
+            .repetition_expansion
+            .checked_add(added_u64)
+            .ok_or_else(|| {
+                LowerError::compile_limit(
+                    CompileErrorKind::RepetitionLimit,
+                    span,
+                    u64::MAX,
+                    self.limits.max_repetition_expansion,
+                )
+            })?;
+        if next_expansion > self.limits.max_repetition_expansion {
+            return Err(LowerError::compile_limit(
+                CompileErrorKind::RepetitionLimit,
+                span,
+                next_expansion,
+                self.limits.max_repetition_expansion,
+            ));
+        }
+        let next_states = self.states.len().checked_add(added).ok_or_else(|| {
+            LowerError::compile_limit(
+                CompileErrorKind::StateLimit,
+                span,
+                u64::MAX,
+                self.limits.max_states,
+            )
+        })?;
+        if next_states > self.limits.max_states {
+            return Err(LowerError::compile_limit(
+                CompileErrorKind::StateLimit,
+                span,
+                next_states,
+                self.limits.max_states,
+            ));
+        }
+
+        self.repetition_expansion = next_expansion;
+        let mut copies = Vec::with_capacity(count);
+        for _ in 0..count {
+            copies.push(self.clone_fragment(fragment, &state_ids, span)?);
+        }
+        Ok(copies)
+    }
+
+    fn clone_fragment(
+        &mut self,
+        fragment: &Fragment,
+        state_ids: &[StateId],
+        span: SourceSpan,
+    ) -> Result<Fragment, LowerError> {
+        let original_count = self.states.len();
+        let mut remap = vec![None; original_count];
+        for state_id in state_ids {
+            let source = self
+                .states
+                .get(state_id.index())
+                .map(|state| state.source)
+                .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+            let clone_id = self.push_state(PendingInstruction::Accept, source)?;
+            remap[state_id.index()] = Some(clone_id);
+        }
+
+        for state_id in state_ids {
+            let instruction = self
+                .states
+                .get(state_id.index())
+                .map(|state| state.instruction.clone())
+                .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+            let translated = translate_pending(instruction, &remap, span)?;
+            let clone_id = remap[state_id.index()]
+                .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+            let clone_state = self
+                .states
+                .get_mut(clone_id.index())
+                .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+            clone_state.instruction = translated;
+        }
+
+        let start = remap
+            .get(fragment.start.index())
+            .and_then(|entry| *entry)
+            .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+        let mut outs = Vec::with_capacity(fragment.outs.len());
+        for patch in &fragment.outs {
+            let state = remap
+                .get(patch.state.index())
+                .and_then(|entry| *entry)
+                .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+            outs.push(Patch { state });
+        }
+        Ok(Fragment { start, outs })
+    }
+
+    fn fragment_state_ids(
+        &self,
+        fragment: &Fragment,
+        span: SourceSpan,
+    ) -> Result<Vec<StateId>, LowerError> {
+        let mut visited = vec![false; self.states.len()];
+        let mut pending = vec![fragment.start];
+        let mut state_ids = Vec::new();
+        while let Some(state_id) = pending.pop() {
+            let Some(visited_state) = visited.get_mut(state_id.index()) else {
+                return Err(LowerError::new(LowerErrorKind::MissingFragment, span));
+            };
+            if *visited_state {
+                continue;
+            }
+            *visited_state = true;
+            let state = self
+                .states
+                .get(state_id.index())
+                .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))?;
+            state_ids.push(state_id);
+            pending.extend(pending_targets(&state.instruction));
+        }
+        state_ids.sort_unstable_by_key(|state_id| state_id.index());
+        Ok(state_ids)
+    }
+
+    fn fragment_contains_save(&self, fragment: &Fragment) -> Result<bool, LowerError> {
+        let state_ids = self.fragment_state_ids(
+            fragment,
+            self.states
+                .get(fragment.start.index())
+                .map_or_else(|| pattern_span(""), |state| state.source),
+        )?;
+        Ok(state_ids.iter().any(|state_id| {
+            self.states
+                .get(state_id.index())
+                .is_some_and(|state| matches!(state.instruction, PendingInstruction::Save { .. }))
+        }))
     }
 
     fn take_fragment(&mut self, id: NodeId, span: SourceSpan) -> Result<Fragment, LowerError> {
@@ -569,7 +1068,8 @@ impl<'analysis> LoweringBuilder<'analysis> {
             let slot = match &mut state.instruction {
                 PendingInstruction::Jump { target }
                 | PendingInstruction::Consume { target, .. }
-                | PendingInstruction::Assert { target, .. } => target,
+                | PendingInstruction::Assert { target, .. }
+                | PendingInstruction::Save { target, .. } => target,
                 PendingInstruction::Accept | PendingInstruction::Split { .. } => {
                     return Err(LowerError::new(LowerErrorKind::DuplicatePatch, span));
                 }
@@ -640,6 +1140,101 @@ impl<'analysis> LoweringBuilder<'analysis> {
         Ok(())
     }
 
+    fn prune_pending_unreachable(
+        &mut self,
+        entry: StateId,
+        accept: StateId,
+        span: SourceSpan,
+    ) -> Result<(StateId, StateId), LowerError> {
+        let mut reachable = vec![false; self.states.len()];
+        let mut pending = vec![entry];
+        while let Some(state_id) = pending.pop() {
+            let Some(visited) = reachable.get_mut(state_id.index()) else {
+                return Err(LowerError::new(LowerErrorKind::InvalidAnalysis, span));
+            };
+            if *visited {
+                continue;
+            }
+            *visited = true;
+            let state = self
+                .states
+                .get(state_id.index())
+                .ok_or_else(|| LowerError::new(LowerErrorKind::InvalidAnalysis, span))?;
+            pending.extend(pending_targets(&state.instruction));
+        }
+        if !reachable.get(accept.index()).copied().unwrap_or(false) {
+            return Err(LowerError::new(LowerErrorKind::InvalidAnalysis, span));
+        }
+
+        let mut state_remap = vec![None; self.states.len()];
+        let mut next_state = 0;
+        for (index, is_reachable) in reachable.iter().copied().enumerate() {
+            if is_reachable {
+                state_remap[index] = Some(StateId::new(next_state));
+                next_state += 1;
+            }
+        }
+
+        let mut referenced_classes = vec![false; self.classes.len()];
+        for (index, is_reachable) in reachable.iter().copied().enumerate() {
+            if !is_reachable {
+                continue;
+            }
+            if let PendingInstruction::Consume { class, .. } = &self.states[index].instruction {
+                let Some(referenced) = referenced_classes.get_mut(class.index()) else {
+                    return Err(LowerError::new(LowerErrorKind::InvalidAnalysis, span));
+                };
+                *referenced = true;
+            }
+        }
+        let mut class_remap = vec![None; self.classes.len()];
+        let mut retained_classes = Vec::new();
+        for (index, referenced) in referenced_classes.into_iter().enumerate() {
+            if referenced {
+                class_remap[index] = Some(ClassId::new(retained_classes.len()));
+                retained_classes.push(self.classes[index].clone());
+            }
+        }
+
+        let states = core::mem::take(&mut self.states);
+        let mut retained_states = Vec::with_capacity(next_state);
+        for (index, state) in states.into_iter().enumerate() {
+            if !reachable[index] {
+                continue;
+            }
+            let mut instruction = translate_pending(state.instruction, &state_remap, span)?;
+            if let PendingInstruction::Consume { class, .. } = &mut instruction {
+                *class = class_remap
+                    .get(class.index())
+                    .and_then(|mapped| *mapped)
+                    .ok_or_else(|| LowerError::new(LowerErrorKind::InvalidAnalysis, span))?;
+            }
+            retained_states.push(PendingState {
+                instruction,
+                source: state.source,
+            });
+        }
+        self.states = retained_states;
+        self.classes = retained_classes;
+        self.total_class_ranges = self
+            .classes
+            .iter()
+            .try_fold(0_usize, |total, class| {
+                total.checked_add(class.ranges.range_count())
+            })
+            .ok_or_else(|| LowerError::new(LowerErrorKind::InvalidAnalysis, span))?;
+
+        let entry = state_remap
+            .get(entry.index())
+            .and_then(|mapped| *mapped)
+            .ok_or_else(|| LowerError::new(LowerErrorKind::InvalidAnalysis, span))?;
+        let accept = state_remap
+            .get(accept.index())
+            .and_then(|mapped| *mapped)
+            .ok_or_else(|| LowerError::new(LowerErrorKind::InvalidAnalysis, span))?;
+        Ok((entry, accept))
+    }
+
     fn finish_states(&mut self) -> Result<Vec<State>, LowerError> {
         core::mem::take(&mut self.states)
             .into_iter()
@@ -670,6 +1265,12 @@ impl<'analysis> LoweringBuilder<'analysis> {
                             LowerError::new(LowerErrorKind::UnresolvedPatch, state.source)
                         })?,
                     },
+                    PendingInstruction::Save { slot, target } => Instruction::Save {
+                        slot,
+                        target: target.ok_or_else(|| {
+                            LowerError::new(LowerErrorKind::UnresolvedPatch, state.source)
+                        })?,
+                    },
                 };
                 Ok(State {
                     instruction,
@@ -677,6 +1278,83 @@ impl<'analysis> LoweringBuilder<'analysis> {
                 })
             })
             .collect()
+    }
+}
+
+fn zero_width_span(byte: usize, scalar: usize) -> SourceSpan {
+    SourceSpan {
+        byte_start: byte,
+        byte_end: byte,
+        scalar_start: scalar,
+        scalar_end: scalar,
+    }
+}
+
+fn pending_targets(instruction: &PendingInstruction) -> Vec<StateId> {
+    match instruction {
+        PendingInstruction::Accept => Vec::new(),
+        PendingInstruction::Jump {
+            target: Some(target),
+        }
+        | PendingInstruction::Consume {
+            target: Some(target),
+            ..
+        }
+        | PendingInstruction::Assert {
+            target: Some(target),
+            ..
+        }
+        | PendingInstruction::Save {
+            target: Some(target),
+            ..
+        } => vec![*target],
+        PendingInstruction::Jump { target: None }
+        | PendingInstruction::Consume { target: None, .. }
+        | PendingInstruction::Assert { target: None, .. }
+        | PendingInstruction::Save { target: None, .. } => Vec::new(),
+        PendingInstruction::Split {
+            preferred,
+            fallback,
+        } => vec![*preferred, *fallback],
+    }
+}
+
+fn translate_pending(
+    instruction: PendingInstruction,
+    remap: &[Option<StateId>],
+    span: SourceSpan,
+) -> Result<PendingInstruction, LowerError> {
+    let map = |target: StateId| {
+        remap
+            .get(target.index())
+            .and_then(|entry| *entry)
+            .ok_or_else(|| LowerError::new(LowerErrorKind::MissingFragment, span))
+    };
+    let map_optional = |target: Option<StateId>| target.map(&map).transpose();
+    match instruction {
+        PendingInstruction::Accept => Ok(PendingInstruction::Accept),
+        PendingInstruction::Jump { target } => Ok(PendingInstruction::Jump {
+            target: map_optional(target)?,
+        }),
+        PendingInstruction::Split {
+            preferred,
+            fallback,
+        } => Ok(PendingInstruction::Split {
+            preferred: map(preferred)?,
+            fallback: map(fallback)?,
+        }),
+        PendingInstruction::Consume { class, target } => Ok(PendingInstruction::Consume {
+            class,
+            target: map_optional(target)?,
+        }),
+        PendingInstruction::Assert { kind, target } => Ok(PendingInstruction::Assert {
+            kind,
+            target: map_optional(target)?,
+        }),
+        PendingInstruction::Save { slot, target } => Ok(PendingInstruction::Save {
+            slot,
+            target: map_optional(target)?,
+        }),
     }
 }
 
@@ -856,13 +1534,99 @@ mod tests {
     }
 
     #[test]
-    fn r3_3_3_nodes_fail_closed_with_distinct_codes() {
-        let capture = lower_default("(a)").expect_err("captures belong to R3.3.3");
-        assert_eq!(capture.kind, LowerErrorKind::UnsupportedCapture);
-        assert_eq!(capture.code(), "RGX-LOWER-E007");
+    fn captures_use_numbered_slot_pairs_and_zero_width_group_boundaries() {
+        let program = lower_default("(a)(b)").expect("two captures");
+        assert_eq!(program.capture_slots, 4);
+        let mut saves = program
+            .states
+            .iter()
+            .filter_map(|state| match state.instruction {
+                Instruction::Save { slot, .. } => Some((slot.index(), state.source)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        saves.sort_unstable_by_key(|(slot, _)| *slot);
+        assert_eq!(
+            saves.iter().map(|(slot, _)| *slot).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_eq!(saves[0].1, zero_width_span(0, 0));
+        assert_eq!(saves[1].1, zero_width_span(3, 3));
+        assert_eq!(saves[2].1, zero_width_span(3, 3));
+        assert_eq!(saves[3].1, zero_width_span(6, 6));
+    }
 
-        let repetition = lower_default("a+").expect_err("repetition belongs to R3.3.3");
-        assert_eq!(repetition.kind, LowerErrorKind::UnsupportedRepetition);
-        assert_eq!(repetition.code(), "RGX-LOWER-E008");
+    #[test]
+    fn quantifier_families_are_bounded_and_preserve_greedy_split_priority() {
+        for pattern in ["a?", "a*", "a+", "a{0}", "a{3}", "a{2,}", "a{1,3}"] {
+            lower_default(pattern)
+                .unwrap_or_else(|error| panic!("{pattern} must lower: {error}"))
+                .validate(CompileLimits::default())
+                .unwrap_or_else(|error| panic!("{pattern} must validate: {error}"));
+        }
+
+        let zero = lower_default("a{0}").expect("zero count");
+        assert_eq!(zero.resources.classes, 0);
+        assert_eq!(zero.resources.states, 2);
+
+        let exact = lower_default("a{3}").expect("exact count");
+        assert_eq!(exact.repetition_expansion, 2);
+        assert_eq!(exact.resources.classes, 1);
+
+        let greedy = lower_default("a*").expect("greedy star");
+        let Instruction::Split { preferred, .. } = greedy.states[greedy.entry.index()].instruction
+        else {
+            panic!("greedy star entry must split");
+        };
+        assert!(matches!(
+            greedy.states[preferred.index()].instruction,
+            Instruction::Consume { .. }
+        ));
+
+        let lazy = lower_default("a*?").expect("lazy star");
+        let Instruction::Split { preferred, .. } = lazy.states[lazy.entry.index()].instruction
+        else {
+            panic!("lazy star entry must split");
+        };
+        assert!(matches!(
+            lazy.states[preferred.index()].instruction,
+            Instruction::Jump { .. }
+        ));
+    }
+
+    #[test]
+    fn scoped_flags_feed_r3_2_classes_and_hazards_fail_closed() {
+        let scoped = lower_default("(?i:a)(?-i:b)").expect("scoped flags");
+        assert!(scoped.classes[0].ranges.contains_scalar('A'));
+        assert!(scoped.classes[0].ranges.contains_scalar('a'));
+        assert!(scoped.classes[1].ranges.contains_scalar('b'));
+        assert!(!scoped.classes[1].ranges.contains_scalar('B'));
+
+        let nullable = lower_default("(?:a?)*").expect_err("nullable loop hazard");
+        assert_eq!(nullable.kind, LowerErrorKind::NullableUnboundedRepetition);
+        assert_eq!(nullable.code(), "RGX-LOWER-E009");
+
+        let erased = lower_default("(a){0}").expect_err("zero repeat erases a capture");
+        assert_eq!(erased.kind, LowerErrorKind::CaptureErasedByZeroRepetition);
+        assert_eq!(erased.code(), "RGX-LOWER-E010");
+
+        let repetition_limit = lower(
+            "(?:ab){4}",
+            LexerLimits::default(),
+            ParserLimits::default(),
+            SemanticLimits::default(),
+            FoldBoundaryLimits::default(),
+            CompileLimits {
+                max_repetition_expansion: 4,
+                ..CompileLimits::default()
+            },
+        )
+        .expect_err("three two-state copies exceed four emitted states");
+        assert_eq!(
+            repetition_limit.kind,
+            LowerErrorKind::Compile(CompileErrorKind::RepetitionLimit)
+        );
+        assert_eq!(repetition_limit.actual, Some(6));
+        assert_eq!(repetition_limit.limit, Some(4));
     }
 }

@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-priority-capture-lowering-contract-v1",
+  "bead_id": "asupersync-5z2scg.8.3.3.3",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "captured_at_utc": "2026-07-26T03:12:00Z",
+  "lowering_id": "ASUP-REGEX-THOMPSON-LOWERING-V1",
+  "lowering_schema_version": 2,
+  "ir_id": "ASUP-REGEX-THOMPSON-IR-V1",
+  "ir_schema_version": 1,
+  "decision": {
+    "disposition": "STAGED_PRIORITY_CAPTURE_LOWERING",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "r3_3_3_lowering_complete": true,
+    "compiler_must_retain_pinned_semantics": true,
+    "capture_numbering_preserved": true,
+    "greediness_priority_preserved": true,
+    "scoped_flags_preserved": true,
+    "nullable_unbounded_loops_fail_closed": true,
+    "matcher_execution_authorized": false,
+    "production_wiring_authorized": false,
+    "persistence_authorized": false,
+    "cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "on_missing_or_drifted_evidence": "KEEP_INCUMBENT_DEFER"
+  },
+  "authority": {
+    "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
+    "semantic_terminal_sha256": "887dd0b97c6794ef7481090a8c1677830093cfdce440ebdb720c3c337b260d23",
+    "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
+    "ir_schema_source_path": "src/observability/regex_ir.rs",
+    "ir_schema_source_sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+    "predecessor_receipt_path": "artifacts/regex_ir_lowering_contract_v1.json",
+    "predecessor_source_sha256": "fc8c41c2a7da18e0881c1e51f5c620953e449c4f2eccb095b78bd37eba73e1d0",
+    "retained_backend": "regex-syntax@0.8.11",
+    "unicode_version": "16.0.0",
+    "on_authority_drift": "KEEP_INCUMBENT_DEFER"
+  },
+  "sources": [
+    {
+      "path": "src/observability/regex_lowering.rs",
+      "sha256": "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54",
+      "bytes": 56882,
+      "role": "bounded priority, capture, repetition and scoped-flag lowering"
+    },
+    {
+      "path": "src/observability/regex_ir.rs",
+      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+      "bytes": 45049,
+      "role": "frozen R3.3.1 Save, Split and checked-program authority"
+    },
+    {
+      "path": "src/observability/regex_syntax.rs",
+      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+      "bytes": 112380,
+      "role": "frozen capture numbering, quantifier, greediness, flag and span authority"
+    },
+    {
+      "path": "src/observability/regex_semantics.rs",
+      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "bytes": 41269,
+      "role": "frozen scoped character-class semantics authority"
+    },
+    {
+      "path": "src/observability/regex_boundaries.rs",
+      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "bytes": 49494,
+      "role": "frozen scoped fold and assertion authority"
+    }
+  ],
+  "quantifier_rows": [
+    {
+      "syntax": "?",
+      "shape": "ordered child-or-empty Split",
+      "compiler_copies": 0
+    },
+    {
+      "syntax": "*",
+      "shape": "ordered entry Split with consuming child back-edge",
+      "compiler_copies": 0
+    },
+    {
+      "syntax": "+",
+      "shape": "child entry with ordered consuming back-edge Split",
+      "compiler_copies": 0
+    },
+    {
+      "syntax": "{n}",
+      "shape": "n finite body instances with zero-count reachability pruning",
+      "compiler_copies": "n-1 for n greater than zero"
+    },
+    {
+      "syntax": "{m,}",
+      "shape": "m finite instances with the final instance reused as the consuming loop",
+      "compiler_copies": "m-1 for m greater than zero"
+    },
+    {
+      "syntax": "{m,n}",
+      "shape": "m mandatory instances followed by n-m ordered optional instances",
+      "compiler_copies": "n-1 for n greater than zero"
+    }
+  ],
+  "capture_contract": {
+    "numbering_authority": "R3_2_1_AST_OPEN_PARENTHESIS_ORDER",
+    "slot_mapping": "capture_index_n_maps_to_slots_2n_minus_2_and_2n_minus_1",
+    "start_source": "zero_width_at_group_byte_and_scalar_start",
+    "end_source": "zero_width_at_group_byte_and_scalar_end",
+    "repetition_policy": "all_compiler_copies_reuse_the_same_numbered_slot_pair",
+    "zero_repeat_policy": "capture_erasure_fails_closed_with_RGX_LOWER_E010",
+    "partial_capture_program_on_error": false
+  },
+  "priority_contract": {
+    "instruction": "Split",
+    "preferred_arm": "greedy_body_or_lazy_exit",
+    "fallback_arm": "greedy_exit_or_lazy_body",
+    "alternation_priority": "unchanged_source_left_to_right",
+    "swap_greed_flag": "resolved_by_R3_2_parser_before_lowering",
+    "scoped_flag_policy": "R3_2_classes_folds_and_boundaries_are_consumed_by_exact_source_span"
+  },
+  "hazard_contract": {
+    "nullable_measure": "AST_EXPANSION_MINIMUM_EQUALS_ZERO",
+    "unbounded_nullable_policy": "FAIL_CLOSED",
+    "unbounded_nullable_code": "RGX-LOWER-E009",
+    "capture_erasure_code": "RGX-LOWER-E010",
+    "invalid_capture_index_code": "RGX-LOWER-E011",
+    "finite_nullable_repeats": "SUPPORTED_WITH_BOUNDED_EXPANSION",
+    "partial_program_on_error": false
+  },
+  "resource_contract": {
+    "repetition_expansion_unit": "compiler_emitted_cloned_states",
+    "preflight": "checked_multiply_then_repetition_and_state_limits_before_allocation",
+    "classes_for_clones": "shared_canonical_class_ids",
+    "zero_count_cleanup": "reachability_prunes_dead_states_and_unreferenced_classes",
+    "finalization": "sole_accept_then_reindex_then_Program_checked",
+    "synchronous_resource_ownership": "no_task_obligation_permit_socket_file_lock_or_background_work"
+  },
+  "evidence": {
+    "unit_cases": [
+      "capture_slot_numbering_and_zero_width_spans",
+      "zero_one_many_bounded_and_unbounded_quantifiers",
+      "greedy_and_lazy_split_arm_order",
+      "scoped_case_and_swap_greed_flags",
+      "nullable_loop_capture_erasure_and_budget_failures"
+    ],
+    "independent_model": "prioritized_IR_interpreter_with_capture_slots",
+    "golden_capture_patterns": 5,
+    "exhaustive_patterns": 12,
+    "exhaustive_haystack_alphabet": "a,b,A",
+    "exhaustive_max_haystack_length": 4,
+    "property_cases": 256,
+    "property_oracle": "anchored_regex_1_13_1_incumbent_match_and_capture_spans",
+    "panic_containment": "all_malformed_or_over_budget_inputs_return_LowerError_without_Program",
+    "cancellation_shutdown_quiescence": "not_applicable_pure_synchronous_transformation"
+  },
+  "proof": {
+    "unit_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_lowering.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --lib observability::regex_lowering::tests -- --nocapture",
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/regex_ir_lowering_contract_v1.json --overlay-path artifacts/regex_priority_capture_lowering_contract_v1.json --overlay-path docs/regex_ir_lowering_contract.md --overlay-path docs/regex_priority_capture_lowering_contract.md --overlay-path src/observability/regex_lowering.rs --overlay-path tests/regex_ir_lowering_contract.rs --overlay-path tests/regex_priority_capture_lowering_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_ir_lowering_contract --test regex_priority_capture_lowering_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/regex_ir_lowering_contract_v1.json --overlay-path artifacts/regex_priority_capture_lowering_contract_v1.json --overlay-path docs/regex_ir_lowering_contract.md --overlay-path docs/regex_priority_capture_lowering_contract.md --overlay-path src/observability/regex_lowering.rs --overlay-path tests/regex_ir_lowering_contract.rs --overlay-path tests/regex_priority_capture_lowering_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_ir_lowering_contract --test regex_priority_capture_lowering_contract -- -D warnings",
+    "format_command": "rustfmt --edition 2024 --check src/observability/regex_lowering.rs tests/regex_ir_lowering_contract.rs tests/regex_priority_capture_lowering_contract.rs",
+    "local_cargo_fallback": false
+  },
+  "execution_receipts": [
+    {
+      "lane": "source_check",
+      "rch_job_id": 29947326818681042,
+      "worker_id": "vmi1153651",
+      "exit_code": 0,
+      "result": "PASS"
+    },
+    {
+      "lane": "priority_capture_contract",
+      "rch_job_id": 29947326818681058,
+      "worker_id": "hz2",
+      "exit_code": 0,
+      "tests_passed": 170,
+      "tests_failed": 0,
+      "result": "PASS"
+    },
+    {
+      "lane": "focused_clippy",
+      "rch_job_id": 29947326818681059,
+      "worker_id": "ovh-a",
+      "exit_code": 0,
+      "result": "PASS"
+    },
+    {
+      "lane": "focused_unit",
+      "rch_job_id": 29947326818681060,
+      "worker_id": "hz2",
+      "exit_code": 0,
+      "tests_passed": 8,
+      "tests_failed": 0,
+      "result": "PASS"
+    }
+  ],
+  "required_doc_markers": [
+    "ASUP-REGEX-THOMPSON-LOWERING-V1",
+    "RGX-LOWER-E009",
+    "RGX-LOWER-E010",
+    "RCH_REQUIRE_REMOTE=1",
+    "No local Cargo fallback is approved.",
+    "matcher or VM execution correctness",
+    "production wiring or dependency removal"
+  ],
+  "no_claims": [
+    "matcher or VM execution correctness",
+    "production wiring or dependency removal",
+    "persisted or deserializable IR format",
+    "broad workspace health",
+    "performance improvement",
+    "release readiness",
+    "live RCH fleet availability",
+    "local Cargo fallback approval"
+  ],
+  "on_failure": "KEEP_INCUMBENT_DEFER"
+}

@@ -319,6 +319,15 @@
       }
     ]
   },
+  "successor_handoff": {
+    "successor_bead_id": "asupersync-5z2scg.8.3.3.3",
+    "successor_artifact_path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
+    "successor_scope": "quantifier_greediness_capture_and_flag_scope_lowering",
+    "historical_source_sha256": "fc8c41c2a7da18e0881c1e51f5c620953e449c4f2eccb095b78bd37eba73e1d0",
+    "live_source_policy": "HISTORICAL_COMPLETION_PIN_SUCCESSOR_OWNS_LIVE_SOURCE",
+    "frozen_semantic_and_ir_authorities_remain_live_checked": true,
+    "r3_3_2_claim_rewritten": false
+  },
   "no_claims": [
     "no capture or repetition lowering",
     "no matcher or VM execution",

@@ -107,6 +107,16 @@ RCH_REQUIRE_REMOTE=1 rch exec \
 
 No local Cargo fallback is approved.
 
+## Successor handoff
+
+This receipt retains the original R3.3.2 source hash and deferred-node rows as
+historical completion evidence. R3.3.3 intentionally extends the same private
+lowerer source under
+`artifacts/regex_priority_capture_lowering_contract_v1.json`; that successor
+owns the live source pin after the extension. The frozen R3.2 semantic terminal
+and R3.3.1 IR source remain live-checked here. This handoff does not rewrite or
+broaden the original R3.3.2 claim.
+
 ## No-claim boundary
 
 This contract proves only private structural lowering for the named R3.3.2

@@ -194,7 +194,11 @@ fn identity_authority_and_source_pins_are_fail_closed() {
     assert_eq!(text(&value, "bead_id"), "asupersync-5z2scg.8.3.3.2");
     assert_eq!(text(&value, "capability_id"), "CAP-REGEX-PRIVACY");
     assert_eq!(text(&value, "lowering_id"), LOWERING_ID);
-    assert_eq!(LOWERING_SCHEMA_VERSION, 1);
+    assert_eq!(number(&value, "lowering_schema_version"), 1);
+    assert!(
+        LOWERING_SCHEMA_VERSION >= 1,
+        "the live implementation may advance only through an explicit successor handoff"
+    );
 
     let decision = Value::Object(object(&value, "decision").clone());
     assert_eq!(
@@ -224,12 +228,29 @@ fn identity_authority_and_source_pins_are_fail_closed() {
     );
     assert_eq!(sha256(TERMINAL_PATH), FROZEN_TERMINAL_SHA256);
     assert_eq!(sha256(IR_SOURCE_PATH), FROZEN_IR_SOURCE_SHA256);
-    assert_eq!(sha256(SOURCE_PATH), FROZEN_SOURCE_SHA256);
 
     for source in array(&value, "sources") {
-        assert_eq!(sha256(text(source, "path")), text(source, "sha256"));
+        if text(source, "path") == SOURCE_PATH {
+            assert_eq!(text(source, "sha256"), FROZEN_SOURCE_SHA256);
+        } else {
+            assert_eq!(sha256(text(source, "path")), text(source, "sha256"));
+        }
         assert!(number(source, "bytes") > 0);
     }
+
+    let handoff = Value::Object(object(&value, "successor_handoff").clone());
+    assert_eq!(
+        text(&handoff, "successor_bead_id"),
+        "asupersync-5z2scg.8.3.3.3"
+    );
+    assert_eq!(
+        text(&handoff, "successor_artifact_path"),
+        "artifacts/regex_priority_capture_lowering_contract_v1.json"
+    );
+    assert_eq!(
+        text(&handoff, "live_source_policy"),
+        "HISTORICAL_COMPLETION_PIN_SUCCESSOR_OWNS_LIVE_SOURCE"
+    );
 }
 
 #[test]
@@ -336,17 +357,19 @@ fn ordered_priority_empty_branches_and_deep_nesting_have_golden_shapes() {
 }
 
 #[test]
-fn malformed_unsupported_and_budget_paths_are_typed_and_non_executable() {
+fn malformed_historical_deferred_rows_and_budget_paths_are_typed() {
     let malformed = lower_default("(").expect_err("malformed syntax");
     assert!(matches!(malformed.kind, LowerErrorKind::Analysis(_)));
     assert_eq!(malformed.span.byte_start, 0);
 
-    let capture = lower_default("(a)").expect_err("capture deferred to R3.3.3");
-    assert_eq!(capture.kind, LowerErrorKind::UnsupportedCapture);
-    assert_eq!(capture.code(), "RGX-LOWER-E007");
-    let repetition = lower_default("a?").expect_err("repetition deferred to R3.3.3");
-    assert_eq!(repetition.kind, LowerErrorKind::UnsupportedRepetition);
-    assert_eq!(repetition.code(), "RGX-LOWER-E008");
+    let value = contract();
+    let deferred = array(&value, "deferred_ast_rows");
+    assert!(deferred.iter().any(|row| {
+        text(row, "ast") == "Capture" && text(row, "error_code") == "RGX-LOWER-E007"
+    }));
+    assert!(deferred.iter().any(|row| {
+        text(row, "ast") == "Repetition" && text(row, "error_code") == "RGX-LOWER-E008"
+    }));
 
     let budget = lower(
         "a|b",
