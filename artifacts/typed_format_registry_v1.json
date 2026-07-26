@@ -89,13 +89,13 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4273,
-      "serde_json::": 6099,
+      "rust_files": 4274,
+      "serde_json::": 6102,
       "rmp_serde::": 67,
-      "bincode::": 31,
-      "SerializationFormat::": 156,
-      "SerdeCodec": 25,
-      "SerializationFormat::Custom": 27
+      "bincode::": 32,
+      "SerializationFormat::": 160,
+      "SerdeCodec": 29,
+      "SerializationFormat::Custom": 28
     },
     "roots": [
       {
@@ -112,13 +112,13 @@
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1874,
-        "serde_json::": 3102,
+        "rust_files": 1875,
+        "serde_json::": 3105,
         "rmp_serde::": 6,
-        "bincode::": 10,
-        "SerializationFormat::": 19,
-        "SerdeCodec": 6,
-        "SerializationFormat::Custom": 5
+        "bincode::": 11,
+        "SerializationFormat::": 23,
+        "SerdeCodec": 10,
+        "SerializationFormat::Custom": 6
       },
       {
         "path": "examples",
@@ -1200,7 +1200,7 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "ac612a9058b6fb6440041ed9577f6005ea0507379ac872d6c9ab95f5d3d95064"
+      "sha256": "3e0050fb53b52ceb0ad139d77e1ce657b5a0170cf7f926c689e0d6c9eac97de0"
     },
     {
       "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",
