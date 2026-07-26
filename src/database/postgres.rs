@@ -2085,8 +2085,8 @@ impl ScramAuth {
         let salted_password = salted_password_result?;
 
         // Compute client key and stored key
-        let client_key = Self::hmac_sha256(&salted_password, b"Client Key");
-        let stored_key = Self::sha256(&client_key);
+        let client_key = Self::hmac_sha256(&salted_password[..], b"Client Key");
+        let stored_key = Self::sha256(&client_key[..]);
 
         // Build client-final-message-without-proof. The `c=` field is the
         // base64 encoding of GS2-header || cbind_data, where the GS2 header
@@ -2107,7 +2107,7 @@ impl ScramAuth {
         );
 
         // Compute client signature and proof
-        let client_signature = Self::hmac_sha256(&stored_key, auth_message.as_bytes());
+        let client_signature = Self::hmac_sha256(&stored_key[..], auth_message.as_bytes());
         let client_proof: zeroize::Zeroizing<[u8; SCRAM_SHA256_LEN]> =
             zeroize::Zeroizing::new(std::array::from_fn(|index| {
                 client_key[index] ^ client_signature[index]
@@ -2119,9 +2119,9 @@ impl ScramAuth {
 
         // Derive the verifier while the single salted-password result is live.
         // Server-final then performs only bounded decoding and comparison.
-        let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
+        let server_key = Self::hmac_sha256(&salted_password[..], b"Server Key");
         self.expected_server_signature =
-            Some(Self::hmac_sha256(&server_key, auth_message.as_bytes()));
+            Some(Self::hmac_sha256(&server_key[..], auth_message.as_bytes()));
 
         // Build client-final-message
         let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
@@ -2193,7 +2193,7 @@ impl ScramAuth {
             )));
         }
 
-        if !scram_constant_time_eq_expected_len(&expected_sig, &server_sig) {
+        if !scram_constant_time_eq_expected_len(&expected_sig[..], &server_sig) {
             return Err(PgError::AuthenticationFailed(
                 "server signature mismatch".to_string(),
             ));
@@ -2237,7 +2237,7 @@ impl ScramAuth {
                 }
             }
 
-            u = keyed.digest(&u);
+            u = keyed.digest(&u[..]);
             for (accumulator, value) in result.iter_mut().zip(u.iter()) {
                 *accumulator ^= value;
             }
@@ -7447,8 +7447,11 @@ mod typed_query_parameter_audit_tests {
         let i16_val = 42i16;
         let i32_val = 42i32;
         let i64_val = 42i64;
-        let f32_val = 3.14f32;
-        let f64_val = 3.14f64;
+        // Arbitrary non-integral values: only the STATIC TYPE selects the
+        // parameter OID here, never the value. Deliberately not 3.14, which
+        // clippy reads as an approximation of PI (`approx_constant`).
+        let f32_val = 2.5f32;
+        let f64_val = 2.5f64;
         let str_val = "hello";
         let string_val = "world".to_string();
 
@@ -9764,7 +9767,7 @@ mod tests {
         let oversized_body_len = body_limit + 1;
         let declared_len = i32::try_from(oversized_body_len + 4).expect("test length fits i32");
 
-        peer.write_all(&[b'R']).expect("write message type");
+        peer.write_all(b"R").expect("write message type");
         peer.write_all(&declared_len.to_be_bytes())
             .expect("write declared length");
         peer.shutdown(Shutdown::Write).expect("shutdown write half");
