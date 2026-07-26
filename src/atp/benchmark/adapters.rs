@@ -324,16 +324,12 @@ fn parse_version_numbers(version_str: &str) -> (Option<u32>, Option<u32>, Option
     let mut parts = version_str
         .split(|c: char| !c.is_ascii_digit() && c != '.')
         .filter(|s| !s.is_empty())
-        .filter_map(|s| {
-            // Take only the part that looks like version numbers
-            if s.chars().any(|c| c.is_ascii_digit()) && s.chars().any(|c| c == '.') {
-                Some(s)
-            } else if s.chars().all(|c| c.is_ascii_digit()) {
-                Some(s)
-            } else {
-                None
-            }
-        });
+        // Keep only the parts that carry a version number. The split above
+        // already admits nothing but digits and '.', so "has a digit and a dot"
+        // OR "is all digits" collapses exactly to "contains a digit" -- the two
+        // arms of the old `filter_map` both returned the input unchanged, and
+        // the only thing the `else` dropped was a run of bare dots.
+        .filter(|s| s.chars().any(|c| c.is_ascii_digit()));
 
     if let Some(version_part) = parts.next() {
         let nums: Vec<u32> = version_part
@@ -856,8 +852,15 @@ impl BaselineAdapter for CurlAdapter {
             if line.contains("curl") {
                 let version = ToolVersion::new("curl", line);
 
-                // Check for minimum curl version (7.50+ for HTTP/3)
-                let min_major = if self.enable_http3 { 7 } else { 7 };
+                // Minimum curl version. Both thresholds live in the curl 7.x
+                // series, so only the minor component actually varies; the
+                // major was previously written as `if http3 { 7 } else { 7 }`.
+                //
+                // NOTE: the comment here used to say "7.50+ for HTTP/3" while
+                // the code requires 7.66. Left at 7.66 rather than silently
+                // relaxing a version gate to match a comment -- if 7.50 is the
+                // intended floor, that is a deliberate behavior change.
+                let min_major = 7;
                 let min_minor = if self.enable_http3 { 66 } else { 0 };
 
                 if version.meets_minimum(min_major, min_minor) {
