@@ -74,7 +74,7 @@ fi
 
 # Format check
 run_check "Format check" \
-    "rch exec -- cargo fmt --check"
+    "rch exec -- env CARGO_TARGET_DIR=\"\${TMPDIR:-/tmp}/rch_target_atp_fmt\" cargo fmt --check"
 
 echo ""
 echo "🎯 ATP Compilation Summary:"
