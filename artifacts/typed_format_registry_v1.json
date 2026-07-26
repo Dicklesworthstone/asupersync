@@ -36,6 +36,7 @@
   "allowed_evidence_states": [
     "BASELINE_EXISTING",
     "CURRENT_CORPUS_ONLY",
+    "HISTORICAL_CORPUS_VERIFIED",
     "UNKNOWN_BLOCKING"
   ],
   "allowed_dependency_dispositions": [
@@ -88,11 +89,11 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4267,
-      "serde_json::": 6072,
+      "rust_files": 4273,
+      "serde_json::": 6128,
       "rmp_serde::": 67,
       "bincode::": 31,
-      "SerializationFormat::": 153,
+      "SerializationFormat::": 156,
       "SerdeCodec": 25,
       "SerializationFormat::Custom": 27
     },
@@ -101,28 +102,28 @@
         "path": "src",
         "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
         "rust_files": 1441,
-        "serde_json::": 2428,
+        "serde_json::": 2457,
         "rmp_serde::": 48,
         "bincode::": 21,
-        "SerializationFormat::": 81,
+        "SerializationFormat::": 82,
         "SerdeCodec": 9,
         "SerializationFormat::Custom": 17
       },
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1870,
-        "serde_json::": 3075,
+        "rust_files": 1874,
+        "serde_json::": 3102,
         "rmp_serde::": 6,
         "bincode::": 10,
-        "SerializationFormat::": 17,
+        "SerializationFormat::": 19,
         "SerdeCodec": 6,
         "SerializationFormat::Custom": 5
       },
       {
         "path": "examples",
         "classification": "EXAMPLE_EVIDENCE; no production compatibility claim",
-        "rust_files": 20,
+        "rust_files": 21,
         "serde_json::": 11,
         "rmp_serde::": 0,
         "bincode::": 0,
@@ -133,7 +134,7 @@
       {
         "path": "benches",
         "classification": "BENCHMARK_EVIDENCE; no production compatibility claim",
-        "rust_files": 45,
+        "rust_files": 46,
         "serde_json::": 27,
         "rmp_serde::": 0,
         "bincode::": 0,
@@ -542,12 +543,13 @@
       "resource_bounds": "Payload <= DEFAULT_SYMBOL_SIZE - 27 and representable as u32.",
       "version_policy": "Header version defaults to 1; type id and schema hash are derived from type_name<T> and version.",
       "error_contract": "Owned SerializationError, DeserializationError, and TypeMismatchError.",
-      "migration_policy": "No type rename map, schema-hash alias, or historical generic payload migration reader.",
+      "migration_policy": "Published v0.3.9 typed symbols used build-sensitive Rust TypeId hashing. Current readers admit those exact headers only through a trusted version-provenanced LegacyTypedSymbolIdentity tuple, decode the generic payload with its recorded backend, and rewrite a distinct current stable-header artifact while retaining the source rollback bytes. This is not a general type-rename or schema-alias registry.",
       "corpus_ids": [
-        "CORPUS-TYPED-SYMBOL-FUZZ"
+        "CORPUS-TYPED-SYMBOL-FUZZ",
+        "CORPUS-HISTORICAL-V039"
       ],
-      "state": "CURRENT_CORPUS_ONLY",
-      "no_claim_boundary": "Current fuzz seeds prove parser coverage inputs, not cross-release byte stability for arbitrary downstream types."
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "no_claim_boundary": "The pinned v0.3.9 MessagePack and Bincode records prove only the exact published-writer type and provenance tuple; they do not prove arbitrary third-party type identity portability across old Rust toolchains."
     },
     {
       "surface_id": "PERSIST-TRACE-FILE",
@@ -575,12 +577,12 @@
       "resource_bounds": "metadata <= 1 MiB; event <= 16 MiB; compressed or uncompressed chunk <= 64 MiB; event preallocation <= 10,000,000.",
       "version_policy": "Writers emit v3; ordinary, streaming, and integrity readers reject versions outside 1..=3 and admit supported v1/v2 containers; the raw-record compatibility inspector admits only uncompressed v1/v2/v3 framing; embedded replay metadata must equal schema version 1.",
       "error_contract": "TraceFileError owns I/O, magic, version, flags, length, compression, MessagePack, schema, checksum, and non-overwriting migration failures; ordinary compatibility reads reject unknown records without skipping.",
-      "migration_policy": "migrate_trace_file and trace migrate stream a legacy v1/v2 source into a distinct non-existing v3 destination, preserve event order/count and the untouched source rollback anchor, and fail if any event lacks a lossless mapping. recover_trace_prefix returns only a caller-bounded contiguous prefix with Complete, Partial, or LimitReached status.",
+      "migration_policy": "migrate_trace_file and trace migrate stream a legacy v1/v2 source into a sibling staging file, sync it, atomically publish a distinct non-existing v3 destination, preserve event order/count and the untouched source rollback anchor, and clean staging without exposing partial output on malformed input or write failure. recover_trace_prefix returns only a caller-bounded contiguous prefix with Complete, Partial, or LimitReached status.",
       "corpus_ids": [
-        "CORPUS-HISTORICAL-TRACE-MISSING"
+        "CORPUS-HISTORICAL-V039"
       ],
-      "state": "CURRENT_CORPUS_ONLY",
-      "no_claim_boundary": "The synthesized exact-v2-to-v3 no-mock E2E proves current-schema migration and deterministic replay only; it does not prove that any artifact emitted by an earlier release remains readable."
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "no_claim_boundary": "The published v0.3.9 v2 boundary and large trace fixtures prove current ordinary/streaming readers, migration, replay, and CLI paths for those exact artifacts only; they do not prove arbitrary earlier releases or performance."
     },
     {
       "surface_id": "PERSIST-REPLAY-BLOB",
@@ -607,12 +609,12 @@
       "resource_bounds": "Raw ReplayTrace::from_bytes has no module-level byte cap; file/streaming envelopes own their bounds.",
       "version_policy": "Exact schema version 1.",
       "error_contract": "Public encode returns rmp_serde::encode::Error; decode returns owned ReplayDecodeError with MessagePack and version cases.",
-      "migration_policy": "No prior-version committed blob or active lower-version migration reader.",
+      "migration_policy": "Replay schema 1 remains current. The committed published-v0.3.9 schema-1 blob is decoded directly by the current reader; malformed bytes and any other schema version fail closed.",
       "corpus_ids": [
-        "CORPUS-HISTORICAL-TRACE-MISSING"
+        "CORPUS-HISTORICAL-V039"
       ],
-      "state": "UNKNOWN_BLOCKING",
-      "no_claim_boundary": "Current round trips do not prove historical replay compatibility."
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "no_claim_boundary": "The published v0.3.9 blob proves compatibility only for replay schema 1 and its recorded semantics, not an unimplemented lower-version migration."
     },
     {
       "surface_id": "PERSIST-TRACE-STREAM",
@@ -634,12 +636,12 @@
       "resource_bounds": "Trace-file metadata/event/chunk bounds apply to StreamingReplayer; standalone evidence chunks have an explicit max_chunk_bytes bound and checkpoint allocation remains separately bounded by its decoder.",
       "version_policy": "StreamingReplayer inherits v1/v2 read and strict v3 checksum/version policy from TraceReader; replay schema metadata remains the semantic version owner.",
       "error_contract": "StreamingReplayError wraps strict TraceFileError, I/O, checkpoint, divergence, MessagePack, record-size, and backpressure failures.",
-      "migration_policy": "The A4 E2E streams synthesized exact-v2 bytes before and after non-overwriting v3 migration; no committed external historical streaming trace corpus exists.",
+      "migration_policy": "The A7 E2E streams the committed published-v0.3.9 v2 trace before and after atomic non-overwriting v3 migration; the large published-writer recipe separately exercises 4,096 events.",
       "corpus_ids": [
-        "CORPUS-HISTORICAL-TRACE-MISSING"
+        "CORPUS-HISTORICAL-V039"
       ],
-      "state": "CURRENT_CORPUS_ONLY",
-      "no_claim_boundary": "Checksum-bearing v3 fuzz construction and synthesized v2 streaming E2E are current evidence only, not external historical compatibility proof."
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "no_claim_boundary": "The pinned v0.3.9 v2 fixtures prove bounded streaming compatibility for those exact event sets, not every historical release or throughput."
     },
     {
       "surface_id": "PERSIST-CRASHPACK",
@@ -802,9 +804,11 @@
       "version_policy": "ASUPSNAP envelope version 1 is independent from state schema version 2; the state reader admits the closed range [1,2], and incremental targets must use current schema 2.",
       "error_contract": "SnapshotCodecError emits leading ASUP-E404 diagnostics for envelope, JSON, limit, validation, delta, and base/target hash failures.",
       "migration_policy": "Legacy raw schema-1 JSON is detected, validated under its original hash rule, and promoted only through explicit migrate_to_current. The no-mock E2E retains the source rollback bytes and installs a distinct target through cancel-safe atomic write.",
-      "corpus_ids": [],
-      "state": "CURRENT_CORPUS_ONLY",
-      "no_claim_boundary": "The current byte golden and generated legacy fixture do not prove an external historical corpus, trace/replay or distributed SNAP migration, performance, dependency removal, or production cutover."
+      "corpus_ids": [
+        "CORPUS-HISTORICAL-V039"
+      ],
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "no_claim_boundary": "The published-v0.3.9 schema-1 raw JSON fixture proves explicit promotion to the current schema and cancel-safe atomic installation only; it does not prove trace/report compatibility, performance, dependency removal, or production cutover."
     },
     {
       "surface_id": "PERSIST-LAB-SCENARIO-AND-EXPLORER-JSON",
@@ -855,13 +859,14 @@
       "resource_bounds": "Owned metadata/vector-clock lengths and arena index <= 1,000,000 and generation <= 10,000 are fail-closed before handle reconstruction.",
       "version_policy": "Exact SNAP_VERSION 2 and v2 HMAC domain.",
       "error_contract": "Owned SnapshotError covers magic, version, bounds, authentication, hashing, and Bincode codec failures.",
-      "migration_policy": "No prior-version reader or committed historical byte golden.",
+      "migration_policy": "SNAP version 2 is unchanged across the pinned v0.3.9 writer and current reader. The committed exact bytes are decoded and reserialized identically; unknown versions and truncation fail closed.",
       "corpus_ids": [
         "CORPUS-DISTRIBUTED-SNAPSHOT-SEEDS",
-        "CORPUS-DISTRIBUTED-SNAPSHOT-INSTA"
+        "CORPUS-DISTRIBUTED-SNAPSHOT-INSTA",
+        "CORPUS-HISTORICAL-V039"
       ],
-      "state": "CURRENT_CORPUS_ONLY",
-      "no_claim_boundary": "Current fuzz seeds and textual snapshots do not prove cross-release byte compatibility."
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "no_claim_boundary": "The empty published-v0.3.9 SNAP v2 fixture proves exact current decoding and reserialization for that boundary artifact only; it does not prove authenticated non-empty state or other releases."
     },
     {
       "surface_id": "TOOL-TRACE-CLI-CONSUMER",
@@ -882,12 +887,12 @@
       "resource_bounds": "Inherited from underlying reader plus CLI I/O policy.",
       "version_policy": "Inherited from strict trace/replay/report schemas; trace migrate accepts only legacy v1/v2 sources and reports source/target versions.",
       "error_contract": "CLI diagnostics wrap underlying format errors; migration reports event count and preserved rollback source and refuses an existing destination.",
-      "migration_policy": "trace migrate exposes the non-overwriting core migration with distinct INPUT and OUTPUT operands; its parser and handler are current-code evidence, not historical release CLI E2E.",
+      "migration_policy": "The current info, events, verify, diff, migrate, export-NDJSON, and compress paths consume the committed published-v0.3.9 trace. Migration uses distinct INPUT and OUTPUT operands, atomic non-overwriting publication, and an untouched rollback source.",
       "corpus_ids": [
-        "CORPUS-HISTORICAL-TRACE-MISSING"
+        "CORPUS-HISTORICAL-V039"
       ],
-      "state": "CURRENT_CORPUS_ONLY",
-      "no_claim_boundary": "A reachable and tested current CLI migration path is not evidence that external historical bytes were exercised."
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "no_claim_boundary": "The A7 journey proves the listed current CLI paths for the pinned v0.3.9 fixtures only, not arbitrary historical files, release readiness, or broad CLI health."
     }
   ],
   "corpora": [
@@ -936,15 +941,15 @@
       "provenance": "Current ATP crashpack-to-repro fixtures; no earlier-release schema provenance."
     },
     {
-      "corpus_id": "CORPUS-HISTORICAL-TRACE-MISSING",
-      "path": null,
-      "file_count": 0,
-      "byte_count": 0,
-      "aggregate_sha256": null,
-      "aggregate_algorithm": null,
-      "compatibility_class": "UNKNOWN_BLOCKING",
-      "state": "UNKNOWN_BLOCKING",
-      "provenance": "No committed prior-release ASUPERTRACE, ReplayTrace MessagePack, or streaming trace byte corpus was found."
+      "corpus_id": "CORPUS-HISTORICAL-V039",
+      "path": "tests/fixtures/typed-format-historical-corpus",
+      "file_count": 1,
+      "byte_count": 6617,
+      "aggregate_sha256": "44029884aa85ec5fd348cdfa20d9b58f4cde14718ceeb2ee5c72862f7e394020",
+      "aggregate_algorithm": "SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'",
+      "compatibility_class": "EXACT_BYTES",
+      "state": "HISTORICAL_CORPUS_VERIFIED",
+      "provenance": "Seven immutable artifacts emitted through the published asupersync 0.3.9 public API or exact release schema, pinned to tag v0.3.9, commit e7e0af2fe0fc5037a087296e22e5eb57a2c1d50a, and crates.io checksum 1cbadf37dce3015a059ffe058804d958026e8b276d665116015e3126d2673cfe. The standalone dual-version consumer exactly regenerates stable artifacts and the 4,096-event trace digest, while masking only the documented build-sensitive TypeId and DefaultHasher fields when comparing freshly generated typed-symbol headers; it separately admits and decodes the exact committed typed-symbol bytes with their recorded provenance tuples."
     }
   ],
   "downstream_consumers": [
@@ -1027,21 +1032,27 @@
     {
       "consumer_id": "CONSUMER-EXTERNAL-HISTORICAL-ARTIFACTS",
       "owner": "asupersync-5z2scg.3.7",
-      "paths": [],
+      "paths": [
+        "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",
+        "tests/fixtures/typed-format-cross-version-consumer/Cargo.lock",
+        "tests/fixtures/typed-format-cross-version-consumer/src/lib.rs",
+        "tests/fixtures/typed-format-historical-corpus/v0.3.9.json",
+        "tests/typed_format_cross_version_e2e.rs"
+      ],
       "formats": [
         "MessagePack",
         "Bincode",
         "Json",
         "Custom"
       ],
-      "evidence": "No external artifact inventory, release provenance, or downstream owner receipt was found.",
-      "state": "UNKNOWN_BLOCKING"
+      "evidence": "Locked standalone consumer invokes the published crates.io asupersync 0.3.9 writer and the current path reader in one process, exactly regenerates stable artifacts, verifies the documented build-sensitive typed-header boundary, admits the immutable committed MessagePack/Bincode captures, exercises non-Serde Custom payloads, and the current root E2E drives migration, replay, every trace CLI path, malformed cases, cancellation, disk failure, atomic output, cleanup, and rollback.",
+      "state": "HISTORICAL_CORPUS_VERIFIED"
     }
   ],
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "e2d9dc52c79eb4c7e24645d7394438b54bfb654d555aae6864f8c10173d94a31"
+      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb"
     },
     {
       "path": "Cargo.lock",
@@ -1049,15 +1060,15 @@
     },
     {
       "path": "src/types/mod.rs",
-      "sha256": "c9a38eece13a2e1ed64a18b21c88ce064b77b08b0fdbb1004fa9119f420a9e20"
+      "sha256": "6f2ed2f5d9f35bf82eb4c9364a59575f0d630deeaaff274a8a9b97b599c6812a"
     },
     {
       "path": "src/types/typed_symbol.rs",
-      "sha256": "f421c326dde7c07b9ba854bdab24e04694acbe491d434344d990c97da15ccc02"
+      "sha256": "17b6b91d57dd8ac132dd3b92962715ef4ea59d2b6d9cf4cf51fb0a384435e1f1"
     },
     {
       "path": "src/trace/file.rs",
-      "sha256": "f7cfbb092bdb83394d015d66da9f8860ceeb0cfbf2fb63afa6b78ef77ce5be89"
+      "sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9"
     },
     {
       "path": "src/trace/mod.rs",
@@ -1168,6 +1179,30 @@
       "sha256": "6d442849149134f242eb99aad3a795c850cb05e9c0f549f29f72a02493734d47"
     },
     {
+      "path": "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",
+      "sha256": "5e6d45658b8015ce2b696612ed15adb0410514d520d25170fd52d634090119fb"
+    },
+    {
+      "path": "tests/fixtures/typed-format-cross-version-consumer/Cargo.lock",
+      "sha256": "62629ec0d245dc667bf621f91e4361c901fdf5b74f47bce3520b9ea9e25b123b"
+    },
+    {
+      "path": "tests/fixtures/typed-format-cross-version-consumer/src/lib.rs",
+      "sha256": "2c40dd8bb5732391307aa2a6d2c7e2dada9c4b5ddc3777fb32f0099fdb5f4d24"
+    },
+    {
+      "path": "tests/fixtures/typed-format-cross-version-consumer/src/bin/capture.rs",
+      "sha256": "57e741f18046711cf0de397cc4f2edb7548eca0362f6c48f11e1931cf4d97e60"
+    },
+    {
+      "path": "tests/typed_format_cross_version_e2e.rs",
+      "sha256": "6a5ce2b2e97b11e65e434e5b50c7c818172d059dae84711a62dd58f67bd77270"
+    },
+    {
+      "path": "scripts/run_dependency_sovereignty_e2e.sh",
+      "sha256": "ac612a9058b6fb6440041ed9577f6005ea0507379ac872d6c9ab95f5d3d95064"
+    },
+    {
       "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",
       "sha256": "eb00f80d9a4670357c871202d8a2a7649eb27a91ea05f5fbb5003aa62e97e698"
     },
@@ -1208,39 +1243,12 @@
       "sha256": "ca0b3f80af74b296e6beae0f7bf76aef0f8e73b161efa177de3239742c324786"
     }
   ],
-  "unknown_blockers": [
-    {
-      "blocker_id": "BLOCK-HISTORICAL-BYTES",
-      "owner_bead": "asupersync-5z2scg.3.7",
-      "affected_surfaces": [
-        "PERSIST-TYPED-SYMBOL",
-        "PERSIST-TRACE-FILE",
-        "PERSIST-REPLAY-BLOB",
-        "PERSIST-TRACE-STREAM",
-        "PERSIST-DISTRIBUTED-SNAPSHOT"
-      ],
-      "missing_evidence": "Prior-release version-provenanced byte corpora for Bincode legacy fields, MessagePack traces/replay, typed symbols, and full SNAP artifacts.",
-      "effect": "Blocks any byte-compatibility, backend replacement, or persisted cutover claim."
-    },
-    {
-      "blocker_id": "BLOCK-CROSS-VERSION-READERS",
-      "owner_bead": "asupersync-5z2scg.3.7",
-      "affected_surfaces": [
-        "PERSIST-TRACE-FILE",
-        "PERSIST-REPLAY-BLOB",
-        "PERSIST-TRACE-STREAM",
-        "PERSIST-DISTRIBUTED-SNAPSHOT",
-        "TOOL-TRACE-CLI-CONSUMER"
-      ],
-      "missing_evidence": "No-mock E2E using committed earlier-version artifacts through every downstream reader and CLI path.",
-      "effect": "Blocks migration and historical-readability claims."
-    }
-  ],
+  "unknown_blockers": [],
   "validation": {
     "contract_test": "tests/typed_format_registry_contract.rs",
     "doc_path": "docs/typed_format_registry.md",
-    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs --overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock --overlay-path artifacts/typed_format_registry_v1.json --overlay-path docs/typed_format_registry.md --overlay-path tests/typed_format_registry_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a6 cargo test -p asupersync --test typed_format_registry_contract -- --nocapture",
-    "proof_scope": "Registry schema, accepted ADR mapping, dependency pins, lexical root counts, direct backend source paths, source pins, corpus aggregates, public/generic invariants, independent MessagePack and Bincode KEEP rows, exact current downstream payload goldens, complete accepted owned-Serde fixture markers, persisted-row completeness, downstream ownership, fail-closed historical unknowns, and documentation markers.",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs --overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock --overlay-path src/types/typed_symbol.rs --overlay-path src/types/mod.rs --overlay-path src/trace/file.rs --overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml --overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.lock --overlay-path tests/fixtures/typed-format-cross-version-consumer/src/lib.rs --overlay-path tests/fixtures/typed-format-cross-version-consumer/src/bin/capture.rs --overlay-path tests/fixtures/typed-format-historical-corpus/v0.3.9.json --overlay-path tests/typed_format_cross_version_e2e.rs --overlay-path scripts/run_dependency_sovereignty_e2e.sh --overlay-path artifacts/typed_format_registry_v1.json --overlay-path docs/typed_format_registry.md --overlay-path tests/typed_format_registry_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_typed_format_registry_a7 cargo test -p asupersync --test typed_format_registry_contract -- --nocapture",
+    "proof_scope": "Registry schema, accepted ADR mapping, dependency pins, lexical root counts, direct backend source paths, source pins, corpus aggregates, public/generic invariants, independent MessagePack and Bincode KEEP rows, exact current downstream payload goldens, complete accepted owned-Serde fixture markers, persisted-row completeness, downstream ownership, published-v0.3.9 provenance and byte-manifest structure, resolved A7 blockers, and documentation markers.",
     "no_claim_boundary": "This focused contract does not execute serialization round trips, fuzzing, migration, historical readers, CLI E2E, broad workspace tests, performance, release readiness, dependency removal, format removal, or cutover."
   }
 }

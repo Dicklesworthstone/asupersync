@@ -76,7 +76,8 @@ use crate::tracing_compat::{error, warn};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // =============================================================================
 // Constants
@@ -1710,11 +1711,74 @@ pub struct TraceFileMigrationReceipt {
     pub events_copied: u64,
 }
 
+static MIGRATION_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct MigrationTempPath {
+    path: PathBuf,
+}
+
+impl MigrationTempPath {
+    fn create(output: &Path) -> io::Result<(File, Self)> {
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = output.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "trace migration output has no file name",
+            )
+        })?;
+        let file_name = file_name.to_string_lossy();
+
+        for _ in 0..64 {
+            let sequence = MIGRATION_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                ".{file_name}.asupersync-migrate-{}-{sequence}",
+                std::process::id()
+            ));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((file, Self { path })),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique trace migration staging path",
+        ))
+    }
+
+    fn publish(self, output: &Path) -> io::Result<()> {
+        std::fs::hard_link(&self.path, output)?;
+        Ok(())
+    }
+}
+
+impl Drop for MigrationTempPath {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            warn!(
+                path = %self.path.display(),
+                error = %error,
+                "failed to remove trace migration staging file"
+            );
+        }
+    }
+}
+
 /// Rewrites a complete v1/v2 trace into the current checksummed container.
 ///
 /// The source is never modified, the destination must not exist, and all
-/// events are streamed in their original order. Keeping the source provides
-/// the explicit rollback anchor.
+/// events are streamed in their original order. The destination is assembled
+/// and synced at a sibling staging path, then atomically published with a hard
+/// link so a malformed source or write failure cannot expose a partial target.
+/// Keeping the source provides the explicit rollback anchor.
 pub fn migrate_trace_file(
     input: impl AsRef<Path>,
     output: impl AsRef<Path>,
@@ -1737,17 +1801,7 @@ pub fn migrate_trace_file(
     }
     let metadata = reader.metadata().clone();
     let compression = reader.compression();
-    let output_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output)
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                TraceFileError::MigrationDestinationExists
-            } else {
-                TraceFileError::Io(error)
-            }
-        })?;
+    let (output_file, staged_path) = MigrationTempPath::create(output)?;
     let mut writer = TraceWriter::from_file(
         output_file,
         TraceFileConfig::new()
@@ -1763,6 +1817,14 @@ pub fn migrate_trace_file(
         events_copied = events_copied.saturating_add(1);
     }
     writer.finish()?;
+    File::open(&staged_path.path)?.sync_all()?;
+    staged_path.publish(output).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            TraceFileError::MigrationDestinationExists
+        } else {
+            TraceFileError::Io(error)
+        }
+    })?;
 
     Ok(TraceFileMigrationReceipt {
         source_version,
@@ -2240,6 +2302,40 @@ mod tests {
         assert_eq!(
             std::fs::read(destination.path()).expect("read destination"),
             destination_before
+        );
+    }
+
+    #[test]
+    fn a7_migration_failure_never_publishes_partial_output_or_leaves_staging_file() {
+        let directory = tempfile::tempdir().expect("create migration directory");
+        let source = directory.path().join("truncated-v2.trace");
+        let destination = directory.path().join("must-not-exist.trace");
+        write_v2_trace(&source, &TraceMetadata::new(19), &sample_events(), 3);
+        let source_before = std::fs::read(&source).expect("read complete v2 source");
+        std::fs::write(&source, &source_before[..source_before.len() - 1])
+            .expect("truncate final event");
+        let truncated_source = std::fs::read(&source).expect("read truncated source");
+
+        assert!(migrate_trace_file(&source, &destination).is_err());
+        assert!(
+            !destination.exists(),
+            "failed migration must not publish a partial destination"
+        );
+        assert_eq!(
+            std::fs::read(&source).expect("read rollback source"),
+            truncated_source,
+            "failed migration must preserve its rollback source"
+        );
+
+        let staging_prefix = ".must-not-exist.trace.asupersync-migrate-";
+        let staging_paths = std::fs::read_dir(directory.path())
+            .expect("read migration directory")
+            .map(|entry| entry.expect("read directory entry").file_name())
+            .filter(|name| name.to_string_lossy().starts_with(staging_prefix))
+            .collect::<Vec<_>>();
+        assert!(
+            staging_paths.is_empty(),
+            "failed migration left staging paths: {staging_paths:?}"
         );
     }
 

@@ -158,6 +158,38 @@ pub enum TypeMismatchError {
     },
 }
 
+/// Trusted identity tuple for a typed-symbol header emitted by a legacy writer.
+///
+/// Typed-symbol writers before the stable SHA-256 header identity used
+/// build-sensitive Rust `TypeId` hashing. A current reader therefore cannot
+/// safely infer the expected legacy type and schema hashes. Callers may use
+/// this tuple only when the values come from a version-provenanced artifact
+/// manifest or another trusted schema registry.
+///
+/// This does not make legacy admission automatic: [`TypedSymbol::try_from_legacy_symbol`]
+/// requires an exact match for all three fields before exposing the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyTypedSymbolIdentity {
+    /// Schema version encoded by the legacy writer.
+    pub version: u16,
+    /// Legacy writer's exact type identifier.
+    pub type_id: u64,
+    /// Legacy writer's exact schema hash.
+    pub schema_hash: u64,
+}
+
+impl LegacyTypedSymbolIdentity {
+    /// Creates an identity pinned by trusted historical provenance.
+    #[must_use]
+    pub const fn new(version: u16, type_id: u64, schema_hash: u64) -> Self {
+        Self {
+            version,
+            type_id,
+            schema_hash,
+        }
+    }
+}
+
 /// Type descriptor registered for typed symbols.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeDescriptor {
@@ -428,6 +460,31 @@ impl<T> TypedSymbol<T> {
         })
     }
 
+    /// Try to interpret a symbol using an exact, trusted legacy header identity.
+    ///
+    /// This is the explicit migration boundary for artifacts whose writer used
+    /// the pre-stable typed-symbol hash scheme. The identity must be taken from
+    /// a version-provenanced corpus or schema registry; copying values from an
+    /// untrusted symbol would turn these checks into self-attestation.
+    ///
+    /// The returned wrapper retains the legacy header and payload. Decode the
+    /// value with [`Self::value_with_deserializer`] or
+    /// [`Self::into_value_with_deserializer`], then write a current artifact
+    /// with [`Self::from_value_with_serializer`] so the stable current identity
+    /// is installed without mutating the rollback source.
+    pub fn try_from_legacy_symbol(
+        symbol: Symbol,
+        identity: LegacyTypedSymbolIdentity,
+    ) -> Result<Self, TypeMismatchError> {
+        let header = TypedHeader::decode(symbol.data())?;
+        validate_legacy_typed_header(header, identity)?;
+        Ok(Self {
+            symbol,
+            header,
+            _marker: PhantomData,
+        })
+    }
+
     /// Validate this wrapper against an explicitly selected schema version.
     fn validate(&self, expected_version: u16) -> Result<(), TypeMismatchError>
     where
@@ -574,6 +631,30 @@ fn validate_typed_header<T: 'static>(
     if header.schema_hash != expected_schema {
         return Err(TypeMismatchError::SchemaMismatch {
             expected: expected_schema,
+            actual: header.schema_hash,
+        });
+    }
+    Ok(())
+}
+
+fn validate_legacy_typed_header(
+    header: TypedHeader,
+    identity: LegacyTypedSymbolIdentity,
+) -> Result<(), TypeMismatchError> {
+    if header.version != identity.version {
+        return Err(TypeMismatchError::VersionMismatch {
+            expected: identity.version,
+            actual: header.version,
+        });
+    }
+    if header.type_id != identity.type_id {
+        return Err(TypeMismatchError::UnknownType {
+            type_id: header.type_id,
+        });
+    }
+    if header.schema_hash != identity.schema_hash {
+        return Err(TypeMismatchError::SchemaMismatch {
+            expected: identity.schema_hash,
             actual: header.schema_hash,
         });
     }
@@ -1531,6 +1612,58 @@ mod tests {
         .into_value()
         .expect("decode");
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn a7_legacy_admission_requires_every_provenance_field() {
+        let value = Demo {
+            id: 81,
+            name: "legacy-provenance".to_string(),
+        };
+        let symbol = TypedSymbol::from_value_with_version(&value, SerializationFormat::Bincode, 7)
+            .expect("versioned symbol");
+        let header = symbol.header;
+        let identity =
+            LegacyTypedSymbolIdentity::new(header.version, header.type_id, header.schema_hash);
+
+        let admitted =
+            TypedSymbol::<Demo>::try_from_legacy_symbol(symbol.clone().into_symbol(), identity)
+                .expect("trusted identity admits exact header");
+        assert_eq!(admitted.value().expect("decode admitted payload"), value);
+
+        assert!(matches!(
+            TypedSymbol::<Demo>::try_from_legacy_symbol(
+                symbol.clone().into_symbol(),
+                LegacyTypedSymbolIdentity::new(
+                    identity.version + 1,
+                    identity.type_id,
+                    identity.schema_hash,
+                ),
+            ),
+            Err(TypeMismatchError::VersionMismatch { .. })
+        ));
+        assert!(matches!(
+            TypedSymbol::<Demo>::try_from_legacy_symbol(
+                symbol.clone().into_symbol(),
+                LegacyTypedSymbolIdentity::new(
+                    identity.version,
+                    identity.type_id ^ 1,
+                    identity.schema_hash,
+                ),
+            ),
+            Err(TypeMismatchError::UnknownType { .. })
+        ));
+        assert!(matches!(
+            TypedSymbol::<Demo>::try_from_legacy_symbol(
+                symbol.into_symbol(),
+                LegacyTypedSymbolIdentity::new(
+                    identity.version,
+                    identity.type_id,
+                    identity.schema_hash ^ 1,
+                ),
+            ),
+            Err(TypeMismatchError::SchemaMismatch { .. })
+        ));
     }
 
     #[test]

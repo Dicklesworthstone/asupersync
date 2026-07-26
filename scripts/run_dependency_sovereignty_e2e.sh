@@ -81,12 +81,13 @@ scenario_ids() {
         feature-platform-consumer-contract \
         aggregate-signoff-contract \
         api-adr-registry-contract \
-        api-adr-phase3-signoff
+        api-adr-phase3-signoff \
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             return 0
             ;;
         *)
@@ -97,7 +98,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             return 0
             ;;
         *)
@@ -109,6 +110,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'e2e' ;;
         runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
@@ -128,6 +130,7 @@ scenario_fixture() {
         aggregate-signoff-contract) printf 'artifacts/dependency_verification_final_signoff_v1.json' ;;
         api-adr-registry-contract) printf 'artifacts/dependency_api_adr_registry_v1.json' ;;
         api-adr-phase3-signoff) printf 'artifacts/dependency_api_adr_phase3_signoff_v1.json' ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'tests/fixtures/typed-format-historical-corpus/v0.3.9.json' ;;
     esac
 }
 
@@ -136,6 +139,7 @@ scenario_profile() {
         catalog | runner-contract) printf 'contract-only' ;;
         feature-platform-consumer-contract) printf 'sparse-feature-platform-consumer' ;;
         aggregate-signoff-contract) printf 'aggregate-signoff' ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'published-v0.3.9-current-cli' ;;
         *) printf 'nightly-default' ;;
     esac
 }
@@ -163,6 +167,20 @@ scenario_capabilities() {
         api-adr-phase3-signoff)
             printf '["CAP-PUBLIC-API-TOPOLOGY","CAP-DEPENDENCY-LEDGER"]'
             ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+            printf '["CAP-PERSISTED-TRACE-SNAPSHOT","CAP-SERDE-GENERIC"]'
+            ;;
+    esac
+}
+
+scenario_features() {
+    case "$1" in
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+            printf '["cli","default","test-internals","trace-compression"]'
+            ;;
+        *)
+            printf '[]'
+            ;;
     esac
 }
 
@@ -174,6 +192,7 @@ scenario_evidence_owner() {
         aggregate-signoff-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.6' ;;
         api-adr-registry-contract) printf 'asupersync-dep-p3-api-adrs-h3jspm.3' ;;
         api-adr-phase3-signoff) printf 'asupersync-dep-p3-api-adrs-h3jspm.13' ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'asupersync-5z2scg.3.7' ;;
         *) printf '%s' "$EVIDENCE_OWNER" ;;
     esac
 }
@@ -186,6 +205,7 @@ scenario_step_id() {
         aggregate-signoff-contract) printf 'ver-a6-aggregate-signoff-contract' ;;
         api-adr-registry-contract) printf 'adr-003-api-adr-registry-contract' ;;
         api-adr-phase3-signoff) printf 'adr-013-api-adr-phase3-signoff' ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'typed-formats-a7-cross-version-e2e' ;;
         *) printf 'ver-a2-%s' "$1" ;;
     esac
 }
@@ -228,6 +248,9 @@ scenario_command_display() {
             ;;
         api-adr-phase3-signoff)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture"
+            ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_consumer cargo test --manifest-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml --locked -- --nocapture && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --features cli,test-internals,trace-compression --test typed_format_cross_version_e2e -- --nocapture --test-threads=1"
             ;;
     esac
 }
@@ -700,6 +723,17 @@ execute_scenario() {
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture
             ;;
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="${target_dir}_consumer" \
+                cargo test --manifest-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml --locked -- --nocapture &&
+                env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                    env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                    RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                    cargo test -p asupersync --features cli,test-internals,trace-compression \
+                    --test typed_format_cross_version_e2e -- --nocapture --test-threads=1
+            ;;
     esac
 }
 
@@ -861,6 +895,7 @@ for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
         --arg step_id "$step_id" \
         --arg validation_surface "$(scenario_surface "$scenario_id")" \
         --arg profile_family "$(scenario_profile "$scenario_id")" \
+        --argjson feature_flags "$(scenario_features "$scenario_id")" \
         --arg seed_or_fixture_id "$(scenario_fixture "$scenario_id")" \
         --arg config_snapshot_ref "environment.json#/config_snapshot" \
         --arg command "$command_display" \
@@ -886,7 +921,7 @@ for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
           step_id: $step_id,
           validation_surface: $validation_surface,
           profile_family: $profile_family,
-          feature_flags: [],
+          feature_flags: $feature_flags,
           seed_or_fixture_id: $seed_or_fixture_id,
           config_snapshot_ref: $config_snapshot_ref,
           command: $command,

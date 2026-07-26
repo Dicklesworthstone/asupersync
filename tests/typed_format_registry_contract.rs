@@ -28,6 +28,7 @@ const DECISION_DOC_PATH: &str = "docs/adr/dep_plan_adr_001_serde_generic_formats
 const DECISION_ID: &str = "DEP-ADR-001";
 const BEAD_ID: &str = "asupersync-5z2scg.3.1";
 const A6_BEAD_ID: &str = "asupersync-5z2scg.3.6";
+const A7_BEAD_ID: &str = "asupersync-5z2scg.3.7";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CONSUMER_MANIFEST_PATH: &str =
     "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml";
@@ -35,6 +36,17 @@ const CONSUMER_LOCK_PATH: &str =
     "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock";
 const CONSUMER_SOURCE_PATH: &str =
     "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs";
+const HISTORICAL_CONSUMER_MANIFEST_PATH: &str =
+    "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml";
+const HISTORICAL_CONSUMER_LOCK_PATH: &str =
+    "tests/fixtures/typed-format-cross-version-consumer/Cargo.lock";
+const HISTORICAL_CONSUMER_SOURCE_PATH: &str =
+    "tests/fixtures/typed-format-cross-version-consumer/src/lib.rs";
+const HISTORICAL_CORPUS_PATH: &str = "tests/fixtures/typed-format-historical-corpus/v0.3.9.json";
+const HISTORICAL_E2E_PATH: &str = "tests/typed_format_cross_version_e2e.rs";
+const V039_COMMIT: &str = "e7e0af2fe0fc5037a087296e22e5eb57a2c1d50a";
+const V039_CRATE_CHECKSUM: &str =
+    "1cbadf37dce3015a059ffe058804d958026e8b276d665116015e3126d2673cfe";
 const MESSAGEPACK_GOLDEN: &str = "95cfffffffffffffffff81a7426f756e646564cfffffffffffffffff82a0a0a7756e69636f6465ac4772c3bcc39f6520f09fa6809600017fcc80ccfeccffd38000000000000000";
 const BINCODE_GOLDEN: &str = "ffffffffffffffff02000000ffffffffffffffff0200000000000000000000000000000000000000000000000700000000000000756e69636f64650c000000000000004772c3bcc39f6520f09fa680060000000000000000017f80feff010000000000000080";
 const EXPECTED_ROOT_COUNT: usize = 13;
@@ -119,6 +131,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
         write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
     }
     output
+}
+
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    assert_eq!(encoded.len() % 2, 0, "hex length must be even");
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex must be ASCII");
+            u8::from_str_radix(pair, 16).expect("hex byte")
+        })
+        .collect()
 }
 
 fn visit_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -270,6 +294,24 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         ])
     {
         return Err("compatibility allow-list drifted".to_owned());
+    }
+
+    let allowed_evidence_states: BTreeSet<&str> = value
+        .get("allowed_evidence_states")
+        .and_then(Value::as_array)
+        .ok_or("allowed_evidence_states must be an array")?
+        .iter()
+        .map(|entry| entry.as_str().ok_or("evidence state must be a string"))
+        .collect::<Result<_, _>>()?;
+    if allowed_evidence_states
+        != BTreeSet::from([
+            "BASELINE_EXISTING",
+            "CURRENT_CORPUS_ONLY",
+            "HISTORICAL_CORPUS_VERIFIED",
+            "UNKNOWN_BLOCKING",
+        ])
+    {
+        return Err("evidence-state allow-list drifted".to_owned());
     }
 
     let allowed_dispositions: BTreeSet<&str> = value
@@ -561,10 +603,28 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
     if observed_persisted != expected_persisted {
         return Err("persisted surface roster drifted".to_owned());
     }
-    let corpus_ids: BTreeSet<&str> = value
+    let corpora = value
         .get("corpora")
         .and_then(Value::as_array)
-        .ok_or("corpora must be an array")?
+        .ok_or("corpora must be an array")?;
+    for corpus in corpora {
+        for key in ["corpus_id", "compatibility_class", "state", "provenance"] {
+            nonempty_text(corpus, key)?;
+        }
+        if !allowed_compatibility.contains(text(corpus, "compatibility_class")) {
+            return Err(format!(
+                "{} has an unregistered compatibility class",
+                text(corpus, "corpus_id")
+            ));
+        }
+        if !allowed_evidence_states.contains(text(corpus, "state")) {
+            return Err(format!(
+                "{} has an unregistered evidence state",
+                text(corpus, "corpus_id")
+            ));
+        }
+    }
+    let corpus_ids: BTreeSet<&str> = corpora
         .iter()
         .filter_map(|corpus| corpus.get("corpus_id").and_then(Value::as_str))
         .collect();
@@ -588,6 +648,12 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         if !allowed_compatibility.contains(text(surface, "compatibility_class")) {
             return Err(format!(
                 "{} has an unregistered compatibility class",
+                text(surface, "surface_id")
+            ));
+        }
+        if !allowed_evidence_states.contains(text(surface, "state")) {
+            return Err(format!(
+                "{} has an unregistered evidence state",
                 text(surface, "surface_id")
             ));
         }
@@ -632,14 +698,8 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         .get("unknown_blockers")
         .and_then(Value::as_array)
         .ok_or("unknown_blockers must be an array")?;
-    let expected_blockers =
-        BTreeSet::from(["BLOCK-CROSS-VERSION-READERS", "BLOCK-HISTORICAL-BYTES"]);
-    let observed_blockers: BTreeSet<&str> = blockers
-        .iter()
-        .filter_map(|blocker| blocker.get("blocker_id").and_then(Value::as_str))
-        .collect();
-    if observed_blockers != expected_blockers {
-        return Err("unknown blocker roster drifted".to_owned());
+    if !blockers.is_empty() {
+        return Err("A7 historical blockers must remain resolved".to_owned());
     }
     for blocker in blockers {
         for key in ["blocker_id", "owner_bead", "missing_evidence", "effect"] {
@@ -663,6 +723,23 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         .get("downstream_consumers")
         .and_then(Value::as_array)
         .ok_or("downstream_consumers must be an array")?;
+    for consumer in consumers {
+        for key in ["consumer_id", "owner", "evidence", "state"] {
+            nonempty_text(consumer, key)?;
+        }
+        if !allowed_evidence_states.contains(text(consumer, "state")) {
+            return Err(format!(
+                "{} has an unregistered evidence state",
+                text(consumer, "consumer_id")
+            ));
+        }
+        if array(consumer, "formats").is_empty() {
+            return Err(format!(
+                "{} must retain at least one format",
+                text(consumer, "consumer_id")
+            ));
+        }
+    }
     let standalone = find_by_id(consumers, "consumer_id", "CONSUMER-STANDALONE-BASELINE");
     if text(standalone, "state") != "CURRENT_CORPUS_ONLY"
         || string_set(standalone, "paths")
@@ -688,8 +765,20 @@ fn validate_registry_shape(value: &Value) -> Result<(), String> {
         "consumer_id",
         "CONSUMER-EXTERNAL-HISTORICAL-ARTIFACTS",
     );
-    if text(external, "state") != "UNKNOWN_BLOCKING" {
-        return Err("external historical artifact consumers must remain blocking".to_owned());
+    if text(external, "owner") != A7_BEAD_ID
+        || text(external, "state") != "HISTORICAL_CORPUS_VERIFIED"
+        || string_set(external, "paths")
+            != BTreeSet::from([
+                HISTORICAL_CONSUMER_MANIFEST_PATH.to_owned(),
+                HISTORICAL_CONSUMER_LOCK_PATH.to_owned(),
+                HISTORICAL_CONSUMER_SOURCE_PATH.to_owned(),
+                HISTORICAL_CORPUS_PATH.to_owned(),
+                HISTORICAL_E2E_PATH.to_owned(),
+            ])
+        || !text(external, "evidence").contains("published crates.io")
+        || !text(external, "evidence").contains("atomic output")
+    {
+        return Err("the A7 historical consumer receipt must stay exact".to_owned());
     }
 
     Ok(())
@@ -1207,7 +1296,7 @@ fn every_registered_source_path_exists_and_source_pins_match() {
 }
 
 #[test]
-fn corpus_receipts_and_missing_historical_corpus_are_fail_closed() {
+fn corpus_receipts_and_published_v039_provenance_are_fail_closed() {
     let registry = registry();
     let corpora = array(&registry, "corpora");
     assert_eq!(corpora.len(), 5);
@@ -1216,20 +1305,6 @@ fn corpus_receipts_and_missing_historical_corpus_are_fail_closed() {
         let corpus_id = text(corpus, "corpus_id");
         let state = text(corpus, "state");
         let path = corpus.get("path");
-        if state == "UNKNOWN_BLOCKING" {
-            assert!(
-                path.is_none_or(Value::is_null),
-                "{corpus_id} missing corpus must not invent a path"
-            );
-            assert_eq!(corpus.get("file_count").and_then(Value::as_u64), Some(0));
-            assert_eq!(corpus.get("byte_count").and_then(Value::as_u64), Some(0));
-            assert!(
-                text(corpus, "provenance").starts_with("No committed"),
-                "{corpus_id} must state the missing evidence"
-            );
-            continue;
-        }
-
         let path = path
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("{corpus_id} must have a path"));
@@ -1253,15 +1328,136 @@ fn corpus_receipts_and_missing_historical_corpus_are_fail_closed() {
             corpus.get("aggregate_algorithm").and_then(Value::as_str),
             Some("SHA-256 of sorted lines '<file_sha256>  <repo_relative_path>\\n'")
         );
-        assert!(
-            text(corpus, "provenance").contains("Current")
-                || text(corpus, "provenance").contains("current"),
-            "{corpus_id} must not imply historical provenance"
-        );
+        if corpus_id == "CORPUS-HISTORICAL-V039" {
+            assert_eq!(state, "HISTORICAL_CORPUS_VERIFIED");
+            assert_eq!(path, "tests/fixtures/typed-format-historical-corpus");
+            assert!(text(corpus, "provenance").contains(V039_COMMIT));
+            assert!(text(corpus, "provenance").contains(V039_CRATE_CHECKSUM));
+        } else {
+            assert_ne!(state, "HISTORICAL_CORPUS_VERIFIED");
+            assert!(
+                text(corpus, "provenance").contains("Current")
+                    || text(corpus, "provenance").contains("current"),
+                "{corpus_id} must not imply historical provenance"
+            );
+        }
     }
 
-    let missing = find_by_id(corpora, "corpus_id", "CORPUS-HISTORICAL-TRACE-MISSING");
-    assert_eq!(text(missing, "compatibility_class"), "UNKNOWN_BLOCKING");
+    let historical = find_by_id(corpora, "corpus_id", "CORPUS-HISTORICAL-V039");
+    assert_eq!(text(historical, "compatibility_class"), "EXACT_BYTES");
+    assert_eq!(
+        historical.get("file_count").and_then(Value::as_u64),
+        Some(1)
+    );
+
+    let manifest = parse_repo_json(HISTORICAL_CORPUS_PATH);
+    assert_eq!(
+        text(&manifest, "schema_version"),
+        "typed-format-historical-corpus-v1"
+    );
+    assert_eq!(text(&manifest, "bead_id"), A7_BEAD_ID);
+    let source_release = manifest
+        .get("source_release")
+        .and_then(Value::as_object)
+        .expect("source_release must be an object");
+    assert_eq!(
+        source_release.get("version").and_then(Value::as_str),
+        Some("0.3.9")
+    );
+    assert_eq!(
+        source_release.get("git_tag").and_then(Value::as_str),
+        Some("v0.3.9")
+    );
+    assert_eq!(
+        source_release.get("git_commit").and_then(Value::as_str),
+        Some(V039_COMMIT)
+    );
+    assert_eq!(
+        source_release
+            .get("crate_checksum_sha256")
+            .and_then(Value::as_str),
+        Some(V039_CRATE_CHECKSUM)
+    );
+
+    let artifacts = array(&manifest, "artifacts");
+    assert_eq!(artifacts.len(), 7);
+    let artifact_ids: BTreeSet<&str> = artifacts
+        .iter()
+        .filter_map(|artifact| artifact.get("artifact_id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        artifact_ids,
+        BTreeSet::from([
+            "distributed-snapshot-v2",
+            "replay-blob-v039",
+            "runtime-snapshot-v1",
+            "trace-v2-boundary",
+            "trace-v2-large",
+            "typed-symbol-v039-bincode",
+            "typed-symbol-v039-messagepack",
+        ])
+    );
+    for artifact in artifacts {
+        for key in [
+            "artifact_id",
+            "surface_id",
+            "format",
+            "sha256",
+            "semantic_fingerprint",
+        ] {
+            nonempty_text(artifact, key)
+                .unwrap_or_else(|error| panic!("historical artifact invalid: {error}"));
+        }
+        let byte_len = artifact
+            .get("byte_len")
+            .and_then(Value::as_u64)
+            .expect("historical artifact byte_len");
+        assert!(byte_len > 0);
+        if let Some(hex) = artifact.get("bytes_hex").and_then(Value::as_str) {
+            assert_eq!(
+                hex.len(),
+                usize::try_from(byte_len).expect("byte length fits usize") * 2
+            );
+            assert_eq!(
+                sha256_hex(&decode_hex(hex)),
+                text(artifact, "sha256"),
+                "{} exact bytes drifted",
+                text(artifact, "artifact_id")
+            );
+        } else {
+            assert_eq!(text(artifact, "artifact_id"), "trace-v2-large");
+            assert_eq!(
+                artifact["extra"]["committed_representation"].as_str(),
+                Some("digest-and-published-writer-recipe")
+            );
+            assert_eq!(artifact["extra"]["event_count"].as_u64(), Some(4096));
+        }
+    }
+
+    let fixture_manifest = read_repo_file(HISTORICAL_CONSUMER_MANIFEST_PATH);
+    assert!(fixture_manifest.contains("version = \"=0.3.9\""));
+    assert!(fixture_manifest.contains("[workspace]"));
+    let fixture_lock = read_repo_file(HISTORICAL_CONSUMER_LOCK_PATH);
+    assert!(fixture_lock.contains("name = \"asupersync\""));
+    assert!(fixture_lock.contains("version = \"0.3.9\""));
+    assert!(fixture_lock.contains(V039_CRATE_CHECKSUM));
+    let fixture_source = read_repo_file(HISTORICAL_CONSUMER_SOURCE_PATH);
+    for marker in [
+        "asupersync_v039",
+        "asupersync_current",
+        "LegacyTypedSymbolIdentity",
+        "OpaqueCodec",
+        "trace-v2-large",
+        "../../typed-format-historical-corpus/v0.3.9.json",
+        "generated_bytes[6..14].fill(0)",
+        "generated_bytes[15..23].fill(0)",
+        "committed provenance tuple admits exact historical bytes",
+    ] {
+        assert!(
+            fixture_source.contains(marker),
+            "historical writer fixture missing {marker}"
+        );
+    }
 }
 
 #[test]
@@ -1289,6 +1485,16 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "--clean-overlay",
         "--overlay-path tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
         "--overlay-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+        "--overlay-path src/types/typed_symbol.rs",
+        "--overlay-path src/types/mod.rs",
+        "--overlay-path src/trace/file.rs",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/Cargo.lock",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/src/lib.rs",
+        "--overlay-path tests/fixtures/typed-format-cross-version-consumer/src/bin/capture.rs",
+        "--overlay-path tests/fixtures/typed-format-historical-corpus/v0.3.9.json",
+        "--overlay-path tests/typed_format_cross_version_e2e.rs",
+        "--overlay-path scripts/run_dependency_sovereignty_e2e.sh",
         "--overlay-path artifacts/typed_format_registry_v1.json",
         "--overlay-path docs/typed_format_registry.md",
         "--overlay-path tests/typed_format_registry_contract.rs",
@@ -1318,6 +1524,7 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "EXACT_BYTES",
         "SEMANTIC",
         "UNKNOWN_BLOCKING",
+        "HISTORICAL_CORPUS_VERIFIED",
         "SerializationFormat::Custom",
         "bincode::config::legacy()",
         "ASUPERTRACE",
@@ -1330,6 +1537,10 @@ fn documentation_and_validation_boundary_are_discoverable() {
         "runtime_snapshot_codec.md",
         "asupersync-5z2scg.3.6",
         "asupersync-5z2scg.3.7",
+        "Published v0.3.9",
+        "LegacyTypedSymbolIdentity",
+        "4,096-event",
+        "atomic",
         "## A6 generic MessagePack/Bincode decision",
         "3,207",
         "18,992",
@@ -1481,17 +1692,17 @@ fn malformed_registry_fixtures_fail_closed() {
             .contains("replacement_parity")
     );
 
-    let mut ownerless_blocker = baseline;
+    let mut invalid_historical_state = baseline;
     find_by_id_mut(
-        ownerless_blocker["unknown_blockers"]
+        invalid_historical_state["downstream_consumers"]
             .as_array_mut()
-            .expect("unknown_blockers must be an array"),
-        "blocker_id",
-        "BLOCK-HISTORICAL-BYTES",
-    )["owner_bead"] = Value::from("");
+            .expect("downstream_consumers must be an array"),
+        "consumer_id",
+        "CONSUMER-EXTERNAL-HISTORICAL-ARTIFACTS",
+    )["state"] = Value::from("ASSUMED_COMPATIBLE");
     assert!(
-        validate_registry_shape(&ownerless_blocker)
-            .expect_err("ownerless blocker must fail")
-            .contains("owner_bead")
+        validate_registry_shape(&invalid_historical_state)
+            .expect_err("unregistered historical evidence state must fail")
+            .contains("evidence state")
     );
 }
