@@ -25,6 +25,25 @@ RCH_EXEC_COMMAND_RE = re.compile(
     r'(?m)(?:\brch\b|"\$RCH_BIN"|\$\{RCH_BIN\}|\$RCH_BIN)\s+exec\s+--\s+([^&;\n|]+)'
 )
 CARGO_WORD_RE = re.compile(r"\bcargo\b")
+# The cargo binary is not always the literal token `cargo`: several proof/smoke
+# runners invoke `"${CARGO_BIN:-cargo}"` so the binary can be overridden. Such a
+# token still contains the word "cargo", so CARGO_WORD_RE admits the body for
+# checking, but `tokens.index("cargo")` then fails and the invocation is
+# misreported as rch_cargo_unparseable. Match the indirection forms explicitly.
+CARGO_BINARY_TOKEN_RE = re.compile(
+    r"^(?:cargo|\$(?:CARGO_BIN\b|\{CARGO_BIN(?::-[^}]*)?\}))$"
+)
+
+
+def is_cargo_binary_token(token: str) -> bool:
+    return CARGO_BINARY_TOKEN_RE.match(token) is not None
+
+
+def find_cargo_token_index(tokens: list[str]) -> int | None:
+    for index, token in enumerate(tokens):
+        if is_cargo_binary_token(token):
+            return index
+    return None
 SHELL_COMMAND_SPLIT_RE = re.compile(r"(?:&&|\|\||;|\n)")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -74,12 +93,152 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+ARRAY_ASSIGN_OPEN_RE = re.compile(
+    r"^[ \t]*(?:(?:local|declare|typeset|readonly|export)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
+    r"[A-Za-z_][A-Za-z0-9_]*\+?=\([ \t]*$"
+)
+ARRAY_ASSIGN_LINE_RE = re.compile(
+    r"^[ \t]*(?:(?:local|declare|typeset|readonly|export)[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)\+?=\((.*)\)[ \t]*$"
+)
+ARRAY_REF_RE = re.compile(r'"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[[@*]\]\}"?')
+MAX_EXPANSION_CHARS = 200_000
+
+
+def fold_multiline_array_assignments(text: str) -> str:
+    """Join `NAME=(\\n  elem\\n  elem\\n)` into a single logical line.
+
+    Command arrays are the house style for routed cargo invocations here:
+
+        cmd=(
+            "$RCH_BIN" exec -- env
+            "CARGO_TARGET_DIR=${bench_target_dir}"
+            cargo bench --bench "$bench"
+        )
+        "${cmd[@]}"
+
+    SHELL_COMMAND_SPLIT_RE splits on newlines, so the `cargo bench ...` element
+    looks like a standalone command starting with `cargo` and is reported
+    local_cargo, even though the composed command is correctly routed. Folding
+    the array back into one line lets the existing checks see the real command.
+
+    An array that is never closed is left exactly as-is, so a malformed script
+    can never hide a bare cargo line behind an unterminated `(`.
+    """
+    lines = text.splitlines()
+    folded: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not ARRAY_ASSIGN_OPEN_RE.match(lines[index]):
+            folded.append(lines[index])
+            index += 1
+            continue
+        block = [lines[index]]
+        cursor = index + 1
+        while cursor < len(lines):
+            block.append(lines[cursor])
+            if lines[cursor].strip().startswith(")"):
+                break
+            cursor += 1
+        if cursor < len(lines):
+            folded.append(" ".join(part.strip() for part in block if part.strip()))
+            index = cursor + 1
+        else:
+            folded.extend(block)
+            index = len(lines)
+    return "\n".join(folded)
+
+
+def collect_array_definitions(text: str) -> dict[str, str]:
+    definitions: dict[str, str] = {}
+    for line in text.splitlines():
+        match = ARRAY_ASSIGN_LINE_RE.match(line)
+        if match:
+            definitions.setdefault(match.group(1), match.group(2).strip())
+    return definitions
+
+
+def expand_array_references(text: str) -> str:
+    """Substitute `"${NAME[@]}"` with NAME's definition, up to three levels.
+
+    Detection then happens where the array is EXECUTED rather than where it is
+    defined, which is what keeps the definition-vs-execution split honest:
+    `CMD=(cargo build)` followed by `"${CMD[@]}"` still expands to a bare
+    `cargo build` at the execution site and is still reported local_cargo.
+    """
+    definitions = collect_array_definitions(text)
+    if not definitions:
+        return text
+    expanded = text
+    for _ in range(3):
+        replaced = ARRAY_REF_RE.sub(
+            lambda match: definitions.get(match.group(1), match.group(0)), expanded
+        )
+        if replaced == expanded or len(replaced) > MAX_EXPANSION_CHARS:
+            break
+        expanded = replaced
+    return expanded
+
+
+def is_array_assignment(segment: str) -> bool:
+    return ARRAY_ASSIGN_LINE_RE.match(segment.strip()) is not None
+
+
 def normalize_shell_text(text: str) -> str:
-    return re.sub(r"\\\s*\n\s*", " ", text)
+    joined = re.sub(r"\\\s*\n\s*", " ", text)
+    return expand_array_references(fold_multiline_array_assignments(joined))
+
+
+def truncate_at_unterminated_quote(text: str) -> str:
+    """Cut `text` at the first quote that is opened and never closed.
+
+    RCH_EXEC_COMMAND_RE captures everything up to a shell metacharacter or end of
+    line, so an `rch exec --` command that is itself a quoted ARGUMENT overruns
+    its own string literal:
+
+        run_proof_lane "P1" "CRITICAL" "Native QUIC Conformance" \\
+            'rch exec -- env CARGO_TARGET_DIR="..." cargo test --lib foo' \\
+            600
+
+    normalize_shell_text folds the continuation, so the captured body becomes
+    `env CARGO_TARGET_DIR="..." cargo test --lib foo'  600` -- the stray quote is
+    mid-body, not trailing, so rstrip cannot help and shlex raises "No closing
+    quotation". The command is fully compliant; only the capture is ragged.
+
+    An unterminated quote is exactly the point where the enclosing literal ended,
+    so truncating there recovers the real command. Balanced quotes are left
+    alone, and text with no unterminated quote is returned unchanged.
+    """
+    quote: str | None = None
+    opened_at: int | None = None
+    for index, char in enumerate(text):
+        if quote is None:
+            if char in "\"'":
+                quote = char
+                opened_at = index
+        elif char == quote:
+            quote = None
+            opened_at = None
+    if quote is not None and opened_at is not None:
+        return text[:opened_at]
+    return text
 
 
 def shell_tokens(text: str) -> list[str]:
-    candidates = [text, text.rstrip('",\''), text.strip().rstrip('",\'')]
+    # Fail-closed by construction: every candidate below only REMOVES trailing
+    # continuation/quote characters or truncates at an unterminated quote. None
+    # can introduce a leading `env` or a CARGO_TARGET_DIR= assignment, so a
+    # genuinely non-compliant body such as `cargo fmt --check"` still tokenizes
+    # to tokens[0] == "cargo" and is still flagged. Anything that fails to parse
+    # after every candidate still yields [] -> rch_cargo_unparseable.
+    stripped = text.strip()
+    candidates = [
+        text,
+        text.rstrip('",\''),
+        stripped.rstrip('",\''),
+        stripped.rstrip("\\").strip().rstrip('",\''),
+        truncate_at_unterminated_quote(stripped).strip(),
+    ]
     for candidate in candidates:
         try:
             return shlex.split(candidate, posix=True)
@@ -106,12 +265,21 @@ def command_starts_with_local_cargo(command: str) -> bool:
         while index < len(tokens) and token_is_env_assignment(tokens[index]):
             index += 1
 
-    return index < len(tokens) and tokens[index] == "cargo"
+    return index < len(tokens) and is_cargo_binary_token(tokens[index])
 
 
 def has_local_cargo_command(text: str) -> bool:
     normalized = normalize_shell_text(text)
-    return any(command_starts_with_local_cargo(segment) for segment in SHELL_COMMAND_SPLIT_RE.split(normalized))
+    return any(
+        # An array assignment DEFINES a command, it does not run one. Skipping it
+        # here is not a hole: expand_array_references has already inlined the
+        # definition at every `"${NAME[@]}"` execution site, so an unrouted array
+        # is still caught there. Checking it in both places would report
+        # `CARGO_COMMAND=(cargo test ...)` as a local invocation even when the
+        # only execution site wraps it in `rch exec -- env CARGO_TARGET_DIR=...`.
+        not is_array_assignment(segment) and command_starts_with_local_cargo(segment)
+        for segment in SHELL_COMMAND_SPLIT_RE.split(normalized)
+    )
 
 
 def rch_exec_cargo_violations(text: str) -> list[str]:
@@ -131,7 +299,7 @@ def rch_exec_cargo_violations(text: str) -> list[str]:
             violations.append("rch_nested_shell_cargo")
             continue
 
-        if tokens[0] == "cargo":
+        if is_cargo_binary_token(tokens[0]):
             violations.append("rch_cargo_missing_env")
             continue
 
@@ -139,9 +307,8 @@ def rch_exec_cargo_violations(text: str) -> list[str]:
             violations.append("rch_cargo_unstructured")
             continue
 
-        try:
-            cargo_index = tokens.index("cargo")
-        except ValueError:
+        cargo_index = find_cargo_token_index(tokens)
+        if cargo_index is None:
             violations.append("rch_cargo_unparseable")
             continue
 
@@ -696,6 +863,58 @@ jobs:
         for item in artifact_threshold_report["missing_contracts"]
     ):
         raise AssertionError("expected required_artifacts_min threshold failure")
+
+    # Shell-shape fixtures for the routing scan (br-asupersync-t440nm). Each
+    # "must flag" case pins a way the scan could silently fail OPEN; each "must
+    # be clean" case pins a false positive that previously made the gate cry
+    # wolf. Keep both halves: a routing gate that reports compliant commands is
+    # as useless as one that misses violations, just in the other direction.
+    routing_must_flag = [
+        # A command array that is never routed, executed via "${CMD[@]}".
+        ('CMD=(\n    cargo build --release\n)\n"${CMD[@]}"\n', "local_cargo"),
+        # Routed, but `cargo` sits directly after `rch exec --` with no env.
+        ('CMD=(\n    "$RCH_BIN" exec --\n    cargo test\n)\n"${CMD[@]}"\n', "rch_cargo_missing_env"),
+        # Routed through env, but without the mandatory CARGO_TARGET_DIR.
+        ('CMD=(\n    "$RCH_BIN" exec -- env FOO=1\n    cargo test\n)\n"${CMD[@]}"\n', "rch_cargo_missing_target_dir"),
+        # Same three shapes with the overridable binary spelling.
+        ('rch exec -- "${CARGO_BIN:-cargo}" test\n', "rch_cargo_missing_env"),
+        ('env CARGO_TARGET_DIR=/t/x "${CARGO_BIN:-cargo}" bench\n', "local_cargo"),
+        # An unterminated array must not swallow the bare cargo line after it.
+        ("CMD=(\n    cargo build --release\n", "local_cargo"),
+        # A plain local invocation, the base case.
+        ("cargo bench --bench x\n", "local_cargo"),
+    ]
+    for source, expected in routing_must_flag:
+        found = cargo_routing_violations(source)
+        if expected not in found:
+            raise AssertionError(
+                f"routing scan failed open: expected {expected} in {found} for {source!r}"
+            )
+
+    routing_must_be_clean = [
+        # Multi-line command array, correctly routed. SHELL_COMMAND_SPLIT_RE
+        # splits on newlines, so without array folding the `cargo` element looks
+        # like a standalone local command.
+        'CMD=(\n    "$RCH_BIN" exec -- env\n    "CARGO_TARGET_DIR=/t/x"\n    cargo bench --bench y\n)\n"${CMD[@]}"\n',
+        # Composed arrays: the cargo array is inlined into a routed wrapper.
+        'CARGO_COMMAND=(\n    cargo test -p asupersync\n)\n'
+        'RCH_COMMAND=(\n    "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=/t/x" "${CARGO_COMMAND[@]}"\n)\n'
+        'timeout 60 "${RCH_COMMAND[@]}"\n',
+        # The overridable binary spelling, correctly routed.
+        'CMD=(\n    "$RCH_BIN" exec -- env\n    "CARGO_TARGET_DIR=/t/x"\n    "${CARGO_BIN:-cargo}" test -p asupersync\n)\n"${CMD[@]}"\n',
+        # An `rch exec --` command passed as a quoted ARGUMENT: the capture runs
+        # past the closing quote, so the body must be truncated at the
+        # unterminated quote instead of being called unparseable.
+        "run_proof_lane \"P1\" \"CRITICAL\" \"Native QUIC\" \\\n"
+        "    'rch exec -- env CARGO_TARGET_DIR=\"/t/x\" cargo test --lib foo' \\\n"
+        "    600\n",
+    ]
+    for source in routing_must_be_clean:
+        found = cargo_routing_violations(source)
+        if found:
+            raise AssertionError(
+                f"routing scan false positive: expected clean, got {found} for {source!r}"
+            )
 
     print("CI matrix policy self-test passed")
     return 0
