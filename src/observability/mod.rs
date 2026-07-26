@@ -153,6 +153,12 @@ pub(crate) mod regex_ir;
 #[cfg(feature = "metrics")]
 #[allow(dead_code)]
 pub(crate) mod regex_lowering;
+// br-asupersync-5z2scg.8.3.4.1: strictly safe, bounded whole-haystack
+// execution over validated Thompson IR. Leftmost search, capture propagation,
+// production privacy wiring, and dependency exit remain downstream.
+#[cfg(feature = "metrics")]
+#[allow(dead_code)]
+pub(crate) mod regex_vm;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
