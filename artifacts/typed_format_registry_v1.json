@@ -84,36 +84,36 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4228,
-      "serde_json::": 5998,
+      "rust_files": 4263,
+      "serde_json::": 6056,
       "rmp_serde::": 61,
       "bincode::": 31,
-      "SerializationFormat::": 120,
+      "SerializationFormat::": 149,
       "SerdeCodec": 22,
-      "SerializationFormat::Custom": 9
+      "SerializationFormat::Custom": 27
     },
     "roots": [
       {
         "path": "src",
         "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
-        "rust_files": 1431,
-        "serde_json::": 2415,
+        "rust_files": 1441,
+        "serde_json::": 2419,
         "rmp_serde::": 46,
         "bincode::": 21,
-        "SerializationFormat::": 56,
+        "SerializationFormat::": 81,
         "SerdeCodec": 9,
-        "SerializationFormat::Custom": 3
+        "SerializationFormat::Custom": 17
       },
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1841,
-        "serde_json::": 3014,
+        "rust_files": 1866,
+        "serde_json::": 3068,
         "rmp_serde::": 4,
         "bincode::": 10,
-        "SerializationFormat::": 9,
+        "SerializationFormat::": 13,
         "SerdeCodec": 3,
-        "SerializationFormat::Custom": 1
+        "SerializationFormat::Custom": 5
       },
       {
         "path": "examples",
@@ -264,7 +264,7 @@
     },
     {
       "token": "serde_json::",
-      "path_count": 249,
+      "path_count": 250,
       "classification": "All src paths are lexically covered by scan_profile. Persisted/public exceptions are enumerated below; the remainder is semantic JSON or inline-test/tooling use and carries no exact-byte claim."
     }
   ],
@@ -842,7 +842,7 @@
         "Json",
         "Custom"
       ],
-      "evidence": "Isolated workspace exercises empty, boundary, extreme, Unicode, and byte-containing arbitrary ConsumerRecord values; malformed JSON; codec recovery; typed-symbol observables; and intentional SerdeCodec Custom rejection.",
+      "evidence": "Isolated workspace exercises empty, boundary, extreme, Unicode, and byte-containing arbitrary ConsumerRecord values; malformed JSON; codec recovery; typed-symbol observables; intentional SerdeCodec Custom rejection; and a non-Serde downstream Custom codec with explicit typed-symbol version handling.",
       "state": "CURRENT_CORPUS_ONLY"
     },
     {
@@ -904,19 +904,19 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0"
+      "sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461"
+      "sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d"
     },
     {
       "path": "src/types/mod.rs",
-      "sha256": "d2e3f37ccd567b36dbfee1721ca97d8cfdfc1cddfdabb00f222a2510e27949ee"
+      "sha256": "c9a38eece13a2e1ed64a18b21c88ce064b77b08b0fdbb1004fa9119f420a9e20"
     },
     {
       "path": "src/types/typed_symbol.rs",
-      "sha256": "6d2224c1b1b362c59e7c99d91322b0baf2d2c18491f5327b48c3a44eaccfd37b"
+      "sha256": "f421c326dde7c07b9ba854bdab24e04694acbe491d434344d990c97da15ccc02"
     },
     {
       "path": "src/trace/file.rs",
@@ -1004,7 +1004,7 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "9016a1e0ed3bfeb1f2eb1c3e287323d64488a16077300a7c817269b30b719da6"
+      "sha256": "e141b1bc99013596cf3fbb6e6e72d6adde41b8672c9e692d8c25635804bcee88"
     },
     {
       "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",

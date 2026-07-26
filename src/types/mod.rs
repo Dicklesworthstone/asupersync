@@ -98,8 +98,8 @@ pub use symbol_set::{
 pub use task_context::{CheckpointHistoryEntry, CheckpointState, CxInner, MAX_MASK_DEPTH};
 pub use typed_symbol::{
     DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
-    Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeDescriptor, TypeMismatchError,
-    TypeRegistry, TypedDecoder, TypedEncoder, TypedSymbol,
+    Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TYPED_SYMBOL_VERSION, TypeDescriptor,
+    TypeMismatchError, TypeRegistry, TypedDecoder, TypedEncoder, TypedSymbol,
 };
 pub use wasm_abi::{
     NextjsAntiPattern, NextjsBootstrapPhase, NextjsBootstrapState, NextjsBootstrapTransitionError,

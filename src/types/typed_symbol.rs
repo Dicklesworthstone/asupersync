@@ -15,15 +15,17 @@ use crate::types::symbol_set::SymbolSet;
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 /// Magic prefix for typed symbols.
 pub const TYPED_SYMBOL_MAGIC: [u8; 4] = *b"TSYM";
 /// Header length in bytes.
 pub const TYPED_SYMBOL_HEADER_LEN: usize = 27;
+/// Current typed-symbol schema version.
+pub const TYPED_SYMBOL_VERSION: u16 = 1;
 
 /// Supported serialization formats for typed symbols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,12 @@ pub enum SerializationError {
         size: usize,
         /// Maximum allowed size.
         max: usize,
+    },
+    /// Memory for the bounded symbol envelope could not be reserved.
+    #[error("allocation failed while reserving {requested} bytes")]
+    AllocationFailed {
+        /// Requested envelope size.
+        requested: usize,
     },
     /// Unsupported type or format.
     #[error("unsupported type: {type_name}")]
@@ -131,6 +139,14 @@ pub enum TypeMismatchError {
     UnsupportedFormatByte {
         /// Raw format byte from the symbol header.
         value: u8,
+    },
+    /// Schema version differs from the version selected by the reader.
+    #[error("typed symbol version mismatch: expected {expected}, got {actual}")]
+    VersionMismatch {
+        /// Version selected by the reader.
+        expected: u16,
+        /// Version encoded in the symbol.
+        actual: u16,
     },
     /// Schema hash mismatch.
     #[error("schema hash mismatch: expected {expected}, got {actual}")]
@@ -392,25 +408,32 @@ impl<T> TypedSymbol<T> {
     where
         T: 'static,
     {
+        Self::try_from_symbol_with_version(symbol, TYPED_SYMBOL_VERSION)
+    }
+
+    /// Try to interpret a raw symbol using an explicitly selected schema version.
+    pub fn try_from_symbol_with_version(
+        symbol: Symbol,
+        expected_version: u16,
+    ) -> Result<Self, TypeMismatchError>
+    where
+        T: 'static,
+    {
         let header = TypedHeader::decode(symbol.data())?;
-        let expected_type = type_id_hash::<T>();
-        if header.type_id != expected_type {
-            return Err(TypeMismatchError::UnknownType {
-                type_id: header.type_id,
-            });
-        }
-        let expected_schema = schema_hash::<T>(u32::from(header.version));
-        if header.schema_hash != expected_schema {
-            return Err(TypeMismatchError::SchemaMismatch {
-                expected: expected_schema,
-                actual: header.schema_hash,
-            });
-        }
+        validate_typed_header::<T>(header, expected_version)?;
         Ok(Self {
             symbol,
             header,
             _marker: PhantomData,
         })
+    }
+
+    /// Validate this wrapper against an explicitly selected schema version.
+    fn validate(&self, expected_version: u16) -> Result<(), TypeMismatchError>
+    where
+        T: 'static,
+    {
+        validate_typed_header::<T>(self.header, expected_version)
     }
 
     /// Returns the underlying symbol.
@@ -447,22 +470,26 @@ impl<T> TypedSymbol<T> {
     fn strip_header(&self) -> Result<&[u8], DeserializationError> {
         let data = self.symbol.data();
         let payload_len = self.header.payload_len as usize;
-        let end = TYPED_SYMBOL_HEADER_LEN + payload_len;
-        if data.len() < end {
+        let end = TYPED_SYMBOL_HEADER_LEN
+            .checked_add(payload_len)
+            .ok_or(DeserializationError::CorruptData)?;
+        if data.len() != end {
             return Err(DeserializationError::CorruptData);
         }
         Ok(&data[TYPED_SYMBOL_HEADER_LEN..end])
     }
-}
 
-impl<T: Serialize + DeserializeOwned + 'static> TypedSymbol<T> {
-    /// Create a typed symbol from a value, using a single symbol payload.
-    pub fn from_value(value: &T, format: SerializationFormat) -> Result<Self, SerializationError> {
-        let codec = SerdeCodec;
-        let payload = codec.serialize(value, format)?;
-        let header = TypedHeader::new::<T>(format, 1, payload.len() as u32);
-        let header_bytes = header.encode();
-
+    /// Create a typed symbol using an explicitly registered serializer.
+    pub fn from_value_with_serializer(
+        value: &T,
+        format: SerializationFormat,
+        version: u16,
+        serializer: &impl Serializer<T>,
+    ) -> Result<Self, SerializationError>
+    where
+        T: 'static,
+    {
+        let payload = serializer.serialize(value, format)?;
         let symbol_size = crate::types::DEFAULT_SYMBOL_SIZE;
         let max_payload = symbol_size.saturating_sub(TYPED_SYMBOL_HEADER_LEN);
         if payload.len() > max_payload {
@@ -471,8 +498,25 @@ impl<T: Serialize + DeserializeOwned + 'static> TypedSymbol<T> {
                 max: max_payload,
             });
         }
+        let payload_len =
+            u32::try_from(payload.len()).map_err(|_| SerializationError::ValueTooLarge {
+                size: payload.len(),
+                max: u32::MAX as usize,
+            })?;
+        let header = TypedHeader::new::<T>(format, version, payload_len);
+        let header_bytes = header.encode();
+        let envelope_len = TYPED_SYMBOL_HEADER_LEN.checked_add(payload.len()).ok_or(
+            SerializationError::ValueTooLarge {
+                size: payload.len(),
+                max: max_payload,
+            },
+        )?;
 
-        let mut data = Vec::with_capacity(TYPED_SYMBOL_HEADER_LEN + payload.len());
+        let mut data = Vec::new();
+        data.try_reserve_exact(envelope_len)
+            .map_err(|_| SerializationError::AllocationFailed {
+                requested: envelope_len,
+            })?;
         data.extend_from_slice(&header_bytes);
         data.extend_from_slice(&payload);
 
@@ -490,18 +534,80 @@ impl<T: Serialize + DeserializeOwned + 'static> TypedSymbol<T> {
         })
     }
 
+    /// Extract the value using an explicitly registered deserializer.
+    pub fn into_value_with_deserializer(
+        self,
+        deserializer: &impl Deserializer<T>,
+    ) -> Result<T, DeserializationError> {
+        let format = self.header.format;
+        let payload = self.strip_header()?;
+        deserializer.deserialize(payload, format)
+    }
+
+    /// Borrow and decode the value using an explicitly registered deserializer.
+    pub fn value_with_deserializer(
+        &self,
+        deserializer: &impl Deserializer<T>,
+    ) -> Result<T, DeserializationError> {
+        let payload = self.strip_header()?;
+        deserializer.deserialize(payload, self.header.format)
+    }
+}
+
+fn validate_typed_header<T: 'static>(
+    header: TypedHeader,
+    expected_version: u16,
+) -> Result<(), TypeMismatchError> {
+    if header.version != expected_version {
+        return Err(TypeMismatchError::VersionMismatch {
+            expected: expected_version,
+            actual: header.version,
+        });
+    }
+    let expected_type = type_id_hash::<T>();
+    if header.type_id != expected_type {
+        return Err(TypeMismatchError::UnknownType {
+            type_id: header.type_id,
+        });
+    }
+    let expected_schema = schema_hash::<T>(u32::from(header.version));
+    if header.schema_hash != expected_schema {
+        return Err(TypeMismatchError::SchemaMismatch {
+            expected: expected_schema,
+            actual: header.schema_hash,
+        });
+    }
+    Ok(())
+}
+
+impl<T: Serialize + 'static> TypedSymbol<T> {
+    /// Create a typed symbol from a value, using a single symbol payload.
+    pub fn from_value(value: &T, format: SerializationFormat) -> Result<Self, SerializationError> {
+        Self::from_value_with_version(value, format, TYPED_SYMBOL_VERSION)
+    }
+
+    /// Create a typed symbol from a value with an explicit schema version.
+    pub fn from_value_with_version(
+        value: &T,
+        format: SerializationFormat,
+        version: u16,
+    ) -> Result<Self, SerializationError> {
+        let codec = SerdeCodec;
+        Self::from_value_with_serializer(value, format, version, &codec)
+    }
+}
+
+impl<T: DeserializeOwned> TypedSymbol<T> {
     /// Extract the value from a typed symbol.
     pub fn into_value(self) -> Result<T, DeserializationError> {
         let codec = SerdeCodec;
-        let payload = self.strip_header()?;
-        codec.deserialize(payload, self.header.format)
+        self.into_value_with_deserializer(&codec)
     }
 
     /// Borrow and decode the value from the typed symbol.
     pub fn value(&self) -> Result<T, DeserializationError> {
         let codec = SerdeCodec;
-        let payload = self.strip_header()?;
-        codec.deserialize(payload, self.header.format)
+        self.value_with_deserializer(&codec)
     }
 }
 
@@ -514,16 +620,22 @@ pub struct TypedEncoder<T> {
     _marker: PhantomData<T>,
 }
 
-impl<T: Serialize + 'static> TypedEncoder<T> {
+impl<T: 'static> TypedEncoder<T> {
     /// Create a new typed encoder with default config.
     #[must_use]
-    pub fn new(format: SerializationFormat) -> Self {
+    pub fn new(format: SerializationFormat) -> Self
+    where
+        T: Serialize,
+    {
         Self::with_config(EncodingConfig::default(), format)
     }
 
     /// Create a new encoder with custom config.
     #[must_use]
-    pub fn with_config(config: EncodingConfig, format: SerializationFormat) -> Self {
+    pub fn with_config(config: EncodingConfig, format: SerializationFormat) -> Self
+    where
+        T: Serialize,
+    {
         Self::with_serializer(config, format, SerdeCodec)
     }
 
@@ -537,10 +649,17 @@ impl<T: Serialize + 'static> TypedEncoder<T> {
         Self {
             config,
             format,
-            version: 1,
+            version: TYPED_SYMBOL_VERSION,
             serializer: Box::new(serializer),
             _marker: PhantomData,
         }
+    }
+
+    /// Select the schema version encoded into subsequent symbols.
+    #[must_use]
+    pub const fn with_version(mut self, version: u16) -> Self {
+        self.version = version;
+        self
     }
 
     /// Encode a value into typed symbols.
@@ -567,6 +686,15 @@ impl<T: Serialize + 'static> TypedEncoder<T> {
 
         let inner_symbol_size = inner_symbol_size(self.config.symbol_size)
             .map_err(|reason| EncodingError::InvalidConfig { reason })?;
+
+        if payload.is_empty() {
+            let symbol = Symbol::new(
+                crate::types::SymbolId::new(object_id, 0, 0),
+                vec![0; usize::from(inner_symbol_size)],
+                SymbolKind::Source,
+            );
+            return Ok(vec![wrap_symbol(&symbol, header, &header_bytes)]);
+        }
 
         let mut inner_config = self.config.clone();
         inner_config.symbol_size = inner_symbol_size;
@@ -646,6 +774,7 @@ impl<T: Serialize + 'static> TypedEncoder<T> {
 pub struct TypedDecoder<T> {
     config: DecodingConfig,
     format: SerializationFormat,
+    version: u16,
     deserializer: Box<dyn Deserializer<T>>,
     _marker: PhantomData<T>,
 }
@@ -665,11 +794,12 @@ impl<T> std::fmt::Debug for TypedDecoder<T> {
         f.debug_struct("TypedDecoder")
             .field("config", &self.config)
             .field("format", &self.format)
+            .field("version", &self.version)
             .finish_non_exhaustive()
     }
 }
 
-impl<T: DeserializeOwned> TypedDecoder<T> {
+impl<T: 'static> TypedDecoder<T> {
     /// Create a new typed decoder.
     ///
     /// br-asupersync-b1fojq: typed decode is an **erasure-only** convenience —
@@ -681,13 +811,19 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
     /// the symbol layer must authenticate symbols upstream before decoding, or
     /// use [`Self::with_config`] with an auth-enabled pipeline.
     #[must_use]
-    pub fn new(format: SerializationFormat) -> Self {
+    pub fn new(format: SerializationFormat) -> Self
+    where
+        T: DeserializeOwned,
+    {
         Self::with_config(DecodingConfig::without_auth(), format)
     }
 
     /// Create a decoder with custom config.
     #[must_use]
-    pub fn with_config(config: DecodingConfig, format: SerializationFormat) -> Self {
+    pub fn with_config(config: DecodingConfig, format: SerializationFormat) -> Self
+    where
+        T: DeserializeOwned,
+    {
         Self::with_deserializer(config, format, SerdeCodec)
     }
 
@@ -701,9 +837,17 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
         Self {
             config,
             format,
+            version: TYPED_SYMBOL_VERSION,
             deserializer: Box::new(deserializer),
             _marker: PhantomData,
         }
+    }
+
+    /// Select the schema version accepted by subsequent decodes.
+    #[must_use]
+    pub const fn with_version(mut self, version: u16) -> Self {
+        self.version = version;
+        self
     }
 
     /// Decode typed symbols back to a value.
@@ -720,7 +864,7 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
                 details: "no symbols provided".to_string(),
             })?;
 
-        let header = validate_header::<T>(&first, self.format)?;
+        let header = validate_header::<T>(&first, self.format, self.version)?;
         let object_id = first.symbol().object_id();
         let inner_size = inner_symbol_size(self.config.symbol_size).map_err(|reason| {
             DecodingError::InconsistentMetadata {
@@ -728,6 +872,17 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
                 details: reason,
             }
         })?;
+
+        if header.payload_len == 0 {
+            validate_empty_typed_symbol(&first, inner_size)?;
+            if let Some(extra) = iter.next() {
+                return Err(DecodingError::InconsistentMetadata {
+                    sbn: extra.symbol().sbn(),
+                    details: "empty typed payload must contain exactly one symbol".to_string(),
+                });
+            }
+            return self.deserialize_payload(&[], header);
+        }
 
         let mut pipeline = DecodingPipeline::new(inner_config(&self.config, inner_size));
         pipeline.set_object_params(object_params_for_payload(
@@ -740,7 +895,7 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
         feed_typed_symbol(&mut pipeline, first, inner_size)?;
 
         for symbol in iter {
-            let current = validate_header::<T>(&symbol, self.format)?;
+            let current = validate_header::<T>(&symbol, self.format, self.version)?;
             if current != header {
                 return Err(DecodingError::InconsistentMetadata {
                     sbn: symbol.symbol().sbn(),
@@ -751,12 +906,7 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
         }
 
         let payload = pipeline.into_data()?;
-        self.deserializer
-            .deserialize(&payload, header.format)
-            .map_err(|err| DecodingError::InconsistentMetadata {
-                sbn: 0,
-                details: err.to_string(),
-            })
+        self.deserialize_payload(&payload, header)
     }
 
     /// Decode from a symbol set.
@@ -767,12 +917,12 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
         let symbols = set
             .iter()
             .map(|(_, symbol)| {
-                TypedSymbol::try_from_symbol(symbol.clone()).map_err(|err| {
-                    DecodingError::InconsistentMetadata {
+                TypedSymbol::try_from_symbol_with_version(symbol.clone(), self.version).map_err(
+                    |err| DecodingError::InconsistentMetadata {
                         sbn: symbol.sbn(),
                         details: err.to_string(),
-                    }
-                })
+                    },
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.decode(symbols)
@@ -795,14 +945,25 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
                 sbn: 0,
                 details: err.to_string(),
             })?;
-            let typed = TypedSymbol::try_from_symbol(symbol.into_symbol()).map_err(|err| {
-                DecodingError::InconsistentMetadata {
-                    sbn: 0,
-                    details: err.to_string(),
-                }
-            })?;
+            let typed =
+                TypedSymbol::try_from_symbol_with_version(symbol.into_symbol(), self.version)
+                    .map_err(|err| DecodingError::InconsistentMetadata {
+                        sbn: 0,
+                        details: err.to_string(),
+                    })?;
 
-            let current = validate_header::<T>(&typed, self.format)?;
+            let current = validate_header::<T>(&typed, self.format, self.version)?;
+            if current.payload_len == 0 {
+                let empty_inner_size =
+                    inner_symbol_size(self.config.symbol_size).map_err(|reason| {
+                        DecodingError::InconsistentMetadata {
+                            sbn: 0,
+                            details: reason,
+                        }
+                    })?;
+                validate_empty_typed_symbol(&typed, empty_inner_size)?;
+                return self.deserialize_payload(&[], current);
+            }
             if let Some(expected) = header {
                 if current != expected {
                     return Err(DecodingError::InconsistentMetadata {
@@ -853,13 +1014,7 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
                     sbn: 0,
                     details: "typed stream header missing at completion".to_string(),
                 })?;
-                return self
-                    .deserializer
-                    .deserialize(&payload, header.format)
-                    .map_err(|err| DecodingError::InconsistentMetadata {
-                        sbn: 0,
-                        details: err.to_string(),
-                    });
+                return self.deserialize_payload(&payload, header);
             }
         }
 
@@ -872,8 +1027,12 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
             details: "typed stream pipeline missing at end of stream".to_string(),
         })?;
         let payload = pipeline.into_data()?;
+        self.deserialize_payload(&payload, header)
+    }
+
+    fn deserialize_payload(&self, payload: &[u8], header: TypedHeader) -> Result<T, DecodingError> {
         self.deserializer
-            .deserialize(&payload, header.format)
+            .deserialize(payload, header.format)
             .map_err(|err| DecodingError::InconsistentMetadata {
                 sbn: 0,
                 details: err.to_string(),
@@ -942,10 +1101,54 @@ fn feed_typed_symbol<T>(
     Ok(())
 }
 
+fn validate_empty_typed_symbol<T>(
+    symbol: &TypedSymbol<T>,
+    inner_size: u16,
+) -> Result<(), DecodingError> {
+    let raw = symbol.symbol();
+    let actual = raw
+        .data()
+        .len()
+        .checked_sub(TYPED_SYMBOL_HEADER_LEN)
+        .ok_or(DecodingError::SymbolSizeMismatch {
+            expected: inner_size,
+            actual: raw.data().len(),
+        })?;
+    if actual != usize::from(inner_size) {
+        return Err(DecodingError::SymbolSizeMismatch {
+            expected: inner_size,
+            actual,
+        });
+    }
+    if raw.kind() != SymbolKind::Source || raw.sbn() != 0 || raw.esi() != 0 {
+        return Err(DecodingError::InconsistentMetadata {
+            sbn: raw.sbn(),
+            details: "empty typed payload sentinel must be source symbol 0:0".to_string(),
+        });
+    }
+    if raw.data()[TYPED_SYMBOL_HEADER_LEN..]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(DecodingError::InconsistentMetadata {
+            sbn: raw.sbn(),
+            details: "empty typed payload sentinel must be zero-filled".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_header<T: 'static>(
     symbol: &TypedSymbol<T>,
     expected_format: SerializationFormat,
+    expected_version: u16,
 ) -> Result<TypedHeader, DecodingError> {
+    symbol
+        .validate(expected_version)
+        .map_err(|err| DecodingError::InconsistentMetadata {
+            sbn: symbol.symbol().sbn(),
+            details: err.to_string(),
+        })?;
     if symbol.header.format != expected_format {
         return Err(DecodingError::InconsistentMetadata {
             sbn: symbol.symbol().sbn(),
@@ -988,24 +1191,54 @@ fn object_params_for_payload(
 }
 
 fn type_id_hash<T: 'static>() -> u64 {
-    let mut hasher = crate::util::DetHasher::default();
-    TypeId::of::<T>().hash(&mut hasher);
-    hasher.finish()
+    let digest = stable_digest(
+        b"asupersync.typed-symbol.type-id.v1",
+        &[std::any::type_name::<T>().as_bytes()],
+    );
+    digest_u64(&digest, 0)
 }
 
 fn schema_hash<T: 'static>(version: u32) -> u64 {
-    let mut hasher = crate::util::DetHasher::default();
-    std::any::type_name::<T>().hash(&mut hasher);
-    version.hash(&mut hasher);
-    hasher.finish()
+    let version_bytes = version.to_le_bytes();
+    let digest = stable_digest(
+        b"asupersync.typed-symbol.schema-hash.v1",
+        &[
+            std::any::type_name::<T>().as_bytes(),
+            version_bytes.as_slice(),
+        ],
+    );
+    digest_u64(&digest, 0)
 }
 
 fn object_id_from_bytes<T: 'static>(bytes: &[u8]) -> ObjectId {
-    let mut hasher = crate::util::DetHasher::default();
-    bytes.hash(&mut hasher);
-    std::any::type_name::<T>().hash(&mut hasher);
-    let hash = hasher.finish();
-    ObjectId::new(hash, hash.rotate_left(17))
+    let digest = stable_digest(
+        b"asupersync.typed-symbol.object-id.v1",
+        &[std::any::type_name::<T>().as_bytes(), bytes],
+    );
+    ObjectId::new(digest_u64(&digest, 0), digest_u64(&digest, 8))
+}
+
+fn stable_digest(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    for part in parts {
+        hasher.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
+fn digest_u64(digest: &[u8; 32], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        digest[offset],
+        digest[offset + 1],
+        digest[offset + 2],
+        digest[offset + 3],
+        digest[offset + 4],
+        digest[offset + 5],
+        digest[offset + 6],
+        digest[offset + 7],
+    ])
 }
 
 #[cfg(test)]
@@ -1020,13 +1253,14 @@ mod tests {
     )]
     use super::*;
     use crate::transport::error::StreamError;
+    use proptest::prelude::*;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     struct Demo {
         id: u64,
         name: String,
@@ -1034,6 +1268,121 @@ mod tests {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct EmptyStruct;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CustomValue {
+        id: u32,
+        name: String,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct CustomValueCodec;
+
+    impl Serializer<CustomValue> for CustomValueCodec {
+        fn serialize(
+            &self,
+            value: &CustomValue,
+            format: SerializationFormat,
+        ) -> Result<Vec<u8>, SerializationError> {
+            if format != SerializationFormat::Custom {
+                return Err(SerializationError::UnsupportedType {
+                    type_name: std::any::type_name::<CustomValue>().to_string(),
+                });
+            }
+            let name_len =
+                u32::try_from(value.name.len()).map_err(|_| SerializationError::ValueTooLarge {
+                    size: value.name.len(),
+                    max: u32::MAX as usize,
+                })?;
+            let mut bytes = Vec::with_capacity(8 + value.name.len());
+            bytes.extend_from_slice(&value.id.to_le_bytes());
+            bytes.extend_from_slice(&name_len.to_le_bytes());
+            bytes.extend_from_slice(value.name.as_bytes());
+            Ok(bytes)
+        }
+    }
+
+    impl Deserializer<CustomValue> for CustomValueCodec {
+        fn deserialize(
+            &self,
+            bytes: &[u8],
+            format: SerializationFormat,
+        ) -> Result<CustomValue, DeserializationError> {
+            if format != SerializationFormat::Custom || bytes.len() < 8 {
+                return Err(DeserializationError::CorruptData);
+            }
+            let id = u32::from_le_bytes(
+                bytes[..4]
+                    .try_into()
+                    .map_err(|_| DeserializationError::CorruptData)?,
+            );
+            let name_len = u32::from_le_bytes(
+                bytes[4..8]
+                    .try_into()
+                    .map_err(|_| DeserializationError::CorruptData)?,
+            ) as usize;
+            if bytes.len() != 8usize.saturating_add(name_len) {
+                return Err(DeserializationError::CorruptData);
+            }
+            let name = std::str::from_utf8(&bytes[8..])
+                .map_err(|_| DeserializationError::CorruptData)?
+                .to_string();
+            Ok(CustomValue { id, name })
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct EmptyCustomValue;
+
+    #[derive(Debug, Clone, Copy)]
+    struct EmptyCustomCodec;
+
+    impl Serializer<EmptyCustomValue> for EmptyCustomCodec {
+        fn serialize(
+            &self,
+            _value: &EmptyCustomValue,
+            format: SerializationFormat,
+        ) -> Result<Vec<u8>, SerializationError> {
+            if format == SerializationFormat::Custom {
+                Ok(Vec::new())
+            } else {
+                Err(SerializationError::UnsupportedType {
+                    type_name: std::any::type_name::<EmptyCustomValue>().to_string(),
+                })
+            }
+        }
+    }
+
+    impl Deserializer<EmptyCustomValue> for EmptyCustomCodec {
+        fn deserialize(
+            &self,
+            bytes: &[u8],
+            format: SerializationFormat,
+        ) -> Result<EmptyCustomValue, DeserializationError> {
+            if format == SerializationFormat::Custom && bytes.is_empty() {
+                Ok(EmptyCustomValue)
+            } else {
+                Err(DeserializationError::CorruptData)
+            }
+        }
+    }
+
+    struct OversizedCustomCodec;
+
+    impl Serializer<CustomValue> for OversizedCustomCodec {
+        fn serialize(
+            &self,
+            _value: &CustomValue,
+            _format: SerializationFormat,
+        ) -> Result<Vec<u8>, SerializationError> {
+            Ok(vec![
+                0;
+                crate::types::DEFAULT_SYMBOL_SIZE
+                    - TYPED_SYMBOL_HEADER_LEN
+                    + 1
+            ])
+        }
+    }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     enum TestEnum {
@@ -1050,6 +1399,28 @@ mod tests {
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
+    }
+
+    fn test_encoding_config() -> EncodingConfig {
+        EncodingConfig {
+            symbol_size: 64,
+            max_block_size: 128,
+            repair_overhead: 1.05,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        }
+    }
+
+    fn test_decoding_config() -> DecodingConfig {
+        DecodingConfig {
+            symbol_size: 64,
+            max_block_size: 128,
+            repair_overhead: 1.05,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: std::time::Duration::from_secs(1),
+            verify_auth: false,
+        }
     }
 
     struct ReadyThenPendingStream {
@@ -1084,6 +1455,261 @@ mod tests {
         let symbol = TypedSymbol::from_value(&value, SerializationFormat::Bincode).expect("symbol");
         let decoded_value = symbol.into_value().expect("decode");
         assert_eq!(value, decoded_value);
+    }
+
+    #[test]
+    fn typed_symbol_header_v1_has_stable_bytes_for_every_format() {
+        let formats = [
+            (SerializationFormat::MessagePack, 1),
+            (SerializationFormat::Bincode, 2),
+            (SerializationFormat::Json, 3),
+            (SerializationFormat::Custom, 255),
+        ];
+
+        for (format, format_byte) in formats {
+            let encoded =
+                TypedHeader::new::<Demo>(format, TYPED_SYMBOL_VERSION, 0x0403_0201).encode();
+            let expected = [
+                0x54,
+                0x53,
+                0x59,
+                0x4d,
+                0x01,
+                0x00,
+                0xd5,
+                0x69,
+                0x8d,
+                0xb3,
+                0x03,
+                0x72,
+                0x7d,
+                0xde,
+                format_byte,
+                0xd9,
+                0x3d,
+                0x6b,
+                0x9c,
+                0x7a,
+                0xae,
+                0xbc,
+                0xde,
+                0x01,
+                0x02,
+                0x03,
+                0x04,
+            ];
+            assert_eq!(encoded, expected);
+        }
+    }
+
+    #[test]
+    fn typed_symbol_default_reader_rejects_unknown_version() {
+        let value = Demo {
+            id: 8,
+            name: "versioned".to_string(),
+        };
+        let symbol = TypedSymbol::from_value_with_version(
+            &value,
+            SerializationFormat::Bincode,
+            TYPED_SYMBOL_VERSION + 1,
+        )
+        .expect("versioned symbol");
+
+        assert!(matches!(
+            TypedSymbol::<Demo>::try_from_symbol(symbol.clone().into_symbol()),
+            Err(TypeMismatchError::VersionMismatch {
+                expected: TYPED_SYMBOL_VERSION,
+                actual: 2,
+            })
+        ));
+
+        let decoded = TypedSymbol::<Demo>::try_from_symbol_with_version(
+            symbol.into_symbol(),
+            TYPED_SYMBOL_VERSION + 1,
+        )
+        .expect("explicit version")
+        .into_value()
+        .expect("decode");
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn typed_symbol_detects_schema_mismatch_and_exact_length_corruption() {
+        let value = Demo {
+            id: 9,
+            name: "bounded".to_string(),
+        };
+        let symbol = TypedSymbol::from_value(&value, SerializationFormat::Bincode).expect("symbol");
+
+        let mut schema_corrupt = symbol.clone().into_symbol();
+        schema_corrupt.data_mut()[15] ^= 0x80;
+        assert!(matches!(
+            TypedSymbol::<Demo>::try_from_symbol(schema_corrupt),
+            Err(TypeMismatchError::SchemaMismatch { .. })
+        ));
+
+        let truncated = symbol.clone().into_symbol();
+        let truncated = Symbol::new(
+            truncated.id(),
+            truncated.data()[..truncated.data().len() - 1].to_vec(),
+            truncated.kind(),
+        );
+        let truncated = TypedSymbol::<Demo>::try_from_symbol(truncated).expect("valid header");
+        assert!(matches!(
+            truncated.value(),
+            Err(DeserializationError::CorruptData)
+        ));
+
+        let trailing = symbol.into_symbol();
+        let mut trailing_data = trailing.data().to_vec();
+        trailing_data.push(0);
+        let trailing = Symbol::new(trailing.id(), trailing_data, trailing.kind());
+        let trailing = TypedSymbol::<Demo>::try_from_symbol(trailing).expect("valid header");
+        assert!(matches!(
+            trailing.value(),
+            Err(DeserializationError::CorruptData)
+        ));
+    }
+
+    #[test]
+    fn custom_codec_roundtrips_non_serde_value_in_single_and_multi_symbol_paths() {
+        let value = CustomValue {
+            id: 17,
+            name: "owned-custom-codec".to_string(),
+        };
+        let symbol = TypedSymbol::from_value_with_serializer(
+            &value,
+            SerializationFormat::Custom,
+            7,
+            &CustomValueCodec,
+        )
+        .expect("custom symbol");
+        assert_eq!(symbol.version(), 7);
+        assert_eq!(
+            symbol
+                .value_with_deserializer(&CustomValueCodec)
+                .expect("custom decode"),
+            value
+        );
+
+        let mut encoder = TypedEncoder::with_serializer(
+            test_encoding_config(),
+            SerializationFormat::Custom,
+            CustomValueCodec,
+        )
+        .with_version(7);
+        let symbols = encoder
+            .encode(ObjectId::new_for_test(17), &value)
+            .expect("custom encode");
+        let mut decoder = TypedDecoder::with_deserializer(
+            test_decoding_config(),
+            SerializationFormat::Custom,
+            CustomValueCodec,
+        )
+        .with_version(7);
+        assert_eq!(decoder.decode(symbols).expect("custom decode"), value);
+    }
+
+    #[test]
+    fn typed_encoder_roundtrips_empty_custom_payload_with_one_bounded_symbol() {
+        let mut encoder = TypedEncoder::with_serializer(
+            test_encoding_config(),
+            SerializationFormat::Custom,
+            EmptyCustomCodec,
+        );
+        let symbols = encoder
+            .encode(ObjectId::new_for_test(18), &EmptyCustomValue)
+            .expect("empty custom encode");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].payload_len(), 0);
+        assert_eq!(symbols[0].symbol().data().len(), 64);
+
+        let mut decoder = TypedDecoder::with_deserializer(
+            test_decoding_config(),
+            SerializationFormat::Custom,
+            EmptyCustomCodec,
+        );
+        assert_eq!(
+            decoder.decode(symbols).expect("empty custom decode"),
+            EmptyCustomValue
+        );
+    }
+
+    #[test]
+    fn typed_decoder_rejects_corrupt_empty_payload_sentinel() {
+        let mut encoder = TypedEncoder::with_serializer(
+            test_encoding_config(),
+            SerializationFormat::Custom,
+            EmptyCustomCodec,
+        );
+        let mut symbols = encoder
+            .encode(ObjectId::new_for_test(181), &EmptyCustomValue)
+            .expect("empty custom encode");
+        symbols[0].symbol.data_mut()[TYPED_SYMBOL_HEADER_LEN] = 1;
+
+        let mut decoder = TypedDecoder::with_deserializer(
+            test_decoding_config(),
+            SerializationFormat::Custom,
+            EmptyCustomCodec,
+        );
+        let error = decoder
+            .decode(symbols)
+            .expect_err("non-zero sentinel padding must be rejected");
+        assert!(matches!(
+            error,
+            DecodingError::InconsistentMetadata { details, .. }
+                if details == "empty typed payload sentinel must be zero-filled"
+        ));
+    }
+
+    #[test]
+    fn typed_symbol_rejects_value_above_single_symbol_limit() {
+        let value = CustomValue {
+            id: 19,
+            name: String::new(),
+        };
+        let result = TypedSymbol::from_value_with_serializer(
+            &value,
+            SerializationFormat::Custom,
+            TYPED_SYMBOL_VERSION,
+            &OversizedCustomCodec,
+        );
+        assert!(matches!(
+            result,
+            Err(SerializationError::ValueTooLarge {
+                size,
+                max
+            }) if size == max + 1
+        ));
+    }
+
+    #[test]
+    fn typed_encoder_and_decoder_require_the_same_explicit_version() {
+        let value = Demo {
+            id: 20,
+            name: "configured-version".to_string(),
+        };
+        let mut encoder =
+            TypedEncoder::with_config(test_encoding_config(), SerializationFormat::Json)
+                .with_version(9);
+        let symbols = encoder
+            .encode(ObjectId::new_for_test(20), &value)
+            .expect("encode");
+
+        let mut default_decoder =
+            TypedDecoder::with_config(test_decoding_config(), SerializationFormat::Json);
+        let mismatch = default_decoder
+            .decode(symbols.clone())
+            .expect_err("default reader must reject version 9");
+        assert!(
+            mismatch.to_string().contains("expected 1, got 9"),
+            "{mismatch}"
+        );
+
+        let mut decoder =
+            TypedDecoder::with_config(test_decoding_config(), SerializationFormat::Json)
+                .with_version(9);
+        assert_eq!(decoder.decode(symbols).expect("decode"), value);
     }
 
     #[test]
@@ -1488,6 +2114,32 @@ mod tests {
             let byte = format.to_byte();
             let recovered = SerializationFormat::from_byte(byte).unwrap();
             assert_eq!(format, recovered);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn typed_header_property_roundtrips_every_bounded_field(
+            version in any::<u16>(),
+            payload_len in any::<u32>(),
+            format_index in 0usize..4,
+        ) {
+            let formats = [
+                SerializationFormat::MessagePack,
+                SerializationFormat::Bincode,
+                SerializationFormat::Json,
+                SerializationFormat::Custom,
+            ];
+            let header = TypedHeader::new::<Demo>(
+                formats[format_index],
+                version,
+                payload_len,
+            );
+            let encoded = header.encode();
+
+            prop_assert_eq!(encoded.len(), TYPED_SYMBOL_HEADER_LEN);
+            let decoded = TypedHeader::decode(&encoded).expect("generated header must decode");
+            prop_assert_eq!(decoded, header);
         }
     }
 

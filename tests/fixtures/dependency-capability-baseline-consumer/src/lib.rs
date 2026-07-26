@@ -11,7 +11,8 @@ mod tests {
     use asupersync::grpc::{Codec, ProstCodec, ProtobufError};
     use asupersync::stream::{Stream, StreamExt};
     use asupersync::types::{
-        Deserializer, SerdeCodec, SerializationFormat, Serializer, TypedSymbol,
+        DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
+        Serializer, TYPED_SYMBOL_VERSION, TypeMismatchError, TypedSymbol,
     };
     use prost::{Message, Oneof};
     use serde::{Deserialize, Serialize};
@@ -47,6 +48,68 @@ mod tests {
                 payload: vec![0, 1, 127, 128, 254, 255],
                 optional: Some(i64::MIN),
             }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ConsumerOpaque {
+        sequence: u32,
+        label: String,
+    }
+
+    struct ConsumerOpaqueCodec;
+
+    impl Serializer<ConsumerOpaque> for ConsumerOpaqueCodec {
+        fn serialize(
+            &self,
+            value: &ConsumerOpaque,
+            format: SerializationFormat,
+        ) -> Result<Vec<u8>, SerializationError> {
+            if format != SerializationFormat::Custom {
+                return Err(SerializationError::UnsupportedType {
+                    type_name: std::any::type_name::<ConsumerOpaque>().to_owned(),
+                });
+            }
+            let label_len = u32::try_from(value.label.len()).map_err(|_| {
+                SerializationError::ValueTooLarge {
+                    size: value.label.len(),
+                    max: u32::MAX as usize,
+                }
+            })?;
+            let mut bytes = Vec::with_capacity(8 + value.label.len());
+            bytes.extend_from_slice(&value.sequence.to_le_bytes());
+            bytes.extend_from_slice(&label_len.to_le_bytes());
+            bytes.extend_from_slice(value.label.as_bytes());
+            Ok(bytes)
+        }
+    }
+
+    impl Deserializer<ConsumerOpaque> for ConsumerOpaqueCodec {
+        fn deserialize(
+            &self,
+            bytes: &[u8],
+            format: SerializationFormat,
+        ) -> Result<ConsumerOpaque, DeserializationError> {
+            if format != SerializationFormat::Custom || bytes.len() < 8 {
+                return Err(DeserializationError::CorruptData);
+            }
+            let sequence = u32::from_le_bytes(
+                bytes[..4]
+                    .try_into()
+                    .map_err(|_| DeserializationError::CorruptData)?,
+            );
+            let label_len = u32::from_le_bytes(
+                bytes[4..8]
+                    .try_into()
+                    .map_err(|_| DeserializationError::CorruptData)?,
+            ) as usize;
+            if bytes.len() != 8usize.saturating_add(label_len) {
+                return Err(DeserializationError::CorruptData);
+            }
+            let label = std::str::from_utf8(&bytes[8..])
+                .map_err(|_| DeserializationError::CorruptData)?
+                .to_owned();
+            Ok(ConsumerOpaque { sequence, label })
         }
     }
 
@@ -186,6 +249,37 @@ mod tests {
         .expect("typed symbol");
         assert_eq!(symbol.format(), SerializationFormat::Bincode);
         assert!(!symbol.symbol().data().is_empty());
+    }
+
+    #[test]
+    fn non_serde_custom_typed_symbol_codec_and_explicit_version_remain_public() {
+        let value = ConsumerOpaque {
+            sequence: 42,
+            label: "downstream-owned".to_owned(),
+        };
+        let symbol = TypedSymbol::from_value_with_serializer(
+            &value,
+            SerializationFormat::Custom,
+            TYPED_SYMBOL_VERSION + 1,
+            &ConsumerOpaqueCodec,
+        )
+        .expect("public custom serializer");
+        assert_eq!(symbol.format(), SerializationFormat::Custom);
+        assert_eq!(symbol.version(), TYPED_SYMBOL_VERSION + 1);
+        assert_eq!(
+            symbol
+                .value_with_deserializer(&ConsumerOpaqueCodec)
+                .expect("public custom deserializer"),
+            value
+        );
+
+        assert!(matches!(
+            TypedSymbol::<ConsumerOpaque>::try_from_symbol(symbol.into_symbol()),
+            Err(TypeMismatchError::VersionMismatch {
+                expected: TYPED_SYMBOL_VERSION,
+                actual: 2,
+            })
+        ));
     }
 
     #[test]

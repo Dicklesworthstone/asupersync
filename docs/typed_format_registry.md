@@ -111,13 +111,35 @@ The exact typed-symbol header is 27 bytes:
 | 23 | 4 | payload length, little endian |
 
 The type id and schema hash depend on Rust `type_name::<T>()`; the schema hash
-also includes the declared version. Renaming a type or changing the version can
-therefore invalidate existing artifacts even if the Serde data model is
-unchanged. There is no registered rename alias or historical generic-payload
-migrator.
+also includes the declared version. They use SHA-256 with distinct
+`asupersync.typed-symbol.*.v1` domain strings. Each input component is framed by
+its little-endian `u64` byte length, and the stored `u64` is the first eight
+digest bytes interpreted little endian. Typed-symbol-derived object IDs use the
+same framing under their own domain and consume the first sixteen digest bytes.
+This is deterministic across processes and does not depend on runtime hash-map
+seeds. Renaming a type or changing the version can therefore invalidate
+existing artifacts even if the Serde data model is unchanged. There is no
+registered rename alias or historical generic-payload migrator.
 
 The payload must fit within `DEFAULT_SYMBOL_SIZE - 27` and a `u32` length. The
-header is canonical. Arbitrary payload maps are not globally canonical.
+single-symbol reader requires the envelope length to exactly equal the declared
+header plus payload length; truncation and trailing bytes are corruption. The
+multi-symbol encoder preserves the total unpadded payload length in every
+header, including a one-symbol sentinel for an empty payload, while the RaptorQ
+layer owns per-symbol padding and its existing object/block bounds. Empty
+sentinels are accepted only as zero-filled source symbol `0:0`; altered padding
+or metadata is corruption. The header is canonical. Arbitrary payload maps are
+not globally canonical.
+
+`TYPED_SYMBOL_VERSION` selects version `1` by default. Default readers reject
+any other version with a typed version-mismatch error. Callers that own another
+schema version must select the same explicit version on the encoder and decoder
+or on `try_from_symbol_with_version`; version selection never silently falls
+back. Unknown format bytes, type IDs, and schema hashes have distinct errors.
+`SerializationFormat::{MessagePack,Bincode,Json,Custom}` retain discriminants
+`1`, `2`, `3`, and `255`. Custom serializers and deserializers can operate on
+non-Serde downstream types through both the single-symbol convenience and
+multi-symbol pipelines.
 
 ## Persisted surface map
 
