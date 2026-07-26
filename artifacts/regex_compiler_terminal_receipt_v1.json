@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-compiler-terminal-receipt-v1",
+  "bead_id": "asupersync-5z2scg.8.3.3.4",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "program_id": "dependency-sovereignty",
+  "captured_at_utc": "2026-07-26T03:30:00Z",
+  "terminal_id": "ASUP-REGEX-COMPILER-TERMINAL-V1",
+  "grammar_id": "ASUP-REGEX-SYNTAX-V1",
+  "lowering_id": "ASUP-REGEX-THOMPSON-LOWERING-V1",
+  "lowering_schema_version": 2,
+  "ir_id": "ASUP-REGEX-THOMPSON-IR-V1",
+  "ir_schema_version": 1,
+  "decision": {
+    "disposition": "KEEP_INCUMBENT_DEFER",
+    "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
+    "candidate_state": "BOUNDED_VALIDATED_COMPILER_WITHOUT_PRODUCTION_MATCHER",
+    "compiler_terminal_complete": true,
+    "all_ast_rows_accounted": true,
+    "all_validator_error_rows_accounted": true,
+    "reference_language_evidence_complete": true,
+    "priority_capture_evidence_complete": true,
+    "bounded_compiler_fuzz_complete": true,
+    "malformed_ir_fuzz_complete": true,
+    "vm_experimentation_authorized": true,
+    "matcher_execution_authorized": false,
+    "production_cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "reason_codes": [
+      "COMPILER_ROWS_AND_VALIDATOR_SAME_WITH_EXPLICIT_KEEP_DEFER",
+      "R3_2_SEMANTIC_TERMINAL_RETAINS_INCUMBENT",
+      "MATCHER_EXECUTION_NOT_IMPLEMENTED_OR_AUTHORIZED",
+      "PRODUCTION_WIRING_AND_DEPENDENCY_EXIT_NOT_EVALUATED"
+    ],
+    "on_missing_unknown_expired_or_drifted_evidence": "KEEP_INCUMBENT_DEFER"
+  },
+  "predecessors": [
+    {
+      "bead_id": "asupersync-5z2scg.8.3.2.4",
+      "path": "artifacts/regex_semantic_terminal_receipt_v1.json",
+      "sha256": "887dd0b97c6794ef7481090a8c1677830093cfdce440ebdb720c3c337b260d23",
+      "disposition": "KEEP_INCUMBENT_DEFER"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.8.3.3.1",
+      "path": "artifacts/regex_ir_schema_contract_v1.json",
+      "sha256": "9a260418e3f6a70d94c9123ac7f3e24f6fee3303986b2e0d4251afd2df1dbf88",
+      "disposition": "STAGED_BOUNDED_IR_SCHEMA"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.8.3.3.2",
+      "path": "artifacts/regex_ir_lowering_contract_v1.json",
+      "sha256": "45336f438f84f71bc5e380e1326595920e2ef79c312aa69b05277298fd344c85",
+      "disposition": "STAGED_CHECKED_STRUCTURAL_LOWERING"
+    },
+    {
+      "bead_id": "asupersync-5z2scg.8.3.3.3",
+      "path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
+      "sha256": "094517b1e5d35d862ac69e8bd30c7d153c85e78435bdd1d2844a98bd9ce49de5",
+      "disposition": "STAGED_PRIORITY_CAPTURE_LOWERING"
+    }
+  ],
+  "candidate_sources": [
+    {
+      "path": "src/observability/regex_syntax.rs",
+      "sha256": "2fbeae8fc1346d51cf5535930b750d0d69055d8923b3c6e8fcb3bf8ce25315b0",
+      "bytes": 112380,
+      "revision": "4022e575808c9a314159b3fe37b9c40d929c1ada"
+    },
+    {
+      "path": "src/observability/regex_semantics.rs",
+      "sha256": "bd762181da7620330a580152688af7684da371a9a32c144ef09ac5b5d0c2221a",
+      "bytes": 41269,
+      "revision": "c5c23b591e794c01db668785fdf29fc136009d2a"
+    },
+    {
+      "path": "src/observability/regex_boundaries.rs",
+      "sha256": "bac41152af892d6fb3c84fcc4c1ee2a75d70219ec877604207dbcd4c8efafbbd",
+      "bytes": 49494,
+      "revision": "bdc6ad3d84b4332c9a40183cb4ac2348c7b7796e"
+    },
+    {
+      "path": "src/observability/regex_ir.rs",
+      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
+      "bytes": 45049,
+      "revision": "6d566c140259c141ccdd2e2a843f2dd5552324d8"
+    },
+    {
+      "path": "src/observability/regex_lowering.rs",
+      "sha256": "664753b2198fa53a4e80845639a21e24c6f3871d240f59f75f7b522cc8a66a54",
+      "bytes": 56882,
+      "revision": "dd553f63c2ec3ef8263dfeeb093af5f12dbcd2ca"
+    }
+  ],
+  "source_revisions": {
+    "cargo_toml_sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d",
+    "cargo_lock_sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d",
+    "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
+    "package": "asupersync",
+    "package_version": "0.3.9",
+    "edition": "2024",
+    "pinned_toolchain": "nightly-2026-07-05"
+  },
+  "oracle": {
+    "incumbent_package": "regex@1.13.1",
+    "structural_reference_package": "regex-syntax@0.8.11",
+    "independent_reference": "bounded_literal_language_enumerator_v1",
+    "incumbent_quarantined_to_test_evidence": true,
+    "wording_is_not_compared": true,
+    "oracle_expiry_utc": "2026-10-23T00:00:00Z",
+    "invalidate_earlier_on": [
+      "Cargo.lock changes either oracle package",
+      "the R3.2 semantic terminal expires or changes",
+      "any candidate source digest changes",
+      "any retained minimized case changes disposition"
+    ]
+  },
+  "ast_rows": [
+    {"row_id": "RGX-COMP-AST-001", "kind": "empty", "pattern": "", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-002", "kind": "literal", "pattern": "a", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-003", "kind": "dot", "pattern": ".", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-004", "kind": "escape", "pattern": "\\n", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-005", "kind": "assertion", "pattern": "\\A", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-006", "kind": "line-start", "pattern": "^", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-007", "kind": "line-end", "pattern": "$", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-008", "kind": "concat", "pattern": "ab", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-009", "kind": "alternation", "pattern": "a|b", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-010", "kind": "capture", "pattern": "(a)", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-011", "kind": "non-capturing", "pattern": "(?:a)", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-012", "kind": "flags-scoped", "pattern": "(?i:a)", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-013", "kind": "flags-directive", "pattern": "(?i)a", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-014", "kind": "repetition", "pattern": "a?", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-015", "kind": "class", "pattern": "[a]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-016", "kind": "class-literal", "pattern": "[a]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-017", "kind": "class-escape", "pattern": "[\\d]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-018", "kind": "posix-class", "pattern": "[[:alpha:]]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-019", "kind": "class-range", "pattern": "[a-z]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-020", "kind": "class-union", "pattern": "[ab]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-021", "kind": "class-set-intersection", "pattern": "[a&&b]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-022", "kind": "class-set-difference", "pattern": "[a--b]", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-AST-023", "kind": "class-set-symmetric-difference", "pattern": "[a~~b]", "result": "LOWERED_CHECKED"}
+  ],
+  "quantifier_rows": [
+    {"row_id": "RGX-COMP-Q-001", "pattern": "a?", "form": "zero-or-one", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-002", "pattern": "a*", "form": "zero-or-more", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-003", "pattern": "a+", "form": "one-or-more", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-004", "pattern": "a{3}", "form": "exact", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-005", "pattern": "a{2,}", "form": "at-least", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-006", "pattern": "a{1,3}", "form": "bounded", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-007", "pattern": "a*?", "form": "lazy-zero-or-more", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-008", "pattern": "a{1,3}?", "form": "lazy-bounded", "result": "LOWERED_CHECKED"},
+    {"row_id": "RGX-COMP-Q-009", "pattern": "(?:a?)*", "form": "nullable-unbounded", "result": "KEEP_DEFER", "error_code": "RGX-LOWER-E009"},
+    {"row_id": "RGX-COMP-Q-010", "pattern": "(a){0}", "form": "capture-erasure", "result": "KEEP_DEFER", "error_code": "RGX-LOWER-E010"}
+  ],
+  "validator_rows": [
+    {"code": "RGX-IR-E001", "kind": "InvalidLimits"},
+    {"code": "RGX-IR-E002", "kind": "InvalidSchema"},
+    {"code": "RGX-IR-E003", "kind": "ArithmeticOverflow"},
+    {"code": "RGX-IR-E004", "kind": "EmptyProgram"},
+    {"code": "RGX-IR-E005", "kind": "StateLimit"},
+    {"code": "RGX-IR-E006", "kind": "TransitionLimit"},
+    {"code": "RGX-IR-E007", "kind": "ClassLimit"},
+    {"code": "RGX-IR-E008", "kind": "ClassRangeLimit"},
+    {"code": "RGX-IR-E009", "kind": "TotalClassRangeLimit"},
+    {"code": "RGX-IR-E010", "kind": "CaptureSlotLimit"},
+    {"code": "RGX-IR-E011", "kind": "OddCaptureSlots"},
+    {"code": "RGX-IR-E012", "kind": "RepetitionLimit"},
+    {"code": "RGX-IR-E013", "kind": "MemoryLimit"},
+    {"code": "RGX-IR-E014", "kind": "WorkLimit"},
+    {"code": "RGX-IR-E015", "kind": "ResourceAccountingMismatch"},
+    {"code": "RGX-IR-E016", "kind": "InvalidEntry"},
+    {"code": "RGX-IR-E017", "kind": "InvalidAccept"},
+    {"code": "RGX-IR-E018", "kind": "AcceptNotTerminal"},
+    {"code": "RGX-IR-E019", "kind": "ExtraAcceptState"},
+    {"code": "RGX-IR-E020", "kind": "InvalidTarget"},
+    {"code": "RGX-IR-E021", "kind": "InvalidClassReference"},
+    {"code": "RGX-IR-E022", "kind": "InvalidCaptureSlot"},
+    {"code": "RGX-IR-E023", "kind": "InvalidSpan"},
+    {"code": "RGX-IR-E024", "kind": "NonCanonicalClass"},
+    {"code": "RGX-IR-E025", "kind": "UnreferencedClass"},
+    {"code": "RGX-IR-E026", "kind": "UnreferencedCaptureSlot"},
+    {"code": "RGX-IR-E027", "kind": "AcceptUnreachable"},
+    {"code": "RGX-IR-E028", "kind": "UnreachableState"}
+  ],
+  "limits": {
+    "max_states": 262144,
+    "max_transitions": 524288,
+    "max_classes": 65536,
+    "max_ranges_per_class": 4096,
+    "max_total_class_ranges": 1048576,
+    "max_capture_slots": 4096,
+    "max_repetition_expansion": 1048576,
+    "max_memory_bytes": 10485760,
+    "max_work_units": 8388608
+  },
+  "evidence": {
+    "ast_rows": 23,
+    "quantifier_rows": 10,
+    "validator_rows": 28,
+    "independent_language_patterns": 14,
+    "independent_haystack_alphabet": "a,b",
+    "independent_max_haystack_length": 5,
+    "independent_language_comparisons": 882,
+    "priority_capture_goldens": 7,
+    "property_cases": 512,
+    "compiler_fuzz_seed": "0xC011_A3D5_7EED_0001",
+    "compiler_fuzz_cases": 1024,
+    "compiler_fuzz_max_pattern_scalars": 48,
+    "malformed_ir_fuzz_seed": "0x1BAD_1DEA_7EED_0002",
+    "malformed_ir_fuzz_cases": 1024,
+    "panic_observed": false,
+    "hang_observed": false,
+    "unbounded_allocation_observed": false,
+    "partial_program_on_error": false,
+    "cancellation_shutdown_quiescence": "not_applicable_pure_synchronous_bounded_compilation"
+  },
+  "retained_minimized_cases": [
+    {"case_id": "RGX-COMP-MIN-001", "pattern": "(?:a?)*", "disposition": "KEEP_DEFER", "error_code": "RGX-LOWER-E009"},
+    {"case_id": "RGX-COMP-MIN-002", "pattern": "(a){0}", "disposition": "KEEP_DEFER", "error_code": "RGX-LOWER-E010"},
+    {"case_id": "RGX-COMP-MIN-003", "pattern": "\\p{Age:16.0}", "disposition": "KEEP_DEFER", "error_code": "RGX-LEX-E004"}
+  ],
+  "proof": {
+    "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/regex_compiler_terminal_receipt_v1.json --overlay-path docs/regex_compiler_terminal_receipt.md --overlay-path tests/regex_compiler_terminal_receipt_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_compiler_terminal_receipt_contract -- --nocapture",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/regex_compiler_terminal_receipt_v1.json --overlay-path docs/regex_compiler_terminal_receipt.md --overlay-path tests/regex_compiler_terminal_receipt_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_compiler_terminal_receipt_contract -- -D warnings",
+    "format_command": "rustfmt --edition 2024 --check tests/regex_compiler_terminal_receipt_contract.rs",
+    "local_cargo_fallback": false
+  },
+  "required_doc_markers": [
+    "ASUP-REGEX-COMPILER-TERMINAL-V1",
+    "KEEP_INCUMBENT_DEFER",
+    "regex@1.13.1",
+    "2026-10-23T00:00:00Z",
+    "RCH_REQUIRE_REMOTE=1",
+    "No local Cargo fallback is approved.",
+    "no matcher or VM execution correctness",
+    "no production wiring or dependency removal"
+  ],
+  "no_claims": [
+    "no matcher or VM execution correctness",
+    "no production wiring or dependency removal",
+    "no persisted or deserializable IR format",
+    "no public API or accepted-syntax expansion",
+    "no owned Unicode table authorization",
+    "no isolated binary-size result",
+    "no cross-target execution result",
+    "no performance improvement or no-regression claim",
+    "no broad workspace health or release-readiness claim",
+    "no live RCH fleet availability claim",
+    "no local Cargo fallback approval"
+  ],
+  "on_failure": "KEEP_INCUMBENT_DEFER"
+}
