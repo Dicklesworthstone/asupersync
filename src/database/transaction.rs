@@ -175,7 +175,14 @@ async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> 
     .await
 }
 
+// Test-only helper: every caller drives this to completion with
+// `futures_lite::future::block_on` on a single thread, so the future is never
+// sent anywhere. Adding `Send` bounds to `Op`/`OpFut`/`Pred` would constrain
+// test closures (which may capture non-`Send` counters) to buy a property no
+// caller needs, so the bound is deliberately absent and the nursery lint is
+// scoped off here rather than satisfied.
 #[cfg(test)]
+#[allow(clippy::future_not_send)]
 async fn retry_with_policy<T, E, Op, OpFut, Pred>(
     cx: &Cx,
     policy: &RetryPolicy,
