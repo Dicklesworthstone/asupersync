@@ -1413,6 +1413,20 @@ Payoff: bridge from deterministic runtime traces to model-checking workflows whe
 
 ---
 
+## Dependency budget contract
+
+The checked
+[`artifacts/dependency_budget_contract_v1.json`](artifacts/dependency_budget_contract_v1.json)
+freezes the exact direct Cargo edge allowset and package-version plus
+unique-package-name ceilings for every canonical synthesized-consumer
+profile/platform cell. The focused `dependency-budget-contract` lane verifies
+the current marginal-ledger fingerprint, profile/target/host/edge-kind
+partitions, automatic downward ratchet, safe direct-edge and graph-growth
+negative fixtures, and the narrow reviewed-exception path. See
+[`docs/dependency_budget_contract.md`](docs/dependency_budget_contract.md).
+This contract does not authorize dependency removal or cutover and is not a
+broad workspace, runtime, security, performance, or release-readiness claim.
+
 ## Dependency supply-chain policy contract
 
 The checked supply-chain gate is

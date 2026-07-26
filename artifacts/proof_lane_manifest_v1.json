@@ -515,7 +515,8 @@
     "artifact-governance-final-signoff",
     "clean-overlay-proof-orchestration-contract",
     "proof-traffic-final-signoff",
-    "dependency-supply-chain-policy-contract"
+    "dependency-supply-chain-policy-contract",
+    "dependency-budget-contract"
   ],
   "lanes": [
     {
@@ -3018,6 +3019,62 @@
           "live-rch-fleet-availability"
         ]
       }
+    },
+    {
+      "lane_id": "dependency-budget-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "dependency-ledger"
+      ],
+      "guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "covers": "The exact direct-dependency allowset, frozen marginal-ledger fingerprint, synthesized-consumer profile/target/host/edge-kind partitions, package-version and unique-name ceilings, ratchet-down behavior, fail-closed direct-edge and graph-growth fixtures, reviewed-exception schema, generator/docs markers, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Dependency removal or cutover authority, compilation, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability.",
+      "expected_signal": "dependency_budget_contract tests pass",
+      "source_paths": [
+        "artifacts/dependency_budget_contract_v1.json",
+        "artifacts/dependency_marginal_ledger_v1.json",
+        "src/bin/dependency_marginal_ledger.rs",
+        "docs/dependency_budget_contract.md",
+        "tests/dependency_budget_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "frozen marginal-ledger fingerprint drift",
+        "Cargo.toml direct-edge inventory drift",
+        "unreviewed synthesized-consumer graph growth",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Regenerate the marginal ledger before the budget whenever Cargo or lock resolution changes. A rare upward exception must be added to the existing budget before regeneration and must identify its reviewer, approval, expiry, review reference, rationale, and exact edge or graph cell.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-budget-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "dependency-removal-authority",
+          "dependency-cutover-authority",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "security",
+          "performance",
+          "excluded-fuzz-health",
+          "live-rch-fleet-availability"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -3425,6 +3482,13 @@
       "description": "Pinned Cargo scanner policy, RustSec freshness receipts, workspace graph scope, expiring exceptions, license/source rules, duplicate ratchets, negative fixtures, CI/runbook wiring, excluded-fuzz quarantine, and scoped no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "dependency-supply-chain-policy-contract"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-budget-contract",
+      "description": "The exact direct-edge allowset, synthesized-consumer package-ID graph ceilings, automatic downward ratchet, reviewed upward-exception path, safe negative fixtures, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-budget-contract"
       ]
     }
   ],

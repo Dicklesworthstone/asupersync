@@ -95,7 +95,8 @@
     "artifact governance final signoff",
     "clean-overlay proof orchestration contract",
     "proof traffic final signoff",
-    "dependency supply-chain policy contract"
+    "dependency supply-chain policy contract",
+    "dependency budget contract"
   ],
   "claim_categories": [
     {
@@ -1120,6 +1121,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped dependency supply-chain policy and integration evidence only. A fresh live runner receipt is separately required for scanner health, and the excluded fuzz workspace is explicitly non-green while its lockfile is stale and its known RustSec findings remain. This row does not prove undisclosed-vulnerability absence, legal compliance, publisher identity, excluded fuzz health, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability."
+    },
+    {
+      "claim_id": "dependency-budget-contract",
+      "category": "dependency budget contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "Dependency budget contract",
+          "dependency-budget-contract"
+        ],
+        "AGENTS.md": [
+          "dependency budget contract",
+          "dependency-budget-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "manifest_lane_ids": [
+        "dependency-budget-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped checked dependency-budget evidence only: exact direct-edge allowset, frozen ledger fingerprint, synthesized-consumer package-ID ceilings, safe negative fixtures, reviewed-exception schema, and proof/docs mapping. It does not authorize dependency removal or cutover and does not prove compilation, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability."
     }
   ],
   "proof_reuse_status_rows": [
