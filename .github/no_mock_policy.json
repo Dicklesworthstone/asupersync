@@ -531,127 +531,19 @@
     {
       "group_id": "known-production-runtime-core-policy-hits-2026-05-05",
       "patterns": [
-        "src/bin/asupersync.rs",
-        "src/cancel/symbol_cancel.rs",
-        "src/combinator/join.rs",
-        "src/combinator/race.rs",
-        "src/combinator/timeout.rs",
-        "src/cx/macaroon.rs",
-        "src/database/postgres.rs",
-        "src/database/sqlite.rs",
-        "src/gen_server.rs",
-        "src/lab/explorer.rs",
-        "src/lab/network/harness.rs",
-        "src/lab/oracle/cancel_signal_ordering.rs",
-        "src/lab/oracle/priority_inversion.rs",
-        "src/lab/oracle/region_leak.rs",
-        "src/lab/util/stack_trace.rs",
-        "src/net/dns/resolver.rs",
-        "src/obligation/choreography/pipeline.rs",
-        "src/obligation/saga.rs",
-        "src/record/obligation.rs",
-        "src/record/region.rs",
-        "src/runtime/epoch_tracking.rs",
-        "src/runtime/panic_isolation.rs",
-        "src/runtime/resource_monitor.rs",
-        "src/runtime/state.rs",
-        "src/runtime/task_table.rs",
-        "src/security/authenticated.rs",
-        "src/security/tag.rs",
-        "src/service/load_balance.rs",
-        "src/service/reconnect.rs",
-        "src/service/steer.rs",
-        "src/supervision.rs",
-        "src/trace/event_structure.rs",
-        "src/trace/file.rs",
-        "src/transport/mock.rs",
-        "src/types/typed_symbol.rs",
-        "src/types/wasm_abi.rs",
-        "src/util/arena.rs",
-        "src/util/stack_trace.rs"
+        "src/bin/asupersync.rs"
       ],
       "category": "production_stub",
       "owner": "runtime-core",
-      "reason": "These exact runtime-core production paths are known lexical hits whose behavior is either live, cfg/test-support bounded, or tracked by closed mock-code-finder repair beads. New production source paths remain uncovered and fail the gate.",
-      "revisit_condition": "Re-audit exact path list during asupersync-u7y final ratchet signoff and retire entries as wording or test-support boundaries are normalized.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-grpc-policy-hits-2026-05-05",
-      "patterns": [
-        "src/grpc/mod.rs"
-      ],
-      "category": "production_stub",
-      "owner": "grpc-core",
-      "reason": "These exact gRPC paths are known lexical hits after gRPC compression, status, and deadline source-truth repairs landed. Future gRPC production placeholders remain policy violations.",
-      "revisit_condition": "Re-audit after asupersync-oelvq2 aggregate proof and asupersync-u7y final gap closure.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-messaging-policy-hits-2026-05-05",
-      "patterns": [
-        "src/messaging/fabric.rs",
-        "src/messaging/jetstream.rs",
-        "src/messaging/nats.rs",
-        "src/messaging/redis.rs"
-      ],
-      "category": "production_stub",
-      "owner": "messaging-core",
-      "reason": "These exact messaging paths are known lexical hits in live or tracked transport surfaces. Kafka phase-0 stubs stay under expiring waivers; new messaging paths remain uncovered.",
-      "revisit_condition": "Re-audit after asupersync-oelvq2 aggregate proof and retire entries as transport wording is normalized.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-observability-policy-hits-2026-05-05",
-      "patterns": [
-        "src/observability/analyzer_plugin.rs",
-        "src/observability/cancellation_analyzer.rs",
-        "src/observability/diagnostics.rs",
-        "src/observability/metrics.rs",
-        "src/observability/mod.rs",
-        "src/observability/otel.rs",
-        "src/observability/otlp_trace_exporter.rs"
-      ],
-      "category": "production_stub",
-      "owner": "observability-core",
-      "reason": "These exact observability production paths are known lexical hits after the OTLP/metrics repair beads closed. Audit modules are separately categorized as stale audit prose.",
-      "revisit_condition": "Re-audit after observability evidence aggregation in asupersync-oelvq2 and final gap closure in asupersync-u7y.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-reactor-policy-hits-2026-05-05",
-      "patterns": [
-        "src/runtime/reactor/browser.rs"
-      ],
-      "category": "production_stub",
-      "owner": "runtime-reactor",
-      "reason": "The browser reactor path contains known platform-boundary fallback terminology and remains separated from default native runtime behavior; macOS and Windows fallback exports remain expiring waivers.",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-tls-policy-hits-2026-05-05",
-      "patterns": [
-        "src/tls/connector.rs",
-        "src/tls/error.rs"
-      ],
-      "category": "production_stub",
-      "owner": "tls-core",
-      "reason": "These exact TLS paths are known lexical hits in live connector/error handling surfaces rather than hidden fake TLS behavior.",
-      "revisit_condition": "Re-audit during asupersync-u7y final ratchet signoff.",
-      "replacement_issue": "asupersync-u7y"
-    },
-    {
-      "group_id": "known-production-web-policy-hits-2026-05-05",
-      "patterns": [
-        "src/web/middleware.rs",
-        "src/web/response.rs"
-      ],
-      "category": "production_stub",
-      "owner": "web-runtime",
-      "reason": "These exact web-runtime paths are known lexical hits in live middleware/response code or documented test-support hooks. New web production placeholders remain uncovered.",
-      "revisit_condition": "Re-audit during asupersync-u7y final ratchet signoff.",
-      "replacement_issue": "asupersync-u7y"
+      "reason": "Re-verified 2026-07-26 under asupersync-3j4ib0. This group held 38 whole-file patterns; after asupersync-pzfwf5 gave the scanner #[cfg(test)] awareness, 37 of them matched no production hit at all and were removed rather than left as standing whole-file coverage. The one survivor is the ATP CLI, and it is narrowed to its five justified sentences: two comments recording that fake progress/sleep-loop streams were REMOVED (br-asupersync-qk02uw), one documented preview sentinel for a local-only receive preflight, and two comments on atp_not_implemented() refusals for sync and mirror reconcile. Those refusals are complete fail-closed behavior, not unfinished work, which is why they take an allowlist entry rather than an expiring waiver.",
+      "revisit_condition": "Any flagged line in this binary outside those five sentences now fails the gate on its own; re-audit if the CLI gains a lexical hit that is not one of them. The 37 removed patterns are recoverable from git history if a marker ever reappears in those files.",
+      "replacement_issue": "asupersync-u7y",
+      "justified_text": [
+        "^\\s*//.*Retained for unit-test coverage of the chunking contract",
+        "^\\s*//.*Retained for unit-test coverage of the progress format",
+        "^\\s*//.*explicit preview placeholder, not a real peer identity",
+        "^\\s*//.*is not implemented; do not fake"
+      ]
     }
   ],
   "waivers": [
