@@ -151,6 +151,20 @@ The non-overlapping oracle is the incumbent's `captures_iter`. The overlapping
 oracle independently repeats `captures_at`, resuming one Unicode scalar after
 the selected match start. Neither oracle calls the candidate's progress helper.
 
+## R3.4.4 successor handoff
+
+R3.4.4 extends the same private source with explicit caller-supplied
+cancellation checkpoints and terminal adversarial/performance evidence. The
+live source digest therefore moves to
+`artifacts/regex_vm_terminal_receipt_v1.json`. This artifact retains the
+original R3.4.3 `src/observability/regex_vm.rs` digest as a historical pin.
+
+`tests/regex_vm_iteration_contract.rs` still imports and executes the current
+source. Its exact, incumbent, model, property, privacy, adversarial, and
+resource cases remain live behavioral evidence even though its original source
+digest is historical. The R3.4.4 terminal runs the core, capture, iteration,
+and terminal contracts together.
+
 ## Proof commands
 
 Run the inline tests through required remote compilation:

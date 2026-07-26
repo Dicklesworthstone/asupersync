@@ -13,6 +13,13 @@
     "priority_capture_predecessor_path": "artifacts/regex_vm_captures_contract_v1.json",
     "production_cutover_eligible": false
   },
+  "successor_handoff": {
+    "live_source_authority": "artifacts/regex_vm_terminal_receipt_v1.json",
+    "successor_bead_id": "asupersync-5z2scg.8.3.4.4",
+    "historical_vm_source_pin_retained": true,
+    "live_vm_source_pin": false,
+    "iteration_behavior_replayed_against_successor_source": true
+  },
   "sources": [
     {
       "path": "src/observability/regex_ir.rs",
@@ -30,7 +37,8 @@
       "path": "src/observability/regex_vm.rs",
       "sha256": "d0d2b841cb3533bc0dbfdcbd6c237e594391015e649477b408ff047ea75ffe2c",
       "bytes": 101389,
-      "revision": "asupersync-5z2scg.8.3.4.3"
+      "revision": "asupersync-5z2scg.8.3.4.3",
+      "pin_scope": "historical_r3_4_3_source"
     },
     {
       "path": "src/observability/mod.rs",

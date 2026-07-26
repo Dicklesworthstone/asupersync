@@ -5,8 +5,9 @@
 //! recognition. The R3.4.2 entry points add one-shot leftmost-first selection,
 //! ordered greedy/lazy execution, and bounded capture histories. R3.4.3 adds
 //! deterministic match/capture iteration, explicit overlap policy, Unicode-safe
-//! zero-width progress, and ordered replacement spans. Cancellation,
-//! production privacy wiring, replacement-template syntax, and dependency
+//! zero-width progress, and ordered replacement spans. R3.4.4 adds explicit
+//! caller-supplied cancellation checkpoints and terminal adversarial evidence.
+//! Production privacy wiring, replacement-template syntax, and dependency
 //! replacement remain downstream work.
 
 use core::fmt;
@@ -50,6 +51,7 @@ pub const DEFAULT_MAX_ITERATED_MATCHES: usize = 262_144;
 pub const DEFAULT_MAX_ITERATION_TRACE_EVENTS: usize = 256;
 pub const ACCOUNTED_ITERATION_MATCH_BYTES: u64 = 128;
 pub const ACCOUNTED_ITERATION_TRACE_EVENT_BYTES: u64 = 80;
+pub const DEFAULT_CANCELLATION_CHECK_INTERVAL_WORK_UNITS: u64 = 1_024;
 
 const FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -158,6 +160,7 @@ pub enum VmErrorKind {
     InvalidCaptureBoundary,
     MatchLimit,
     InvalidIterationBoundary,
+    Cancelled,
 }
 
 impl VmErrorKind {
@@ -179,6 +182,7 @@ impl VmErrorKind {
             Self::InvalidCaptureBoundary => "RGX-VM-E012",
             Self::MatchLimit => "RGX-VM-E013",
             Self::InvalidIterationBoundary => "RGX-VM-E014",
+            Self::Cancelled => "RGX-VM-E015",
         }
     }
 }
@@ -272,6 +276,137 @@ impl fmt::Display for VmError {
 }
 
 impl std::error::Error for VmError {}
+
+/// One deterministic, input-free cancellation observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmCancellationCheckpoint {
+    pub sequence: u64,
+    pub work_units: u64,
+    pub offset: usize,
+    pub state: Option<StateId>,
+}
+
+/// Caller-owned cancellation decision with no ambient runtime dependency.
+pub trait VmCancellationProbe {
+    fn should_cancel(&mut self, checkpoint: VmCancellationCheckpoint) -> bool;
+}
+
+impl<F> VmCancellationProbe for F
+where
+    F: FnMut(VmCancellationCheckpoint) -> bool,
+{
+    fn should_cancel(&mut self, checkpoint: VmCancellationCheckpoint) -> bool {
+        self(checkpoint)
+    }
+}
+
+/// Explicit cooperative cancellation state shared across one VM operation.
+///
+/// The control retains only normalized work/offset/state metadata. It never
+/// stores pattern or haystack bytes, and can span nested searches so an
+/// iteration has one aggregate checkpoint sequence.
+pub struct VmCancellationControl<'probe> {
+    check_interval_work_units: u64,
+    next_check_work_units: u64,
+    observed_work_units: u64,
+    checkpoints: u64,
+    checkpoint_fingerprint: u64,
+    cancelled_at: Option<VmCancellationCheckpoint>,
+    probe: &'probe mut dyn VmCancellationProbe,
+}
+
+impl<'probe> VmCancellationControl<'probe> {
+    pub fn new(
+        check_interval_work_units: u64,
+        probe: &'probe mut dyn VmCancellationProbe,
+    ) -> Result<Self, VmError> {
+        if check_interval_work_units == 0 {
+            return Err(VmError::new(VmErrorKind::InvalidLimits));
+        }
+        Ok(Self {
+            check_interval_work_units,
+            next_check_work_units: check_interval_work_units,
+            observed_work_units: 0,
+            checkpoints: 0,
+            checkpoint_fingerprint: FINGERPRINT_OFFSET_BASIS,
+            cancelled_at: None,
+            probe,
+        })
+    }
+
+    pub const fn observed_work_units(&self) -> u64 {
+        self.observed_work_units
+    }
+
+    pub const fn checkpoints(&self) -> u64 {
+        self.checkpoints
+    }
+
+    pub const fn checkpoint_fingerprint(&self) -> u64 {
+        self.checkpoint_fingerprint
+    }
+
+    pub const fn cancelled_at(&self) -> Option<VmCancellationCheckpoint> {
+        self.cancelled_at
+    }
+
+    fn observe_charge(
+        &mut self,
+        units: u64,
+        offset: usize,
+        state: Option<StateId>,
+    ) -> Result<(), VmError> {
+        let next = self
+            .observed_work_units
+            .checked_add(units)
+            .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow).with_offset(offset))?;
+        while next >= self.next_check_work_units {
+            self.checkpoints = checked_increment(self.checkpoints)?;
+            let checkpoint = VmCancellationCheckpoint {
+                sequence: self.checkpoints,
+                work_units: self.next_check_work_units,
+                offset,
+                state,
+            };
+            self.checkpoint_fingerprint =
+                fingerprint_mix(self.checkpoint_fingerprint, checkpoint.sequence);
+            self.checkpoint_fingerprint =
+                fingerprint_mix(self.checkpoint_fingerprint, checkpoint.work_units);
+            self.checkpoint_fingerprint = fingerprint_mix(
+                self.checkpoint_fingerprint,
+                u64::try_from(checkpoint.offset)
+                    .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?,
+            );
+            self.checkpoint_fingerprint = fingerprint_mix(
+                self.checkpoint_fingerprint,
+                match checkpoint.state {
+                    Some(state) => u64::try_from(state.index())
+                        .map_err(|_| VmError::new(VmErrorKind::ArithmeticOverflow))?
+                        .saturating_add(1),
+                    None => 0,
+                },
+            );
+            if self.probe.should_cancel(checkpoint) {
+                self.observed_work_units = checkpoint.work_units;
+                self.cancelled_at = Some(checkpoint);
+                let mut error = VmError::new(VmErrorKind::Cancelled).with_offset(offset);
+                error.state = state;
+                error.actual = Some(checkpoint.work_units);
+                return Err(error);
+            }
+            let Some(following) = self
+                .next_check_work_units
+                .checked_add(self.check_interval_work_units)
+            else {
+                self.next_check_work_units = u64::MAX;
+                break;
+            };
+            self.next_check_work_units = following;
+        }
+        self.observed_work_units = next;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmTraceAction {
@@ -493,10 +628,11 @@ impl OffsetBucket {
     }
 }
 
-struct Executor<'program, 'haystack> {
+struct Executor<'program, 'haystack, 'control, 'probe> {
     program: &'program Program,
     haystack: &'haystack str,
     limits: VmLimits,
+    control: Option<&'control mut VmCancellationControl<'probe>>,
     buckets: Vec<OffsetBucket>,
     active_threads: usize,
     resources: VmResources,
@@ -517,6 +653,27 @@ pub fn execute_full(
     haystack: &str,
     compile_limits: CompileLimits,
     limits: VmLimits,
+) -> Result<VmOutcome, VmError> {
+    execute_full_with_optional_control(program, haystack, compile_limits, limits, None)
+}
+
+/// Execute whole-haystack recognition with explicit cooperative cancellation.
+pub fn execute_full_with_control(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: VmLimits,
+    control: &mut VmCancellationControl<'_>,
+) -> Result<VmOutcome, VmError> {
+    execute_full_with_optional_control(program, haystack, compile_limits, limits, Some(control))
+}
+
+fn execute_full_with_optional_control(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: VmLimits,
+    control: Option<&mut VmCancellationControl<'_>>,
 ) -> Result<VmOutcome, VmError> {
     if !limits.invariants_hold() {
         return Err(VmError::new(VmErrorKind::InvalidLimits));
@@ -542,6 +699,7 @@ pub fn execute_full(
         program,
         haystack,
         limits,
+        control,
         thread_capacity,
         accounted_memory_bytes,
     )
@@ -584,11 +742,12 @@ fn accounted_memory_bytes(
         .ok_or_else(|| VmError::new(VmErrorKind::ArithmeticOverflow))
 }
 
-impl<'program, 'haystack> Executor<'program, 'haystack> {
+impl<'program, 'haystack, 'control, 'probe> Executor<'program, 'haystack, 'control, 'probe> {
     fn new(
         program: &'program Program,
         haystack: &'haystack str,
         limits: VmLimits,
+        control: Option<&'control mut VmCancellationControl<'probe>>,
         thread_capacity: usize,
         accounted_memory_bytes: u64,
     ) -> Self {
@@ -596,6 +755,7 @@ impl<'program, 'haystack> Executor<'program, 'haystack> {
             program,
             haystack,
             limits,
+            control,
             buckets: (0..OFFSET_BUCKET_COUNT)
                 .map(|_| OffsetBucket::new(program.states.len(), thread_capacity))
                 .collect(),
@@ -902,6 +1062,9 @@ impl<'program, 'haystack> Executor<'program, 'haystack> {
             error.state = state;
             return Err(error);
         }
+        if let Some(control) = self.control.as_deref_mut() {
+            control.observe_charge(units, offset, state)?;
+        }
         self.resources.work_units = next;
         Ok(())
     }
@@ -1012,10 +1175,11 @@ impl CaptureOffsetBucket {
     }
 }
 
-struct CaptureExecutor<'program, 'haystack> {
+struct CaptureExecutor<'program, 'haystack, 'control, 'probe> {
     program: &'program Program,
     haystack: &'haystack str,
     limits: CaptureVmLimits,
+    control: Option<&'control mut VmCancellationControl<'probe>>,
     buckets: Vec<CaptureOffsetBucket>,
     active_threads: usize,
     seen: Vec<u8>,
@@ -1047,6 +1211,25 @@ pub fn execute_anchored(
         compile_limits,
         limits,
         CaptureMode::AnchoredPrefix,
+        None,
+    )
+}
+
+/// Execute an anchored one-shot match with explicit cooperative cancellation.
+pub fn execute_anchored_with_control(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+    control: &mut VmCancellationControl<'_>,
+) -> Result<CaptureVmOutcome, VmError> {
+    execute_capture_mode(
+        program,
+        haystack,
+        compile_limits,
+        limits,
+        CaptureMode::AnchoredPrefix,
+        Some(control),
     )
 }
 
@@ -1063,6 +1246,25 @@ pub fn execute_captures_full(
         compile_limits,
         limits,
         CaptureMode::AnchoredFull,
+        None,
+    )
+}
+
+/// Execute an anchored full capture match with explicit cancellation.
+pub fn execute_captures_full_with_control(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+    control: &mut VmCancellationControl<'_>,
+) -> Result<CaptureVmOutcome, VmError> {
+    execute_capture_mode(
+        program,
+        haystack,
+        compile_limits,
+        limits,
+        CaptureMode::AnchoredFull,
+        Some(control),
     )
 }
 
@@ -1075,7 +1277,18 @@ pub fn execute_search(
     compile_limits: CompileLimits,
     limits: CaptureVmLimits,
 ) -> Result<CaptureVmOutcome, VmError> {
-    execute_search_from(program, haystack, compile_limits, limits, 0)
+    execute_search_from(program, haystack, compile_limits, limits, 0, None)
+}
+
+/// Find one leftmost-first match with explicit cooperative cancellation.
+pub fn execute_search_with_control(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    limits: CaptureVmLimits,
+    control: &mut VmCancellationControl<'_>,
+) -> Result<CaptureVmOutcome, VmError> {
+    execute_search_from(program, haystack, compile_limits, limits, 0, Some(control))
 }
 
 fn execute_search_from(
@@ -1084,6 +1297,7 @@ fn execute_search_from(
     compile_limits: CompileLimits,
     limits: CaptureVmLimits,
     start_offset: usize,
+    control: Option<&mut VmCancellationControl<'_>>,
 ) -> Result<CaptureVmOutcome, VmError> {
     execute_capture_mode(
         program,
@@ -1091,6 +1305,7 @@ fn execute_search_from(
         compile_limits,
         limits,
         CaptureMode::Search { start_offset },
+        control,
     )
 }
 
@@ -1105,6 +1320,36 @@ pub fn execute_find_iter(
     compile_limits: CompileLimits,
     policy: IterationPolicy,
     limits: IterationVmLimits,
+) -> Result<VmIterationOutcome, VmError> {
+    execute_find_iter_with_optional_control(program, haystack, compile_limits, policy, limits, None)
+}
+
+/// Repeatedly select matches with explicit aggregate cancellation checkpoints.
+pub fn execute_find_iter_with_control(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    policy: IterationPolicy,
+    limits: IterationVmLimits,
+    control: &mut VmCancellationControl<'_>,
+) -> Result<VmIterationOutcome, VmError> {
+    execute_find_iter_with_optional_control(
+        program,
+        haystack,
+        compile_limits,
+        policy,
+        limits,
+        Some(control),
+    )
+}
+
+fn execute_find_iter_with_optional_control(
+    program: &Program,
+    haystack: &str,
+    compile_limits: CompileLimits,
+    policy: IterationPolicy,
+    limits: IterationVmLimits,
+    mut control: Option<&mut VmCancellationControl<'_>>,
 ) -> Result<VmIterationOutcome, VmError> {
     if !limits.invariants_hold() {
         return Err(VmError::new(VmErrorKind::InvalidLimits));
@@ -1137,6 +1382,7 @@ pub fn execute_find_iter(
             1,
             limits.capture.vm.max_work_units,
             search_start,
+            control.as_deref_mut(),
         )?;
         let retained_before = iteration_retained_memory_bytes(
             matches.len(),
@@ -1186,6 +1432,7 @@ pub fn execute_find_iter(
             compile_limits,
             search_limits,
             search_start,
+            control.as_deref_mut(),
         )?;
         resources.search_attempts = checked_increment(resources.search_attempts)?;
         resources.total_work_units = resources
@@ -1299,6 +1546,7 @@ fn execute_capture_mode(
     compile_limits: CompileLimits,
     limits: CaptureVmLimits,
     mode: CaptureMode,
+    control: Option<&mut VmCancellationControl<'_>>,
 ) -> Result<CaptureVmOutcome, VmError> {
     if !limits.invariants_hold() {
         return Err(VmError::new(VmErrorKind::InvalidLimits));
@@ -1335,6 +1583,7 @@ fn execute_capture_mode(
         program,
         haystack,
         limits,
+        control,
         seen_keys,
         thread_capacity,
         base_memory_bytes,
@@ -1420,6 +1669,7 @@ fn iteration_charge(
     units: u64,
     limit: u64,
     offset: usize,
+    control: Option<&mut VmCancellationControl<'_>>,
 ) -> Result<(), VmError> {
     let next = resources
         .total_work_units
@@ -1429,6 +1679,9 @@ fn iteration_charge(
         return Err(VmError::new(VmErrorKind::WorkLimit)
             .with_offset(offset)
             .with_actual_limit(next, limit));
+    }
+    if let Some(control) = control {
+        control.observe_charge(units, offset, None)?;
     }
     resources.total_work_units = next;
     Ok(())
@@ -1537,11 +1790,12 @@ fn mix_match_fingerprint(mut fingerprint: u64, matched: &VmMatch) -> Result<u64,
     Ok(fingerprint)
 }
 
-impl<'program, 'haystack> CaptureExecutor<'program, 'haystack> {
+impl<'program, 'haystack, 'control, 'probe> CaptureExecutor<'program, 'haystack, 'control, 'probe> {
     fn new(
         program: &'program Program,
         haystack: &'haystack str,
         limits: CaptureVmLimits,
+        control: Option<&'control mut VmCancellationControl<'probe>>,
         seen_keys: usize,
         thread_capacity: usize,
         base_memory_bytes: u64,
@@ -1550,6 +1804,7 @@ impl<'program, 'haystack> CaptureExecutor<'program, 'haystack> {
             program,
             haystack,
             limits,
+            control,
             buckets: (0..CAPTURE_OFFSET_BUCKET_COUNT)
                 .map(|_| CaptureOffsetBucket::new(thread_capacity))
                 .collect(),
@@ -2105,6 +2360,9 @@ impl<'program, 'haystack> CaptureExecutor<'program, 'haystack> {
             error.state = state;
             return Err(error);
         }
+        if let Some(control) = self.control.as_deref_mut() {
+            control.observe_charge(units, offset, state)?;
+        }
         self.resources.core.work_units = next;
         Ok(())
     }
@@ -2584,6 +2842,138 @@ mod tests {
         )
         .expect_err("aggregate work limit");
         assert_eq!(work.kind, VmErrorKind::WorkLimit);
+    }
+
+    #[test]
+    fn explicit_cancellation_is_exact_private_and_leaves_programs_reusable() {
+        let mut invalid_probe = |_: VmCancellationCheckpoint| false;
+        let invalid = VmCancellationControl::new(0, &mut invalid_probe);
+        assert!(matches!(
+            invalid,
+            Err(VmError {
+                kind: VmErrorKind::InvalidLimits,
+                ..
+            })
+        ));
+
+        let full_program = lower_default("a*");
+        let full_haystack = "a".repeat(64);
+        let ordinary = execute_full(
+            &full_program,
+            &full_haystack,
+            CompileLimits::default(),
+            VmLimits::default(),
+        )
+        .expect("ordinary full execution");
+        let mut never_cancel = |_: VmCancellationCheckpoint| false;
+        let mut full_control = VmCancellationControl::new(7, &mut never_cancel)
+            .expect("nonzero cancellation interval");
+        let controlled = execute_full_with_control(
+            &full_program,
+            &full_haystack,
+            CompileLimits::default(),
+            VmLimits::default(),
+            &mut full_control,
+        )
+        .expect("controlled full execution");
+        assert_eq!(controlled, ordinary);
+        assert_eq!(
+            full_control.observed_work_units(),
+            controlled.resources.work_units
+        );
+        assert!(full_control.checkpoints() > 0);
+        assert_eq!(full_control.cancelled_at(), None);
+
+        let capture_program = lower_default("(a+)");
+        let private_haystack = "private-cancel-canary-aaaa";
+        let mut capture_receipts = Vec::new();
+        let mut cancel_capture = |checkpoint: VmCancellationCheckpoint| {
+            capture_receipts.push(checkpoint);
+            checkpoint.sequence == 3
+        };
+        let mut capture_control = VmCancellationControl::new(5, &mut cancel_capture)
+            .expect("nonzero cancellation interval");
+        let capture_error = execute_search_with_control(
+            &capture_program,
+            private_haystack,
+            CompileLimits::default(),
+            CaptureVmLimits::default(),
+            &mut capture_control,
+        )
+        .expect_err("third checkpoint cancels capture search");
+        assert_eq!(capture_error.kind, VmErrorKind::Cancelled);
+        assert_eq!(
+            capture_control.cancelled_at(),
+            Some(VmCancellationCheckpoint {
+                sequence: 3,
+                work_units: 15,
+                offset: capture_error.offset.expect("cancel offset"),
+                state: capture_error.state,
+            })
+        );
+        assert!(!capture_error.to_string().contains(private_haystack));
+        assert_ne!(
+            capture_control.checkpoint_fingerprint(),
+            FINGERPRINT_OFFSET_BASIS
+        );
+        assert_eq!(capture_receipts.len(), 3);
+        assert!(
+            execute_search(
+                &capture_program,
+                private_haystack,
+                CompileLimits::default(),
+                CaptureVmLimits::default(),
+            )
+            .expect("program is reusable after cancellation")
+            .is_match()
+        );
+
+        let iteration_program = lower_default("a");
+        let mut first_probe = |checkpoint: VmCancellationCheckpoint| checkpoint.sequence == 4;
+        let mut first_control =
+            VmCancellationControl::new(3, &mut first_probe).expect("valid first control");
+        let first_error = execute_find_iter_with_control(
+            &iteration_program,
+            "a a a a",
+            CompileLimits::default(),
+            IterationPolicy::NonOverlapping,
+            IterationVmLimits::default(),
+            &mut first_control,
+        )
+        .expect_err("fourth aggregate checkpoint cancels iteration");
+        let first_receipt = (
+            first_error,
+            first_control.cancelled_at(),
+            first_control.checkpoint_fingerprint(),
+        );
+
+        let mut second_probe = |checkpoint: VmCancellationCheckpoint| checkpoint.sequence == 4;
+        let mut second_control =
+            VmCancellationControl::new(3, &mut second_probe).expect("valid second control");
+        let second_error = execute_find_iter_with_control(
+            &iteration_program,
+            "a a a a",
+            CompileLimits::default(),
+            IterationPolicy::NonOverlapping,
+            IterationVmLimits::default(),
+            &mut second_control,
+        )
+        .expect_err("replayed aggregate cancellation");
+        assert_eq!(
+            first_receipt,
+            (
+                second_error,
+                second_control.cancelled_at(),
+                second_control.checkpoint_fingerprint(),
+            )
+        );
+        assert_eq!(first_receipt.0.kind, VmErrorKind::Cancelled);
+        assert_eq!(
+            iterate("a", "a a a a", IterationPolicy::NonOverlapping)
+                .matches
+                .len(),
+            4
+        );
     }
 
     #[test]
