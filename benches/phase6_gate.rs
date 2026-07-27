@@ -38,6 +38,17 @@ struct TrackedBaseline {
 struct TrackedBaselineRow {
     operation: String,
     p50_ns: f64,
+    /// Host-class tag of the run that recorded this row (`host:<hostname>`).
+    /// The RCH fleet is heterogeneous (OVH dedicated vs Contabo VPS classes
+    /// differ 30-70% on single-thread micro-cycles) and workers cannot be
+    /// pinned, so a 5% gate is only meaningful like-to-like: tagged rows are
+    /// compared ONLY when this process is executing on the same host class,
+    /// and are loudly skipped otherwise. Untagged rows (the legacy
+    /// `methodology/` set) compare unconditionally, preserving the original
+    /// gate behavior until they are re-recorded with tags
+    /// (br-asupersync-pjivey).
+    #[serde(default)]
+    environment: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +93,26 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T
         .map_err(|error| format!("cannot parse {label} {}: {error}", path.display()))
 }
 
+/// The host-class tag of THIS process: `host:<hostname>`. The gate runs
+/// inside the bench process on the executing worker, so the hostname is the
+/// ground truth for like-to-like comparison — no operator input, no worker
+/// lottery ambiguity.
+fn current_environment() -> Result<String, String> {
+    let output = std::process::Command::new("hostname")
+        .output()
+        .map_err(|error| format!("cannot resolve hostname for environment matching: {error}"))?;
+    if !output.status.success() {
+        return Err("hostname exited non-zero; cannot match tagged baseline rows".to_string());
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        return Err(
+            "hostname returned empty output; cannot match tagged baseline rows".to_string(),
+        );
+    }
+    Ok(format!("host:{name}"))
+}
+
 /// Runs the Phase 6 p50 gate over the tracked rows owned by `prefix`.
 ///
 /// Returns `Ok(())` when the gate env var is unset (gate not requested) or
@@ -116,6 +147,9 @@ pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
     let criterion_home = criterion_home();
     let mut operations = BTreeSet::new();
     let mut owned_rows = 0usize;
+    let mut compared_rows = 0usize;
+    let mut skipped_environments = BTreeSet::new();
+    let mut current_env: Option<String> = None;
     let mut regressions = Vec::new();
 
     for row in &baseline.baselines {
@@ -132,6 +166,25 @@ pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
             continue;
         }
         owned_rows += 1;
+        if let Some(tag) = &row.environment {
+            let current = match &current_env {
+                Some(current) => current,
+                None => {
+                    current_env = Some(current_environment()?);
+                    current_env.as_ref().expect("environment just resolved")
+                }
+            };
+            if tag != current {
+                println!(
+                    "[PHASE6] row {:?} skipped: recorded on {tag}, this run is {current} \
+                     (like-to-like only; see docs/perf_runbook.md)",
+                    row.operation
+                );
+                skipped_environments.insert(tag.clone());
+                continue;
+            }
+        }
+        compared_rows += 1;
         if !row.p50_ns.is_finite() || row.p50_ns <= 0.0 {
             return Err(format!(
                 "tracked Phase 6 baseline operation {:?} has invalid p50_ns",
@@ -167,12 +220,26 @@ pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
              a gated bench binary must own at least one tracked row"
         ));
     }
+    if compared_rows == 0 {
+        // Every owned row was recorded on a different host class. A skip is
+        // not a pass: fail closed so a worker-lottery mismatch can never be
+        // cited as gate evidence.
+        return Err(format!(
+            "environment mismatch: all {owned_rows} rows under prefix {prefix:?} were recorded \
+             on {:?}, but this run executed on {:?}; rerun until the dispatch lands on the \
+             recording host class, or re-record the rows for this class \
+             (docs/perf_runbook.md)",
+            skipped_environments.iter().cloned().collect::<Vec<_>>(),
+            current_env.as_deref().unwrap_or("<unresolved>")
+        ));
+    }
 
     if regressions.is_empty() {
+        let skipped = owned_rows - compared_rows;
         println!(
-            "[PHASE6] p50 gate passed: {owned_rows} tracked rows compared at 5.00% under prefix \
-             {prefix:?}; rows under other prefixes and untracked Criterion rows are outside this \
-             gate."
+            "[PHASE6] p50 gate passed: {compared_rows} of {owned_rows} tracked rows compared at \
+             5.00% under prefix {prefix:?} ({skipped} skipped as other-host-class); rows under \
+             other prefixes and untracked Criterion rows are outside this gate."
         );
         Ok(())
     } else {

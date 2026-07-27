@@ -477,7 +477,7 @@
       "ci95_lower_ns": 18363.3,
       "ci95_upper_ns": 18582.03,
       "cv_pct": 1.19,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -489,7 +489,7 @@
       "ci95_lower_ns": 3411.39,
       "ci95_upper_ns": 3582.56,
       "cv_pct": 4.89,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -501,7 +501,7 @@
       "ci95_lower_ns": 4355.16,
       "ci95_upper_ns": 4360.36,
       "cv_pct": 0.12,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -513,7 +513,7 @@
       "ci95_lower_ns": 7526.18,
       "ci95_upper_ns": 7882.73,
       "cv_pct": 4.63,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -525,7 +525,7 @@
       "ci95_lower_ns": 5623.2,
       "ci95_upper_ns": 5634.64,
       "cv_pct": 0.2,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -537,7 +537,7 @@
       "ci95_lower_ns": 8452.11,
       "ci95_upper_ns": 8471.47,
       "cv_pct": 0.23,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -549,7 +549,7 @@
       "ci95_lower_ns": 130479.34,
       "ci95_upper_ns": 130723.17,
       "cv_pct": 0.19,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -561,7 +561,7 @@
       "ci95_lower_ns": 27351.44,
       "ci95_upper_ns": 28146.8,
       "cv_pct": 2.89,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -573,7 +573,7 @@
       "ci95_lower_ns": 19897.27,
       "ci95_upper_ns": 19978.17,
       "cv_pct": 0.41,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -585,7 +585,7 @@
       "ci95_lower_ns": 14921.39,
       "ci95_upper_ns": 15288.73,
       "cv_pct": 2.43,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -597,7 +597,7 @@
       "ci95_lower_ns": 434.74,
       "ci95_upper_ns": 443.53,
       "cv_pct": 2.01,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -609,7 +609,7 @@
       "ci95_lower_ns": 487.14,
       "ci95_upper_ns": 506.87,
       "cv_pct": 3.99,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -621,7 +621,7 @@
       "ci95_lower_ns": 333.7,
       "ci95_upper_ns": 342.84,
       "cv_pct": 2.7,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -633,7 +633,7 @@
       "ci95_lower_ns": 11020.36,
       "ci95_upper_ns": 11404.21,
       "cv_pct": 3.43,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -645,7 +645,7 @@
       "ci95_lower_ns": 5630.32,
       "ci95_upper_ns": 5834.56,
       "cv_pct": 3.59,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -657,7 +657,7 @@
       "ci95_lower_ns": 1730.5,
       "ci95_upper_ns": 1732.03,
       "cv_pct": 0.09,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -669,7 +669,7 @@
       "ci95_lower_ns": 1170.36,
       "ci95_upper_ns": 1171.97,
       "cv_pct": 0.14,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -681,7 +681,7 @@
       "ci95_lower_ns": 119917.88,
       "ci95_upper_ns": 121118.76,
       "cv_pct": 1.0,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -693,7 +693,7 @@
       "ci95_lower_ns": 91251.51,
       "ci95_upper_ns": 91969.17,
       "cv_pct": 0.78,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -705,7 +705,7 @@
       "ci95_lower_ns": 34681.03,
       "ci95_upper_ns": 35265.06,
       "cv_pct": 1.68,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -717,7 +717,7 @@
       "ci95_lower_ns": 74.7,
       "ci95_upper_ns": 79.1,
       "cv_pct": 5.81,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -729,7 +729,7 @@
       "ci95_lower_ns": 9150.32,
       "ci95_upper_ns": 9589.91,
       "cv_pct": 4.72,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -741,7 +741,7 @@
       "ci95_lower_ns": 13774.55,
       "ci95_upper_ns": 14283.13,
       "cv_pct": 3.63,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -753,7 +753,7 @@
       "ci95_lower_ns": 2800.29,
       "ci95_upper_ns": 2841.06,
       "cv_pct": 1.44,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -765,7 +765,7 @@
       "ci95_lower_ns": 730.88,
       "ci95_upper_ns": 749.98,
       "cv_pct": 2.58,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -777,7 +777,7 @@
       "ci95_lower_ns": 557.55,
       "ci95_upper_ns": 579.9,
       "cv_pct": 3.91,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -789,7 +789,7 @@
       "ci95_lower_ns": 189.49,
       "ci95_upper_ns": 196.22,
       "cv_pct": 3.52,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -801,7 +801,7 @@
       "ci95_lower_ns": 35225.19,
       "ci95_upper_ns": 35737.22,
       "cv_pct": 1.44,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -813,7 +813,7 @@
       "ci95_lower_ns": 77444.77,
       "ci95_upper_ns": 80071.85,
       "cv_pct": 3.33,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     },
@@ -825,10 +825,10 @@
       "ci95_lower_ns": 1411.39,
       "ci95_upper_ns": 1422.77,
       "cv_pct": 0.8,
-      "environment": "rch-fleet-shared-2026-07",
+      "environment": "host:fixmydocuments",
       "timestamp": "2026-07-27T17:30:29Z",
       "git_sha": "7f8828a8a78aaf8745a6768fab450b8cca5fc142"
     }
   ],
-  "note_sched": "sched/ rows recorded by br-asupersync-sched-hot-path-perf-bt4y5f.1 on the shared RCH fleet (worker ovh-a, environment rch-fleet-shared-2026-07). Rows are gated per bench-binary prefix by benches/phase6_gate.rs; compare like-to-like environments only (docs/perf_runbook.md). High-variance contended rows (cv>6%) are measured on the bead record but deliberately untracked to keep the 5% hard gate meaningful on a shared fleet."
+  "note_sched": "sched/ rows recorded by br-asupersync-sched-hot-path-perf-bt4y5f.1 on RCH worker ovh-a (hostname fixmydocuments), git 7f8828a8a. Rows are gated per bench-binary prefix by benches/phase6_gate.rs; environment-tagged rows are compared ONLY when the executing host matches the tag (hostname auto-detection), and skipped loudly otherwise \u2014 a run where every owned row skips fails closed. High-variance contended rows (cv>6%) are measured on the bead record but deliberately untracked to keep the 5% hard gate meaningful (docs/perf_runbook.md)."
 }

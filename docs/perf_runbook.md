@@ -48,15 +48,26 @@ against the tracked rows under the binary's prefix and exits 2 on any p50 more
 than 5% slower. Untracked criterion rows and rows under other prefixes are
 outside the gate.
 
-## Environment tags (compare like-to-like ONLY)
+## Environment tags (compare like-to-like ONLY — enforced by the gate)
 
-Every tracked row carries an `environment` field (for example
-`rch-fleet-shared-2026-07` or `bare-metal-<host>`). A gate comparison is only
-meaningful when the candidate runs in the same environment class the baseline
-was recorded in — shared-fleet numbers are load-sensitive, so a fleet-recorded
-baseline must not be "beaten" or "regressed" by a bare-metal run and vice
-versa. When re-recording baselines in a new environment, update every row of
-the affected prefix in one commit and say so in the message.
+The RCH fleet is heterogeneous and `rch exec` cannot pin a worker; measured
+cross-class drift on single-thread micro-cycles is 30-70% (ovh-a vs a Contabo
+VPS on the channel cycles, 2026-07-27) — far beyond the 5% gate. The gate
+therefore enforces like-to-like itself:
+
+- Every `sched/` row carries `environment: "host:<hostname>"` from its
+  recording run. The gate resolves the executing worker's hostname in-process
+  and **compares a tagged row only on a hostname match**; mismatched rows are
+  skipped with a loud `[PHASE6] row ... skipped` line.
+- A run where EVERY owned row skips **fails closed** ("environment
+  mismatch") — a worker-lottery miss can never be cited as gate evidence.
+  Rerun until the dispatch lands on the recording host class (warm
+  `CARGO_TARGET_DIR` affinity helps), or re-record the rows for the new class.
+- Untagged rows (the legacy `methodology/` set) compare unconditionally —
+  original behavior — until br-asupersync-pjivey re-records them with tags.
+
+When re-recording baselines on a new host class, update every row of the
+affected prefix in one commit and say so in the message.
 
 ## Lever procedure (before/after)
 
