@@ -1,14 +1,25 @@
-//! Benchmark demonstrating OTLP queue mutex contention fix.
+//! Bounded OTLP export-queue comparison.
 //!
-//! **PURPOSE**: Verify 10x+ performance improvement after converting
-//! Mutex<VecDeque<T>> to lock-free ArrayQueue<T>.
+//! This benchmark compares a safe `Mutex<VecDeque<T>>` prototype with the
+//! production [`BoundedExportQueue`]. It deliberately makes no fixed
+//! performance-improvement claim: the Phase 8b queue experiment records the
+//! measured result for each concurrency cell and keeps the incumbent unless
+//! the safe prototype wins or ties every required axis.
+//!
+//! This is evidence for the bounded exporter surface only. Scheduler,
+//! blocking-pool, and epoch queues require their own workload evidence.
 
+use asupersync::observability::otlp_trace_exporter::BoundedExportQueue;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 
-// Mock span batch for benchmarking
+const QUEUE_CAPACITY: usize = 1_000;
+const TOTAL_OPERATIONS: usize = 65_536;
+const THREAD_COUNTS: [usize; 4] = [1, 8, 32, 64];
+
+// Mock span batch for benchmarking.
 #[derive(Clone)]
 struct BenchSpanBatch {
     id: u64,
@@ -24,8 +35,8 @@ impl BenchSpanBatch {
     }
 }
 
-// Legacy mutex-based queue (original implementation)
-mod legacy {
+// Safe bounded prototype with the production queue's drop-oldest semantics.
+mod safe {
     use parking_lot::Mutex;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,14 +57,14 @@ mod legacy {
             }
         }
 
-        pub fn enqueue(&self, item: T) -> bool {
+        pub fn enqueue(&self, item: T) -> Option<T> {
             let mut queue = self.queue.lock();
-            let dropped = if queue.len() >= self.capacity {
-                queue.pop_front(); // Drop oldest
+            let dropped = if queue.len() == self.capacity {
+                let dropped = queue.pop_front();
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                true
+                dropped
             } else {
-                false
+                None
             };
             queue.push_back(item);
             dropped
@@ -69,86 +80,23 @@ mod legacy {
     }
 }
 
-// Lock-free queue (new implementation)
-mod lock_free {
-    use crossbeam_queue::ArrayQueue;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-    #[derive(Debug)]
-    pub struct LockFreeQueue<T> {
-        queue: ArrayQueue<T>,
-        current_len: AtomicUsize,
-        dropped_count: AtomicU64,
-    }
-
-    impl<T> LockFreeQueue<T> {
-        pub fn new(capacity: usize) -> Self {
-            Self {
-                queue: ArrayQueue::new(capacity),
-                current_len: AtomicUsize::new(0),
-                dropped_count: AtomicU64::new(0),
-            }
-        }
-
-        pub fn enqueue(&self, item: T) -> bool {
-            let mut dropped = false;
-
-            match self.queue.push(item) {
-                Ok(()) => {
-                    self.current_len.fetch_add(1, Ordering::Relaxed);
-                    return false;
-                }
-                Err(returned_item) => {
-                    if let Some(_oldest) = self.queue.pop() {
-                        self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                        self.current_len.fetch_sub(1, Ordering::Relaxed);
-                        dropped = true;
-
-                        if self.queue.push(returned_item).is_err() {
-                            return dropped;
-                        }
-                    } else if self.queue.push(returned_item).is_err() {
-                        return dropped;
-                    }
-                }
-            }
-
-            self.current_len.fetch_add(1, Ordering::Relaxed);
-            dropped
-        }
-
-        pub fn dequeue(&self) -> Option<T> {
-            if let Some(item) = self.queue.pop() {
-                self.current_len.fetch_sub(1, Ordering::Relaxed);
-                Some(item)
-            } else {
-                None
-            }
-        }
-
-        pub fn len(&self) -> usize {
-            self.current_len.load(Ordering::Relaxed)
-        }
-    }
-}
-
 fn bench_queue_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("otlp_queue_contention");
+    group.sample_size(10);
 
-    // Test with different thread counts to show contention effects
-    for thread_count in [1, 2, 4, 8, 16] {
-        let operations_per_thread = 10000;
+    // Fixed total work makes these strong-scaling cells comparable.
+    for thread_count in THREAD_COUNTS {
+        let operations_per_thread = TOTAL_OPERATIONS / thread_count;
         let total_ops = thread_count * operations_per_thread;
 
         group.throughput(Throughput::Elements(total_ops as u64));
 
-        // Benchmark mutex-based queue
         group.bench_with_input(
-            BenchmarkId::new("mutex_queue", thread_count),
+            BenchmarkId::new("safe_mutex_queue", thread_count),
             &thread_count,
             |b, &thread_count| {
                 b.iter(|| {
-                    let queue = Arc::new(legacy::MutexQueue::new(1000));
+                    let queue = Arc::new(safe::MutexQueue::new(QUEUE_CAPACITY));
                     let handles: Vec<_> = (0..thread_count)
                         .map(|thread_id| {
                             let queue = Arc::clone(&queue);
@@ -158,9 +106,9 @@ fn bench_queue_contention(c: &mut Criterion) {
                                         (thread_id * operations_per_thread + i) as u64,
                                         64,
                                     );
-                                    queue.enqueue(batch);
+                                    black_box(queue.enqueue(batch));
 
-                                    // Occasionally dequeue to prevent queue from staying full
+                                    // Match the incumbent cell's mixed producer/drain workload.
                                     if i % 10 == 0 {
                                         if let Some(batch) = queue.dequeue() {
                                             black_box((batch.id, batch.data.len()));
@@ -179,13 +127,12 @@ fn bench_queue_contention(c: &mut Criterion) {
             },
         );
 
-        // Benchmark lock-free queue
         group.bench_with_input(
-            BenchmarkId::new("lock_free_queue", thread_count),
+            BenchmarkId::new("incumbent_array_queue", thread_count),
             &thread_count,
             |b, &thread_count| {
                 b.iter(|| {
-                    let queue = Arc::new(lock_free::LockFreeQueue::new(1000));
+                    let queue = Arc::new(BoundedExportQueue::new(QUEUE_CAPACITY));
                     let handles: Vec<_> = (0..thread_count)
                         .map(|thread_id| {
                             let queue = Arc::clone(&queue);
@@ -195,9 +142,8 @@ fn bench_queue_contention(c: &mut Criterion) {
                                         (thread_id * operations_per_thread + i) as u64,
                                         64,
                                     );
-                                    queue.enqueue(batch);
+                                    black_box(queue.enqueue(batch));
 
-                                    // Occasionally dequeue to prevent queue from staying full
                                     if i % 10 == 0 {
                                         if let Some(batch) = queue.dequeue() {
                                             black_box((batch.id, batch.data.len()));

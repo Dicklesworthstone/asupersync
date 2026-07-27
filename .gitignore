@@ -137,6 +137,7 @@ artifacts/*
 !artifacts/artifact_governance_ledger_v1.json
 !artifacts/cache_padded_alignment_experiment_v1.json
 !artifacts/deflate_surface_inventory_v1.json
+!artifacts/crossbeam_queue_safe_experiment_v1.json
 !artifacts/memory_residency_inventory_v1.json
 !artifacts/memory_residency_policy_contract_v1.json
 !artifacts/memory_residency_accounting_snapshot_v1.json
