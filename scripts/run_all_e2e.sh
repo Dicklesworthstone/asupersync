@@ -342,6 +342,15 @@ declare -A SUITES=(
     [doctor-frankensuite-export]="test_doctor_frankensuite_export_e2e.sh"
     [doctor-e2e-proof-lane]="run_doctor_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
+    # server-stack and agent-dx are registered but DELIBERATELY absent from
+    # SUITE_ORDER (br-asupersync-1do8g1): measured 2026-07-27, neither lane is
+    # default-run-ready. server-stack wraps its fixture in `timeout 120`
+    # THROUGH rch, but a cold dispatch alone costs ~180s (structurally
+    # unreachable; same class as br-asupersync-9yr1t8). agent-dx's
+    # live_failure_chain stage compiles the full lib-test binary with the
+    # `fuzz` feature graph and was OOM-killed (SIGKILL) on a standard fleet
+    # worker at 754s wall. Wire them into SUITE_ORDER only after their owners
+    # fix the per-lane budget/feature-set; run them standalone until then.
     [server-stack]="run_server_stack_e2e.sh"
     [agent-dx]="run_agent_dx_e2e.sh"
     [api-v2-journey]="run_api_v2_e2e.sh"
