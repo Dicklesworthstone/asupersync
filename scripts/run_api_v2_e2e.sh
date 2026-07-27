@@ -223,7 +223,8 @@ require_rch() {
 #
 # rch_cargo <stage> <repro-label> <cargo args...>
 #   Runs one cargo command remotely, refuses local fallback, and requires
-#   POSITIVE evidence that a worker took it. Sets RCH_STATUS / RCH_OUT / RCH_MS.
+#   POSITIVE evidence that a worker took it. Sets RCH_STATUS / RCH_OUT /
+#   RCH_LOG / RCH_MS.
 rch_cargo() {
     local stage="$1"; shift
     local out_file="${RUN_DIR}/${1}"; shift
@@ -261,6 +262,16 @@ rch_cargo() {
     end="$(now_ms)"
     RCH_MS=$((end - start))
     RCH_OUT="${out_file}"
+    # Remote command output does NOT arrive on `rch exec`'s stdout: rch relays
+    # the worker's combined output (compile lines, test results, the program's
+    # own stdout) on ITS stderr, so it lands in ${rch_log} and ${out_file}
+    # stays empty. First proven by run_full10: integration tests printed
+    # "test result: ok. 6 passed" into the rch log while the stdout capture
+    # was 0 bytes, and the golden/pass checks read only the empty file — a
+    # never-executed check reading a never-written stream. Evidence checks
+    # must therefore accept either stream; they still require the POSITIVE
+    # marker, so this stays fail-closed.
+    RCH_LOG="${rch_log}"
     cat "${rch_log}" >> "${RUN_LOG}"
 
     # Positive-only offload evidence. An earlier version of this check accepted
@@ -311,7 +322,7 @@ run_example() {
         return 1
     fi
     local golden="${STDOUT_GOLDEN[${name}]:-}"
-    if [[ -n "${golden}" ]] && ! grep -qF "${golden}" "${RCH_OUT}"; then
+    if [[ -n "${golden}" ]] && ! grep -qF "${golden}" "${RCH_OUT}" "${RCH_LOG}"; then
         emit_event "run_example:${name}" "fail" "${RCH_MS}" "${repro}" \
             "stdout golden not found; expected substring '${golden}'"
         return 1
@@ -334,7 +345,7 @@ run_integration_lane() {
     fi
     # An empty lane is a silently-passing lane. Require observed test results.
     local passed
-    passed="$(grep -oE 'test result: ok\. [0-9]+ passed' "${RCH_OUT}" | grep -oE '[0-9]+' | head -1 || true)"
+    passed="$(grep -ohE 'test result: ok\. [0-9]+ passed' "${RCH_OUT}" "${RCH_LOG}" | grep -oE '[0-9]+' | head -1 || true)"
     if [[ -z "${passed}" || "${passed}" -eq 0 ]]; then
         emit_event "integration_lane" "fail" "${RCH_MS}" "${repro}" \
             "lane reported no passing tests; a lane that runs nothing proves nothing"
