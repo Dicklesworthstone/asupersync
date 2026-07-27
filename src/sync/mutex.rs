@@ -336,21 +336,70 @@ impl<T> Mutex<T> {
         // Extract the waker to wake outside the lock to prevent deadlocks.
         // Waking while holding the lock can cause priority inversion or deadlock
         // if the woken task tries to acquire another mutex.
-        let waker_to_wake = {
+        let granted = {
             let mut state = self.state.lock();
             state.locked = false;
             // br-asupersync-wlf0xh: O(1) FIFO take via slab pop_front.
             if let Some((id, waker, _)) = state.waiters.pop_front() {
                 state.granted_waiter = Some(id);
-                Some(waker)
+                Some((id, waker))
             } else {
                 state.granted_waiter = None;
                 None
             }
         };
         // Wake outside the lock
-        if let Some(waker) = waker_to_wake {
-            waker.wake();
+        if let Some((id, waker)) = granted {
+            self.wake_granted(id, waker);
+        }
+    }
+
+    /// Delivers a baton wake to the waiter pinned by `granted_waiter`,
+    /// exception-safely (br-asupersync-mutex-panicking-grantee-freezes-fifo-l4sgpj).
+    ///
+    /// A panicking grantee `Waker` would otherwise leave the mutex unlocked
+    /// with the grant still pinned to a task that was never woken: the fast
+    /// path and `try_lock` both refuse while a grant is outstanding, so every
+    /// later waiter would wait forever on a baton nobody holds. On a wake
+    /// panic the failed grant is revoked — only if it is still pinned to the
+    /// failed waiter, since a concurrent `cleanup_waiter` may already have
+    /// resolved it — and the baton passes to the next eligible waiter. The
+    /// first panic payload is resumed once the baton lands, unless this
+    /// thread is already unwinding (every `unlock` is a guard drop, and
+    /// `cleanup_waiter` also runs from `LockFuture::drop`): a second panic
+    /// there would abort the process, so it is suppressed, matching the
+    /// `Notify` drop fanout policy (br-asupersync-b3td9n).
+    fn wake_granted(&self, id: crate::sync::waiter::WaiterId, waker: Waker) {
+        let mut pending = Some((id, waker));
+        let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        while let Some((failed_id, waker)) = pending.take() {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || waker.wake())) {
+                Ok(()) => break,
+                Err(payload) => {
+                    if first_panic.is_none() {
+                        first_panic = Some(payload);
+                    }
+                    let mut state = self.state.lock();
+                    if state.granted_waiter == Some(failed_id) {
+                        state.granted_waiter = None;
+                        if !state.locked {
+                            // br-asupersync-wlf0xh: O(1) FIFO take via slab
+                            // pop_front.
+                            if let Some((next_id, next_waker, _)) = state.waiters.pop_front() {
+                                state.granted_waiter = Some(next_id);
+                                pending = Some((next_id, next_waker));
+                            }
+                        }
+                    }
+                    // else: a concurrent cleanup already resolved the failed
+                    // grant; the baton is no longer ours to pass.
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            if !std::thread::panicking() {
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 }
@@ -385,11 +434,11 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
     }
 
     #[inline]
-    fn grant_next_waiter(state: &mut MutexState) -> Option<Waker> {
+    fn grant_next_waiter(state: &mut MutexState) -> Option<(crate::sync::waiter::WaiterId, Waker)> {
         // br-asupersync-wlf0xh: O(1) FIFO take via slab pop_front.
         if let Some((id, waker, _)) = state.waiters.pop_front() {
             state.granted_waiter = Some(id);
-            Some(waker)
+            Some((id, waker))
         } else {
             state.granted_waiter = None;
             None
@@ -430,8 +479,10 @@ impl<T, Caps> LockFuture<'_, '_, T, Caps> {
                 }
             };
 
-            if let Some(waker) = waker_to_wake {
-                waker.wake();
+            if let Some((id, waker)) = waker_to_wake {
+                // Exception-safe baton pass; see `Mutex::wake_granted`
+                // (br-asupersync-mutex-panicking-grantee-freezes-fifo-l4sgpj).
+                self.mutex.wake_granted(id, waker);
             }
             // A RawWaker destructor may run arbitrary user code. Retire the
             // removed queue owner only after the state guard is gone.
@@ -4863,5 +4914,191 @@ mod tests {
         field_a: i32,
         field_b: String,
         field_c: Vec<i32>,
+    }
+
+    /// br-asupersync-mutex-panicking-grantee-freezes-fifo-l4sgpj helpers: a
+    /// Waker that panics on every wake, and a Waker that counts wakes.
+    struct BatonPanickingWaker;
+
+    impl std::task::Wake for BatonPanickingWaker {
+        fn wake(self: Arc<Self>) {
+            panic!("baton waker panic");
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            panic!("baton waker panic");
+        }
+    }
+
+    struct BatonCountingWaker(Arc<AtomicUsize>);
+
+    impl std::task::Wake for BatonCountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// br-asupersync-mutex-panicking-grantee-freezes-fifo-l4sgpj: a grantee
+    /// whose Waker panics during `unlock` must not freeze the FIFO — the
+    /// failed grant is revoked, the baton passes to the next waiter, and the
+    /// panic resumes once (this drop is not inside an existing unwind).
+    #[test]
+    fn unlock_baton_survives_panicking_grantee_waker() {
+        init_test("unlock_baton_survives_panicking_grantee_waker");
+        let cx = test_cx();
+        let mutex = Mutex::new(0u32);
+
+        let noop = std::task::Waker::noop();
+        let mut noop_context = std::task::Context::from_waker(noop);
+        let mut holder = Box::pin(mutex.lock(&cx));
+        let guard = match holder.as_mut().poll(&mut noop_context) {
+            std::task::Poll::Ready(Ok(guard)) => guard,
+            other => panic!("holder must acquire immediately, got {other:?}"),
+        };
+
+        // A registers a panicking Waker, B a counting Waker (FIFO order A, B).
+        let panic_waker = std::task::Waker::from(Arc::new(BatonPanickingWaker));
+        let mut context_a = std::task::Context::from_waker(&panic_waker);
+        let mut fut_a = Box::pin(mutex.lock(&cx));
+        assert!(fut_a.as_mut().poll(&mut context_a).is_pending(), "A parks");
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_waker = std::task::Waker::from(Arc::new(BatonCountingWaker(Arc::clone(&count))));
+        let mut context_b = std::task::Context::from_waker(&count_waker);
+        let mut fut_b = Box::pin(mutex.lock(&cx));
+        assert!(fut_b.as_mut().poll(&mut context_b).is_pending(), "B parks");
+
+        // Guard drop grants A; A's wake panics; the baton must land on B and
+        // the panic must resume out of the drop.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)));
+        assert!(
+            result.is_err(),
+            "grantee wake panic resumes after baton lands"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 1, "B woken despite A's panic");
+
+        // B holds the grant and acquires; A never does.
+        match fut_b.as_mut().poll(&mut context_b) {
+            std::task::Poll::Ready(Ok(guard_b)) => drop(guard_b),
+            other => panic!("B must acquire after the baton pass, got {other:?}"),
+        }
+        drop(fut_a);
+        crate::test_complete!("unlock_baton_survives_panicking_grantee_waker");
+    }
+
+    /// Same defect on the `cleanup_waiter` baton path: an ABANDONED granted
+    /// waiter (future dropped without consuming the grant) re-batons to the
+    /// next waiter; if THAT waiter's Waker panics, the grant must be revoked
+    /// and passed onward instead of freezing.
+    #[test]
+    fn cleanup_baton_survives_panicking_successor_waker() {
+        init_test("cleanup_baton_survives_panicking_successor_waker");
+        let cx = test_cx();
+        let mutex = Mutex::new(0u32);
+
+        let noop = std::task::Waker::noop();
+        let mut noop_context = std::task::Context::from_waker(noop);
+        let mut holder = Box::pin(mutex.lock(&cx));
+        let guard = match holder.as_mut().poll(&mut noop_context) {
+            std::task::Poll::Ready(Ok(guard)) => guard,
+            other => panic!("holder must acquire immediately, got {other:?}"),
+        };
+
+        // FIFO order: A (noop — will be granted then abandoned), B (panicking
+        // successor), C (counting).
+        let mut fut_a = Box::pin(mutex.lock(&cx));
+        assert!(
+            fut_a.as_mut().poll(&mut noop_context).is_pending(),
+            "A parks"
+        );
+
+        let panic_waker = std::task::Waker::from(Arc::new(BatonPanickingWaker));
+        let mut context_b = std::task::Context::from_waker(&panic_waker);
+        let mut fut_b = Box::pin(mutex.lock(&cx));
+        assert!(fut_b.as_mut().poll(&mut context_b).is_pending(), "B parks");
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_waker = std::task::Waker::from(Arc::new(BatonCountingWaker(Arc::clone(&count))));
+        let mut context_c = std::task::Context::from_waker(&count_waker);
+        let mut fut_c = Box::pin(mutex.lock(&cx));
+        assert!(fut_c.as_mut().poll(&mut context_c).is_pending(), "C parks");
+
+        // Unlock grants A (noop wake succeeds).
+        drop(guard);
+
+        // Abandon A without consuming the grant: cleanup re-batons to B,
+        // whose wake panics; the baton must land on C and the panic resume.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(fut_a)));
+        assert!(
+            result.is_err(),
+            "successor wake panic resumes after baton lands"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 1, "C woken despite B's panic");
+
+        match fut_c.as_mut().poll(&mut context_c) {
+            std::task::Poll::Ready(Ok(guard_c)) => drop(guard_c),
+            other => panic!("C must acquire after the baton pass, got {other:?}"),
+        }
+        drop(fut_b);
+        crate::test_complete!("cleanup_baton_survives_panicking_successor_waker");
+    }
+
+    /// Guard drop during an EXISTING unwind: the grantee's wake panic must be
+    /// SUPPRESSED (a second panic would abort the process), the baton must
+    /// still pass, and the original panic must reach the caller unchanged.
+    #[test]
+    fn unlock_baton_suppresses_wake_panic_during_unwind() {
+        init_test("unlock_baton_suppresses_wake_panic_during_unwind");
+        let cx = test_cx();
+        let mutex = Mutex::new(0u32);
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let noop = std::task::Waker::noop();
+            let mut noop_context = std::task::Context::from_waker(noop);
+            let mut holder = Box::pin(mutex.lock(&cx));
+            let _guard = match holder.as_mut().poll(&mut noop_context) {
+                std::task::Poll::Ready(Ok(guard)) => guard,
+                other => panic!("holder must acquire immediately, got {other:?}"),
+            };
+
+            let panic_waker = std::task::Waker::from(Arc::new(BatonPanickingWaker));
+            let mut context_a = std::task::Context::from_waker(&panic_waker);
+            let mut fut_a = Box::pin(mutex.lock(&cx));
+            assert!(fut_a.as_mut().poll(&mut context_a).is_pending(), "A parks");
+
+            let count_waker =
+                std::task::Waker::from(Arc::new(BatonCountingWaker(Arc::clone(&count))));
+            let mut context_b = std::task::Context::from_waker(&count_waker);
+            let mut fut_b = Box::pin(mutex.lock(&cx));
+            assert!(fut_b.as_mut().poll(&mut context_b).is_pending(), "B parks");
+
+            // The unwind drops locals in reverse declaration order, so the
+            // futures would deregister A and B from the queue BEFORE the
+            // guard's unlock runs. Leak them instead: their queue entries
+            // survive, and the guard's unlock during the unwind hits the
+            // panicking grantee exactly as an abandoned-task teardown would.
+            std::mem::forget(fut_a);
+            std::mem::forget(fut_b);
+            panic!("outer unwind");
+        }));
+
+        let payload = outer.expect_err("outer panic propagates");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .expect("outer payload is the original &str");
+        assert_eq!(
+            message, "outer unwind",
+            "the ORIGINAL panic survives; the wake panic was suppressed"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "baton still passed to B during the unwind"
+        );
+        crate::test_complete!("unlock_baton_suppresses_wake_panic_during_unwind");
     }
 }
