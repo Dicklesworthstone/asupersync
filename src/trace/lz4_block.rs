@@ -730,6 +730,136 @@ impl BoundedOutput {
     }
 }
 
+/// Feature-gated test and fuzz boundary for the private codec.
+///
+/// This deliberately exposes only classified errors and explicit resource
+/// limits. Production trace readers and writers continue to use the incumbent
+/// codec until A4 integration and A5 cutover decisions are complete.
+#[cfg(any(feature = "fuzz", feature = "test-internals"))]
+#[doc(hidden)]
+pub mod harness {
+    use super::{DEFAULT_MAX_EXPANSION_RATIO, Error, Limits};
+
+    /// Stable error categories used by the independent corpus and fuzz target.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ErrorClass {
+        /// The caller supplied an internally invalid limit set.
+        InvalidLimits,
+        /// Encoder input exceeded its configured or persisted-size ceiling.
+        InputLimit,
+        /// A complete compressed input or output crossed its byte ceiling.
+        CompressedLimit,
+        /// The block ended before a required field or literal run completed.
+        Truncated,
+        /// An LZ4 frame container was supplied instead of an independent block.
+        UnsupportedContainer,
+        /// Advertised or decoded output crossed a size or ratio ceiling.
+        OutputLimit,
+        /// A checked integer operation overflowed.
+        IntegerOverflow,
+        /// A zero or out-of-history match offset was rejected.
+        Offset,
+        /// The input violated a canonical independent-block rule.
+        NonCanonical,
+        /// Actual decoded length did not equal the persisted size prefix.
+        SizeMismatch,
+        /// A bounded allocation reservation failed.
+        Allocation,
+    }
+
+    impl ErrorClass {
+        /// Canonical machine-readable category used by the corpus artifact.
+        #[must_use]
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::InvalidLimits => "invalid_limits",
+                Self::InputLimit => "input_limit",
+                Self::CompressedLimit => "compressed_limit",
+                Self::Truncated => "truncated",
+                Self::UnsupportedContainer => "unsupported_container",
+                Self::OutputLimit => "output_limit",
+                Self::IntegerOverflow => "integer_overflow",
+                Self::Offset => "offset",
+                Self::NonCanonical => "noncanonical",
+                Self::SizeMismatch => "size_mismatch",
+                Self::Allocation => "allocation",
+            }
+        }
+    }
+
+    impl From<Error> for ErrorClass {
+        fn from(error: Error) -> Self {
+            match error {
+                Error::InvalidLimits { .. } => Self::InvalidLimits,
+                Error::InputTooLarge { .. } | Error::InputLengthNotRepresentable { .. } => {
+                    Self::InputLimit
+                }
+                Error::CompressedInputTooLarge { .. } | Error::CompressedOutputTooLarge { .. } => {
+                    Self::CompressedLimit
+                }
+                Error::MissingSizePrefix { .. }
+                | Error::UnexpectedEnd { .. }
+                | Error::LiteralOutOfBounds { .. } => Self::Truncated,
+                Error::UnsupportedContainer { .. } => Self::UnsupportedContainer,
+                Error::AdvertisedOutputTooLarge { .. }
+                | Error::ExpansionRatioExceeded { .. }
+                | Error::OutputLengthExceeded { .. } => Self::OutputLimit,
+                Error::LengthOverflow { .. } => Self::IntegerOverflow,
+                Error::OffsetZero { .. } | Error::ExternalDictionaryRequired { .. } => Self::Offset,
+                Error::NonCanonicalBlock { .. } => Self::NonCanonical,
+                Error::OutputLengthMismatch { .. } => Self::SizeMismatch,
+                Error::AllocationFailed { .. } => Self::Allocation,
+            }
+        }
+    }
+
+    /// Encode with explicit input and complete-compressed-output ceilings.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error before either ceiling is exceeded.
+    pub fn encode(
+        input: &[u8],
+        max_input_bytes: usize,
+        max_compressed_bytes: usize,
+    ) -> Result<Vec<u8>, ErrorClass> {
+        super::encode_size_prepended(
+            input,
+            Limits {
+                max_input_bytes,
+                max_compressed_bytes,
+                max_decompressed_bytes: max_input_bytes,
+                max_expansion_ratio: DEFAULT_MAX_EXPANSION_RATIO,
+            },
+        )
+        .map_err(ErrorClass::from)
+    }
+
+    /// Decode with explicit complete-input, output, and expansion-ratio caps.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for malformed, unsupported, non-canonical, or
+    /// resource-exceeding input.
+    pub fn decode(
+        input: &[u8],
+        max_compressed_bytes: usize,
+        max_decompressed_bytes: usize,
+        max_expansion_ratio: usize,
+    ) -> Result<Vec<u8>, ErrorClass> {
+        super::decode_size_prepended(
+            input,
+            Limits {
+                max_input_bytes: max_decompressed_bytes,
+                max_compressed_bytes,
+                max_decompressed_bytes,
+                max_expansion_ratio,
+            },
+        )
+        .map_err(ErrorClass::from)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

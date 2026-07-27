@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const ARTIFACT_PATH: &str = "artifacts/lz4_surface_artifact_inventory_v1.json";
+const A3_CORPUS_PATH: &str = "artifacts/lz4_owned_codec_corpus_v1.json";
 const DOC_PATH: &str = "docs/lz4_surface_artifact_inventory.md";
 const BEAD_ID: &str = "asupersync-0h6myr.4.1";
 const CAPABILITY_ID: &str = "CAP-TRACE-LZ4";
@@ -153,11 +154,32 @@ fn inventory_schema_and_authority_are_fail_closed() {
 #[test]
 fn every_pinned_source_hash_matches_the_baseline() {
     let inventory = artifact();
+    let a3 = parse_repo_json(A3_CORPUS_PATH);
+    let fuzz_transition = object(&a3, "fuzz_contract");
     let pins = array(&inventory, "source_pins");
     assert_eq!(pins.len(), 14, "source pin census changed");
     for pin in pins {
         let path = text(pin, "path");
         let expected = text(pin, "sha256");
+        if path == "fuzz/Cargo.toml" {
+            assert_eq!(
+                expected,
+                text(
+                    &Value::Object(fuzz_transition.clone()),
+                    "a1_manifest_sha256"
+                ),
+                "A3 must name the exact A1 fuzz-manifest baseline"
+            );
+            assert_eq!(
+                sha256_hex(&read_repo_bytes(path)),
+                text(
+                    &Value::Object(fuzz_transition.clone()),
+                    "a3_manifest_sha256"
+                ),
+                "only the exact A3 current-version fuzz transition is allowed"
+            );
+            continue;
+        }
         assert_eq!(
             sha256_hex(&read_repo_bytes(path)),
             expected,
@@ -202,7 +224,7 @@ fn production_lz4_api_census_matches_source() {
 }
 
 #[test]
-fn manifest_lock_and_fuzz_version_drift_are_frozen() {
+fn manifest_lock_and_a3_fuzz_version_transition_are_frozen() {
     let inventory = artifact();
     let graph = object(&inventory, "dependency_graph");
     assert_eq!(graph["root_normal_edge"]["requirement"], "0.14");
@@ -225,7 +247,16 @@ fn manifest_lock_and_fuzz_version_drift_are_frozen() {
     assert!(manifest.contains("lz4_flex = \"0.14\""));
 
     let fuzz_manifest = read_repo_file("fuzz/Cargo.toml");
-    assert!(fuzz_manifest.contains("lz4_flex = \"0.13\""));
+    assert!(fuzz_manifest.contains("lz4_flex = \"=0.14.0\""));
+    assert!(!fuzz_manifest.contains("lz4_flex = \"0.13\""));
+    let a3 = parse_repo_json(A3_CORPUS_PATH);
+    let transition = object(&a3, "fuzz_contract");
+    assert_eq!(transition["incumbent_requirement"], "=0.14.0");
+    assert_eq!(transition["incumbent_resolved"], "0.14.0");
+    assert_eq!(
+        sha256_hex(fuzz_manifest.as_bytes()),
+        transition["a3_manifest_sha256"]
+    );
     let root_lock = read_repo_file("Cargo.lock");
     assert!(root_lock.contains("name = \"lz4_flex\"\nversion = \"0.14.0\""));
 }
@@ -335,6 +366,12 @@ fn registered_baseline_mismatch_and_future_evidence_are_visible() {
         .find(|row| row["gap_id"] == "LZ4-GAP-05")
         .expect("baseline mismatch gap must be present");
     assert_eq!(gap["owner"], "asupersync-0h6myr.4.3");
+
+    let a3 = parse_repo_json(A3_CORPUS_PATH);
+    let disposition = object(&a3, "baseline_evidence_disposition");
+    assert_eq!(disposition["historical_evidence_id"], "EVD-TRACE-LZ4");
+    assert_eq!(disposition["historical_state"], "SEMANTIC_FILTERING_ONLY");
+    assert_eq!(disposition["a3_receipt"], "LZ4-EVD-A3-CORPUS");
 }
 
 #[test]

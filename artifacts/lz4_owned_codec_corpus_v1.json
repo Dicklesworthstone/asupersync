@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "artifact_id": "lz4-owned-codec-corpus-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-0h6myr.4.3",
+  "capability_id": "CAP-TRACE-LZ4",
+  "a2_codec_revision": "747e8620af2532372f61bfdcbdc6243b457e599f",
+  "format_contract": {
+    "container": "LZ4_SIZE_PREPENDED_BLOCK",
+    "size_prefix": "u32 little-endian decoded byte length",
+    "block_count": 1,
+    "block_independence": "no external dictionary",
+    "frame_format_supported": false,
+    "dictionary_supported": false,
+    "block_checksum_supported": false,
+    "content_checksum_supported": false,
+    "checksum_corruption_disposition": "LZ4 frame containers are rejected from their magic before flags or checksums are interpreted; ASUPERTRACE v3 SHA-256 coverage remains an A4 integration concern."
+  },
+  "vector_provenance": {
+    "specification": "https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md",
+    "method": "Hand-authored from token, length-extension, little-endian offset, overlap-copy, and canonical end-condition rules without using lz4_flex to generate expected bytes.",
+    "oracle_role": "lz4_flex 0.14.0 is used only after vector construction for differential validation and remains the production oracle through A5.",
+    "independence_state": "INDEPENDENT_EXPECTED_BYTES"
+  },
+  "resource_envelope": {
+    "trace_max_compressed_bytes": 67108864,
+    "trace_max_decompressed_bytes": 67108864,
+    "trace_max_expansion_ratio": 256,
+    "fuzz_max_compressed_bytes": 1048576,
+    "fuzz_max_decompressed_bytes": 1048576,
+    "fuzz_max_payload_bytes": 262144,
+    "fuzz_max_encoded_bytes": 524288,
+    "fuzz_max_total_time_seconds": 60,
+    "fuzz_rss_limit_mb": 2048
+  },
+  "valid_vectors": [
+    {
+      "vector_id": "LZ4-V-EMPTY",
+      "producer": "hand_spec",
+      "encoded_hex": "0000000000",
+      "decoded_hex": "",
+      "boundary": "empty independent block with a final zero token"
+    },
+    {
+      "vector_id": "LZ4-V-SINGLE-LITERAL",
+      "producer": "hand_spec",
+      "encoded_hex": "010000001061",
+      "decoded_hex": "61",
+      "boundary": "one literal and no match"
+    },
+    {
+      "vector_id": "LZ4-V-LITERAL-15",
+      "producer": "hand_spec",
+      "encoded_hex": "0f000000f000303132333435363738396162636465",
+      "decoded_hex": "303132333435363738396162636465",
+      "boundary": "literal nibble saturation with a zero extension byte"
+    },
+    {
+      "vector_id": "LZ4-V-LITERAL-20",
+      "producer": "hand_spec",
+      "encoded_hex": "14000000f0056162636465666768696a6b6c6d6e6f7071727374",
+      "decoded_hex": "6162636465666768696a6b6c6d6e6f7071727374",
+      "boundary": "non-zero literal length extension"
+    },
+    {
+      "vector_id": "LZ4-V-OVERLAP-MATCH-EXTENSION",
+      "producer": "hand_spec",
+      "encoded_hex": "190000001f61010000506263646566",
+      "decoded_hex": "61616161616161616161616161616161616161616263646566",
+      "boundary": "offset-one overlap copy, saturated match nibble, and five final literals"
+    },
+    {
+      "vector_id": "LZ4-V-OFFSET-FOUR",
+      "producer": "hand_spec",
+      "encoded_hex": "1100000044616263640400504546474849",
+      "decoded_hex": "6162636461626364616263644546474849",
+      "boundary": "four literals, offset-four match, and canonical five-literal tail"
+    }
+  ],
+  "malformed_vectors": [
+    {
+      "vector_id": "LZ4-E-MISSING-PREFIX",
+      "encoded_hex": "000000",
+      "expected_error_class": "truncated",
+      "boundary": "three-byte size prefix"
+    },
+    {
+      "vector_id": "LZ4-E-MISSING-TOKEN",
+      "encoded_hex": "00000000",
+      "expected_error_class": "truncated",
+      "boundary": "empty block body"
+    },
+    {
+      "vector_id": "LZ4-E-FRAME-MAGIC",
+      "encoded_hex": "04224d1800",
+      "expected_error_class": "unsupported_container",
+      "boundary": "standard LZ4 frame magic"
+    },
+    {
+      "vector_id": "LZ4-E-LEGACY-FRAME-MAGIC",
+      "encoded_hex": "02214c1800",
+      "expected_error_class": "unsupported_container",
+      "boundary": "legacy LZ4 frame magic"
+    },
+    {
+      "vector_id": "LZ4-E-SKIPPABLE-FRAME-MAGIC",
+      "encoded_hex": "502a4d1800",
+      "expected_error_class": "unsupported_container",
+      "boundary": "skippable LZ4 frame magic"
+    },
+    {
+      "vector_id": "LZ4-E-TRUNCATED-LITERAL-EXTENSION",
+      "encoded_hex": "0f000000f0",
+      "expected_error_class": "truncated",
+      "boundary": "literal nibble requires a missing extension byte"
+    },
+    {
+      "vector_id": "LZ4-E-LITERAL-OUT-OF-BOUNDS",
+      "encoded_hex": "030000003061",
+      "expected_error_class": "truncated",
+      "boundary": "literal run crosses compressed input"
+    },
+    {
+      "vector_id": "LZ4-E-TRUNCATED-OFFSET",
+      "encoded_hex": "05000000106101",
+      "expected_error_class": "truncated",
+      "boundary": "one-byte match offset"
+    },
+    {
+      "vector_id": "LZ4-E-OFFSET-ZERO",
+      "encoded_hex": "0a00000010610000",
+      "expected_error_class": "offset",
+      "boundary": "zero match offset"
+    },
+    {
+      "vector_id": "LZ4-E-EXTERNAL-DICTIONARY",
+      "encoded_hex": "0a00000010610200",
+      "expected_error_class": "offset",
+      "boundary": "offset exceeds bytes produced by this independent block"
+    },
+    {
+      "vector_id": "LZ4-E-TRUNCATED-MATCH-EXTENSION",
+      "encoded_hex": "140000001f610100",
+      "expected_error_class": "truncated",
+      "boundary": "saturated match nibble requires a missing extension byte"
+    },
+    {
+      "vector_id": "LZ4-E-OUTPUT-LIMIT",
+      "encoded_hex": "01000000206162",
+      "expected_error_class": "output_limit",
+      "boundary": "literal run exceeds the advertised decoded length"
+    },
+    {
+      "vector_id": "LZ4-E-SIZE-MISMATCH",
+      "encoded_hex": "020000001061",
+      "expected_error_class": "size_mismatch",
+      "boundary": "decoded bytes are shorter than the size prefix"
+    },
+    {
+      "vector_id": "LZ4-E-FINAL-MATCH-BITS",
+      "encoded_hex": "010000001161",
+      "expected_error_class": "noncanonical",
+      "boundary": "final literal-only token has non-zero match bits"
+    },
+    {
+      "vector_id": "LZ4-E-FIRST-SEQUENCE-MATCH",
+      "encoded_hex": "0900000000010000500102030405",
+      "expected_error_class": "noncanonical",
+      "boundary": "independent block begins with a match"
+    },
+    {
+      "vector_id": "LZ4-E-FOUR-FINAL-LITERALS",
+      "encoded_hex": "11000000186101004062636465",
+      "expected_error_class": "noncanonical",
+      "boundary": "last sequence has only four literals"
+    },
+    {
+      "vector_id": "LZ4-E-LATE-MATCH",
+      "encoded_hex": "0a00000010610100506263646566",
+      "expected_error_class": "noncanonical",
+      "boundary": "last match begins fewer than twelve decoded bytes before block end"
+    }
+  ],
+  "budget_vectors": [
+    {
+      "vector_id": "LZ4-B-COMPRESSED-INPUT",
+      "operation": "decode",
+      "encoded_hex": "0000000000",
+      "max_compressed_bytes": 4,
+      "max_decompressed_bytes": 1024,
+      "max_expansion_ratio": 256,
+      "expected_error_class": "compressed_limit"
+    },
+    {
+      "vector_id": "LZ4-B-ADVERTISED-OUTPUT",
+      "operation": "decode",
+      "encoded_hex": "05000000500102030405",
+      "max_compressed_bytes": 1024,
+      "max_decompressed_bytes": 4,
+      "max_expansion_ratio": 256,
+      "expected_error_class": "output_limit"
+    },
+    {
+      "vector_id": "LZ4-B-EXPANSION-RATIO",
+      "operation": "decode",
+      "encoded_hex": "0101000000",
+      "max_compressed_bytes": 1024,
+      "max_decompressed_bytes": 1024,
+      "max_expansion_ratio": 256,
+      "expected_error_class": "output_limit"
+    },
+    {
+      "vector_id": "LZ4-B-ZERO-RATIO",
+      "operation": "decode",
+      "encoded_hex": "0000000000",
+      "max_compressed_bytes": 1024,
+      "max_decompressed_bytes": 1024,
+      "max_expansion_ratio": 0,
+      "expected_error_class": "invalid_limits"
+    }
+  ],
+  "property_contract": {
+    "cases": 256,
+    "maximum_payload_bytes": 32768,
+    "properties": [
+      "owned encoding is deterministic",
+      "owned encode then owned decode preserves bytes",
+      "owned output decodes identically with lz4_flex 0.14.0",
+      "lz4_flex 0.14.0 output decodes identically with the owned decoder",
+      "single-bit mutation and every truncation boundary never panic or exceed declared output limits"
+    ]
+  },
+  "fuzz_contract": {
+    "manifest": "fuzz/Cargo.toml",
+    "target": "fuzz/fuzz_targets/trace_compression.rs",
+    "target_name": "fuzz_trace_compression",
+    "incumbent_requirement": "=0.14.0",
+    "incumbent_resolved": "0.14.0",
+    "a1_manifest_sha256": "1a90bcc6869fcca866b6572f6c571b42dcdbcea43960211901ed21bdad83f21f",
+    "a3_manifest_sha256": "8756d0bf2578d20726a63285daa2f7a6a789e4811c5756c9c9c6871a66551473",
+    "a3_target_sha256": "6e730416956770b0e092cd9d129fe6af6b0a8081d0c9a89e66550a334b939ec7",
+    "bounded_operations": [
+      "arbitrary candidate decode under compressed, decoded, and ratio caps",
+      "owned deterministic encode and roundtrip for payloads at most 256 KiB",
+      "current incumbent decode of every owned-accepted block",
+      "owned decode of every current incumbent-produced block",
+      "zero and u32::MAX size-prefix mutation under the same caps"
+    ],
+    "execution_receipt": {
+      "executed_at": "2026-07-26T21:34:54Z",
+      "runner": "RCH-admitted cargo run with the libfuzzer-sys linked main",
+      "instrumentation": "libFuzzer execution without cargo-fuzz sanitizer or coverage instrumentation",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 RUSTFLAGS='-D warnings -C debuginfo=0 --cfg fuzzing' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_lz4_a3_fuzz_run\" cargo run --manifest-path fuzz/Cargo.toml --bin fuzz_trace_compression --release -- -max_total_time=60 -rss_limit_mb=2048 -max_len=1048576",
+      "seed": 873385395,
+      "executions": 11010692,
+      "elapsed_seconds": 61,
+      "reported_rss_mb": 227,
+      "exit_code": 0
+    }
+  },
+  "baseline_evidence_disposition": {
+    "historical_evidence_id": "EVD-TRACE-LZ4",
+    "historical_fixture": "tests/trace_compression_conformance.rs",
+    "historical_state": "SEMANTIC_FILTERING_ONLY",
+    "a3_receipt": "LZ4-EVD-A3-CORPUS",
+    "a3_fixture": "tests/lz4_owned_codec_corpus_contract.rs",
+    "policy": "The CAP baseline remains a historical incumbent snapshot. A3 supersedes its LZ4 byte-codec evidence for this campaign without rewriting cross-program baseline history."
+  },
+  "a4_handoff": {
+    "persistent_block_corpus_state": "COMPLETE",
+    "historical_full_trace_corpus_state": "ROUTED_TO_A4",
+    "required_next_evidence": [
+      "retained v2 and v3 compressed ASUPERTRACE artifacts",
+      "TraceReader, replay, migration, and CLI journeys",
+      "ASUPERTRACE v3 SHA-256 corruption behavior",
+      "combined compressed plus decompressed peak-memory measurement"
+    ]
+  },
+  "no_claim_boundaries": [
+    "This corpus does not integrate the owned codec into trace production or change persisted trace bytes.",
+    "It does not prove historical full-trace compatibility; A4 owns retained v2 and v3 ASUPERTRACE artifacts and replay journeys.",
+    "It does not add or validate LZ4 frames, dictionaries, block checksums, or content checksums.",
+    "A 60-second fuzz smoke is bounded evidence, not exhaustive proof of all possible inputs.",
+    "The RCH-admitted cargo run exercises the libFuzzer target without cargo-fuzz sanitizer or coverage instrumentation and makes no sanitizer or coverage claim.",
+    "Differential agreement with lz4_flex 0.14.0 does not independently authorize oracle retirement.",
+    "It does not prove performance, throughput, allocation, RSS, or latency parity.",
+    "It does not authorize production cutover, changing the root Cargo manifest or lockfile, or removing lz4_flex.",
+    "It does not cover ATP, Kafka, HTTP compression, or any non-trace LZ4 capability.",
+    "It does not prove broad workspace health, release readiness, live RCH fleet availability, local Cargo fallback approval, or permission to delete files."
+  ]
+}

@@ -69,6 +69,9 @@ pub mod integrity;
     reason = "A2 keeps the owned LZ4 codec private and inactive until A4 integration"
 )]
 mod lz4_block;
+#[cfg(any(feature = "fuzz", feature = "test-internals"))]
+#[doc(hidden)]
+pub use lz4_block::harness as lz4_harness;
 pub mod minimizer;
 pub mod raptorq_journal;
 pub mod raptorq_journal_writer;
