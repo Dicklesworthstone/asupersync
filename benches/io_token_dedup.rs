@@ -27,8 +27,6 @@ use std::hint::black_box;
 use asupersync::runtime::reactor::Token;
 use smallvec::SmallVec;
 
-mod phase6_gate;
-
 const BATCH_SIZES: [usize; 4] = [16, 64, 256, 1024];
 const DUP_PERCENTS: [usize; 3] = [0, 25, 75];
 
@@ -122,8 +120,12 @@ criterion_group!(benches, bench_token_dedup);
 fn main() {
     benches();
     Criterion::default().configure_from_args().final_summary();
-    if let Err(error) = phase6_gate::run_phase6_p50_gate("sched/io_token_dedup/") {
-        eprintln!("[PHASE6] baseline gate failed: {error}");
-        std::process::exit(2);
-    }
+    // COMPARATOR-ONLY: this binary is deliberately NOT Phase-6 gated. Its
+    // value is the RELATIVE hashset-vs-smallvec strategy data for the
+    // seen-token lever (bt4y5f.9), which is robust because both strategies
+    // measure back-to-back under identical load. The ABSOLUTE cell costs are
+    // cache-resident microbenches that drifted +15..111% between same-host
+    // runs under co-tenant fleet compile load (2026-07-27, ovh-a) — a 5%
+    // hard gate on them would be a flake generator, not a regression net.
+    // See docs/perf_runbook.md and artifacts/baseline.json note_sched.
 }
