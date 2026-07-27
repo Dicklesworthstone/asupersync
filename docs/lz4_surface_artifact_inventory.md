@@ -186,6 +186,31 @@ historical artifacts, trace/CLI/replay/migration integration, canonical E2E,
 memory, and performance. A5 alone may serialize a production/manifest
 cutover or emit KEEP.
 
+## A5 terminal decision
+
+The checked terminal packet is
+[`artifacts/lz4_final_signoff_v1.json`](../artifacts/lz4_final_signoff_v1.json),
+with operator guidance in
+[`docs/lz4_final_signoff.md`](./lz4_final_signoff.md). Its verdict is
+`KEEP_INCUMBENT_NO_CUTOVER`.
+
+A2 and A3 establish scoped safe block-codec correctness. A4 establishes
+retained v2/v3 trace compatibility, real writer/reader/migration/replay/CLI
+journeys, bounded malformed behavior, and a named-host comparison. Those
+results do not satisfy the serialized replacement gate:
+
+- public level and Auto semantics remain unresolved;
+- the owned probe encoded 50.292% slower and decoded 105.505% slower on the
+  retained named host, despite a 2.476% smaller block;
+- allocation-count and portable performance evidence remain absent;
+- the incumbent remains the differential oracle and production default; and
+- five ATP production call sites sit outside `CAP-TRACE-LZ4`.
+
+A5 therefore leaves `Cargo.toml`, `Cargo.lock`, persisted trace bytes,
+production constructor selection, public modes, diagnostics, and all accepted
+artifacts unchanged. The terminal packet is a durable KEEP receipt, not a
+partial switch or a deferred hidden cutover.
+
 ## Gate and rollback
 
 `REPLACE_EXPERIMENT_AUTHORIZED` means only that A2 may construct an isolated

@@ -32,7 +32,7 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "d0313c329ca637a61aaf88d01f69f98e06184f19d42843bfc8cb1f0f2d84c815"
+      "sha256": "a1908b10016b633cd5e2f923cb077533eaa66290c218e4f1c7de09e70e8400a2"
     },
     {
       "path": "tests/lz4_surface_artifact_inventory_contract.rs",
