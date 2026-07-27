@@ -4518,6 +4518,8 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
         entropy,
         trace,
         loser_drain_history,
+        spawn_gateway,
+        pending_spawns,
     ) = {
         let guard = inner
             .state
@@ -4536,9 +4538,19 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
             guard.entropy_source().fork(task),
             guard.trace_handle(),
             guard.loser_drain_history_handle(),
+            guard.spawn_gateway(),
+            guard
+                .region(inner.root_region)
+                .map(crate::record::RegionRecord::pending_spawn_handle),
         )
     };
 
+    // br-asupersync-zc5865: the gateway + root-region pending-spawn counter
+    // must ride this Cx, or `Cx::spawn`/`Cx::spawn_in` inside `block_on`
+    // (the `#[asupersync::main]` body) fail with `RuntimeUnavailable` while
+    // the runtime's workers sit idle. Spawned children are admitted through
+    // the mailbox into `root_region` as ordinary registered tasks; only this
+    // request-scoped parent stays unregistered.
     let request_cx = crate::cx::Cx::new_with_drivers(
         inner.root_region,
         task,
@@ -4550,7 +4562,9 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
         Some(entropy),
     )
     .with_blocking_pool_handle(blocking_pool)
-    .with_logical_clock(logical_clock);
+    .with_logical_clock(logical_clock)
+    .with_spawn_gateway(spawn_gateway)
+    .with_pending_spawn_counter(pending_spawns);
     request_cx.set_trace_buffer(trace);
     request_cx.set_loser_drain_history_handle(loser_drain_history);
     request_cx
@@ -6825,6 +6839,41 @@ worker_threads = 16
         assert!(
             weak_handle.blocking_handle().is_none(),
             "stale weak handle should not yield a blocking handle"
+        );
+    }
+
+    /// The ambient Cx installed by `Runtime::block_on` must carry the spawn
+    /// gateway and the root region's pending-spawn counter, so `Cx::spawn`
+    /// works from the `#[asupersync::main]` body (br-asupersync-zc5865).
+    /// Before the fix this failed with `SpawnError::RuntimeUnavailable`
+    /// while the runtime's workers sat idle.
+    #[test]
+    fn block_on_ambient_cx_spawns_through_the_gateway() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let joined = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs an ambient Cx");
+            assert!(
+                cx.spawn_gateway_handle().is_some(),
+                "ambient Cx must carry the spawn gateway (br-asupersync-zc5865)"
+            );
+            assert!(
+                cx.pending_spawn_counter_handle().is_some(),
+                "ambient Cx must carry the root region's pending-spawn counter"
+            );
+            let mut handle = cx
+                .spawn(|task_cx| async move {
+                    task_cx.checkpoint().expect("child checkpoint");
+                    41_u32 + 1
+                })
+                .expect("ambient Cx spawn must reach the gateway");
+            handle.join(&cx).await.expect("spawned child joins")
+        });
+        assert_eq!(
+            joined, 42,
+            "the child spawned from the block_on body must run to completion"
         );
     }
 

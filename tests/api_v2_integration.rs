@@ -18,6 +18,7 @@
 #![allow(clippy::unused_async)]
 
 use asupersync::lab::LabRuntime;
+use asupersync::lab_test;
 use asupersync::prelude::*;
 
 /// The `hello.rs` shape: the attribute macro alone must produce a usable
