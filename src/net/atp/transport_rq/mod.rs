@@ -9642,7 +9642,32 @@ where
     let mut pending_flush_bytes = 0usize;
     let mut flushes = 0u64;
     let mut entry_digests = Vec::with_capacity(encoders.len());
-    let mut logical_digests: Vec<EntryDigest> = precomputed_logical_digests.to_vec();
+    // The entry loop below emits the authoritative streamed digest for every
+    // plain entry and every fragment group itself. Seed only the digests the
+    // loop cannot produce — packed members, whose bytes ride inside a pack
+    // object. The delta-capable main send path precomputes a digest for EVERY
+    // logical file (it needs them for the manifest/transfer-id preflight), and
+    // seeding those unfiltered emitted each plain/split file twice in the
+    // ObjectComplete frame; the receiver fail-closes on any duplicate rel_path
+    // (br-asupersync-lbfdvs).
+    let loop_emitted: BTreeSet<&str> = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            if let Some(fragment) = entry.fragment.as_ref() {
+                Some(fragment.rel_path.as_str())
+            } else if entry.members.is_empty() {
+                Some(entry.rel_path.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut logical_digests: Vec<EntryDigest> = precomputed_logical_digests
+        .iter()
+        .filter(|digest| !loop_emitted.contains(digest.rel_path.as_str()))
+        .cloned()
+        .collect();
     let mut logical_fragment_hashes: BTreeMap<
         String,
         crate::net::atp::transport_common::StagedEntryReceive,
@@ -21130,6 +21155,173 @@ mod tests {
             "bulk source stream should flush groups of data frames, not every frame"
         );
         assert!(RQ_CONTROL_SOURCE_FLUSH_BYTES <= 16 * 1024 * 1024);
+    }
+
+    /// br-asupersync-lbfdvs: the delta-capable main send path precomputes a
+    /// logical digest for EVERY file and passes that full list as the seed of
+    /// `stream_control_source_entries`. The entry loop then emits the streamed
+    /// digest for every plain entry itself, so an unfiltered seed produced the
+    /// same rel_path twice in the ObjectComplete frame and the receiver
+    /// fail-closed with "duplicate ObjectComplete logical digest" — breaking
+    /// every authenticated single-file control-source-stream send.
+    #[test]
+    fn control_source_stream_full_precomputed_seed_does_not_duplicate_plain_digests() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plain.bin");
+        std::fs::write(&path, vec![7u8; 3072]).expect("write source");
+
+        let entry = RqSourceEntry {
+            rel_path: "plain.bin".to_string(),
+            abs_path: path.clone(),
+            metadata: EntryMetadata::default(),
+            source_offset: 0,
+            source_len: None,
+            members: Vec::new(),
+            fragment: None,
+        };
+        // Exactly what the main path does before the handshake: full digest
+        // list, singletons NOT deferred.
+        let (entries, precomputed, _pack_tempdir) =
+            futures_lite::future::block_on(pack_small_files(vec![entry], &RqConfig::default()))
+                .expect("pack");
+        assert_eq!(precomputed.len(), 1, "full preflight digest list");
+
+        let transfer_id = "lbfdvs-test-transfer";
+        let manifest = TransferManifest {
+            transfer_id: transfer_id.to_string(),
+            root_name: "plain.bin".to_string(),
+            is_directory: false,
+            total_bytes: 3072,
+            merkle_root_hex: sha256_hex_placeholder(),
+            metadata: None,
+            delta_manifest: None,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: "plain.bin".to_string(),
+                size: 3072,
+                sha256_hex: sha256_hex_placeholder(),
+                members: Vec::new(),
+                fragment: None,
+            }],
+        };
+        let encoders = vec![EntryEncoder {
+            index: 0,
+            object_id: entry_object_id(transfer_id, 0),
+            abs_path: entries[0].abs_path.clone(),
+            source_offset: 0,
+            size: 3072,
+            repair_cursors: Vec::new(),
+        }];
+
+        let mut control = FrameTransport::new(CountingControlIo::default());
+        let report = futures_lite::future::block_on(stream_control_source_entries(
+            &cx,
+            &mut control,
+            &encoders,
+            &manifest,
+            &precomputed,
+            transfer_id,
+            None,
+        ))
+        .expect("stream");
+
+        let plain_rows = report
+            .logical_digests
+            .iter()
+            .filter(|digest| digest.rel_path == "plain.bin")
+            .count();
+        assert_eq!(
+            plain_rows, 1,
+            "plain entry must appear exactly once in ObjectComplete logical digests"
+        );
+        assert_eq!(report.logical_digests.len(), 1);
+        assert_eq!(report.bytes_streamed, 3072);
+    }
+
+    /// Companion guard for br-asupersync-lbfdvs: the seed filter must KEEP
+    /// packed-member digests — the entry loop cannot produce them (a pack
+    /// entry streams the combined object, and only the seed knows the member
+    /// digests).
+    #[test]
+    fn control_source_stream_seed_keeps_packed_member_digests() {
+        let cx = Cx::for_testing();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path_a = dir.path().join("a.bin");
+        let path_b = dir.path().join("b.bin");
+        std::fs::write(&path_a, vec![1u8; 1024]).expect("write a");
+        std::fs::write(&path_b, vec![2u8; 1024]).expect("write b");
+
+        let make_entry = |rel: &str, abs: &Path| RqSourceEntry {
+            rel_path: rel.to_string(),
+            abs_path: abs.to_path_buf(),
+            metadata: EntryMetadata::default(),
+            source_offset: 0,
+            source_len: None,
+            members: Vec::new(),
+            fragment: None,
+        };
+        let (entries, precomputed, pack_tempdir) =
+            futures_lite::future::block_on(pack_small_files(
+                vec![make_entry("a.bin", &path_a), make_entry("b.bin", &path_b)],
+                &RqConfig::default(),
+            ))
+            .expect("pack");
+        assert_eq!(entries.len(), 1, "two small files coalesce into one pack");
+        assert_eq!(entries[0].members.len(), 2);
+        assert_eq!(precomputed.len(), 2, "member digests precomputed");
+
+        let transfer_id = "lbfdvs-pack-transfer";
+        let manifest = TransferManifest {
+            transfer_id: transfer_id.to_string(),
+            root_name: "tree".to_string(),
+            is_directory: true,
+            total_bytes: 2048,
+            merkle_root_hex: sha256_hex_placeholder(),
+            metadata: None,
+            delta_manifest: None,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: entries[0].rel_path.clone(),
+                size: 2048,
+                sha256_hex: sha256_hex_placeholder(),
+                members: entries[0].members.clone(),
+                fragment: None,
+            }],
+        };
+        let encoders = vec![EntryEncoder {
+            index: 0,
+            object_id: entry_object_id(transfer_id, 0),
+            abs_path: entries[0].abs_path.clone(),
+            source_offset: 0,
+            size: 2048,
+            repair_cursors: Vec::new(),
+        }];
+
+        let mut control = FrameTransport::new(CountingControlIo::default());
+        let report = futures_lite::future::block_on(stream_control_source_entries(
+            &cx,
+            &mut control,
+            &encoders,
+            &manifest,
+            &precomputed,
+            transfer_id,
+            None,
+        ))
+        .expect("stream");
+        drop(pack_tempdir);
+
+        let mut member_paths: Vec<&str> = report
+            .logical_digests
+            .iter()
+            .map(|digest| digest.rel_path.as_str())
+            .collect();
+        member_paths.sort_unstable();
+        assert_eq!(
+            member_paths,
+            vec!["a.bin", "b.bin"],
+            "packed member digests must survive the seed filter exactly once each"
+        );
     }
 
     #[test]
