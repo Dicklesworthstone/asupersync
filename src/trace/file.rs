@@ -261,6 +261,39 @@ impl CompressionMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lz4Codec {
+    Incumbent,
+    #[cfg(all(feature = "trace-compression", feature = "test-internals"))]
+    Owned,
+}
+
+#[cfg(feature = "trace-compression")]
+impl Lz4Codec {
+    fn encode(self, input: &[u8]) -> TraceFileResult<Vec<u8>> {
+        match self {
+            Self::Incumbent => Ok(lz4_flex::compress_prepend_size(input)),
+            #[cfg(feature = "test-internals")]
+            Self::Owned => {
+                super::lz4_block::encode_size_prepended(input, super::lz4_block::Limits::TRACE)
+                    .map_err(|error| TraceFileError::Compression(error.to_string()))
+            }
+        }
+    }
+
+    fn decode(self, input: &[u8]) -> TraceFileResult<Vec<u8>> {
+        match self {
+            Self::Incumbent => lz4_flex::decompress_size_prepended(input)
+                .map_err(|error| TraceFileError::Decompression(error.to_string())),
+            #[cfg(feature = "test-internals")]
+            Self::Owned => {
+                super::lz4_block::decode_size_prepended(input, super::lz4_block::Limits::TRACE)
+                    .map_err(|error| TraceFileError::Decompression(error.to_string()))
+            }
+        }
+    }
+}
+
 /// Configuration for trace file operations.
 #[derive(Debug, Clone)]
 pub struct TraceFileConfig {
@@ -507,6 +540,8 @@ pub struct TraceWriter {
     buffered_bytes: u64,
     stopped: bool,
     halted: bool,
+    #[cfg(feature = "trace-compression")]
+    lz4_codec: Lz4Codec,
     /// Buffer for uncompressed event data (used in chunked compression).
     #[cfg(feature = "trace-compression")]
     event_buffer: Vec<u8>,
@@ -536,6 +571,12 @@ impl TraceWriter {
     }
 
     fn from_file(file: File, config: TraceFileConfig) -> Self {
+        Self::from_file_with_lz4_codec(file, config, Lz4Codec::Incumbent)
+    }
+
+    fn from_file_with_lz4_codec(file: File, config: TraceFileConfig, lz4_codec: Lz4Codec) -> Self {
+        #[cfg(not(feature = "trace-compression"))]
+        let _ = lz4_codec;
         let writer = BufWriter::new(file);
 
         Self {
@@ -551,6 +592,8 @@ impl TraceWriter {
             buffered_bytes: 0,
             stopped: false,
             halted: false,
+            #[cfg(feature = "trace-compression")]
+            lz4_codec,
             #[cfg(feature = "trace-compression")]
             event_buffer: Vec::new(),
         }
@@ -840,8 +883,8 @@ impl TraceWriter {
             return Ok(());
         }
 
-        // Compress the buffer
-        let compressed = lz4_flex::compress_prepend_size(&self.event_buffer);
+        // Compress the buffer through the selected integration backend.
+        let compressed = self.lz4_codec.encode(&self.event_buffer)?;
 
         // Write chunk: compressed_len (u32) + compressed_data
         let chunk_len = u32::try_from(compressed.len()).map_err(|_| {
@@ -952,6 +995,8 @@ pub struct TraceReader {
     compression: CompressionMode,
     expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
     event_hasher: Sha256,
+    #[cfg(feature = "trace-compression")]
+    lz4_codec: Lz4Codec,
     /// Buffer for decompressed event data.
     #[cfg(feature = "trace-compression")]
     decompressed_buffer: Vec<u8>,
@@ -974,6 +1019,12 @@ impl TraceReader {
     /// - The file is compressed but the `trace-compression` feature is not enabled
     /// - The metadata is corrupt
     pub fn open(path: impl AsRef<Path>) -> TraceFileResult<Self> {
+        Self::open_with_lz4_codec(path, Lz4Codec::Incumbent)
+    }
+
+    fn open_with_lz4_codec(path: impl AsRef<Path>, lz4_codec: Lz4Codec) -> TraceFileResult<Self> {
+        #[cfg(not(feature = "trace-compression"))]
+        let _ = lz4_codec;
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
@@ -1117,6 +1168,8 @@ impl TraceReader {
             expected_event_digest,
             event_hasher: Sha256::new(),
             #[cfg(feature = "trace-compression")]
+            lz4_codec,
+            #[cfg(feature = "trace-compression")]
             decompressed_buffer: Vec::new(),
             #[cfg(feature = "trace-compression")]
             buffer_pos: 0,
@@ -1171,6 +1224,8 @@ impl TraceReader {
             compression: self.compression,
             expected_event_digest: self.expected_event_digest,
             event_hasher: self.event_hasher,
+            #[cfg(feature = "trace-compression")]
+            lz4_codec: self.lz4_codec,
             #[cfg(feature = "trace-compression")]
             decompressed_buffer: self.decompressed_buffer,
             #[cfg(feature = "trace-compression")]
@@ -1316,10 +1371,8 @@ impl TraceReader {
             }
         }
 
-        // Decompress
-        self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(
-            |e: lz4_flex::block::DecompressError| TraceFileError::Decompression(e.to_string()),
-        )?;
+        // Decompress through the selected integration backend.
+        self.decompressed_buffer = self.lz4_codec.decode(&compressed)?;
         self.buffer_pos = 0;
 
         Ok(())
@@ -1379,6 +1432,8 @@ pub struct TraceEventIterator {
     compression: CompressionMode,
     expected_event_digest: Option<[u8; TRACE_CHECKSUM_LEN]>,
     event_hasher: Sha256,
+    #[cfg(feature = "trace-compression")]
+    lz4_codec: Lz4Codec,
     /// Buffer for decompressed event data.
     #[cfg(feature = "trace-compression")]
     decompressed_buffer: Vec<u8>,
@@ -1533,10 +1588,8 @@ impl TraceEventIterator {
             }
         }
 
-        // Decompress
-        self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(
-            |e: lz4_flex::block::DecompressError| TraceFileError::Decompression(e.to_string()),
-        )?;
+        // Decompress through the selected integration backend.
+        self.decompressed_buffer = self.lz4_codec.decode(&compressed)?;
         self.buffer_pos = 0;
 
         Ok(())
@@ -1783,6 +1836,14 @@ pub fn migrate_trace_file(
     input: impl AsRef<Path>,
     output: impl AsRef<Path>,
 ) -> TraceFileResult<TraceFileMigrationReceipt> {
+    migrate_trace_file_with_lz4_codec(input, output, Lz4Codec::Incumbent)
+}
+
+fn migrate_trace_file_with_lz4_codec(
+    input: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    lz4_codec: Lz4Codec,
+) -> TraceFileResult<TraceFileMigrationReceipt> {
     let input = input.as_ref();
     let output = output.as_ref();
     if input == output {
@@ -1792,7 +1853,7 @@ pub fn migrate_trace_file(
         return Err(TraceFileError::MigrationDestinationExists);
     }
 
-    let mut reader = TraceReader::open(input)?;
+    let mut reader = TraceReader::open_with_lz4_codec(input, lz4_codec)?;
     let source_version = reader.file_version();
     if source_version == TRACE_FILE_VERSION {
         return Err(TraceFileError::MigrationAlreadyCurrent {
@@ -1802,12 +1863,13 @@ pub fn migrate_trace_file(
     let metadata = reader.metadata().clone();
     let compression = reader.compression();
     let (output_file, staged_path) = MigrationTempPath::create(output)?;
-    let mut writer = TraceWriter::from_file(
+    let mut writer = TraceWriter::from_file_with_lz4_codec(
         output_file,
         TraceFileConfig::new()
             .with_compression(compression)
             .with_max_file_size(0)
             .on_limit(LimitAction::Fail),
+        lz4_codec,
     );
     writer.write_metadata(&metadata)?;
 
@@ -1831,6 +1893,80 @@ pub fn migrate_trace_file(
         target_version: TRACE_FILE_VERSION,
         events_copied,
     })
+}
+
+/// Test-only entry points that route real trace operations through the owned
+/// LZ4 block codec while production constructors continue to use the incumbent.
+#[doc(hidden)]
+#[cfg(all(feature = "trace-compression", feature = "test-internals"))]
+pub mod lz4_integration_harness {
+    use super::{
+        File, Lz4Codec, Path, ReplayEvent, TraceFileConfig, TraceFileMigrationReceipt,
+        TraceFileResult, TraceMetadata, TraceReader, TraceWriter,
+        migrate_trace_file_with_lz4_codec,
+    };
+
+    /// Creates a real streaming trace writer backed by the owned codec.
+    pub fn create_owned_writer(
+        path: impl AsRef<Path>,
+        config: TraceFileConfig,
+    ) -> TraceFileResult<TraceWriter> {
+        let file = File::create(path)?;
+        Ok(TraceWriter::from_file_with_lz4_codec(
+            file,
+            config,
+            Lz4Codec::Owned,
+        ))
+    }
+
+    /// Opens a real streaming trace reader backed by the owned codec.
+    pub fn open_owned_reader(path: impl AsRef<Path>) -> TraceFileResult<TraceReader> {
+        TraceReader::open_with_lz4_codec(path, Lz4Codec::Owned)
+    }
+
+    /// Writes a complete trace through the owned codec.
+    pub fn write_owned_trace(
+        path: impl AsRef<Path>,
+        metadata: &TraceMetadata,
+        events: &[ReplayEvent],
+        config: TraceFileConfig,
+    ) -> TraceFileResult<()> {
+        let mut writer = create_owned_writer(path, config)?;
+        writer.write_metadata(metadata)?;
+        for event in events {
+            writer.write_event(event)?;
+        }
+        writer.finish()
+    }
+
+    /// Reads a complete trace through the owned codec.
+    pub fn read_owned_trace(
+        path: impl AsRef<Path>,
+    ) -> TraceFileResult<(TraceMetadata, Vec<ReplayEvent>)> {
+        let reader = open_owned_reader(path)?;
+        let metadata = reader.metadata().clone();
+        let events = reader.load_all()?;
+        Ok((metadata, events))
+    }
+
+    /// Migrates a legacy trace while routing compressed input and output through
+    /// the owned codec.
+    pub fn migrate_owned_trace(
+        input: impl AsRef<Path>,
+        output: impl AsRef<Path>,
+    ) -> TraceFileResult<TraceFileMigrationReceipt> {
+        migrate_trace_file_with_lz4_codec(input, output, Lz4Codec::Owned)
+    }
+
+    /// Encodes one trace chunk through the owned codec.
+    pub fn encode_owned_chunk(input: &[u8]) -> TraceFileResult<Vec<u8>> {
+        Lz4Codec::Owned.encode(input)
+    }
+
+    /// Decodes one trace chunk through the owned codec.
+    pub fn decode_owned_chunk(input: &[u8]) -> TraceFileResult<Vec<u8>> {
+        Lz4Codec::Owned.decode(input)
+    }
 }
 
 // =============================================================================

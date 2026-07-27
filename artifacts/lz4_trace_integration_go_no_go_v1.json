@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "artifact_id": "lz4-trace-integration-go-no-go-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-0h6myr.4.4",
+  "capability_id": "CAP-TRACE-LZ4",
+  "generated_at_utc": "2026-07-27T03:50:02Z",
+  "evidence_base_revision": "da625d842d1b5d691c03c24cb87e8d91adfed010",
+  "source_transition": {
+    "a1_baseline_revision": "a4a92df81109afa362814c4e0638afcbe16424d0",
+    "a1_trace_file_sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9",
+    "a4_trace_file_sha256": "c0b163a5fb758cc0a056133b55d5f799b68add1479a7a63ed9599361b5c5e774",
+    "root_manifest_changed": false,
+    "root_manifest_sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+    "root_lockfile_changed": false,
+    "root_lockfile_sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+    "production_codec": "lz4_flex 0.14.0",
+    "production_default_selection": "Lz4Codec::Incumbent",
+    "production_constructor_paths": [
+      "TraceWriter::from_file",
+      "TraceReader::open",
+      "migrate_trace_file"
+    ],
+    "owned_codec_surface": "test-internals shadow integration only",
+    "owned_codec_cfg": "all(feature = \"trace-compression\", feature = \"test-internals\")",
+    "persisted_format_changed": false
+  },
+  "evidence_files": [
+    {
+      "path": "tests/lz4_trace_integration_e2e.rs",
+      "sha256": "88786b3b834943139387387bb00149004cf180f49c7765fee981c449b727fd36"
+    },
+    {
+      "path": "scripts/run_dependency_sovereignty_e2e.sh",
+      "sha256": "d0313c329ca637a61aaf88d01f69f98e06184f19d42843bfc8cb1f0f2d84c815"
+    },
+    {
+      "path": "tests/lz4_surface_artifact_inventory_contract.rs",
+      "sha256": "fd6aae1c6802d1a2e178f614994b4afe4f81896bde43d396f5bf32e42a7465ea"
+    },
+    {
+      "path": "docs/lz4_trace_integration_go_no_go.md",
+      "sha256": "109916edaed122f15ffe41a164c3913693a7bb134c1a6a8d0ee8d1826c24fd0a"
+    }
+  ],
+  "retained_corpus": {
+    "path": "tests/fixtures/lz4-trace-historical-corpus/v0.3.9.json",
+    "sha256": "930164fdd5a7cbca20f38db5fbca2d532bb8c4b872d356a532e31a54f6fa4597",
+    "semantic_event_count": 6,
+    "artifacts": [
+      {
+        "artifact_id": "trace-v2-manual-incumbent",
+        "file_version": 2,
+        "byte_len": 195,
+        "sha256": "f3ac94f8774f17b9f582543cd9db4ea8bf091b542e797014f5887dd631900deb",
+        "producer": "manual ASUPERTRACE v2 container plus lz4_flex 0.14.0 block"
+      },
+      {
+        "artifact_id": "trace-v3-v039-incumbent",
+        "file_version": 3,
+        "byte_len": 259,
+        "sha256": "c1cda2ff81e1b20f064480d29569e0d4679677012d99b40aaf07f7f3973acffa",
+        "producer": "asupersync v0.3.9 TraceWriter plus lz4_flex 0.14.0 block"
+      }
+    ]
+  },
+  "canonical_scenarios": [
+    {
+      "scenario_id": "lz4_trace_replay",
+      "validation_surface": "e2e",
+      "profile_family": "lz4-owned-shadow",
+      "feature_flags": [
+        "cli",
+        "test-internals",
+        "trace-compression"
+      ],
+      "status": "PASS"
+    },
+    {
+      "scenario_id": "lz4_cross_version_artifact",
+      "validation_surface": "e2e",
+      "profile_family": "lz4-owned-shadow",
+      "feature_flags": [
+        "cli",
+        "test-internals",
+        "trace-compression"
+      ],
+      "status": "PASS"
+    },
+    {
+      "scenario_id": "lz4_malformed_limits",
+      "validation_surface": "e2e",
+      "profile_family": "lz4-owned-shadow",
+      "feature_flags": [
+        "cli",
+        "test-internals",
+        "trace-compression"
+      ],
+      "status": "PASS"
+    }
+  ],
+  "compatibility_results": {
+    "retained_v2_incumbent_to_incumbent": "PASS",
+    "retained_v2_incumbent_to_owned": "PASS",
+    "retained_v3_incumbent_to_incumbent": "PASS",
+    "retained_v3_incumbent_to_owned": "PASS",
+    "v2_incumbent_migration_to_v3": "PASS",
+    "v2_owned_migration_to_v3": "PASS",
+    "migration_source_preserved": "PASS",
+    "current_incumbent_to_owned": "PASS",
+    "current_owned_to_incumbent": "PASS",
+    "semantic_replay_equivalence": "PASS",
+    "owned_output_determinism": "PASS",
+    "interrupted_writer_bounded_recovery": "PASS",
+    "cli_info_verify_events_diff_compress": "PASS",
+    "persisted_format_migration_required": false
+  },
+  "malformed_and_limit_results": {
+    "header_and_chunk_truncation_boundaries": "PASS",
+    "zero_chunk_length": "PASS",
+    "oversized_compressed_chunk_length": "PASS",
+    "oversized_advertised_output": "PASS",
+    "event_stream_checksum_corruption": "PASS",
+    "accepted_trailing_data_preserved": "PASS",
+    "typed_trace_file_diagnostics_preserved": "PASS"
+  },
+  "measurement_receipt": {
+    "schema_version": "lz4-a4-measurement-v1",
+    "status": "PASS",
+    "worker": "vmi1264463",
+    "cpu_model": "AMD EPYC Processor (with IBPB)",
+    "cargo_profile": "test with CARGO_PROFILE_TEST_DEBUG=0",
+    "rustflags": "-D warnings -C debuginfo=0",
+    "iterations": 64,
+    "payload_bytes": 95887,
+    "incumbent_encoded_bytes": 29688,
+    "owned_encoded_bytes": 28953,
+    "incumbent_encode_nanos": 479433053,
+    "owned_encode_nanos": 720550247,
+    "incumbent_decode_nanos": 95060587,
+    "owned_decode_nanos": 195354661,
+    "compressed_plus_decompressed_peak_bytes": {
+      "incumbent_block": 125575,
+      "owned_block": 124840
+    },
+    "process_vm_hwm_before_kib": 4236,
+    "process_vm_hwm_after_kib": 4904,
+    "derived_observations": {
+      "owned_size_delta_percent": -2.476,
+      "owned_encode_time_ratio": 1.502922,
+      "owned_encode_time_delta_percent": 50.292,
+      "owned_decode_time_ratio": 2.055054,
+      "owned_decode_time_delta_percent": 105.505,
+      "owned_peak_block_bytes_delta_percent": -0.585
+    },
+    "method_limits": [
+      "one named remote worker",
+      "one test-profile process",
+      "elapsed wall-clock probe rather than a statistical benchmark",
+      "cross-decoding uses each codec's opposite encoded block",
+      "process VmHWM is not per-operation RSS",
+      "no allocation-count instrumentation"
+    ]
+  },
+  "decision": {
+    "verdict": "KEEP_INCUMBENT",
+    "production_default_changed": false,
+    "production_cutover_authorized": false,
+    "dependency_removal_authorized": false,
+    "reasons": [
+      "owned encode elapsed time was 50.292 percent higher in the bounded named-host probe",
+      "owned decode elapsed time was 105.505 percent higher in the bounded named-host probe",
+      "the 2.476 percent encoded-size reduction does not offset the measured slowdowns",
+      "single-host test-profile timing and process VmHWM are insufficient for a portable performance claim"
+    ],
+    "blockers": [
+      {
+        "gap_id": "LZ4-GAP-01",
+        "summary": "CompressionMode Lz4 level remains unapplied"
+      },
+      {
+        "gap_id": "LZ4-GAP-02",
+        "summary": "CompressionMode Auto threshold remains unused"
+      },
+      {
+        "gap_id": "LZ4-GAP-03",
+        "summary": "compression byte does not retain level or Auto intent"
+      },
+      {
+        "gap_id": "LZ4-GAP-09",
+        "summary": "combined block bytes are measured but allocation counts and portable RSS evidence remain absent"
+      },
+      {
+        "gap_id": "A4-MEASUREMENT-SCOPE",
+        "summary": "one named test-profile host is not a cross-host statistical benchmark"
+      },
+      {
+        "gap_id": "A4-ATP-OUT-OF-SCOPE",
+        "summary": "ATP LZ4 call sites were not integrated or measured"
+      }
+    ]
+  },
+  "rollback": {
+    "strategy": "remove the private codec selector and test-internals harness",
+    "persisted_artifact_migration_required": false,
+    "retained_corpus_remains_readable_by_incumbent": true
+  },
+  "a5_handoff": {
+    "owner_bead": "asupersync-0h6myr.4.5",
+    "required_disposition": "retain KEEP_INCUMBENT unless every blocker is resolved with new scoped evidence",
+    "terminal_cutover_authority": "A5 only"
+  },
+  "no_claims": [
+    "production cutover",
+    "dependency removal",
+    "allocator behavior",
+    "portable performance improvement",
+    "p50 p95 or p999 latency",
+    "broad workspace health",
+    "release readiness",
+    "live RCH fleet health",
+    "LZ4 frame dictionary block-checksum or content-checksum support",
+    "ATP replacement",
+    "local Cargo fallback",
+    "permission to delete files"
+  ]
+}

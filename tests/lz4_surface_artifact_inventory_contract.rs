@@ -19,6 +19,7 @@ use std::time::Instant;
 
 const ARTIFACT_PATH: &str = "artifacts/lz4_surface_artifact_inventory_v1.json";
 const A3_CORPUS_PATH: &str = "artifacts/lz4_owned_codec_corpus_v1.json";
+const A4_RECEIPT_PATH: &str = "artifacts/lz4_trace_integration_go_no_go_v1.json";
 const DOC_PATH: &str = "docs/lz4_surface_artifact_inventory.md";
 const BEAD_ID: &str = "asupersync-0h6myr.4.1";
 const CAPABILITY_ID: &str = "CAP-TRACE-LZ4";
@@ -155,7 +156,9 @@ fn inventory_schema_and_authority_are_fail_closed() {
 fn every_pinned_source_hash_matches_the_baseline() {
     let inventory = artifact();
     let a3 = parse_repo_json(A3_CORPUS_PATH);
+    let a4 = parse_repo_json(A4_RECEIPT_PATH);
     let fuzz_transition = object(&a3, "fuzz_contract");
+    let trace_transition = object(&a4, "source_transition");
     let pins = array(&inventory, "source_pins");
     assert_eq!(pins.len(), 14, "source pin census changed");
     for pin in pins {
@@ -177,6 +180,25 @@ fn every_pinned_source_hash_matches_the_baseline() {
                     "a3_manifest_sha256"
                 ),
                 "only the exact A3 current-version fuzz transition is allowed"
+            );
+            continue;
+        }
+        if path == "src/trace/file.rs" {
+            assert_eq!(
+                expected,
+                text(
+                    &Value::Object(trace_transition.clone()),
+                    "a1_trace_file_sha256"
+                ),
+                "A4 must name the exact A1 trace-file baseline"
+            );
+            assert_eq!(
+                sha256_hex(&read_repo_bytes(path)),
+                text(
+                    &Value::Object(trace_transition.clone()),
+                    "a4_trace_file_sha256"
+                ),
+                "only the exact A4 shadow-integration transition is allowed"
             );
             continue;
         }
@@ -208,8 +230,8 @@ fn production_lz4_api_census_matches_source() {
 
     let trace = read_repo_file("src/trace/file.rs");
     assert_eq!(count(&trace, "lz4_flex::compress_prepend_size"), 3);
-    assert_eq!(count(&trace, "lz4_flex::decompress_size_prepended"), 2);
-    assert_eq!(count(&trace, "lz4_flex::block::DecompressError"), 2);
+    assert_eq!(count(&trace, "lz4_flex::decompress_size_prepended"), 1);
+    assert_eq!(count(&trace, "lz4_flex::block::DecompressError"), 0);
 
     let manifest = read_repo_file("src/atp/manifest.rs");
     assert_eq!(count(&manifest, "lz4_flex::compress_prepend_size"), 1);
@@ -282,12 +304,42 @@ fn trace_container_and_block_contract_match_source() {
         "pub const FLAG_COMPRESSED: u16 = 0x0001;",
         "pub const FLAG_CHECKSUMMED: u16 = 0x0002;",
         "1 => Some(Self::Lz4 { level: 1 })",
-        "let compressed = lz4_flex::compress_prepend_size(&self.event_buffer);",
+        "let compressed = self.lz4_codec.encode(&self.event_buffer)?;",
         "let chunk_len = u32::from_le_bytes(chunk_len_bytes) as usize;",
     ] {
         assert!(
             source.contains(needle),
             "missing trace contract needle: {needle}"
+        );
+    }
+}
+
+#[test]
+fn a4_owned_shadow_integration_preserves_the_incumbent_default() {
+    let receipt = parse_repo_json(A4_RECEIPT_PATH);
+    assert_eq!(receipt["bead_id"], "asupersync-0h6myr.4.4");
+    assert_eq!(receipt["capability_id"], CAPABILITY_ID);
+    assert_eq!(receipt["decision"]["verdict"], "KEEP_INCUMBENT");
+    assert_eq!(receipt["decision"]["production_default_changed"], false);
+
+    let transition = object(&receipt, "source_transition");
+    assert_eq!(transition["root_manifest_changed"], false);
+    assert_eq!(transition["production_codec"], "lz4_flex 0.14.0");
+    assert_eq!(
+        transition["owned_codec_surface"],
+        "test-internals shadow integration only"
+    );
+
+    let source = read_repo_file("src/trace/file.rs");
+    for needle in [
+        "Self::from_file_with_lz4_codec(file, config, Lz4Codec::Incumbent)",
+        "Self::open_with_lz4_codec(path, Lz4Codec::Incumbent)",
+        "migrate_trace_file_with_lz4_codec(input, output, Lz4Codec::Incumbent)",
+        "#[cfg(all(feature = \"trace-compression\", feature = \"test-internals\"))]",
+    ] {
+        assert!(
+            source.contains(needle),
+            "missing A4 shadow-integration guard: {needle}"
         );
     }
 }

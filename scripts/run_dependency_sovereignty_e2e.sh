@@ -67,6 +67,12 @@ Cargo-backed scenarios require:
     --scenario api-adr-phase3-signoff
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario lz4_trace_replay
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario lz4_cross_version_artifact
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario lz4_malformed_limits
 USAGE
 }
 
@@ -85,12 +91,15 @@ scenario_ids() {
         api-adr-registry-contract \
         api-adr-phase3-signoff \
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e \
-        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988
+        dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 \
+        lz4_trace_replay \
+        lz4_cross_version_artifact \
+        lz4_malformed_limits
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits)
             return 0
             ;;
         *)
@@ -101,7 +110,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits)
             return 0
             ;;
         *)
@@ -113,7 +122,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'e2e' ;;
+        dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits) printf 'e2e' ;;
         runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
@@ -135,6 +144,8 @@ scenario_fixture() {
         api-adr-phase3-signoff) printf 'artifacts/dependency_api_adr_phase3_signoff_v1.json' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'artifacts/typed_format_final_signoff_v1.json' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'tests/fixtures/typed-format-historical-corpus/v0.3.9.json' ;;
+        lz4_trace_replay | lz4_cross_version_artifact) printf 'tests/fixtures/lz4-trace-historical-corpus/v0.3.9.json' ;;
+        lz4_malformed_limits) printf 'tests/lz4_trace_integration_e2e.rs' ;;
     esac
 }
 
@@ -145,6 +156,7 @@ scenario_profile() {
         aggregate-signoff-contract) printf 'aggregate-signoff' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'typed-format-terminal-keep' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'published-v0.3.9-current-cli' ;;
+        lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits) printf 'lz4-owned-shadow' ;;
         *) printf 'nightly-default' ;;
     esac
 }
@@ -175,6 +187,9 @@ scenario_capabilities() {
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '["CAP-PERSISTED-TRACE-SNAPSHOT","CAP-SERDE-GENERIC"]'
             ;;
+        lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits)
+            printf '["CAP-TRACE-LZ4"]'
+            ;;
     esac
 }
 
@@ -182,6 +197,9 @@ scenario_features() {
     case "$1" in
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '["cli","default","test-internals","trace-compression"]'
+            ;;
+        lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits)
+            printf '["cli","test-internals","trace-compression"]'
             ;;
         *)
             printf '[]'
@@ -199,6 +217,7 @@ scenario_evidence_owner() {
         api-adr-phase3-signoff) printf 'asupersync-dep-p3-api-adrs-h3jspm.13' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'asupersync-5z2scg.3.5' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'asupersync-5z2scg.3.7' ;;
+        lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits) printf 'asupersync-0h6myr.4.4' ;;
         *) printf '%s' "$EVIDENCE_OWNER" ;;
     esac
 }
@@ -213,6 +232,9 @@ scenario_step_id() {
         api-adr-phase3-signoff) printf 'adr-013-api-adr-phase3-signoff' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'typed-formats-a5-terminal-keep-signoff' ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988) printf 'typed-formats-a7-cross-version-e2e' ;;
+        lz4_trace_replay) printf 'lz4-a4-trace-replay' ;;
+        lz4_cross_version_artifact) printf 'lz4-a4-cross-version-artifact' ;;
+        lz4_malformed_limits) printf 'lz4-a4-malformed-limits' ;;
         *) printf 'ver-a2-%s' "$1" ;;
     esac
 }
@@ -261,6 +283,9 @@ scenario_command_display() {
             ;;
         dep-sovereignty-asupersync_5z2scg_3_7_94b694387988)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_consumer cargo test --manifest-path tests/fixtures/typed-format-cross-version-consumer/Cargo.toml --locked -- --nocapture && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --features cli,test-internals,trace-compression --test typed_format_cross_version_e2e -- --nocapture --test-threads=1"
+            ;;
+        lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --features cli,test-internals,trace-compression --test lz4_trace_integration_e2e $scenario_id -- --nocapture --test-threads=1"
             ;;
     esac
 }
@@ -765,6 +790,13 @@ execute_scenario() {
                     RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                     cargo test -p asupersync --features cli,test-internals,trace-compression \
                     --test typed_format_cross_version_e2e -- --nocapture --test-threads=1
+            ;;
+        lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --features cli,test-internals,trace-compression \
+                --test lz4_trace_integration_e2e "$scenario_id" -- --nocapture --test-threads=1
             ;;
     esac
 }

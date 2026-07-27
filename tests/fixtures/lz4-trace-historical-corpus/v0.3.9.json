@@ -1,0 +1,71 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "trace-v2-manual-incumbent",
+      "byte_len": 195,
+      "bytes_hex": "41535550455254524143450200010001400000009501ce00a41a04cf17f4753bc6d34f40cfa4a40404c0decafed92572657461696e6564204c5a3420747261636520696e746567726174696f6e20636f7270757306000000000000006300000076000000f0160b00000092a7526e6753656564cca41100000093ad5461736b5363686564756c65640700121500f003ac54696d65416476616e63656400cd03e80e3a0010ab2b008f5969656c646564073d000116011500b0436f6d706c657465640700",
+      "compression_byte": 1,
+      "event_count": 6,
+      "file_version": 2,
+      "producer": "manual ASUPERTRACE v2 container plus lz4_flex 0.14.0 block",
+      "sha256": "f3ac94f8774f17b9f582543cd9db4ea8bf091b542e797014f5887dd631900deb"
+    },
+    {
+      "artifact_id": "trace-v3-v039-incumbent",
+      "byte_len": 259,
+      "bytes_hex": "4153555045525452414345030003000140000000c852a7d78460f7b4c59a8f3373d747d8843262115a15d320230bb4b7c71703e09501ce00a41a04cf17f4753bc6d34f40cfa4a40404c0decafed92572657461696e6564204c5a3420747261636520696e746567726174696f6e20636f7270757306000000000000008f210e5c2461771e5bacca13221c8379af4e5e1d6d923a217db23eca3a7d42bb6300000076000000f0160b00000092a7526e6753656564cca41100000093ad5461736b5363686564756c65640700121500f003ac54696d65416476616e63656400cd03e80e3a0010ab2b008f5969656c646564073d000116011500b0436f6d706c657465640700",
+      "compression_byte": 1,
+      "event_count": 6,
+      "file_version": 3,
+      "producer": "asupersync v0.3.9 TraceWriter plus lz4_flex 0.14.0 block",
+      "sha256": "c1cda2ff81e1b20f064480d29569e0d4679677012d99b40aaf07f7f3973acffa"
+    }
+  ],
+  "bead_id": "asupersync-0h6myr.4.4",
+  "capability_id": "CAP-TRACE-LZ4",
+  "schema_version": "lz4-trace-historical-corpus-v1",
+  "semantic_fixture": {
+    "events": [
+      {
+        "seed": 164,
+        "type": "RngSeed"
+      },
+      {
+        "at_tick": 0,
+        "task": 7,
+        "type": "TaskScheduled"
+      },
+      {
+        "from_nanos": 0,
+        "to_nanos": 1000,
+        "type": "TimeAdvanced"
+      },
+      {
+        "task": 7,
+        "type": "TaskYielded"
+      },
+      {
+        "at_tick": 1,
+        "task": 7,
+        "type": "TaskScheduled"
+      },
+      {
+        "outcome": 0,
+        "task": 7,
+        "type": "TaskCompleted"
+      }
+    ],
+    "metadata": {
+      "config_hash": 11863611736862935806,
+      "description": "retained LZ4 trace integration corpus",
+      "recorded_at": 1726133456789000000,
+      "seed": 10754564,
+      "version": 1
+    }
+  },
+  "source_release": {
+    "incumbent": "lz4_flex 0.14.0",
+    "trace_file_version": 3,
+    "version": "0.3.9"
+  }
+}
