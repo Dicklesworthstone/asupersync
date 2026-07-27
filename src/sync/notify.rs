@@ -556,10 +556,19 @@ impl Drop for Notify {
             wakers
         };
 
-        // Wake all pending waiters outside the lock
-        // They will see the Notify as dropped when they poll
+        // Wake all pending waiters outside the lock. They will see the Notify
+        // as dropped when they poll. Isolate each wake so one panicking safe
+        // Waker cannot strand the later detached waiters (br-asupersync-b3td9n,
+        // same class as notify_waiters/br-asupersync-cnl0jn). Unlike
+        // notify_waiters, the payload is SUPPRESSED, never resumed: Drop can
+        // run during an existing unwind, where a second panic aborts the
+        // process — fail closed on teardown.
         for waker in wakers {
-            waker.wake();
+            drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                move || {
+                    waker.wake();
+                },
+            )));
         }
     }
 }
@@ -1153,6 +1162,48 @@ mod tests {
         assert!(poll_once(&mut fut_a).is_ready(), "waiter A polls Ready");
         assert!(poll_once(&mut fut_b).is_ready(), "waiter B polls Ready");
         crate::test_complete!("notify_waiters_wake_panic_still_notifies_peers_then_resumes");
+    }
+
+    /// br-asupersync-b3td9n: `Drop for Notify` detaches every pending waiter
+    /// under the mutex, then wakes them in a fanout. A first panicking safe
+    /// Waker must not strand the later detached waiters, and the panic must be
+    /// SUPPRESSED, never resumed -- Drop can run during an existing unwind,
+    /// where a second panic aborts the process. The populate-slab-then-drop
+    /// path is reachable in safe code: `mem::forget` on a registered
+    /// `Notified` ends the borrow without running its destructor, so the slab
+    /// entry (and its Waker) survives into `Notify::drop`.
+    #[test]
+    fn drop_wake_panic_still_wakes_peers_and_is_suppressed() {
+        init_test("drop_wake_panic_still_wakes_peers_and_is_suppressed");
+        let notify = Notify::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        // A registers a panicking Waker, B a counting Waker; leak both while
+        // registered so their wakers stay in the slab across drop.
+        let mut fut_a = notify.notified();
+        let mut fut_b = notify.notified();
+        let panic_waker = Waker::from(Arc::new(PanickingWaker));
+        let count_waker = CountingWaker::from_counter(Arc::clone(&counter));
+        assert!(
+            poll_with_waker(&mut fut_a, &panic_waker).is_pending(),
+            "waiter A parks"
+        );
+        assert!(
+            poll_with_waker(&mut fut_b, &count_waker).is_pending(),
+            "waiter B parks"
+        );
+        std::mem::forget(fut_a);
+        std::mem::forget(fut_b);
+
+        // Drop fanout: A's Waker panics first (slot order), B must still be
+        // woken, and no panic may escape Drop.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(notify)));
+        assert!(result.is_ok(), "no panic escapes Notify::drop");
+        assert!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "later waiter still woken despite earlier wake panic"
+        );
+        crate::test_complete!("drop_wake_panic_still_wakes_peers_and_is_suppressed");
     }
 
     fn broadcast_with_middle_hole_signature(
