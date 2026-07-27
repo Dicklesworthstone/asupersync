@@ -21,6 +21,17 @@
 # exercises that attribution path on purpose (see AC4 in the bead).
 #
 # Cargo work is remote-required through `rch exec`; there is no local fallback.
+#
+# LANE TIME BUDGET (br-asupersync-9yr1t8, measured 2026-07-27): each cargo
+# stage pays ~170-192s of rch dispatch + source sync + artifact retrieval even
+# warm on one worker (runs full10: 711.8s, full11: 725.5s wall; stage walls
+# 180.9/171.5/192.2/180.1s on the green run). Four cargo stages make ~12min
+# the structural floor, and RCH-E301 forbids batching them into one dispatch.
+# The lane budget is therefore <=15min (TIMEOUT_SEC default 900) with a
+# per-stage guideline of <=240s — NOT the original epic's <5min, which is
+# unreachable as long as per-stage rch round-trips cost what they cost.
+# Slimming retrieval or an rch suite-batching feature would lower the floor;
+# both are rch-owner asks recorded on the bead.
 
 set -euo pipefail
 
