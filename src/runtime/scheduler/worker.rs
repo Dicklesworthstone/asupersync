@@ -37,14 +37,18 @@ pub type WorkerId = usize;
 pub const MAX_SEEN_IO_TOKENS: usize = 65_536;
 
 #[derive(Debug, Default)]
-struct SeenIoTokens {
+#[doc(hidden)] // pub ONLY for the io_token_dedup comparator bench
+// (br-asupersync-sched-hot-path-perf-bt4y5f.9); not a supported API.
+pub struct SeenIoTokens {
     latest_generation: HashMap<u64, u64>,
     generation_order: VecDeque<(u64, u64)>,
     next_generation: u64,
 }
 
 impl SeenIoTokens {
-    fn with_capacity(capacity: usize) -> Self {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             latest_generation: HashMap::with_capacity(capacity),
             generation_order: VecDeque::with_capacity(capacity),
@@ -52,7 +56,8 @@ impl SeenIoTokens {
         }
     }
 
-    fn observe(&mut self, token: u64) -> bool {
+    #[doc(hidden)]
+    pub fn observe(&mut self, token: u64) -> bool {
         let generation = self.allocate_generation();
         let is_first_observation = match self.latest_generation.entry(token) {
             Entry::Occupied(mut entry) => {

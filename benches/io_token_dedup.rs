@@ -25,6 +25,7 @@ use std::collections::HashSet;
 use std::hint::black_box;
 
 use asupersync::runtime::reactor::Token;
+use asupersync::runtime::scheduler::worker::{MAX_SEEN_IO_TOKENS, SeenIoTokens};
 use smallvec::SmallVec;
 
 const BATCH_SIZES: [usize; 4] = [16, 64, 256, 1024];
@@ -115,7 +116,140 @@ fn bench_token_dedup(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_token_dedup);
+/// The retired full-clear-at-cap strategy (br-asupersync-414j0b, commit
+/// 3d6bb2104): bounded `HashSet` that clears ALL history when the cap is
+/// reached. Kept ONLY as the comparator showing the boundary-crossing spike
+/// and re-admission burst that the shipped generation ring
+/// (br-asupersync-sched-hot-path-perf-bt4y5f.9, commit b976af66a) eliminates.
+struct FullClearReplica {
+    seen: HashSet<u64>,
+}
+
+impl FullClearReplica {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            seen: HashSet::with_capacity(capacity),
+        }
+    }
+
+    fn observe(&mut self, token: u64) -> bool {
+        if self.seen.len() >= MAX_SEEN_IO_TOKENS {
+            self.seen.clear();
+        }
+        self.seen.insert(token)
+    }
+}
+
+/// Cap-boundary comparator for the per-worker seen-token structures
+/// (br-asupersync-sched-hot-path-perf-bt4y5f.9 AC2): fill the structure to
+/// exactly the cap in setup, then measure a 256-observe window of fresh
+/// tokens that crosses the boundary. The generation ring pays a constant
+/// incremental eviction per observe (window p50 ≈ steady-state p50); the
+/// full-clear replica pays the clear inside the window and then re-admits
+/// history. Deterministic token sequences; setup excluded from measurement.
+fn bench_worker_seen_tokens_cap_boundary(c: &mut Criterion) {
+    const WINDOW: usize = 256;
+    let mut group = c.benchmark_group("sched/io_token_dedup");
+    group.throughput(Throughput::Elements(WINDOW as u64));
+    group.sample_size(10);
+
+    group.bench_function("worker_ring_cap_boundary_window", |b| {
+        b.iter_batched(
+            || {
+                let mut seen = SeenIoTokens::with_capacity(MAX_SEEN_IO_TOKENS);
+                for token in 0..MAX_SEEN_IO_TOKENS as u64 {
+                    seen.observe(token);
+                }
+                seen
+            },
+            |mut seen| {
+                let base = MAX_SEEN_IO_TOKENS as u64;
+                let mut first_sights = 0usize;
+                for i in 0..WINDOW as u64 {
+                    if seen.observe(base + i) {
+                        first_sights += 1;
+                    }
+                }
+                assert_eq!(first_sights, WINDOW);
+                black_box(seen)
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    group.bench_function("worker_full_clear_cap_boundary_window", |b| {
+        b.iter_batched(
+            || {
+                let mut seen = FullClearReplica::with_capacity(MAX_SEEN_IO_TOKENS);
+                for token in 0..MAX_SEEN_IO_TOKENS as u64 {
+                    seen.observe(token);
+                }
+                seen
+            },
+            |mut seen| {
+                let base = MAX_SEEN_IO_TOKENS as u64;
+                let mut first_sights = 0usize;
+                for i in 0..WINDOW as u64 {
+                    if seen.observe(base + i) {
+                        first_sights += 1;
+                    }
+                }
+                assert_eq!(first_sights, WINDOW);
+                black_box(seen)
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    // Steady-state floors far from the boundary, same window shape.
+    group.bench_function("worker_ring_steady_state_window", |b| {
+        b.iter_batched(
+            || {
+                let mut seen = SeenIoTokens::with_capacity(MAX_SEEN_IO_TOKENS);
+                for token in 0..(MAX_SEEN_IO_TOKENS / 2) as u64 {
+                    seen.observe(token);
+                }
+                seen
+            },
+            |mut seen| {
+                let base = MAX_SEEN_IO_TOKENS as u64;
+                for i in 0..WINDOW as u64 {
+                    black_box(seen.observe(base + i));
+                }
+                black_box(seen)
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    group.bench_function("worker_full_clear_steady_state_window", |b| {
+        b.iter_batched(
+            || {
+                let mut seen = FullClearReplica::with_capacity(MAX_SEEN_IO_TOKENS);
+                for token in 0..(MAX_SEEN_IO_TOKENS / 2) as u64 {
+                    seen.observe(token);
+                }
+                seen
+            },
+            |mut seen| {
+                let base = MAX_SEEN_IO_TOKENS as u64;
+                for i in 0..WINDOW as u64 {
+                    black_box(seen.observe(base + i));
+                }
+                black_box(seen)
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_token_dedup,
+    bench_worker_seen_tokens_cap_boundary
+);
 
 fn main() {
     benches();
