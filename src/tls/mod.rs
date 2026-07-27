@@ -42,6 +42,8 @@ use crate::types::Time;
 
 mod acceptor;
 mod connector;
+#[cfg(feature = "tls")]
+pub(crate) mod der_min;
 mod error;
 mod stream;
 mod types;
