@@ -6,9 +6,9 @@
 //!
 //! This contract proves a source-pinned inventory, exact production
 //! x509-parser occurrence census, explicit rustls/WebPKI and local ownership,
-//! routed gaps, and a minimal provisional residue. It does not prove parser
-//! correctness, certificate interoperability, performance, or permission to
-//! remove the incumbent dependency.
+//! routed gaps, and the A2 delegation update to the provisional residue. It
+//! does not prove parser correctness, certificate interoperability,
+//! performance, or permission to remove the incumbent dependency.
 
 #![allow(missing_docs)]
 
@@ -226,11 +226,12 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
     );
     let atp = find_row(call_sites, "call_site_id", "X509-CS-ATP-CLI-PIN-FALLBACK");
     if !text(native, "custom_verifier_bypass").contains("only UnknownIssuer")
-        || !text(atp, "custom_verifier_bypass").contains("any WebPKI")
-        || native.get("full_input_consumed").and_then(Value::as_bool) != Some(false)
+        || !text(atp, "custom_verifier_bypass").contains("only UnknownIssuer")
+        || native.get("full_input_consumed").and_then(Value::as_bool) != Some(true)
         || atp.get("full_input_consumed").and_then(Value::as_bool) != Some(true)
+        || text(atp, "delegation_verdict") != "A2_DELEGATED_TO_SHARED_EXPLICIT_PIN_POLICY"
     {
-        return Err("the two exact-pin fallback boundaries must remain explicit".to_owned());
+        return Err("the shared exact-pin fallback boundary must remain explicit".to_owned());
     }
 
     let expected_verifiers = expected_set(&[
@@ -260,7 +261,7 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
             find_row(verifiers, "path_id", "X509-VP-ATP-CLI-PIN"),
             "standard_checks_bypassed",
         )
-        .contains("any WebPKI")
+        .contains("only UnknownIssuer")
     {
         return Err("custom verifier ownership or bypass boundary drifted".to_owned());
     }
@@ -306,9 +307,9 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
     let key_usage = find_row(checks, "check_id", "X509-CHK-KEY-USAGE");
     if !text(key_usage, "standard_server").contains("intentionally ignores")
         || !text(key_usage, "native_pin_fallback").contains("digitalSignature")
-        || text(key_usage, "atp_pin_fallback") != "not checked"
+        || !text(key_usage, "atp_pin_fallback").contains("digitalSignature")
     {
-        return Err("the active KeyUsage ownership divergence must remain explicit".to_owned());
+        return Err("the shared pin-only KeyUsage policy must remain explicit".to_owned());
     }
     let cert_signature = find_row(checks, "check_id", "X509-CHK-CERT-SIGNATURE");
     let handshake_signature = find_row(checks, "check_id", "X509-CHK-HANDSHAKE-SIGNATURE");
@@ -331,7 +332,13 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
         return Err("provisional_residue must contain exactly R1 through R5".to_owned());
     }
     for row in residue {
-        if text(row, "state") != "PLANNED"
+        let expected_state = match text(row, "residue_id") {
+            "X509-R1-SPKI" | "X509-R2-CA-ADMISSION" | "X509-R3-ACCEPTOR-PREFLIGHT" => "PLANNED",
+            "X509-R4-NATIVE-PIN-FALLBACK" => "A2_SHARED_POLICY_ACTIVE_PENDING_A3_OWNED_READER",
+            "X509-R5-ATP-PIN-FALLBACK" => "RESOLVED_BY_A2_DELEGATION_TO_X509-R4",
+            other => return Err(format!("unexpected residue {other}")),
+        };
+        if text(row, "state") != expected_state
             || text(row, "scope").is_empty()
             || text(row, "current_owner").is_empty()
             || array(row, "allowed_checks").is_empty()
@@ -342,7 +349,7 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
             })
         {
             return Err(format!(
-                "{} must stay provisional, bounded, and unable to build paths",
+                "{} must stay explicitly dispositioned, bounded, and unable to build paths",
                 text(row, "residue_id")
             ));
         }
@@ -444,12 +451,19 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
         return Err("routed_gaps must retain X509-GAP-01 through 12".to_owned());
     }
     for row in gaps {
-        if text(row, "state") != "ROUTED"
+        let expected_state = match text(row, "gap_id") {
+            "X509-GAP-02" | "X509-GAP-03" => "CLOSED_BY_A2_SHARED_POLICY",
+            "X509-GAP-04" | "X509-GAP-05" | "X509-GAP-06" | "X509-GAP-11" => {
+                "A2_DECIDED_KEEP_A8_E2E_PENDING"
+            }
+            _ => "ROUTED",
+        };
+        if text(row, "state") != expected_state
             || text(row, "owner").is_empty()
             || text(row, "finding").is_empty()
         {
             return Err(format!(
-                "{} must remain explicit and routed",
+                "{} must remain explicit and correctly dispositioned",
                 text(row, "gap_id")
             ));
         }
@@ -564,7 +578,6 @@ fn source_pins_match_the_audited_revision() {
 fn production_x509_parser_occurrences_are_exact_and_source_marked() {
     let inventory = artifact();
     let expected_paths = expected_set(&[
-        "src/bin/atp.rs",
         "src/net/quic_native/handshake_driver.rs",
         "src/tls/acceptor.rs",
         "src/tls/connector.rs",
@@ -578,13 +591,28 @@ fn production_x509_parser_occurrences_are_exact_and_source_marked() {
     );
 
     let call_sites = array(&inventory, "call_sites");
+    let expected_call_site_paths = expected_paths
+        .iter()
+        .cloned()
+        .chain(["src/bin/atp.rs".to_owned()])
+        .collect::<BTreeSet<_>>();
     assert_eq!(
         call_sites
             .iter()
             .map(|row| text(row, "path").to_owned())
             .collect::<BTreeSet<_>>(),
-        expected_paths
+        expected_call_site_paths
     );
+    let census = inventory
+        .get("occurrence_census")
+        .expect("occurrence_census must be present");
+    assert_eq!(
+        census
+            .get("active_production_call_site_files")
+            .and_then(Value::as_u64),
+        Some(4)
+    );
+    assert_eq!(string_set(census, "paths"), expected_paths);
     for row in call_sites {
         let source = read_repo_file(text(row, "path"));
         for marker in array(row, "source_markers") {
@@ -748,11 +776,12 @@ fn operator_documentation_covers_paths_residue_gaps_and_no_claims() {
         DOC_END,
         "KEEP_UNTIL_PARITY",
         "KEEP_INCUMBENT",
-        "five active production call sites",
+        "four active production parser call sites",
         "X509-CS-NATIVE-QUIC-PIN-FALLBACK",
         "X509-CS-ATP-CLI-PIN-FALLBACK",
         "only when:",
-        "any WebPKI",
+        "Only `UnknownIssuer`",
+        "webpki_server_verifier_with_exact_leaf_fallback",
         "X509-R1-SPKI",
         "X509-R5-ATP-PIN-FALLBACK",
         "X509-GAP-01",
@@ -798,7 +827,7 @@ fn mutation_unknown_or_unrouted_gap_is_rejected() {
     assert!(
         validate_inventory_structure(&inventory)
             .expect_err("unrouted gap must fail")
-            .contains("explicit and routed")
+            .contains("correctly dispositioned")
     );
 }
 
@@ -820,7 +849,7 @@ fn mutation_broadened_fallback_or_dependency_exit_is_rejected() {
     assert!(
         validate_inventory_structure(&inventory)
             .expect_err("broadened fallback must fail")
-            .contains("fallback boundaries")
+            .contains("fallback boundary")
     );
 
     let mut inventory = artifact();

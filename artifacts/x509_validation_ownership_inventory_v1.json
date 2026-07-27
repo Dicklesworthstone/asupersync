@@ -13,7 +13,7 @@
     "dependency_exit_allowed": false,
     "parser_code_allowed_in_this_bead": false,
     "standard_validation_owner": "rustls-0.23.42/rustls-webpki-0.103.13",
-    "residue_status": "PROVISIONAL_PENDING_A2_DELEGATION_AND_A3_SPEC"
+    "residue_status": "A2_SHARED_PIN_DELEGATION_COMPLETE_A3_SPEC_PENDING"
   },
   "policy": {
     "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
@@ -59,13 +59,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "6f23d63e0addc5c10841c3a425a6c4aed5e00cea37bc9a0752b94ca98ee3ab7d",
-      "line_count": 1000
+      "sha256": "b6789b10b8e984a98004cde19952c6b73418afdde30aa61e1c5a6a45377f17bb",
+      "line_count": 1015
     },
     {
       "path": "Cargo.lock",
-      "sha256": "e23937c9cafef508e7fb72861c11388b9960edb3b13665ae91f4c0670fb67e2d",
-      "line_count": 4665
+      "sha256": "c670712ab8713897bacc9591c170db2d030df83011dc7b9d092f16099f1540dd",
+      "line_count": 4666
     },
     {
       "path": "src/tls/types.rs",
@@ -89,8 +89,8 @@
     },
     {
       "path": "src/net/quic_native/handshake_driver.rs",
-      "sha256": "5bfbec1e8d9485244627571e78b13264e674cf836d390bac940bde5420ae8306",
-      "line_count": 1240
+      "sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
+      "line_count": 1438
     },
     {
       "path": "src/net/quic_native/tls.rs",
@@ -104,8 +104,8 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "cc9528cfafcb2a0dfec210ad486694c22c628ee04966dd4f6b997e2a28ce9c9e",
-      "line_count": 12090
+      "sha256": "b77dd1e90ae1ab81bf084feac214b31cc8f17557d6f3c476dcdb1868075eee4b",
+      "line_count": 11912
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
@@ -134,10 +134,9 @@
     }
   ],
   "occurrence_census": {
-    "active_production_call_site_files": 5,
-    "active_production_call_sites": 5,
+    "active_production_call_site_files": 4,
+    "active_production_call_sites": 4,
     "paths": [
-      "src/bin/atp.rs",
       "src/net/quic_native/handshake_driver.rs",
       "src/tls/acceptor.rs",
       "src/tls/connector.rs",
@@ -294,23 +293,24 @@
       ],
       "input": "peer end-entity DER, configured ServerName, and rustls UnixTime",
       "checks_or_extractions": [
-        "DER parse",
+        "DER parse with explicit trailing-byte rejection",
         "not-before and not-after",
-        "EKU serverAuth or any",
+        "explicit EKU serverAuth",
         "KeyUsage digitalSignature when extension is present",
         "exact case-insensitive DNS SAN or exact IP SAN"
       ],
       "standard_verifier_before": "WebPkiServerVerifier receives leaf, intermediates, server name, OCSP bytes, time, and configured roots first",
       "standard_verifier_after": "TLS 1.2/1.3 handshake signatures and supported schemes delegate back to WebPkiServerVerifier",
-      "full_input_consumed": false,
+      "full_input_consumed": true,
       "custom_verifier_bypass": "only UnknownIssuer may enter fallback, and only when the presented leaf DER exactly equals a configured pinned end entity; chain/path/trust-anchor verification is then replaced by the byte pin",
       "error_behavior": "local failures map to rustls CertificateError; the live handshake collapses certificate details to QuicTlsError code read_hs_fatal_alert or read_hs_failed",
-      "owner": "rustls/WebPKI first; asupersync exact-leaf trust and shape fallback",
-      "delegation_verdict": "PARTIAL_DELEGATION_WITH_EXPLICIT_PIN_POLICY",
+      "owner": "rustls/WebPKI first; one shared asupersync exact-leaf trust and shape fallback",
+      "delegation_verdict": "A2_SHARED_PARTIAL_DELEGATION_WITH_EXPLICIT_PIN_POLICY",
       "residue_ids": [
         "X509-R4-NATIVE-PIN-FALLBACK"
       ],
       "source_markers": [
+        "pub fn webpki_server_verifier_with_exact_leaf_fallback",
         "fn verify_pinned_end_entity_shape",
         "if is_unknown_issuer(&error)",
         "self.webpki.verify_tls13_signature"
@@ -319,38 +319,35 @@
     {
       "call_site_id": "X509-CS-ATP-CLI-PIN-FALLBACK",
       "path": "src/bin/atp.rs",
-      "function": "verify_quic_cli_pinned_leaf",
+      "function": "quic_cli_client_config",
       "cfg": "feature=tls; the atp binary requires atp-cli, and atp-cli enables tls",
       "symbols": [
-        "x509_parser::prelude::FromDer",
-        "x509_parser::prelude::GeneralName",
-        "x509_parser::prelude::X509Certificate",
-        "X509Certificate::from_der",
-        "X509Certificate::validity",
-        "X509Certificate::extended_key_usage",
-        "X509Certificate::subject_alternative_name"
+        "rustls::client::WebPkiServerVerifier::builder_with_provider",
+        "webpki_server_verifier_with_exact_leaf_fallback",
+        "ClientConfig::dangerous",
+        "ConfigBuilder::with_custom_certificate_verifier"
       ],
-      "input": "peer end-entity DER, configured CLI ServerName, and rustls UnixTime",
+      "input": "configured CLI roots and typed exact-leaf pins; peer inputs flow through the shared verifier",
       "checks_or_extractions": [
-        "DER parse with explicit trailing-byte rejection",
-        "not-before and not-after",
-        "EKU serverAuth required",
-        "exact case-insensitive DNS SAN or exact IP SAN"
+        "standard WebPKI verification first",
+        "only UnknownIssuer may enter the shared fallback",
+        "exact complete leaf DER pin",
+        "shared validity, explicit serverAuth EKU, optional KeyUsage digitalSignature, and exact SAN policy"
       ],
       "standard_verifier_before": "WebPkiServerVerifier receives leaf, intermediates, server name, OCSP bytes, time, and configured roots first",
-      "standard_verifier_after": "TLS 1.2/1.3 handshake signatures use the configured crypto provider's WebPKI algorithms",
+      "standard_verifier_after": "TLS 1.2/1.3 handshake signatures and supported schemes delegate through the same WebPkiServerVerifier",
       "full_input_consumed": true,
-      "custom_verifier_bypass": "any WebPKI certificate rejection may enter fallback when the presented leaf DER exactly equals a configured pinned leaf; chain/path/trust-anchor and WebPKI extension-policy rejection are then replaced by the byte pin plus local checks",
-      "error_behavior": "local failures map to rustls CertificateError; native-link handshake surfaces a redacted QuicTlsError provider/code string",
-      "owner": "rustls/WebPKI first; ATP CLI exact-leaf trust and shape fallback",
-      "delegation_verdict": "PARTIAL_DELEGATION_WITH_BROAD_PIN_FALLBACK",
+      "custom_verifier_bypass": "only UnknownIssuer may enter the shared fallback, and only when the presented leaf DER exactly equals a configured typed pin; every other WebPKI error is returned unchanged",
+      "error_behavior": "the existing client_verifier_build_failed code is preserved; shared local failures map to rustls CertificateError and the native-link handshake remains redacted",
+      "owner": "rustls/WebPKI first; ATP delegates exact-leaf policy to handshake_driver",
+      "delegation_verdict": "A2_DELEGATED_TO_SHARED_EXPLICIT_PIN_POLICY",
       "residue_ids": [
-        "X509-R5-ATP-PIN-FALLBACK"
+        "X509-R4-NATIVE-PIN-FALLBACK"
       ],
       "source_markers": [
-        "fn verify_quic_cli_pinned_leaf",
-        "if !remaining.is_empty()",
-        "Err(_) if self.pinned_leaf_matches(end_entity)"
+        "fn quic_cli_client_config",
+        "WebPkiServerVerifier::builder_with_provider",
+        "webpki_server_verifier_with_exact_leaf_fallback"
       ]
     }
   ],
@@ -408,8 +405,8 @@
     {
       "path_id": "X509-VP-NATIVE-QUIC-PIN",
       "surface": "handshake_driver::client_config",
-      "configuration": "WebPkiOrPinnedEndEntityVerifier",
-      "owner": "rustls/WebPKI first, local exact-leaf fallback second",
+      "configuration": "webpki_server_verifier_with_exact_leaf_fallback",
+      "owner": "rustls/WebPKI first, shared exact-leaf fallback second",
       "trust_inputs": "the roots vector is also the exact-leaf pin set",
       "custom_verifier": true,
       "standard_checks_bypassed": "only UnknownIssuer plus exact leaf byte match",
@@ -418,11 +415,11 @@
     {
       "path_id": "X509-VP-ATP-CLI-PIN",
       "surface": "atp quic_cli_client_config",
-      "configuration": "QuicCliServerVerifier when pinned_leafs is nonempty",
-      "owner": "rustls/WebPKI first, ATP CLI exact-leaf fallback second",
-      "trust_inputs": "CLI --ca roots and exact pinned leaf bytes",
+      "configuration": "shared webpki_server_verifier_with_exact_leaf_fallback when pinned_leafs is nonempty",
+      "owner": "rustls/WebPKI first, shared exact-leaf fallback second",
+      "trust_inputs": "CLI --ca roots and typed exact pinned leaves",
       "custom_verifier": true,
-      "standard_checks_bypassed": "any WebPKI error plus exact leaf byte match",
+      "standard_checks_bypassed": "only UnknownIssuer plus exact leaf byte match",
       "state": "ACTIVE"
     },
     {
@@ -452,8 +449,8 @@
       "requirement": "certificate DER structure, bounded parsing, and full outer consumption",
       "standard_server": "rustls-webpki strict DER parser and read-all boundaries",
       "mtls_client": "rustls-webpki strict DER parser and read-all boundaries",
-      "native_pin_fallback": "x509-parser parse; trailing bytes are not rejected",
-      "atp_pin_fallback": "x509-parser X509Certificate::from_der; trailing bytes are rejected",
+      "native_pin_fallback": "shared x509-parser fallback rejects trailing bytes",
+      "atp_pin_fallback": "delegates to the same full-consumption fallback",
       "local_auxiliary": "SPKI, CA-admission, and acceptor-preflight sites do not reject trailing bytes",
       "delegation": "PARTIAL",
       "preservation": "A3/A4 must make every retained residue canonical, bounded, and full-consumption"
@@ -464,10 +461,10 @@
       "standard_server": "rustls WebPkiServerVerifier",
       "mtls_client": "rustls WebPkiClientVerifier",
       "native_pin_fallback": "WebPKI first; exact leaf byte pin replaces path building only after UnknownIssuer",
-      "atp_pin_fallback": "WebPKI first; exact leaf byte pin replaces path building after any WebPKI rejection",
+      "atp_pin_fallback": "WebPKI first; exact leaf byte pin replaces path building only after UnknownIssuer",
       "local_auxiliary": "not performed by parser-only sites",
       "delegation": "STANDARD_DELEGATED_PIN_PATH_EXPLICITLY_REPLACED",
-      "preservation": "A2 must narrow and prove both pin policies"
+      "preservation": "A2 narrows both paths to one checked UnknownIssuer-only policy"
     },
     {
       "check_id": "X509-CHK-CERT-SIGNATURE",
@@ -518,11 +515,11 @@
       "requirement": "enforce serverAuth or clientAuth purpose",
       "standard_server": "rustls-webpki KeyUsage::server_auth EKU validator",
       "mtls_client": "rustls-webpki KeyUsage::client_auth EKU validator",
-      "native_pin_fallback": "local serverAuth or any EKU",
-      "atp_pin_fallback": "local serverAuth EKU required",
+      "native_pin_fallback": "shared local explicit serverAuth EKU required",
+      "atp_pin_fallback": "delegates to the same explicit serverAuth requirement",
       "local_auxiliary": "none",
-      "delegation": "MIXED_WITH_POLICY_DIVERGENCE",
-      "preservation": "A2 must resolve serverAuth-or-any versus serverAuth-required"
+      "delegation": "MIXED_WITH_A2_SHARED_PIN_POLICY",
+      "preservation": "A2 resolves both pin paths to the stricter explicit serverAuth policy"
     },
     {
       "check_id": "X509-CHK-KEY-USAGE",
@@ -530,10 +527,10 @@
       "standard_server": "rustls-webpki 0.103.13 intentionally ignores certificate KeyUsage during ordinary path validation",
       "mtls_client": "rustls-webpki 0.103.13 intentionally ignores certificate KeyUsage during ordinary path validation",
       "native_pin_fallback": "local digitalSignature required when KeyUsage is present",
-      "atp_pin_fallback": "not checked",
+      "atp_pin_fallback": "delegates to the same conditional digitalSignature check",
       "local_auxiliary": "CA admission does not check keyCertSign",
-      "delegation": "LOCAL_ONLY_AND_DIVERGENT",
-      "preservation": "A2 tests and owner decision are mandatory"
+      "delegation": "LOCAL_ONLY_SHARED_PIN_POLICY",
+      "preservation": "A2 retains this stricter pin-only check and covers it directly"
     },
     {
       "check_id": "X509-CHK-SAN-NAME",
@@ -544,7 +541,7 @@
       "atp_pin_fallback": "local exact DNS case-insensitive or exact IP SAN; no wildcard interpretation",
       "local_auxiliary": "TlsConnector constructs rustls ServerName and rejects invalid names before handshake",
       "delegation": "MIXED_WITH_STRICTER_PIN_NAME_POLICY",
-      "preservation": "A2 must prove whether exact-only pin names are intentional"
+      "preservation": "A2 records exact-only DNS/IP matching as the intentional stricter pin-fallback policy"
     },
     {
       "check_id": "X509-CHK-BASIC-CONSTRAINTS",
@@ -555,7 +552,7 @@
       "atp_pin_fallback": "not checked on the exact pinned leaf",
       "local_auxiliary": "is_ca_certificate requires BasicConstraints CA=true for env roots and opt-in strict direct roots",
       "delegation": "MIXED",
-      "preservation": "pre-trust admission remains local unless A2 proves an identical API"
+      "preservation": "A2 retains pre-trust admission locally because rustls exposes no identical pre-insertion policy and diagnostic"
     },
     {
       "check_id": "X509-CHK-NAME-CONSTRAINTS",
@@ -563,7 +560,7 @@
       "standard_server": "rustls-webpki path verification",
       "mtls_client": "rustls-webpki path verification",
       "native_pin_fallback": "not applicable to the no-path exact-leaf policy",
-      "atp_pin_fallback": "not applied after the broad exact-leaf fallback",
+      "atp_pin_fallback": "not applicable to the same no-path exact-leaf policy",
       "local_auxiliary": "not parsed locally",
       "delegation": "STANDARD_DELEGATED_PIN_PATH_BYPASS",
       "preservation": "A2/A5 must test constrained-chain behavior and pin-policy boundaries"
@@ -574,10 +571,10 @@
       "standard_server": "rustls-webpki strict unknown-extension policy",
       "mtls_client": "rustls-webpki strict unknown-extension policy",
       "native_pin_fallback": "no explicit rejection after UnknownIssuer exact-pin fallback",
-      "atp_pin_fallback": "no explicit rejection after broad exact-pin fallback",
+      "atp_pin_fallback": "no explicit rejection after UnknownIssuer exact-pin fallback",
       "local_auxiliary": "parser-only sites inspect selected extensions without a critical-extension policy",
       "delegation": "PARTIAL",
-      "preservation": "A2 must delegate where possible; A3/A4 specify retained residue rejection"
+      "preservation": "A2 preserves every non-UnknownIssuer WebPKI failure; A3/A4/A5 specify retained residue rejection on the exact-pin branch"
     },
     {
       "check_id": "X509-CHK-DUPLICATE-EXTENSIONS",
@@ -621,7 +618,7 @@
       "atp_pin_fallback": "not applicable",
       "local_auxiliary": "TlsAcceptorBuilder strict preflight, enabled by default but publicly disableable",
       "delegation": "LOCAL",
-      "preservation": "A2 decides whether any portion is redundant; diagnostics remain a compatibility obligation"
+      "preservation": "A2 retains the operator preflight because rustls exposes no identical owner or diagnostic; A8 owns mode parity"
     }
   ],
   "provisional_residue": [
@@ -681,9 +678,10 @@
       "scope": "exact-leaf pin fallback shape checks after an inner WebPKI UnknownIssuer result",
       "current_owner": "src/net/quic_native/handshake_driver.rs",
       "allowed_checks": [
+        "full DER consumption",
         "leaf validity",
-        "EKU",
-        "KeyUsage",
+        "explicit serverAuth EKU",
+        "KeyUsage digitalSignature when present",
         "exact DNS/IP SAN"
       ],
       "forbidden_checks": [
@@ -691,15 +689,17 @@
         "certificate signatures",
         "general trust-anchor validation"
       ],
-      "state": "PLANNED"
+      "state": "A2_SHARED_POLICY_ACTIVE_PENDING_A3_OWNED_READER"
     },
     {
       "residue_id": "X509-R5-ATP-PIN-FALLBACK",
-      "scope": "ATP CLI exact-leaf pin fallback shape checks",
-      "current_owner": "src/bin/atp.rs",
+      "scope": "historical ATP CLI duplicate fallback, now delegated to X509-R4",
+      "current_owner": "src/net/quic_native/handshake_driver.rs",
       "allowed_checks": [
+        "full DER consumption",
         "leaf validity",
-        "EKU",
+        "explicit serverAuth EKU",
+        "KeyUsage digitalSignature when present",
         "exact DNS/IP SAN"
       ],
       "forbidden_checks": [
@@ -707,7 +707,7 @@
         "certificate signatures",
         "general trust-anchor validation"
       ],
-      "state": "PLANNED"
+      "state": "RESOLVED_BY_A2_DELEGATION_TO_X509-R4"
     }
   ],
   "feature_target_matrix": [
@@ -949,39 +949,39 @@
   "routed_gaps": [
     {
       "gap_id": "X509-GAP-01",
-      "finding": "Four of five parser sites ignore trailing bytes returned by x509-parser.",
+      "finding": "Three of four retained parser sites ignore trailing bytes; the shared native/ATP pin fallback now rejects them.",
       "owner": "asupersync-0h6myr.3.3, asupersync-0h6myr.3.4, asupersync-0h6myr.3.5",
       "state": "ROUTED"
     },
     {
       "gap_id": "X509-GAP-02",
-      "finding": "Native QUIC falls back only on UnknownIssuer, while ATP CLI falls back after any WebPKI rejection.",
+      "finding": "A2 removed the ATP broad fallback; native QUIC and ATP now share an UnknownIssuer-only exact-leaf policy.",
       "owner": "asupersync-0h6myr.3.2",
-      "state": "ROUTED"
+      "state": "CLOSED_BY_A2_SHARED_POLICY"
     },
     {
       "gap_id": "X509-GAP-03",
-      "finding": "Native and ATP pinned fallbacks differ on EKU any and leaf KeyUsage digitalSignature policy.",
+      "finding": "A2 unified both pin paths on explicit serverAuth and conditional KeyUsage digitalSignature.",
       "owner": "asupersync-0h6myr.3.2",
-      "state": "ROUTED"
+      "state": "CLOSED_BY_A2_SHARED_POLICY"
     },
     {
       "gap_id": "X509-GAP-04",
-      "finding": "rustls-webpki ignores certificate KeyUsage in standard validation; the only active leaf digitalSignature check is the native pinned fallback.",
-      "owner": "asupersync-0h6myr.3.2, asupersync-0h6myr.3.8",
-      "state": "ROUTED"
+      "finding": "rustls-webpki ignores certificate KeyUsage in standard validation; A2 intentionally retains and shares the pin-only conditional digitalSignature check.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
     },
     {
       "gap_id": "X509-GAP-05",
-      "finding": "Local CA admission requires BasicConstraints CA=true but not KeyUsage keyCertSign, and strict admission is optional for direct roots.",
-      "owner": "asupersync-0h6myr.3.2, asupersync-0h6myr.3.8",
-      "state": "ROUTED"
+      "finding": "A2 retains local BasicConstraints CA=true admission because rustls exposes no identical pre-insertion policy/diagnostic; keyCertSign and direct-root modes remain A8 evidence obligations.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
     },
     {
       "gap_id": "X509-GAP-06",
-      "finding": "The acceptor's server-chain date and subject preflight has no identical rustls owner and can be publicly disabled.",
-      "owner": "asupersync-0h6myr.3.2, asupersync-0h6myr.3.8",
-      "state": "ROUTED"
+      "finding": "A2 retains the acceptor's server-chain date/subject operator preflight because rustls has no identical owner or diagnostic; disable-mode parity remains an A8 obligation.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
     },
     {
       "gap_id": "X509-GAP-07",
@@ -1009,9 +1009,9 @@
     },
     {
       "gap_id": "X509-GAP-11",
-      "finding": "OCSP response bytes are not validated by rustls 0.23.42; CRL policy is optional and is bypassed by an admitted exact-leaf fallback.",
-      "owner": "asupersync-0h6myr.3.2, asupersync-0h6myr.3.8",
-      "state": "ROUTED"
+      "finding": "A2 narrows both exact-leaf paths to UnknownIssuer but intentionally does not claim OCSP validation or CRL enforcement on the pin branch; A8 owns explicit supported/unsupported E2E.",
+      "owner": "asupersync-0h6myr.3.8",
+      "state": "A2_DECIDED_KEEP_A8_E2E_PENDING"
     },
     {
       "gap_id": "X509-GAP-12",
@@ -1041,7 +1041,7 @@
   },
   "rollback_triggers": [
     "a source pin changes without a refreshed call-site audit",
-    "a new x509-parser symbol appears outside the five inventoried files",
+    "a new x509-parser symbol appears outside the four inventoried production parser files",
     "a standard verifier path becomes caller-defined without an explicit ownership row",
     "a pin fallback broadens beyond its recorded WebPKI error class or exact-byte predicate",
     "any active validity, EKU, KeyUsage, SAN, BasicConstraints, constraint, extension, or SPKI requirement loses an owner",
@@ -1052,7 +1052,7 @@
   "no_claim_boundaries": [
     "This inventory does not implement a DER parser or change runtime behavior.",
     "It does not prove rustls, rustls-webpki, x509-parser, ring, or any certificate corpus correct.",
-    "It does not approve either exact-leaf fallback policy; A2 must narrow and prove delegation.",
+    "It records A2's shared exact-leaf policy but does not prove the broader A8 real-peer interoperability matrix.",
     "It does not prove canonical DER, duplicate-extension, critical-extension, time, allocation, or depth bounds for retained residue.",
     "It does not prove live cross-implementation TLS, QUIC, ATP, mTLS, rotation, cancellation, or shutdown.",
     "It does not claim wasm TLS support merely because Cargo metadata contains the edge.",

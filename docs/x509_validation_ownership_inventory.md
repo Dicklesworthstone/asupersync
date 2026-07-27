@@ -10,9 +10,10 @@ This is the operator-readable companion to
 
 The governing disposition remains `KEEP_UNTIL_PARITY` /
 `KEEP_INCUMBENT`. This inventory does not add a parser, change certificate
-policy, or authorize removing `x509-parser`. Its job is to make every current
-check visible before A2 delegates standard validation and A3 specifies the
-smallest safe residue.
+cutover authority, or authorize removing `x509-parser`. A2
+(`asupersync-0h6myr.3.2`) updates the baseline in place after consolidating the
+two exact-leaf paths behind one standard-verifier-first policy. A3 still owns
+the smallest safe residue specification.
 
 ## Locked graph and scope
 
@@ -43,7 +44,7 @@ x509-parser performs certificate validation.
 
 ## Complete production parser census
 
-There are five active production call sites in five files. No other
+There are four active production parser call sites in four files. No other
 `x509_parser::` symbol occurs under `src/`.
 
 | ID | Path | Local responsibility | Standard-verifier relationship |
@@ -51,13 +52,17 @@ There are five active production call sites in five files. No other
 | `X509-CS-SPKI-PIN` | `src/tls/types.rs` | Extract complete SPKI DER and hash it with SHA-256 | Builder-created connectors finish WebPKI verification first. A raw caller-provided `ClientConfig` remains caller-owned. |
 | `X509-CS-ROOT-CA-ADMISSION` | `src/tls/connector.rs` | Require `BasicConstraints CA:TRUE` for environment roots and opt-in strict direct-root additions | Runs before bytes enter `RootCertStore`; no verifier can safely undo a bad trust-anchor admission. |
 | `X509-CS-ACCEPTOR-PREFLIGHT` | `src/tls/acceptor.rs` | Check every configured server-chain certificate's dates and require a nonempty CN/OU/O subject | Operator preflight before `with_single_cert`; remote peers later own path/name validation. |
-| `X509-CS-NATIVE-QUIC-PIN-FALLBACK` | `src/net/quic_native/handshake_driver.rs` | For an exact pinned leaf after WebPKI `UnknownIssuer`, check dates, EKU, optional KU, and exact DNS/IP SAN | WebPKI runs first; TLS handshake signatures still delegate to its verifier. The byte pin replaces issuer path trust only in the recorded fallback. |
-| `X509-CS-ATP-CLI-PIN-FALLBACK` | `src/bin/atp.rs` | For an exact pinned leaf, check full DER consumption, dates, server EKU, and exact DNS/IP SAN | WebPKI runs first, but any WebPKI rejection can enter the exact-leaf fallback. Handshake signatures use the configured provider algorithms. |
+| `X509-CS-NATIVE-QUIC-PIN-FALLBACK` | `src/net/quic_native/handshake_driver.rs` | For an exact pinned leaf after WebPKI `UnknownIssuer`, require full DER consumption, dates, explicit server EKU, optional KU, and exact DNS/IP SAN | WebPKI runs first; TLS handshake signatures still delegate to its verifier. The byte pin replaces issuer path trust only in the recorded fallback. |
+
+`X509-CS-ATP-CLI-PIN-FALLBACK` remains a verifier call path, but it is no
+longer an independent parser site. `src/bin/atp.rs::quic_cli_client_config`
+constructs its ordinary WebPKI
+verifier and passes it with typed exact-leaf pins to
+`webpki_server_verifier_with_exact_leaf_fallback`.
 
 The symbols are not merely parser constructors. The live surface includes
-`X509Certificate::from_der`, `parse_x509_certificate`, validity times,
-EKU, KU, SAN DNS/IP names, `BasicConstraints`, subject attributes, and raw
-SPKI bytes.
+`parse_x509_certificate`, validity times, EKU, KU, SAN DNS/IP names,
+`BasicConstraints`, subject attributes, and raw SPKI bytes.
 
 References in the replacement plan, feature docs, marginal-ledger test, and
 oracle-policy test are policy strings, not parser calls. The permissive
@@ -120,9 +125,10 @@ local fallback only when:
 1. WebPKI returned exactly `UnknownIssuer`; and
 2. the presented leaf DER exactly matches one of the supplied root/pin bytes.
 
-The fallback checks the leaf validity interval, accepts EKU `serverAuth` or
-`any`, requires KU `digitalSignature` when KU exists, and matches an exact
-case-insensitive DNS SAN or exact IP SAN. It does not interpret wildcards.
+The fallback requires full DER consumption, checks the leaf validity interval,
+requires explicit EKU `serverAuth`, requires KU `digitalSignature` when KU
+exists, and matches an exact case-insensitive DNS SAN or exact IP SAN. It does
+not interpret wildcards.
 Issuer-chain signatures are not verified on this branch: exact certificate
 bytes are the trust decision. TLS CertificateVerify is still verified by the
 inner WebPKI verifier, so possession of the pinned certificate's private key
@@ -130,15 +136,15 @@ remains mandatory.
 
 ### ATP CLI exact-leaf fallback
 
-`QuicCliServerVerifier` also invokes WebPKI first and requires an exact leaf
-byte match before local acceptance. Its boundary is broader: any WebPKI
-certificate error may enter the fallback, not only `UnknownIssuer`. It
-rejects trailing DER bytes, checks dates, requires EKU `serverAuth`, and
-matches exact DNS/IP SANs. It does not perform the native fallback's optional
-KU `digitalSignature` check.
+ATP no longer owns `QuicCliServerVerifier` or a second DER policy. It builds
+`WebPkiServerVerifier` with its existing root-admission and
+`client_verifier_build_failed` diagnostic, then delegates to the same wrapper
+used by native QUIC. Only `UnknownIssuer` plus an exact typed leaf pin can
+enter the fallback. Bad signature, wrong name/purpose, critical-extension,
+constraint, and revocation errors return unchanged.
 
-TLS CertificateVerify uses the configured crypto provider's WebPKI-supported
-algorithms. Certificate-specific detail is later reduced to the native
+TLS CertificateVerify and supported schemes delegate to the inner WebPKI
+verifier. Certificate-specific detail is later reduced to the native
 handshake's stable `read_hs_fatal_alert` / `read_hs_failed` codes.
 
 ### Dormant legacy QUIC
@@ -161,15 +167,15 @@ ownership decisions are:
 - TLS CertificateVerify signatures always remain cryptographic-verifier work.
   They are distinct from issuer signatures in a certificate chain.
 - `rustls-webpki` 0.103.13 intentionally ignores certificate KeyUsage in its
-  ordinary path checks. The native pinned fallback's conditional
+  ordinary path checks. The shared pinned fallback's conditional
   `digitalSignature` check is therefore an active local requirement, not a
   redundant copy of WebPKI behavior.
 - WebPKI strictly remembers supported extensions once and rejects unsupported
   critical extensions. The local x509-parser fallbacks do not currently
   express equivalent duplicate/critical-extension policy.
-- WebPKI owns name constraints for built paths. Exact-leaf pin branches have
-  no built issuer path; A2 must prove that this exception is sufficiently
-  narrow and intentional.
+- WebPKI owns name constraints for built paths. The shared exact-leaf branch
+  has no built issuer path; A2 proves that the exception is limited to
+  `UnknownIssuer` plus exact complete leaf bytes.
 - CRLs apply only when configured on `TlsConnectorBuilder`. Rustls 0.23.42
   does not validate the passed OCSP response. Neither pinned fallback has a
   local revocation policy.
@@ -178,19 +184,19 @@ ownership decisions are:
 
 ## Provisional minimal residue
 
-A1 records five provisional residue families. “Provisional” matters: A2 must
-first eliminate any check that can be identically delegated, and A3 must
-write the approved threat model before parser implementation begins.
+A1 records five residue identifiers. A2 resolves the ATP-specific duplicate
+into the shared native policy; A3 must still write the approved threat model
+before parser implementation begins.
 
 1. `X509-R1-SPKI`: locate complete SPKI DER for SHA-256 pinning.
 2. `X509-R2-CA-ADMISSION`: enforce pre-insertion `BasicConstraints CA:TRUE`
    on untrusted root-bundle input.
 3. `X509-R3-ACCEPTOR-PREFLIGHT`: retain configured-chain time and
    subject-presence diagnostics not supplied by rustls server setup.
-4. `X509-R4-NATIVE-PIN-FALLBACK`: the exact-leaf fallback checks that remain
-   after A2 narrows WebPKI delegation.
-5. `X509-R5-ATP-PIN-FALLBACK`: the ATP exact-leaf checks that remain after A2
-   resolves its broader fallback and policy differences.
+4. `X509-R4-NATIVE-PIN-FALLBACK`: the shared exact-leaf fallback checks that
+   remain after A2 narrows WebPKI delegation.
+5. `X509-R5-ATP-PIN-FALLBACK`: a historical compatibility row now resolved by
+   delegation to `X509-R4`; ATP owns no separate parser.
 
 No residue API may grow into general path building, certificate-signature
 verification, trust-anchor validation, or general hostname verification.
@@ -242,21 +248,26 @@ There are zero unknown rows. The twelve observed gaps are all routed:
 
 | Gap | Finding | Owner |
 | --- | --- | --- |
-| `X509-GAP-01` | Four parser sites ignore trailing DER bytes. | A3/A4/A5 |
-| `X509-GAP-02` | Native fallback accepts only `UnknownIssuer`; ATP fallback accepts any WebPKI rejection. | A2 |
-| `X509-GAP-03` | Native and ATP pin branches differ on EKU and KU policy. | A2 |
-| `X509-GAP-04` | Standard WebPKI ignores certificate KU; native pinning alone checks leaf `digitalSignature`. | A2/A8 |
-| `X509-GAP-05` | CA admission omits `keyCertSign` and is optional for direct roots. | A2/A8 |
-| `X509-GAP-06` | Acceptor preflight has no identical rustls owner and can be disabled. | A2/A8 |
+| `X509-GAP-01` | Three retained parser sites still ignore trailing DER; the shared pin path now consumes the full input. | A3/A4/A5 |
+| `X509-GAP-02` | Closed: ATP's broad fallback was removed; both paths require WebPKI `UnknownIssuer`. | A2 |
+| `X509-GAP-03` | Closed: both paths require explicit `serverAuth` and conditional `digitalSignature`. | A2 |
+| `X509-GAP-04` | A2 keeps the shared pin-only KU check; real cross-peer parity remains pending. | A8 |
+| `X509-GAP-05` | A2 keeps CA admission because rustls has no identical pre-insertion policy/diagnostic; mode parity remains pending. | A8 |
+| `X509-GAP-06` | A2 keeps acceptor preflight because rustls has no identical operator diagnostic; disable-mode parity remains pending. | A8 |
 | `X509-GAP-07` | Raw `ClientConfig` construction leaves all standard validation caller-owned. | A6/A7 |
 | `X509-GAP-08` | Live native QUIC collapses detailed certificate errors. | A6/A8 |
 | `X509-GAP-09` | wasm carries the edge without a supported TLS evidence claim. | A8/A9 |
 | `X509-GAP-10` | Canonical `tls_x509_interop` result artifacts do not yet exist. | A8 |
-| `X509-GAP-11` | OCSP is unvalidated and CRL coverage is optional/bypassable by a pin fallback. | A2/A8 |
+| `X509-GAP-11` | A2 narrows both pin paths but makes no OCSP/CRL claim; supported/unsupported real-peer evidence remains pending. | A8 |
 | `X509-GAP-12` | The generated API map lacks nested TLS/X.509 surfaces. | A6/A9 |
 
 Any new call site, changed verifier boundary, lost check, unknown ownership,
 or unrouted gap forces `KEEP_X509_PARSER_AND_BLOCK_CUTOVER`.
+
+The A2 decision packet and focused validation contract are
+`artifacts/x509_standard_verifier_delegation_v1.json`,
+`docs/x509_standard_verifier_delegation.md`, and
+`tests/x509_standard_verifier_delegation_contract.rs`.
 
 ## Validation
 
