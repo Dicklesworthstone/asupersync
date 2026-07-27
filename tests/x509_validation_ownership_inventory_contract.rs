@@ -159,8 +159,13 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
             .get("parser_code_allowed_in_this_bead")
             .and_then(Value::as_bool)
             != Some(false)
+        || authority.get("residue_status").and_then(Value::as_str)
+            != Some("A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING")
     {
-        return Err("A1 must forbid parser implementation and dependency exit".to_owned());
+        return Err(
+            "A1 must record A3 approval while forbidding parser implementation and dependency exit"
+                .to_owned(),
+        );
     }
 
     let policy = object(inventory, "policy");
@@ -333,8 +338,10 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
     }
     for row in residue {
         let expected_state = match text(row, "residue_id") {
-            "X509-R1-SPKI" | "X509-R2-CA-ADMISSION" | "X509-R3-ACCEPTOR-PREFLIGHT" => "PLANNED",
-            "X509-R4-NATIVE-PIN-FALLBACK" => "A2_SHARED_POLICY_ACTIVE_PENDING_A3_OWNED_READER",
+            "X509-R1-SPKI"
+            | "X509-R2-CA-ADMISSION"
+            | "X509-R3-ACCEPTOR-PREFLIGHT"
+            | "X509-R4-NATIVE-PIN-FALLBACK" => "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING",
             "X509-R5-ATP-PIN-FALLBACK" => "RESOLVED_BY_A2_DELEGATION_TO_X509-R4",
             other => return Err(format!("unexpected residue {other}")),
         };
@@ -452,6 +459,7 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
     }
     for row in gaps {
         let expected_state = match text(row, "gap_id") {
+            "X509-GAP-01" => "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING",
             "X509-GAP-02" | "X509-GAP-03" => "CLOSED_BY_A2_SHARED_POLICY",
             "X509-GAP-04" | "X509-GAP-05" | "X509-GAP-06" | "X509-GAP-11" => {
                 "A2_DECIDED_KEEP_A8_E2E_PENDING"
@@ -467,6 +475,35 @@ fn validate_inventory_structure(inventory: &Value) -> Result<(), String> {
                 text(row, "gap_id")
             ));
         }
+    }
+
+    let residue_contract = object(inventory, "der_residue_spec_contract");
+    for (key, expected) in [
+        ("artifact", "artifacts/x509_der_residue_spec_v1.json"),
+        ("document", "docs/x509_der_residue_spec.md"),
+        ("test", "tests/x509_der_residue_spec_contract.rs"),
+        ("state", "APPROVED"),
+        ("reviewer", "/root/architecture_trace"),
+        (
+            "reviewed_draft_sha256",
+            "9a1d64225bbce6fbcf671964f2f567d7b9cdb500929f61a2e0b46872b4bbcfd2",
+        ),
+        (
+            "reviewed_normative_payload_sha256",
+            "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
+        ),
+        ("implementation_owner", "asupersync-0h6myr.3.4"),
+    ] {
+        if residue_contract.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("der_residue_spec_contract.{key} drifted"));
+        }
+    }
+    if residue_contract
+        .get("cutover_allowed")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("A3 approval must not authorize cutover".to_owned());
     }
 
     let downstream = object(inventory, "downstream_e2e_contract");
@@ -786,6 +823,9 @@ fn operator_documentation_covers_paths_residue_gaps_and_no_claims() {
         "X509-R5-ATP-PIN-FALLBACK",
         "X509-GAP-01",
         "X509-GAP-12",
+        "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING",
+        "artifacts/x509_der_residue_spec_v1.json",
+        "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
         "tls_x509_interop",
         "No local Cargo fallback",
         "does not authorize removing `x509-parser`",

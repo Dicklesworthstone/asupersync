@@ -12,8 +12,9 @@ The governing disposition remains `KEEP_UNTIL_PARITY` /
 `KEEP_INCUMBENT`. This inventory does not add a parser, change certificate
 cutover authority, or authorize removing `x509-parser`. A2
 (`asupersync-0h6myr.3.2`) updates the baseline in place after consolidating the
-two exact-leaf paths behind one standard-verifier-first policy. A3 still owns
-the smallest safe residue specification.
+two exact-leaf paths behind one standard-verifier-first policy. A3
+(`asupersync-0h6myr.3.3`) now owns the independently approved smallest-safe
+residue specification; A4 implementation remains pending.
 
 ## Locked graph and scope
 
@@ -185,8 +186,13 @@ ownership decisions are:
 ## Provisional minimal residue
 
 A1 records five residue identifiers. A2 resolves the ATP-specific duplicate
-into the shared native policy; A3 must still write the approved threat model
-before parser implementation begins.
+into the shared native policy. A3's independently reviewed contract is
+`artifacts/x509_der_residue_spec_v1.json`, with operator guidance in
+`docs/x509_der_residue_spec.md` and executable checks in
+`tests/x509_der_residue_spec_contract.rs`. Its normative payload SHA-256 is
+`8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274`.
+A4 may implement only that approved fact-only boundary; dependency cutover
+remains forbidden.
 
 1. `X509-R1-SPKI`: locate complete SPKI DER for SHA-256 pinning.
 2. `X509-R2-CA-ADMISSION`: enforce pre-insertion `BasicConstraints CA:TRUE`
@@ -200,6 +206,10 @@ before parser implementation begins.
 
 No residue API may grow into general path building, certificate-signature
 verification, trust-anchor validation, or general hostname verification.
+`X509-R1` through `X509-R4` are
+`A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING`; `X509-R5` remains resolved by A2
+delegation to the shared `X509-R4` policy. `X509-GAP-01` carries the same A4
+implementation-pending state.
 
 ## Public and downstream journeys
 

@@ -13,7 +13,7 @@
     "dependency_exit_allowed": false,
     "parser_code_allowed_in_this_bead": false,
     "standard_validation_owner": "rustls-0.23.42/rustls-webpki-0.103.13",
-    "residue_status": "A2_SHARED_PIN_DELEGATION_COMPLETE_A3_SPEC_PENDING"
+    "residue_status": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
   },
   "policy": {
     "inventory_state": "BASELINED_WITH_ROUTED_GAPS",
@@ -637,7 +637,7 @@
         "trust anchors",
         "hostname validation"
       ],
-      "state": "PLANNED"
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
     },
     {
       "residue_id": "X509-R2-CA-ADMISSION",
@@ -653,7 +653,7 @@
         "certificate signatures",
         "hostname validation"
       ],
-      "state": "PLANNED"
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
     },
     {
       "residue_id": "X509-R3-ACCEPTOR-PREFLIGHT",
@@ -671,7 +671,7 @@
         "trust anchors",
         "hostname validation"
       ],
-      "state": "PLANNED"
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
     },
     {
       "residue_id": "X509-R4-NATIVE-PIN-FALLBACK",
@@ -689,7 +689,7 @@
         "certificate signatures",
         "general trust-anchor validation"
       ],
-      "state": "A2_SHARED_POLICY_ACTIVE_PENDING_A3_OWNED_READER"
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
     },
     {
       "residue_id": "X509-R5-ATP-PIN-FALLBACK",
@@ -951,7 +951,7 @@
       "gap_id": "X509-GAP-01",
       "finding": "Three of four retained parser sites ignore trailing bytes; the shared native/ATP pin fallback now rejects them.",
       "owner": "asupersync-0h6myr.3.3, asupersync-0h6myr.3.4, asupersync-0h6myr.3.5",
-      "state": "ROUTED"
+      "state": "A3_SPEC_APPROVED_A4_IMPLEMENTATION_PENDING"
     },
     {
       "gap_id": "X509-GAP-02",
@@ -1020,6 +1020,17 @@
       "state": "ROUTED"
     }
   ],
+  "der_residue_spec_contract": {
+    "artifact": "artifacts/x509_der_residue_spec_v1.json",
+    "document": "docs/x509_der_residue_spec.md",
+    "test": "tests/x509_der_residue_spec_contract.rs",
+    "state": "APPROVED",
+    "reviewer": "/root/architecture_trace",
+    "reviewed_draft_sha256": "9a1d64225bbce6fbcf671964f2f567d7b9cdb500929f61a2e0b46872b4bbcfd2",
+    "reviewed_normative_payload_sha256": "8a619557ce3a8d87833d7e8733ac89a5fe78a1286c7cdb93c9c88bbd37e17274",
+    "implementation_owner": "asupersync-0h6myr.3.4",
+    "cutover_allowed": false
+  },
   "downstream_e2e_contract": {
     "scenario_id": "tls_x509_interop",
     "suite": "dependency-sovereignty",
